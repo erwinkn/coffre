@@ -24,7 +24,7 @@ import {
 } from '@coffre/core/access';
 import { EXCHANGED_CREDENTIAL_MS, MAX_SESSION_HOURS, POLICY_DEFAULTS, POLICY_FIELDS, SESSION_MS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
 import { CLOCK_SKEW_MS, isConfirmation } from '@coffre/core/vault';
-import type { BindingColumns, ChangeBindingsInput, CredentialColumns, IssueTokenInput, MadeBinding, IssueTokenRefusal, RequestTrace, RevokeCredentialInput, SignInCredential, SignInInput, SignInRefusal } from '@coffre/core/vault';
+import type { BindingColumns, ChangeBindingsInput, CredentialColumns, IssueTokenInput, LoggedChange, MadeBinding, IssueTokenRefusal, RequestTrace, RevokeCredentialInput, SignInCredential, SignInInput, SignInRefusal } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { engineOf } from '@coffre/db/dialect';
 
@@ -32,7 +32,8 @@ import { NotLogged, payloadOf, type ChangeKeys } from './changes.ts';
 import { applyOp, canonical, objectKey, sealed, sealOf, type Op, type Ref } from './inputs.ts';
 import { bindingsOnPostgres, issueOnPostgres, revokeOnPostgres, signInOnPostgres } from './credentials.postgres.ts';
 import { bindingsOnSqlite, issueOnSqlite, revokeOnSqlite, signInOnSqlite } from './credentials.sqlite.ts';
-import { entryMac } from './log-entry.ts';
+import { changeHolds, entryMac, MAC_BYTES, type LogMacKey } from './log-entry.ts';
+import type { CheckedChange } from './store.ts';
 import { bindingObject, credentialObject } from './objects.ts';
 
 /**
@@ -53,6 +54,13 @@ import { bindingObject, credentialObject } from './objects.ts';
 export const SIGN_INS_PER_WINDOW = 60;
 export const SIGN_IN_WINDOW_MS = 60_000;
 
+/**
+ * A sign-in's statements in all, before it is refused `busy`, asked again shortly: each one after the first because the
+ * account's or the binding's newest change moved since it was read (`moved`), read again. Three, as a key write's
+ * (two-trips.md, "Retries"): a churn fails fast (R44), never queues.
+ */
+export const SIGN_IN_TRIES = 3;
+
 
 
 /** What the change of a sign-in records besides its op (D147): its binding, proof, issuer, the run's claims, and a session's key and hard end. */
@@ -66,7 +74,67 @@ export type SignInCall = {
   /** At most `rate` credentials a binding makes in `window` ms. */
   rate: number; window: number;
   credential: SignInCredential & { createdBy: string; tokenHashBytes: Buffer; authMacBytes: Buffer };
+  pins: SignInPins;
 };
+
+/**
+ * What a sign-in's statement holds the account's and the binding's newest
+ * changes to, under their rows' locks (T192, ChangePinsChecked): each the
+ * change whose MAC the vault checked, whole (ChangePinsWhole): its number and
+ * every column its MAC covers, and the MAC. Its number and seal alone would
+ * not do: no MAC covers a number, so an app could hand back an old, authentic
+ * change of the account under the number of its removal, whose seal column a
+ * writer had set to the old change's (review r2). The binding's seal is the
+ * one the vault checked over its columns (`bindingSeal`), which must be that
+ * change's. Another newest change is `moved`: the vault reads them again.
+ */
+export type SignInPin = { number: bigint; at: number; requestId: string; actor: string; payload: string; seal: Buffer; mac: Buffer };
+export type SignInPins = { member: SignInPin; binding: SignInPin };
+
+/**
+ * The pins of the account's and the binding's newest changes as the app read
+ * them beside the binding (T192, `SignInInput.newest`), each held to its MAC
+ * over its object, which the vault derives: null where either is missing, its
+ * MAC fails, or the binding's is not of the seal the vault checked
+ * (`bindingSeal`). Null asks the vault to read them itself (`changesHold`),
+ * which reports what is wrong: the app's word refuses nothing.
+ */
+export function givenPins(macs: readonly LogMacKey[], input: SignInInput, bindingSeal: Buffer): SignInPins | null {
+  const given = input.newest;
+  if (given == null) return null;
+  const member = heldChange(macs, { kind: 'principal', id: input.principal }, given.member);
+  const binding = heldChange(macs, { kind: 'binding', id: input.binding.columns.id }, given.binding);
+  if (member === null || binding === null || !binding.seal.equals(bindingSeal)) return null;
+  return { member, binding };
+}
+
+/** Postgres's largest `bigint`, a change number's type: a number past it is none, not an error at its cast (review r4). */
+const BIGINT_MAX = 9223372036854775807n;
+
+/** A change as the app read it, if it is `ref`'s and its MAC holds: what the statement holds its object's newest change to. */
+function heldChange(macs: readonly LogMacKey[], ref: Ref, change: LoggedChange | null | undefined): SignInPin | null {
+  if (change == null || typeof change.number !== 'string' || !/^[1-9][0-9]{0,18}$/.test(change.number) || BigInt(change.number) > BIGINT_MAX || !Number.isSafeInteger(change.at)
+    || typeof change.requestId !== 'string' || typeof change.actor !== 'string' || typeof change.payload !== 'string'
+    || typeof change.seal !== 'string' || !isBase64(change.seal, 16) || typeof change.mac !== 'string' || !isBase64(change.mac, MAC_BYTES)) {
+    return null;
+  }
+  const pin = { number: BigInt(change.number), at: change.at, requestId: change.requestId, actor: change.actor, payload: change.payload,
+    seal: Buffer.from(change.seal, 'base64'), mac: Buffer.from(change.mac, 'base64') };
+  return changeHolds(macs, { ...pin, object: objectKey(ref) }) ? pin : null;
+}
+
+/**
+ * The pins of the account's and the binding's newest changes as the vault read them (`changesHold`, which refuses one
+ * whose MAC fails): null where either has none or no seal, or the binding's is not the one it checked (`bindingSeal`),
+ * which an end that came between makes so.
+ */
+export function readPins(found: ReadonlyMap<string, readonly CheckedChange[]>, input: SignInInput, bindingSeal: Buffer): SignInPins | null {
+  const member = found.get(objectKey({ kind: 'principal', id: input.principal }))?.[0];
+  const binding = found.get(objectKey({ kind: 'binding', id: input.binding.columns.id }))?.[0];
+  if (member?.seal == null || !member.holds || binding?.seal == null || !binding.holds || !binding.seal.equals(bindingSeal)) return null;
+  const pin = (c: CheckedChange & { seal: Buffer }): SignInPin => ({ number: c.number, at: c.at, requestId: c.requestId, actor: c.actor, payload: c.payload, seal: c.seal, mac: c.mac });
+  return { member: pin(member as CheckedChange & { seal: Buffer }), binding: pin(binding as CheckedChange & { seal: Buffer }) };
+}
 
 /** The statement's answer: its change's number, or why it made nothing. */
 export type Answer = { number?: string | null; state?: SignInRefusal | IssueTokenRefusal | 'moved' | 'stale' | 'policy' | 'unbound' | 'full' };
@@ -87,10 +155,10 @@ function isBusy(error: unknown): boolean {
  * change, then one statement. Throws on an input no app of this release
  * sends.
  */
-export async function signIn(db: Database, keys: ChangeKeys, at: number, input: SignInInput): Promise<Answer> {
+export async function signIn(db: Database, keys: ChangeKeys, at: number, input: SignInInput, pins: SignInPins): Promise<Answer> {
   let call: SignInCall;
   try {
-    call = decideSignIn(keys, at, input);
+    call = { ...decideSignIn(keys, at, input), pins };
   } catch (error) {
     if (error instanceof SignInRefused) return { state: error.state };
     throw error;
@@ -104,7 +172,7 @@ export async function signIn(db: Database, keys: ChangeKeys, at: number, input: 
   }
 }
 
-function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): SignInCall {
+function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): Omit<SignInCall, 'pins'> {
   const { principal, credential, appKey, spent, validUntil, record } = input ?? ({} as SignInInput);
   if (typeof principal !== 'string' || !/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(principal)) throw new Error('a sign-in is a service account\'s, token:<id>');
   const binding = checkBinding(input?.binding?.columns);

@@ -8,7 +8,7 @@
 -- RETURNING and row counts as on the table). `security_invoker`: a login reads and writes through it only what the
 -- table grants it, and the view grants each login what the table does, column by column, so neither is wider. The
 -- release after 0.16.0 drops the views. The functions that name these tables are made again with the new names, each as
--- its last migration left it but for them; the use's and the route's warm-up marks move to `0075`, so that a session
+-- its last migration left it but for them; the use's and the route's warm-up marks move to `0076`, so that a session
 -- warmed by the last ones plans these before the fence (T131). `CREATE OR REPLACE` keeps their owners and grants.
 ALTER TABLE "vault_members" RENAME TO "principals";--> statement-breakpoint
 ALTER TABLE "vault_grants" RENAME TO "grants";--> statement-breakpoint
@@ -769,6 +769,107 @@ BEGIN
 END
 $function$;
 --> statement-breakpoint
+CREATE OR REPLACE FUNCTION public.sign_in(p_request text, p_at bigint, p_actor text, p_payload text, p_mac bytea, p_seal bytea, p_binding uuid, p_principal text, p_generation integer, p_binding_profile text, p_binding_scope text, p_binding_policy text, p_binding_issuer text, p_binding_jwks_uri text, p_binding_claims text, p_binding_seal bytea, p_spent bytea, p_valid_until bigint, p_frozen boolean, p_rate integer, p_window bigint, p_longest bigint, p_id uuid, p_kind text, p_auth_mac bytea, p_token_hash bytea, p_token_hint text, p_label text, p_created_by text, p_scope text, p_places text, p_expires bigint, p_not_after bigint, p_jkt text, p_app_key text, p_member_number bigint, p_member_at bigint, p_member_request text, p_member_actor text, p_member_payload text, p_member_seal bytea, p_member_mac bytea, p_binding_number bigint, p_binding_at bigint, p_binding_request text, p_binding_actor text, p_binding_payload text, p_binding_mac bytea)
+ RETURNS json
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'pg_catalog', 'pg_temp'
+ SET lock_timeout TO '1s'
+AS $function$
+DECLARE
+    n bigint;
+    held record;
+    newest record;
+    now_ms bigint;
+    since timestamptz;
+    target uuid := public.log_object('credential', p_id::text);
+BEGIN
+    IF p_created_by IS DISTINCT FROM 'binding:' || p_binding::text OR p_kind NOT IN ('service', 'workload') THEN
+        RAISE EXCEPTION 'a sign-in makes a credential of its binding''s, a service''s or a workload''s' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- A lock not had within `lock_timeout` raises `lock_not_available`, which the vault answers as busy: no subtransaction to catch it here.
+    -- The account's row, locked, then its newest change, in a statement of its own, which reads what committed while it
+    -- waited: a recheck under the lock sees the row's new version beside the snapshot's older changes. That change must be
+    -- the one whose MAC the vault checked (ChangePinsChecked), whole (ChangePinsWhole): its number, every column its MAC
+    -- covers, and the MAC. Its seal alone would not do, a column a writer may edit in place, number kept, once the check is
+    -- done; nor its number and seal, which an old, authentic change of the account shares with its removal once a writer
+    -- sets the removal's seal to the old one's: no MAC covers a number, and the app chooses what it hands back. Whole, the
+    -- row is one whose MAC holds, as if the vault had read it here. Another is `moved`, for the vault to read it again.
+    -- Then the row held to that seal: a row put back is none.
+    SELECT m.seal INTO held FROM public.principals m
+     WHERE m.principal = p_principal AND m.status = 'active' AND m.generation = p_generation
+       FOR SHARE;
+    IF NOT FOUND THEN RETURN json_build_object('state', 'unbound'); END IF;
+    SELECT c.number, c.at, c.request_id, c.actor, c.payload, c.seal, c.mac INTO newest
+      FROM public.log_changes c WHERE c.object = public.log_object('principal', p_principal) ORDER BY c.number DESC LIMIT 1;
+    IF (newest.number, newest.at, newest.request_id, newest.actor, newest.payload, newest.seal, newest.mac)
+       IS DISTINCT FROM (p_member_number, p_member_at, p_member_request, p_member_actor, p_member_payload, p_member_seal, p_member_mac) THEN
+        RETURN json_build_object('state', 'moved');
+    END IF;
+    IF held.seal IS DISTINCT FROM p_member_seal THEN RETURN json_build_object('state', 'unbound'); END IF;
+    -- The binding as the vault checked its seal (BindingSealed): its every column its object takes, and that seal; then, in
+    -- a statement of its own once locked, its object's newest change the one the vault checked, whole, of that seal
+    -- (`moved` otherwise, as the account's). A row put back after its end, or edited around the vault, is none.
+    PERFORM 1 FROM public.service_bindings b
+     WHERE b.id = p_binding AND b.principal = p_principal AND b.generation = p_generation AND b.revoked_at IS NULL AND b.profile = p_binding_profile
+       AND b.scope IS NOT DISTINCT FROM p_binding_scope AND b.policy IS NOT DISTINCT FROM p_binding_policy
+       AND b.issuer = p_binding_issuer AND b.jwks_uri = p_binding_jwks_uri AND b.claims = p_binding_claims AND b.seal = p_binding_seal
+       FOR UPDATE;
+    IF NOT FOUND THEN RETURN json_build_object('state', 'unbound'); END IF;
+    SELECT c.number, c.at, c.request_id, c.actor, c.payload, c.seal, c.mac INTO newest
+      FROM public.log_changes c WHERE c.object = public.log_object('binding', p_binding::text) ORDER BY c.number DESC LIMIT 1;
+    IF (newest.number, newest.at, newest.request_id, newest.actor, newest.payload, newest.seal, newest.mac)
+       IS DISTINCT FROM (p_binding_number, p_binding_at, p_binding_request, p_binding_actor, p_binding_payload, p_binding_seal, p_binding_mac) THEN
+        RETURN json_build_object('state', 'moved');
+    END IF;
+    -- The app's key, not one it rotated from (audit_log_subject_idx).
+    IF EXISTS (SELECT 1 FROM public.audit_log a WHERE a.author = 'app' AND a.subject_principal = p_app_key AND a.action IN ('key.reseal', 'key.rotate')) THEN
+        RETURN json_build_object('state', 'retired');
+    END IF;
+    -- A freeze of the whole instance, the account or the binding: its newest freeze or lift (audit_log_freeze_idx).
+    IF p_frozen AND EXISTS (
+        SELECT 1 FROM unnest(ARRAY['instance', p_principal, 'binding:' || p_binding::text]) t(target)
+         WHERE (SELECT a.action FROM public.audit_log a
+                 WHERE a.author = 'app' AND a.action IN ('workload.freeze', 'workload.unfreeze') AND a.decision = 'allow'
+                   AND (a.metadata::jsonb ->> 'target') = t.target
+                 ORDER BY a.seq DESC LIMIT 1) = 'workload.freeze'
+    ) THEN
+        RETURN json_build_object('state', 'frozen');
+    END IF;
+    -- Its rate, under the binding's row (credentials_issued_by_idx: the last window's, never the history). Its start a
+    -- value, not `clock_timestamp()`, which is volatile: compared with that, the index bounds nothing, and the window's
+    -- count would read the binding's every credential.
+    since := clock_timestamp() - p_window * interval '1 millisecond';
+    IF (SELECT count(*) FROM (
+            SELECT 1 FROM public.credentials c
+             WHERE c.principal = p_principal AND c.created_by = p_created_by AND c.created_at > since
+             LIMIT p_rate
+        ) z) >= p_rate THEN
+        RETURN json_build_object('state', 'busy');
+    END IF;
+    now_ms := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+    IF p_valid_until <= now_ms OR p_expires <= now_ms OR p_expires > now_ms + p_longest + 60000 OR (p_not_after IS NOT NULL AND (p_not_after <= now_ms OR p_expires > p_not_after)) THEN
+        RETURN json_build_object('state', 'expired');
+    END IF;
+    -- The token spent (SpentChecked): the primary key decides between two runs presenting it at once.
+    IF p_spent IS NOT NULL THEN
+        INSERT INTO public.spent_id_tokens (hash) VALUES (p_spent) ON CONFLICT DO NOTHING;
+        IF NOT FOUND THEN RETURN json_build_object('state', 'replayed'); END IF;
+    END IF;
+    INSERT INTO public.credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, identity_id, scope, places, label, created_by,
+                                    expires_at, revoked_at, jkt, not_after, seal)
+        VALUES (p_id, p_kind, p_auth_mac, p_token_hash, p_token_hint, p_generation, p_principal, NULL, p_scope, p_places, p_label, p_created_by,
+                timestamptz 'epoch' + p_expires * interval '1 millisecond', NULL, p_jkt,
+                CASE WHEN p_not_after IS NULL THEN NULL ELSE timestamptz 'epoch' + p_not_after * interval '1 millisecond' END, p_seal);
+    UPDATE public.service_bindings SET last_used_at = clock_timestamp() WHERE id = p_binding;
+    PERFORM pg_advisory_xact_lock_shared(1668244070, 1);
+    INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
+        VALUES (nextval('public.log_number'), p_at, p_request, target, p_actor, p_payload, p_seal, p_mac)
+        RETURNING number INTO n;
+    RETURN json_build_object('number', n::text);
+END
+$function$;
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION public.use_credential(p_credential uuid, p_secret uuid, p_request bigint, p_at bigint, p_purpose smallint, p_place uuid, p_mac bytea, p_deadline bigint, p_cover bigint DEFAULT NULL::bigint, p_cover_at bigint DEFAULT NULL::bigint, p_cover_request bigint DEFAULT NULL::bigint, p_known bigint DEFAULT NULL::bigint, p_known_mac bytea DEFAULT NULL::bytea, p_cap_count integer DEFAULT NULL::integer, p_cap_window bigint DEFAULT NULL::bigint, p_token_hash bytea DEFAULT NULL::bytea, p_project text DEFAULT NULL::text, p_environment text DEFAULT NULL::text, p_key text DEFAULT NULL::text, p_decided boolean DEFAULT false, p_handle boolean DEFAULT false, p_unless text[] DEFAULT NULL::text[], p_signin boolean DEFAULT NULL::boolean, p_issuers text[] DEFAULT NULL::text[], p_roles jsonb DEFAULT NULL::jsonb, p_way smallint DEFAULT 0, p_principal text DEFAULT NULL::text, p_forks boolean DEFAULT false, p_route text DEFAULT NULL::text, p_gate boolean DEFAULT false, p_passkeys text DEFAULT NULL::text)
  RETURNS json
  LANGUAGE plpgsql
@@ -789,7 +890,7 @@ DECLARE
     -- Each form's period is its key's for its principal (`bulk_period`), read with the principal.
     c_refresh bigint := greatest(1, least(60000, p_cap_window / 10));
     -- Whether this session has yet to plan the four statements (T131), and the form the warm-up is at.
-    dry boolean := current_setting('coffre.use_planned', true) IS DISTINCT FROM '0075';
+    dry boolean := current_setting('coffre.use_planned', true) IS DISTINCT FROM '0076';
     form integer := 0;
     first_probe boolean;
     first_whole boolean;
@@ -1828,7 +1929,7 @@ BEGIN
                 whole := form % 2 = 1;
                 CONTINUE;
             END IF;
-            PERFORM set_config('coffre.use_planned', '0075', false);
+            PERFORM set_config('coffre.use_planned', '0076', false);
             dry := false;
             probe := first_probe;
             whole := first_whole;
@@ -1977,7 +2078,7 @@ DECLARE
     -- A handle's gate that found it standing nowhere there, or at a place cut: the route is not read.
     v_unstood boolean := false;
     -- Whether this session planned the reading's statements, on its first call, before the fence (T200).
-    v_planned boolean := current_setting('coffre.route_planned', true) IS NOT DISTINCT FROM '0075';
+    v_planned boolean := current_setting('coffre.route_planned', true) IS NOT DISTINCT FROM '0076';
     -- The gate's answer, parsed once (T200): each `->>` of a json value parses its text whole again.
     g jsonb;
 BEGIN
@@ -2040,7 +2141,7 @@ BEGIN
         PERFORM pg_advisory_xact_lock_shared(1668244070, 0);
     END LOOP;
     IF NOT v_planned AND v_handle AND p_named IS NOT NULL THEN
-        PERFORM set_config('coffre.route_planned', '0075', false);
+        PERFORM set_config('coffre.route_planned', '0076', false);
     END IF;
     IF v_handle THEN
         g := gate::jsonb;

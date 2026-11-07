@@ -7,7 +7,7 @@ import type * as schema from '@coffre/db/schema';
 import { and, asc, eq, inArray, isNotNull, isNull, lt, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { authMac, checkAuthRow } from '../auth-rows.ts';
-import { hasTombstone, insert, type BindingRow } from './queries.ts';
+import { hasTombstone, insert, newestChangeColumns, newestChanges, type BindingRow, type NewestChanges } from './queries.ts';
 
 // A workload's key-bound sessions (docs/design/workload-access.md, section
 // 5): the one statement every request runs, the bindings an exchange reads,
@@ -215,6 +215,8 @@ const bindingCalls = prepared((db) => {
  * and an explicit profile list, so a binding of another proof's (its
  * claims none) never matches a token (section 11, "Filtered by profile").
  * More than `max` is a database changed around the app, and matches nothing.
+ * With them, the account's and each binding's newest change, which the
+ * vault checks and pins in its one statement (T192, `NewestChanges`).
  */
 export async function workloadCandidates(
   db: Queryable,
@@ -223,11 +225,11 @@ export async function workloadCandidates(
   issuer: string,
   profiles: readonly WorkloadProfile[],
   max: number,
-): Promise<BindingRow[]> {
+): Promise<{ bindings: BindingRow[]; newest: NewestChanges }> {
   const { serviceBindings, principals } = tablesOf(db);
-  if (profiles.length === 0) return [];
+  if (profiles.length === 0) return { bindings: [], newest: await newestChanges(db, principal, []) };
   const rows = await db
-    .select({ binding: serviceBindings, tombstoned: tombstoned(db, idText(db, serviceBindings.id)), now: clockMillis(db) })
+    .select({ binding: serviceBindings, tombstoned: tombstoned(db, idText(db, serviceBindings.id)), ...newestChangeColumns(db, principal, serviceBindings.id), now: clockMillis(db) })
     .from(serviceBindings)
     .innerJoin(principals, and(eq(principals.principal, serviceBindings.principal), eq(principals.generation, serviceBindings.generation)))
     .where(and(
@@ -241,9 +243,10 @@ export async function workloadCandidates(
     .limit(max + 1);
   if (rows.length > max) {
     console.error({ event: 'bindings_over_limit', principal, issuer }, 'a service holds more bindings than any can');
-    return [];
+    return { bindings: [], newest: await newestChanges(db, principal, []) };
   }
-  return rows.filter((row) => !row.tombstoned).map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
+  const bindings = rows.filter((row) => !row.tombstoned).map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
+  return { bindings, newest: await newestChanges(db, principal, rows) };
 }
 
 /** Which of these freeze targets are frozen now, in one statement: the exchange's check, under the log's head. */

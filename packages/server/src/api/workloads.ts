@@ -48,7 +48,7 @@ import {
   type WorkloadsConfig,
 } from '@coffre/core/identity';
 import { shownMember } from '@coffre/core/schemas';
-import type { Access, ChangeBindingsInput, EndedBinding, SignInCredential, SignInOutcome, SignInRefusal, Vault } from '@coffre/core/vault';
+import type { Access, ChangeBindingsInput, EndedBinding, SignInCredential, SignInInput, SignInOutcome, SignInRefusal, Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { KeyRetired } from '@coffre/db/log';
 import { serviceBindings, type credentials } from '@coffre/db/schema';
@@ -243,6 +243,13 @@ export type MatchedProof = {
   spentKey?: Buffer;
   /** A bearer token's own `exp`, which ends the session it makes (section 5.4). */
   notAfter?: Date;
+  /**
+   * The account's and the binding's newest changes, as the read that found
+   * the binding had them (T192), for the vault to check and pin in its one
+   * statement; none where that read has none (`aws`, `enrollment`), and the
+   * vault reads them itself.
+   */
+  newest?: SignInInput['newest'];
 };
 
 /** What a proof decides inside the exchange's transaction, on database facts alone. */
@@ -318,7 +325,7 @@ const OIDC: ProofKind = {
     const issuer = decoded.claims.iss;
     const unbound = new ExchangeRefused('no_match', `no workload binding of ${shownMember(ctx.service)} trusts tokens from ${issuer}`);
     // The bindings first, so that a token none can take costs this one read.
-    const loaded = await workloadCandidates(ctx.db, ctx.chainKey, ctx.service, issuer, OIDC_PROFILES, MAX_BINDINGS);
+    const { bindings: loaded, newest: changes } = await workloadCandidates(ctx.db, ctx.chainKey, ctx.service, issuer, OIDC_PROFILES, MAX_BINDINGS);
     if (loaded.length === 0) return unbound;
     // Those made on this instance's URL: one made on another shadows none that was (review r1).
     const candidates = loaded.filter((binding) => madeHere(binding, ctx.publicUrl));
@@ -368,6 +375,7 @@ const OIDC: ProofKind = {
       claims,
       ...(namesKey || repeating ? {} : { spentKey: decoded.signingInputHash }),
       ...(namesKey ? {} : { notAfter: new Date(decoded.claims.exp * 1000) }),
+      newest: { member: changes.member, binding: changes.bindings.get(binding.id) ?? null },
     };
   },
 };
@@ -497,7 +505,11 @@ export type KeysPlan = { issuer: string; jwksUri: string; keys: KeySummary[]; re
  * whether it was spent already, and the newest policy change, for the
  * vault's answer about the service that follows (`exchangeCandidates`).
  */
-export type VerifiedWorkload = { binding: BindingRow; claims: Record<string, unknown>; token: DecodedToken; spent: boolean; policySeq: bigint | null };
+export type VerifiedWorkload = {
+  binding: BindingRow; claims: Record<string, unknown>; token: DecodedToken; spent: boolean; policySeq: bigint | null;
+  /** The account's and the binding's newest changes, as `exchangeCandidates` read them beside it (T192). */
+  newest: NonNullable<SignInInput['newest']>;
+};
 
 /**
  * The IDs a binding names, as an owner would otherwise look them up, under
@@ -1197,7 +1209,7 @@ export class WorkloadService {
     if (!/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(member)) throw unbound();
 
     // The bindings first, so that a token none can take costs this one read.
-    const { bindings: loaded, spent, policySeq } = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS, decoded.signingInputHash);
+    const { bindings: loaded, spent, policySeq, newest: changes } = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS, decoded.signingInputHash);
     if (loaded.length === 0 || spent === null) throw unbound();
     // Those made on this instance's URL: one made on another shadows none that was (review r1).
     const candidates = loaded.filter((binding) => madeHere(binding, this.#deps.publicUrl));
@@ -1217,7 +1229,7 @@ export class WorkloadService {
       throw refused(error);
     }
     const binding = matching(candidates.filter((candidate) => candidate.jwksUri === newest.jwksUri), claims, member);
-    return { binding, claims, token: decoded, spent, policySeq };
+    return { binding, claims, token: decoded, spent, policySeq, newest: { member: changes.member, binding: changes.bindings.get(binding.id) ?? null } };
   }
 
   /**
@@ -1422,6 +1434,8 @@ export class WorkloadService {
       // signed request), are the app's alone, so a compromised app could make sessions of such a binding's.
       idToken: vaultVerifies(binding) ? { token: given as string, jwks: binding.jwks! } : null,
       dpop: meta.dpop,
+      // The account's and the binding's newest changes, as its proof's read found them: the vault checks and pins them (T192).
+      ...(verified.newest === undefined ? {} : { newest: verified.newest }),
     });
     if (!outcome.ok) {
       if (outcome.refused === 'proof') throw proofRefusal(outcome, member, binding);
@@ -1492,7 +1506,7 @@ export class WorkloadService {
   async #exchange(request: ExchangeRequest, meta: { requestId: string; sourceIp: string | null }): Promise<Exchanged> {
     const { db, chainKey, vault } = this.#deps;
     const member = request.service;
-    const { binding, claims, token: decoded, spent, policySeq } = await this.verify(member, request.token);
+    const { binding, claims, token: decoded, spent, policySeq, newest } = await this.verify(member, request.token);
     const issuer = decoded.claims.iss;
     const unbound = () => new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts tokens from ${issuer}`);
 
@@ -1500,7 +1514,7 @@ export class WorkloadService {
     // With 0.15's log, the vault makes it (T149): one call, no 0.14 head. Every sign-in through a binding goes there, so
     // that each one's rate is counted under its row: one 0.4 made, its scope unsealed, is sealed first, and read again.
     const byVault = await vaultMakesCredentials(vault);
-    if (byVault && !unsealedScope(binding.scope)) return this.#exchangeByVault(vault as CredentialsVault, member, binding, claims, request.token, decoded);
+    if (byVault && !unsealedScope(binding.scope)) return this.#exchangeByVault(vault as CredentialsVault, member, binding, claims, request.token, decoded, newest);
     const standing = await vault.access(member);
     if (standing.status !== 'active' || standing.generation !== binding.generation) throw unbound();
     // One an older release made after the app sealed its own: sealed with the account's grants the vault just answered, before a run's credential reads it.
@@ -1510,7 +1524,8 @@ export class WorkloadService {
     if (byVault) {
       const sealed = await findBinding(db, chainKey, member, binding.id);
       if (sealed === null || unsealedScope(sealed.scope)) throw unbound();
-      return this.#exchangeByVault(vault as CredentialsVault, member, sealed, claims, request.token, decoded);
+      // Sealed since it was read: its newest change is the seal's, which the vault reads itself.
+      return this.#exchangeByVault(vault as CredentialsVault, member, sealed, claims, request.token, decoded, null);
     }
 
     const service = member.slice('token:'.length);
@@ -1568,7 +1583,9 @@ export class WorkloadService {
    * check, the app's a filter. Of keys its issuer publishes, the app's
    * check decides: the vault fetches nothing.
    */
-  async #exchangeByVault(vault: CredentialsVault, member: string, binding: BindingRow, claims: Record<string, unknown>, token: string, decoded: DecodedToken): Promise<Exchanged> {
+  async #exchangeByVault(
+    vault: CredentialsVault, member: string, binding: BindingRow, claims: Record<string, unknown>, token: string, decoded: DecodedToken, newest: SignInInput['newest'] | null,
+  ): Promise<Exchanged> {
     const issuer = decoded.claims.iss;
     if (!madeHere(binding, this.#deps.publicUrl)) throw madeElsewhere(binding, this.#deps.publicUrl);
     const { row, issued } = this.#deps.signin.exchangedCredential(member.slice('token:'.length), {
@@ -1586,6 +1603,8 @@ export class WorkloadService {
       record: { proof: 'oidc', issuer, run: runClaims(claims) },
       idToken: vaultVerifies(binding) ? { token, jwks: binding.jwks! } : null,
       dpop: null,
+      // The account's and the binding's newest changes, read beside it: the vault checks and pins them, one statement (T192).
+      ...(newest == null ? {} : { newest }),
     });
     if (!outcome.ok) {
       if (outcome.refused === 'proof') throw proofRefusal(outcome, member, binding);

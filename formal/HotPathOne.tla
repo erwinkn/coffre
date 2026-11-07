@@ -103,7 +103,15 @@
 (*                                                                         *)
 (* Changers: the change processes, each one change at a time. Two can race *)
 (* on one input: each reads the row outside the lock and works out the     *)
-(* next state from what it read.                                           *)
+(* next state from what it read. A change stands for every write that      *)
+(* holds a row to its object's newest seal (`newestChange`, `prepare`,     *)
+(* sign-in, issue). Those of PinnedChangers are sign-ins (T192): their     *)
+(* statement holds the newest change to the one whose MAC the vault        *)
+(* checked. With AppPins, the app hands that change over, read beside the  *)
+(* binding, and may hand back any authentic change of the object, under    *)
+(* any number: no MAC covers a number. The vault reads it itself after a   *)
+(* `moved`. The others pin nothing here: T179's two-trip writes hold their *)
+(* read set whole (Writing.tla, ReadByNumber), and the rest do not yet.    *)
 (*                                                                         *)
 (* Clocks. Postgres's clock `pnow` moves on (to MaxTime), and may step     *)
 (* back. A use is stamped `at` by the Worker's clock (pnow, give or take   *)
@@ -285,12 +293,26 @@
 (*                         sign-in, issue), as a use does; else a change   *)
 (*                         to a row put back so seals the writer's row     *)
 (*                         under a new, authentic entry (EachChangeFlips). *)
-(*                         The code checks it just before its statement,   *)
-(*                         and so does the model: of the change read at    *)
-(*                         ChangeStart. The gap between the two needs a    *)
-(*                         second tamper, past MaxTampers = 1: T179's to   *)
-(*                         close, pinning the checked seal                 *)
-(*                         (sealed-inputs.md);                             *)
+(*                         The code checks it before its statement, and so *)
+(*                         does the model: of the change read at           *)
+(*                         ChangeStart;                                    *)
+(*   ChangePinsChecked     ... and a sign-in's statement (PinnedChangers)  *)
+(*                         holds the object's newest change, under the     *)
+(*                         lock, to the one whose MAC it checked (T192):   *)
+(*                         else a second tamper, the seal column forged    *)
+(*                         once the check is done, passes the statement's  *)
+(*                         seal comparison (HotPathOneForgedGap: the row   *)
+(*                         put back, then the forgery, MaxTampers = 2).    *)
+(*                         Writes that pin nothing (`app_change`,          *)
+(*                         `issue_token` outside T179's two trips) keep    *)
+(*                         that gap: the scenario without the pin is       *)
+(*                         theirs;                                         *)
+(*   ChangePinsWhole       ... whole: its number, every column its MAC     *)
+(*                         covers (`made`, `value`) and the seal, not its  *)
+(*                         number and seal alone, which an old, authentic  *)
+(*                         change handed back under the newest's number    *)
+(*                         shares with the newest once a writer sets its   *)
+(*                         seal to the old one's (AppPins, review r2);     *)
 (*   IssueOwnLock          an issue takes the issue lock shared, not the   *)
 (*                         fence shared (which a barrier or a change       *)
 (*                         queued behind it would make every use wait on); *)
@@ -329,6 +351,8 @@ EXTENDS Integers, FiniteSets, Sequences, TLC
 CONSTANTS
     Uses,            \* the uses, each one request, one call
     Changers,        \* the change processes
+    PinnedChangers,  \* ... of them, the sign-ins, whose statement pins the change checked (T192)
+    AppPins,         \* the app hands a sign-in that change, any authentic one of the object, under any number
     MaxChanges,      \* changes each changer makes in a behaviour
     MaxAborts,       \* change statements that fail after taking the lock
     MaxCheckpoints,  \* checkpoints signed in a behaviour
@@ -358,7 +382,7 @@ CONSTANTS
     CoverChecksChanges, CoverChecksAllInputs, CoverExists, StaleFirst, CacheChecked, CacheSameChange,
     ChangeCAS, ChangeRereads, ChangeChecksSeal, BarrierChecksFloor, BarrierAcceptsLate, ChunkFloor, AheadChecked, DeadlineChecked, FloorChecked, WorkerHonoursDeadline,
     PrincipalLocks, RefreshLocks, RefreshPeriods, RefreshShared, RefreshOnUse, CoverFresh, ReplayPhases, ReplayPhased, Slack, DeadlineSlack,
-    AheadSlack, CapFromPolicy, CapSealed, ChangeMacChecked, CacheVerified, ChangeChecksMac,
+    AheadSlack, CapFromPolicy, CapSealed, ChangeMacChecked, CacheVerified, ChangeChecksMac, ChangePinsChecked, ChangePinsWhole,
     Issuers,         \* the sign-ins, each issuing one new credential: {} for none
     IssueOwnLock, IssueNumberUnderLock, BarrierWaitsIssues, BarrierIssueFirst, NamedAfterIssue,
     DecideBeforeLock
@@ -434,6 +458,16 @@ NewestEntriesIn(L, i) ==
     IN {e \in cs : \A d \in cs : d.seq <= e.seq}
 LoggedIn(L, i) == IF NewestEntriesIn(L, i) = {} THEN TRUE ELSE (CHOOSE e \in NewestEntriesIn(L, i) : TRUE).seal
 ForgedIn(L) == {i \in Inputs : \E e \in NewestEntriesIn(L, i) : e.seal /= e.value}
+\* Its newest change as a statement reads it: its number, the seal its row records, and what its MAC
+\* covers, the seal the vault logged (`value`) and the change's own columns (`made`: its request id,
+\* time, actor, payload). None: 0, TRUE.
+NoPin == [seq |-> 0, seal |-> TRUE, value |-> TRUE, made |-> <<>>]
+PinIn(L, i) == IF NewestEntriesIn(L, i) = {} THEN NoPin
+               ELSE LET e == CHOOSE e \in NewestEntriesIn(L, i) : TRUE IN [seq |-> e.seq, seal |-> e.seal, value |-> e.value, made |-> e.made]
+\* What an app may hand a sign-in as input i's newest change (AppPins): any change of i's, as the vault
+\* wrote it (its MAC holds: its seal is its value), under any change's number.
+AppPinsIn(L, i) == {[seq |-> s, seal |-> d.value, value |-> d.value, made |-> d.made] :
+                      d \in {d \in ChangesIn(L) : d.input = i}, s \in {e.seq : e \in ChangesIn(L)}}
 Newest == [i \in Inputs |-> LoggedIn(log, i)]
 Forged == ForgedIn(log)
 Rows == [i \in Inputs |-> IF tamper[i].on THEN tamper[i].value ELSE NewestIn(log, i)]
@@ -587,7 +621,7 @@ Init ==
     /\ shared = {}
     /\ plock = NoPlock
     /\ u = [x \in Uses |-> IdleUse]
-    /\ c = [h \in Changers |-> [pc |-> "idle", n |-> 0, seq |-> 0, aborts |-> 0, input |-> None, read |-> TRUE, forged |-> FALSE, value |-> FALSE]]
+    /\ c = [h \in Changers |-> [pc |-> "idle", n |-> 0, seq |-> 0, aborts |-> 0, input |-> None, read |-> TRUE, forged |-> FALSE, pin |-> NoPin, value |-> FALSE]]
     /\ answered = 0
     /\ released = {}
     /\ cp = [open |-> FALSE, from |-> 0, upto |-> 0, readFloor |-> 0, floor |-> 0 - D]
@@ -887,21 +921,27 @@ UseCrash(x) ==
 (* A change: one input revoked, or restored, by one of the changers. *)
 
 \* The call starts, for one input: the vault reads its row, outside the lock, and works out the
-\* next state from it; and its newest change's, whose MAC it checks (ChangeChecksMac, T190). Without ChangeNumberUnderLock, its number was taken by a read before it.
+\* next state from it; and its newest change's, whose MAC it checks (ChangeChecksMac, T190), and which
+\* a sign-in pins (ChangePinsChecked, T192). With AppPins, a sign-in may take the change the app
+\* handed it instead, whose MAC holds over what the app handed, under whatever number it says. Without
+\* ChangeNumberUnderLock, its number was taken by a read before it.
 ChangeStart(h) ==
     /\ c[h].pc = "idle"
     /\ c[h].n < MaxChanges
     /\ \E i \in Inputs :
-          c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "started", !.input = i, !.read = Rows[i], !.forged = i \in Forged,
+       \E r \in {[pin |-> PinIn(log, i), forged |-> i \in Forged]}
+               \cup (IF AppPins /\ h \in PinnedChangers THEN {[pin |-> p, forged |-> FALSE] : p \in AppPinsIn(log, i)} ELSE {}) :
+          c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "started", !.input = i, !.read = Rows[i], !.forged = r.forged, !.pin = r.pin,
                                           !.seq = IF ChangeNumberUnderLock THEN 0 ELSE nextSeq]]
     /\ nextSeq' = IF ChangeNumberUnderLock THEN nextSeq ELSE nextSeq + 1
     /\ UNCHANGED <<log, holder, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
-\* After a refused write, the vault reads the row again.
+\* After a refused write, the vault reads the row again, and the newest change itself (a sign-in's `moved`).
 ChangeReread(h) ==
     /\ c[h].pc = "refused"
-    /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "started", !.read = Rows[c[h].input], !.forged = c[h].input \in Forged]]
+    /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "started", !.read = Rows[c[h].input], !.forged = c[h].input \in Forged,
+                                            !.pin = PinIn(log, c[h].input)]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
@@ -916,15 +956,23 @@ ChangeLock(h) ==
 
 \* Its statement: if the row is no longer the one it read (ChangeCAS), or not the one its object's
 \* newest change wrote (ChangeChecksSeal), or that change's MAC did not hold over its seal when the
-\* vault read it (ChangeChecksMac: SQL cannot check a MAC; the CAS holds the row to that read), nothing is written, the lock goes and the vault reads
+\* vault read it (ChangeChecksMac: SQL cannot check a MAC; the CAS holds the row to that read), or,
+\* for a sign-in, that change is no longer the one checked (ChangePinsChecked: a seal column forged
+\* since keeps its number), whole (ChangePinsWhole: else by number and seal), nothing is written, the lock goes and the vault reads
 \* again (without ChangeRereads, it tries the same read again). Else the write (the flip of what it
 \* read) and its entry's number. Without LockToCommit the lock goes here; without CommitBeforeAnswer
 \* it answers here.
+\* A sign-in's pin, under the lock: the newest change is not the one checked.
+PinMoved(h) ==
+    LET now == PinIn(log, c[h].input)
+    IN IF ChangePinsWhole THEN now /= c[h].pin ELSE now.seq /= c[h].pin.seq \/ now.seal /= c[h].pin.seal
+
 ChangeRun(h) ==
     /\ c[h].pc = "locked"
     /\ IF \/ ChangeCAS /\ Rows[c[h].input] /= c[h].read
           \/ ChangeChecksSeal /\ Rows[c[h].input] /= LoggedIn(log, c[h].input)
           \/ ChangeChecksMac /\ c[h].forged
+          \/ ChangePinsChecked /\ h \in PinnedChangers /\ PinMoved(h)
        THEN /\ c' = [c EXCEPT ![h].pc = IF ChangeRereads THEN "refused" ELSE "started"]
             /\ holder' = IF holder = h THEN None ELSE holder
             /\ UNCHANGED <<nextSeq, answered, issueVars>>

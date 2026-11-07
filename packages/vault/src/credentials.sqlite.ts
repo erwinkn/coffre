@@ -3,8 +3,8 @@ import { CLOCK_SKEW_MS } from '@coffre/core/vault';
 import { tablesOf, type Queryable } from '@coffre/db';
 import { and, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 
-import type { Answer, BindingsCall, IssueCall, RevokeCall, SignInCall } from './credentials.ts';
-import { objectKey } from './inputs.ts';
+import type { Answer, BindingsCall, IssueCall, RevokeCall, SignInCall, SignInPin } from './credentials.ts';
+import { objectKey, type Ref } from './inputs.ts';
 
 /**
  * `sign_in` on SQLite, step for step, in one transaction: SQLite runs one
@@ -17,17 +17,24 @@ export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answ
   const k = c.credential;
   const [member] = await tx.select({ status: principals.status, generation: principals.generation, seal: principals.seal }).from(principals).where(eq(principals.principal, c.principal));
   if (member?.status !== 'active' || member.generation !== c.binding.generation) return { state: 'unbound' };
-  // Its row as its newest change sealed it, or 0.14's with neither: a row put back is none.
-  const [sealedAs] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'principal', id: c.principal }))).orderBy(desc(logChanges.number)).limit(1);
-  if (!same(member.seal ?? null, sealedAs?.seal ?? null)) return { state: 'unbound' };
-  // The binding as the vault checked its seal, and that seal its object's newest change's (BindingSealed).
+  // Its newest change the one the vault checked, whole (ChangePinsChecked, ChangePinsWhole, T192): its number, every
+  // column its MAC covers, and the MAC, as 0075's `sign_in`; else `moved`. Then its row as that change sealed it: a row
+  // put back is none.
+  const newestOf = async (ref: Ref) => (await tx.select({ number: logChanges.number, at: logChanges.at, requestId: logChanges.requestId, actor: logChanges.actor,
+    payload: logChanges.payload, seal: logChanges.seal, mac: logChanges.mac }).from(logChanges).where(eq(logChanges.object, objectKey(ref))).orderBy(desc(logChanges.number)).limit(1))[0];
+  const pinned = (newest: Awaited<ReturnType<typeof newestOf>>, pin: SignInPin) =>
+    newest !== undefined && BigInt(newest.number) === pin.number && Number(newest.at) === pin.at && newest.requestId === pin.requestId
+    && newest.actor === pin.actor && newest.payload === pin.payload && same(newest.seal ?? null, pin.seal) && same(newest.mac, pin.mac);
+  if (!pinned(await newestOf({ kind: 'principal', id: c.principal }), c.pins.member)) return { state: 'moved' };
+  if (!same(member.seal ?? null, c.pins.member.seal)) return { state: 'unbound' };
+  // The binding as the vault checked its seal, and its object's newest change the one the vault checked, of that seal (BindingSealed).
   const [binding] = await tx.select().from(serviceBindings).where(eq(serviceBindings.id, c.binding.id));
-  const [bindingSealedAs] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'binding', id: c.binding.id }))).orderBy(desc(logChanges.number)).limit(1);
   if (binding === undefined || binding.principal !== c.principal || binding.generation !== c.binding.generation || binding.revokedAt !== null || binding.profile !== c.binding.profile
     || binding.scope !== c.binding.scope || binding.policy !== c.binding.policy || binding.issuer !== c.binding.issuer || binding.jwksUri !== c.binding.jwksUri
-    || binding.claims !== c.binding.claims || !same(binding.seal ?? null, c.bindingSeal) || !same(bindingSealedAs?.seal ?? null, c.bindingSeal)) {
+    || binding.claims !== c.binding.claims || !same(binding.seal ?? null, c.bindingSeal)) {
     return { state: 'unbound' };
   }
+  if (!pinned(await newestOf({ kind: 'binding', id: c.binding.id }), c.pins.binding)) return { state: 'moved' };
   const [moved] = await tx.select({ seq: auditLog.seq }).from(auditLog)
     .where(and(eq(auditLog.author, 'app'), eq(auditLog.subjectPrincipal, c.appKey), inArray(auditLog.action, ['key.reseal', 'key.rotate']))).limit(1);
   if (moved !== undefined) return { state: 'retired' };

@@ -460,7 +460,7 @@ type Managed = { relations: string[]; functions: string[]; types: string[] };
  * Postgres folds it. A name followed by a dot is a schema's, never the
  * object's: `CREATE TABLE public.%I`, in the SQL a function runs (0022,
  * 0049), makes no table named public. A renamed table's old name stays
- * among them: 0075 keeps it, a view, one release (T178).
+ * among them: 0076 keeps it, a view, one release (T178).
  */
 export function managedObjects(sqlTexts: readonly string[]): Managed {
   const name = String.raw`(?:"?public"?\.)?(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_$]*))(?![A-Za-z0-9_$"]|\s*\.)`;

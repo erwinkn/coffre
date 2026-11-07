@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // pnpm test:compat (compat-check.sh), for a release from before 0.16.0's
-// table renames (T178, packages/db/src/migrations/postgres/0075_table_renames.sql)
+// table renames (T178, packages/db/src/migrations/postgres/0076_table_renames.sql)
 // only: tells that release's conformance the three names it holds the
 // database to by name.
 //

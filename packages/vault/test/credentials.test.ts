@@ -17,7 +17,7 @@ import { loggedChange, type ChangeKeys } from '../src/changes.ts';
 import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { objectKey, sealKey, sealOf } from '../src/inputs.ts';
-import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
+import { authentic, changeEntry, entryMac, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
 import { credentialObject } from '../src/objects.ts';
 import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, nothingHeld, withLogUnlocked, type TestDatabase } from './database.ts';
@@ -261,18 +261,22 @@ test('a sign-in takes the issue lock, never the fence: it commits while a change
   }
 });
 
-test("a sign-in that waits on its account's row while a change to it commits goes ahead on the change: the seal is compared once the lock is had", postgresOnly('row locks'), async () => {
+test("a sign-in that waits on its account's row while a change to it commits goes ahead on the change: the newest change is compared once the lock is had, `moved`, and read again (T192)", postgresOnly('row locks'), async () => {
   const w = await world();
   const holder = postgresSession(OWNER_URL);
   try {
-    // A change of the account's (a grant, say) under way: its row held, its seal moved, its entry written, not yet committed.
+    // A change of the account's (a grant, say) under way: its row held, its seal moved, its entry written under the
+    // vault's MAC, not yet committed. The sign-in's statement waits for the row, then finds a newer change than the one
+    // the vault checked: `moved`; the vault reads it, its MAC holds, and the sign-in goes ahead on it.
     const seal = randomBytes(16);
     await holder.unsafe('BEGIN');
     await holder.unsafe(`SELECT 1 FROM principals WHERE principal = '${CI}' FOR NO KEY UPDATE`);
     await holder.unsafe(`UPDATE principals SET seal = $1 WHERE principal = '${CI}'`, [seal]);
-    await holder.unsafe(`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-      SELECT nextval('log_number'), c.at, gen_random_uuid()::text, c.object, c.actor, c.payload, $1, c.mac
-        FROM log_changes c WHERE c.object = log_object('principal', '${CI}') ORDER BY c.number DESC LIMIT 1`, [seal]);
+    const [last] = await holder.unsafe<{ at: string; object: string; actor: string; payload: string }[]>(`SELECT c.at::text AS at, c.object::text AS object, c.actor, c.payload
+      FROM log_changes c WHERE c.object = log_object('principal', '${CI}') ORDER BY c.number DESC LIMIT 1`);
+    const row = { at: Number(last!.at), requestId: randomUUID(), object: last!.object, actor: last!.actor, payload: last!.payload, seal };
+    await holder.unsafe(`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_number'), $1, $2, $3, $4, $5, $6, $7)`,
+      [String(row.at), row.requestId, row.object, row.actor, row.payload, seal, entryMac(w.keys.mac, { tree: 'changes', row })]);
     const signing = w.vault.signIn!(asked(w));
     await sleep(200);
     await holder.unsafe('COMMIT');

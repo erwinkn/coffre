@@ -530,8 +530,32 @@ export type ProxyItemView = {
    * keys saves it again. The tab's read (`proxy`) says it; a save's answer
    * leaves it out, since its reads would hold the save's locks longer.
    */
-  notCleared?: { key: string; reason: string } | null;
+  notCleared?: NotCleared | null;
 };
+
+/**
+ * Why a UI item's key does not clear for its editor now (decision 5,
+ * section 8), as the tab says it: for what their save froze, or for them
+ * as they stand now.
+ *
+ *   unread              they do not read it where it is held, now
+ *   unread_at_save      what their save froze does not read it there: the place protected since, or a fork made since
+ *   not_owner_at_save   it is sensitive, and their save was no Owner's of its project: made sensitive since
+ *   not_owner           it is sensitive, and they saved it as an Owner of its project, which they no longer are
+ */
+export type NotClearedCode = 'unread' | 'unread_at_save' | 'not_owner_at_save' | 'not_owner';
+
+/**
+ * A UI item's mark (`ProxyItemView.notCleared`): the first key that does
+ * not clear, why (`code`), and the environment that holds it, whose
+ * readers save the item again, and whose project's Owners do for a
+ * sensitive key (R66). That project is the place's: a reference is decided
+ * where it lives (R71), and a fork's parents are of its project.
+ * `reason` is the vault's own words, as a use's `route_not_cleared` says them.
+ *
+ *   { key: 'OPENAI_API_KEY', code: 'unread', environment: 'dev', reason: 'OPENAI_API_KEY: its editor does not read it in dev (no_grant)' }
+ */
+export type NotCleared = { key: string; code: NotClearedCode; environment: string; reason: string };
 
 /**
  * An environment's proxy definitions as its sealed object holds them, and
@@ -553,7 +577,7 @@ export type ProxyView = {
    * their keys, its own values over a parent's, so a parent's page's mark
    * does not say. Only the tab's read (`proxy`) says it.
    */
-  inheritedNotCleared?: Record<string, { key: string; reason: string }>;
+  inheritedNotCleared?: Record<string, NotCleared>;
 };
 
 export type SaveProxyInput = Correlation & Through & ProxyInput & {
@@ -911,7 +935,26 @@ export type SignInInput = {
   idToken: { token: string; jwks: string } | null;
   /** A workload's DPoP proof, whose key the session is bound to, which the vault verifies; null for a CI run's sign-in. */
   dpop: string | null;
+  /**
+   * The account's and the binding's newest changes in 0.15's log, as the app
+   * read them in the statement that read the binding (T192). The vault
+   * checks each one's MAC over the object it derives (the account by
+   * `principal`, the binding by its id), and the statement holds each
+   * object's newest change, under its row's lock, to the one checked,
+   * whole (its number, every column its MAC covers, and the MAC): one vault
+   * statement. Absent (an app of an earlier
+   * release), null, or one that does not hold: the vault reads them itself,
+   * one statement more, as T190 made it.
+   */
+  newest?: { member: LoggedChange | null; binding: LoggedChange | null };
 };
+
+/**
+ * A change of 0.15's log as a reader outside the vault hands it back (T192):
+ * every column its MAC covers but its object, its number as text, its bytes
+ * in base64. Only its MAC makes it the vault's.
+ */
+export type LoggedChange = { number: string; at: number; requestId: string; actor: string; payload: string; seal: string | null; mac: string };
 
 /**
  * A trust binding's columns as its object takes them (T149, PR 3a): what a

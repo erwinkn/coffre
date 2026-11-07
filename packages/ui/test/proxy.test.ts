@@ -192,12 +192,17 @@ test('the sample call matches as the proxy does: globs by segment, a plain path 
   assert.match(sampleCall(openai, 'GET', '/files').refusal!, /^403/);
 });
 
-test("an item that would not route now says why, and who clears it", () => {
+test("an item that would not route now says why, and who clears it, from the mark's code and where the key is held", () => {
   const item = { definition: route('gemini'), savedBy: 'user:lead@acme.example' };
-  assert.equal(notClearedInWords({ ...item, notCleared: { key: 'OPENAI_API_KEY', reason: 'OPENAI_API_KEY: its editor does not read it in dev (no_grant)' } }, DEV),
-    'gemini does not route now: lead@acme.example, who saved it, no longer reads OPENAI_API_KEY here. Someone who does saves it again.');
-  assert.equal(notClearedInWords({ ...item, notCleared: { key: 'OPENAI_API_KEY', reason: "OPENAI_API_KEY is sensitive, and its editor was no Owner of its project when they saved it" } }, DEV),
-    "gemini does not route now: OPENAI_API_KEY is sensitive, and lead@acme.example's save was not an Owner's. An Owner of market saves it again.");
+  const mark = (code: 'unread' | 'unread_at_save' | 'not_owner_at_save' | 'not_owner', environment = 'dev') =>
+    notClearedInWords({ ...item, notCleared: { key: 'OPENAI_API_KEY', code, environment, reason: 'the vault\'s words, which the tab does not read' } }, DEV);
+  assert.equal(mark('unread'), 'gemini does not route now: lead@acme.example, who saved it, does not read OPENAI_API_KEY in market/dev. Someone who does saves it again.');
+  // A fork's key held in its parent: named where it is held.
+  assert.equal(mark('unread', 'staging'), 'gemini does not route now: lead@acme.example, who saved it, does not read OPENAI_API_KEY in market/staging. Someone who does saves it again.');
+  assert.equal(mark('unread_at_save'), 'gemini does not route now: what lead@acme.example held when they saved it does not read OPENAI_API_KEY in market/dev. Someone who reads it saves it again.');
+  assert.equal(mark('not_owner_at_save'), 'gemini does not route now: OPENAI_API_KEY is sensitive, and lead@acme.example was no Owner of market when they saved it. An Owner of market saves it again.');
+  // A former Owner's save: an Owner's when made, no longer one's.
+  assert.equal(mark('not_owner'), 'gemini does not route now: OPENAI_API_KEY is sensitive, and lead@acme.example, who saved it as an Owner of market, no longer is one. An Owner of market saves it again.');
 });
 
 test('code may give a route and a signer one name: each its own row', () => {

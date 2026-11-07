@@ -2362,10 +2362,13 @@ is fixed in this document, within PR C.
 - **The `route_not_cleared` mark** is the vault's: `Vault.proxy()` decides
   each item's keys for its frozen holdings and its editor's standing now
   (`notCleared` in `packages/vault/src/proxy.ts`, the rule section 8 gives
-  the use), and answers `notCleared` per item. A save's answer leaves it
+  the use), and answers `notCleared` per item: the first key that does not
+  clear, the environment that holds it, and why, as a code the tab words
+  (`NotClearedCode`: `unread`, `unread_at_save`, `not_owner_at_save`,
+  `not_owner`), never by matching the vault's text (T197). A save's answer leaves it
   out: its reads would hold the change's locks two round trips longer
-  (`change-cost.test.ts`). PR C's use decides the same way; the two share
-  `routeRefusal`, `frozenAllows` and `frozenOwns`. A fork's read also
+  (`change-cost.test.ts`). PR C's use decides the same way, through the
+  same `editorRefusal`. A fork's read also
   marks what it inherits (`inheritedNotCleared`), decided where the fork
   resolves the keys: dev's `openai`, saved by someone who reads dev's
   OPENAI_API_KEY, does not route in dev-eu once dev-eu sets its own value

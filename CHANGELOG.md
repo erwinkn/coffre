@@ -54,6 +54,24 @@
   signed-in member's own page, `coffre members` and `coffre access` now say
   that removing does not clear it and that the record is put back from a
   backup (`docs/restore.md`, "A member refused as tampered").
+- **A CI run's or a workload's sign-in is one vault statement again
+  (T192), and closes the gap T190 left.** T190 had the vault read the
+  account's and the binding's newest changes in a statement of its own, to
+  check their MACs before `sign_in` trusted their seals. The app now reads
+  them in the statement it already makes, its service's bindings on the
+  token's issuer, and the vault checks them there; migration 0075's
+  `sign_in` holds each object's newest change, under its row's lock, to
+  the one the vault checked, whole (its number, every column its MAC
+  covers, and the MAC), and answers `moved` for any other, which the vault
+  reads itself, as before. So a seal column edited in place once the check
+  was done, which let an account removed and put back sign in on timing
+  alone, is refused; and so is an old, authentic change the app hands back
+  under the number of the account's removal, whose seal column a writer
+  made the old one's: no MAC covers a number. Still open, as under 0037: an
+  account's row put back with its removal's own seal, no log edited, gets
+  a credential made, which every use refuses, as the row fails its seal.
+  Additive: 0037's `sign_in` stays for the previous release's vault. An AWS proof's sign-in still takes the
+  vault's read.
 
 - **With passkeys on, a reveal by name, a key write and a member add check
   the caller's passkey in the vault's own call (T216).** Each read the
@@ -123,6 +141,15 @@
   check) work through the views until then: move them to the new names. The
   sign-in rows' MACs still name the tables as they were when first written
   (`device_authorizations`, `enrollments`), so nothing is signed again.
+
+- **The Proxy tab says why a route stopped from the vault's code, not its
+  words (T197).** The note on a UI item that would not route now matched
+  the vault's text, so a route saved by an Owner who was then demoted read
+  "its save was not an Owner's", and an inherited key was said to be read
+  "here". The vault's mark now carries a code (`unread`, `unread_at_save`,
+  `not_owner_at_save`, `not_owner`) and the environment that holds the
+  key, and the tab words each: "pat@acme.example, who saved it as an Owner
+  of market, no longer is one. An Owner of market saves it again."
 
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
