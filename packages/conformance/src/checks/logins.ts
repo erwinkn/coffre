@@ -21,7 +21,7 @@ const IMMUTABLE = [
   "UPDATE audit_log SET action = 'rewritten' WHERE author = 'vault'",
   'DELETE FROM audit_log', 'TRUNCATE audit_log', 'DROP TABLE audit_log',
   'UPDATE secret_versions SET id = id', 'DELETE FROM secret_versions',
-  'DELETE FROM vault_members', 'CREATE TABLE conformance_probe (id integer)',
+  'DELETE FROM principals', 'CREATE TABLE conformance_probe (id integer)',
   'CREATE TEMP TABLE conformance_probe (id integer)',
   'ALTER TABLE audit_log DISABLE TRIGGER USER', "SET session_replication_role = 'replica'",
   'SET ROLE coffre_owner',
@@ -30,7 +30,7 @@ const IMMUTABLE = [
 /** A column of each app table, for an update that would change nothing, if it were allowed. */
 const APP_COLUMNS: Record<string, string> = {
   projects: 'id', environments: 'id', secrets: 'id', secret_versions: 'id', identities: 'id',
-  credentials: 'id', device_authorizations: 'id',
+  credentials: 'id', device_logins: 'id',
 };
 
 async function refuses(sql: Sql, statements: string[]): Promise<number> {
@@ -73,7 +73,8 @@ async function noWrites(sql: Sql, names: readonly string[]): Promise<void> {
 export async function appLogin(deployment: Deployment): Promise<string> {
   if (deployment.kind === 'node') throw new Skip('SQLite has no database logins');
   expect(deployment.runtime !== null, 'the app runtime login is missing');
-  const protectedTables = (await using(deployment.database(), tables)).filter((name) => name.startsWith('vault_'));
+  // The vault's own: its principals, their grants, and `vault_releases` (and any `vault_` table a deployment adds).
+  const protectedTables = (await using(deployment.database(), tables)).filter((name) => name === 'principals' || name === 'grants' || name.startsWith('vault_'));
   return using(deployment.runtime(), async (sql) => {
     await noWrites(sql, protectedTables);
     const statements = [...IMMUTABLE, appendAs('vault'), 'SET ROLE coffre_vault', 'DELETE FROM secrets'];
@@ -106,7 +107,7 @@ export async function hotLogin(deployment: Deployment): Promise<string> {
   return using(deployment.hotRuntime(), async (sql) => {
     const [login] = await sql.query<{ name: string; lock: string; statement: string; members: boolean }>(`SELECT current_user AS name,
       current_setting('lock_timeout') AS lock, current_setting('statement_timeout') AS statement,
-      has_table_privilege(current_user, 'vault_members', 'INSERT') AS members`);
+      has_table_privilege(current_user, 'principals', 'INSERT') AS members`);
     expect(login.name === 'coffre_vault_hot', `the hot path's URL logs in as ${login.name}, not coffre_vault_hot`);
     expect(login.lock === HOT_SETTINGS.lock_timeout && login.statement === HOT_SETTINGS.statement_timeout, "the hot path's login lacks its timeouts", login);
     expect(login.members, "the hot path's login cannot write members, as the vault's can");
@@ -117,7 +118,7 @@ export async function hotLogin(deployment: Deployment): Promise<string> {
 /** The tables only the app writes: every one but the vault's and the log's. */
 async function vaultReadOnly(deployment: Deployment): Promise<string[]> {
   return (await using(deployment.database(), tables)).filter((name) =>
-    !['vault_members', 'vault_grants', 'audit_log', 'audit_chain_head'].includes(name));
+    !['principals', 'grants', 'audit_log', 'audit_chain_head'].includes(name));
 }
 
 /** What a vault login may not do: write the app's tables, replace the log's head, rewrite the log or act as the app. */
@@ -131,7 +132,7 @@ async function vaultRefuses(sql: Sql, appTables: readonly string[]): Promise<str
   expect(!head.insertable && !head.deletable && !head.truncatable && !head.identity_updatable, 'the vault can replace the head row', head);
   const statements = [...IMMUTABLE, appendAs('app'), 'SET ROLE coffre_app',
     'UPDATE audit_chain_head SET only_row = only_row', 'DELETE FROM audit_chain_head', 'TRUNCATE audit_chain_head',
-    'UPDATE vault_members SET principal = principal', 'UPDATE vault_grants SET role = role'];
+    'UPDATE principals SET principal = principal', 'UPDATE grants SET role = role'];
   for (const table of appTables) {
     const column = APP_COLUMNS[table];
     if (column !== undefined) statements.push(`UPDATE ${quoted(table)} SET ${column} = ${column}`);

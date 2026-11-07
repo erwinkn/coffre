@@ -24,7 +24,7 @@ proposals are taken; "What the reviews change" says where each lands.
   grants. The app writes everything else. SQLite remains for tests and local
   development only.
 - **One member list, owned by the vault.** The app's and the vault's
-  `principals` merge into `vault_members`. A removal bumps the member's
+  `principals` merge into `principals`. A removal bumps the member's
   generation, and every session, token, linked account and device approval
   issued before it stops working, whether or not the app ever touches its
   row.
@@ -103,10 +103,10 @@ this document is about getting as much of the second back as possible.
        ▼                                                ▼
   ┌─────────────────────────────── one database ───────────────────────────────┐
   │ written by the app          │ written by both          │ written by the vault │
-  │ projects, environments,     │ audit_log, under each    │ vault_members,       │
-  │ secrets, secret_versions,   │ author's MAC             │ vault_grants         │
+  │ projects, environments,     │ audit_log, under each    │ principals,       │
+  │ secrets, secret_versions,   │ author's MAC             │ grants         │
   │ identities, credentials,    │ audit_chain_head, the    │                      │
-  │ device_authorizations,      │ one lock                 │ read by the app      │
+  │ device_logins,      │ one lock                 │ read by the app      │
   │ syncs, sync_keys            │                          │                      │
   └────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -120,13 +120,13 @@ database login; what each API caller may see is still the server's rule.
 | `environments` | id, project, slug, name, archive state | app | app, vault |
 | `secrets` | id, environment, key, current version, archive state | app | app, vault |
 | `secret_versions` | one immutable envelope per version: ciphertext, wrapped data key, KEK labels | app, append only | app, vault |
-| `vault_members` | the one directory: principal, created, status, owner, status changed, `generation`, `access_seq`, `mac` | vault | app, vault |
-| `vault_grants` | principal, exactly one of project or environment, role, expiry, granted | vault | app, vault |
+| `principals` | the one directory: principal, created, status, owner, status changed, `generation`, `access_seq`, `mac` | vault | app, vault |
+| `grants` | principal, exactly one of project or environment, role, expiry, granted | vault | app, vault |
 | `audit_log` | every event of both authors, with its MAC and chain hash | app and vault, each its own author, append only | app, vault |
 | `audit_chain_head` | the one row every append and every vault decision locks | app, vault | app, vault |
 | `identities` | a provider account bound to a member: provider, `issuer_hash`, subject, generation, `auth_mac` | app | app |
 | `credentials` | hashed browser, CLI and service tokens, with generation and `auth_mac` | app | app |
-| `device_authorizations` | a `coffre login` approval, with generation and `auth_mac` | app | app |
+| `device_logins` | a `coffre login` approval, with generation and `auth_mac` | app | app |
 | `syncs` | a sync's configuration, source, credential secret and lease | app | app, vault |
 | `sync_keys` | what each destination accepted, and so what coffre may delete there | app | app |
 
@@ -414,7 +414,7 @@ other four come from keys, and hold on SQLite too.
 3. **Triggers** refuse UPDATE, DELETE and TRUNCATE on `audit_log`, for every
    login, the owner's too. They stop bugs and a careless owner, not a
    determined one: the owner can `DISABLE TRIGGER`, as the spike did.
-4. **A MAC over each member's access.** Each `vault_members` row carries an
+4. **A MAC over each member's access.** Each `principals` row carries an
    HMAC, under `HKDF(signingKey, "coffre.vault.rows")`, over every field that
    bears on access, `generation` and `access_seq` included, and over that
    member's grants as a sorted set, lapsed ones included. A grant inserted,
@@ -463,7 +463,7 @@ The target is the table in "The proposal". What changes, and why:
 **One directory** (S2). Today the app's `principals` is a directory and a
 foreign-key target, the vault's `principals` decides membership, and
 `members.ts` joins two separately fetched lists. Both become
-`vault_members(principal, created_at, created_by, status, owner,
+`principals(principal, created_at, created_by, status, owner,
 status_changed_at, status_changed_by, generation, access_seq, mac)`, written
 by the vault alone. Principals are the canonical strings coffre already uses
 at its edges, `user:<email>`, `token:<id>` and `sync:<id>`, so the
@@ -486,7 +486,7 @@ housekeeping: it stamps only older generations, so it never revokes a new
 session. A sign-in started under generation 7 carries 7 to its end and is
 refused if the member is at 8 by then.
 
-**Grants name exactly one place** (S5). `vault_grants(principal,
+**Grants name exactly one place** (S5). `grants(principal,
 project_id NULL, environment_id NULL, role, expires_at, granted_at,
 granted_by)`, with a check that exactly one of the two is set, a unique key
 on each with the principal, and foreign keys to both. An environment grant
@@ -732,9 +732,9 @@ queries:
 
 | Page or command | Today | After |
 |---|---|---|
-| The Users page and `coffre access`: everyone, their status, owner flag and grants (`GET /api/members`) | `vault.members()`, then joined with the app's directory | one query over `vault_members`, `vault_grants`, identities and credentials |
+| The Users page and `coffre access`: everyone, their status, owner flag and grants (`GET /api/members`) | `vault.members()`, then joined with the app's directory | one query over `principals`, `grants`, identities and credentials |
 | A member's page: status, grants, sessions, what they read (`GET /api/members/user:ada@acme.example`) | `vault.access()` for status and grants, plus the app's queries | the same query, for one member |
-| A project's Access tab: who holds what on `market` | `vault.members()`, filtered to the project | `vault_grants` joined to members, for one project |
+| A project's Access tab: who holds what on `market` | `vault.members()`, filtered to the project | `grants` joined to members, for one project |
 | The audit page's "Vault log" panel (`GET /api/audit/vault`) | `vault.log()`, the vault's own pager and serialiser | gone: one audit page reads `audit_log` |
 | The audit page's checkpoint status | `vault.latestCheckpoint()` | the newest `audit.checkpoint` entry, its signature checked with the vault's public key, which comes from the vault |
 
@@ -1099,9 +1099,9 @@ verifies what it signed under an earlier KEK's key while that KEK stays in
    Verified by the vectors, the suite and #21's sequence tests.
 4. **The vault on the shared database, owning the directory** (S2, S3, S5,
    F2, F5), built in #31 (the vault's tables and logins), #33 (one member
-   list), #34 (KMS deadlines and accounting) and #45 (version ids). `vault_members`, which replaces both `principals` tables, and
-   `vault_grants` with one foreign key per grant; canonical principals; the
-   sign-in tables pointing at `vault_members`, with #23's columns made NOT
+   list), #34 (KMS deadlines and accounting) and #45 (version ids). `principals`, which replaces both `principals` tables, and
+   `grants` with one foreign key per grant; canonical principals; the
+   sign-in tables pointing at `principals`, with #23's columns made NOT
    NULL. The `coffre_vault` role, the GRANTs and row-level security per
    author. The vault's store rewritten with Drizzle, appending v2 entries
    under its key. Decisions lock the member row, then the head; with a local
@@ -1231,8 +1231,8 @@ grant and commits:
 READ COMMITTED: T2 waiting on the head row -> lock acquired; then sees T1's grant: 1
 REPEATABLE READ: T2 waiting on the head row -> 40001 could not serialize access due to concurrent update
 
-app  SELECT vault_grants:            42501 permission denied for table vault_grants
-app  INSERT vault_grants:            42501 permission denied for table vault_grants
+app  SELECT grants:            42501 permission denied for table grants
+app  INSERT grants:            42501 permission denied for table grants
 app  SELECT vault_log:               42501 permission denied for table vault_log
 vault INSERT vault_log:              ok
 vault UPDATE vault_log:              42501 permission denied for table vault_log

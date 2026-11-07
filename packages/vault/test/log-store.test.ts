@@ -117,7 +117,7 @@ test('a forged entry, a floor lowered by a writer, and a tile changed under the 
     await use();
     assert.ok((await cp.tick()).signed);
     // BarrierChecksFloor: a writer lowers the unsigned floor row.
-    await run(db.owner, sql`UPDATE log_fence SET at_floor = at_floor - 60000`);
+    await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = at_floor - 60000`);
     await use();
     const t = await cp.tick();
     assert.ok(!t.signed && /floor of at is .* lowered by a writer/.test(t.failures.join()), t.failures.join());

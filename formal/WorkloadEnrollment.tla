@@ -50,7 +50,7 @@ CONSTANTS
     \* And renewal checks it in the statement that updates the row, after
     \* it read the clock. Off, in a statement of its own before it.
     SupersedeCheckInUpdate,
-    \* A session takes its code's scope, fixed at minting (`enrollments.scope`),
+    \* A session takes its code's scope, fixed at minting (`enrollment_codes.scope`),
     \* not the binding's.
     ScopeFromCode,
     \* A code's scope reads sensitive values only where its minter is an
@@ -91,7 +91,7 @@ Principals == {"omar", "vic", "deploy", "api"}
 
 VARIABLES
     now,            \* the database's statement clock
-    codes,          \* codes[c]: the enrollments row, [minted, scope]
+    codes,          \* codes[c]: the enrollment_codes row, [minted, scope]
     mintedBy,       \* the binding's policy's `mintedBy`
     sessions,       \* the code's sessions, roots: [id, code, expires, revoked, scope]
     held,           \* held[p]: the session process p holds, or NoSession

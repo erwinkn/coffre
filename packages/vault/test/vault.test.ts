@@ -1654,14 +1654,14 @@ test('a service account admitted with its first grant is one decision: a grant r
 
 test('a service account whose row was deleted is refused, under forged entries about it too, and never comes back from nothing', log014Only(START_OVER), async () => {
   const w = await world();
-  const { vaultMembers } = tablesOf(db.owner);
+  const { principals } = tablesOf(db.owner);
   const code = (outcome: { ok: boolean; refusal?: { code: string } }) => (outcome.ok ? 'ok' : outcome.refusal!.code);
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'developer', scope: DEV_ONLY })).ok);
   assert.ok((await w.vault.admit({ actor: ROOT, principal: 'token:ci' })).ok);
   assert.ok((await w.vault.remove({ actor: ROOT, principal: 'token:ci' })).ok);
 
   // Root removed it; its row deleted, the log still says so, under a page of forged entries and under more than the vault reads back.
-  await db.owner.delete(vaultMembers).where(eq(vaultMembers.principal, 'token:ci'));
+  await db.owner.delete(principals).where(eq(principals.principal, 'token:ci'));
   assert.equal((await w.vault.access('token:ci')).status, 'tampered');
   await forgeEntries(32, { action: 'member.add', subjectPrincipal: 'token:ci' });
   assert.equal(code(await w.vault.admit({ actor: ADA, principal: 'token:ci' })), 'tampered');
@@ -1787,11 +1787,11 @@ test('only those who run the instance set roles, never their own, and a scoped a
  * vault of 0.4 would have left them.
  */
 async function everyProjectGrant(principal: string, slug: string | null, role: string, expiresAt: number | null = null): Promise<void> {
-  const { vaultGrants, vaultMembers } = tablesOf(db.owner);
+  const { grants, principals } = tablesOf(db.owner);
   const metadata = JSON.stringify({ role, expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(), previousRole: null, place: slug === null ? '*' : `*/${slug}` });
   const appended = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: principal, metadata }], undefined, undefined, [], true));
-  await db.owner.insert(vaultGrants).values({ principal, projectId: null, environmentId: null, environmentSlug: slug, role, expiresAt, grantedAt: appended.occurredAt, grantedBy: ROOT });
-  await db.owner.update(vaultMembers).set({ accessSeq: appended.seqStart }).where(eq(vaultMembers.principal, principal));
+  await db.owner.insert(grants).values({ principal, projectId: null, environmentId: null, environmentSlug: slug, role, expiresAt, grantedAt: appended.occurredAt, grantedBy: ROOT });
+  await db.owner.update(principals).set({ accessSeq: appended.seqStart }).where(eq(principals.principal, principal));
   await reseal(principal);
 }
 
@@ -1855,8 +1855,8 @@ test('a vault of 0.5 replaces the grants on every project of 0.4 once, holding n
   assert.deepEqual([service.role, service.grants.map((grant) => [grant.environmentId, grant.role]).sort()], ['member', [[other.devId, 'developer'], [w.dev, 'developer']].sort()]);
 
   // None is left; the log says what became of each, and still replays.
-  const { vaultGrants } = tablesOf(db.owner);
-  assert.deepEqual(await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`), []);
+  const { grants } = tablesOf(db.owner);
+  assert.deepEqual(await db.owner.select().from(grants).where(sql`${grants.projectId} IS NULL AND ${grants.environmentId} IS NULL`), []);
   const log = (await vaultLog(w)).filter((entry) => entry.actor === 'system:vault');
   const revoked = log.filter((entry) => entry.action === 'access.revoke');
   assert.deepEqual(revoked.map((entry) => [entry.subject, entry.detail.place, entry.detail.previousRole]).sort(), [
@@ -1904,64 +1904,64 @@ test('the conversion takes no read away: viewer on every project beside auditor 
 
 test('migrate marks a member whose row the vault found tampered with, whose grants it leaves as they are', log014Only(CONVERSION), async () => {
   const w = await world();
-  const { vaultGrants } = tablesOf(db.owner);
+  const { grants } = tablesOf(db.owner);
   await member(w, ADA, []);
   await member(w, BOB, []);
   await everyProjectGrant(ADA, null, 'viewer');
   await everyProjectGrant(BOB, null, 'viewer');
-  await db.owner.update(vaultGrants).set({ role: 'owner' }).where(eq(vaultGrants.principal, BOB));
+  await db.owner.update(grants).set({ role: 'owner' }).where(eq(grants.principal, BOB));
   assert.equal((await w.vault.access(BOB)).status, 'tampered');
   assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => [preview.principal, preview.reported]), [[ADA, false], [BOB, true]]);
   await (await fresh()).access(ADA);
-  assert.deepEqual((await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`)).map((grant) => grant.principal), [BOB]);
+  assert.deepEqual((await db.owner.select().from(grants).where(sql`${grants.projectId} IS NULL AND ${grants.environmentId} IS NULL`)).map((grant) => grant.principal), [BOB]);
 });
 
 test('a genuine row put back after a tamper report is left as migrate says, until a change to what they hold settles it', log014Only(CONVERSION), async () => {
   const w = await world();
-  const { vaultGrants } = tablesOf(db.owner);
+  const { grants } = tablesOf(db.owner);
   await member(w, BOB, []);
   await everyProjectGrant(BOB, null, 'viewer');
-  await db.owner.update(vaultGrants).set({ role: 'owner' }).where(eq(vaultGrants.principal, BOB));
+  await db.owner.update(grants).set({ role: 'owner' }).where(eq(grants.principal, BOB));
   assert.equal((await w.vault.access(BOB)).status, 'tampered');
   // The exact row put back: it checks out again, and no entry says so.
-  await db.owner.update(vaultGrants).set({ role: 'viewer' }).where(eq(vaultGrants.principal, BOB));
+  await db.owner.update(grants).set({ role: 'viewer' }).where(eq(grants.principal, BOB));
   assert.equal((await w.vault.access(BOB)).status, 'active');
 
   // migrate, which holds no key, marks BOB reported; the vault leaves him as he is.
   assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => [preview.principal, preview.reported]), [[BOB, true]]);
   await (await fresh()).access(BOB);
-  const everyProject = sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`;
-  assert.deepEqual((await db.owner.select().from(vaultGrants).where(everyProject)).map((grant) => grant.principal), [BOB]);
+  const everyProject = sql`${grants.projectId} IS NULL AND ${grants.environmentId} IS NULL`;
+  assert.deepEqual((await db.owner.select().from(grants).where(everyProject)).map((grant) => grant.principal), [BOB]);
 
   // A change to what he holds is newer than the report: both convert him again.
   assert.ok((await w.vault.setAccess({ actor: ROOT, principal: BOB, changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }] })).ok);
   assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => [preview.principal, preview.reported]), [[BOB, false]]);
   await (await fresh()).access(BOB);
-  assert.deepEqual(await db.owner.select().from(vaultGrants).where(everyProject), []);
+  assert.deepEqual(await db.owner.select().from(grants).where(everyProject), []);
 });
 
 test('tamper reports forged in the vault\'s name above its own leave the one it wrote standing', log014Only(CONVERSION), async () => {
   const w = await world();
-  const { vaultGrants } = tablesOf(db.owner);
+  const { grants } = tablesOf(db.owner);
   await member(w, BOB, []);
   await everyProjectGrant(BOB, null, 'viewer');
-  await db.owner.update(vaultGrants).set({ role: 'owner' }).where(eq(vaultGrants.principal, BOB));
+  await db.owner.update(grants).set({ role: 'owner' }).where(eq(grants.principal, BOB));
   assert.equal((await w.vault.access(BOB)).status, 'tampered');
-  await db.owner.update(vaultGrants).set({ role: 'viewer' }).where(eq(vaultGrants.principal, BOB));
+  await db.owner.update(grants).set({ role: 'viewer' }).where(eq(grants.principal, BOB));
   assert.equal((await w.vault.access(BOB)).status, 'active');
 
   // More forged reports than a page holds, above the vault's own: it still stands, as migrate says.
   await forgeEntries(33, { action: 'vault.tampered', code: 'stale', subjectPrincipal: BOB });
   assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map((preview) => [preview.principal, preview.reported]), [[BOB, true]]);
   await (await fresh()).access(BOB);
-  const everyProject = sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`;
-  assert.deepEqual((await db.owner.select().from(vaultGrants).where(everyProject)).map((grant) => grant.principal), [BOB]);
+  const everyProject = sql`${grants.projectId} IS NULL AND ${grants.environmentId} IS NULL`;
+  assert.deepEqual((await db.owner.select().from(grants).where(everyProject)).map((grant) => grant.principal), [BOB]);
   assert.equal((await tamperings(w)).filter(([, fault]) => fault === 'forged_entry').length, 33);
 });
 
 test('tamper reports forged in the vault\'s name before a change to what a member holds leave the conversion to run, as migrate says', log014Only(CONVERSION), async () => {
   const w = await world();
-  const { vaultGrants } = tablesOf(db.owner);
+  const { grants } = tablesOf(db.owner);
   await member(w, 'token:legacy', []);
   // As many as the vault reads back, all before the grant: none can stand.
   await forgeEntries(32 * 32, { action: 'vault.tampered', code: 'stale', subjectPrincipal: 'token:legacy' });
@@ -1969,7 +1969,7 @@ test('tamper reports forged in the vault\'s name before a change to what a membe
   assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map(({ principal, conversion, reported }) => [principal, conversion.grants.length, reported]), [['token:legacy', 1, false]]);
   const converted = await (await fresh()).access('token:legacy');
   assert.deepEqual(converted.grants.map((grant) => [grant.projectId, grant.environmentId, grant.role]), [[w.project, null, 'viewer']]);
-  assert.deepEqual(await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`), []);
+  assert.deepEqual(await db.owner.select().from(grants).where(sql`${grants.projectId} IS NULL AND ${grants.environmentId} IS NULL`), []);
 });
 
 // Forged after the grant, they are what the vault would leave the grant for, were they its own: migrate cannot tell.
@@ -1977,7 +1977,7 @@ for (const forged of [1, 32, 33, 32 * 32 - 1, 32 * 32]) {
   const within = forged < 32 * 32;
   test(`after ${forged} tamper report${forged === 1 ? '' : 's'} forged in the vault's name, ${within ? 'migrate lists the conversion of a grant on every project, which the vault makes' : 'more than it reads past, the vault leaves a grant on every project, as migrate warns'}`, log014Only(CONVERSION), async () => {
     const w = await world();
-    const { vaultGrants } = tablesOf(db.owner);
+    const { grants } = tablesOf(db.owner);
     await member(w, 'token:legacy', []);
     await everyProjectGrant('token:legacy', null, 'viewer');
     await forgeEntries(forged, { action: 'vault.tampered', code: 'stale', subjectPrincipal: 'token:legacy' });
@@ -1988,7 +1988,7 @@ for (const forged of [1, 32, 33, 32 * 32 - 1, 32 * 32]) {
       ['token:legacy', [[w.project, 'viewer']], true],
     ]);
     const converted = await (await fresh()).access('token:legacy');
-    const left = await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`);
+    const left = await db.owner.select().from(grants).where(sql`${grants.projectId} IS NULL AND ${grants.environmentId} IS NULL`);
     if (within) {
       assert.deepEqual(converted.grants.map((grant) => [grant.projectId, grant.environmentId, grant.role]), [[w.project, null, 'viewer']]);
       assert.deepEqual(left, []);
@@ -2001,22 +2001,22 @@ for (const forged of [1, 32, 33, 32 * 32 - 1, 32 * 32]) {
 for (const history of ['none', 'forged'] as const) {
   test(`a member with ${history === 'none' ? 'no access entry' : 'only access entries forged in the vault\'s name'} is left as they are under forged reports, and migrate marks them`, log014Only(CONVERSION), async () => {
     const w = await world();
-    const { auditLog, vaultGrants, vaultMembers } = tablesOf(db.owner);
+    const { auditLog, grants, principals } = tablesOf(db.owner);
     const LEGACY = 'token:legacy';
     await member(w, ADA, []);
     if (history === 'forged') await forgeEntries(3, { action: 'member.add', subjectPrincipal: LEGACY });
     // ADA's row, as LEGACY's, naming the newest entry about LEGACY, or one about nobody, and sealed with a grant on every project.
     const [newest] = await db.owner.select({ seq: auditLog.seq }).from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
-    const [row] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, ADA));
-    await db.owner.insert(vaultMembers).values({ ...row, principal: LEGACY, accessSeq: newest.seq });
-    await db.owner.insert(vaultGrants).values({ principal: LEGACY, projectId: null, environmentId: null, environmentSlug: null, role: 'viewer', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT });
+    const [row] = await db.owner.select().from(principals).where(eq(principals.principal, ADA));
+    await db.owner.insert(principals).values({ ...row, principal: LEGACY, accessSeq: newest.seq });
+    await db.owner.insert(grants).values({ principal: LEGACY, projectId: null, environmentId: null, environmentSlug: null, role: 'viewer', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT });
     await reseal(LEGACY);
     await forgeEntries(1, { action: 'vault.tampered', code: 'stale', subjectPrincipal: LEGACY });
 
     assert.deepEqual((await everyProjectPreview(db.owner, Date.now())).map(({ principal, reported }) => [principal, reported]), [[LEGACY, true]]);
     // Its row names no entry of the vault's own: stale, so it never comes to the reports.
     await (await fresh()).access(ADA);
-    const left = await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.projectId} IS NULL AND ${vaultGrants.environmentId} IS NULL`);
+    const left = await db.owner.select().from(grants).where(sql`${grants.projectId} IS NULL AND ${grants.environmentId} IS NULL`);
     assert.deepEqual(left.map((grant) => grant.principal), [LEGACY]);
     const reported = (await vaultLog(w)).filter((entry) => entry.action === 'vault.tampered' && entry.actor === 'system:vault' && entry.subject === LEGACY);
     assert.deepEqual(reported.map((entry) => entry.code).filter((code) => code !== 'forged_entry'), ['stale']);
@@ -2313,7 +2313,7 @@ test('a full check covers the head the app verified up to, and refuses an entry 
 
 test('a full check replays who holds what from the log, and finds what a holder of the vault\'s key wrote around it', async () => {
   const w = await world();
-  const { vaultGrants, vaultMembers } = tablesOf(db.owner);
+  const { grants, principals } = tablesOf(db.owner);
   const change = async (principal: string, environmentId: string | null, role: string | null) =>
     assert.ok(
       (
@@ -2341,7 +2341,7 @@ test('a full check replays who holds what from the log, and finds what a holder 
   // A grant written straight into the database, and BOB's row sealed again
   // over it by someone holding the vault's key: the MAC holds, the replay
   // does not.
-  await db.owner.insert(vaultGrants).values({
+  await db.owner.insert(grants).values({
     principal: BOB, projectId: w.project, environmentId: null, role: 'owner', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
   });
   await reseal(BOB);
@@ -2354,10 +2354,10 @@ test('a full check replays who holds what from the log, and finds what a holder 
   assert.deepEqual(await w.vault.verifyLog({}), extra);
 
   // Or a removal undone, grants and all.
-  await db.owner.delete(vaultGrants).where(eq(vaultGrants.role, 'owner'));
+  await db.owner.delete(grants).where(eq(grants.role, 'owner'));
   assert.ok((await w.vault.remove({ actor: ROOT, principal: ADA })).ok);
-  await db.owner.update(vaultMembers).set({ status: 'active', role: 'owner' }).where(eq(vaultMembers.principal, ADA));
-  await db.owner.insert(vaultGrants).values({
+  await db.owner.update(principals).set({ status: 'active', role: 'owner' }).where(eq(principals.principal, ADA));
+  await db.owner.insert(grants).values({
     principal: ADA, projectId: null, environmentId: w.dev, role: 'viewer', expiresAt: null, grantedAt: 0, grantedBy: ROOT,
   });
   await reseal(BOB);
@@ -2372,23 +2372,23 @@ test('a full check replays who holds what from the log, and finds what a holder 
 
 /** Seal `principal`'s row again over what the database now holds, as only the holder of the vault's key can. */
 async function reseal(principal: string) {
-  const { vaultMembers } = tablesOf(db.owner);
+  const { principals } = tablesOf(db.owner);
   const row = (await store.member(db.owner, principal))!;
   const mac = memberMac(rowKey(SIGNING_KEY), row, await store.grants(db.owner, principal));
-  await db.owner.update(vaultMembers).set({ mac }).where(eq(vaultMembers.principal, principal));
+  await db.owner.update(principals).set({ mac }).where(eq(principals.principal, principal));
 }
 
 // --- member integrity -------------------------------------------------------------
 
 /** A member's row and grants as they are now, to put back later as the database's owner could. */
 async function snapshot(principal: string) {
-  const { vaultMembers, vaultGrants } = tablesOf(db.owner);
-  const [row] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, principal));
-  const held = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, principal));
+  const { principals, grants } = tablesOf(db.owner);
+  const [row] = await db.owner.select().from(principals).where(eq(principals.principal, principal));
+  const held = await db.owner.select().from(grants).where(eq(grants.principal, principal));
   return async () => {
-    await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, principal));
-    await db.owner.update(vaultMembers).set(row).where(eq(vaultMembers.principal, principal));
-    if (held.length > 0) await db.owner.insert(vaultGrants).values(held);
+    await db.owner.delete(grants).where(eq(grants.principal, principal));
+    await db.owner.update(principals).set(row).where(eq(principals.principal, principal));
+    if (held.length > 0) await db.owner.insert(grants).values(held);
   };
 }
 
@@ -2400,20 +2400,20 @@ async function tamperings(w: World) {
 for (const edit of ['forged', 'edited', 'deleted'] as const) {
   test(`a grant ${edit} in the database leaves its member refused as tampered, until an owner starts them over`, log014Only(START_OVER), async () => {
     const w = await world();
-    const { vaultGrants } = tablesOf(db.owner);
+    const { grants } = tablesOf(db.owner);
     await member(w, ADA, [[w.dev, 'viewer']]);
     const secret = await w.secret(w.dev);
     const items = [{ secret, wrapped: await wrapped(w, secret) }];
     assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) })).ok, true);
 
     if (edit === 'forged') {
-      await db.owner.insert(vaultGrants).values({
+      await db.owner.insert(grants).values({
         principal: ADA, projectId: w.project, environmentId: null, role: 'owner', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
       });
     } else if (edit === 'edited') {
-      await db.owner.update(vaultGrants).set({ role: 'developer' }).where(eq(vaultGrants.principal, ADA));
+      await db.owner.update(grants).set({ role: 'developer' }).where(eq(grants.principal, ADA));
     } else {
-      await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, ADA));
+      await db.owner.delete(grants).where(eq(grants.principal, ADA));
     }
 
     const access = await w.vault.access(ADA);
@@ -2471,7 +2471,7 @@ async function whileHeadHeld<T>(decision: () => Promise<T>, during: () => Promis
 
 test('a grant written around the vault while it decides about its member is refused, not sealed in (review R2)', postgresOnly('SQLite lets no write in beside a decision'), async () => {
   const w = await world();
-  const { vaultGrants } = tablesOf(db.owner);
+  const { grants } = tablesOf(db.owner);
   // Mallory manages access on a sandbox project, holds nothing on market, and has the owner's login.
   const sandbox = await newProject(db.owner);
   const sandboxEnv = await newEnvironment(db.owner, sandbox);
@@ -2485,7 +2485,7 @@ test('a grant written around the vault while it decides about its member is refu
   const change = await whileHeadHeld(
     () => w.vault.setAccess({ actor: ADA, principal: ADA, changes: [{ projectId: sandbox, environmentId: sandboxEnv, role: 'viewer', expiresAt: null }] }),
     async () => {
-      await db.owner.insert(vaultGrants).values({
+      await db.owner.insert(grants).values({
         principal: ADA, projectId: null, environmentId: w.prod, role: 'developer', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
       });
     },
@@ -2502,12 +2502,12 @@ test('a grant written around the vault while it decides about its member is refu
 
 test('a grant written around the vault while it removes a member goes with the removal', log014Only(START_OVER, postgresOnly('SQLite lets no write in beside a decision')), async () => {
   const w = await world();
-  const { vaultGrants } = tablesOf(db.owner);
+  const { grants } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
   const removal = await whileHeadHeld(
     () => w.vault.remove({ actor: ROOT, principal: ADA }),
     async () => {
-      await db.owner.insert(vaultGrants).values({
+      await db.owner.insert(grants).values({
         principal: ADA, projectId: null, environmentId: w.prod, role: 'developer', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
       });
     },
@@ -2524,11 +2524,11 @@ test('a grant written around the vault while it removes a member goes with the r
 
 test('a checkpoint refuses to sign over entries cut from the middle of the log (review R1b)', async () => {
   const w = await world();
-  const { auditLog, vaultGrants, vaultMembers } = tablesOf(db.owner);
+  const { auditLog, grants, principals } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'developer']]);
   // Mallory keeps Ada's row and grants from before her removal.
-  const [kept] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, ADA));
-  const keptGrants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, ADA));
+  const [kept] = await db.owner.select().from(principals).where(eq(principals.principal, ADA));
+  const keptGrants = await db.owner.select().from(grants).where(eq(grants.principal, ADA));
   assert.equal((await w.vault.remove({ actor: ROOT, principal: ADA })).ok, true);
   await wrapped(w, await w.secret(w.prod));
   assert.equal((await w.vault.checkpoint()).ok, true, 'a checkpoint signs a prefix that holds the removal');
@@ -2536,8 +2536,8 @@ test('a checkpoint refuses to sign over entries cut from the middle of the log (
   // She cuts the removal out of the log, now before the newest checkpoint, and puts Ada's rows back.
   await withLogUnlocked(db.owner, async (owned) => {
     await owned.delete(auditLog).where(and(eq(auditLog.author, 'vault'), eq(auditLog.subjectPrincipal, ADA), gt(auditLog.seq, kept.accessSeq)));
-    await owned.update(vaultMembers).set(kept).where(eq(vaultMembers.principal, ADA));
-    await owned.insert(vaultGrants).values(keptGrants);
+    await owned.update(principals).set(kept).where(eq(principals.principal, ADA));
+    await owned.insert(grants).values(keptGrants);
   });
   await wrapped(w, await w.secret(w.prod));
   // The prefix the last checkpoint signed is short of entries: one count of its index finds it, and where.
@@ -2914,14 +2914,14 @@ async function rewriteMetadata(seq: bigint, change: (metadata: Record<string, un
 
 test('a checkpoint finds a row changed around the vault before its member asks for anything', async () => {
   const w = await world();
-  const { vaultGrants } = tablesOf(db.owner);
+  const { grants } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
   await member(w, BOB, [[w.dev, 'viewer']]);
   assert.ok((await w.vault.checkpoint()).ok);
   assert.deepEqual(await tamperings(w), []);
 
   // Lists read rows without the vault, so the scheduled checkpoint is what looks.
-  await db.owner.insert(vaultGrants).values({
+  await db.owner.insert(grants).values({
     principal: ADA, projectId: w.project, environmentId: null, role: 'owner', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
   });
   assert.ok((await w.vault.checkpoint()).ok);
@@ -2964,18 +2964,18 @@ test('an old member row put back with its grants is refused: the log holds the l
 
 test('a generation edited back is refused, and so is a member row deleted outright', async () => {
   const w = await world();
-  const { vaultMembers } = tablesOf(db.owner);
+  const { principals } = tablesOf(db.owner);
   await member(w, ADA, []);
   await member(w, BOB, []);
   assert.equal((await w.vault.remove({ actor: ROOT, principal: ADA })).ok, true);
   assert.equal((await w.vault.admit({ actor: ROOT, principal: ADA })).ok, true);
 
   // Back to the generation an old session was issued under.
-  await db.owner.update(vaultMembers).set({ generation: 0 }).where(eq(vaultMembers.principal, ADA));
+  await db.owner.update(principals).set({ generation: 0 }).where(eq(principals.principal, ADA));
   assert.deepEqual([(await w.vault.access(ADA)).status, (await w.vault.access(ADA)).generation], ['tampered', 0]);
 
   // A row the log admitted, gone: not a stranger, but a member taken out.
-  await db.owner.delete(vaultMembers).where(eq(vaultMembers.principal, BOB));
+  await db.owner.delete(principals).where(eq(principals.principal, BOB));
   assert.equal((await w.vault.access(BOB)).status, 'tampered');
   const admitted = await w.vault.admit({ actor: ROOT, principal: BOB });
   assert.equal(!admitted.ok && admitted.refusal.code, 'tampered');
@@ -3016,19 +3016,19 @@ test('under 0.15\'s log, a 0.14 write about a member that the log does not accou
 
 test('under 0.15\'s log, a member row put back with its seal, or one never sealed, is refused by the vault\'s own decisions (T179 PR 2)', { skip: LOG === '0.15' ? false : "0.15's log only" }, async () => {
   const w = await world();
-  const { vaultMembers } = tablesOf(db.owner);
+  const { principals } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
-  const [before] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, ADA));
+  const [before] = await db.owner.select().from(principals).where(eq(principals.principal, ADA));
   const raised = await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] });
   assert.ok(raised.ok, JSON.stringify(raised));
   // Only the seal put back: the 0.4 MAC, the columns and the grants are the vault's, the seal an older change's, over
   // another object (a whole row put back is stale: 'an old member row put back with its grants is refused').
-  await db.owner.update(vaultMembers).set({ seal: before.seal }).where(eq(vaultMembers.principal, ADA));
+  await db.owner.update(principals).set({ seal: before.seal }).where(eq(principals.principal, ADA));
   assert.equal((await w.vault.access(ADA)).status, 'tampered');
   const regrant = await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }] });
   assert.equal(!regrant.ok && regrant.refusal.code, 'tampered');
   // No seal at all: a row the log never sealed.
-  await db.owner.update(vaultMembers).set({ seal: null }).where(eq(vaultMembers.principal, ADA));
+  await db.owner.update(principals).set({ seal: null }).where(eq(principals.principal, ADA));
   assert.equal((await w.vault.access(ADA)).status, 'tampered');
   // Each the vault's seal over no object her row holds: reported once.
   assert.deepEqual((await tamperings(w)).map(([, code]) => code), ['mac']);
@@ -3038,8 +3038,8 @@ test('under 0.15\'s log, an old member row put back with the newest change\'s se
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const putBack = await snapshot(ADA);
-  const { vaultMembers } = tablesOf(db.owner);
-  const [before] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, ADA));
+  const { principals } = tablesOf(db.owner);
+  const [before] = await db.owner.select().from(principals).where(eq(principals.principal, ADA));
   assert.ok((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: null, expiresAt: null }] })).ok);
   // The revoked row put back, seal and all, and the revoke's change edited to name that seal: its payload, and so the
   // 0.14 entry it accounts for, left as they were. Only the change's MAC, over its seal, tells.
@@ -3306,7 +3306,7 @@ test('the database holds no key', async () => {
   assert.ok(wrap.ok);
   await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([{ secret, wrapped: wrap.wrapped[0] }]) });
   const everything = [];
-  for (const table of ['audit_log', 'audit_chain_head', 'vault_members', 'vault_grants', 'vault_releases']) {
+  for (const table of ['audit_log', 'audit_chain_head', 'principals', 'grants', 'vault_releases']) {
     everything.push(...(await rows<Record<string, unknown>>(db.owner, sql.raw(`SELECT * FROM ${table}`))));
   }
   const dump = Buffer.concat(
@@ -3442,13 +3442,13 @@ test('after a rotation, the replaced KEK vouches for nothing new: entries and ro
   assert.equal((await after.vault.access(ADA)).status, 'active');
   assert.deepEqual(await tamperings(after), [[ADA, 'forged_entry']]);
   // A grant given to her, with her row sealed again under the old row key, leaves her tampered.
-  const { vaultGrants, vaultMembers } = tablesOf(db.owner);
-  await db.owner.insert(vaultGrants).values({
+  const { grants, principals } = tablesOf(db.owner);
+  await db.owner.insert(grants).values({
     principal: ADA, projectId: after.project, environmentId: null, role: 'owner', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
   });
   const row = (await store.member(db.owner, ADA))!;
   const mac = memberMac(leaked.row, row, await store.grants(db.owner, ADA));
-  await db.owner.update(vaultMembers).set({ mac }).where(eq(vaultMembers.principal, ADA));
+  await db.owner.update(principals).set({ mac }).where(eq(principals.principal, ADA));
   assert.equal((await after.vault.access(ADA)).status, 'tampered');
   // And the log stops verifying where the old key wrote again, so the vault signs it no more.
   const verdict = await after.vault.verifyLog({});
@@ -4141,8 +4141,8 @@ test('taking someone off the list leaves them an Owner, whom an Owner may then d
 test('an Owner the deployment names whose row was changed around the vault is started over and made one again: at their next request, and as a vault starts', async () => {
   const w = await world();
   // Someone with the database demotes root, the only Owner, writing their row.
-  const { vaultMembers } = tablesOf(db.owner);
-  await db.owner.update(vaultMembers).set({ role: 'developer', owner: false }).where(eq(vaultMembers.principal, ROOT));
+  const { principals } = tablesOf(db.owner);
+  await db.owner.update(principals).set({ role: 'developer', owner: false }).where(eq(principals.principal, ROOT));
   // Under 0.15's log, nothing starts them over: refused, holding nothing, and no start writes anything, until a
   // reseal makes their row the log's again (START_OVER).
   if (LOG === '0.15') {
@@ -4157,7 +4157,7 @@ test('an Owner the deployment names whose row was changed around the vault is st
   assert.deepEqual([root.status, root.role, root.scope, root.generation], ['active', 'owner', EVERYWHERE, 1]);
   assert.deepEqual((await ownership()).filter(([, , outcome]) => outcome === 'allow').slice(-2), [['member.remove', ROOT, 'allow', null], ['member.restore', ROOT, 'allow', 'owners']]);
   // Again, and a new process: its start does it before anyone asks about root.
-  await db.owner.update(vaultMembers).set({ generation: 7 }).where(eq(vaultMembers.principal, ROOT));
+  await db.owner.update(principals).set({ generation: 7 }).where(eq(principals.principal, ROOT));
   const deployed = await namingOwners('root@acme.example');
   assert.equal((await deployed.access(ADA)).status, 'unknown');
   const row = await store.member(db.owner, ROOT);
@@ -4168,8 +4168,8 @@ test('an Owner the deployment names whose row was changed around the vault is st
 test('a row edited to an Owner\'s around the vault makes nobody an Owner, nor anyone the deployment names', async () => {
   const w = await world();
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);
-  const { vaultMembers } = tablesOf(db.owner);
-  await db.owner.update(vaultMembers).set({ role: 'owner', owner: true, scope: null }).where(eq(vaultMembers.principal, ADA));
+  const { principals } = tablesOf(db.owner);
+  await db.owner.update(principals).set({ role: 'owner', owner: true, scope: null }).where(eq(principals.principal, ADA));
   const ada = await w.vault.access(ADA);
   assert.deepEqual([ada.status, ada.role], ['tampered', 'member']);
   // The list is the deployment's: no row adds to it.
@@ -4183,9 +4183,9 @@ test('an Owner\'s scope written another way around the vault is still everywhere
   // The column says everywhere as JSON, not null: the row's MAC reads it parsed, and holds.
   const w = await world({ owners: ['root@acme.example', 'sam@acme.example'] });
   assert.equal((await w.vault.access(SAM)).role, 'owner');
-  const { vaultMembers } = tablesOf(db.owner);
+  const { principals } = tablesOf(db.owner);
   const before = (await ownership()).length;
-  await db.owner.update(vaultMembers).set({ scope: JSON.stringify(EVERYWHERE) }).where(eq(vaultMembers.principal, ROOT));
+  await db.owner.update(principals).set({ scope: JSON.stringify(EVERYWHERE) }).where(eq(principals.principal, ROOT));
   const deployed = await namingOwners('root@acme.example', 'sam@acme.example');
   assert.deepEqual(await deployed.access(ROOT).then(({ status, role, scope }) => [status, role, scope]), ['active', 'owner', EVERYWHERE]);
   assert.deepEqual(await deployed.access(SAM).then(({ status, role }) => [status, role]), ['active', 'owner']);
@@ -4397,7 +4397,7 @@ test('a vault starting while another makes someone on its list an Owner finds th
   assert.equal((await (await namingOwners('root@acme.example')).access(ROOT)).role, 'owner');
   const config = configure({ owners: ['root@acme.example', 'bob@acme.example'] });
   // Its start reads that Bob has no row, then waits while another process, deployed with the same list, admits him an Owner.
-  const slow = pausedReadAbout(db.vault, BOB, 'vault_members');
+  const slow = pausedReadAbout(db.vault, BOB, 'principals');
   const starting = openVault(slow.database, await prepareVault(config, { log: '0.14' }));
   slow.arm();
   const pending = starting.access(ADA);

@@ -12,7 +12,7 @@ import { eq } from 'drizzle-orm';
 
 import { FRESH_MS } from '../src/api/fresh-routes.ts';
 import { clientFor } from './api-fixture.ts';
-import { credentials, deviceAuthorizations, mcpApprovals, mcpConnections } from './db/tables.ts';
+import { credentials, deviceLogins, mcpApprovals, mcpConnections } from './db/tables.ts';
 import { browserFor, callRaw, CLAUDE_CODE, db, deps, DEV, entries, fromPage, ORIGIN, RESOURCE, route, runtime, useMcp } from './mcp-fixture.ts';
 import { addPasskey, touchFor, type Touch } from './passkey-rows.ts';
 
@@ -63,7 +63,7 @@ test('approving a terminal takes a touch for its code: a confirmed session alone
   const signin = runtime.signin!;
   const started = await signin.startDevice({ clientLabel: 'laptop', sourceIp: null });
   const other = await signin.startDevice({ clientLabel: 'laptop', sourceIp: null });
-  const undecided = async (code: string) => (await db.owner.select().from(deviceAuthorizations).where(eq(deviceAuthorizations.userCode, code)))[0]!.decidedAt === null;
+  const undecided = async (code: string) => (await db.owner.select().from(deviceLogins).where(eq(deviceLogins.userCode, code)))[0]!.decidedAt === null;
   const approved = (await entries('device.approve')).length;
 
   // Refused, with a touch to ask for this code: nothing decided, no entry, the person's live passkey offered.
@@ -93,7 +93,7 @@ test('approving a terminal takes a touch for its code: a confirmed session alone
   // The touch for this code: approved, naming the passkey, and the CLI session it redeems confirmed when it was decided.
   const touch: Touch = { state: asked.touch!.state, response: await touchFor(passkey, asked.touch!.options) };
   assert.equal((await post(session, `/api/device-logins/${started.userCode}`, { approve: true, touch })).status, 200);
-  const [row] = await db.owner.select().from(deviceAuthorizations).where(eq(deviceAuthorizations.userCode, started.userCode));
+  const [row] = await db.owner.select().from(deviceLogins).where(eq(deviceLogins.userCode, started.userCode));
   assert.equal(row!.passkeyId, passkey);
   assert.equal((await entries('device.approve')).at(-1)!.metadata.passkeyId, passkey);
   assert.deepEqual((await entries('passkey.check')).filter((entry) => entry.decision === 'allow').map((entry) => entry.metadata.purpose), ['step-up', 'device']);
@@ -222,7 +222,7 @@ test("a touch is its session's: another of the person's sessions sending it is a
   const second = stepped.credential.token;
 
   const started = await signin.startDevice({ clientLabel: 'laptop', sourceIp: null });
-  const undecided = async () => (await db.owner.select().from(deviceAuthorizations).where(eq(deviceAuthorizations.userCode, started.userCode)))[0]!.decidedAt === null;
+  const undecided = async () => (await db.owner.select().from(deviceLogins).where(eq(deviceLogins.userCode, started.userCode)))[0]!.decidedAt === null;
   const prompt = await refusal(await post(session, `/api/device-logins/${started.userCode}`, { approve: true }));
   const touch: Touch = { state: prompt.touch!.state, response: await touchFor(passkey, prompt.touch!.options) };
   assert.equal((await refusal(await post(second, `/api/device-logins/${started.userCode}`, { approve: true, touch }))).error, 'touch_required');

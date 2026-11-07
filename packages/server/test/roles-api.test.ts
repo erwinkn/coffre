@@ -7,7 +7,7 @@ import { and, asc, eq } from 'drizzle-orm';
 
 import { members } from '../src/db/queries.ts';
 import { writeAuditHeartbeat } from './watch-fixture.ts';
-import { auditLog, vaultMembers } from './db/tables.ts';
+import { auditLog, principals } from './db/tables.ts';
 import {
   clientFor,
   openTestDatabase,
@@ -106,9 +106,9 @@ test('a project access manager cannot add an unknown member to the directory', a
   await assert.rejects(accessManager.members.add('user:unknown@acme.example'), { status: 403 });
   assert.deepEqual(
     await db.owner
-      .select({ principal: vaultMembers.principal })
-      .from(vaultMembers)
-      .where(eq(vaultMembers.principal, 'user:unknown@acme.example')),
+      .select({ principal: principals.principal })
+      .from(principals)
+      .where(eq(principals.principal, 'user:unknown@acme.example')),
     [],
   );
 });

@@ -66,7 +66,7 @@ await pool.unsafe('DELETE FROM secret_references');
 await pool.unsafe('ALTER TABLE audit_log DISABLE TRIGGER USER');
 await pool.unsafe('DELETE FROM audit_log');
 await pool.unsafe('ALTER TABLE audit_log ENABLE TRIGGER USER');
-for (const table of ['log_uses', 'log_bulk', 'log_changes', 'log_config', 'proxy_definitions', 'proxy_reserved', 'log_checkpoints', 'log_tiles', 'log_reads', 'log_read_days', 'log_read_place_days']) {
+for (const table of ['log_uses', 'bulk_cap', 'log_changes', 'log_config', 'proxy_definitions', 'proxy_reserved', 'log_checkpoints', 'log_tiles', 'log_reads', 'log_read_days', 'log_read_place_days']) {
     await pool.unsafe(`DELETE FROM ${table}`);
 }
 await pool.unsafe('UPDATE log_reads_cursor SET through = 0, pair = 0, at = 0, mac = NULL');
@@ -75,15 +75,15 @@ await pool.unsafe('DELETE FROM mcp_approvals');
 await pool.unsafe('DELETE FROM mcp_connections');
 await pool.unsafe('DELETE FROM oauth_clients');
 await pool.unsafe('DELETE FROM credentials');
-await pool.unsafe('DELETE FROM enrollments');
-await pool.unsafe('DELETE FROM device_authorizations');
+await pool.unsafe('DELETE FROM enrollment_codes');
+await pool.unsafe('DELETE FROM device_logins');
 await pool.unsafe('DELETE FROM identities');
 await pool.unsafe('DELETE FROM passkeys');
 await pool.unsafe('DELETE FROM service_bindings');
-await pool.unsafe('DELETE FROM consumed_tokens');
+await pool.unsafe('DELETE FROM spent_id_tokens');
 await pool.unsafe('DELETE FROM capped_alerts');
-await pool.unsafe('DELETE FROM vault_grants');
-await pool.unsafe('DELETE FROM vault_members');
+await pool.unsafe('DELETE FROM grants');
+await pool.unsafe('DELETE FROM principals');
 await pool.unsafe('DELETE FROM dismissed_keys');
 await pool.unsafe('UPDATE secrets SET current_version_id = NULL');
 await pool.unsafe('DELETE FROM secret_versions');

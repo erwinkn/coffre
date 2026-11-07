@@ -504,7 +504,7 @@ R41's: a replaced key vouches only for what came before the rotation.
   issue lock, then the fence, both exclusive), reads `retired` again under
   them (a start that rotated first leaves nothing to do) and takes the
   number; the vault MACs the entry naming it; `log_rotate` writes it at
-  that number and adds the old key's tag to `log_fence.retired`
+  that number and adds the old key's tag to `checkpoint_fence.retired`
   (migration 0053). An entry's MAC covers every column but its number,
   which a database writer can change: a rotation counts only at the
   number it names (`rotationOf`), so one moved up extends nothing. And a

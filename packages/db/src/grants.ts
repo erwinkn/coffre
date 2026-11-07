@@ -23,7 +23,7 @@ import { engineOf, rowsOf, tombstone, truth } from './dialect.ts';
 import { entryColumns, logObject, newestAuthentic, newestVaultEntries, type Authenticity, type Newest } from './log.ts';
 
 /**
- * One grant, as `vault_grants` holds it: on a project (`environmentId`
+ * One grant, as `grants` holds it: on a project (`environmentId`
  * null), or one of its environments (`projectId` is the environment's
  * project). A grant on every project of 0.4 names neither, and
  * `environmentSlug` the one environment slug it covers in each, until the
@@ -50,28 +50,28 @@ export async function readGrants(
   // A member's grants, which every check reads, built once (`prepared`); any other filter, as asked.
   const rows = filter.principal !== undefined && filter.liveAt === undefined
     ? await grantsOf(db, { principal: filter.principal })
-    : await grantRows(db, filter.principal === undefined ? undefined : eq(tablesOf(db).vaultGrants.principal, filter.principal), filter.liveAt);
+    : await grantRows(db, filter.principal === undefined ? undefined : eq(tablesOf(db).grants.principal, filter.principal), filter.liveAt);
   return rows.map(({ grant, environmentProjectId }) => ({ ...grant, projectId: grant.projectId ?? environmentProjectId }));
 }
 
 function grantRows(db: Queryable, principal: SQL | undefined, liveAt?: number) {
-  const { vaultGrants, environments } = tablesOf(db);
+  const { grants, environments } = tablesOf(db);
   return db
-    .select({ grant: vaultGrants, environmentProjectId: environments.projectId })
-    .from(vaultGrants)
-    .leftJoin(environments, eq(environments.id, vaultGrants.environmentId))
-    .where(and(principal, liveAt === undefined ? undefined : or(isNull(vaultGrants.expiresAt), gt(vaultGrants.expiresAt, liveAt))));
+    .select({ grant: grants, environmentProjectId: environments.projectId })
+    .from(grants)
+    .leftJoin(environments, eq(environments.id, grants.environmentId))
+    .where(and(principal, liveAt === undefined ? undefined : or(isNull(grants.expiresAt), gt(grants.expiresAt, liveAt))));
 }
 
-const grantsOf = prepared((db) => grantRows(db, eq(tablesOf(db).vaultGrants.principal, sql.placeholder('principal'))));
+const grantsOf = prepared((db) => grantRows(db, eq(tablesOf(db).grants.principal, sql.placeholder('principal'))));
 
 /** Add a grant; an environment's row names only the environment. */
 export async function insertGrant(db: Queryable, grant: GrantRow): Promise<void> {
-  const { vaultGrants } = tablesOf(db);
-  await db.insert(vaultGrants).values({ ...grant, projectId: grant.environmentId === null ? grant.projectId : null });
+  const { grants } = tablesOf(db);
+  await db.insert(grants).values({ ...grant, projectId: grant.environmentId === null ? grant.projectId : null });
 }
 
-/** A member's instance role and its scope, as `vault_members` stores them. */
+/** A member's instance role and its scope, as `principals` stores them. */
 export type StoredRole = { owner: boolean; role: string | null; scope: string | null };
 
 /**
@@ -173,13 +173,13 @@ export type EveryProjectPreview = {
  * converts is listed.
  */
 export async function everyProjectPreview(db: Queryable, at: number): Promise<EveryProjectPreview[]> {
-  const { vaultMembers, projects, environments } = tablesOf(db);
+  const { principals, projects, environments } = tablesOf(db);
   const grants = await readGrants(db, { liveAt: at });
   const held = grants.filter((grant) => grant.projectId === null && grant.environmentId === null);
   if (held.length === 0) return [];
   const holders = [...new Set(held.map((grant) => grant.principal))].sort();
   const [members, places, inside, live, tampered] = await Promise.all([
-    db.select({ principal: vaultMembers.principal, status: vaultMembers.status, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope }).from(vaultMembers),
+    db.select({ principal: principals.principal, status: principals.status, owner: principals.owner, role: principals.role, scope: principals.scope }).from(principals),
     db.select({ id: projects.id, slug: projects.slug }).from(projects),
     db.select({ id: environments.id, projectId: environments.projectId, slug: environments.slug }).from(environments),
     liveProjects(db),
@@ -220,7 +220,7 @@ export type Unsealed = { kind: 'token' | 'binding'; id: string; principal: strin
  * credential a binding issued carries its binding's.
  */
 export async function unsealedCredentials(db: Queryable, at: Date): Promise<Unsealed[]> {
-  const { credentials, serviceBindings, vaultMembers } = tablesOf(db);
+  const { credentials, serviceBindings, principals } = tablesOf(db);
   // Every scope this release writes for a service says, at each place it names, whether it reads the sensitive values
   // there; one that names none, sealed while its account held nothing, is sealed (`unsealedScope` in @coffre/server).
   const unsealed = (scope: typeof credentials.scope | typeof serviceBindings.scope) =>
@@ -229,20 +229,20 @@ export async function unsealedCredentials(db: Queryable, at: Date): Promise<Unse
     db
       .select({ id: credentials.id, principal: credentials.principal, createdBy: credentials.createdBy, scope: credentials.scope })
       .from(credentials)
-      .innerJoin(vaultMembers, and(eq(vaultMembers.principal, credentials.principal), eq(vaultMembers.generation, credentials.generation)))
+      .innerJoin(principals, and(eq(principals.principal, credentials.principal), eq(principals.generation, credentials.generation)))
       .where(and(
         eq(credentials.kind, 'service'),
         unsealed(credentials.scope),
         sql`${credentials.createdBy} NOT LIKE 'binding:%'`,
         isNull(credentials.revokedAt),
         gt(credentials.expiresAt, at),
-        eq(vaultMembers.status, 'active'),
+        eq(principals.status, 'active'),
       )),
     db
       .select({ id: serviceBindings.id, principal: serviceBindings.principal, createdBy: serviceBindings.createdBy, scope: serviceBindings.scope })
       .from(serviceBindings)
-      .innerJoin(vaultMembers, and(eq(vaultMembers.principal, serviceBindings.principal), eq(vaultMembers.generation, serviceBindings.generation)))
-      .where(and(unsealed(serviceBindings.scope), isNull(serviceBindings.revokedAt), eq(vaultMembers.status, 'active'))),
+      .innerJoin(principals, and(eq(principals.principal, serviceBindings.principal), eq(principals.generation, serviceBindings.generation)))
+      .where(and(unsealed(serviceBindings.scope), isNull(serviceBindings.revokedAt), eq(principals.status, 'active'))),
   ]);
   return [
     ...tokens.map((row) => ({ kind: 'token' as const, ...row })),

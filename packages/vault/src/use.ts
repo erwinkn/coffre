@@ -445,7 +445,7 @@ function checkInput(input: Pick<UseInput, 'requestId' | 'at' | 'deadline' | 'kee
 
 function checkIds(input: { credential: string; secretId: string | null; place: string | null; way?: unknown }): void {
   if (input.way !== undefined && !(WAYS as readonly unknown[]).includes(input.way)) throw new Error(`no way in ${String(input.way)}`);
-  // Behind Access, the account: a `user:` or a `token:`, as `vault_members` holds them.
+  // Behind Access, the account: a `user:` or a `token:`, as `principals` holds them.
   const named = input.way === 'access' ? /^(user|token):[^\s]{1,320}$/.test(input.credential) : UUID.test(input.credential);
   if (!named || (input.secretId !== null && !UUID.test(input.secretId)) || (input.place !== null && !UUID.test(input.place))) {
     throw new Error('a use names its way in, its key and its place, if any, by lowercase UUID; behind Access, its account');

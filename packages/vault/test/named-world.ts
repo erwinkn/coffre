@@ -59,13 +59,13 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
   /** Revoke the member's grant on dev: a change to their object, as `access.revoke` makes it. */
   const revoke = () => change({ kind: 'principal', id: w.principal }, { op: 'access.revoke', place: { projectId: w.project, environmentId: w.dev, environmentSlug: null } },
     { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants: [] }, async (tx, value) => {
-      await run(tx, sql`DELETE FROM vault_grants WHERE principal = ${w.principal}`);
-      await seal('vault_members', 'principal', w.principal)(tx, value);
+      await run(tx, sql`DELETE FROM grants WHERE principal = ${w.principal}`);
+      await seal('principals', 'principal', w.principal)(tx, value);
     });
   type Grant = Extract<Input, { kind: 'principal' }>['grants'][number];
   /** Their grants as their object holds them: an environment's with its project. */
   const grantsNow = async (): Promise<Grant[]> => (await rows<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | string | null }>(
-    db.owner, sql`SELECT project_id, environment_id, environment_slug, role, expires_at FROM vault_grants WHERE principal = ${w.principal}`,
+    db.owner, sql`SELECT project_id, environment_id, environment_slug, role, expires_at FROM grants WHERE principal = ${w.principal}`,
   )).map((g) => ({ projectId: g.project_id ?? w.project, environmentId: g.environment_id, environmentSlug: g.environment_slug, role: g.role, expiresAt: g.expires_at === null ? null : Number(g.expires_at) }));
   /** A grant of theirs on `environment`, in place of any they hold there: a change to their object, as `access.grant` makes it. */
   const grantAt = async (environment: string, role: string) => {
@@ -74,10 +74,10 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
     const now = Date.now();
     await change({ kind: 'principal', id: w.principal }, { op: 'access.grant', grant: added },
       { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants }, async (tx, value) => {
-        await run(tx, sql`DELETE FROM vault_grants WHERE principal = ${w.principal} AND environment_id = ${environment}`);
-        await run(tx, sql`INSERT INTO vault_grants (principal, project_id, environment_id, environment_slug, role, granted_at, granted_by)
+        await run(tx, sql`DELETE FROM grants WHERE principal = ${w.principal} AND environment_id = ${environment}`);
+        await run(tx, sql`INSERT INTO grants (principal, project_id, environment_id, environment_slug, role, granted_at, granted_by)
           VALUES (${w.principal}, NULL, ${environment}, NULL, ${role}, ${now}, ${ROOT})`);
-        await seal('vault_members', 'principal', w.principal)(tx, value);
+        await seal('principals', 'principal', w.principal)(tx, value);
       });
   };
   /**
@@ -91,9 +91,9 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
       ? { op: 'access.revoke', place: { projectId: w.project, environmentId: environment, environmentSlug: null } }
       : { op: 'access.grant', grant: grants.find((g) => g.environmentId === environment)! };
     await change({ kind: 'principal', id: w.principal }, op, { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants }, async (tx, value) => {
-      if (endsAt === undefined) await run(tx, sql`DELETE FROM vault_grants WHERE principal = ${w.principal} AND environment_id = ${environment}`);
-      else await run(tx, sql`UPDATE vault_grants SET expires_at = ${endsAt} WHERE principal = ${w.principal} AND environment_id = ${environment}`);
-      await seal('vault_members', 'principal', w.principal)(tx, value);
+      if (endsAt === undefined) await run(tx, sql`DELETE FROM grants WHERE principal = ${w.principal} AND environment_id = ${environment}`);
+      else await run(tx, sql`UPDATE grants SET expires_at = ${endsAt} WHERE principal = ${w.principal} AND environment_id = ${environment}`);
+      await seal('principals', 'principal', w.principal)(tx, value);
     });
   };
   type Environment = Extract<Input, { kind: 'environment' }>;
@@ -316,7 +316,7 @@ export async function weighed(call: HotCall | null, on?: WeighingSession): Promi
  * its controls read at each, each in a new session of its own: its twin, of a key its world never made (`twinOf`), and
  * that twin with nothing the isolate kept of the key (`absentOf`); null on SQLite, or for no call. Each of the three is
  * first called once unweighed, in a session of its own: after a batch's rolled-back writes (its standing cells',
- * weighed), a request's first scan of `log_bulk` read 1 or 2 more blocks than any after it, the same request again
+ * weighed), a request's first scan of `bulk_cap` read 1 or 2 more blocks than any after it, the same request again
  * included, and settling the last control alone left the key's own first call to differ (docs/design/planner-defaults.md,
  * "Holding it"). A settled request still plans afresh in each weighed
  * session, so a read the planning or the call makes by the key's id shows at every weighing (a dry run reading

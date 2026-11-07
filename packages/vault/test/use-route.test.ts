@@ -753,10 +753,10 @@ test("the editor's principal row is the vault's: a grant planted around the log 
   await w.save({ openai: { definition: route('openai', [name]), editor: lin } });
   const { vault } = await isolate();
   assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
-  const sealOf = async () => (await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM vault_members WHERE principal = ${lin.principal}`))[0]!.seal;
+  const sealOf = async () => (await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM principals WHERE principal = ${lin.principal}`))[0]!.seal;
   const grants = async (role: string) => {
-    await run(db.owner, sql`DELETE FROM vault_grants WHERE principal = ${lin.principal}`);
-    await run(db.owner, sql`INSERT INTO vault_grants (principal, project_id, environment_id, environment_slug, role, granted_at, granted_by)
+    await run(db.owner, sql`DELETE FROM grants WHERE principal = ${lin.principal}`);
+    await run(db.owner, sql`INSERT INTO grants (principal, project_id, environment_id, environment_slug, role, granted_at, granted_by)
       VALUES (${lin.principal}, NULL, ${w.dev}, NULL, ${role}, ${Date.now()}, 'root')`);
   };
   const before = await sealOf();
@@ -767,7 +767,7 @@ test("the editor's principal row is the vault's: a grant planted around the log 
   await grants('developer');
   await w.restand(lin, []);
   await grants('developer');
-  await run(db.owner, sql`UPDATE vault_members SET seal = ${before} WHERE principal = ${lin.principal}`);
+  await run(db.owner, sql`UPDATE principals SET seal = ${before} WHERE principal = ${lin.principal}`);
   assert.deepEqual(refused(await vault.useRoute(w.askRoute('openai'))), { code: 'stale', key: null });
 });
 
@@ -942,13 +942,13 @@ test("T190: an editor demoted, their rows put back and the demotion's entry made
   await w.save({ openai: { definition: route('openai', [name]), editor: lin } });
   const { vault } = await isolate();
   assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
-  const [before] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM vault_members WHERE principal = ${lin.principal}`);
+  const [before] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM principals WHERE principal = ${lin.principal}`);
   await w.restand(lin, []);
   assert.equal(refused(await vault.useRoute(w.askRoute('openai'))).code, 'route_not_cleared');
   // Her grant and her seal put back as they were, and her newest change made to record that seal.
-  await run(db.owner, sql`INSERT INTO vault_grants (principal, project_id, environment_id, environment_slug, role, granted_at, granted_by)
+  await run(db.owner, sql`INSERT INTO grants (principal, project_id, environment_id, environment_slug, role, granted_at, granted_by)
     VALUES (${lin.principal}, NULL, ${w.dev}, NULL, 'developer', ${Date.now()}, 'root')`);
-  await run(db.owner, sql`UPDATE vault_members SET seal = ${before!.seal} WHERE principal = ${lin.principal}`);
+  await run(db.owner, sql`UPDATE principals SET seal = ${before!.seal} WHERE principal = ${lin.principal}`);
   await forgeNewest({ kind: 'principal', id: lin.principal }, Buffer.from(before!.seal));
   for (const one of [vault, (await isolate()).vault]) assert.deepEqual(refused(await one.useRoute(w.askRoute('openai'))), { code: 'stale', key: null });
 });
@@ -1055,19 +1055,19 @@ test("T200, T205: under a light gate, or the route's named call, the caller is d
   const vault = watch?.vault ?? (await isolate()).vault;
   try {
     for (let i = 0; i < 2; i += 1) assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
-    const [member] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM vault_members WHERE principal = ${w.principal}`);
+    const [member] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM principals WHERE principal = ${w.principal}`);
     const grants = await rows<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: unknown; granted_at: unknown; granted_by: string }>(
-      db.owner, sql`SELECT project_id, environment_id, environment_slug, role, expires_at, granted_at, granted_by FROM vault_grants WHERE principal = ${w.principal}`);
+      db.owner, sql`SELECT project_id, environment_id, environment_slug, role, expires_at, granted_at, granted_by FROM grants WHERE principal = ${w.principal}`);
     assert.ok(grants.length > 0);
     await w.revoke();
     assert.equal(answered(await vault.useRoute(w.askRoute('openai'))).stands, false, 'revoked: refused on the place');
     // Her grants and her seal put back as they were, and her newest change made to record that seal: the statement's
     // gate finds her standing on the rows, and only the vault, on her key's row, finds the change's MAC not holding.
     for (const g of grants) {
-      await run(db.owner, sql`INSERT INTO vault_grants (principal, project_id, environment_id, environment_slug, role, expires_at, granted_at, granted_by)
+      await run(db.owner, sql`INSERT INTO grants (principal, project_id, environment_id, environment_slug, role, expires_at, granted_at, granted_by)
         VALUES (${w.principal}, ${g.project_id}, ${g.environment_id}, ${g.environment_slug}, ${g.role}, ${g.expires_at}, ${g.granted_at}, ${g.granted_by})`);
     }
-    await run(db.owner, sql`UPDATE vault_members SET seal = ${member!.seal} WHERE principal = ${w.principal}`);
+    await run(db.owner, sql`UPDATE principals SET seal = ${member!.seal} WHERE principal = ${w.principal}`);
     await forgeNewest({ kind: 'principal', id: w.principal }, Buffer.from(member!.seal));
     // Her account's row not as the log says: the credential's own route (`routeOf`), `stale`, as the whole gate answers it.
     const stale = { served: true, route: 'credential', outcome: { ok: false, code: 'stale', number: null } };
@@ -1133,7 +1133,7 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
     // Every row the file's cases deleted or wrote over dead to every session first: a transaction that could still see
     // them (an autovacuum worker's ANALYZE of this database, say) keeps their versions from the VACUUM below, and each
     // scan reads them until it ends; ending between a call and its twin, it left the call 9 to 35 buffers above its twin
-    // (CI, T238; forced, 13 to 42), as T225 found of the matrices' `log_bulk`. Then weighed with the horizon held where
+    // (CI, T238; forced, 13 to 42), as T225 found of the matrices' `bulk_cap`. Then weighed with the horizon held where
     // it is, so that a transaction of another database ending between a call and its twin moves nothing either
     // (`horizonHeld`; T238 r2: 146 buffers beside 111), nor one of this database that took its snapshot while such a
     // transaction ran (T238 r3: 40 and 42).

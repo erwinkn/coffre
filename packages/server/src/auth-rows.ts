@@ -1,19 +1,31 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import { deriveKey } from '@coffre/core/identity';
-import type { credentials, deviceAuthorizations, enrollments, identities, mcpConnections, oauthClients, passkeys, serviceBindings } from '@coffre/db/schema';
+import type { credentials, deviceLogins, enrollmentCodes, identities, mcpConnections, oauthClients, passkeys, serviceBindings } from '@coffre/db/schema';
 
 type Rows = {
   identities: typeof identities.$inferSelect;
   credentials: typeof credentials.$inferSelect;
-  device_authorizations: typeof deviceAuthorizations.$inferSelect;
+  device_authorizations: typeof deviceLogins.$inferSelect;
   service_bindings: typeof serviceBindings.$inferSelect;
   oauth_clients: typeof oauthClients.$inferSelect;
   mcp_connections: typeof mcpConnections.$inferSelect;
-  enrollments: typeof enrollments.$inferSelect;
+  enrollments: typeof enrollmentCodes.$inferSelect;
   passkeys: typeof passkeys.$inferSelect;
 };
+/**
+ * A signed table by the kind its rows' MACs name: its name when they were first written. 0.16 renamed two of them
+ * (T178), `device_authorizations` to `device_logins` and `enrollments` to `enrollment_codes`, whose rows keep their
+ * kind, so that nothing is signed again; a rotation's cursor in the log names the kind too.
+ */
 export type AuthTable = keyof Rows;
+
+const RENAMED: Record<string, AuthTable> = { device_logins: 'device_authorizations', enrollment_codes: 'enrollments' };
+
+/** The kind a table's rows are signed as, by the table's name in the database. */
+export function signedAs(table: string): AuthTable {
+  return RENAMED[table] ?? (table as AuthTable);
+}
 
 // IDs and userCode bind a MAC to the row an approval or revocation selects.
 // decidedAt also matters: clearing it would make a device decidable again.

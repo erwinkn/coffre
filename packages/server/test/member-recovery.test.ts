@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { eq } from 'drizzle-orm';
 
 import { clientFor, openTestDatabase, resetDatabase, START_OVER_014, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { vaultGrants, vaultMembers } from './db/tables.ts';
+import { grants, principals } from './db/tables.ts';
 
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
@@ -33,8 +33,8 @@ beforeEach(async () => {
 });
 
 async function deleteMember() {
-  await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, MEMBER));
-  await db.owner.delete(vaultMembers).where(eq(vaultMembers.principal, MEMBER));
+  await db.owner.delete(grants).where(eq(grants.principal, MEMBER));
+  await db.owner.delete(principals).where(eq(principals.principal, MEMBER));
 }
 
 test('R3: removal recovers a member whose row was deleted around the vault', { skip: START_OVER_014 }, async () => {
@@ -54,7 +54,7 @@ test('R3: removal recovers a member whose row was deleted around the vault', { s
 test('R3: removal recovers an edited row of an already removed member', { skip: START_OVER_014 }, async () => {
   await root.members.remove(MEMBER);
   const { generation } = await deps.vault.access(MEMBER);
-  await db.owner.update(vaultMembers).set({ statusChangedBy: 'user:someone@acme.example' }).where(eq(vaultMembers.principal, MEMBER));
+  await db.owner.update(principals).set({ statusChangedBy: 'user:someone@acme.example' }).where(eq(principals.principal, MEMBER));
   assert.equal((await deps.vault.access(MEMBER)).status, 'tampered');
 
   await root.members.remove(MEMBER);

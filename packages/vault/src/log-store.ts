@@ -487,10 +487,10 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
     async close(after, from, limit, told) {
       // One writer: every number committed is final. The barrier only moves the floor, as close_one does.
       const barrier = await db.transaction(async (tx) => {
-        const [fence] = await rowsOf<{ at_floor: number }>(tx, sql`SELECT at_floor FROM log_fence WHERE only_row`);
-        await rowsOf(tx, sql`UPDATE log_fence SET at_floor = max(at_floor, ${NOW} - ${DEADLINE}) WHERE only_row`);
+        const [fence] = await rowsOf<{ at_floor: number }>(tx, sql`SELECT at_floor FROM checkpoint_fence WHERE only_row`);
+        await rowsOf(tx, sql`UPDATE checkpoint_fence SET at_floor = max(at_floor, ${NOW} - ${DEADLINE}) WHERE only_row`);
         const [now] = await rowsOf<{ at_floor: number; ceiling: number; upto: number | null }>(tx, sql`
-          SELECT (SELECT at_floor FROM log_fence WHERE only_row) AS at_floor, ${NOW} - ${DEADLINE} AS ceiling,
+          SELECT (SELECT at_floor FROM checkpoint_fence WHERE only_row) AS at_floor, ${NOW} - ${DEADLINE} AS ceiling,
                  max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) AS upto`);
         return { found: fence?.at_floor ?? null, set: Number(now!.at_floor), ceiling: Number(now!.ceiling), upto: BigInt(now!.upto ?? 0) };
       });
@@ -605,13 +605,13 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
       // One writer at a time: the transaction is the barrier's locks. The fence's retired tags are hex, a JSON array.
       return db.transaction(async (tx) => {
         const tag = retire.toString('hex');
-        const [fence] = await rowsOf<{ held: number }>(tx, sql`SELECT EXISTS (SELECT 1 FROM log_fence f, json_each(f.retired) j WHERE f.only_row AND j.value = ${tag}) AS held`);
+        const [fence] = await rowsOf<{ held: number }>(tx, sql`SELECT EXISTS (SELECT 1 FROM checkpoint_fence f, json_each(f.retired) j WHERE f.only_row AND j.value = ${tag}) AS held`);
         if (Number(fence?.held) === 1) return null;
         const [next] = await rowsOf<{ n: string }>(tx, sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) + 1 AS TEXT) AS n`);
         const change = make(BigInt(next!.n));
         await rowsOf(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
           VALUES (${BigInt(next!.n)}, ${change.at}, ${change.requestId}, ${KEY_OBJECT}, 'system:vault', ${change.payload}, NULL, ${change.mac})`);
-        const retired = await rowsOf(tx, sql`UPDATE log_fence SET retired = json_insert(retired, '$[#]', ${tag}) WHERE only_row RETURNING 1 AS n`);
+        const retired = await rowsOf(tx, sql`UPDATE checkpoint_fence SET retired = json_insert(retired, '$[#]', ${tag}) WHERE only_row RETURNING 1 AS n`);
         // No fence row (a damaged or partial restore): no key retired, so the whole rotation fails, closed.
         if (retired.length !== 1) throw new Error("the log's fence row is gone");
         return BigInt(next!.n);
@@ -628,8 +628,8 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
     },
     async pruneBulk(limit) {
       // prune_bulk's bound (migration 0022): the policy's window, its refresh, the deadline and an hour.
-      const pruned = await rowsOf(db, sql`DELETE FROM log_bulk WHERE rowid IN (
-          SELECT b.rowid FROM log_bulk b, (
+      const pruned = await rowsOf(db, sql`DELETE FROM bulk_cap WHERE rowid IN (
+          SELECT b.rowid FROM bulk_cap b, (
             SELECT CAST(json_extract(x.payload, '$.value.bulk.windowMs') AS INTEGER) AS w FROM log_changes x
              WHERE x.object = ${logObject('policy', 'instance')} ORDER BY x.number DESC LIMIT 1) p
            WHERE p.w IS NOT NULL AND b.last < ${NOW} - p.w - min(${REFRESH_MAX}, p.w / ${REFRESH_SHARE}) - ${DEADLINE} - 3600000 LIMIT ${limit})

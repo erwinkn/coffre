@@ -9,7 +9,7 @@
 (* interleave with because the step holds the lock they need, as in        *)
 (* Coffre.tla. Isolation is READ COMMITTED. One lock, held to the end of   *)
 (* its transaction: the log's head. A read takes the reader's row too,     *)
-(* vault_members, but shared with their other reads (vault store.ts,       *)
+(* principals, but shared with their other reads (vault store.ts,       *)
 (* lockMembers, FOR SHARE), so it orders none of them, and is left out.    *)
 (*                                                                         *)
 (* There is no counter: each decision counts the distinct keys of the      *)

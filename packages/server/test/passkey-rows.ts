@@ -12,7 +12,7 @@ import { eq } from 'drizzle-orm';
 import { authMac } from '../src/auth-rows.ts';
 import type { SigninService } from '../src/api/signin.ts';
 import { memberStanding } from '../src/db/queries.ts';
-import { credentials, deviceAuthorizations, mcpConnections, passkeys } from './db/tables.ts';
+import { credentials, deviceLogins, mcpConnections, passkeys } from './db/tables.ts';
 
 async function generationOf(owner: Database, email: string): Promise<number> {
   return (await memberStanding(owner, `user:${email}`))!.generation;
@@ -86,7 +86,7 @@ export async function approvedCode(owner: Database, chainKey: Buffer, email: str
     id: randomUUID(), deviceCodeHash: hashToken(deviceCode), userCode: `${randomUUID().slice(0, 4)}-${randomUUID().slice(0, 4)}`.toUpperCase(), decision: 'approved',
     decidedAt: new Date(), principal: `user:${email}`, generation: await generationOf(owner, email), expiresAt: new Date(Date.now() + 600_000), consumedAt: null, passkeyId,
   };
-  await owner.insert(deviceAuthorizations).values({ ...row, clientLabel: 'laptop', clientIp: null, authMac: authMac(chainKey, 'device_authorizations', row) });
+  await owner.insert(deviceLogins).values({ ...row, clientLabel: 'laptop', clientIp: null, authMac: authMac(chainKey, 'device_authorizations', row) });
   return { deviceCode, id: row.id };
 }
 

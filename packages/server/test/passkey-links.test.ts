@@ -9,7 +9,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { authMac } from '../src/auth-rows.ts';
 import { contextFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
-import { credentials, deviceAuthorizations, passkeys } from './db/tables.ts';
+import { credentials, deviceLogins, passkeys } from './db/tables.ts';
 
 const ROOT = 'admin@acme.example';
 const KEY = Buffer.alloc(32, 0xa1);
@@ -55,10 +55,10 @@ const credential = (kind: string, confirmedAt: Date | null) => ({
 
 test('a device login names a passkey only once approved: never while pending, never denied', async () => {
   for (const decision of [null, 'denied'] as const) {
-    await refused(db.owner.insert(deviceAuthorizations).values(device(decision)), /device_authorizations_passkey_check/);
-    await db.owner.insert(deviceAuthorizations).values(device(decision, null));
+    await refused(db.owner.insert(deviceLogins).values(device(decision)), /device_logins_passkey_check/);
+    await db.owner.insert(deviceLogins).values(device(decision, null));
   }
-  await db.owner.insert(deviceAuthorizations).values(device('approved'));
+  await db.owner.insert(deviceLogins).values(device('approved'));
 });
 
 test('a touch is a browser or CLI session\'s alone: a token or handle copies the passkey, never the touch', async () => {

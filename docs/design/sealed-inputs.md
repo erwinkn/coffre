@@ -305,7 +305,7 @@ A change's MAC is checked under the key its tag names, among every
 signing key the vault holds, as seals are (`sealed`): this check guards
 the seal check and trusts no more keys than it. A retired key
 included: its holder can forge a row's seal and re-MAC the change to match
-under that key's tag, and `log_fence.retired`, which stops them inserting
+under that key's tag, and `checkpoint_fence.retired`, which stops them inserting
 entries, does not stop them editing one. Refusing that takes accepting a
 retired key only for changes numbered at or before its rotation, which the
 keyring knows and the hot path does not load: a known limit, not a
@@ -364,7 +364,7 @@ configuration writes a `bulk.limit` change first (`limitChange`).
   `<principal>/<key>` modulo `refresh` (`phaseOf`, `bulk_period`). With
   one phase for every row, every hot key's next use after each minute's
   turn found its row stale at once, and each of those uses was two calls,
-  three reads of the statement, two locks, a `log_bulk` update and a
+  three reads of the statement, two locks, a `bulk_cap` update and a
   `log_uses` row its cover would have spared. At 1,000 uses a second of
   100 keys, the burst answered 61 to 66 of 20,000 uses busy, all of them
   in the quarter second after a turn. Spread over the period, the same

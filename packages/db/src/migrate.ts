@@ -455,20 +455,25 @@ type Managed = { relations: string[]; functions: string[]; types: string[] };
 
 /**
  * The names a migration's SQL makes: CREATE TABLE, VIEW, MATERIALIZED VIEW
- * and SEQUENCE, CREATE FUNCTION, and CREATE TYPE, in public. Unquoted, a
- * name is folded to lower case, as Postgres folds it. A name followed by a
- * dot is a schema's, never the object's: `CREATE TABLE public.%I`, in the
- * SQL a function runs (0022, 0049), makes no table named public.
+ * and SEQUENCE, the new name of ALTER TABLE … RENAME TO, CREATE FUNCTION,
+ * and CREATE TYPE, in public. Unquoted, a name is folded to lower case, as
+ * Postgres folds it. A name followed by a dot is a schema's, never the
+ * object's: `CREATE TABLE public.%I`, in the SQL a function runs (0022,
+ * 0049), makes no table named public. A renamed table's old name stays
+ * among them: 0076 keeps it, a view, one release (T178).
  */
 export function managedObjects(sqlTexts: readonly string[]): Managed {
   const name = String.raw`(?:"?public"?\.)?(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_$]*))(?![A-Za-z0-9_$"]|\s*\.)`;
   const relation = new RegExp(String.raw`\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:UNLOGGED\s+)?(?:TABLE|VIEW|MATERIALIZED\s+VIEW|SEQUENCE)\s+(?:IF\s+NOT\s+EXISTS\s+)?${name}`, 'gi');
+  // The table renamed, by a name captured nowhere: the new one is what it makes.
+  const any = String.raw`(?:"?public"?\.)?(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)`;
+  const renamed = new RegExp(String.raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${any}\s+RENAME\s+TO\s+${name}`, 'gi');
   const fn = new RegExp(String.raw`\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+${name}\s*\(`, 'gi');
   const type = new RegExp(String.raw`\bCREATE\s+TYPE\s+${name}`, 'gi');
-  const names = (pattern: RegExp) => [
-    ...new Set(sqlTexts.flatMap((text) => [...text.matchAll(pattern)].map(([, quoted, bare]) => (quoted !== undefined ? quoted.replace(/""/g, '"') : bare!.toLowerCase())))),
+  const names = (...patterns: RegExp[]) => [
+    ...new Set(sqlTexts.flatMap((text) => patterns.flatMap((pattern) => [...text.matchAll(pattern)].map(([, quoted, bare]) => (quoted !== undefined ? quoted.replace(/""/g, '"') : bare!.toLowerCase()))))),
   ];
-  return { relations: names(relation), functions: names(fn), types: names(type) };
+  return { relations: names(relation, renamed), functions: names(fn), types: names(type) };
 }
 
 /**

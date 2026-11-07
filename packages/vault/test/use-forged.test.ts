@@ -300,8 +300,8 @@ async function grantAt(w: World, environmentId: string): Promise<void> {
   const added = { projectId: w.project, environmentId, environmentSlug: null, role: 'viewer', expiresAt: null };
   const after = { ...principalOf(w), grants: [...principalOf(w).grants, added] };
   await change({ kind: 'principal', id: w.principal }, { op: 'access.grant', grant: added }, after, async (tx, value) => {
-    await run(tx, sql`INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by) VALUES (${w.principal}, ${environmentId}, 'viewer', ${Date.now()}, ${ROOT})`);
-    await seal('vault_members', 'principal', w.principal)(tx, value);
+    await run(tx, sql`INSERT INTO grants (principal, environment_id, role, granted_at, granted_by) VALUES (${w.principal}, ${environmentId}, 'viewer', ${Date.now()}, ${ROOT})`);
+    await seal('principals', 'principal', w.principal)(tx, value);
   });
   w.objects.principal = after;
 }

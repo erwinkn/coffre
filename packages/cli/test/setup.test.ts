@@ -737,7 +737,7 @@ test("the hot path's URL logs in under its own bounds: the administrator's sessi
 test('a boundary that is not what coffre needs fails, and shows nothing', needsCluster, async () => {
   const url = await database('setup_loose', 'superuser');
   json(setup(['--json'], { stdin: `${url}\n` }));
-  await asSuperuser('setup_loose', (client) => client.unsafe('GRANT INSERT ON vault_members TO coffre_app'));
+  await asSuperuser('setup_loose', (client) => client.unsafe('GRANT INSERT ON principals TO coffre_app'));
   for (const args of [['--reset-passwords', '--json'], ['--json']]) {
     const run = setup(args, { stdin: `${url}\n` });
     assert.equal(run.status, 1);

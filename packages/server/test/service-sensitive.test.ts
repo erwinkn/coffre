@@ -22,7 +22,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { auditLog, credentials, environments, logChanges, secretReferences, secrets, secretVersions, serviceBindings, vaultMembers } from './db/tables.ts';
+import { auditLog, credentials, environments, logChanges, secretReferences, secrets, secretVersions, serviceBindings, principals } from './db/tables.ts';
 import { clientFor, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -373,7 +373,7 @@ test("a binding's runs read the sensitive values only where an Owner bound it; o
 });
 
 test("a binding an older release made, replaced before anything sealed it, is sealed first: its Owner's say is kept, never dropped", async () => {
-  const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));
+  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
   const [dev] = await db.owner.select({ projectId: environments.projectId, id: environments.id }).from(environments).where(eq(environments.slug, 'dev'));
   const scope = JSON.stringify([{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
   const binding = { id: randomUUID(), principal: CI, generation: member!.generation, profile: 'github', issuer: ISSUER, jwksUri: KEYS, claims: JSON.stringify(DEPLOY), revokedAt: null, scope };
@@ -413,7 +413,7 @@ test('the vault decides it too, whatever the app asks: a service reads a sensiti
 
 // Its tokens of 0.10 are planted in the database: rows no change of 0.15's log sealed, refused by a use until the cutover (plan PR 9).
 test('tokens and bindings issued before 0.11 are sealed once by who issued them: an Owner of the project keeps reading its sensitive values, anyone else does not', { skip: LOG_014_ONLY }, async () => {
-  const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));
+  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
   const [dev] = await db.owner.select({ projectId: environments.projectId, id: environments.id }).from(environments).where(eq(environments.slug, 'dev'));
   // As 0.10 stored a scope: each place's role and what it held, nothing said of sensitive values.
   const scope = JSON.stringify([{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
@@ -454,7 +454,7 @@ test('tokens and bindings issued before 0.11 are sealed once by who issued them:
 });
 
 test('an Owner demoted while their older token is sealed seals it reading nothing sensitive: the seal is weighed as the vault answered, committed only while still so', async () => {
-  const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));
+  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
   const [dev] = await db.owner.select({ projectId: environments.projectId, id: environments.id }).from(environments).where(eq(environments.slug, 'dev'));
   const scope = JSON.stringify([{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
   const token = generateToken('service');

@@ -76,7 +76,7 @@ async function seed(): Promise<void> {
       const person = `user:p${p}@acme.example`;
       await client.unsafe(`INSERT INTO projects (id, slug, name) VALUES ($1, $2, 'P')`, [id, `p-${p}`]);
       await client.unsafe(`INSERT INTO environments (id, project_id, slug, name, protected) VALUES ($1, $3, 'dev', 'D', false), ($2, $3, 'prod', 'P', false)`, [dev, prod, id]);
-      await client.unsafe(`INSERT INTO vault_members (principal, status, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES ($1, 'active', 0, $2, 'system:bench', $2, 'system:bench', 0, $3)`,
+      await client.unsafe(`INSERT INTO principals (principal, status, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES ($1, 'active', 0, $2, 'system:bench', $2, 'system:bench', 0, $3)`,
         [person, now, Buffer.alloc(32)]);
       await client.unsafe(`INSERT INTO environments (id, project_id, slug, name, protected, parent_id, owner) VALUES ($1, $2, 'dev-mine', 'Mine', false, $3, $4)`, [mine, id, dev, person]);
       for (const [env, slug, parent, own] of [[dev, 'dev', null, null], [prod, 'prod', null, null], [mine, 'dev-mine', dev, person]] as const) {
@@ -126,14 +126,14 @@ async function seed(): Promise<void> {
       const principal = `token:bench-${m}`;
       const project = projects[m % PROJECTS]!;
       const credential = randomUUID();
-      await client.unsafe(`INSERT INTO vault_members (principal, status, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES ($1, 'active', 0, $2, 'system:bench', $2, 'system:bench', 0, $3)`,
+      await client.unsafe(`INSERT INTO principals (principal, status, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES ($1, 'active', 0, $2, 'system:bench', $2, 'system:bench', 0, $3)`,
         [principal, now, Buffer.alloc(32)]);
       const grants = [project.dev, project.prod].map((env) => ({ projectId: project.id, environmentId: env, environmentSlug: null, role: 'viewer', expiresAt: null }));
       for (const grant of grants) {
-        await client.unsafe(`INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by) VALUES ($1, $2, 'viewer', $3, 'system:bench')`, [principal, grant.environmentId, now]);
+        await client.unsafe(`INSERT INTO grants (principal, environment_id, role, granted_at, granted_by) VALUES ($1, $2, 'viewer', $3, 'system:bench')`, [principal, grant.environmentId, now]);
       }
       const member: Input = { kind: 'principal', principal, status: 'active', generation: 0, role: 'member', scope: { projects: 'all', environments: 'all' }, grants };
-      await client.unsafe('UPDATE vault_members SET seal = $1 WHERE principal = $2', [await change({ kind: 'principal', id: principal }, member, client), principal]);
+      await client.unsafe('UPDATE principals SET seal = $1 WHERE principal = $2', [await change({ kind: 'principal', id: principal }, member, client), principal]);
       const expiresAt = now + 30 * 86_400_000;
       await client.unsafe(`INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at) VALUES ($1, 'service', $2, $3, 'h', 0, $4, 'system:bench', $5)`,
         [credential, Buffer.alloc(32), randomBytes(32), principal, new Date(expiresAt)]);
@@ -146,7 +146,7 @@ async function seed(): Promise<void> {
         FROM generate_series(1, ${MEMBERS}) g`, [now, Buffer.alloc(32)]);
     const today = new Date().toISOString().slice(0, 10);
     for (let d = -2; d <= 2; d += 1) await client.unsafe(`SELECT make_day($1::date + $2::integer)`, [today, d]);
-    await client.unsafe('UPDATE log_fence SET at_floor = $1', [now - 86_400_000 * 2]);
+    await client.unsafe('UPDATE checkpoint_fence SET at_floor = $1', [now - 86_400_000 * 2]);
   });
 }
 
@@ -163,7 +163,7 @@ async function grow(total: number): Promise<void> {
   }
   await q(`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
     SELECT nextval('log_number'), $1, 'history-' || g || '-' || $3, gen_random_uuid(), 'system:x', '{"op":"x"}', NULL, $4 FROM generate_series(1, $2) g`, [now, Math.round(more / 100), String(total), randomBytes(16)]);
-  await q(`INSERT INTO log_bulk (principal, secret, last) SELECT 'token:other-' || (g % 1000), gen_random_uuid(), $1 FROM generate_series(1, $2) g ON CONFLICT DO NOTHING`, [now, Math.round(more / 10)]);
+  await q(`INSERT INTO bulk_cap (principal, secret, last) SELECT 'token:other-' || (g % 1000), gen_random_uuid(), $1 FROM generate_series(1, $2) g ON CONFLICT DO NOTHING`, [now, Math.round(more / 10)]);
   await q(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, subject_principal, metadata, prev_hash, mac, hash)
     SELECT (SELECT coalesce(max(seq), 0) FROM audit_log) + g, 'vault', 'vault:x', $1, 'system:x', 'secret.read', 'allow', NULL, '{}', $3, $3, $3 FROM generate_series(1, $2) g`,
   [now, Math.round(more / 10), Buffer.alloc(32)]);
@@ -176,9 +176,9 @@ type Pair = { credential: string; secret: string; place: string | null };
 async function pairs(form: string): Promise<Pair[]> {
   const rows = await q<{ credential: string; secret: string; place: string | null }>(form === 'reference'
     ? `SELECT c.id AS credential, s.id AS secret, (SELECT e.id FROM environments e WHERE e.project_id = s.project_id AND e.slug = 'dev' AND e.owner IS NULL) AS place
-         FROM credentials c JOIN vault_grants g ON g.principal = c.principal JOIN environments e ON e.id = g.environment_id AND e.slug = 'prod'
+         FROM credentials c JOIN grants g ON g.principal = c.principal JOIN environments e ON e.id = g.environment_id AND e.slug = 'prod'
          JOIN secrets s ON s.environment_id = e.id AND s.current_version_id IS NULL`
-    : `SELECT c.id AS credential, s.id AS secret, NULL AS place FROM credentials c JOIN vault_grants g ON g.principal = c.principal
+    : `SELECT c.id AS credential, s.id AS secret, NULL AS place FROM credentials c JOIN grants g ON g.principal = c.principal
          JOIN secrets s ON s.environment_id = g.environment_id AND s.current_version_id IS NOT NULL`);
   return rows;
 }

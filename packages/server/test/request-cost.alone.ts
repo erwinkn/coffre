@@ -1403,7 +1403,7 @@ test("the missing members' read looks in the log, beyond naming its principals, 
   const rowless = await db.owner.execute<{ n: number }>(sql`
     SELECT count(DISTINCT subject_principal)::int AS n FROM audit_log
     WHERE author = 'vault' AND (subject_principal LIKE 'user:%' OR subject_principal LIKE 'token:%')
-      AND NOT EXISTS (SELECT 1 FROM vault_members WHERE vault_members.principal = audit_log.subject_principal)`);
+      AND NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = audit_log.subject_principal)`);
   const inLog = (node: Plan): number => node['Node Type'] === 'Recursive Union' ? 0
     : (node['Relation Name'] === 'audit_log' ? node['Shared Hit Blocks'] + node['Shared Read Blocks'] : 0) + (node.Plans ?? []).reduce((sum, child) => sum + inLog(child), 0);
   assert.ok(inLog(tree) <= 8 * rowless[0]!.n + 16, `the missing members' read read ${inLog(tree)} pages of the log beyond naming its principals, ${rowless[0]!.n} of them with no member row:\n${plan}`);

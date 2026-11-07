@@ -12,8 +12,8 @@ UPDATE audit_chain_head
 DELETE FROM credentials;
 DELETE FROM passkeys;
 DELETE FROM service_bindings;
-DELETE FROM vault_grants;
-DELETE FROM vault_members;
+DELETE FROM grants;
+DELETE FROM principals;
 DELETE FROM dismissed_keys;
 UPDATE secrets SET current_version_id = NULL;
 DELETE FROM secret_versions;

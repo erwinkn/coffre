@@ -16,8 +16,8 @@ import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, l
 /**
  * Every query the vault makes, and the only code in it that holds them.
  * Each reads or writes one thing; what they add up to, a decision, is in
- * `vault.ts`. The tables are the shared database's: `vault_members` and
- * `vault_grants`, which only the vault writes, the places it decides on,
+ * `vault.ts`. The tables are the shared database's: `principals` and
+ * `grants`, which only the vault writes, the places it decides on,
  * and the audit log, where its entries are the ones `author = 'vault'`.
  *
  * Times are milliseconds since the epoch, from the database's clock.
@@ -114,20 +114,20 @@ const clock = prepared((db) => db.select({ at: clockMillis(db) }).from(tablesOf(
 // --- members --------------------------------------------------------------------
 
 function memberColumns(db: Queryable) {
-  const { vaultMembers } = tablesOf(db);
+  const { principals } = tablesOf(db);
   return {
-    principal: vaultMembers.principal,
-    status: vaultMembers.status,
-    owner: vaultMembers.owner,
-    role: vaultMembers.role,
-    scope: vaultMembers.scope,
-    generation: vaultMembers.generation,
-    createdAt: vaultMembers.createdAt,
-    createdBy: vaultMembers.createdBy,
-    statusChangedAt: vaultMembers.statusChangedAt,
-    statusChangedBy: vaultMembers.statusChangedBy,
-    accessSeq: vaultMembers.accessSeq,
-    mac: vaultMembers.mac,
+    principal: principals.principal,
+    status: principals.status,
+    owner: principals.owner,
+    role: principals.role,
+    scope: principals.scope,
+    generation: principals.generation,
+    createdAt: principals.createdAt,
+    createdBy: principals.createdBy,
+    statusChangedAt: principals.statusChangedAt,
+    statusChangedBy: principals.statusChangedBy,
+    accessSeq: principals.accessSeq,
+    mac: principals.mac,
   };
 }
 
@@ -151,13 +151,13 @@ export async function member(db: Queryable, principal: string): Promise<Member |
 }
 
 const memberRow = prepared((db) => {
-  const { vaultMembers } = tablesOf(db);
-  return db.select(memberColumns(db)).from(vaultMembers).where(eq(vaultMembers.principal, sql.placeholder('principal')));
+  const { principals } = tablesOf(db);
+  return db.select(memberColumns(db)).from(principals).where(eq(principals.principal, sql.placeholder('principal')));
 });
 
 export async function allMembers(db: Queryable): Promise<Member[]> {
-  const { vaultMembers } = tablesOf(db);
-  return ((await db.select(memberColumns(db)).from(vaultMembers).orderBy(asc(vaultMembers.principal))) as StoredMember[]).map(memberOf);
+  const { principals } = tablesOf(db);
+  return ((await db.select(memberColumns(db)).from(principals).orderBy(asc(principals.principal))) as StoredMember[]).map(memberOf);
 }
 
 /**
@@ -167,12 +167,12 @@ export async function allMembers(db: Queryable): Promise<Member[]> {
  * row's MAC reads it, parsed: any way of writing everywhere is everywhere.
  */
 export async function instanceOwners(db: Queryable): Promise<Member[]> {
-  const { vaultMembers } = tablesOf(db);
+  const { principals } = tablesOf(db);
   const rows = await db
     .select(memberColumns(db))
-    .from(vaultMembers)
-    .where(and(eq(vaultMembers.status, 'active'), eq(vaultMembers.role, 'owner')))
-    .orderBy(asc(vaultMembers.principal));
+    .from(principals)
+    .where(and(eq(principals.status, 'active'), eq(principals.role, 'owner')))
+    .orderBy(asc(principals.principal));
   return (rows as StoredMember[]).map(memberOf).filter(ownsInstance);
 }
 
@@ -207,18 +207,18 @@ export function laterLockMembers(tx: Transaction, principals: readonly string[])
 }
 
 /** The members' queues and rows, locked in principal order (`lockMembers`). */
-function membersLocked(tx: Transaction, principals: readonly string[], shared: boolean) {
-  const { vaultMembers } = tablesOf(tx);
+function membersLocked(tx: Transaction, names: readonly string[], shared: boolean) {
+  const { principals } = tablesOf(tx);
   const queued: Record<string, SQL> = engineOf(tx) === 'postgres'
-    ? { queued: sql`${sql.raw(shared ? 'pg_advisory_xact_lock_shared' : 'pg_advisory_xact_lock')}(${MEMBER_QUEUE}, hashtext(${vaultMembers.principal}))` }
+    ? { queued: sql`${sql.raw(shared ? 'pg_advisory_xact_lock_shared' : 'pg_advisory_xact_lock')}(${MEMBER_QUEUE}, hashtext(${principals.principal}))` }
     : {};
   return forUpdate(
     tx,
     tx
       .select({ ...memberColumns(tx), ...queued })
-      .from(vaultMembers)
-      .where(inArray(vaultMembers.principal, [...new Set(principals)]))
-      .orderBy(asc(vaultMembers.principal)),
+      .from(principals)
+      .where(inArray(principals.principal, [...new Set(names)]))
+      .orderBy(asc(principals.principal)),
     shared ? 'share' : 'no key update',
   );
 }
@@ -244,8 +244,8 @@ export async function insertMember(
   /** `final`: nothing awaits it, it goes with what the transaction asks next, its COMMIT at the latest (`later`). */
   { final = false }: { final?: boolean } = {},
 ): Promise<void> {
-  const { vaultMembers } = tablesOf(tx);
-  const statement = tx.insert(vaultMembers).values(storedChange(row) as typeof vaultMembers.$inferInsert);
+  const { principals } = tablesOf(tx);
+  const statement = tx.insert(principals).values(storedChange(row) as typeof principals.$inferInsert);
   if (final) later(tx, statement);
   else await statement;
 }
@@ -257,8 +257,8 @@ export async function updateMember(
   /** `final`: nothing awaits it, it goes with what the transaction asks next, its COMMIT at the latest (`later`). */
   { final = false }: { final?: boolean } = {},
 ): Promise<void> {
-  const { vaultMembers } = tablesOf(tx);
-  const statement = tx.update(vaultMembers).set(storedChange(change)).where(eq(vaultMembers.principal, principal));
+  const { principals } = tablesOf(tx);
+  const statement = tx.update(principals).set(storedChange(change)).where(eq(principals.principal, principal));
   if (final) later(tx, statement);
   else await statement;
 }
@@ -275,13 +275,13 @@ export function grants(db: Queryable, principal?: string): Promise<GrantRow[]> {
  * neither on every project, with the slug it covers there, if any.
  */
 function at(db: Queryable, place: Place) {
-  const { vaultGrants } = tablesOf(db);
-  if (place.environmentId !== null) return eq(vaultGrants.environmentId, place.environmentId);
-  if (place.projectId !== null) return and(eq(vaultGrants.projectId, place.projectId), isNull(vaultGrants.environmentId));
+  const { grants } = tablesOf(db);
+  if (place.environmentId !== null) return eq(grants.environmentId, place.environmentId);
+  if (place.projectId !== null) return and(eq(grants.projectId, place.projectId), isNull(grants.environmentId));
   return and(
-    isNull(vaultGrants.projectId),
-    isNull(vaultGrants.environmentId),
-    place.environmentSlug === null ? isNull(vaultGrants.environmentSlug) : eq(vaultGrants.environmentSlug, place.environmentSlug),
+    isNull(grants.projectId),
+    isNull(grants.environmentId),
+    place.environmentSlug === null ? isNull(grants.environmentSlug) : eq(grants.environmentSlug, place.environmentSlug),
   );
 }
 
@@ -559,7 +559,7 @@ function memberLogsPostgres(principals: readonly string[]): SQL {
   return sql`SELECT p.principal, m.seal, l.number, l.at, l.request_id::text AS request_id, l.object::text AS object, l.actor, l.payload, l.seal AS newest, l.mac,
       ${newestAccessSeq(sql`p.principal`, actions)} AS access
     FROM ${asked} AS p (principal)
-    LEFT JOIN vault_members m ON m.principal = p.principal
+    LEFT JOIN principals m ON m.principal = p.principal
     LEFT JOIN LATERAL (
       SELECT x.* FROM log_changes x WHERE x.object = log_object('principal', p.principal) ORDER BY x.number DESC LIMIT 1
     ) l ON true`;
@@ -571,18 +571,18 @@ function memberLogsSqlite(principals: readonly string[]): SQL {
   const actions = sql`(SELECT value FROM json_each(${JSON.stringify(ACCESS_ACTIONS)}))`;
   return sql`SELECT a.p AS principal, m.seal, c.number, c.at, c.request_id, c.object, c.actor, c.payload, c.seal AS newest, c.mac, ${newestAccessSeq(sql`a.p`, actions)} AS access
     FROM (SELECT json_extract(value, '$.p') AS p, json_extract(value, '$.k') AS k FROM json_each(${pairs})) a
-    LEFT JOIN vault_members m ON m.principal = a.p
+    LEFT JOIN principals m ON m.principal = a.p
     LEFT JOIN log_changes c ON c.object = a.k AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = a.k)`;
 }
 
 export async function deleteGrant(tx: Transaction, principal: string, place: Place): Promise<void> {
-  const { vaultGrants } = tablesOf(tx);
-  await tx.delete(vaultGrants).where(and(eq(vaultGrants.principal, principal), at(tx, place)));
+  const { grants } = tablesOf(tx);
+  await tx.delete(grants).where(and(eq(grants.principal, principal), at(tx, place)));
 }
 
 export async function deleteGrants(tx: Transaction, principal: string): Promise<void> {
-  const { vaultGrants } = tablesOf(tx);
-  await tx.delete(vaultGrants).where(eq(vaultGrants.principal, principal));
+  const { grants } = tablesOf(tx);
+  await tx.delete(grants).where(eq(grants.principal, principal));
 }
 
 /**
@@ -635,12 +635,12 @@ export async function places(
 
 /** Who holds a grant on every project of 0.4, lapsed or not, which the vault replaces (`#convert`). */
 export async function everyProjectHolders(db: Queryable): Promise<string[]> {
-  const { vaultGrants } = tablesOf(db);
+  const { grants } = tablesOf(db);
   const rows = await db
-    .selectDistinct({ principal: vaultGrants.principal })
-    .from(vaultGrants)
-    .where(and(isNull(vaultGrants.projectId), isNull(vaultGrants.environmentId)))
-    .orderBy(asc(vaultGrants.principal));
+    .selectDistinct({ principal: grants.principal })
+    .from(grants)
+    .where(and(isNull(grants.projectId), isNull(grants.environmentId)))
+    .orderBy(asc(grants.principal));
   return rows.map((row) => row.principal);
 }
 
@@ -1006,11 +1006,11 @@ export async function newestSensitive(db: Queryable, secretIds: readonly string[
 
 /** How many grants name `role`: all of them, or those on environments. */
 export async function grantsNaming(db: Queryable, role: string, filter: { onEnvironments?: boolean } = {}): Promise<number> {
-  const { vaultGrants } = tablesOf(db);
+  const { grants } = tablesOf(db);
   const rows = await db
     .select({ count: sql<number | string>`count(*)` })
-    .from(vaultGrants)
-    .where(and(eq(vaultGrants.role, role), filter.onEnvironments === true ? or(isNotNull(vaultGrants.environmentId), isNotNull(vaultGrants.environmentSlug)) : undefined));
+    .from(grants)
+    .where(and(eq(grants.role, role), filter.onEnvironments === true ? or(isNotNull(grants.environmentId), isNotNull(grants.environmentSlug)) : undefined));
   return Number(rows[0]?.count ?? 0);
 }
 
@@ -1147,13 +1147,13 @@ export type ReadKind = Exclude<Kind, 'credential' | 'connection' | 'binding'>;
 
 /** `archived`: a key's rows read even while it is archived, as its unarchive would make them (an end's check, T134). */
 export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, { archived = false } = {}): Promise<HeldObject> {
-  const { vaultMembers, environments, projects, logConfig } = tablesOf(db);
+  const { principals, environments, projects, logConfig } = tablesOf(db);
   switch (ref.kind) {
     case 'principal': {
       const [row] = await db
-        .select({ status: vaultMembers.status, generation: vaultMembers.generation, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope, seal: vaultMembers.seal })
-        .from(vaultMembers)
-        .where(eq(vaultMembers.principal, ref.id));
+        .select({ status: principals.status, generation: principals.generation, owner: principals.owner, role: principals.role, scope: principals.scope, seal: principals.seal })
+        .from(principals)
+        .where(eq(principals.principal, ref.id));
       if (row === undefined) return { row: null, seal: null };
       return {
         row: principalObject({ principal: ref.id, status: row.status, generation: row.generation, ...memberStanding(row) }, await readGrants(db, { principal: ref.id })),
@@ -1517,7 +1517,7 @@ const KNOWN_OPS: Record<Kind, readonly string[]> = {
 
 /** `change_input`, step for step, on SQLite. */
 async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint | null> {
-  const { logChanges, logUses, vaultMembers, environments, projects, logConfig, credentials, mcpConnections, serviceBindings, secrets, secretReferences } = tablesOf(tx);
+  const { logChanges, logUses, principals, environments, projects, logConfig, credentials, mcpConnections, serviceBindings, secrets, secretReferences } = tablesOf(tx);
   const { ref } = call;
   const target = objectKey(ref);
   const [prior] = await tx.select({ number: logChanges.number, object: logChanges.object, payload: logChanges.payload, seal: logChanges.seal }).from(logChanges).where(eq(logChanges.requestId, call.requestId));
@@ -1549,7 +1549,7 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
   let done: number;
   switch (ref.kind) {
     case 'principal':
-      done = changedRows(await tx.update(vaultMembers).set({ seal: call.seal }).where(and(eq(vaultMembers.principal, ref.id), from(vaultMembers.seal))));
+      done = changedRows(await tx.update(principals).set({ seal: call.seal }).where(and(eq(principals.principal, ref.id), from(principals.seal))));
       break;
     case 'credential':
       done = changedRows(await tx.update(credentials).set({ seal: call.seal }).where(and(eq(credentials.id, ref.id), from(credentials.seal))))
@@ -1742,7 +1742,7 @@ export async function configRows(db: Queryable): Promise<Set<string>> {
 
 /** A member's row's seal, by principal. */
 export async function memberSeals(db: Queryable): Promise<Map<string, Buffer | null>> {
-  const rows = await rowsOf<{ principal: string; seal: Buffer | Uint8Array | null }>(db, sql`SELECT principal, seal FROM vault_members`);
+  const rows = await rowsOf<{ principal: string; seal: Buffer | Uint8Array | null }>(db, sql`SELECT principal, seal FROM principals`);
   return new Map(rows.map((row) => [row.principal, bytes(row.seal)]));
 }
 

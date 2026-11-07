@@ -29,7 +29,7 @@ import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { USES_AT_ONCE } from '../src/api/keys.ts';
 import { aroundNextUseByIds, clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, environments, logBulk, logCheckpoints, logFence, logTiles, logUses } from './db/tables.ts';
+import { auditLog, environments, bulkCap, logCheckpoints, checkpointFence, logTiles, logUses } from './db/tables.ts';
 import { openVaultDatabase } from './db/engine.ts';
 import { answer, type Pages } from './start-fixture.ts';
 
@@ -93,9 +93,9 @@ async function instance(log: '0.14' | '0.15', inFlight?: number, batches = true)
   await checkpointer?.stop();
   checkpointer = null;
   await resetDatabase(db.owner);
-  for (const table of [logUses, logBulk, logCheckpoints, logTiles]) await db.owner.delete(table);
+  for (const table of [logUses, bulkCap, logCheckpoints, logTiles]) await db.owner.delete(table);
   // Uses go in at or past the floor of `at` (schema 0022), as a deployment's checkpointer keeps it.
-  await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
+  await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
   const kek = randomBytes(32);
   signingKey = derivedSigningKey(kek);
   if (log === '0.15') {

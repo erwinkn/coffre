@@ -153,11 +153,11 @@ test(`the named statement's gate stands a caller exactly where the vault's rule 
         await q(`INSERT INTO environments (id, project_id, slug, name, protected, parent_id, owner) VALUES ($1, $2, $3, 'e', $4, $5, $6)`,
           [c.place, c.project, c.slug, c.protected, c.kind === 'own' ? null : c.sibling, c.owner]);
         {
-          await q(`INSERT INTO vault_members (principal, status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac, role, scope)
+          await q(`INSERT INTO principals (principal, status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac, role, scope)
                    VALUES ($1, $2, $3, $4, 0, 'test', 0, 'test', 0, $7, $5, $6)`, [c.principal, c.member.status, c.member.owner, c.memberGeneration, c.member.role, c.member.scope, Buffer.alloc(32)]);
         }
         for (const grant of c.grants) {
-          await q(`INSERT INTO vault_grants (principal, project_id, environment_id, role, expires_at, granted_at, granted_by) VALUES ($1, $2, $3, $4, $5, 0, 'test')`,
+          await q(`INSERT INTO grants (principal, project_id, environment_id, role, expires_at, granted_at, granted_by) VALUES ($1, $2, $3, $4, $5, 0, 'test')`,
             [c.principal, grant.project, grant.environment, grant.role, grant.expires === null ? null : String(grant.expires)]);
         }
         await q(`DELETE FROM log_config WHERE name = 'roles'`);

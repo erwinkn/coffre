@@ -11,9 +11,9 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import {
   auditLog,
   credentials,
-  deviceAuthorizations,
+  deviceLogins,
   identities,
-  vaultMembers,
+  principals,
 } from './db/tables.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { verifyAudit } from '../src/api/audit.ts';
@@ -153,7 +153,7 @@ async function credentialRow(id: string) {
 const aSecondAgo = () => new Date(Date.now() - 1000);
 
 /** Set an authentic past expiry; tampering is tested separately. */
-async function expire(table: typeof credentials | typeof deviceAuthorizations, where?: SQL) {
+async function expire(table: typeof credentials | typeof deviceLogins, where?: SQL) {
   const expiresAt = aSecondAgo();
   const kind = table === credentials ? 'credentials' : 'device_authorizations';
   for (const row of await db.owner.select().from(table).where(where)) {
@@ -192,7 +192,7 @@ test('editing a credential generation cannot revive a removed membership', async
 test('a device approval forged by the database owner cannot mint a session', async () => {
   const started = await signin.startDevice({ clientLabel: 'attacker', sourceIp: IP });
   const { generation } = await deps.vault.access(member(DEV));
-  await db.owner.update(deviceAuthorizations).set({
+  await db.owner.update(deviceLogins).set({
     decision: 'approved', decidedAt: new Date(), principal: `user:${DEV}`, generation,
   });
   await assert.rejects(signin.pollDevice(started.deviceCode, meta()), /authentic|tamper/i);
@@ -201,7 +201,7 @@ test('a device approval forged by the database owner cannot mint a session', asy
 
 test('an undecided device row cannot name an approving principal', async () => {
   await signin.startDevice({ clientLabel: null, sourceIp: IP });
-  await assert.rejects(db.owner.update(deviceAuthorizations).set({ principal: `user:${DEV}` }));
+  await assert.rejects(db.owner.update(deviceLogins).set({ principal: `user:${DEV}` }));
 });
 
 test('the database owner cannot extend a credential or undo its revocation', async () => {
@@ -218,7 +218,7 @@ test('the database owner cannot extend a credential or undo its revocation', asy
 test('the database owner cannot move a short device code to another request', async () => {
   const started = await signin.startDevice({ clientLabel: null, sourceIp: IP });
   const moved = started.userCode === 'BCDF-GHJK' ? 'BCDF-GHJL' : 'BCDF-GHJK';
-  await db.owner.update(deviceAuthorizations).set({ userCode: moved });
+  await db.owner.update(deviceLogins).set({ userCode: moved });
   await assert.rejects(signin.decideDevice(dev, moved, true), /authentication/);
   assert.equal(await countRows(credentials), 0);
 });
@@ -472,9 +472,9 @@ test('the Owner the deployment names needs no invitation, and is not removed whi
   assert.deepEqual(first.principal, { type: 'user', id: ROOT });
   // The vault made them the instance's Owner, a member row of its own, as its deployment names them.
   const [row] = await db.owner
-    .select({ createdBy: vaultMembers.createdBy, role: vaultMembers.role, scope: vaultMembers.scope })
-    .from(vaultMembers)
-    .where(eq(vaultMembers.principal, `user:${ROOT}`));
+    .select({ createdBy: principals.createdBy, role: principals.role, scope: principals.scope })
+    .from(principals)
+    .where(eq(principals.principal, `user:${ROOT}`));
   assert.deepEqual(row, { createdBy: 'system:vault', role: 'owner', scope: null });
   assert.equal((await signin.verify(first.credential.token)).id, ROOT);
 
@@ -987,7 +987,7 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
   assert.equal(started.expiresIn, 600);
   assert.equal(started.interval, 5);
 
-  const [stored] = await db.owner.select().from(deviceAuthorizations);
+  const [stored] = await db.owner.select().from(deviceLogins);
   assert.deepEqual(stored.deviceCodeHash, hashToken(started.deviceCode), 'only a hash is stored');
 
   assert.deepEqual(await poll(started.deviceCode), { status: 'pending' });
@@ -1082,7 +1082,7 @@ test('device flow: a denied code polls as denied and never yields a token', asyn
 
 test('device flow: an expired code cannot be described, decided or polled', async () => {
   const started = await signin.startDevice({ clientLabel: null, sourceIp: IP });
-  await expire(deviceAuthorizations);
+  await expire(deviceLogins);
 
   assert.equal(await signin.describeDevice(started.userCode), null);
   await assert.rejects(signin.decideDevice(dev, started.userCode, true), { status: 404 });
@@ -1099,7 +1099,7 @@ test('device flow: an expired code cannot be described, decided or polled', asyn
 test('device flow: an approved code left unpolled past its expiry yields nothing', async () => {
   const started = await signin.startDevice({ clientLabel: null, sourceIp: IP });
   await signin.decideDevice(dev, started.userCode, true);
-  await expire(deviceAuthorizations);
+  await expire(deviceLogins);
   assert.deepEqual(await poll(started.deviceCode), { status: 'expired' });
   assert.equal(await countRows(credentials), 0);
 });
@@ -1151,9 +1151,9 @@ test('device flow: open requests are capped per address and freed by a decision'
   await signin.startDevice({ clientLabel: null, sourceIp: IP });
   await assert.rejects(signin.startDevice({ clientLabel: null, sourceIp: IP }), { status: 429 });
   await db.owner
-    .update(deviceAuthorizations)
+    .update(deviceLogins)
     .set({ expiresAt: aSecondAgo() })
-    .where(eq(deviceAuthorizations.userCode, codes[1].userCode));
+    .where(eq(deviceLogins.userCode, codes[1].userCode));
   await signin.startDevice({ clientLabel: null, sourceIp: IP });
 
   // Starting writes no audit rows: the caller is anonymous.

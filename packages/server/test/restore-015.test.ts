@@ -30,7 +30,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { clientFor, resetDatabase, testDeps, testVault, type TestVault } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_OWNER_DATABASE_URL } from './db/connections.ts';
 import { openTestDatabase, openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
-import { environments, logBulk, logChanges, logCheckpoints, logFence, logTiles, logUses, projects, secrets } from './db/tables.ts';
+import { environments, bulkCap, logChanges, logCheckpoints, checkpointFence, logTiles, logUses, projects, secrets } from './db/tables.ts';
 
 const ROOT = 'admin@acme.example';
 const CI = 'token:ci';
@@ -134,8 +134,8 @@ function opened(outcome: UseOutcome, secretId: string, environmentId: string, pr
 
 test("a 0.15 instance backed up and restored comes back on 0.15: cut over, its trees signed by its vault key, its rows the log's, a token's use serving its value; the signer's memory of later pairs refuses it, a new one takes it; the wrong vault key verifies nothing", postgres, async () => {
   await resetDatabase(db.owner);
-  for (const table of [logUses, logBulk, logCheckpoints, logTiles]) await db.owner.delete(table);
-  await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
+  for (const table of [logUses, bulkCap, logCheckpoints, logTiles]) await db.owner.delete(table);
+  await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
 
   // The instance: its vault under 0.15's log, cut over as it opens, its checkpointer sealing every change.
   const kek = randomBytes(32);
@@ -217,8 +217,8 @@ test("a 0.15 instance backed up and restored comes back on 0.15: cut over, its t
 
 test('a backup taken before the vault key was rotated, restored under the new key: the old memory refuses it, a new one takes it and moves the log on again (T168)', postgres, async () => {
   await resetDatabase(db.owner);
-  for (const table of [logUses, logBulk, logCheckpoints, logTiles]) await db.owner.delete(table);
-  await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000, retired: [] });
+  for (const table of [logUses, bulkCap, logCheckpoints, logTiles]) await db.owner.delete(table);
+  await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000, retired: [] });
 
   // The instance under the old vault key, a value and a token's use of it, sealed; then backed up.
   const [oldKek, newKek] = [randomBytes(32), randomBytes(32)];

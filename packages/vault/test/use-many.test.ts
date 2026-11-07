@@ -92,7 +92,7 @@ test('a batch is one entry a key, every value opened, in the order asked; a firs
   const { vault } = await isolate();
   assert.deepEqual(opened(heard(await vault.useMany!(many(w, ids)))), ['a', 'b', 'c']);
   assert.equal(await count('log_uses'), 3);
-  assert.equal(await count('log_bulk'), 3);
+  assert.equal(await count('bulk_cap'), 3);
   // In the set now: each key's use takes no lock, and the batch is one call.
   assert.deepEqual(opened(heard(await vault.useMany!(many(w, [ids[2]!, ids[0]!], { purpose: 'reveal' })))), ['c', 'a']);
   assert.equal(await count('log_uses'), 5);
@@ -137,7 +137,7 @@ test('CountsOwnBatch: each key counts the keys before it in its batch; past the 
   assert.deepEqual([outcome.index, outcome.code], [2, 'bulk_limit']);
   assert.notEqual(outcome.number, null, 'the request over the cap is logged, as a lone use over it is');
   // The cap holds: three keys in the set, never the batch's four on top of the one.
-  assert.equal(await count('log_bulk'), 3);
+  assert.equal(await count('bulk_cap'), 3);
   assert.equal(await count('log_uses'), 1 + 4, 'every request of the batch logged, the one past the cap and the one after it included');
   // The replay counts each of the batch's keys as it is numbered: the refusal it answered is the replay's too.
   assert.equal(await replayed(answered), 1);
@@ -158,8 +158,8 @@ test('AllDecidedFirst: a batch the vault refuses on its first call\'s rows enter
   // Her grant revoked: a change to the principal.
   const revoked = { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants: [] };
   await change({ kind: 'principal', id: w.principal }, { op: 'access.revoke', place: { projectId: w.project, environmentId: w.dev, environmentSlug: null } }, revoked, async (tx, value) => {
-    await run(tx, sql`DELETE FROM vault_grants WHERE principal = ${w.principal}`);
-    await seal('vault_members', 'principal', w.principal)(tx, value);
+    await run(tx, sql`DELETE FROM grants WHERE principal = ${w.principal}`);
+    await seal('principals', 'principal', w.principal)(tx, value);
   });
   const outcome = heard(await vault.useMany!(many(w, ids, when)));
   // Its first key, in the set, is used and logged in the first call, refused; the others answered `decide`, written nothing.
@@ -167,13 +167,13 @@ test('AllDecidedFirst: a batch the vault refuses on its first call\'s rows enter
   assert.equal(outcome.index, 0);
   assert.equal(outcome.code, 'no_grant');
   assert.notEqual(outcome.number, null);
-  assert.equal(await count('log_bulk'), 1, 'no key entered the set');
+  assert.equal(await count('bulk_cap'), 1, 'no key entered the set');
   assert.equal(await count('log_uses'), 2);
   // The same batch, its fresh key last: refused at its first key, which answered `decide`, logged nothing (the app logs
   // it); its fresh key's request is logged all the same, as every request of a first call that takes no lock is.
   const unlogged = heard(await vault.useMany!(many(w, [ids[1]!, ids[2]!, fresh], when)));
   assert.deepEqual(unlogged, { ok: false, index: 0, code: 'no_grant', number: null });
-  assert.equal(await count('log_bulk'), 1);
+  assert.equal(await count('bulk_cap'), 1);
   assert.equal(await count('log_uses'), 3);
   assert.equal(await replayed(answered), 2);
 });
@@ -187,7 +187,7 @@ test('AnswerWhole: one key the rules refuse (another environment, no grant there
   assert.ok(!outcome.ok && 'code' in outcome, JSON.stringify(outcome));
   assert.equal(outcome.index, 1);
   assert.equal(outcome.code, 'no_grant');
-  assert.equal(await count('log_bulk'), 0, 'refused on the first call\'s rows: nothing entered');
+  assert.equal(await count('bulk_cap'), 0, 'refused on the first call\'s rows: nothing entered');
 });
 
 test('StrongestFirst: two batches of one principal\'s, each moving one key on and entering another, both answered, neither waiting on the other', postgresOnly('advisory locks'), async () => {
@@ -196,7 +196,7 @@ test('StrongestFirst: two batches of one principal\'s, each moving one key on an
   const { use } = await isolate();
   assert.ok((await use(ask(w, moved))).ok);
   // Its row from two periods back, still in the window: the next use moves it on, under the principal's lock shared.
-  await run(db.owner, sql`UPDATE log_bulk SET last = last - 120000`);
+  await run(db.owner, sql`UPDATE bulk_cap SET last = last - 120000`);
   // The principal's lock held exclusive elsewhere, so that both batches' second calls queue on it, then go together.
   const holder = await db.connect(1);
   let release!: () => void;
@@ -226,7 +226,7 @@ test('StrongestFirst: two batches of one principal\'s, each moving one key on an
     release();
     await held.catch(() => {});
   }
-  assert.equal(await count('log_bulk'), 3);
+  assert.equal(await count('bulk_cap'), 3);
   assert.equal(await replayed(answered), 4);
 });
 
@@ -274,7 +274,7 @@ test('a batch past `limits.batch` keys is made in statements of that many, in tu
   } finally {
     await isolate.close();
   }
-  assert.equal(await count('log_bulk'), 5);
+  assert.equal(await count('bulk_cap'), 5);
   assert.equal(await replayed(answered), 5);
 });
 
@@ -396,8 +396,8 @@ test('a batch refused on its second call\'s rows (her grant revoked between the 
     before: async (n) => {
       if (n !== 2) return;
       await change({ kind: 'principal', id: w.principal }, { op: 'access.revoke', place: { projectId: w.project, environmentId: w.dev, environmentSlug: null } }, revoked, async (tx, value) => {
-        await run(tx, sql`DELETE FROM vault_grants WHERE principal = ${w.principal}`);
-        await seal('vault_members', 'principal', w.principal)(tx, value);
+        await run(tx, sql`DELETE FROM grants WHERE principal = ${w.principal}`);
+        await seal('principals', 'principal', w.principal)(tx, value);
       });
     },
   });
@@ -412,7 +412,7 @@ test('a batch refused on its second call\'s rows (her grant revoked between the 
   // Each key's request logged, refused, under the lock; and each counted in the set, as every request the cap does not
   // refuse is, whatever the rules decide (HotPathOne's bulk rows, which the replay recomputes alike).
   assert.equal(await count('log_uses'), 2);
-  assert.equal(await count('log_bulk'), 2);
+  assert.equal(await count('bulk_cap'), 2);
   assert.equal(await replayed(answered), 1);
 });
 

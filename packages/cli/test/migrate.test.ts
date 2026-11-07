@@ -342,12 +342,13 @@ test("coffre's objects are what its migrations make, by name, as Postgres folds 
     managedObjects([
       'CREATE TABLE "audit_log" (\n "id" bigint);\nCREATE TABLE IF NOT EXISTS public."Mixed" ();\n--> statement-breakpoint\nCREATE UNLOGGED TABLE Folded ();',
       'CREATE MATERIALIZED VIEW "totals" AS SELECT 1;\nCREATE SEQUENCE "public"."numbers";\nCREATE FUNCTION audit_log_append_only() RETURNS trigger\nCREATE OR REPLACE FUNCTION "Quoted" ()\nALTER TABLE "audit_log" ADD COLUMN "scope" text;',
+      'ALTER TABLE "totals" RENAME TO "Sums";\nALTER TABLE public.folded RENAME TO Kept;\nALTER TABLE "audit_log" RENAME CONSTRAINT "a" TO "b";',
       'CREATE TYPE use_row AS (state text);\nCREATE TYPE "public"."Kind" AS ENUM (\'a\');\nALTER TYPE use_row ADD ATTRIBUTE at bigint;',
     ]),
-    { relations: ['audit_log', 'Mixed', 'folded', 'totals', 'numbers'], functions: ['audit_log_append_only', 'Quoted'], types: ['use_row', 'Kind'] },
+    { relations: ['audit_log', 'Mixed', 'folded', 'totals', 'numbers', 'Sums', 'kept'], functions: ['audit_log_append_only', 'Quoted'], types: ['use_row', 'Kind'] },
   );
   const made = managedObjects(readdirSync(migrationsFolder('postgres')).filter((file) => file.endsWith('.sql')).map((file) => readFileSync(join(migrationsFolder('postgres'), file), 'utf8')));
-  assert.ok(made.relations.includes('vault_members') && made.relations.includes('mcp_approvals') && made.functions.includes('secret_versions_erase_only'), JSON.stringify(made));
+  assert.ok(made.relations.includes('vault_members') && made.relations.includes('principals') && made.relations.includes('mcp_approvals') && made.functions.includes('secret_versions_erase_only'), JSON.stringify(made));
   assert.deepEqual(made.types.toSorted(), ['use_row', 'use_view'], JSON.stringify(made));
   // A name followed by a dot is a schema: the SQL that 0022's and 0049's functions run makes no table named public.
   assert.ok(!made.relations.includes('public'), JSON.stringify(made));
@@ -655,7 +656,7 @@ test("a member of the owner hands it, before the migrations commit, what it made
   deployer.username = 'setup_deployer';
   deployer.password = 'deployer-only-p4ss';
   await asSuperuser('setup_migrate_as_owner', async (client) => {
-    await client.unsafe('ALTER TABLE vault_members OWNER TO setup_deployer');
+    await client.unsafe('ALTER TABLE principals OWNER TO setup_deployer');
     await client.unsafe('ALTER FUNCTION make_day(date) OWNER TO setup_deployer');
     await client.unsafe('ALTER FUNCTION make_tiles(bigint, bigint) OWNER TO setup_deployer');
     await client.unsafe('ALTER TYPE use_row OWNER TO setup_deployer');
@@ -666,14 +667,14 @@ test("a member of the owner hands it, before the migrations commit, what it made
     await client.unsafe('ALTER TABLE log_tiles_uses_leaves DETACH PARTITION log_tiles_uses_4294967296');
   });
   const made = 'log_changes_records_stats=setup_deployer, log_tiles_uses_4294967296=setup_deployer, log_uses_20310101=setup_deployer, log_uses_20310102=setup_deployer, ' +
-    'make_day(date)=setup_deployer, make_tiles(bigint,bigint)=setup_deployer, use_row=setup_deployer, vault_members=setup_deployer';
+    'make_day(date)=setup_deployer, make_tiles(bigint,bigint)=setup_deployer, principals=setup_deployer, use_row=setup_deployer';
   assert.equal(await notTheOwners('setup_migrate_as_owner', 'setup_owner'), made, 'the indexes and the sequences move with their table');
 
   // The hand-over is the migrations' transaction's: a run that fails, here waiting for a table another session reads,
   // hands over nothing, as it applies nothing.
   await asSuperuser('setup_migrate_as_owner', (client) =>
     client.begin(async (tx) => {
-      await tx.unsafe('LOCK TABLE vault_members IN ACCESS SHARE MODE');
+      await tx.unsafe('LOCK TABLE principals IN ACCESS SHARE MODE');
       await assert.rejects(migrateDatabase(deployer.href), (error) => error instanceof LockWaitsExhausted);
     }),
   );
@@ -682,7 +683,7 @@ test("a member of the owner hands it, before the migrations commit, what it made
   await migrateDatabase(deployer.href);
   assert.equal(await notTheOwners('setup_migrate_as_owner', 'setup_owner'), null, "every one of them is the owner's");
   await asSuperuser('setup_migrate_as_owner', async (client) => {
-    const [{ inherited }] = await client.unsafe<[{ inherited: string }]>("SELECT pg_get_userbyid(relowner) AS inherited FROM pg_class WHERE oid = 'vault_members_pkey'::regclass");
+    const [{ inherited }] = await client.unsafe<[{ inherited: string }]>("SELECT pg_get_userbyid(relowner) AS inherited FROM pg_class WHERE oid = 'principals_pkey'::regclass");
     assert.equal(inherited, 'setup_owner');
     // Retention's second step, as the owner its functions run as: it drops what it detached.
     await client.unsafe('SET ROLE setup_owner; DROP TABLE public.log_uses_20310101; DROP TABLE public.log_tiles_uses_4294967296; RESET ROLE');

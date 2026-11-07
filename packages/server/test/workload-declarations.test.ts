@@ -5,7 +5,7 @@ import { createHmac } from 'node:crypto';
 import { deriveKey, generateToken, github, hashToken, signin, tokenHint } from '@coffre/core/identity';
 import { eq } from 'drizzle-orm';
 
-import { credentials, enrollments, serviceBindings } from './db/tables.ts';
+import { credentials, enrollmentCodes, serviceBindings } from './db/tables.ts';
 import { authMac, checkAuthRow } from '../src/auth-rows.ts';
 import { serveApi } from '../src/api/router.ts';
 import { routes } from '../src/api/routes.ts';
@@ -147,8 +147,8 @@ test("a workload's session is a MAC kind of its own, over what binds it; a bindi
     id: crypto.randomUUID(), bindingId, codeHash: hashToken(code), codeHint: tokenHint(code), scope: '[]',
     createdAt: new Date(), createdBy: `user:${ROOT}`, createdWith: null, expiresAt: new Date(Date.now() + 86_400_000),
   };
-  await db.owner.insert(enrollments).values({ ...enrollment, authMac: authMac(deps.chainKey, 'enrollments', enrollment) });
-  const [stored] = await db.owner.select().from(enrollments);
+  await db.owner.insert(enrollmentCodes).values({ ...enrollment, authMac: authMac(deps.chainKey, 'enrollments', enrollment) });
+  const [stored] = await db.owner.select().from(enrollmentCodes);
   assert.ok(checkAuthRow(deps.chainKey, 'enrollments', stored!));
   // The tuple as section 11 spells it, encoded here on its own: kind `enrollments`, its seven fields once each.
   assert.deepEqual(stored!.authMac, independentMac('enrollments', [enrollment.id, bindingId, enrollment.codeHash.toString('hex'), '[]', `user:${ROOT}`, null, enrollment.expiresAt.getTime()]));

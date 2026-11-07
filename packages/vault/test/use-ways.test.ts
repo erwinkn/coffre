@@ -112,12 +112,12 @@ async function removeAndRestore(w: { principal: string; objects: { principal: In
   const member = w.objects.principal as Extract<Input, { kind: 'principal' }>;
   const removed: Input = { ...member, status: 'removed', generation: member.generation + 1 };
   await change({ kind: 'principal', id: w.principal }, { op: 'member.remove' }, removed, async (tx, value) => {
-    await run(tx, sql`UPDATE vault_members SET status = 'removed', generation = ${member.generation + 1}, seal = ${value} WHERE principal = ${w.principal}`);
+    await run(tx, sql`UPDATE principals SET status = 'removed', generation = ${member.generation + 1}, seal = ${value} WHERE principal = ${w.principal}`);
   });
   if (!restore) return;
   const back: Input = { ...removed, status: 'active' };
   await change({ kind: 'principal', id: w.principal }, { op: 'member.restore', role: member.role, scope: member.scope }, back, async (tx, value) => {
-    await run(tx, sql`UPDATE vault_members SET status = 'active', seal = ${value} WHERE principal = ${w.principal}`);
+    await run(tx, sql`UPDATE principals SET status = 'active', seal = ${value} WHERE principal = ${w.principal}`);
   });
 }
 
@@ -242,7 +242,7 @@ test('behind Cloudflare Access: the person alone, the entry naming their object\
   // Admitted again: nothing of theirs ended but the account, which stands again.
   const member = w.objects.principal as Extract<Input, { kind: 'principal' }>;
   await change({ kind: 'principal', id: w.principal }, { op: 'member.restore', role: member.role, scope: member.scope }, { ...member, generation: 1 } as Input, async (tx, value) => {
-    await run(tx, sql`UPDATE vault_members SET status = 'active', seal = ${value} WHERE principal = ${w.principal}`);
+    await run(tx, sql`UPDATE principals SET status = 'active', seal = ${value} WHERE principal = ${w.principal}`);
   });
   assert.ok((heard(await (await isolate()).use(via()))).ok);
   assert.equal(await replayAgrees(), 3);

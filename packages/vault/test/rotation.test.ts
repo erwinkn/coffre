@@ -49,8 +49,8 @@ after(() => db.close());
 beforeEach(async () => {
   keks = new KekRegistry(LocalKekProvider.generate('test-kek-1'));
   await emptyDatabase(db.owner);
-  for (const table of ['log_uses', 'log_bulk', 'log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
-  await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE log_fence SET at_floor = ${Date.now() - 60_000}, retired = '{}'` : sql`UPDATE log_fence SET at_floor = ${Date.now() - 60_000}, retired = '[]'`);
+  for (const table of ['log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}, retired = '{}'` : sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}, retired = '[]'`);
   if (ENGINE === 'postgres') {
     const today = new Date().toISOString().slice(0, 10);
     await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
@@ -169,8 +169,8 @@ const rotations = async () => (await rows<{ number: string | number; payload: st
 
 /** The fence's retired tags, hex. */
 async function retired(): Promise<string[]> {
-  if (ENGINE === 'postgres') return (await rows<{ tag: string }>(db.owner, sql`SELECT encode(unnest(retired), 'hex') AS tag FROM log_fence`)).map((r) => r.tag);
-  return JSON.parse((await rows<{ retired: string }>(db.owner, sql`SELECT retired FROM log_fence`))[0]!.retired) as string[];
+  if (ENGINE === 'postgres') return (await rows<{ tag: string }>(db.owner, sql`SELECT encode(unnest(retired), 'hex') AS tag FROM checkpoint_fence`)).map((r) => r.tag);
+  return JSON.parse((await rows<{ retired: string }>(db.owner, sql`SELECT retired FROM checkpoint_fence`))[0]!.retired) as string[];
 }
 
 /** The origin a pair's changes note is signed under. */
@@ -201,7 +201,7 @@ for (const rotation of ROTATIONS) {
     const used = await w.use(now.vault, w.secret);
     assert.ok(used.ok, JSON.stringify(used));
     assert.ok((await w.use(now.vault, await w.key(now))).ok);
-    assert.equal((await db.owner.select().from(t.logFence)).length, 1);
+    assert.equal((await db.owner.select().from(t.checkpointFence)).length, 1);
     clean(await verify(now.vault));
     // Started again, it neither rotates twice nor refuses its memory.
     await now.cp.close();
@@ -412,7 +412,7 @@ test('a backlog sealed a part at a time across the rotation: a pair under the ne
  */
 async function plantRotationIntoOld(w: Awaited<ReturnType<typeof underOldKey>>, oldOrigin: string): Promise<{ planted: bigint; number: bigint }> {
   const planted = await plantUse(w.old.keys.mac);
-  await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE log_fence SET retired = '{}'` : sql`UPDATE log_fence SET retired = '[]'`);
+  await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE checkpoint_fence SET retired = '{}'` : sql`UPDATE checkpoint_fence SET retired = '[]'`);
   const [next] = await rows<{ n: string | number }>(db.owner, ENGINE === 'postgres'
     ? sql`SELECT nextval('log_number') AS n`
     : sql`SELECT max(n) + 1 AS n FROM (SELECT max(number) AS n FROM log_changes UNION ALL SELECT max(number) FROM log_uses)`);
@@ -552,7 +552,7 @@ test('two rotations, A to B to C, and someone who holds A and B: a rotation from
   const plant = async () => {
     const use = await plantUse(ka!.mac);
     // The fence's `retired` emptied first: a row she writes, and its trigger would refuse a change under B.
-    await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE log_fence SET retired = '{}'` : sql`UPDATE log_fence SET retired = '[]'`);
+    await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE checkpoint_fence SET retired = '{}'` : sql`UPDATE checkpoint_fence SET retired = '[]'`);
     const [next] = await rows<{ n: string | number }>(db.owner, ENGINE === 'postgres'
       ? sql`SELECT nextval('log_number') AS n`
       : sql`SELECT max(n) + 1 AS n FROM (SELECT max(number) AS n FROM log_changes UNION ALL SELECT max(number) FROM log_uses)`);
@@ -584,14 +584,14 @@ test('a rotation over a database whose fence row is gone fails whole: no rotatio
   const rotation = ROTATIONS[0]!;
   const w = await underOldKey(rotation.before);
   await w.old.cp.close();
-  await run(db.owner, sql`DELETE FROM log_fence`);
+  await run(db.owner, sql`DELETE FROM checkpoint_fence`);
   try {
     // Postgres's says it in the failed query's cause.
     await assert.rejects(vaultUnder(rotation.after, w.memory), (e: Error) => /the log's fence row is gone/.test(`${e.message} ${(e.cause as Error | undefined)?.message}`));
     assert.deepEqual(await rotations(), []);
   } finally {
     // Put back for the tests after (`empty` updates the row, it never makes it).
-    await run(db.owner, sql`INSERT INTO log_fence (only_row, at_floor) VALUES (true, 0)`);
+    await run(db.owner, sql`INSERT INTO checkpoint_fence (only_row, at_floor) VALUES (true, 0)`);
   }
 });
 

@@ -69,7 +69,7 @@ if (process.env.BENCH_LOADER === '1') {
 const seed = randomBytes(32);
 const owner = postgresClient(ownerUrl, { max: 2 });
 for (const table of ['log_checkpoints', 'log_tiles', 'log_changes', 'log_uses']) await owner.unsafe(`DELETE FROM ${table}`);
-await owner.unsafe(`UPDATE log_fence SET at_floor = $1`, [Date.now() - 3000]);
+await owner.unsafe(`UPDATE checkpoint_fence SET at_floor = $1`, [Date.now() - 3000]);
 const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 await owner.unsafe('SELECT make_day($1::date), make_day($2::date)', [day(Date.now()), day(Date.now() + 86_400_000)]);
 await owner.unsafe('CHECKPOINT');

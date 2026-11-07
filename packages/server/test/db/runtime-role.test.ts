@@ -29,20 +29,20 @@ const EXPECTED_UPDATE_COLUMNS = [
   'credentials.revoked_by',
   // Once, to seal a token of 0.4 with its account's grants; its MAC covers it.
   'credentials.scope',
-  'device_authorizations.auth_mac',
-  'device_authorizations.consumed_at',
-  'device_authorizations.decided_at',
-  'device_authorizations.decision',
-  'device_authorizations.generation',
+  'device_logins.auth_mac',
+  'device_logins.consumed_at',
+  'device_logins.decided_at',
+  'device_logins.decision',
+  'device_logins.generation',
   // The passkey that approved a CLI login, named when it is decided (0063_passkeys).
-  'device_authorizations.passkey_id',
-  'device_authorizations.principal',
+  'device_logins.passkey_id',
+  'device_logins.principal',
   'dismissed_keys.dismissed_at',
   'dismissed_keys.dismissed_by',
   'dismissed_keys.restored_at',
   'dismissed_keys.restored_by',
   // An enrollment code's MAC, signed again by the app key's rotation (T105): nothing else of a code changes.
-  'enrollments.auth_mac',
+  'enrollment_codes.auth_mac',
   'environments.archived_at',
   'environments.name',
   'environments.slug',
@@ -164,12 +164,14 @@ test(
       assert.equal(ownership.object_count, 0);
 
       const updateColumns = await owner.unsafe<{ column_name: string; table_name: string }[]>(
-        `SELECT table_name, column_name
-           FROM information_schema.column_privileges
-          WHERE grantee = 'coffre_app'
-            AND table_schema = 'public'
-            AND privilege_type = 'UPDATE'
-          ORDER BY table_name, column_name`,
+        // The tables' own: 0.15's names for the renamed ones, views one release, grant what their tables do (log-owner.sql).
+        `SELECT p.table_name, p.column_name
+           FROM information_schema.column_privileges p
+           JOIN information_schema.tables t ON t.table_schema = p.table_schema AND t.table_name = p.table_name AND t.table_type = 'BASE TABLE'
+          WHERE p.grantee = 'coffre_app'
+            AND p.table_schema = 'public'
+            AND p.privilege_type = 'UPDATE'
+          ORDER BY p.table_name, p.column_name`,
       );
       assert.deepEqual(
         updateColumns.map((row) => `${row.table_name}.${row.column_name}`),

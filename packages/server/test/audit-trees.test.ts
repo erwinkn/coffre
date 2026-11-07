@@ -22,8 +22,8 @@ const running: RunningCheckpointer[] = [];
 beforeEach(async () => {
   for (const checkpointer of running.splice(0)) await checkpointer.stop();
   await resetDatabase(db.owner);
-  const { logUses, logBulk, logCheckpoints, logTiles } = tablesOf(db.owner);
-  for (const table of [logUses, logBulk, logCheckpoints, logTiles]) await db.owner.delete(table);
+  const { logUses, bulkCap, logCheckpoints, logTiles } = tablesOf(db.owner);
+  for (const table of [logUses, bulkCap, logCheckpoints, logTiles]) await db.owner.delete(table);
 });
 after(async () => {
   for (const checkpointer of running.splice(0)) await checkpointer.stop();

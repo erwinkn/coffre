@@ -34,7 +34,7 @@ role with a project-wide permission (`maintainer`, `access-manager`,
 
 ## Where they live
 
-In `vault_grants`, beside every other grant, with one new nullable column,
+In `grants`, beside every other grant, with one new nullable column,
 `environment_slug`. A row names its place by which columns it fills:
 
 | Place | `project_id` | `environment_id` | `environment_slug` |
@@ -51,7 +51,7 @@ per member and slug.
 
 The first draft put them in a table of their own. The previous release's
 conformance rules that out: it holds the vault's database login to writing
-`vault_members`, `vault_grants` and the log, and nothing else, so a new
+`principals`, `grants` and the log, and nothing else, so a new
 table the vault writes fails it (`test:compat`). Changing a check is the
 other expand migration: every row the previous release writes passes the
 new checks, and it never reads the new column. On SQLite, which changes a
@@ -63,7 +63,7 @@ join that set as tuples of a new kind, `['every-project', environment_slug,
 role, expires_at, granted_at, granted_by]`. A member with none has the same set,
 and so the same MAC, as before. A row inserted, edited or deleted around
 the vault fails the MAC, and the vault refuses that member, as it does
-today for `vault_grants`. Replaying the log (`coffre verify log`) rebuilds
+today for `grants`. Replaying the log (`coffre verify log`) rebuilds
 them too, so a row the log never gave is named.
 
 ## The access decision

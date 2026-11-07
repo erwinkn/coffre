@@ -16,11 +16,11 @@ where its login may ([deploy.md](../deploy.md#the-database-and-its-keys-for-eith
 ## What the settings were hiding
 
 **One misestimated table.** `use_credential`'s main statement joined the
-fence, `log_fence`, a table of exactly one row (its key is `only_row`,
+fence, `checkpoint_fence`, a table of exactly one row (its key is `only_row`,
 held true by a check):
 
 ```sql
-LEFT JOIN public.log_fence f ON f.only_row
+LEFT JOIN public.checkpoint_fence f ON f.only_row
 ```
 
 A table nobody has analyzed or vacuumed has no statistics. The planner
@@ -64,7 +64,7 @@ autovacuum's thresholds.
 **The fix** is a query that says what is true:
 
 ```sql
-LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.log_fence y WHERE y.only_row LIMIT 1) f ON true
+LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.checkpoint_fence y WHERE y.only_row LIMIT 1) f ON true
 ```
 
 `LIMIT 1` bounds the estimate to one row whatever the statistics say, and
@@ -198,10 +198,10 @@ its own database did, and holds it to every other check
     of the three requests (the key's, its twin and the control below) is
     called once, unweighed, in a session of its own, as `weigh` drops its
     first run. A batch's rolled-back writes leave dead entries in
-    `log_bulk`'s index under the keys they wrote, and the first scan to
+    `bulk_cap`'s index under the keys they wrote, and the first scan to
     meet them visits their heap page and marks them dead, so no scan after
     it does (our reading of the runs below; the pages were not inspected):
-    that first request reads 1 or 2 more `log_bulk` blocks than
+    that first request reads 1 or 2 more `bulk_cap` blocks than
     every one after it, the same request asked again included (75 beside
     74, in CI's shards 3/6 and 5/6 and in three local runs out of three;
     74 again when it was asked after its controls). One settling call of
@@ -210,17 +210,17 @@ its own database did, and holds it to every other check
     sessions of their own, so a read a session makes of the key as it
     plans, as T207 r2's dry run did, still shows in every weighed session.
     Rows deleted before the weighing cost a block of their own. A row of
-    the window passed deletes its principal's `log_bulk` rows. While a
+    the window passed deletes its principal's `bulk_cap` rows. While a
     transaction older than that delete still runs anywhere in the cluster,
     in any database (a new snapshot's xmin is the oldest id running
-    anywhere), a new session's planner, probing an end of `log_bulk_pkey`
+    anywhere), a new session's planner, probing an end of `bulk_cap_pkey`
     for its estimates (`get_actual_variable_range`, which skips only rows
     known dead), reads a deleted row's heap page as a live row's. Once that
     transaction ends, the next session to plan reads the dead row's page
     and the next row's, and marks the entry dead, and no session after it
     reads it. CI runs the matrices side by side on one Postgres, so another
     file's transaction ending between a call and its controls moved that
-    block from one to the next: 9 `log_bulk` blocks beside 8, or 8 beside
+    block from one to the next: 9 `bulk_cap` blocks beside 8, or 8 beside
     9 (T225; the deleted rows' heap tuples had their xmax set and their
     index entries were still live). A transaction of that kind, planted in
     another database, failed 499 of 500 comparisons when it committed
@@ -261,7 +261,7 @@ its own database did, and holds it to every other check
 A plan made for a call's own values is made with them, and planning for a
 value can read pages by it. Sol's review r2 weighed a session's first
 calls at the server's settings and found a named call of a caller who
-stands nowhere reading 16 more blocks of the key's tables (`log_bulk`,
+stands nowhere reading 16 more blocks of the key's tables (`bulk_cap`,
 `secret_versions`, `environments`) on its first call for a key held than
 for one never made. Every statement's own execution read the same: the
 gap was the dry run's planning, which bound the key id the isolate passed

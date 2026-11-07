@@ -31,7 +31,7 @@ const meta = () => ({ requestId: randomUUID(), sourceIp: '203.0.113.7', label: '
 const db = await openTestDatabase();
 const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 await db.owner.execute(sql`SELECT make_day(${day(Date.now())}::date), make_day(${day(Date.now() + 86_400_000)}::date)`);
-await db.owner.execute(sql`UPDATE log_fence SET at_floor = ${Date.now() - 3000}`);
+await db.owner.execute(sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 3000}`);
 
 const q = (xs: number[], p: number) => [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor(p * xs.length))]!;
 const shown = (xs: number[]) => `${q(xs, 0.5).toFixed(1)} / ${q(xs, 0.9).toFixed(1)} / ${q(xs, 0.99).toFixed(1)}`;

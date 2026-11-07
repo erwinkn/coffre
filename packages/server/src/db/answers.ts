@@ -129,13 +129,13 @@ function postgres(principal: SQL): SQL {
       'member', (
         SELECT json_build_object('status', status, 'owner', owner, 'role', role, 'scope', scope, 'generation', generation,
           'statusChangedAt', status_changed_at, 'statusChangedBy', status_changed_by)
-        FROM vault_members WHERE principal = ${principal}
+        FROM principals WHERE principal = ${principal}
       ),
       'grants', (
         SELECT coalesce(json_agg(json_build_object(
           'projectId', coalesce(g.project_id, env.project_id), 'environmentId', g.environment_id, 'role', g.role,
           'expiresAt', g.expires_at, 'grantedAt', g.granted_at, 'grantedBy', g.granted_by)), '[]')
-        FROM vault_grants g LEFT JOIN environments env ON env.id = g.environment_id
+        FROM grants g LEFT JOIN environments env ON env.id = g.environment_id
         WHERE g.principal = ${principal}
       ),
       'policySeq', (SELECT seq::text FROM policy),
@@ -162,13 +162,13 @@ function sqlite(principal: SQL): SQL {
       'member', json((
         SELECT json_object('status', status, 'owner', owner, 'role', role, 'scope', scope, 'generation', generation,
           'statusChangedAt', status_changed_at, 'statusChangedBy', status_changed_by)
-        FROM vault_members WHERE principal = ${principal}
+        FROM principals WHERE principal = ${principal}
       )),
       'grants', json((
         SELECT json_group_array(json_object(
           'projectId', coalesce(g.project_id, env.project_id), 'environmentId', g.environment_id, 'role', g.role,
           'expiresAt', g.expires_at, 'grantedAt', g.granted_at, 'grantedBy', g.granted_by))
-        FROM vault_grants g LEFT JOIN environments env ON env.id = g.environment_id
+        FROM grants g LEFT JOIN environments env ON env.id = g.environment_id
         WHERE g.principal = ${principal}
       )),
       'policySeq', (SELECT seq FROM policy),

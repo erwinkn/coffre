@@ -89,7 +89,7 @@ const joined = (...parts: (SQL | string)[]) => sql.join(parts.map((part) => (typ
 /**
  * Section 5.3's one statement, by the session token's hash: the session's
  * row and its ancestors' (a `narrow` child's, root first, at most four),
- * each with its member's standing as `vault_members` holds it (read
+ * each with its member's standing as `principals` holds it (read
  * without the vault's MAC: removal only moves the generation on, so a
  * stale read can only refuse), its binding and whether a tombstone names
  * it, and the freezes of the instance, the service, the binding, the
@@ -118,7 +118,7 @@ const sessionRows = prepared((db) => sessionStatement(db));
 
 /** Section 5.3's statement as built, before it is prepared: for a test that holds its plan to its indexes. */
 export function sessionStatement(db: Queryable) {
-  const { credentials, serviceBindings, vaultMembers } = tablesOf(db);
+  const { credentials, serviceBindings, principals } = tablesOf(db);
   const postgres = dialect.engineOf(db) === 'postgres';
   const tokenHash = sql.placeholder('tokenHash');
   // The binding a workload's row names, `binding:<id>`: every workload row has one, a child its root's.
@@ -142,8 +142,8 @@ export function sessionStatement(db: Queryable) {
       credential: credentials,
       binding: serviceBindings,
       bindingTombstoned: tombstoned(db, idText(db, serviceBindings.id)),
-      memberStatus: vaultMembers.status,
-      memberGeneration: vaultMembers.generation,
+      memberStatus: principals.status,
+      memberGeneration: principals.generation,
       frozen: {
         instance: frozen(db, 'instance'),
         service: frozen(db, sql`${credentials.principal}`),
@@ -157,7 +157,7 @@ export function sessionStatement(db: Queryable) {
       policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`,
     })
     .from(credentials)
-    .leftJoin(vaultMembers, eq(vaultMembers.principal, credentials.principal))
+    .leftJoin(principals, eq(principals.principal, credentials.principal))
     .leftJoin(serviceBindings, sql`${serviceBindings.id} = ${bindingId}`)
     .where(or(eq(credentials.tokenHash, tokenHash), ancestors));
 }
@@ -176,15 +176,15 @@ export async function callBindings(db: Queryable, principal: string, uses: { pla
 }
 
 const bindingCalls = prepared((db) => {
-  const { serviceBindings, vaultMembers } = tablesOf(db);
+  const { serviceBindings, principals } = tablesOf(db);
   const { place, placePath } = placeColumns(db, sql`NULL`);
   const name = sql`CAST(${sql.placeholder('credential')} AS text)`;
   return db
     .select({
       binding: serviceBindings,
       tombstoned: tombstoned(db, idText(db, serviceBindings.id)),
-      memberStatus: vaultMembers.status,
-      memberGeneration: vaultMembers.generation,
+      memberStatus: principals.status,
+      memberGeneration: principals.generation,
       frozen: {
         instance: frozen(db, 'instance'),
         service: frozen(db, sql`${serviceBindings.principal}`),
@@ -197,7 +197,7 @@ const bindingCalls = prepared((db) => {
       policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`,
     })
     .from(serviceBindings)
-    .leftJoin(vaultMembers, eq(vaultMembers.principal, serviceBindings.principal))
+    .leftJoin(principals, eq(principals.principal, serviceBindings.principal))
     .where(and(
       eq(serviceBindings.principal, sql.placeholder('principal')),
       eq(serviceBindings.profile, 'cloudflare'),
@@ -226,12 +226,12 @@ export async function workloadCandidates(
   profiles: readonly WorkloadProfile[],
   max: number,
 ): Promise<{ bindings: BindingRow[]; newest: NewestChanges }> {
-  const { serviceBindings, vaultMembers } = tablesOf(db);
+  const { serviceBindings, principals } = tablesOf(db);
   if (profiles.length === 0) return { bindings: [], newest: await newestChanges(db, principal, []) };
   const rows = await db
     .select({ binding: serviceBindings, tombstoned: tombstoned(db, idText(db, serviceBindings.id)), ...newestChangeColumns(db, principal, serviceBindings.id), now: clockMillis(db) })
     .from(serviceBindings)
-    .innerJoin(vaultMembers, and(eq(vaultMembers.principal, serviceBindings.principal), eq(vaultMembers.generation, serviceBindings.generation)))
+    .innerJoin(principals, and(eq(principals.principal, serviceBindings.principal), eq(principals.generation, serviceBindings.generation)))
     .where(and(
       eq(serviceBindings.principal, principal),
       eq(serviceBindings.issuer, issuer),

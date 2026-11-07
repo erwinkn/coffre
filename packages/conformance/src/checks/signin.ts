@@ -80,10 +80,10 @@ export async function forgedApproval(deployment: Deployment, people: People): Pr
   const person = await member(deployment, people, 'forged-approval');
   const device = await startDevice(deployment);
   await using(deployment.database(), async (sql) => {
-    const [row] = await query(sql, 'SELECT * FROM device_authorizations WHERE user_code = $1', [device.user_code]);
-    const [standing] = await query<{ generation: number }>(sql, 'SELECT generation FROM vault_members WHERE principal = $1', [person.member]);
+    const [row] = await query(sql, 'SELECT * FROM device_logins WHERE user_code = $1', [device.user_code]);
+    const [standing] = await query<{ generation: number }>(sql, 'SELECT generation FROM principals WHERE principal = $1', [person.member]);
     expect(row !== undefined, 'no device row to forge');
-    await query(sql, `UPDATE device_authorizations SET decision = 'approved', decided_at = $1, principal = $2, generation = $3 WHERE id = $4`,
+    await query(sql, `UPDATE device_logins SET decision = 'approved', decided_at = $1, principal = $2, generation = $3 WHERE id = $4`,
       [sql.engine === 'sqlite' ? Date.now() : new Date(), person.member, standing.generation, row.id]);
     try {
       const response = await pollDevice(deployment, device.device_code);
@@ -91,7 +91,7 @@ export async function forgedApproval(deployment: Deployment, people: People): Pr
       expect(!response.ok && !body.includes('access_token'), 'an owner-forged approval minted a session', body);
       await reported(deployment, String(row.id));
     } finally {
-      await query(sql, 'DELETE FROM device_authorizations WHERE id = $1', [row.id]);
+      await query(sql, 'DELETE FROM device_logins WHERE id = $1', [row.id]);
     }
   });
   const control = await startDevice(deployment);
@@ -114,7 +114,7 @@ export async function editedGeneration(deployment: Deployment, people: People): 
     await admin.api.members.add(principal);
     await admin.api.access.set(principal, { 'conformance/dev': 'viewer' });
     const [current] = await query(sql, 'SELECT * FROM credentials WHERE id = $1', [old.id]);
-    const [standing] = await query<{ generation: number }>(sql, 'SELECT generation FROM vault_members WHERE principal = $1', [principal]);
+    const [standing] = await query<{ generation: number }>(sql, 'SELECT generation FROM principals WHERE principal = $1', [principal]);
     await restoreRow(sql, 'credentials', { ...old, generation: standing.generation }, 'id');
     try {
       const response = await fetch(`${deployment.origin}/api/me`, { headers: { authorization: `Bearer ${issued.token}` } });

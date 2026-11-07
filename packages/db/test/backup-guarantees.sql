@@ -61,12 +61,12 @@ BEGIN
            OR has_any_column_privilege(relation.name, 'INSERT, UPDATE, REFERENCES') THEN
             RAISE EXCEPTION 'the backup login does not hold exactly SELECT on %', relation.name;
         END IF;
+        -- A view takes no TRUNCATE at all (0.15's names for 0076's renamed tables): its table's is tried.
         FOREACH attempt IN ARRAY ARRAY[
             format('INSERT INTO %s DEFAULT VALUES', relation.name),
             format('UPDATE %s SET %s = %s', relation.name, relation.col, relation.col),
-            format('DELETE FROM %s', relation.name),
-            format('TRUNCATE %s', relation.name)
-        ] LOOP
+            format('DELETE FROM %s', relation.name)
+        ] || CASE WHEN relation.relkind IN ('r', 'p') THEN ARRAY[format('TRUNCATE %s', relation.name)] ELSE '{}' END LOOP
             BEGIN
                 EXECUTE attempt;
                 RAISE EXCEPTION 'the backup login ran %', attempt;

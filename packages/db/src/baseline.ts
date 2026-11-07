@@ -26,6 +26,10 @@ import * as sqlite from './schema.sqlite.ts';
  * from this one baseline; an expression index's SQL is written by hand in it,
  * as drizzle-kit splits one at its comma on SQLite.
  *
+ * The template is held to 0000_baseline.sql, so it keeps 0.4.0's names: a
+ * table later renamed (0076's `vault_members`, now `principals`) is granted
+ * under its old name here, and the migration that renames it moves its grants.
+ *
  * `pnpm db:generate` runs this file and appends pending schema changes.
  */
 

@@ -254,7 +254,7 @@ Cache-Control: no-store
   |---|---|---|
   | Names the key: an ID token whose audience names it, or a signed `GetCallerIdentity` | never | Only that key can use it. The same key presenting a platform's cached token again, to re-prove, is harmless. |
   | `azure` | never | A managed identity hands the same cached token to every replica and restart. Spending it would refuse them. It is a bearer until it expires (4.2). |
-  | Any other ID token (`kubernetes`, `gitlab`, `custom`) | once, as today, in `consumed_tokens` | It is a bearer, and single use is what bounds a copy. |
+  | Any other ID token (`kubernetes`, `gitlab`, `custom`) | once, as today, in `spent_id_tokens` | It is a bearer, and single use is what bounds a copy. |
 - **`places`** are the environments of the binding's scope, as a handle's
   `places`. With exactly one, the stable URL `/use/<credential>` works. With
   several, the SDK names the environment (`/use/<project>/<env>/<credential>`),
@@ -481,7 +481,7 @@ coffre trust api-prod --enrollment --replicas 2 --source 162.220.232.0/24 --mint
   - Each place's `sensitive` is true only where the minter is an Owner of
     its project as a person, which R32 requires. A CI service minting is
     never one, so its codes read no sensitive value.
-  - The scope is stored in the `enrollments` row under its MAC, every
+  - The scope is stored in the `enrollment_codes` row under its MAC, every
     session the code makes carries it, and a binding's `reads` apply only
     within it.
   - So a Viewer who manages `api-prod` and mints a code gets sessions that
@@ -904,7 +904,7 @@ request:
 1. **The row.** The token's row: `kind = 'workload'`, not revoked or
    expired, `not_after` not past, its MAC, and `approved_at` set where its
    binding says `approve`. Its `generation` equals its member's in
-   `vault_members`: read without the vault's MAC, which is safe in this
+   `principals`: read without the vault's MAC, which is safe in this
    direction, because removal only ever moves the generation on. Its binding
    stands: MAC, no revocation, no tombstone, as for an exchanged credential
    today. Its ancestors stand (8.4). Its client address is within `sources`.
@@ -1669,7 +1669,7 @@ migration does, and its test checks that every row and index survives.
 | `not_after timestamptz NULL` | the hard end (5.4) |
 | `ancestors text NULL` | JSON array of credential IDs, root first (8.4) |
 | `constraints text NULL` | canonical JSON of a child's limits (8.4) |
-| `enrollment_id uuid NULL REFERENCES enrollments(id)` | the code that made it (4.4) |
+| `enrollment_id uuid NULL REFERENCES enrollment_codes(id)` | the code that made it (4.4) |
 | `approved_at timestamptz NULL`, `approved_by text NULL` | for `approve` bindings (4.4) |
 | index `credentials_enrollment_roots_idx (enrollment_id, created_at) WHERE kind = 'workload' AND ancestors IS NULL` | the capacity count and the tripwire (4.4): roots only, ended ones kept, since the tripwire reads the last hour |
 
@@ -1678,7 +1678,7 @@ migration does, and its test checks that every row and index survives.
   | Made by | `created_by` | `scope` | `enrollment_id` | `ancestors`, `constraints` |
   |---|---|---|---|---|
   | an `oidc` or `aws` exchange | `binding:<id>` | null, so it holds the binding's, as an exchanged credential does today | null | null |
-  | an enrollment code | `binding:<id>` | the code's, from `enrollments.scope` | the code | null |
+  | an enrollment code | `binding:<id>` | the code's, from `enrollment_codes.scope` | the code | null |
   | `narrow` | `binding:<id>` of its root | its parent's | its root's | set |
 
   A Cloudflare call has no row (9.2).
@@ -1713,10 +1713,10 @@ migration does, and its test checks that every row and index survives.
   bindings by an explicit profile list (4.1), so a binding with no claims
   never matches a token.
 
-**`enrollments`**, a new table:
+**`enrollment_codes`**, a new table:
 
 ```sql
-CREATE TABLE enrollments (
+CREATE TABLE enrollment_codes (
   id uuid PRIMARY KEY,
   auth_mac bytea NOT NULL,               -- kind 'enrollments': id, binding_id, code_hash, scope, created_by, created_with, expires_at
   binding_id uuid NOT NULL REFERENCES service_bindings(id),
@@ -1728,7 +1728,7 @@ CREATE TABLE enrollments (
   created_with uuid,                     -- their credential: the CI run's session
   expires_at timestamptz NOT NULL
 );
-CREATE INDEX enrollments_binding_idx ON enrollments (binding_id, created_at DESC);
+CREATE INDEX enrollment_codes_binding_idx ON enrollment_codes (binding_id, created_at DESC);
 ```
 
 The runtime login gets `SELECT` and `INSERT`, and nothing else.

@@ -341,7 +341,7 @@ export async function emptyReads(owner: Database): Promise<void> {
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
   if (ENGINE === 'postgres') await endLeftOpen(owner);
-  const { auditLog, auditChainHead, vaultGrants, vaultMembers, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys, logChanges, logConfig, proxyDefinitions, proxyReserved, credentials, passkeys, serviceBindings, consumedTokens } = tablesOf(owner);
+  const { auditLog, auditChainHead, grants, principals, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys, logChanges, logConfig, proxyDefinitions, proxyReserved, credentials, passkeys, serviceBindings, spentIdTokens } = tablesOf(owner);
   await owner.delete(secretReferences);
   // SQLite checks a RESTRICT foreign key row by row, so entries that point
   // at others let go of them first.
@@ -358,14 +358,14 @@ export async function emptyDatabase(owner: Database): Promise<void> {
   await owner.delete(proxyDefinitions);
   await owner.delete(proxyReserved);
   await emptyReads(owner);
-  await owner.delete(vaultGrants);
+  await owner.delete(grants);
   // A session a test made, for a use to name; a binding a sign-in came through, and the tokens it spent (credentials.test.ts).
   await owner.delete(credentials);
   // A passkey a session names (issue.test.ts), gone after the sessions and before its person.
   await owner.delete(passkeys);
   await owner.delete(serviceBindings);
-  await owner.delete(consumedTokens);
-  await owner.delete(vaultMembers);
+  await owner.delete(spentIdTokens);
+  await owner.delete(principals);
   await owner.delete(dismissedKeys);
   await owner.update(secrets).set({ currentVersionId: null });
   await run(owner, sql`DELETE FROM secret_versions`);

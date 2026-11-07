@@ -50,11 +50,11 @@ function signedTable(db: Queryable, table: AuthTable) {
   return {
     identities: tables.identities,
     credentials: tables.credentials,
-    device_authorizations: tables.deviceAuthorizations,
+    device_authorizations: tables.deviceLogins,
     service_bindings: tables.serviceBindings,
     oauth_clients: tables.oauthClients,
     mcp_connections: tables.mcpConnections,
-    enrollments: tables.enrollments,
+    enrollments: tables.enrollmentCodes,
     passkeys: tables.passkeys,
   }[table];
 }

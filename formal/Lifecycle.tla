@@ -101,7 +101,7 @@ CONSTANTS
     \* binding's row (its update comes first).
     SweepAfterLock,
     \* The ID token spent once: the sign-in's insert into
-    \* `consumed_tokens`, unique.
+    \* `spent_id_tokens`, unique.
     SpentChecked,
     \* A use decides only on a row that is its object's newest sealed
     \* change (sealed-inputs.md).
@@ -172,7 +172,7 @@ VARIABLES
     bindings,   \* the binding rows: b, b2 once evil writes it, b3 once Ada's bind commits
     bsealed,    \* the bindings the vault sealed: b, and b3 once Ada's bind commits
     unbound,    \* whether b was unbound, and its number (0: not)
-    spent,      \* the ID tokens spent (`consumed_tokens`)
+    spent,      \* the ID tokens spent (`spent_id_tokens`)
     pc, op, l,  \* each process: where it is, what it does, what it read
     handed,     \* the tokens that went out: a use may present them
     answered,   \* the revokes answered: sealed, past their seal wait

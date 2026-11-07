@@ -80,19 +80,19 @@ END
 $$;
 
 -- 4. The vault writes members and grants, and deletes only a grant.
-INSERT INTO vault_members (principal, status, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
+INSERT INTO principals (principal, status, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
 VALUES ('user:ada@acme.example', 'active', 0, 'user:admin@acme.example', 0, 'user:admin@acme.example', 1,
         decode(repeat('00', 32), 'hex'));
-UPDATE vault_members SET role = 'developer', scope = '{"projects":"all","environments":{"only":["dev"]}}' WHERE principal = 'user:ada@acme.example';
-UPDATE vault_members SET status = 'removed', role = 'member', scope = NULL, generation = generation + 1 WHERE principal = 'user:ada@acme.example';
-INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by)
+UPDATE principals SET role = 'developer', scope = '{"projects":"all","environments":{"only":["dev"]}}' WHERE principal = 'user:ada@acme.example';
+UPDATE principals SET status = 'removed', role = 'member', scope = NULL, generation = generation + 1 WHERE principal = 'user:ada@acme.example';
+INSERT INTO grants (principal, environment_id, role, granted_at, granted_by)
 VALUES ('user:ada@acme.example', '22222222-2222-2222-2222-222222222222', 'viewer', 0, 'user:admin@acme.example');
-DELETE FROM vault_grants WHERE principal = 'user:ada@acme.example';
+DELETE FROM grants WHERE principal = 'user:ada@acme.example';
 \echo 'PASS: coffre_vault can admit, set a role and its scope, remove, grant and revoke'
 
 DO $$
 BEGIN
-    DELETE FROM vault_members;
+    DELETE FROM principals;
     RAISE EXCEPTION 'FAIL: coffre_vault was able to delete a member';
 EXCEPTION
     WHEN insufficient_privilege THEN
@@ -102,7 +102,7 @@ $$;
 
 DO $$
 BEGIN
-    UPDATE vault_members SET principal = 'user:eve@acme.example';
+    UPDATE principals SET principal = 'user:eve@acme.example';
     RAISE EXCEPTION 'FAIL: coffre_vault was able to change who a member is';
 EXCEPTION
     WHEN insufficient_privilege THEN
@@ -113,7 +113,7 @@ $$;
 -- 5. A grant names exactly one place, and a role the catalogue allows there.
 DO $$
 BEGIN
-    INSERT INTO vault_grants (principal, project_id, environment_id, role, granted_at, granted_by)
+    INSERT INTO grants (principal, project_id, environment_id, role, granted_at, granted_by)
     VALUES ('user:ada@acme.example', '11111111-1111-1111-1111-111111111111',
             '22222222-2222-2222-2222-222222222222', 'viewer', 0, 'user:admin@acme.example');
     RAISE EXCEPTION 'FAIL: a grant named two places';
@@ -127,7 +127,7 @@ $$;
 -- grant to a role named by an id, one that ships or one an Owner made, and nothing else.
 DO $$
 BEGIN
-    INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by)
+    INSERT INTO grants (principal, environment_id, role, granted_at, granted_by)
     VALUES ('user:ada@acme.example', '22222222-2222-2222-2222-222222222222', 'Not a role', 0, 'user:admin@acme.example');
     RAISE EXCEPTION 'FAIL: a grant named no role id';
 EXCEPTION
@@ -139,7 +139,7 @@ $$;
 -- 5b. On every project, a grant names neither id, and an environment slug at most.
 DO $$
 BEGIN
-    INSERT INTO vault_grants (principal, project_id, environment_slug, role, granted_at, granted_by)
+    INSERT INTO grants (principal, project_id, environment_slug, role, granted_at, granted_by)
     VALUES ('user:ada@acme.example', '11111111-1111-1111-1111-111111111111', 'dev', 'viewer', 0, 'user:admin@acme.example');
     RAISE EXCEPTION 'FAIL: a slug was named with a project';
 EXCEPTION
@@ -152,7 +152,7 @@ $$;
 
 DO $$
 BEGIN
-    INSERT INTO vault_grants (principal, environment_slug, role, granted_at, granted_by)
+    INSERT INTO grants (principal, environment_slug, role, granted_at, granted_by)
     VALUES ('user:ada@acme.example', 'Dev', 'viewer', 0, 'user:admin@acme.example');
     RAISE EXCEPTION 'FAIL: a grant named no slug';
 EXCEPTION
@@ -163,7 +163,7 @@ $$;
 
 DO $$
 BEGIN
-    INSERT INTO vault_grants (principal, role, granted_at, granted_by)
+    INSERT INTO grants (principal, role, granted_at, granted_by)
     VALUES ('user:ada@acme.example', 'viewer', 0, 'user:admin@acme.example'),
            ('user:ada@acme.example', 'owner', 0, 'user:admin@acme.example');
     RAISE EXCEPTION 'FAIL: a member held two grants on every project';
@@ -231,10 +231,10 @@ BEGIN
     FOREACH statement IN ARRAY ARRAY[
         'SELECT * FROM identities',
         'SELECT * FROM credentials',
-        'SELECT * FROM enrollments',
-        'SELECT * FROM device_authorizations',
+        'SELECT * FROM enrollment_codes',
+        'SELECT * FROM device_logins',
         'SELECT * FROM service_bindings',
-        'SELECT * FROM consumed_tokens',
+        'SELECT * FROM spent_id_tokens',
         'SELECT prune_consumed_tokens(1)',
         'SELECT * FROM capped_alerts',
         'UPDATE secret_references SET ended_at = now()',
@@ -249,11 +249,11 @@ BEGIN
         'SELECT * FROM passkeys',
         'DELETE FROM passkeys',
             'DELETE FROM identities',
-        'DELETE FROM device_authorizations',
-        'TRUNCATE vault_members',
-        'TRUNCATE vault_grants',
+        'DELETE FROM device_logins',
+        'TRUNCATE principals',
+        'TRUNCATE grants',
         'TRUNCATE audit_log',
-        'UPDATE vault_grants SET role = role',
+        'UPDATE grants SET role = role',
         'INSERT INTO vault_releases VALUES (''user:admin@acme.example'', ''forged'', 0)',
         'UPDATE vault_releases SET released_at = 0',
         'DELETE FROM vault_releases',

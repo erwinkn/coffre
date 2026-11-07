@@ -150,9 +150,9 @@ test('a removed member, or one removed and admitted again, is shown as the vault
 
 test('a row changed around the vault is shown as it says, and decides nothing: what the caller asks next, the vault refuses', { skip: START_OVER_014 }, async () => {
   const token = await cliToken(DEV);
-  const { vaultMembers } = tablesOf(db.owner);
+  const { principals } = tablesOf(db.owner);
   // Someone who owns the database makes DEV an Owner, around the vault.
-  await db.owner.update(vaultMembers).set({ owner: true, role: 'owner' }).where(eq(vaultMembers.principal, `user:${DEV}`));
+  await db.owner.update(principals).set({ owner: true, role: 'owner' }).where(eq(principals.principal, `user:${DEV}`));
   const shown = await (await me(token)).json() as { instanceRole: string; runsInstance: boolean; tampered: boolean };
   assert.deepEqual([shown.instanceRole, shown.runsInstance, shown.tampered], ['owner', true, false], 'shown as the row says: the app cannot check it');
   // Anything else asks the vault, which refuses the row, and their session with it: as before, at every request but this one.

@@ -37,7 +37,7 @@ beforeEach(async () => {
   if (skip) return;
   await emptyDatabase(db.owner);
   // 0.15's trees too: each test's checkpointer starts with no memory, over a log of its own.
-  for (const table of ['log_uses', 'log_bulk', 'log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  for (const table of ['log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
 });
 
 /**

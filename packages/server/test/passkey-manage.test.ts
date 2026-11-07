@@ -16,7 +16,7 @@ import { MAX_PASSKEYS } from '../src/api/signin.ts';
 import { passkeyName } from '../src/passkey-names.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, credentials, deviceAuthorizations, mcpConnections, passkeys } from './db/tables.ts';
+import { auditLog, credentials, deviceLogins, mcpConnections, passkeys } from './db/tables.ts';
 import * as rows from './passkey-rows.ts';
 import { assertion, Browser, bytes, enroll, me, register, RP, signinDeployment, touch } from './signin-browser.ts';
 
@@ -105,7 +105,7 @@ async function redeems(deviceCode: string): Promise<boolean> {
 
 /** What an approved device code's row and a connection's say once a change to the person's passkeys ended them. */
 async function endedRows(approval: string, connection: string) {
-  const [code] = await db.owner.select().from(deviceAuthorizations).where(eq(deviceAuthorizations.id, approval));
+  const [code] = await db.owner.select().from(deviceLogins).where(eq(deviceLogins.id, approval));
   const [app] = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.id, connection));
   return { decision: code!.decision, passkeyId: code!.passkeyId, connectionRevoked: app!.revokedAt !== null };
 }

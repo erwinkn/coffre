@@ -34,7 +34,7 @@ export function weighingSession(url: string): WeighingSession {
  * each through, whatever the key. A call that reads no key (W268, NoKeyBeforeStanding) fetches as many blocks of
  * them for every key: its probes by a key it never looked up are by none, which a B-tree answers reading nothing.
  */
-const KEY_TABLES = ['secrets', 'secret_versions', 'secret_references', 'log_bulk', 'log_uses'];
+const KEY_TABLES = ['secrets', 'secret_versions', 'secret_references', 'bulk_cap', 'log_uses'];
 const KEY_INDEXES = ['log_changes_object_idx'];
 
 /**
@@ -46,7 +46,7 @@ const KEY_INDEXES = ['log_changes_object_idx'];
  * key's work reads of these (a reference's source's environment, a personal config's parent) takes columns no index
  * holds, a heap fetch that no all-visible page spares (review r6 of W268).
  */
-export const WORLD_TABLES = ['environments', 'projects', 'credentials', 'identities', 'vault_members', 'vault_grants', 'log_config', 'log_fence'];
+export const WORLD_TABLES = ['environments', 'projects', 'credentials', 'identities', 'principals', 'grants', 'log_config', 'checkpoint_fence'];
 
 /** What a weighed call read: its shared buffers, of them the blocks `KEY_TABLES` and `KEY_INDEXES` gave, and every relation's blocks. */
 export type Weighed = { buffers: number; keyBlocks: number; blocks: Record<string, number> };
@@ -106,11 +106,11 @@ const NAME_HOLDERS_EVERY_MS = 60_000;
  * another database older than the row's delete, which each new snapshot here takes the oldest of, and which moves the
  * horizon when it ends, and for a session of this database that took a snapshot while one ran; weigh under
  * `horizonHeld`, which waits for the second and keeps the horizon where it is. Until then a new session's planner, probing an
- * end of `log_bulk_pkey` for the range its estimates use (`get_actual_variable_range`, which skips only rows known
+ * end of `bulk_cap_pkey` for the range its estimates use (`get_actual_variable_range`, which skips only rows known
  * dead), takes a deleted row there for one that may still be seen and reads its heap page as a live row's; once that
  * ends, the first session to plan reads the dead row's page and the next row's, one block more, and marks the entry
  * dead, so that no session after it reads it. A transaction ending between a call and its twins moved that block from
- * one to the next: `log_bulk` 9 blocks beside 8 for a key never made, or 8 beside 9, in
+ * one to the next: `bulk_cap` 9 blocks beside 8 for a key never made, or 8 beside 9, in
  * the rows of the window passed, which delete their principal's rows of the cap's (T225: in CI, the other matrices'
  * work beside them on the one Postgres). Weighed after this, under `horizonHeld`, every call faces the index its first
  * warm-up leaves.

@@ -379,7 +379,7 @@ such a row the log's again is not built yet (the 0.15 plan's PR 9). Until
 it is, there are two ways back:
 
 - **Undo the write**, when it was to the member's own rows. Put their
-  `vault_members` row and their `vault_grants` rows back exactly as the
+  `principals` row and their `grants` rows back exactly as the
   log last sealed them, from any backup taken after their newest change
   (0.15's log names it: the newest `log_changes` entry of their object).
   The vault checks the row against that change's seal, so the copy must
