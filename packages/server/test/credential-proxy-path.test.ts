@@ -58,8 +58,12 @@ before(async () => {
       // A relative redirect whose first segment is the token's, `%3A` or `%3a` for its colon (review r2 of #483).
       else if (url.includes('?first=')) {
         const [segment, way] = url.split('/').at(-1)!.split('?first=') as [string, string];
-        response.writeHead(302, { location: `${segment.replace(':', way === 'upper' ? '%3A' : '%3a')}/getMe` }).end();
+        // `raw` keeps the colon: a relative Location whose first segment reads as a scheme.
+        response.writeHead(302, { location: `${way === 'raw' ? segment : segment.replace(':', way === 'upper' ? '%3A' : '%3a')}/getMe` }).end();
       }
+      // The token's colon encoded twice, `%253A`, in a path and in a query: after one decoding it is `%3A`, not the token (review of #483, T211).
+      else if (url.endsWith('/twice')) response.writeHead(302, { location: url.replace(/twice$/, 'getMe').replace(':', '%253A') }).end();
+      else if (url.endsWith('/twicequery')) response.writeHead(302, { location: `/tg/getMe?t=${url.split('/')[2]!.slice(3).replace(':', '%253A')}` }).end();
       // An absolute redirect to the path as it came, where the value is the upstream's own host and port (review r3 of #483).
       else if (url.endsWith('/loop')) response.writeHead(302, { location: `${upstreamUrl}${url.replace(/loop$/, 'getMe')}` }).end();
       // A query rule's value quoted in a redirect's query as it is, `%41%42…`, which `searchParams` would write `AB…` (review r4 of #483).
@@ -264,6 +268,27 @@ test("a redirect under the upstream quoting the token gets the app's placeholder
   assert.equal(echoed.status, 404);
   assert.ok(free(page) && free(echoed.headers.get('x-path')!), page);
   assert.match(page, /\[redacted by coffre\]/);
+});
+
+test("a token's colon encoded twice in a redirect, in its path or its query, is a 502 with nothing of the answer: no form of it leaves", async () => {
+  const { handle } = await run();
+  for (const at of ['twice', 'twicequery']) {
+    const moved = await route(`/use/telegram/bot${handle}/${at}`);
+    assert.equal(moved.status, 502, at);
+    assert.equal(moved.headers.get('location'), null, at);
+    const said = await moved.text();
+    assert.ok(free(said) && free(decodeURIComponent(said)), said);
+    for (const form of ['%253A', '%3A', '%3a']) assert.ok(!said.includes(form), said);
+  }
+});
+
+test("a relative redirect whose first segment holds a raw colon reads as a scheme, not a path: refused, never followed", async () => {
+  const { handle } = await run();
+  // `bot123456789:AAE…/getMe` is the scheme `bot123456789:`, nowhere under the upstream: a client would not read it as a path either.
+  const moved = await route(`/use/telegram/x/bot${handle}?first=raw`);
+  assert.equal(moved.status, 502);
+  assert.equal(moved.headers.get('location'), null);
+  assert.ok(free(await moved.text()));
 });
 
 test('a relative redirect resolves against the URL the app sent, never the one the token went out in', async () => {

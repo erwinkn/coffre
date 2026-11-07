@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **`path()` redirects: two cases held by a test, one written down (T211).**
+  A `Location` with the token's colon encoded twice (`%253A`), in its path or
+  its query, is a 502 with nothing of the answer, and a relative one whose
+  first segment has a raw colon parses as a scheme and is a 502 too; the
+  proxy's docs say so, with the one accepted cost: a key made only of escapes
+  can make a redirect to `/tg/keep////next` fail shut.
+
 - **The UI and the CLI no longer tell anyone to remove a tampered member to
   start over (T195).** 0.15's log refuses that removal. The Users page, the
   signed-in member's own page, `coffre members` and `coffre access` now say
