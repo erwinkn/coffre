@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import { postgresClient } from '@coffre/db/connect';
 
-import { deletesSettled, horizonHeld } from '../../../scripts/matrix-weigh.ts';
+import { deletesSettled, horizonHeld, removeDeleted } from '../../../scripts/matrix-weigh.ts';
 import { ENGINE, OWNER_URL } from './database.ts';
 
 const skip = ENGINE !== 'postgres' ? 'Postgres horizons' : false;
@@ -107,5 +107,21 @@ test("a session of this database that took its snapshot while such a transaction
     } finally {
       await local.end();
     }
+  });
+});
+
+test("rows taken out once settled are read alike by every session, however other databases' transactions come and go (removeDeleted, T240: bulk_cap 9 and 11 blocks beside 8)", { skip }, async (t) => {
+  await deletedBeside(t, async ({ owner, foreign, weighed }) => {
+    // A row left, on a page the VACUUM would make all-visible. No hold: what a session takes the deleted rows for,
+    // maybe seen or dead, no longer matters once they are gone.
+    await owner.unsafe("INSERT INTO weighed_rows VALUES (1, 'left')");
+    await removeDeleted(owner, 'weighed_rows');
+    const before = await weighed();
+    await foreign.end();
+    const after = await weighed();
+    // Left in, 66 buffers beside 7, as unheld above.
+    assert.equal(after, before, `${before} buffers while the other database's transaction ran, ${after} after it ended`);
+    const [{ visible }] = await owner.unsafe(`SELECT count(*)::int AS visible FROM pg_visibility_map('weighed_rows') WHERE all_visible`) as unknown as { visible: number }[];
+    assert.equal(visible, 0, 'no page all-visible, as before the VACUUM');
   });
 });

@@ -245,6 +245,25 @@ its own database did, and holds it to every other check
     that did not wait; none with both
     (`packages/vault/test/weighing.test.ts` holds the helper to each
     case: 66 buffers beside 7 without).
+    The hold did not settle `bulk_cap`'s deleted rows, though: shard 5/6
+    still read 9 blocks beside 8 now and then (T240). A new session takes
+    the bounds it judges rows dead by as it logs in, counting every
+    database's sessions, and reconsiders them for its own database alone
+    only once its snapshot's oldest moves, when a transaction ends
+    anywhere. So while another database holds a snapshot older than the
+    delete, a session that logged in after it takes the rows for ones that
+    may still be seen, and one that saw a transaction end first knows them
+    dead, reads their pages and marks them: five rows deleted, a snapshot
+    open in another database, each new session read 1 block; with a
+    transaction ended between its login and its probe, 2, then 1 for the
+    next. With `bulk_cap` as large as at the end of shard 5/6 (about 600
+    rows, the batch's principals at the index's ends) and snapshots held a
+    few seconds in another database, 7 of 24 of the matrix's own batches
+    failed, `bulk_cap` 10 or 12 blocks beside 8; 0 of 24 with the rows
+    taken out first. A lazy VACUUM counts this database's sessions alone,
+    so once `deletesSettled` returns, `removeDeleted` takes the rows out,
+    heap and index (`INDEX_CLEANUP ON`), and drops the visibility map the
+    VACUUM left, so no page of `bulk_cap` is all-visible, as before.
     The twin changes only the
     key's name, and keeps what the isolate remembered of the key: its id,
     a cover. A read by that id would cost the twin as much as the key, so

@@ -42,7 +42,8 @@ const KEY_INDEXES = ['log_changes_object_idx'];
  * credential and account): `VACUUM` them before weighing. Their dead versions cost a heap page or more, whatever
  * the key, as the versions of a cell's rows fall on one page or on several (a row of no key read spread 74 to 81 in
  * `environments`, W268; 8 in `credentials`, T194). None is a key's: `KEY_TABLES` and `log_changes` stay unvacuumed, so
- * that no all-visible page lets a probe skip the heap and hide the work of a key's history (review r4 of W268). What a
+ * that no all-visible page lets a probe skip the heap and hide the work of a key's history (review r4 of W268); but
+ * for `bulk_cap`'s rows a batch deleted, which `removeDeleted` takes out, leaving no page all-visible. What a
  * key's work reads of these (a reference's source's environment, a personal config's parent) takes columns no index
  * holds, a heap fetch that no all-visible page spares (review r6 of W268).
  */
@@ -105,15 +106,15 @@ const NAME_HOLDERS_EVERY_MS = 60_000;
  * is left (`HOLDERS`): from then, every such row is dead to every session started after, but for a transaction of
  * another database older than the row's delete, which each new snapshot here takes the oldest of, and which moves the
  * horizon when it ends, and for a session of this database that took a snapshot while one ran; weigh under
- * `horizonHeld`, which waits for the second and keeps the horizon where it is. Until then a new session's planner, probing an
- * end of `bulk_cap_pkey` for the range its estimates use (`get_actual_variable_range`, which skips only rows known
- * dead), takes a deleted row there for one that may still be seen and reads its heap page as a live row's; once that
- * ends, the first session to plan reads the dead row's page and the next row's, one block more, and marks the entry
- * dead, so that no session after it reads it. A transaction ending between a call and its twins moved that block from
- * one to the next: `bulk_cap` 9 blocks beside 8 for a key never made, or 8 beside 9, in
- * the rows of the window passed, which delete their principal's rows of the cap's (T225: in CI, the other matrices'
- * work beside them on the one Postgres). Weighed after this, under `horizonHeld`, every call faces the index its first
- * warm-up leaves.
+ * `horizonHeld`, which waits for the second and keeps the horizon where it is. From then too, a lazy VACUUM of this
+ * database removes every such row (`removeDeleted`), whatever runs elsewhere: a VACUUM counts this database's sessions
+ * alone, and not its own snapshot. Until then a new session's planner, probing an end of `bulk_cap_pkey` for the range
+ * its estimates use (`get_actual_variable_range`, which skips only rows known dead), takes a deleted row there for one
+ * that may still be seen and reads its heap page as a live row's; once that ends, the first session to plan reads the
+ * dead row's page and the next row's, one block more, and marks the entry dead, so that no session after it reads it.
+ * A transaction ending between a call and its twins moved that block from one to the next: `bulk_cap` 9 blocks beside
+ * 8 for a key never made, or 8 beside 9, in the rows of the window passed, which delete their principal's rows of the
+ * cap's (T225: in CI, the other matrices' work beside them on the one Postgres).
  *
  * `watcher` must have the privileges of `pg_read_all_stats` (a superuser does: the owner, in compose and CI), not only
  * be a member of it (`USAGE`, not `MEMBER`: a membership granted `INHERIT FALSE` gives none): without them Postgres
@@ -134,6 +135,34 @@ export async function deletesSettled(watcher: WeighingSession, signal: AbortSign
   // row deleted before the call was deleted by a transaction older than this.
   const [{ ended }] = await watcher.unsafe(`SELECT (pg_snapshot_xmax(pg_current_snapshot())::text::numeric % 4294967296)::text AS ended`) as unknown as { ended: string }[];
   await noneOlder(watcher, ended, signal, 'deletesSettled', 'the rows a batch deleted may still be seen');
+}
+
+/**
+ * Takes the rows of `table` deleted before `deletesSettled` returned out of it, heap and index alike, with a lazy
+ * VACUUM, which removes every row no session of this database can see (above); then drops the visibility map that
+ * VACUUM left, so that every page is read as before, none all-visible (review r4 of W268: `KEY_TABLES` hide no heap work).
+ *
+ * Left in, such a row's index entry was read differently by one weighed session than by the next, held horizon or not
+ * (T240). A new session takes the bounds it judges rows dead by as it logs in, counting every database's sessions,
+ * and reconsiders them, for its own database alone, only once its snapshot's oldest moves: a transaction ending,
+ * anywhere. While another database holds a snapshot older than the delete (one of the other matrices, in CI), a
+ * session that logged in after it takes the rows for ones that may still be seen; one that saw a transaction end first
+ * knows them dead, reads every one of their heap pages, and marks the entries. So `bulk_cap` read 9 blocks beside 8, or
+ * 8 beside 10, in whichever of a cell's call, twin or control was the first to know (Postgres 16.14, by hand: five rows
+ * deleted, an index end probed in each new session, a snapshot open in another database: 1 block a session; a
+ * transaction ended between a session's login and its probe, 2 blocks and the entries marked, then 1). Taken out, they
+ * are read by no session (`packages/vault/test/weighing.test.ts`: 66 buffers beside 7 left in). `INDEX_CLEANUP ON`:
+ * VACUUM may otherwise leave a table's index alone when few of its pages had rows to remove, and the entries in it.
+ *
+ * `watcher` must be a superuser (the owner, in compose and CI): the visibility map's truncation, `pg_visibility`'s, is
+ * a superuser's, and so is its extension, which this adds to the database if it is not there.
+ */
+export async function removeDeleted(watcher: WeighingSession, table: string): Promise<void> {
+  // Asked first: `IF NOT EXISTS` would say it is there, a notice the client prints, every batch.
+  const [{ there }] = await watcher.unsafe(`SELECT count(*) > 0 AS there FROM pg_extension WHERE extname = 'pg_visibility'`) as unknown as { there: boolean }[];
+  if (!there) await watcher.unsafe('CREATE EXTENSION pg_visibility');
+  await watcher.unsafe(`VACUUM (INDEX_CLEANUP ON) ${table}`);
+  await watcher.unsafe('SELECT pg_truncate_visibility_map($1::regclass)', [table]);
 }
 
 /**
