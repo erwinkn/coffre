@@ -248,7 +248,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | The two credential writers that take the uses' lock exclusively, in SQL (`revoke_credential`, `change_bindings`) | 500 ms (from 1 s) | `LOCK_WAIT_MS` | #538 (migration 0076) |
 | `sign_in`, `issue_token` | 1 s | they take only the issue lock, which no use asks for | #538 |
 | A read call, from start to answer (`CALL_DEADLINE_MS`, was `READ_DEADLINE_MS`) | 5 s | a choice: "a caller hears within it" | #356 ⚠ not derived |
-| A read call with a key service | 10 s | `CALL_DEADLINE_MS` + `KEY_BUDGET_MS` | #538 |
+| A read call with a key service | 10 s; 8.1 s once `KEY_BUDGET_MS` is derived (below) | `CALL_DEADLINE_MS` + `KEY_BUDGET_MS` | #538 |
 | A write call | its lock waits retried for up to 5 s from its first attempt; its work itself unbounded | `CALL_DEADLINE_MS` as a retry budget | R75: writes may take longer |
 | Its retry pauses | 25 ms doubling to 400 ms, ×0.5 to ×1.5 | a retry policy, written as one | #538 |
 | A read's lock wait (`READ_LOCK_TIMEOUT_MS`) | 3 s, or what is left of the call's deadline if less | a choice | #347 ⚠ |
@@ -256,8 +256,10 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | Waiters for the log's head (`READ_HEAD_WAITERS`) | 16 | 2.4 s ÷ 150 ms measured; should also be ≤ the vault's connections − 2 | Q3 |
 | A plain 503's `Retry-After` | 1 s (from 5) | `LOCK_WAIT_MS` rounded up to whole seconds | #538 |
 | An app write's lock wait | 500 ms (from unbounded) | `LOCK_WAIT_MS`; then 503 at once | #538 |
-| The key service, per call (`KEY_BUDGET_MS`) | 5 s | **pending:** the KMS measurement and its derivation (706 ms an attempt, 3,118 ms in all), from #538's follow-up | placeholder |
-| AWS KMS calls: tries, timeout, at once | 3, 5 s each, 8 per provider object | unchanged by #538 | **pending**, as above. The 8 cites "six connections", which Workers counts per request, not per isolate ([limits.md](limits.md), item 5) |
+| An AWS KMS attempt's timeout | 706 ms (from 5 s), or what is left of the caller's deadline if less | a measured p99 of a KMS call | #538's stacked KMS PR (its measurement table not yet in a PR) |
+| AWS KMS attempts | 3 (unchanged), pauses 100-200 ms then 400-800 ms | `100 × 4^(attempt−1) × (1 + random)`, as in `aws-kms.ts` | a retry policy, written as one |
+| The key service, per call (`KEY_BUDGET_MS`) | 3,118 ms (from 5 s) | 3 attempts × 706 ms + the two longest pauses (200 + 800 ms) | derived; same PR. A read call with a key service is then 5 s + 3.1 s |
+| AWS KMS calls at once | 8 per provider object → per call | the isolate-wide `Slots(8)` goes: a `/use` waited 5 s behind 8 hung calls (measured). The 8 cited "six connections", which Workers counts per request, not per isolate ([limits.md](limits.md), item 5) | same PR, with `formal/KeyService.tla` |
 
 ### 2.5 Database connections
 
@@ -278,7 +280,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | A sign-in the vault found busy | 503, `Retry-After: 1` | one lock wait | #520 |
 | Node's limiter keys | 10,000 | the addresses one window's target can come from; about 2 MB | #520 |
 | Exchanges in flight per isolate | **32** ⚠ | none written | stays until a sign-in has a deadline of its own (limits.md #35) |
-| A binding removal's batch, Node (`UNBIND_BATCH`) | 125 | 10 ms ÷ 0.08 ms a credential, measured | the 10 ms is `FENCE_BUDGET_MS` = 10 uses in flight ÷ 1,000 a second: **derived from Q1's 10**, see Q1. **Pending:** D181's derivation, its refusal table and follow-ups, from #520's helper |
+| A binding removal's batch, Node (`UNBIND_BATCH`) | 125 | 10 ms ÷ 0.08 ms a credential, measured | the 10 ms is `FENCE_BUDGET_MS` = 10 uses in flight ÷ 1,000 a second: **derived from Q1's 10**, see Q1 and its refusal table |
 | The same, on Workers | 114 a call, 228 a request | (10 ms − 4.85 ms fixed) ÷ 0.045 ms; 2 calls in the request's CPU, within 32 invocations | measured on workerd (#520) |
 | A batch's bytes | 4 MiB | half the Node vault socket's 8 MiB message | #520 |
 | Spent sign-in tokens forgotten a beat | 600,000 | 2 × 1,000 a second × 300 s | R44 (#520; was 5,000) |
@@ -348,12 +350,21 @@ there is no pool (limits.md §2). Measured since:
 - A held use costs about 30 KiB in the vault's isolate, 36 KiB by heap
   snapshot, flat from 100 to 500 held. CPU is about 2.4 ms a use (local
   workerd).
-- Beside a binding removal, at a 1,000-a-second target on one Node process
-  (indicative: a shared host at load 37-41, from #520's helper):
-  17% to 33% of uses were refused beside the removal, 1% to 4% alone. With
-  the cap bypassed, driving the vault's use statement directly, every use
-  was answered at 1,000 a second beside a removal of 20,000 credentials,
-  even in 50 ms batches. **The cap of 10 causes the refusals, not the
+- Beside a binding removal, on one Node process with its own Postgres
+  16.14, removing 5,000 credentials in batches of 125 (10 ms each). Indicative
+  only: a shared host at load 37-41 (#520's helper, D181):
+
+  | Target | Run | Alone: answered, refused, p99 | Beside the removal: answered, refused, p99 |
+  |---|---|---|---|
+  | 1,000/s | 1 | 672/s, 0.9%, 24 ms | 421/s, 17%, 44 ms |
+  | 1,000/s | 2 | 249/s, 2.8%, 116 ms | 241/s, 33%, 137 ms |
+  | 400/s | 3 | 307/s, 4.0%, 116 ms | 210/s, 28%, 131 ms |
+
+  With the cap bypassed, driving the vault's use statement directly
+  (`packages/server/test/bench/ci.ts --uses 1000 --unbind 20000`, #520's
+  `--unbind` flag), every use was answered at
+  1,000 a second beside a removal of 20,000 credentials, even in 50 ms
+  batches: zero refused. **The cap of 10 causes the refusals, not the
   lock the removal holds.** A quiet-host run at 1,000 a second is still to
   come.
 - W208, on Cloudflare: with no cap at all, goodput stays at the database's
@@ -617,7 +628,8 @@ it ends at 30 s with the app's.
 | The pre-sign-in body bounds | 4 KiB, 16 KiB, 256 KiB by entry point | the API's 1 MiB (#533); ~32 KiB pending |
 | The proxy's caches | 1,000 or 10,000 entries, some cleared whole | least recently used, within a slice of 16 MiB (#519) |
 | The proxy's body read whole | 16 MiB | 1 MiB; larger bodies stream (#519) |
-| KMS's 8 calls at once | slots handed from one request to the next | pending the KMS measurement (placeholder in 2.4) |
+| KMS's 8 calls at once | slots handed from one request to the next | per call (#538's KMS PR) |
+| KMS's attempt timeout and key budget | 5 s each; 5 s in all | 706 ms each, measured; 3,118 ms in all, derived (2.4) |
 
 What a deployment writes after all of this: its wiring, as today, and
 `policy.ts`, ten fields, each with a default it can leave alone.
