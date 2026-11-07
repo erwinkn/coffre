@@ -29,7 +29,7 @@ import { affects, queries, refresh } from '../lib/queries';
 import { signinErrorMessage } from '../lib/signin-errors';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { useShell } from '../lib/use-shell';
-import { creationOptions, requestOptions, toJSON, type CreationJSON, type RequestJSON } from '../lib/webauthn';
+import { createCredential, getCredential, toJSON, type CreationJSON, type RequestJSON } from '../lib/webauthn';
 
 /**
  * The passkey pages (docs/design/passkeys.md, sections 3.3, 3.6 and 3.7): Account › Passkeys, its dialogs, the prompt
@@ -280,9 +280,20 @@ function AddPasskeyDialog({ open, onOpenChange, member }: { open: boolean; onOpe
           return;
         }
         unsent.current.asked = true;
-        const credential = await navigator.credentials.create({ publicKey: creationOptions({ ...current.options, timeout: Math.min(left, current.options.timeout) }) });
-        if (credential === null) throw new DOMException('no passkey answered', 'NotAllowedError');
-        answer = { state: current.state, response: toJSON(credential as PublicKeyCredential) as Record<string, unknown> };
+        let credential: PublicKeyCredential;
+        try {
+          credential = await createCredential({ ...current.options, timeout: Math.min(left, current.options.timeout) });
+        } catch (thrown) {
+          // Ended at the options' deadline (the session's fresh window's end, at most): new options, asked of a session
+          // fresh again, rather than a passkey coffre would refuse.
+          if (thrown instanceof DOMException && thrown.name === 'TimeoutError') {
+            setError(authenticatorError(thrown, current.options.rp.id));
+            setAttempt((n) => n + 1);
+            return;
+          }
+          throw thrown;
+        }
+        answer = { state: current.state, response: toJSON(credential) as Record<string, unknown> };
         unsent.current.answer = answer;
       }
       try {
@@ -444,9 +455,8 @@ function RemovePasskeyDialog({
         unsent.current,
         async (left) => {
           if (current.options === null) return JSON.stringify({ state: current.state });
-          const credential = await navigator.credentials.get({ publicKey: requestOptions({ ...current.options, timeout: Math.min(left, current.options.timeout) }) });
-          if (credential === null) throw new DOMException('no passkey answered', 'NotAllowedError');
-          return JSON.stringify({ state: current.state, response: toJSON(credential as PublicKeyCredential) });
+          const credential = await getCredential({ ...current.options, timeout: Math.min(left, current.options.timeout) });
+          return JSON.stringify({ state: current.state, response: toJSON(credential) });
         },
         (body) => fetch('/api/auth/passkey', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body }),
       );

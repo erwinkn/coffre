@@ -59,6 +59,34 @@ export function leftOf(ends: Deadline, clock: Clock): number {
 }
 
 /**
+ * A call to the authenticator ended at `left` milliseconds, by this page: `call` is given the signal to pass to
+ * `create()` or `get()`, aborted then, and a call it ended throws `TimeoutError` (`lapsed`). The options' `timeout` is
+ * a hint the browser may stretch: Chromium raises one under three minutes to three, so a step with seconds left would
+ * wait minutes, and a passkey made after the step lapsed is one coffre refuses, left on the device (review r2 of
+ * #539). An answer that came first is kept: coffre, not the page, says whether it came in time.
+ */
+export async function withinDeadline<T>(left: number, call: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(lapsed()), Math.max(0, left));
+  try {
+    return await call(controller.signal);
+  } catch (thrown) {
+    throw controller.signal.aborted ? lapsed() : thrown;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The throw of an authenticator call the page ended at its step's deadline (`withinDeadline`). */
+export function lapsed(): DOMException {
+  return new DOMException('the request lapsed before a passkey answered', 'TimeoutError');
+}
+
+function isLapse(thrown: unknown): boolean {
+  return thrown instanceof DOMException && thrown.name === 'TimeoutError';
+}
+
+/**
  * A step's press, in the page's own memory: the answer the server did not answer, for the next press, whether the
  * step's options were asked of the authenticator already, and when they lapse. Each GET's step starts with neither
  * answer nor ask.
@@ -87,7 +115,8 @@ export type Unsent = { body: string | null; asked?: boolean; ends?: Deadline };
  * `ends`: a press past it answers `expired`, asking nothing either. A page left open past its five minutes would
  * otherwise hand the authenticator options the server no longer takes, and the person a passkey coffre refuses (the
  * `timeout` the options carry starts when the authenticator is called, not at the GET). Before it, `ask` is given what
- * is left, the `timeout` to call the authenticator with (review r14 of #500).
+ * is left, the `timeout` to call the authenticator with (review r14 of #500), and an `ask` the page ended there
+ * (`withinDeadline`) answers `expired` too.
  */
 export async function sendPasskey<T>(
   unsent: Unsent,
@@ -100,7 +129,12 @@ export async function sendPasskey<T>(
   if (body === null) {
     const left = unsent.ends === undefined ? undefined : leftOf(unsent.ends, clock);
     if (left === 0) return { kind: 'expired' };
-    body = await ask(left ?? Number.POSITIVE_INFINITY);
+    try {
+      body = await ask(left ?? Number.POSITIVE_INFINITY);
+    } catch (thrown) {
+      if (isLapse(thrown)) return { kind: 'expired' };
+      throw thrown;
+    }
   }
   unsent.body = body;
   unsent.asked = true;
@@ -121,6 +155,7 @@ export async function sendPasskey<T>(
 export function authenticatorError(thrown: unknown, rpId: string): string {
   const name = thrown instanceof DOMException ? thrown.name : undefined;
   if (name === 'InvalidStateError') return 'This device already holds a passkey of yours here. Use another device, or sign in with that one.';
+  if (name === 'TimeoutError') return 'This request lapsed before a passkey answered. Press again for a new one.';
   if (name === 'NotAllowedError') return 'No passkey answered. Try again when you’re ready.';
   if (name === 'SecurityError') {
     return `This browser makes no passkey for ${rpId} on this site. Whoever runs coffre here: passkeys.rpId must be this site’s host or a domain registered above it, not a public suffix such as co.uk or workers.dev.`;

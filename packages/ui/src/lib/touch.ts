@@ -1,7 +1,7 @@
 import { CoffreError } from '@coffre/client';
 
 import { authenticatorError, browserClock, deadlineOf, leftOf, readClock, type Clock, type Deadline } from './passkey-answer.ts';
-import { requestOptions, toJSON, type RequestJSON } from './webauthn.ts';
+import { getCredential, toJSON, type RequestJSON } from './webauthn.ts';
 
 /** What a `403 touch_required` asks: `get()`'s options, for this act and this session alone, and the state to send back. */
 export type TouchAsked = { options: RequestJSON; state: string };
@@ -81,6 +81,5 @@ export function touchOf(error: unknown): TouchAsked | null {
 
 /** A touch of one of the passkeys the options name, as the verifier reads it. */
 async function getAssertion(options: RequestJSON): Promise<Record<string, unknown>> {
-  const credential = await navigator.credentials.get({ publicKey: requestOptions(options) });
-  return toJSON(credential as PublicKeyCredential) as Record<string, unknown>;
+  return toJSON(await getCredential(options)) as Record<string, unknown>;
 }

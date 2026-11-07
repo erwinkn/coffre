@@ -735,7 +735,13 @@ Another passkey's options last no longer than the session stays fresh
 to the fresh check too, and a `create()` answered after would meet a
 step-up, which replaces the session the options name, leaving a
 passkey on the device coffre never stored; the page asks for new
-options instead, after the step-up. An add whose reply was lost, sent
+options instead, after the step-up. The page ends the authenticator's
+call at that deadline itself (an `AbortSignal`), since browsers take
+`timeout` as a hint (Chromium raises one under three minutes to
+three); every `create()` and `get()` the pages make is held so
+(`withinDeadline`, review r2 of #539). A 401 or 409 whose body did not
+arrive whole keeps the add's answer for the next press, as the
+sign-in's page does. An add whose reply was lost, sent
 again, finds its passkey among the person's live ones before it counts
 them and answers `409 passkey_exists`, which the dialog takes as done
 (review r1 of #539).

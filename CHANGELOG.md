@@ -352,7 +352,8 @@
   Account → Passkeys, the prompt (shown again for a reset after a Not
   now, and in the page the server renders) and the sign-in's step
   that adds a new one. Another passkey's options last no longer than
-  the session stays fresh, and an add whose reply was lost, sent
+  the session stays fresh, the page ending the authenticator's call
+  then (browsers stretch a short `timeout`), and an add whose reply was lost, sent
   again, answers `passkey_exists`, which the dialog takes as done. The audit log reads
   `passkey.remove`, `passkey.reset` and `passkey.rename` in words. A
   removal now lands back on `/account/passkeys`. `coffre update` adds
