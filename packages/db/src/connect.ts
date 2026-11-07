@@ -17,14 +17,15 @@ export { postgresClient, postgresOptions, postgresSession, quoteIdentifier, quot
  * The SQLite driver loads only when asked for. The Worker does not
  * come through here; it builds its Postgres database from the Hyperdrive
  * pool with createDatabase. `max`, for a pool of its own beside another,
- * as the vault's checkpointer has (T169).
+ * as the vault's checkpointer has (T169). `lockWaitMs`, Postgres's: each
+ * transaction's lock waits (`createDatabase`).
  */
-export async function openDatabase(url: string, options: { max?: number } = {}): Promise<OpenDatabase> {
+export async function openDatabase(url: string, options: { max?: number; lockWaitMs?: number } = {}): Promise<OpenDatabase> {
   switch (engineOfUrl(url)) {
     case 'postgres': {
       // As node-postgres's pool was: 10 connections, each closed after 10 s idle.
       const client = postgresClient(url, { max: options.max ?? 10, idle_timeout: 10 });
-      return { engine: 'postgres', db: createDatabase(client), close: () => client.end(), cut: () => client.end({ timeout: 0 }) };
+      return { engine: 'postgres', db: createDatabase(client, { lockWaitMs: options.lockWaitMs }), close: () => client.end(), cut: () => client.end({ timeout: 0 }) };
     }
     case 'sqlite': {
       const [{ createClient }, { drizzle }, schema] = await Promise.all([

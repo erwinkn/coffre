@@ -44,9 +44,13 @@ proposals are taken; "What the reviews change" says where each lands.
 - **No app transaction stays open across a vault call.** Otherwise a write
   and its log entry can wait on each other through an HTTP call, which
   Postgres cannot see and so cannot break.
-- **With KMS, a read in flight holds its reader's member row.** A removal
-  then waits for the read instead of racing it, and nobody else waits. With
-  a local KEK there is no race.
+- **With KMS, a read holds nothing while KMS answers** (superseded: this
+  read "holds its reader's member row" until R75, 2026-11-06). It checks
+  and logs its intent, calls KMS with no lock and no transaction open, then
+  checks again under its row and the head before anything is released: a
+  removal meanwhile commits at once, and the read is refused, its keys
+  wiped and never released ([below](#releasing-a-key-and-the-race-with-kms)). With a local
+  KEK there is no race.
 - **The database alone can no longer mint a session.** The security fields
   of identities, credentials and device approvals carry a MAC under a key
   derived from the app's.
@@ -296,7 +300,44 @@ a quarter of a second. Something has to give. Say Bob removes Ada while her
 | Held across KMS | nothing | a transaction and one pooled connection per read in flight | the whole instance |
 | A KMS outage | reads fail; nothing waits | each read holds its member's row and a connection for the KMS budget, then fails as an outage | everything stops |
 
-**Decided: (b), with KMS.** It gives the order people expect, reads
+**Superseded by R75 (2026-11-06): (a).** Erwin's rule: "Writes can take
+longer, but they shouldn't lock concurrent operations. [...] KMS can likely
+get a lower limit, but also shouldn't take a lock. The only real hot path
+are uses." (b) held a lock, a transaction and a connection across every KMS
+call: a removal of Ada waited for her reads at KMS, every later read of hers
+queued behind the removal, and in a KMS brownout twenty reveals held the
+vault's whole Hyperdrive pool for the key budget (W331's audit). So since
+W331 the order is (a)'s, in `#keys`:
+
+1. **The intent**, a short decision under Ada's row, shared, and the head:
+   her standing, grants, places, references and bulk count checked, the
+   `key.intent` entry committed. A refused call still never reaches KMS.
+2. **KMS**, every key of the call, with no lock held and no transaction
+   open: on Workers, no Hyperdrive origin connection either.
+3. **The outcome**, a decision of its own under her row, shared, and the
+   head, which reads and checks it all again: a removal, a revocation, a
+   deletion, a reference ended, a policy changed or a bulk count passed
+   while KMS answered is seen, and every key is refused, logged with the
+   refusal's code (`removed`, `no_grant`…), its data key wiped; otherwise
+   each key's outcome is logged and released.
+   `formal/Coffre.tla` holds it: without this check again
+   (`StandingRecheckUnderHead`), TLC releases a value after a removal.
+
+A rotation to a new signing key, which locks every member's row, waited for
+every read at KMS under (b); now it waits for none, and a vault on the
+retired key can append nothing after it, its own outcomes included. So the
+rotation logs them, under the new key: each key of each intent still open,
+refused (`wrong_kek`, uncertain), as `IntentsAccounted` requires.
+
+The cost is (a)'s, accepted: when a removal lands while Ada's Decrypt is in
+flight, KMS has opened keys for a read that is then refused. CloudTrail
+shows the Decrypts, and the log explains them: the intent, then each key
+refused with the refusal's code, after the removal. Bob's removal waits
+for nothing; Ada's `coffre run` fails instead of finishing first.
+
+What follows is (b) as it was decided, kept for the record.
+
+**Decided then: (b), with KMS.** It gives the order people expect, reads
 in flight finish and then the person is out, for the price of one
 connection per read in flight. At erwinkn.com's or a team's scale that is
 a handful of Hyperdrive's 20 (Free) or 100 (Paid) connections. Three

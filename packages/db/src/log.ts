@@ -403,7 +403,10 @@ export async function appendEntries(
     if (final) later(tx, statement);
     else await tx.execute(statement);
   } else {
-    await tx.insert(auditLog).values(rows);
+    // In statements of at most as many entries as one may bind (review r3 of #538): a rotation that logs the
+    // outcomes of every key service's call still open may log thousands, and one statement past the bound fails.
+    const atOnce = engineOf(tx) === 'postgres' ? ROWS_AT_ONCE : SQLITE_ROWS_AT_ONCE;
+    for (let start = 0; start < rows.length; start += atOnce) await tx.insert(auditLog).values(rows.slice(start, start + atOnce));
     await tx.update(auditChainHead).set({ nextSeq: seq, headHash: prevHash }).where(eq(auditChainHead.onlyRow, true));
     if (final && changes.length > 0) numbered = await laterChanges(tx, changes);
     else numbers = await appChanges(tx, changes);
@@ -440,6 +443,12 @@ function heldOf(read: Awaited<ReturnType<typeof underHead>>[number] | undefined,
 
 /** Entries one statement inserts at most, at 21 parameters each (`log015` a literal): Postgres takes 65,535. */
 const ROWS_AT_ONCE = 3000;
+
+/**
+ * The same on SQLite, which binds 32,766 variables a statement at most (`SQLITE_MAX_VARIABLE_NUMBER`'s default since
+ * 3.32): 21 each, 1,560 rows.
+ */
+const SQLITE_ROWS_AT_ONCE = Math.floor(32_766 / 21);
 
 /**
  * `readUnderHead`'s statement. Its `FOR UPDATE` waits for nothing in a

@@ -52,7 +52,12 @@ CONSTANTS
     Budget,         \* Budget[p]: how many it runs, one after another
     InitArchived,   \* the places archived at the start
     InitGrants,     \* the grants at the start
-    InitRef         \* the holder's reference at the start, or NoRef
+    InitRef,        \* the holder's reference at the start, or NoRef
+    \* Whether key services' intents and refused outcomes go in the log: what
+    \* only a rotation to a new vault key reads (IntentsAccounted). Scenarios
+    \* with no rotation leave them out, which keeps their states to the
+    \* orders of the entries their invariants read.
+    IntentsLogged
 
 (***************************************************************************)
 (* The protections the code has, each a switch, so a run with one turned   *)
@@ -90,12 +95,20 @@ CONSTANTS
     \* Members' rows are locked in principal order (vault store.ts,
     \* lockMembers, `ORDER BY principal`), not in the order a call names them.
     SortedMemberLocks,
-    \* A read decides under the reader's row, shared with their other reads,
-    \* which a change to their grants or their removal waits for (vault
-    \* vault.ts, #keys through #decide, `reads`; store.ts, lockMembers, FOR
-    \* SHARE). Off, it takes none, as KEY SHARE would be: a lock that a
-    \* writer's FOR NO KEY UPDATE never waits for.
-    ReaderRowLocked,
+    \* A read or a wrap checks its reader's standing again where it commits,
+    \* under their row, shared, and the head, once its key service has
+    \* answered: the first check, the intent's, holds no lock across the key
+    \* service (R75), so a revocation or a removal commits meanwhile and is
+    \* seen here, and the key is withheld (vault vault.ts, #keys: the
+    \* outcome's decision runs the check again). Off, only the first check.
+    StandingRecheckUnderHead,
+    \* A rotation to a new vault key logs, under the new key, an outcome for
+    \* every key service's intent still open (vault vault.ts, #rotate,
+    \* `closeIntents`): the call that logged it, its key now retired, can
+    \* append nothing more, and holds no lock the rotation would wait for
+    \* (R75). Off, the intent is left with no outcome, which verification
+    \* reports as missing once it is overdue.
+    RotationClosesIntents,
     \* A read through a reference checks again, under the head, that no
     \* `reference.end` committed since it decided (vault vault.ts, unwrap's
     \* `vet`, run again in #keys' `underLock`).
@@ -337,6 +350,48 @@ Refuse(p) ==
 \* is about. A read's names the reference it went through, if any.
 Entry(kind, at, p) == [kind |-> kind, at |-> at, id |-> l[p].id, who |-> op[p].who, via |-> NoRef]
 
+\* What closes a key service's intent: its read released, its wrap logged,
+\* or each of its keys refused (`withheld`, or the refusal's code).
+Outcomes == {"secret.read", "key.wrap", "key.refused"}
+
+\* The intent logged with id, at i, has its outcome in the log: its own, or
+\* a rotation's that closed it.
+Accounted(i) ==
+    \E k \in (i + 1)..Len(log) :
+        \/ log[k].kind \in Outcomes /\ log[k].id = log[i].id
+        \/ log[k].kind = "key.rotate" /\ log[i].id \in log[k].closes
+
+\* The intents still open: logged, with no outcome yet.
+OpenIntents == {log[i].id : i \in {j \in 1..Len(log) : log[j].kind = "key.intent" /\ ~Accounted(j)}}
+
+\* A rotation came since p logged its intent: its vault's key is retired, and
+\* writes nothing more (vault.ts, #append: `superseded`).
+RotatedSince(p) ==
+    \E i \in 1..Len(log) :
+        /\ log[i].kind = "key.intent" /\ log[i].id = l[p].id
+        /\ \E j \in (i + 1)..Len(log) : log[j].kind = "key.rotate"
+
+\* The intent: its check, then its entry, under the head, which it takes and
+\* lets go of in the one step, its own transaction (#keys).
+LogIntent(p, then) ==
+    IF IntentsLogged
+      THEN /\ head = None
+           /\ log' = Append(log, Entry("key.intent", None, p))
+           /\ Goto(p, then)
+           /\ UNCHANGED <<rows, creds, locks, op, l, left, history>>
+      ELSE Read(p, then, l[p])
+
+\* A key operation's outcome refused under the head: each key logged so, then
+\* its transaction ends. A vault whose key a rotation retired since its
+\* intent logs nothing (`superseded`).
+RefuseKeys(p) ==
+    IF RotatedSince(p) \/ ~IntentsLogged
+      THEN Refuse(p)
+      ELSE /\ log' = Append(log, Entry("key.refused", None, p))
+           /\ Release(p)
+           /\ Goto(p, "idle")
+           /\ UNCHANGED <<rows, creds, op, l, left, history>>
+
 -----------------------------------------------------------------------------
 (* Starting an operation *)
 
@@ -403,23 +458,28 @@ ReadResolve(p) ==
 ReadVersions(p) ==
     /\ pc[p] = "read.versions"
     /\ IF ~Gone("env") /\ held
-         THEN Read(p, IF ReaderRowLocked THEN "read.lock" ELSE "read.check", l[p])
+         THEN Read(p, "read.check", l[p])
          ELSE Refuse(p)
 
-ReadLock(p) == pc[p] = "read.lock" /\ ShareNext(p, "read.check")
-
-\* Under the reader's row: their standing and grants where they read, and
-\* whether either place was deleted (environmentsById); through a
-\* reference, whether it ended (`vet`). Then the bulk limit and the key
-\* service. Without the row's lock, a revocation or a removal can commit
-\* between this check and the entry.
+\* The first check, the key service's intent's, which commits on its own
+\* (#keys): their standing and grants where they read, and whether either
+\* place was deleted (environmentsById); through a reference, whether it
+\* ended (`vet`). The intent's transaction is short, and nothing comes
+\* between its statements that the commit below does not read again, so
+\* it is one step here, holding nothing after. Then the key service, with
+\* no lock and no transaction open (R75): any step of any other process
+\* may come between this one and ReadLock.
 ReadCheck(p) ==
     /\ pc[p] = "read.check"
     /\ IF /\ MayUse(op[p].who, op[p].at)
           /\ ~Gone("env") /\ ~Gone(op[p].at)
           /\ l[p].ref # NoRef => ~Ended(l[p].ref)
-         THEN Read(p, "read.head", l[p])
+         THEN LogIntent(p, "read.lock")
          ELSE Refuse(p)
+
+\* The outcome's decision, once the keys are open: the reader's row, shared
+\* with their other reads, then the head.
+ReadLock(p) == pc[p] = "read.lock" /\ ShareNext(p, "read.head")
 
 ReadHead(p) == pc[p] = "read.head" /\ TakeHead(p, "read.commit")
 
@@ -449,9 +509,11 @@ ReadGivesUp(p) ==
 \* statement of its own and reads again), so it reads as of the lock.
 ReadCommit(p) ==
     /\ pc[p] = "read.commit"
-    /\ IF \/ KeyPlaceRecheckUnderHead /\ (Gone("env") \/ Gone(op[p].at))
-          \/ EndRecheckUnderHead /\ l[p].ref # NoRef /\ Ended(l[p].ref)
-         THEN Refuse(p)
+    /\ IF RotatedSince(p) THEN Refuse(p)
+       ELSE IF \/ StandingRecheckUnderHead /\ ~MayUse(op[p].who, op[p].at)
+               \/ KeyPlaceRecheckUnderHead /\ (Gone("env") \/ Gone(op[p].at))
+               \/ EndRecheckUnderHead /\ l[p].ref # NoRef /\ Ended(l[p].ref)
+         THEN RefuseKeys(p)
          ELSE /\ log' = Append(log, [Entry("secret.read", "env", p) EXCEPT !.via = l[p].ref])
               /\ Release(p)
               /\ Goto(p, "read.answer")
@@ -473,24 +535,28 @@ ReadAnswer(p) ==
 WriteResolve(p) ==
     /\ pc[p] = "write.resolve"
     /\ IF AppLive
-         THEN Read(p, "write.lock", [l[p] EXCEPT !.named = Named, !.nver = version])
+         THEN Read(p, "write.check", [l[p] EXCEPT !.named = Named, !.nver = version])
          ELSE Refuse(p)
 
-WriteLock(p) == pc[p] = "write.lock" /\ ShareNext(p, "write.check")
-
+\* The wrap's intent, as a read's (ReadCheck); then the key service, holding nothing.
 WriteCheck(p) ==
     /\ pc[p] = "write.check"
     /\ IF MayUse(op[p].who, "env") /\ ~Gone("env")
-         THEN Read(p, "write.head", l[p])
+         THEN LogIntent(p, "write.lock")
          ELSE Refuse(p)
+
+WriteLock(p) == pc[p] = "write.lock" /\ ShareNext(p, "write.head")
 
 WriteHead(p) == pc[p] = "write.head" /\ TakeHead(p, "write.wrap")
 
-\* The vault appends `key.wrap` and commits; the wrapped key goes to the app.
+\* Under the writer's row and the head, the check again, then the vault
+\* appends `key.wrap` and commits; the wrapped key goes to the app.
 WriteWrap(p) ==
     /\ pc[p] = "write.wrap"
-    /\ IF KeyPlaceRecheckUnderHead /\ Gone("env")
-         THEN Refuse(p)
+    /\ IF RotatedSince(p) THEN Refuse(p)
+       ELSE IF \/ StandingRecheckUnderHead /\ ~MayUse(op[p].who, "env")
+               \/ KeyPlaceRecheckUnderHead /\ Gone("env")
+         THEN RefuseKeys(p)
          ELSE /\ log' = Append(log, Entry("key.wrap", "env", p))
               /\ Release(p)
               /\ Goto(p, "write.tx")
@@ -965,11 +1031,14 @@ RotateLock(p) == pc[p] = "rotate.lock" /\ LockNext(p, "rotate.head")
 
 RotateHead(p) == pc[p] = "rotate.head" /\ TakeHead(p, "rotate.commit")
 
+\* Its first entry under the new key, `key.rotate`, and with it, an outcome
+\* for every intent still open, which no vault on the old key can log now.
 RotateCommit(p) ==
     /\ pc[p] = "rotate.commit"
+    /\ log' = Append(log, [Entry("key.rotate", None, p) EXCEPT !.who = None] @@ [closes |-> IF RotationClosesIntents THEN OpenIntents ELSE {}])
     /\ Release(p)
     /\ Goto(p, "idle")
-    /\ UNCHANGED <<rows, log, creds, op, l, left, history>>
+    /\ UNCHANGED <<rows, creds, op, l, left, history>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -1047,10 +1116,31 @@ Init ==
     /\ declared = {}
     /\ regens = {}
 
+\* The process p waits for: the holders of the lock its next step takes,
+\* and for a share lock, those queued to take it alone.
+HeadLabels == {"read.head", "write.head", "write.tx", "call.headfirst", "call.head",
+               "delete.head", "patch.head", "addenv.head", "renamekey.head",
+               "signin.head", "remove.head", "demote.head", "declare.head", "rotate.head", "refer.head", "refer.tx", "end.head",
+               "regen.tx", "override.head"}
+WaitsFor(p) ==
+    IF pc[p] \in LockLabels /\ l[p].toLock # <<>>
+      THEN LET m == Head(l[p].toLock) IN
+           (({memberLock[m]} \ {None}) \cup (IF pc[p] \in SharedLabels THEN Changing(m) ELSE memberShared[m])) \ {p}
+    ELSE IF pc[p] \in HeadLabels /\ head \notin {None, p}
+      THEN {head}
+    ELSE {}
+
+\* Or any process waiting for a lock gives up (R75): a change's wait is
+\* short, half a use's (`LOCK_WAIT_MS`, vault.ts, store.ts boundLockWaits;
+\* the app's write transactions too), and past it the transaction rolls
+\* back, having committed nothing, and the call decides again from the
+\* start, or answers unavailable. No invariant may need a wait to last.
+GivesUp(p) == WaitsFor(p) # {} /\ Refuse(p)
+
 Step(p) ==
     \/ Begin(p)
     \/ ReadResolve(p) \/ ReadVersions(p) \/ ReadLock(p) \/ ReadCheck(p)
-    \/ ReadHead(p) \/ ReadGivesUp(p) \/ ReadCommit(p) \/ ReadAnswer(p)
+    \/ ReadHead(p) \/ ReadGivesUp(p) \/ ReadCommit(p) \/ ReadAnswer(p) \/ GivesUp(p)
     \/ WriteResolve(p) \/ WriteLock(p) \/ WriteCheck(p) \/ WriteHead(p)
     \/ WriteWrap(p) \/ WriteTx(p) \/ WriteStore(p)
     \/ GrantResolve(p) \/ CallLock(p) \/ CallHeadFirst(p) \/ CallCheck(p)
@@ -1095,19 +1185,6 @@ TypeOK ==
     /\ \A m \in Members : memberLock[m] # None => memberShared[m] \subseteq {memberLock[m]}
     /\ head \in Procs \cup {None}
 
-\* The process p waits for: the holders of the lock its next step takes,
-\* and for a share lock, those queued to take it alone.
-HeadLabels == {"read.head", "write.head", "write.tx", "call.headfirst", "call.head",
-               "delete.head", "patch.head", "addenv.head", "renamekey.head",
-               "signin.head", "remove.head", "demote.head", "declare.head", "rotate.head", "refer.head", "refer.tx", "end.head",
-               "regen.tx", "override.head"}
-WaitsFor(p) ==
-    IF pc[p] \in LockLabels /\ l[p].toLock # <<>>
-      THEN LET m == Head(l[p].toLock) IN
-           (({memberLock[m]} \ {None}) \cup (IF pc[p] \in SharedLabels THEN Changing(m) ELSE memberShared[m])) \ {p}
-    ELSE IF pc[p] \in HeadLabels /\ head \notin {None, p}
-      THEN {head}
-    ELSE {}
 
 RECURSIVE Waited(_, _)
 Waited(p, n) == IF n = 0 THEN {} ELSE WaitsFor(p) \cup UNION {Waited(q, n - 1) : q \in WaitsFor(p)}
@@ -1144,6 +1221,13 @@ TombstonesStayArchived == \A x \in Places : everDeleted[x] => archived[x]
 
 \* A value reaches its caller only once its `secret.read` entry has committed.
 AuditBeforeRelease == \A id \in revealed : \E i \in 1..Len(log) : log[i].kind = "secret.read" /\ log[i].id = id
+
+\* Every key service's intent logged before a rotation has its outcome in
+\* the log: no vault on the retired key can log one after it (vault.ts,
+\* #rotate; accounting.ts, an intent overdue with outcomes missing).
+IntentsAccounted ==
+    \A i \in 1..Len(log) :
+        (log[i].kind = "key.intent" /\ \E j \in (i + 1)..Len(log) : log[j].kind = "key.rotate") => Accounted(i)
 
 \* Every credential was issued at the member's generation as it was when
 \* the credential committed, to an active member.

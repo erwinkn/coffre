@@ -1,4 +1,4 @@
-import { versioned } from '@coffre/core/vault';
+import { LOCK_WAIT_MS, versioned } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 
@@ -85,7 +85,7 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     // A request's plain reads asked together go under one Sync, a round trip for them all: a page's calls read side by side.
     const pool = new HyperdrivePool(entry.config.database.hyperdrive.connectionString, { groupReads: true });
     const left: Promise<unknown>[] = [];
-    const runtime = createRuntime(entry.resolved, createDatabase(pool), versioned(entry.config.vault), fetchTransport(), (promise) => {
+    const runtime = createRuntime(entry.resolved, createDatabase(pool, { lockWaitMs: LOCK_WAIT_MS }), versioned(entry.config.vault), fetchTransport(), (promise) => {
       left.push(promise);
       ctx.waitUntil(promise);
     }, entry.gates);
@@ -130,7 +130,7 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
       const pool = new HyperdrivePool(config.database.hyperdrive.connectionString, { closeIdleMs: IDLE_DATABASE_MS });
       // Tunnels are admitted here: a UI tunnel's database, a host an Owner typed, goes out through `connect()`, whose
       // network reaches no private address (`WorkloadTransport.connect`).
-      const runtime = createRuntime(resolved, createDatabase(pool), versioned(config.vault), { ...fetchTransport(), connect: workersConnect }, (promise) => state.waitUntil(promise), gates);
+      const runtime = createRuntime(resolved, createDatabase(pool, { lockWaitMs: LOCK_WAIT_MS }), versioned(config.vault), { ...fetchTransport(), connect: workersConnect }, (promise) => state.waitUntil(promise), gates);
       return (request, sourceIp, hold) => admitSocket(request, runtime, sourceIp, hold);
     }),
     Gates: CoffreGates,
@@ -141,7 +141,7 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
         const pool = new HyperdrivePool(config.database.hyperdrive.connectionString);
         const left: Promise<unknown>[] = [];
         try {
-          const runtime = createRuntime(resolved, createDatabase(pool), versioned(config.vault), fetchTransport(), (promise) => void left.push(promise));
+          const runtime = createRuntime(resolved, createDatabase(pool, { lockWaitMs: LOCK_WAIT_MS }), versioned(config.vault), fetchTransport(), (promise) => void left.push(promise));
           const watch = watchOf(runtime);
           return watch === null ? false : await watch.hooks.walkOn(watch.context(), store);
         } finally {

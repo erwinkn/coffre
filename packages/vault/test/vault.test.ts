@@ -19,7 +19,7 @@ import {
   type KeyOperation,
 } from '@coffre/core/kek';
 import { EVERYWHERE, type Scope } from '@coffre/core/access';
-import { ACCESS_ACTIONS, checkpointMessage, USE_METADATA_LENGTH, verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, checkpointMessage, HOT_LOCK_TIMEOUT_MS, LOCK_WAIT_MS, USE_METADATA_LENGTH, verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { everyProjectPreview, findingMetadata, newestChangeNames, reportStands, tamperedMembers } from '@coffre/db/grants';
 import { isUnavailable, SNAPSHOT } from '@coffre/db/dialect';
@@ -33,7 +33,7 @@ import { memberMac, rowKey, sealed } from '../src/rows.ts';
 import { snapshot as readSnapshot } from '../src/snapshot.ts';
 import * as store from '../src/store.ts';
 import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
-import { openVault, prepareVault, READ_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
+import { openVault, prepareVault, CALL_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
 import { openLocalVault as openEntry, spoken } from '../src/local.ts';
 import {
   CONVERSION,
@@ -1040,29 +1040,118 @@ test('two processes on one SQLite file share the bulk limit exactly', { skip: EN
   assert.equal(all.filter((outcome) => outcome === 'bulk_limit').length, 6);
 });
 
-test('a removal waits for a read in flight at the key service, and the next read is refused before it', async () => {
-  const { keks, seen } = service({ delayMs: 300 });
+test('a removal lands while a read is at the key service, waiting for nothing: the read is withheld, and the next refused before it (R75)', async () => {
+  const { keks, seen } = service();
   const w = await world({ keks });
   const other = await w.twin();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
 
+  // Her read's key operation says it is under way, then waits until told to answer: the removal comes meanwhile.
+  let answer = () => {};
+  const until = new Promise<void>((resolve) => (answer = resolve));
+  const reached = new Promise<void>((resolve) => (seen.pause = { reached: resolve, until }));
   const read = w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
-  await sleep(150);
-  const asked = seen.unwrap;
-  const removal = other.remove({ actor: ROOT, principal: ADA });
-  const [released, removed] = await Promise.all([read, removal]);
-  assert.equal(released.ok, true, 'the read in flight finishes');
+  await reached;
+  const started = Date.now();
+  const removed = await other.remove({ actor: ROOT, principal: ADA });
+  const took = Date.now() - started;
+  answer();
+  const released = await read;
   assert.equal(removed.ok, true);
+  assert.ok(took < 1_000, `the removal waited ${took} ms for a read at the key service`);
+  assert.equal(!released.ok && released.refusal.code, 'removed', 'the read, its key opened, is refused under the head');
   const log = await vaultLog(w);
-  const release = log.findLast((entry) => entry.action === 'secret.read' && entry.outcome === 'allow')!;
-  const removal_ = log.find((entry) => entry.action === 'member.remove')!;
-  assert.ok(release.seq < removal_.seq, 'and is logged before the removal, which waited for it');
+  const removal = log.find((entry) => entry.action === 'member.remove')!;
+  const outcome = log.findLast((entry) => entry.action === 'secret.read')!;
+  assert.ok(outcome.seq > removal.seq && outcome.outcome === 'refuse' && outcome.code === 'removed', 'and logged after the removal, refused');
+  assert.ok(!log.some((entry) => entry.action === 'secret.read' && entry.outcome === 'allow'), 'nothing released');
+  for (const key of seen.opened) assert.ok(key.every((byte) => byte === 0), 'the key it opened is wiped');
 
+  const asked = seen.unwrap;
   const next = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
   assert.equal(!next.ok && next.refusal.code, 'removed');
   assert.equal(seen.unwrap, asked, 'refused before the key service is asked');
+  assert.ok((await w.vault.verifyLog({})).ok);
+});
+
+test('a read at a key service whose outcome is decided again hands back the key it opened, wiped only once it is answered (review r1)', postgresOnly('a unique violation injected by a Postgres trigger'), async () => {
+  const { keks, seen } = service();
+  const w = await world({ keks });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  // The first append of its release fails as a unique violation would (another decision admitted someone meanwhile):
+  // the outcome's decision is made again (`#decideNow`), on the keys the key service opened once.
+  await run(db.owner, sql.raw(`CREATE SEQUENCE test_fail_once`));
+  await run(db.owner, sql.raw(`CREATE FUNCTION test_fail_once() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+    BEGIN IF NEW.author = 'vault' AND NEW.action = 'secret.read' AND nextval('test_fail_once') = 1 THEN
+      RAISE unique_violation USING MESSAGE = 'test: decided again'; END IF; RETURN NEW; END $$`));
+  await run(db.owner, sql`CREATE TRIGGER test_fail_once BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION test_fail_once()`);
+  try {
+    seen.opened.length = 0;
+    const asked = seen.unwrap;
+    const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+    assert.ok(read.ok, JSON.stringify(read));
+    const [key] = read.keys;
+    assert.notEqual(key, Buffer.alloc(32).toString('base64'), 'the key handed back is the one opened, not its wiped buffer');
+    assert.equal(seen.unwrap, asked + 1, 'the key service asked once, whatever the attempts');
+    assert.equal(Buffer.from(key!, 'base64').length, 32);
+    assert.ok(seen.opened.every((opened) => opened.equals(Buffer.alloc(32))), 'and its buffer wiped after');
+    const [{ n }] = await rows<{ n: string }>(db.owner, sql`SELECT last_value::text AS n FROM test_fail_once`);
+    assert.equal(n, '2', 'its release was appended on the second attempt');
+  } finally {
+    await run(db.owner, sql`DROP TRIGGER test_fail_once ON audit_log`);
+    await run(db.owner, sql`DROP FUNCTION test_fail_once()`);
+    await run(db.owner, sql`DROP SEQUENCE test_fail_once`);
+  }
+});
+
+test('a key service\'s intent is accounted for until the call\'s whole budget from when it was logged, and a margin', async () => {
+  const { keks } = service();
+  const w = await world({ keks });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  assert.ok((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok);
+  const intent = (await vaultLog(w)).findLast((entry) => entry.action === 'key.intent')!;
+  const { expiresAt } = intent.detail as { expiresAt: number };
+  // The call's budget, its deadline and the key budget (5 s by default), from the intent's own time, then one more deadline.
+  const left = expiresAt - Date.parse(intent.at);
+  assert.ok(left >= 2 * CALL_DEADLINE_MS + 5_000 && left < 2 * CALL_DEADLINE_MS + 5_000 + 1_000, `accounted for ${left} ms`);
+});
+
+test('a vault moved to a new signing key while a read is at the key service logs that read\'s outcome itself: no intent left open (review r2)', async () => {
+  const { keks, seen } = service();
+  const w = await world({ keks });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  let answer = () => {};
+  const until = new Promise<void>((resolve) => (answer = resolve));
+  const reached = new Promise<void>((resolve) => (seen.pause = { reached: resolve, until }));
+  const read = w.vault.unwrap({ principal: ADA, purpose: 'reveal', items }).catch((error: unknown) => error);
+  await reached;
+  // A deploy's new vault, given a new signing key with the old one after it, rotates as it starts: nothing it waits
+  // for is held across the key service, so it lands while the read is there.
+  const newer = randomBytes(32);
+  const config = configure({ keks, signingKeys: [newer, SIGNING_KEY] });
+  const rotated = await openLocalVault(await db.connect(), config);
+  assert.equal((await rotated.access(ROOT)).role, 'owner');
+  answer();
+  const released = await read;
+  assert.ok(released instanceof Error || !(released as { ok: boolean }).ok, 'the read on the retired key releases nothing');
+  for (const key of seen.opened) assert.ok(key.every((byte) => byte === 0), 'the key it opened is wiped');
+  const log = await vaultLog(w);
+  const intent = log.findLast((entry) => entry.action === 'key.intent')!;
+  const rotation = log.find((entry) => entry.action === 'key.rotate')!;
+  const outcome = log.find((entry) => entry.action === 'secret.read' && entry.detail.relatedSeq === String(intent.seq))!;
+  assert.ok(outcome.seq > rotation.seq && outcome.outcome === 'refuse' && outcome.code === 'wrong_kek', 'its outcome logged by the rotation, refused');
+  // Long after the intent's deadline, verification finds every key it named accounted for.
+  const later = await openLocalVault(await db.connect(), config, { clockOffset: () => 3_600_000 });
+  const verified = await later.verifyLog({});
+  assert.ok(verified.ok, JSON.stringify(verified));
 });
 
 test('one member\'s reads at the key service run side by side, not one behind the other', postgresOnly('SQLite runs one writer at a time'), async () => {
@@ -1144,6 +1233,94 @@ async function holdHead(database: Database): Promise<() => Promise<void>> {
   };
 }
 
+test('a change waits for the head half a use\'s wait at a time, and tries again: it lands once the head is let go (R75)', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const owner = await db.connect();
+  const release = await holdHead(owner);
+  const started = Date.now();
+  let longest = 0;
+  let pending: Promise<unknown>;
+  try {
+    pending = w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] });
+    // For 1.5 s, the longest any of its waits has lasted, as Postgres says: each gives up within `LOCK_WAIT_MS`.
+    for (const until = Date.now() + 1_500; Date.now() < until; await sleep(20)) {
+      const [waiting] = await rows<{ ms: number | null }>(db.owner, sql`SELECT max(extract(epoch FROM clock_timestamp() - state_change) * 1000)::int AS ms
+        FROM pg_stat_activity WHERE datname = current_database() AND usename = 'coffre_vault_runtime' AND wait_event_type = 'Lock'`);
+      longest = Math.max(longest, waiting.ms ?? 0);
+    }
+  } finally {
+    await release();
+  }
+  const changed = await pending! as { ok: boolean };
+  const took = Date.now() - started;
+  assert.equal(changed.ok, true, 'it lands once the head is free');
+  assert.ok(longest > 0 && longest < LOCK_WAIT_MS + 250, `a wait lasted ${longest} ms`);
+  assert.ok(took >= 1_500 && took < 3_000, `it landed after ${took} ms`);
+});
+
+test('a change that cannot have the head within its call\'s time fails as unavailable, having written nothing', postgresOnly('SQLite runs one writer at a time'), async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const before = (await vaultLog(w)).length;
+  const release = await holdHead(await db.connect());
+  const started = Date.now();
+  try {
+    await assert.rejects(
+      w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] }),
+      (error: Error) => isUnavailable(error),
+    );
+  } finally {
+    await release();
+  }
+  const took = Date.now() - started;
+  assert.ok(took >= CALL_DEADLINE_MS - LOCK_WAIT_MS && took < CALL_DEADLINE_MS + 1_500, `it gave up after ${took} ms`);
+  assert.equal((await vaultLog(w)).length, before, 'nothing written');
+});
+
+test('a use asking for the fence while a change waits for it is let in within its own wait: the change leaves the queue first (R75)', postgresOnly('SQLite has no fence'), async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  // A long use statement holds the fence shared, as a batch does; the change then waits for it exclusive, its grant's
+  // entry's trigger taking it (migration 0026), and a use that asks for it shared after the change queues behind it.
+  const fence = sql`SELECT pg_advisory_xact_lock_shared(1668244070, 0)`;
+  let letGo = () => {};
+  const held = new Promise<void>((resolve) => (letGo = resolve));
+  let holding = () => {};
+  const holds = new Promise<void>((resolve) => (holding = resolve));
+  const long = (await db.connect()).transaction(async (tx) => {
+    await tx.execute(fence);
+    holding();
+    await held;
+  });
+  await holds;
+  let changing: Promise<{ ok: boolean }>;
+  try {
+    changing = w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] });
+    changing.catch(() => {});
+    for (let i = 0; ; i++) {
+      const [waiting] = await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND usename = 'coffre_vault_runtime' AND wait_event_type = 'Lock' AND wait_event = 'advisory'`);
+      if (waiting.n > 0) break;
+      assert.ok(i < 200, 'the change never waited for the fence');
+      await sleep(10);
+    }
+    // The use, as the hot login waits: a second at most.
+    const started = Date.now();
+    await (await db.connect()).transaction(async (tx) => {
+      await tx.execute(sql.raw(`SET LOCAL lock_timeout = ${HOT_LOCK_TIMEOUT_MS}`));
+      await tx.execute(fence);
+    });
+    const waited = Date.now() - started;
+    assert.ok(waited < HOT_LOCK_TIMEOUT_MS, `the use waited ${waited} ms behind the change`);
+  } finally {
+    letGo();
+    await long;
+  }
+  // The change, having let the use in, tries again, and lands once the long statement has let go: before the next test.
+  assert.equal((await changing!).ok, true);
+});
+
 test('a read gives up a lock it waits seconds for, and fails as unavailable, its connection let go', postgresOnly('SQLite runs one writer at a time'), async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
@@ -1188,7 +1365,7 @@ test("a burst of reads at a held head: those past its places in line are refused
     // Until they all are: one that answered first never will be, nor any past its deadline.
     while ((await inLine()) < READ_HEAD_WAITERS) {
       assert.equal(first, undefined, `a read answered before all were in line: ${first?.ok ? 'ok' : String(first?.error)}`);
-      assert.ok(Date.now() - started < READ_DEADLINE_MS, `the reads were not all in line after ${Date.now() - started} ms`);
+      assert.ok(Date.now() - started < CALL_DEADLINE_MS, `the reads were not all in line after ${Date.now() - started} ms`);
       await sleep(20);
     }
     // The next waits for nothing: unavailable, at once, as a lock not available.
@@ -1202,7 +1379,7 @@ test("a burst of reads at a held head: those past its places in line are refused
   }
   for (const { ok, error, ms } of outcomes) {
     assert.ok(!ok && isUnavailable(error), `a read in line ended ${ok ? 'ok' : String(error)}`);
-    assert.ok(ms < READ_DEADLINE_MS + 1_000, `a read in line answered after ${ms} ms`);
+    assert.ok(ms < CALL_DEADLINE_MS + 1_000, `a read in line answered after ${ms} ms`);
   }
   assert.equal(await inLine(), 0, 'and every place is free again');
   assert.equal((await vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true, 'the head free, the next read reads');

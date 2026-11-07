@@ -162,6 +162,14 @@ export function isUnreachable(error: unknown): boolean {
   return false;
 }
 
+/** Whether a statement gave up waiting for a lock: `lock_timeout` (55P03), anywhere in its causes. */
+export function lockNotAvailable(error: unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    if ((cause as { code?: unknown }).code === '55P03') return true;
+  }
+  return false;
+}
+
 /** Postgres's codes for a statement that gave up waiting: on a lock (55P03), or past its own bound (57014). */
 const GAVE_UP = new Set(['55P03', '57014']);
 

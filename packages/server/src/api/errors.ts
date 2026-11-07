@@ -1,4 +1,4 @@
-import { isDeploying, isUnsealed } from '@coffre/core/vault';
+import { isDeploying, isUnsealed, LOCK_WAIT_MS } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { gaveUp, isUnavailable } from '@coffre/db/dialect';
@@ -199,11 +199,17 @@ export const UNAVAILABLE = 'coffre cannot reach what it depends on right now; tr
 
 /**
  * How long, in seconds, a 503 `unavailable` tells its caller to wait
- * (`Retry-After`): what it waited on, a lock or a connection, gives up
- * after 15 s, and a caller back sooner than a few seconds joins the same
- * queue it left.
+ * (`Retry-After`), derived from the lock waits that refuse (R75, W331):
+ * every wait for a lock is `LOCK_WAIT_MS` (500 ms), the app's write
+ * transactions' once, the vault's again after each pause for its call's
+ * `CALL_DEADLINE_MS` (5 s). What refused gave up one lock wait ago at most,
+ * so a caller back after one more wait has the chance the next retry here
+ * would have had, and sooner than that joins the queue it just left:
+ * `LOCK_WAIT_MS` in HTTP's whole seconds, rounded up, 1. A database or key
+ * service that does not answer has no recovery coffre can know: for those,
+ * the same second is a retry policy, and the CLI backs off past it.
  */
-export const UNAVAILABLE_RETRY_AFTER = '5';
+export const UNAVAILABLE_RETRY_AFTER = String(Math.ceil(LOCK_WAIT_MS / 1000));
 
 /**
  * What a change is told when it committed but its seal did not come in time
