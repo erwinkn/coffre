@@ -2,7 +2,7 @@
 -- table renames (T178) only, on SQLite: the tables back under the names that
 -- release knows. Postgres keeps those names one release as views of the
 -- renamed tables, and the release's code runs through them; SQLite, which no
--- deployment runs, keeps none (sqlite/0036_table_renames.sql says why), so the
+-- deployment runs, keeps none (sqlite/0037_table_renames.sql says why), so the
 -- release is held to everything else of this schema under its own names.
 -- Each rename moves every reference to the table, as 0036's did. Delete this,
 -- and its use, once 0.16.0 is the newest release.

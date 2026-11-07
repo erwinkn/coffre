@@ -257,8 +257,15 @@
     {
       "idx": 36,
       "version": "6",
-      "when": 1793820000000,
-      "tag": "0036_table_renames",
+      "when": 1793830000000,
+      "tag": "0036_bulk_phase",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1793840000000,
+      "tag": "0037_table_renames",
       "breakpoints": true
     }
   ]

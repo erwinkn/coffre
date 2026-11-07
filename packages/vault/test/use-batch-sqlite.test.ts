@@ -11,7 +11,7 @@ import type { UseManyInput } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
-import { periodOf, refreshMs } from '../src/bulk.ts';
+import { periodOf, phaseOf, refreshMs } from '../src/bulk.ts';
 import type { UseCall, UseRow } from '../src/use.ts';
 import { newRequestId } from '../src/use.ts';
 import { callBatch, callUse } from '../src/use.sqlite.ts';
@@ -84,7 +84,8 @@ test('a batch answers each key as its use alone does, row for row, and writes th
   const w = await namedWorld(db, LIMIT);
   const at = Date.now();
   const refresh = refreshMs(LIMIT);
-  const period = periodOf(at, refresh);
+  // Each key's period for its principal (T204): its own phase.
+  const period = (secret: string, principal = w.principal) => periodOf(at, refresh, phaseOf(principal, secret, refresh));
   const [fresh1, fresh2, stale, older, out, gone] = [await w.key(), await w.key(), await w.key(), await w.key(), await w.key(), await w.key()];
   const entering = [await w.key(), await w.key(), await w.key(), await w.key()];
   const reference = await w.reference('REF');
@@ -107,14 +108,14 @@ test('a batch answers each key as its use alone does, row for row, and writes th
     const cap = (secret: string, last: number, principal = w.principal) => run(db.owner, sql`INSERT INTO bulk_cap (principal, secret, last) VALUES (${principal}, ${secret}, ${last})`);
     // In the set, this period's; in it, an earlier period's (moved on); past the set, but counted against a new key
     // (`window + refresh + deadline + ahead`); past both.
-    await cap(fresh1, period);
-    await cap(fresh2, period);
-    await cap(covered, period);
-    await cap(stale, period - 2 * refresh);
+    await cap(fresh1, period(fresh1));
+    await cap(fresh2, period(fresh2));
+    await cap(covered, period(covered));
+    await cap(stale, period(stale) - 2 * refresh);
     await cap(older, at - WINDOW - refresh - 1_000);
     await cap(out, at - WINDOW - refresh - 10 * 60_000);
     // Another principal's rows count for nobody here.
-    for (const secret of someoneElse) await cap(secret, period, 'token:someone-else');
+    for (const secret of someoneElse) await cap(secret, period(secret, 'token:someone-else'), 'token:someone-else');
   };
   // Four in the set or counted (fresh1, fresh2, covered, stale) and one counted only against new keys (older): of
   // count 6, one new key enters, the next is over the cap; repeats in the batch count once; a key with no row, one
@@ -177,8 +178,8 @@ test('a batch answers each key as its use alone does, row for row, and writes th
   // What the decided batch did, as the cap's rule has it: the first new key entered, the rest over the cap.
   await start();
   const rowsOf = await callBatch(db.vault, cases[0]![1], null);
-  const entered = await rows<{ secret: string }>(db.owner, sql`SELECT secret FROM bulk_cap WHERE principal = ${w.principal} AND last = ${period}`);
-  assert.ok(entered.some((row) => row.secret === entering[0]), 'the first new key entered');
+  const entered = await rows<{ secret: string; last: number }>(db.owner, sql`SELECT secret, last FROM bulk_cap WHERE principal = ${w.principal}`);
+  assert.ok(entered.some((row) => row.secret === entering[0] && Number(row.last) === period(entering[0]!)), 'the first new key entered, at its period');
   assert.ok(!entered.some((row) => row.secret === entering[1]), 'the second, over the cap, did not');
   assert.deepEqual([rowsOf[1]!.others, rowsOf[2]!.others, rowsOf[4]!.in_set], [5, 6, true]);
 });

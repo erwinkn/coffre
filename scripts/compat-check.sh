@@ -221,7 +221,7 @@ for kind in "${kinds[@]}"; do
     quietly "installing coffre-$kind" "$work/$kind-install.log" pnpm --dir "$project" install --store-dir "$store"
     engine="$([[ "$kind" == workers ]] && echo postgres || echo sqlite)"
 
-    # 0.16.0 renamed tables (T178, postgres/0074_table_renames.sql). On
+    # 0.16.0 renamed tables (T178, postgres/0075_table_renames.sql). On
     # Postgres a release before it runs through the views kept under the old
     # names, and its conformance is told the new ones where it names tables
     # (scripts/compat/renamed-tables.mjs). SQLite keeps no views and no

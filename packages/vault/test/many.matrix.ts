@@ -25,7 +25,6 @@ import type { NamedManyInput, NamedManyOutcome } from '@coffre/core/vault';
 import { sql } from 'drizzle-orm';
 
 import { shardOf } from '../../../scripts/matrix-shard.ts';
-import { refreshMs } from '../src/bulk.ts';
 import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { holding, namedWorld, principalLocks, slowed, weighed, weighingSession, type HotCall } from './named-world.ts';
 import { emptyLog, useDatabases } from './use-world.ts';
@@ -100,11 +99,6 @@ const count = async (query: ReturnType<typeof sql>) => Number((await rows<{ n: n
 const delayOf = () => (ENGINE !== 'postgres' ? 0 : 1000);
 const LAPSES_MS = ENGINE === 'postgres' ? 2500 : 300;
 
-async function inPeriod(ms: number): Promise<void> {
-  const period = refreshMs({ count: 1000, windowMs: 15 * 60_000 });
-  const left = period - (Date.now() % period);
-  if (left < ms) await sleep(left + 50);
-}
 
 /** An answer as the matrix compares it: whether they stood, and its outcome. */
 function shapeOf(answer: NamedManyOutcome): { stands: boolean | null; code: string; keys: string[] } {
@@ -225,7 +219,7 @@ test(`several keys by name, mixed: no batch tells what a caller may not have, in
   const differing: string[] = [];
   await namedWorld(db);
   for (const row of ROWS) {
-    await inPeriod(20_000);
+    // Each cell's keys are made as their periods start (T204, `freshKeyId`): made and asked within a minute, each within one.
     const made = await each(CELLS, (states) => cell(row, states));
     const measureAll = () => each(made, async (c) => ({ states: c.states, ...(await c.measure()) }));
     const results = ENGINE === 'postgres' ? await holding(db, principalLocks(made.map((c) => c.principal)), measureAll) : await measureAll();

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 
 import { EVERYWHERE, ROLES } from '@coffre/core/access';
 
-import { bulkStep, refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS } from '../src/bulk.ts';
+import { bulkStep, periodOf, phaseOf, refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS } from '../src/bulk.ts';
 import { DEFAULT_BULK_LIMIT } from '../src/config.ts';
 import { limitOp, applyOp, limitChange, noEdits, objectKey, sealOf, SEAL_BYTES, type PolicyInput, type PrincipalInput } from '../src/inputs.ts';
 import { purposeCode, purposeOf, WAYS, PURPOSES, replay, type LoggedUse } from '../src/log-replay.ts';
@@ -237,7 +237,7 @@ test('the replay names what does not hold: a change that does nothing, a seal no
     ...entries,
     { ...created, number: last.number + 1n },
     { ...last, number: last.number + 2n, op: { op: 'secret.delete' }, seal: Buffer.alloc(SEAL_BYTES) },
-    { kind: 'use', number: 1n, request: ask(1, 1) },
+    { kind: 'use', number: 1n, request: ask(1, 1), phased: true },
   ]).faults;
   assert.equal(faults.length, 3, faults.join('\n'));
   assert.match(faults[0]!, /does nothing/);
@@ -245,15 +245,67 @@ test('the replay names what does not hold: a change that does nothing, a seal no
   assert.match(faults[2]!, /out of number order/);
 });
 
-test('bulkStep refreshes a hot key once a refresh, not on every use', () => {
+test('bulkStep refreshes a hot key once a refresh, not on every use, from its phase', () => {
   const limit = { count: 5, windowMs: 15 * 60_000 };
+  const refresh = refreshMs(limit);
   const rows = new Map<string, number>();
-  bulkStep(rows, 'k', 0, limit);
-  bulkStep(rows, 'k', 30_000, limit);
-  assert.equal(rows.get('k'), 0);
-  bulkStep(rows, 'k', 60_000, limit);
-  assert.equal(rows.get('k'), 60_000);
+  const phase = phaseOf('token:a', 'k', refresh);
+  bulkStep(rows, 'token:a', 'k', phase, limit, true);
+  bulkStep(rows, 'token:a', 'k', phase + 30_000, limit, true);
+  assert.equal(rows.get('k'), phase);
+  bulkStep(rows, 'token:a', 'k', phase + 59_999, limit, true);
+  assert.equal(rows.get('k'), phase);
+  bulkStep(rows, 'token:a', 'k', phase + 60_000, limit, true);
+  assert.equal(rows.get('k'), phase + 60_000);
   assert.equal(refreshMs({ count: 1, windowMs: 1500 }), 150);
+});
+
+test("T204, review r1: the replay moves a key on as the statement that decided its use did, phased or not", () => {
+  // Count 1 over 15 minutes. T is a period's start for every key under the previous release's statement; A's use
+  // there, at T + phase, wrote T, whatever A's phase, its last included (review r2). 0074's statement, 1,023,001 ms
+  // after T, counts against B only the keys moved on past T + 1 (window, refresh, deadline and the minute ahead back):
+  // not A, whose row says T.
+  const limit = { count: 1, windowMs: 15 * 60_000 };
+  const refresh = refreshMs(limit);
+  const T = 1_793_829_960_000;
+  const b = '00000000-0000-4000-8000-00000000000b';
+  for (const phase of [2, 30_000, refresh - 1]) {
+    const a = keyAtPhase('token:p', phase, refresh);
+    assert.ok(T % refresh === 0);
+    const live = new Map<string, number>();
+    bulkStep(live, 'token:p', a, T + phase, limit, false);
+    assert.equal(live.get(a), T, `phase ${phase}`);
+    assert.deepEqual(bulkStep(live, 'token:p', b, T + 1_023_001, limit, true), { inSet: false, others: 0 });
+    // Replayed as if 0074's had decided A too, A's row would say T + phase, and B be refused: what r1 found.
+    const wrong = new Map<string, number>();
+    bulkStep(wrong, 'token:p', a, T + phase, limit, true);
+    assert.equal(wrong.get(a), T + phase, `phase ${phase}`);
+    assert.deepEqual(bulkStep(wrong, 'token:p', b, T + 1_023_001, limit, true), { inSet: false, others: 1 });
+  }
+});
+
+/** The first of a fixed run of key ids whose phase for `principal` is `phase`: about `refresh` tries. */
+function keyAtPhase(principal: string, phase: number, refresh: number): string {
+  for (let i = 0; ; i += 1) {
+    const id = `00000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`;
+    if (phaseOf(principal, id, refresh) === phase) return id;
+  }
+}
+
+test("T204: a principal's keys, and a key's principals, move on at phases spread over the period", () => {
+  const refresh = refreshMs({ count: 1000, windowMs: 15 * 60_000 });
+  const ids = Array.from({ length: 1000 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`);
+  // A period's start is one of its phase + n × refresh, at most a refresh before the use, and never after it.
+  for (const at of [0, 1, refresh - 1, refresh, 1_793_830_000_123, -7]) {
+    const period = periodOf(at, refresh, phaseOf('token:a', ids[0]!, refresh));
+    assert.ok(period <= at && period > at - refresh && ((period - phaseOf('token:a', ids[0]!, refresh)) % refresh + refresh) % refresh === 0, `${at}: ${period}`);
+  }
+  // 1000 keys of one principal, and one key of 1000 principals, each spread over the period's 10 tenths: no tenth
+  // holds more than twice its share.
+  for (const phases of [ids.map((id) => phaseOf('token:a', id, refresh)), ids.map((_, i) => phaseOf(`token:${i}`, ids[0]!, refresh))]) {
+    const tenths = Array.from({ length: 10 }, (_, tenth) => phases.filter((phase) => Math.floor(phase / (refresh / 10)) === tenth).length);
+    assert.ok(tenths.every((n) => n > 50 && n < 200), tenths.join(' '));
+  }
 });
 
 test("a personal config's owner on a token: Ada's viewer token for dev reads her own config of dev, and nothing in prod", () => {
@@ -293,7 +345,7 @@ test('a replay resumed on its own state goes on from its last number: an entry r
   assert.equal(state.faults.length, 1);
   assert.match(state.faults[0]!, /out of number order/);
   // Against the highest number seen: 10, then 5 and 7, faults twice.
-  const use = (number: bigint) => ({ kind: 'use' as const, number, request: ask(1, 1) });
+  const use = (number: bigint) => ({ kind: 'use' as const, number, request: ask(1, 1), phased: true });
   const base = replay(SEAL_KEYS, w.log.slice(0, -1));
   const at = base.last;
   const after = replay(SEAL_KEYS, [use(at + 10n), use(at + 5n), use(at + 7n)], undefined, base);

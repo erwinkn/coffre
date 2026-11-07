@@ -17,6 +17,7 @@ import { openVault, prepareVault } from '../src/vault.ts';
 import { absentOf, twinOf, weigh, weighInTurn, weighingSession as weighingSessionAt, type HotCall, type Weighed, type WeighingSession } from '../../../scripts/matrix-weigh.ts';
 import { ENGINE, HOT_URL, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { change, CONFIG, genesis, LOG_015, ROOT, seal, SIGNING_KEY, world } from './use-world.ts';
+import { freshKeyId } from './window-fixture.ts';
 
 /** A world whose credential's token is known, and the names its requests use: its project's slug, `dev`, a key's name. */
 export async function namedWorld(db: TestDatabase, options: Parameters<typeof world>[0] = {}) {
@@ -35,7 +36,7 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
   /** A plain value in `dev`, sealed: its text's digest in its object, no key. */
   const plain = async (text: string, name = `PLAIN_${randomUUID().slice(0, 4)}`) => {
     const t = tablesOf(db.owner);
-    const id = randomUUID();
+    const id = freshKeyId(w.principal);
     const version = randomUUID();
     // Its version as the app writes a plain one: sealed as any, its text beside (app-places.test.ts, `newVersion`).
     const dek = freshDek();
@@ -151,7 +152,7 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
   /** A reference held in `dev` as `name`, to a key of its own in `at` (`dev` by default). */
   const reference = async (name: string, at = w.dev) => {
     const source = await w.key(`source of ${name}`, false, at);
-    const holder = randomUUID();
+    const holder = freshKeyId(w.principal);
     const row = randomUUID();
     const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'reference.create', decision: 'allow', metadata: '{}' }], undefined, undefined, [], true));
     await db.owner.insert(tablesOf(db.owner).secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: name });

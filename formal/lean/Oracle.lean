@@ -311,7 +311,7 @@ def answer (j : Json) : Parse Json := do
     let rows ← (← list (← req j "rows")).mapM fun r => do pure (← str (← req r "key"), ← int (← req r "last"))
     let limit ← req j "limit"
     let (inSet, others, write) := bulkRule rows (← str (← req j "key")) (← int (← req j "at"))
-      ⟨← (← req limit "count").getNat?, ← int (← req limit "windowMs")⟩
+      ⟨← (← req limit "count").getNat?, ← int (← req limit "windowMs")⟩ (← int (← req j "phase"))
     pure (Json.mkObj [("inSet", Json.bool inSet), ("others", Json.num others), ("write", match write with | some t => Json.num t | none => Json.null)])
   | _ => throw s!"no op {op}"
 

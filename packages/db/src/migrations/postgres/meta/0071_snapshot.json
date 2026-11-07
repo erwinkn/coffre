@@ -1,4 +1,6 @@
 {
+  "id": "93097179-d585-46a6-a4eb-d50907b90727",
+  "prevId": "5fb3a206-51ca-4af5-8141-1c609143e4c6",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -656,45 +658,6 @@
       },
       "isRLSEnabled": false
     },
-    "public.bulk_cap": {
-      "name": "bulk_cap",
-      "schema": "",
-      "columns": {
-        "principal": {
-          "name": "principal",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "secret": {
-          "name": "secret",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "last": {
-          "name": "last",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "bulk_cap_pkey": {
-          "name": "bulk_cap_pkey",
-          "columns": [
-            "principal",
-            "secret"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.capped_alerts": {
       "name": "capped_alerts",
       "schema": "",
@@ -734,29 +697,22 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.checkpoint_fence": {
-      "name": "checkpoint_fence",
+    "public.consumed_tokens": {
+      "name": "consumed_tokens",
       "schema": "",
       "columns": {
-        "only_row": {
-          "name": "only_row",
-          "type": "boolean",
+        "hash": {
+          "name": "hash",
+          "type": "bytea",
           "primaryKey": true,
-          "notNull": true,
-          "default": true
-        },
-        "at_floor": {
-          "name": "at_floor",
-          "type": "bigint",
-          "primaryKey": false,
           "notNull": true
         },
-        "retired": {
-          "name": "retired",
-          "type": "bytea[]",
+        "consumed_at": {
+          "name": "consumed_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{}'"
+          "default": "now()"
         }
       },
       "indexes": {},
@@ -765,9 +721,9 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "checkpoint_fence_only_row_check": {
-          "name": "checkpoint_fence_only_row_check",
-          "value": "\"checkpoint_fence\".\"only_row\""
+        "consumed_tokens_hash_check": {
+          "name": "consumed_tokens_hash_check",
+          "value": "octet_length(\"consumed_tokens\".\"hash\") = 32"
         }
       },
       "isRLSEnabled": false
@@ -1058,7 +1014,7 @@
         "credentials_principal_fkey": {
           "name": "credentials_principal_fkey",
           "tableFrom": "credentials",
-          "tableTo": "principals",
+          "tableTo": "vault_members",
           "columnsFrom": [
             "principal"
           ],
@@ -1088,7 +1044,7 @@
         "credentials_enrollment_id_fkey": {
           "name": "credentials_enrollment_id_fkey",
           "tableFrom": "credentials",
-          "tableTo": "enrollment_codes",
+          "tableTo": "enrollments",
           "columnsFrom": [
             "enrollment_id"
           ],
@@ -1146,8 +1102,8 @@
       },
       "isRLSEnabled": false
     },
-    "public.device_logins": {
-      "name": "device_logins",
+    "public.device_authorizations": {
+      "name": "device_authorizations",
       "schema": "",
       "columns": {
         "id": {
@@ -1240,9 +1196,9 @@
       },
       "indexes": {},
       "foreignKeys": {
-        "device_logins_passkey_id_fkey": {
-          "name": "device_logins_passkey_id_fkey",
-          "tableFrom": "device_logins",
+        "device_authorizations_passkey_id_fkey": {
+          "name": "device_authorizations_passkey_id_fkey",
+          "tableFrom": "device_authorizations",
           "tableTo": "passkeys",
           "columnsFrom": [
             "passkey_id"
@@ -1253,10 +1209,10 @@
           "onDelete": "restrict",
           "onUpdate": "no action"
         },
-        "device_logins_principal_fkey": {
-          "name": "device_logins_principal_fkey",
-          "tableFrom": "device_logins",
-          "tableTo": "principals",
+        "device_authorizations_principal_fkey": {
+          "name": "device_authorizations_principal_fkey",
+          "tableFrom": "device_authorizations",
+          "tableTo": "vault_members",
           "columnsFrom": [
             "principal"
           ],
@@ -1269,15 +1225,15 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "device_logins_device_code_hash_key": {
-          "name": "device_logins_device_code_hash_key",
+        "device_authorizations_device_code_hash_key": {
+          "name": "device_authorizations_device_code_hash_key",
           "nullsNotDistinct": false,
           "columns": [
             "device_code_hash"
           ]
         },
-        "device_logins_user_code_key": {
-          "name": "device_logins_user_code_key",
+        "device_authorizations_user_code_key": {
+          "name": "device_authorizations_user_code_key",
           "nullsNotDistinct": false,
           "columns": [
             "user_code"
@@ -1286,21 +1242,21 @@
       },
       "policies": {},
       "checkConstraints": {
-        "device_logins_passkey_check": {
-          "name": "device_logins_passkey_check",
-          "value": "\"device_logins\".\"passkey_id\" IS NULL OR (\"device_logins\".\"decision\" IS NOT NULL AND \"device_logins\".\"decision\" = 'approved')"
+        "device_authorizations_passkey_check": {
+          "name": "device_authorizations_passkey_check",
+          "value": "\"device_authorizations\".\"passkey_id\" IS NULL OR (\"device_authorizations\".\"decision\" IS NOT NULL AND \"device_authorizations\".\"decision\" = 'approved')"
         },
-        "device_logins_auth_mac_check": {
-          "name": "device_logins_auth_mac_check",
-          "value": "octet_length(\"device_logins\".\"auth_mac\") = 32"
+        "device_authorizations_auth_mac_check": {
+          "name": "device_authorizations_auth_mac_check",
+          "value": "octet_length(\"device_authorizations\".\"auth_mac\") = 32"
         },
-        "device_logins_decision_check": {
-          "name": "device_logins_decision_check",
-          "value": "\"device_logins\".\"decision\" IS NULL OR \"device_logins\".\"decision\" IN ('approved', 'denied')"
+        "device_authorizations_decision_check": {
+          "name": "device_authorizations_decision_check",
+          "value": "\"device_authorizations\".\"decision\" IS NULL OR \"device_authorizations\".\"decision\" IN ('approved', 'denied')"
         },
-        "device_logins_approval_names_principal": {
-          "name": "device_logins_approval_names_principal",
-          "value": "(\"device_logins\".\"decision\" IS NULL AND \"device_logins\".\"decided_at\" IS NULL AND \"device_logins\".\"principal\" IS NULL AND \"device_logins\".\"generation\" = 0 AND \"device_logins\".\"consumed_at\" IS NULL)\n        OR (\"device_logins\".\"decision\" IS NOT NULL AND \"device_logins\".\"decided_at\" IS NOT NULL AND (\n          (\"device_logins\".\"decision\" = 'denied' AND \"device_logins\".\"principal\" IS NULL AND \"device_logins\".\"generation\" = 0 AND \"device_logins\".\"consumed_at\" IS NULL)\n          OR (\"device_logins\".\"decision\" = 'approved' AND \"device_logins\".\"principal\" IS NOT NULL AND \"device_logins\".\"principal\" LIKE 'user:%')\n        ))"
+        "device_authorizations_approval_names_principal": {
+          "name": "device_authorizations_approval_names_principal",
+          "value": "(\"device_authorizations\".\"decision\" IS NULL AND \"device_authorizations\".\"decided_at\" IS NULL AND \"device_authorizations\".\"principal\" IS NULL AND \"device_authorizations\".\"generation\" = 0 AND \"device_authorizations\".\"consumed_at\" IS NULL)\n        OR (\"device_authorizations\".\"decision\" IS NOT NULL AND \"device_authorizations\".\"decided_at\" IS NOT NULL AND (\n          (\"device_authorizations\".\"decision\" = 'denied' AND \"device_authorizations\".\"principal\" IS NULL AND \"device_authorizations\".\"generation\" = 0 AND \"device_authorizations\".\"consumed_at\" IS NULL)\n          OR (\"device_authorizations\".\"decision\" = 'approved' AND \"device_authorizations\".\"principal\" IS NOT NULL AND \"device_authorizations\".\"principal\" LIKE 'user:%')\n        ))"
         }
       },
       "isRLSEnabled": false
@@ -1382,8 +1338,8 @@
       },
       "isRLSEnabled": false
     },
-    "public.enrollment_codes": {
-      "name": "enrollment_codes",
+    "public.enrollments": {
+      "name": "enrollments",
       "schema": "",
       "columns": {
         "id": {
@@ -1449,8 +1405,8 @@
         }
       },
       "indexes": {
-        "enrollment_codes_binding_idx": {
-          "name": "enrollment_codes_binding_idx",
+        "enrollments_binding_idx": {
+          "name": "enrollments_binding_idx",
           "columns": [
             {
               "expression": "binding_id",
@@ -1472,9 +1428,9 @@
         }
       },
       "foreignKeys": {
-        "enrollment_codes_binding_id_fkey": {
-          "name": "enrollment_codes_binding_id_fkey",
-          "tableFrom": "enrollment_codes",
+        "enrollments_binding_id_fkey": {
+          "name": "enrollments_binding_id_fkey",
+          "tableFrom": "enrollments",
           "tableTo": "service_bindings",
           "columnsFrom": [
             "binding_id"
@@ -1488,8 +1444,8 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "enrollment_codes_code_hash_key": {
-          "name": "enrollment_codes_code_hash_key",
+        "enrollments_code_hash_key": {
+          "name": "enrollments_code_hash_key",
           "nullsNotDistinct": false,
           "columns": [
             "code_hash"
@@ -1498,17 +1454,17 @@
       },
       "policies": {},
       "checkConstraints": {
-        "enrollment_codes_auth_mac_check": {
-          "name": "enrollment_codes_auth_mac_check",
-          "value": "octet_length(\"enrollment_codes\".\"auth_mac\") = 32"
+        "enrollments_auth_mac_check": {
+          "name": "enrollments_auth_mac_check",
+          "value": "octet_length(\"enrollments\".\"auth_mac\") = 32"
         },
-        "enrollment_codes_code_hash_check": {
-          "name": "enrollment_codes_code_hash_check",
-          "value": "octet_length(\"enrollment_codes\".\"code_hash\") = 32"
+        "enrollments_code_hash_check": {
+          "name": "enrollments_code_hash_check",
+          "value": "octet_length(\"enrollments\".\"code_hash\") = 32"
         },
-        "enrollment_codes_scope_check": {
-          "name": "enrollment_codes_scope_check",
-          "value": "\"enrollment_codes\".\"scope\"::jsonb IS NOT NULL"
+        "enrollments_scope_check": {
+          "name": "enrollments_scope_check",
+          "value": "\"enrollments\".\"scope\"::jsonb IS NOT NULL"
         }
       },
       "isRLSEnabled": false
@@ -1689,162 +1645,6 @@
       },
       "isRLSEnabled": false
     },
-    "public.grants": {
-      "name": "grants",
-      "schema": "",
-      "columns": {
-        "principal": {
-          "name": "principal",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "project_id": {
-          "name": "project_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "environment_id": {
-          "name": "environment_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "environment_slug": {
-          "name": "environment_slug",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "role": {
-          "name": "role",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "granted_at": {
-          "name": "granted_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "granted_by": {
-          "name": "granted_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {
-        "grants_on_every_project": {
-          "name": "grants_on_every_project",
-          "columns": [
-            {
-              "expression": "principal",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"grants\".\"project_id\" IS NULL AND \"grants\".\"environment_id\" IS NULL AND \"grants\".\"environment_slug\" IS NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "grants_principal_fkey": {
-          "name": "grants_principal_fkey",
-          "tableFrom": "grants",
-          "tableTo": "principals",
-          "columnsFrom": [
-            "principal"
-          ],
-          "columnsTo": [
-            "principal"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "grants_project_id_fkey": {
-          "name": "grants_project_id_fkey",
-          "tableFrom": "grants",
-          "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "grants_environment_id_fkey": {
-          "name": "grants_environment_id_fkey",
-          "tableFrom": "grants",
-          "tableTo": "environments",
-          "columnsFrom": [
-            "environment_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "grants_on_project": {
-          "name": "grants_on_project",
-          "nullsNotDistinct": false,
-          "columns": [
-            "principal",
-            "project_id"
-          ]
-        },
-        "grants_on_environment": {
-          "name": "grants_on_environment",
-          "nullsNotDistinct": false,
-          "columns": [
-            "principal",
-            "environment_id"
-          ]
-        },
-        "grants_on_environment_slug": {
-          "name": "grants_on_environment_slug",
-          "nullsNotDistinct": false,
-          "columns": [
-            "principal",
-            "environment_slug"
-          ]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {
-        "grants_one_place": {
-          "name": "grants_one_place",
-          "value": "((\"grants\".\"project_id\" IS NULL) <> (\"grants\".\"environment_id\" IS NULL) AND \"grants\".\"environment_slug\" IS NULL) OR (\"grants\".\"project_id\" IS NULL AND \"grants\".\"environment_id\" IS NULL)"
-        },
-        "grants_environment_slug_check": {
-          "name": "grants_environment_slug_check",
-          "value": "\"grants\".\"environment_slug\" IS NULL OR \"grants\".\"environment_slug\" ~ '^[a-z0-9][a-z0-9-]{0,62}$'"
-        },
-        "grants_role_check": {
-          "name": "grants_role_check",
-          "value": "\"grants\".\"role\" ~ '^[a-z][a-z0-9-]{1,31}$'"
-        }
-      },
-      "isRLSEnabled": false
-    },
     "public.identities": {
       "name": "identities",
       "schema": "",
@@ -1994,7 +1794,7 @@
         "identities_principal_fkey": {
           "name": "identities_principal_fkey",
           "tableFrom": "identities",
-          "tableTo": "principals",
+          "tableTo": "vault_members",
           "columnsFrom": [
             "principal"
           ],
@@ -2032,6 +1832,45 @@
           "value": "octet_length(\"identities\".\"auth_mac\") = 32"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.log_bulk": {
+      "name": "log_bulk",
+      "schema": "",
+      "columns": {
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "secret": {
+          "name": "secret",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "last": {
+          "name": "last",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "log_bulk_pkey": {
+          "name": "log_bulk_pkey",
+          "columns": [
+            "principal",
+            "secret"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.log_changes": {
@@ -2762,6 +2601,44 @@
       },
       "isRLSEnabled": false
     },
+    "public.log_fence": {
+      "name": "log_fence",
+      "schema": "",
+      "columns": {
+        "only_row": {
+          "name": "only_row",
+          "type": "boolean",
+          "primaryKey": true,
+          "notNull": true,
+          "default": true
+        },
+        "at_floor": {
+          "name": "at_floor",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "retired": {
+          "name": "retired",
+          "type": "bytea[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "log_fence_only_row_check": {
+          "name": "log_fence_only_row_check",
+          "value": "\"log_fence\".\"only_row\""
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.log_read_days": {
       "name": "log_read_days",
       "schema": "",
@@ -3361,6 +3238,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "phased": {
+          "name": "phased",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -3729,7 +3612,7 @@
         "mcp_connections_principal_fkey": {
           "name": "mcp_connections_principal_fkey",
           "tableFrom": "mcp_connections",
-          "tableTo": "principals",
+          "tableTo": "vault_members",
           "columnsFrom": [
             "principal"
           ],
@@ -4016,7 +3899,7 @@
         "passkeys_principal_fkey": {
           "name": "passkeys_principal_fkey",
           "tableFrom": "passkeys",
-          "tableTo": "principals",
+          "tableTo": "vault_members",
           "columnsFrom": [
             "principal"
           ],
@@ -4078,128 +3961,6 @@
         "passkeys_removed_check": {
           "name": "passkeys_removed_check",
           "value": "(\"passkeys\".\"removed_at\" IS NULL) = (\"passkeys\".\"removed_by\" IS NULL)"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.principals": {
-      "name": "principals",
-      "schema": "",
-      "columns": {
-        "principal": {
-          "name": "principal",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "owner": {
-          "name": "owner",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "role": {
-          "name": "role",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "scope": {
-          "name": "scope",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "generation": {
-          "name": "generation",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_by": {
-          "name": "created_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status_changed_at": {
-          "name": "status_changed_at",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status_changed_by": {
-          "name": "status_changed_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "access_seq": {
-          "name": "access_seq",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "mac": {
-          "name": "mac",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "seal": {
-          "name": "seal",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "principals_seal_check": {
-          "name": "principals_seal_check",
-          "value": "\"principals\".\"seal\" IS NULL OR octet_length(\"principals\".\"seal\") = 16"
-        },
-        "principals_mac_check": {
-          "name": "principals_mac_check",
-          "value": "octet_length(\"principals\".\"mac\") = 32"
-        },
-        "principals_principal_check": {
-          "name": "principals_principal_check",
-          "value": "\"principals\".\"principal\" ~ '^(user|token):[^[:space:]:][^[:space:]]*$'"
-        },
-        "principals_user_lowercase": {
-          "name": "principals_user_lowercase",
-          "value": "\"principals\".\"principal\" NOT LIKE 'user:%' OR \"principals\".\"principal\" = lower(\"principals\".\"principal\")"
-        },
-        "principals_status_check": {
-          "name": "principals_status_check",
-          "value": "\"principals\".\"status\" IN ('active', 'removed')"
-        },
-        "principals_owner_check": {
-          "name": "principals_owner_check",
-          "value": "NOT \"principals\".\"owner\" OR (\"principals\".\"status\" = 'active' AND \"principals\".\"principal\" LIKE 'user:%')"
-        },
-        "principals_generation_check": {
-          "name": "principals_generation_check",
-          "value": "\"principals\".\"generation\" >= 0"
         }
       },
       "isRLSEnabled": false
@@ -5160,7 +4921,7 @@
         "service_bindings_principal_fkey": {
           "name": "service_bindings_principal_fkey",
           "tableFrom": "service_bindings",
-          "tableTo": "principals",
+          "tableTo": "vault_members",
           "columnsFrom": [
             "principal"
           ],
@@ -5194,22 +4955,245 @@
       },
       "isRLSEnabled": false
     },
-    "public.spent_id_tokens": {
-      "name": "spent_id_tokens",
+    "public.vault_grants": {
+      "name": "vault_grants",
       "schema": "",
       "columns": {
-        "hash": {
-          "name": "hash",
-          "type": "bytea",
+        "principal": {
+          "name": "principal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "environment_id": {
+          "name": "environment_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "environment_slug": {
+          "name": "environment_slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "granted_at": {
+          "name": "granted_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "granted_by": {
+          "name": "granted_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "vault_grants_on_every_project": {
+          "name": "vault_grants_on_every_project",
+          "columns": [
+            {
+              "expression": "principal",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"vault_grants\".\"project_id\" IS NULL AND \"vault_grants\".\"environment_id\" IS NULL AND \"vault_grants\".\"environment_slug\" IS NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "vault_grants_principal_fkey": {
+          "name": "vault_grants_principal_fkey",
+          "tableFrom": "vault_grants",
+          "tableTo": "vault_members",
+          "columnsFrom": [
+            "principal"
+          ],
+          "columnsTo": [
+            "principal"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "vault_grants_project_id_fkey": {
+          "name": "vault_grants_project_id_fkey",
+          "tableFrom": "vault_grants",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "vault_grants_environment_id_fkey": {
+          "name": "vault_grants_environment_id_fkey",
+          "tableFrom": "vault_grants",
+          "tableTo": "environments",
+          "columnsFrom": [
+            "environment_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "vault_grants_on_project": {
+          "name": "vault_grants_on_project",
+          "nullsNotDistinct": false,
+          "columns": [
+            "principal",
+            "project_id"
+          ]
+        },
+        "vault_grants_on_environment": {
+          "name": "vault_grants_on_environment",
+          "nullsNotDistinct": false,
+          "columns": [
+            "principal",
+            "environment_id"
+          ]
+        },
+        "vault_grants_on_environment_slug": {
+          "name": "vault_grants_on_environment_slug",
+          "nullsNotDistinct": false,
+          "columns": [
+            "principal",
+            "environment_slug"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "vault_grants_one_place": {
+          "name": "vault_grants_one_place",
+          "value": "((\"vault_grants\".\"project_id\" IS NULL) <> (\"vault_grants\".\"environment_id\" IS NULL) AND \"vault_grants\".\"environment_slug\" IS NULL) OR (\"vault_grants\".\"project_id\" IS NULL AND \"vault_grants\".\"environment_id\" IS NULL)"
+        },
+        "vault_grants_environment_slug_check": {
+          "name": "vault_grants_environment_slug_check",
+          "value": "\"vault_grants\".\"environment_slug\" IS NULL OR \"vault_grants\".\"environment_slug\" ~ '^[a-z0-9][a-z0-9-]{0,62}$'"
+        },
+        "vault_grants_role_check": {
+          "name": "vault_grants_role_check",
+          "value": "\"vault_grants\".\"role\" ~ '^[a-z][a-z0-9-]{1,31}$'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.vault_members": {
+      "name": "vault_members",
+      "schema": "",
+      "columns": {
+        "principal": {
+          "name": "principal",
+          "type": "text",
           "primaryKey": true,
           "notNull": true
         },
-        "consumed_at": {
-          "name": "consumed_at",
-          "type": "timestamp with time zone",
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "owner": {
+          "name": "owner",
+          "type": "boolean",
           "primaryKey": false,
           "notNull": true,
-          "default": "now()"
+          "default": false
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status_changed_at": {
+          "name": "status_changed_at",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status_changed_by": {
+          "name": "status_changed_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "access_seq": {
+          "name": "access_seq",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mac": {
+          "name": "mac",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "seal": {
+          "name": "seal",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -5218,9 +5202,33 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "spent_id_tokens_hash_check": {
-          "name": "spent_id_tokens_hash_check",
-          "value": "octet_length(\"spent_id_tokens\".\"hash\") = 32"
+        "vault_members_seal_check": {
+          "name": "vault_members_seal_check",
+          "value": "\"vault_members\".\"seal\" IS NULL OR octet_length(\"vault_members\".\"seal\") = 16"
+        },
+        "vault_members_mac_check": {
+          "name": "vault_members_mac_check",
+          "value": "octet_length(\"vault_members\".\"mac\") = 32"
+        },
+        "vault_members_principal_check": {
+          "name": "vault_members_principal_check",
+          "value": "\"vault_members\".\"principal\" ~ '^(user|token):[^[:space:]:][^[:space:]]*$'"
+        },
+        "vault_members_user_lowercase": {
+          "name": "vault_members_user_lowercase",
+          "value": "\"vault_members\".\"principal\" NOT LIKE 'user:%' OR \"vault_members\".\"principal\" = lower(\"vault_members\".\"principal\")"
+        },
+        "vault_members_status_check": {
+          "name": "vault_members_status_check",
+          "value": "\"vault_members\".\"status\" IN ('active', 'removed')"
+        },
+        "vault_members_owner_check": {
+          "name": "vault_members_owner_check",
+          "value": "NOT \"vault_members\".\"owner\" OR (\"vault_members\".\"status\" = 'active' AND \"vault_members\".\"principal\" LIKE 'user:%')"
+        },
+        "vault_members_generation_check": {
+          "name": "vault_members_generation_check",
+          "value": "\"vault_members\".\"generation\" >= 0"
         }
       },
       "isRLSEnabled": false
@@ -5272,10 +5280,8 @@
   "policies": {},
   "views": {},
   "_meta": {
+    "columns": {},
     "schemas": {},
-    "tables": {},
-    "columns": {}
-  },
-  "id": "b20117a2-57b4-49a7-9934-5282b902fbf0",
-  "prevId": "5fb3a206-51ca-4af5-8141-1c609143e4c6"
+    "tables": {}
+  }
 }

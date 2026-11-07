@@ -23,6 +23,7 @@ import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, entryOf, contextFor, LOG, openTestDatabase, refusedIn, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog } from './db/tables.ts';
+import { inBulkPeriod } from './window-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -150,11 +151,10 @@ test('a read on a kept answer makes one vault call, which checks it', async () =
 test("0.15: a read of one key keeps and recalls nothing: the vault's one use by name decides on the reader as they are", { skip: LOG === '0.15' ? false : "0.14's reads go through the vault's unwrap" }, async () => {
   named = true;
   const reader = await readerSession();
-  // Both reads in one of the cap's refresh periods (a minute, at the default window), with time to spare: a repeat
-  // rides its cover only while its key's bulk row is of the period it is in (CoverFresh), and two reads either side of
-  // a minute's turn write a use each (seen in CI on T158's branch and on #438's).
-  const left = 60_000 - (Date.now() % 60_000);
-  if (left < 5_000) await new Promise((resolve) => setTimeout(resolve, left + 50));
+  // Both reads in one of the key's refresh periods (a minute, at the default window, from its phase, T204), with time
+  // to spare: a repeat rides its cover only while its key's bulk row is of the period it is in (CoverFresh), and two
+  // reads either side of a period's turn write a use each (seen in CI on T158's branch and on #438's).
+  await inBulkPeriod(5_000, db.owner, [`user:${READER}`], 'market/dev');
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
   calls = [];
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');

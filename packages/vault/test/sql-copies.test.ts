@@ -1,7 +1,7 @@
 // The numbers the hot path's SQL holds as literals, held to the constants the
 // TypeScript reads: a migration never changes once applied, so its functions
 // keep their own copies of the use deadline, the clock-ahead minute, the bulk
-// refresh and the hot login's timeouts, and a table's constraint its own copy
+// refresh, its periods' phases and the hot login's timeouts, and a table's constraint its own copy
 // of a role id's length. Each test reads what the migrated database runs, the
 // newest definition of each function and constraint, never a migration's
 // text. The functions and logins are Postgres's: SQLite has neither, and its
@@ -15,7 +15,9 @@ import { CLOCK_SKEW_MS, HOT_LOCK_TIMEOUT_MS, HOT_STATEMENT_TIMEOUT_MS, USE_DEADL
 import { HOT_SETTINGS } from '@coffre/db/migrate';
 import { sql } from 'drizzle-orm';
 
-import { REFRESH_MAX_MS, REFRESH_WINDOW_SHARE, USE_AHEAD_MS } from '../src/bulk.ts';
+import { randomUUID } from 'node:crypto';
+
+import { periodOf, phaseOf, REFRESH_MAX_MS, REFRESH_WINDOW_SHARE, USE_AHEAD_MS } from '../src/bulk.ts';
 import { HELD_PAST_DEADLINE_MS } from '../src/use.ts';
 import { ENGINE, openTestDatabase, postgresOnly, rows, type TestDatabase } from './database.ts';
 
@@ -54,6 +56,30 @@ test("every function's bulk refresh is refreshMs's: least(REFRESH_MAX_MS, window
   const refresh = found(/least\((\d+), [\w.]+ \/ (\d+)\)/g);
   assert.ok(refresh.some(({ name }) => name === 'use_credential') && refresh.some(({ name }) => name === 'prune_bulk'), 'the uses and the prune hold it, as the pattern finds them');
   for (const { name, groups } of refresh) assert.deepEqual(groups.map(Number), [REFRESH_MAX_MS, REFRESH_WINDOW_SHARE], name);
+});
+
+test("bulk_period is periodOf's, from phaseOf's phase (T204): every key's period where the replay's starts", POSTGRES, async () => {
+  // Principals of every way in, a person's name beyond ASCII, uuids either case; times about now, near zero and before
+  // it; refreshes of a minute, a tenth of short windows, and 1 ms.
+  const principals = ['token:ci-build', 'user:5b0f7f0e-1f7e-4c55-a2a8-8d1c4b7c2e11', 'service:deploy', 'user:zoë@acme.example'];
+  const cases = Array.from({ length: 400 }, (_, i) => {
+    const secret = randomUUID();
+    return {
+      principal: principals[i % principals.length]!, secret: i % 3 === 0 ? secret.toUpperCase() : secret,
+      at: [Date.now() + i * 997, i * 13, -i * 7_919, 1_793_830_000_000 + i][i % 4]!, refresh: [60_000, 6_000, 150, 1, 7][i % 5]!,
+    };
+  });
+  const [row] = await rows<{ periods: string[] }>(db.owner, sql`
+    SELECT array_agg(public.bulk_period(c.principal, c.secret, c.at, c.refresh)::text ORDER BY c.i) AS periods
+      FROM unnest(${sql.param(cases.map((c) => c.principal))}::text[], ${sql.param(cases.map((c) => c.secret))}::uuid[],
+                  ${sql.param(cases.map((c) => String(c.at)))}::bigint[], ${sql.param(cases.map((c) => String(c.refresh)))}::bigint[])
+           WITH ORDINALITY AS c (principal, secret, at, refresh, i)`);
+  assert.deepEqual(row!.periods.map(Number), cases.map((c) => periodOf(c.at, c.refresh, phaseOf(c.principal, c.secret, c.refresh))));
+});
+
+test("no function works out a key's period but through bulk_period", POSTGRES, () => {
+  assert.ok(found(/public\.bulk_period\(/g).some(({ name }) => name === 'use_credential'), "use_credential's period is bulk_period's");
+  assert.deepEqual(found(/(% (?:[\w.]*refresh)\) \+)/g), [], "a period worked out in place, its phase every key's 0: call bulk_period");
 });
 
 test('no function holds another copy of the minute or the deadline than the ones above', POSTGRES, () => {

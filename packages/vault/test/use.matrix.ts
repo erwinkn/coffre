@@ -34,7 +34,6 @@ import { sql } from 'drizzle-orm';
 
 import { shardOf } from '../../../scripts/matrix-shard.ts';
 import { deletesSettled, WORLD_TABLES } from '../../../scripts/matrix-weigh.ts';
-import { refreshMs } from '../src/bulk.ts';
 import type { Input } from '../src/inputs.ts';
 import { ENGINE, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
 import { holding, keyBlocksOf, namedWorld, principalLocks, slowed, turnsApart, weighed, weighedInTurn, weighingSession, type HotCall, type Weighed } from './named-world.ts';
@@ -122,15 +121,6 @@ const writes = (row: Row, key: Key) => row.lost === 'they stand' && key !== 'a r
  * (`not served`), are each their own.
  */
 const told = (code: string) => (code === 'ok' || code === 'not served' || code === 'credential' || code === 'bulk_limit' || code.startsWith('busy') ? code : 'no');
-/**
- * The cap's period (a minute, at the 15-minute window): a key fresh in the set stays so within it, and one passed moves it
- * on, which decides first and writes no entry. So cells are made and asked with at least `ms` of one left.
- */
-async function inPeriod(ms: number): Promise<void> {
-  const period = refreshMs({ count: 1000, windowMs: 15 * 60_000 });
-  const left = period - (Date.now() % period);
-  if (left < ms) await sleep(left + 50);
-}
 
 const codeOf = (answer: NamedUseOutcome) => !answer.served ? 'not served' : answer.outcome.ok ? 'ok' : 'busy' in answer.outcome ? `busy:${answer.outcome.busy}` : answer.outcome.code;
 /** How the app answers it (`routeOf`): by the vault's decision, by the credential's own check, busy, or not by name. */
@@ -486,7 +476,9 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
         for (const row of batch) {
           const results = [];
           for (const key of KEYS) {
-            await inPeriod(15_000);
+            // The cap's period (a minute, at the 15-minute window): a key fresh in the set stays so within it, and one
+            // passed moves it on, which decides first and writes no entry. Each cell's keys are made as their periods
+            // start (T204, `freshKeyId`), so a cell is made and asked within one.
             const made = await cell(row, key);
             results.push({ key, ...(await past(row, async () => {
               const result = await made.measure();
@@ -500,7 +492,7 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
         continue;
       }
       // Rows a few at a time, each with its own world per cell, made side by side, then asked side by side.
-      await inPeriod(30_000);
+      // Made and asked within a minute of their keys' making: within each key's period (above).
       const cells = await each(batch, async (row) => ({ row, cells: await each(KEYS, (key) => cell(row, key)) }));
       const measured = await past(batch[0]!, async () => {
         // Every cell's principal's lock held by another connection while the cells are asked: all of the batch's on one, a

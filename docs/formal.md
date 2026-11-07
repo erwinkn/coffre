@@ -1561,6 +1561,8 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 | new and stale keys under the principal's lock; refresh on use; covers only while fresh; the refresh's and the deadline's slack | `BulkCapHolds`, `BulkReplayAgrees` |
 | a key moved on takes the principal's lock too, shared (RefreshLocks): without it, a key entering the set misses a move numbered before it, and the replay counts a key live did not | `BulkReplayAgrees` |
 | a row moves to the start of its use's refresh period, never to the use's time (RefreshPeriods): without it, two moves at once leave the row at the later time, where the replay's first move left it earlier | `BulkReplayAgrees` |
+| each key's periods start at a phase of its own (T204; `HotPathOneBulkPhases`, its keys' phases apart): the cap's invariants hold so, and the replay starts each key's periods where the statement does (ReplayPhases). Without, the replay moves a key on at a turn of every key's 0 that the statement did not, or the reverse | `BulkReplayAgrees` |
+| a use the previous release's statement decides, every key's phase 0, beside 0074's (`HotPathOneBulkSwitch`, `OldUses`): each entry records whether its statement phased its key (`log_uses.phased`), and the replay phases a use only on one that says so (ReplayPhased). Without, it replays the old statement's use phased and moves its key's row on to where the statement did not | `BulkReplayAgrees` |
 | other keys count a skew longer again (AheadSlack): a use stamped by a Worker whose clock runs ahead is decided before one stamped earlier, up to D + MaxSkew. Without it, HotPathOneBulkSkew lets two keys out in one window. It was missing before W228: with periods a row starts earlier, and TLC reached the case within the scenario's clock; 0024's design breaks the same way with the clock run to 9 | `BulkCapHolds` |
 | moves take the lock shared, not exclusive (RefreshShared, T127). Its break is by definition (a move holding the lock exclusive while another waits); the harm, one principal's uses queued one behind the other at each refresh, the bench measures | `RefreshesNeverQueue` (R44) |
 | the cap's count and window from the policy read in the use's snapshot (CapFromPolicy), and from its newest change, not its row (CapSealed); HotPathOnePolicyWindow flips the window alone | `BulkReplayAgrees` |
@@ -1603,13 +1605,21 @@ it on in every bulk scenario.
 **Symmetry.** No step, invariant or constant names one use over another,
 nor one key, and no `CHOOSE` breaks a tie between them: each picks a log
 entry by its number, which `NumbersUnique` holds unique. Uses and keys are
-told apart only by what they do. The three bulk scenarios
-(`HotPathOneBulk`, `HotPathOneBulkSlack`, `HotPathOneBulkSkew`), three uses
+told apart only by what they do. Two bulk scenarios
+(`HotPathOneBulk`, `HotPathOneBulkSlack`), three uses
 and two keys each, name them as model values and check one state of each
 set alike but for those names (`SYMMETRY Alike`), `NumbersUnique` among
 their invariants: `HotPathOneBulk` is 2.5 million states rather than 30, a
-twelfth, the most the 3! × 2! orderings allow. A scenario with `PROPERTIES`
-cannot: TLC's liveness checking is unsound under symmetry.
+twelfth, the most the 3! × 2! orderings allow. `HotPathOneBulkPhases`
+tells its two keys apart by their phases (`Staggered`, whose `KeyOrder`
+is the one `CHOOSE` between keys, and which only they use), so only its
+uses are alike (`SYMMETRY UsesAlike`): 5.0 million states.
+`HotPathOneBulkSkew` staggers its keys' phases too, so that a Worker's
+clock ahead may move a phased row before an earlier-stamped use (Fable's
+review of T204): `UsesAlike`, 10.7 million.
+`HotPathOneBulkSwitch` tells its previous release's use apart too, so
+only the others are (`SYMMETRY NewUsesAlike`): 14.8 million. A scenario with
+`PROPERTIES` cannot: TLC's liveness checking is unsound under symmetry.
 
 **Liveness** (`HotPathOneLive`, `FairSpec`: weak fairness on every protocol
 step and on the clock; failures, crashes, tampering and restores are
@@ -2829,7 +2839,7 @@ shortest one.
 Before 0.15's models, run in order, the 125 TLC runs took 22 minutes, twice
 the tests. As three shards they took about 11 (Tampering's), as long as the
 tests do; skipped, seconds. With 0.15's models the suite is 370 TLC runs in
-twelve shards, since `rest` was split in three (below); seven of them are 0.15's. On a shared host with 4 workers,
+thirteen shards, since `rest` was split in three (below); eight of them are 0.15's. On a shared host with 4 workers,
 each new one takes about 5 minutes. CI's runners took about twice as long:
 in its first CI run, Tampering took 10.7 minutes (6.4 here) and the bulk
 shards 10.9 (5.8 and 5.5 here).
@@ -2869,7 +2879,7 @@ every pull request that is not a version-only bump:
   branch could already make `Validate` pass by editing the workflow in their
   own pull request, so this guards against mistakes and stale answers, not
   against them.
-- **A run is twelve jobs in parallel.** `scripts/formal.sh --shard
+- **A run is thirteen jobs in parallel.** `scripts/formal.sh --shard
   <name>` runs the scenarios of one
   (`shard_of`), each with its runs without a protection, balanced by what
   they took:
@@ -2886,10 +2896,11 @@ every pull request that is not a version-only bump:
       there;
     - `routing`: Routing's six and the other Probing variants, about 17;
     - `rest`: everything else, 11 to 13;
-  - 0.15's models in seven:
+  - 0.15's models in eight:
     - `hotpath`;
     - `hotpath-policy` (the policy, liveness, stall liveness and stale-bulk scenarios);
     - `hotpath-bulk` (the bulk cap's main scenario);
+    - `hotpath-phases` (its keys' phases, and beside the previous release's statement, T204);
     - `hotpath-skew` (its slack and clock-skew scenarios);
     - `seal` (Seal and Migration015);
     - `seal-plugin` (SealPlugin, SealCore and SealStall);
@@ -2898,7 +2909,7 @@ every pull request that is not a version-only bump:
 
   A new scenario is in `rest`, unless its name starts as one above. `--list` prints
   what a run would run, without TLC; `scripts/formal-shards.test.mjs` (part of
-  `pnpm test`) holds the matrix to `formal.sh`'s shard list and the twelve to a
+  `pnpm test`) holds the matrix to `formal.sh`'s shard list and the thirteen to a
   partition of every scenario and every run without a protection, so a scenario
   can neither fall out of CI nor run twice. A shard that fails fails `Formal model`, and each prints its own
   counterexamples. CI gives TLC 4 GB of heap (`--heap 4g`, the script's
@@ -2969,7 +2980,7 @@ the code.
 | `standingAt_keyless` | The model's standing at a place reads nothing of a key's: the view with any key and source, or none, decides it alike, by construction (W268). The named statement's gate is held to the rule it models by `use-stands.test.ts`, not by a proof. |
 | `refused_without_standing` | Where the caller does not stand, by 0.14's rules, at the place the use's standing is decided at, the use is refused, whatever its seals and its key: the gate refuses only uses the decision refuses (W268). |
 | `allowed_keyread` | A 0.15 use allowed is one `KeyRead.decide`, 0.14's rules, allows on the reader its sealed inputs make. |
-| `allowed_within_cap`, `bulkRule_writes_admitted` | An allowed use's key is in its principal's set, or fewer than the log's count of other keys count; the cap's rule writes a key's row only for a request it admits, at the start of its refresh period, less than a refresh before its time (`periodOf_lags`). |
+| `allowed_within_cap`, `bulkRule_writes_admitted` | An allowed use's key is in its principal's set, or fewer than the log's count of other keys count; the cap's rule writes a key's row only for a request it admits, at the start of its refresh period, less than a refresh before its time, whatever the phase its principal's key's periods start at (`periodOf_lags`; the oracle passes `phaseOf`'s, T204). |
 | `encodeAad_injective` | No two contexts encode to the same AAD. |
 | `open_only_as_sealed` | A row that opens as a context holds a key the vault wrapped as exactly that context (project, environment, key, owner, sensitivity), and opens to the value the app encrypted under that key for those ids: nothing swaps across them. A rewrap, one key wrapped again as another version, is part of the history it covers. |
 | `versions_not_bound` | The version is not bound: an older version's row, put back, opens as the newer. |

@@ -5,7 +5,7 @@ import type { Database, Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { periodOf, refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS } from './bulk.ts';
+import { periodOf, phaseOf, refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS } from './bulk.ts';
 import { namedStanding } from './decide.ts';
 import { noEdits, objectKey, type Kind, type RolesInput } from './inputs.ts';
 import { purposeOf, WAYS } from './log-replay.ts';
@@ -425,9 +425,10 @@ const NEXT = sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes),
 async function insertUses(tx: Queryable, uses: readonly { number: bigint; call: UseCall }[]): Promise<void> {
   for (let start = 0; start < uses.length; start += CHUNK) {
     const values = uses.slice(start, start + CHUNK).map(({ number, call }) =>
-      sql`(${number}, ${call.at}, ${BigInt(call.requestId)}, ${call.credential}, ${call.secretId}, ${call.purpose}, ${call.mac}, ${call.place}, ${call.route ?? null})`);
+      sql`(${number}, ${call.at}, ${BigInt(call.requestId)}, ${call.credential}, ${call.secretId}, ${call.purpose}, ${call.mac}, ${call.place}, ${call.route ?? null}, 1)`);
     try {
-      await rowsOf(tx, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place, route) VALUES ${sql.join(values, sql`, `)}`);
+      // Every use this twin decides phased its key (`phased`, 0036, as 0074's statement writes it).
+      await rowsOf(tx, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place, route, phased) VALUES ${sql.join(values, sql`, `)}`);
     } catch (error) {
       // The unique (at, request_id), as Postgres says it.
       if (/UNIQUE constraint failed: log_uses/.test(`${String(error)} ${String((error as { cause?: unknown }).cause)}`)) throw Object.assign(new Error('a replayed use'), { code: '23505' });
@@ -823,7 +824,8 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows, routed?: { read
 
   // The cap's rule (bulk.ts, as 0022 and 0024 write it): the key's row, and the others only for a key not in the set.
   const refresh = refreshMs(limit);
-  const period = periodOf(call.at, refresh);
+  // Its key's period for its principal (T204, 0074's `bulk_period`): none to read without a credential or a key.
+  const period = c === undefined || read.secretId === null ? 0 : periodOf(call.at, refresh, phaseOf(c.principal, read.secretId, refresh));
   const since = call.at - limit.windowMs - refresh - USE_DEADLINE_MS - USE_AHEAD_MS;
   const b = c === undefined || read.secretId === null ? undefined : await rows.bulk(c.principal, read.secretId, since);
   const inSet = b !== undefined && b.last > call.at - limit.windowMs - refresh;

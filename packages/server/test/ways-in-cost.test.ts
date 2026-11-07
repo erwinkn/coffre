@@ -152,7 +152,7 @@ async function statements(request: () => Promise<Response>): Promise<{ app: stri
     await response.arrayBuffer();
   };
   // The warm-up and the measured request share one refresh period of the bulk cap: a use in the next one writes its key's row again (T202).
-  await inBulkPeriod(5000);
+  await inBulkPeriod(5000, db.owner, [`user:${DEV}`, EDGE], 'market/dev');
   await run();
   for (const pool of [app, vaultPool, hot]) pool.recording = [];
   await run();

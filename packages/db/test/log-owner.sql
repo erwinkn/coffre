@@ -118,7 +118,7 @@ BEGIN
 END
 $$;
 
--- 0.15's names for the tables 0.16 renamed (0074_table_renames, T178), kept one release: each a view of its table,
+-- 0.15's names for the tables 0.16 renamed (0075_table_renames, T178), kept one release: each a view of its table,
 -- written through as the table (automatically updatable), checked as the caller (security_invoker), and granting
 -- every role exactly what the table grants it, table and column privileges alike, so that neither is wider.
 DO $$

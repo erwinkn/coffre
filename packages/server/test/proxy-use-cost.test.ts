@@ -43,6 +43,8 @@ const API_KEY = 'sk_live_0123456789abcdef';
 
 /** What a request and its warm-up need of one bulk-cap period, far more than they take (T202). */
 const PERIOD_ROOM_MS = 5000;
+/** Whoever uses market/dev's keys here, by handle or token: a person, and a service. */
+const PRINCIPALS = [`user:${DEV}`, 'token:ci'];
 
 type Statement = { text: string; values: unknown[]; rows: number };
 
@@ -150,7 +152,7 @@ async function statements(url: string, token = handle, { warm = true, at = runti
     await response.arrayBuffer();
   };
   // The warm-up and the measured request share one refresh period of the bulk cap: a use in the next one writes its key's row again (T202).
-  await inBulkPeriod(PERIOD_ROOM_MS);
+  await inBulkPeriod(PERIOD_ROOM_MS, db.owner, PRINCIPALS, 'market/dev');
   if (warm) await use();
   for (const pool of [app, vaultPool, hot]) pool.recording = [];
   await use();
@@ -282,7 +284,7 @@ async function revealed(token: string, body: { path: string; keys?: readonly str
     assert.equal(response.status, 200, await response.clone().text());
     await response.arrayBuffer();
   };
-  await inBulkPeriod(PERIOD_ROOM_MS);
+  await inBulkPeriod(PERIOD_ROOM_MS, db.owner, PRINCIPALS, 'market/dev');
   await reveal();
   for (const pool of [app, vaultPool, hot]) pool.recording = [];
   await reveal();

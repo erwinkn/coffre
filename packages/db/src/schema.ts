@@ -1245,6 +1245,13 @@ export const logUses = pgTable(
     place: uuid(),
     // The UI route it was a use of (0.16, T186; docs/design/proxy-ui.md, section 4), under its MAC: null for every other.
     route: text(),
+    // Whether the statement that decided it started its key's refresh periods at the key's phase (0.16, T204, 0074):
+    // true from 0074's `use_credential` on, null from the one before, whose periods all start together. The log's
+    // replay moves the cap as the statement did. Outside the MAC: the previous release's callers MAC their entries,
+    // and 0074's statement may decide them; who could write this could write the cap's rows (R64). Outside the chain's
+    // leaves too (useColumns): only the suites' replay reads it, and a verifier that replays decisions must take it as
+    // unauthenticated. One byte of a row's padding (112 B, 0.15's row with its route null, either way).
+    phased: boolean(),
   },
   (table) => [
     check('log_uses_mac_check', sql`octet_length(${table.mac}) = 16`),

@@ -19,7 +19,7 @@
 #   scripts/formal.sh Deletion Locks  several
 #   scripts/formal.sh --shard rest    one of CI's shards (shard_of): tampering,
 #                                     large, probing, routing, rest, hotpath,
-#                                     hotpath-policy, hotpath-bulk,
+#                                     hotpath-policy, hotpath-bulk, hotpath-phases,
 #                                     hotpath-skew, seal, seal-plugin or
 #                                     seal-retention
 #   scripts/formal.sh --workers 4     TLC's worker threads (default 2)
@@ -311,6 +311,12 @@ REMOVALS=(
   "HotPathOneBulk CoverFresh BulkCapHolds"
   "HotPathOneBulk DeadlineSlack BulkCapHolds"
   "HotPathOneBulkSlack Slack BulkCapHolds"
+  # Each key's periods from a phase of its own (T204): the replay must start them where the statement does.
+  "HotPathOneBulkPhases ReplayPhases BulkReplayAgrees"
+  "HotPathOneBulkPhases RefreshPeriods BulkReplayAgrees"
+  "HotPathOneBulkPhases CoverFresh BulkCapHolds"
+  # Across 0074: the previous release's statement, beside the new one, phases no key; the replay phases a use only if its entry says its statement did.
+  "HotPathOneBulkSwitch ReplayPhased BulkReplayAgrees"
   # A use whose Worker's clock runs ahead is decided before one stamped earlier: other keys count that much longer (W228).
   "HotPathOneBulkSkew AheadSlack BulkCapHolds"
   "HotPathOnePolicy CapFromPolicy BulkReplayAgrees"
@@ -688,16 +694,17 @@ EXPECTED=(
 #             largest: 11 to 13 minutes.
 # T165's ProbingMany scenarios, about 10 minutes of CI (ProbingManyFork 7 of
 # them), are in `large`. 0.15's models (HotPathOne, Seal,
-# Migration015) have seven of their own, each about 5 minutes of TLC with 4
+# Migration015) have eight of their own, each about 5 minutes of TLC with 4
 # workers on a shared host, which CI's runners took about twice as long to
 # run: hotpath, hotpath-policy (the policy, liveness and stale-bulk
-# scenarios), hotpath-bulk (the bulk cap's main scenario), hotpath-skew (its
-# slack and clock-skew scenarios), seal (Seal and Migration015),
+# scenarios), hotpath-bulk (the bulk cap's main scenario), hotpath-phases
+# (its keys' phases, and beside the previous release's statement, T204),
+# hotpath-skew (its slack and clock-skew scenarios), seal (Seal and Migration015),
 # seal-plugin (SealPlugin and SealCore) and seal-retention (SealRetention,
 # SealRetentionCrash and the key's Rotation scenarios). A scenario in no case
 # below is in `rest`; `scripts/formal-shards.test.mjs` holds the shards to a
 # partition of every scenario and every run without a protection.
-SHARDS="tampering large probing routing rest hotpath hotpath-policy hotpath-bulk hotpath-skew seal seal-plugin seal-retention"
+SHARDS="tampering large probing routing rest hotpath hotpath-policy hotpath-bulk hotpath-phases hotpath-skew seal seal-plugin seal-retention"
 shard_of() {
   case "$1" in
     Tampering) echo tampering ;;
@@ -706,6 +713,7 @@ shard_of() {
     Routing*|Probing*) echo routing ;;
     HotPathOneBulkSkew|HotPathOneBulkSlack) echo hotpath-skew ;;
     HotPathOneBulk) echo hotpath-bulk ;;
+    HotPathOneBulkPhases|HotPathOneBulkSwitch) echo hotpath-phases ;;
     HotPathOneLive|HotPathOneStallLive|HotPathOnePolicy|HotPathOnePolicyWindow|HotPathOneStaleBulk) echo hotpath-policy ;;
     HotPathOne*) echo hotpath ;;
     SealPlugin|SealCore|SealStall) echo seal-plugin ;;

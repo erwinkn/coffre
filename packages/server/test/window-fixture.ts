@@ -1,11 +1,17 @@
-// Fixed windows in tests (T217, T202, T218). Two things count by the wall clock's minute: a workload gate's
-// limits (`gate.ts`: a count's window starts at `floor(now / windowMs) * windowMs`), and the vault's bulk cap, whose
-// refresh period a use writes its key's row in (`bulk.ts`). A minute turning over between a test's calls resets the
-// first and makes the second's next use write its row again, a statement and a round it did not take before.
+// Fixed windows in tests (T217, T202, T218, T204). Two things count by the clock: a workload gate's limits (`gate.ts`:
+// a count's window starts at `floor(now / windowMs) * windowMs`), the wall clock's minute; and the vault's bulk cap,
+// whose refresh period a use writes its key's row in (`bulk.ts`), a minute that starts for each principal's key at a
+// phase of its own (`phaseOf`, 0074's `bulk_period`). A window turning over between a test's calls resets the first and makes
+// the second's next use write its row again, a statement and a round it did not take before.
 // A test whose assertion depends on all its calls sharing one window uses what is here, rather than hope it does.
 // A gate's day count is the same, by the UTC day: a test in this process stops the clock (`t.mock.timers`), one in
 // another (workerd) waits for a day with room (`inUtcDay`).
+import { createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
+
+import type { Queryable } from '@coffre/db';
+import { rowsOf } from '@coffre/db/dialect';
+import { sql } from 'drizzle-orm';
 
 import { GateState, type Gates } from '../src/gate.ts';
 
@@ -31,13 +37,37 @@ export function pinnedGates(now: number = Date.now()): Gates {
 }
 
 /**
- * Waits for the next minute if fewer than `ms` of this one are left, so that calls taking less than `ms` share a
- * refresh period of the bulk cap (a minute, `refreshMs` of the default 15-minute window). The same wait as the
- * vault's matrices make (`inPeriod`); the database's clock and this one are the machine's.
+ * Where `principal`'s `key` starts its refresh periods, in [0, `refresh`): the vault's `phaseOf` (`bulk.ts`), which
+ * 0074's `bulk_period` and the SQLite store compute too (`sql-copies.test.ts` holds the first to it). A copy, since a
+ * package's tests import another's exports only, and the vault exports no cap internals; a copy that drifted would
+ * only wait at the wrong times again, as the minute did (T204).
  */
-export async function inBulkPeriod(ms: number, now: () => number = Date.now): Promise<void> {
-  const left = MINUTE_MS - (now() % MINUTE_MS);
-  if (left < ms) await sleep(left + 50);
+function phaseOf(principal: string, key: string, refresh: number): number {
+  return createHash('sha256').update(`${principal}/${key.toLowerCase()}`, 'utf8').digest().readUIntBE(0, 6) % refresh;
+}
+
+/**
+ * Waits until no key with a value in `place` (`project/environment`) turns its bulk-cap period within `ms` for any of
+ * `principals`, so that calls taking less than `ms` share each key's period (a minute, `refreshMs` of the default
+ * 15-minute window). Reads the keys from `db`, on either engine. Waits less than a minute, or throws if no time in the
+ * next one leaves `ms` for every key. The database's clock and this one are the machine's.
+ */
+export async function inBulkPeriod(ms: number, db: Queryable, principals: readonly string[], place: string, now: () => number = Date.now): Promise<void> {
+  const [project, environment] = place.split('/');
+  const keys = await rowsOf<{ id: string }>(db, sql`
+    SELECT s.id FROM secrets s JOIN environments e ON e.id = s.environment_id JOIN projects q ON q.id = e.project_id
+     WHERE q.slug = ${project} AND e.slug = ${environment} AND s.current_version_id IS NOT NULL`);
+  if (keys.length === 0) throw new Error(`no key with a value in ${place}`);
+  const phases = principals.flatMap((principal) => keys.map(({ id }) => phaseOf(principal, id, MINUTE_MS)));
+  const left = (at: number) => Math.min(...phases.map((phase) => MINUTE_MS - ((((at - phase) % MINUTE_MS) + MINUTE_MS) % MINUTE_MS)));
+  const start = now();
+  for (let at = start; at < start + MINUTE_MS; at += left(at) + 50) {
+    if (left(at) >= ms) {
+      if (at > start) await sleep(at - now());
+      return;
+    }
+  }
+  throw new Error(`no time in the next minute leaves ${ms} ms in every one of ${phases.length} keys' periods`);
 }
 
 const DAY_MS = 86_400_000;

@@ -1073,6 +1073,8 @@ export const logUses = sqliteTable(
     mac: bytes('mac').notNull(),
     place: text(),
     route: text(),
+    // As Postgres's: 1 from 0074's statement's twin on, null before.
+    phased: flag('phased'),
   },
   (table) => [
     check('log_uses_mac_check', sql`octet_length(${table.mac}) = 16`),
