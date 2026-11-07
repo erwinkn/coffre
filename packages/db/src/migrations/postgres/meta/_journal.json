@@ -519,6 +519,13 @@
       "when": 1793980000000,
       "tag": "0076_table_renames",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1794080575180,
+      "tag": "0077_access_index",
+      "breakpoints": true
     }
   ]
 }

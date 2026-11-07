@@ -9,6 +9,7 @@ import { later, laterRows } from './later.ts';
 import { prepared } from './prepared.ts';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf } from './dialect.ts';
 
+export { accessAllowed } from './access-entries.ts';
 export { recordField, recorded, RECORDS, type ChangeRecord } from './change-records.ts';
 
 /**

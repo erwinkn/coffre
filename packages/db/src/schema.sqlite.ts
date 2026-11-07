@@ -15,6 +15,7 @@ import {
   type AnySQLiteColumn,
 } from 'drizzle-orm/sqlite-core';
 
+import { accessAllowed } from './access-entries.ts';
 import { ACTIVE_SUBJECT } from './active-subject.ts';
 import { recordField, recorded } from './change-records.ts';
 
@@ -426,6 +427,11 @@ export const auditLog = sqliteTable(
     index('audit_log_action_idx').on(table.author, table.action, table.seq),
     index('audit_log_releases_idx').on(table.author, table.actor, table.action, table.decision, table.occurredAt),
     index('audit_log_subject_idx').on(table.author, table.subjectPrincipal, table.seq),
+    // Of those, the allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
+    // however many refusals the log holds about them (T239, R48). Keyed as the subject index, `author` first, unlike
+    // Postgres's: SQLite weighs an index by the equalities it matches, and picks the subject index over one that matches
+    // fewer.
+    index('audit_log_access_idx').on(table.author, table.subjectPrincipal, table.seq).where(accessAllowed()),
     // A binding's tombstone: the app's successful `token.unbind` naming it.
     index('audit_log_unbind_idx')
       .on(sql`json_extract(${table.metadata}, '$.bindingId')`)

@@ -1389,7 +1389,9 @@ test("a member's report, `me` and the members list read as many pages however ma
  * the walk that names the principals, to the rowless principals' log: a ceiling of its own, not a baseline an earlier
  * plan could raise. This file leaves no principal rowless, so the ceiling is 16 pages, which the old order passed by
  * about 170 (172 against 0 over 20 analyzes, each a fresh sample of the ~190,000 entries this file leaves): a bound for
- * this fixture, not for any log, where a hash join may scan the log for a few rowless principals.
+ * this fixture, not for any log, where a hash join may scan the log for a few rowless principals. Since T239 the read
+ * looks for no access entry at all: `audit_log_access_idx` holds the allowed ones alone, which name the principals, and
+ * the next test holds that walk flat.
  */
 test("the missing members' read looks in the log, beyond naming its principals, only for those with no member row (T233)", POSTGRES, async () => {
   await db.owner.execute(sql`ANALYZE audit_log`);
@@ -1407,6 +1409,73 @@ test("the missing members' read looks in the log, beyond naming its principals, 
   const inLog = (node: Plan): number => node['Node Type'] === 'Recursive Union' ? 0
     : (node['Relation Name'] === 'audit_log' ? node['Shared Hit Blocks'] + node['Shared Read Blocks'] : 0) + (node.Plans ?? []).reduce((sum, child) => sum + inLog(child), 0);
   assert.ok(inLog(tree) <= 8 * rowless[0]!.n + 16, `the missing members' read read ${inLog(tree)} pages of the log beyond naming its principals, ${rowless[0]!.n} of them with no member row:\n${plan}`);
+});
+
+/**
+ * R48 for the missing members' read (`missingMembers`), of everyone and of one: the vault's refusals of access changes
+ * about someone with no member row, which name them in the log as its allowed changes do, cost nothing however many
+ * there are; nor do the other changes of 0.15's log. Before `audit_log_access_idx` (T239), the read of everyone named
+ * them by any entry of the vault's about them, then looked through every one for an allowed access change, and the read
+ * of one scanned the log for it: 33 pages to 233 from 1,000 refusals to 10,000, and the whole log. Each refusal here is a
+ * copy of the vault's own, older than any entry.
+ */
+test("the missing members' read reads as many pages however many refusals the log holds about someone with no member row (T239)", POSTGRES, async () => {
+  const REFUSED = 'user:refused@acme.example';
+  const ROOT_PRINCIPAL = `user:${ROOT}`;
+  // An entry of the vault's, whose key and chain columns each copy keeps: a refusal is 0.14's log's alone, which an
+  // upgraded instance keeps, as 0.15's records its refusals in its own (`refusedAdd`).
+  const [vaultEntry] = await db.owner.execute<{ seq: string }>(sql`SELECT CAST(max(seq) AS text) AS seq FROM audit_log WHERE author = 'vault'`);
+  assert.ok(vaultEntry?.seq, 'the vault logged an entry');
+  const reads: Record<string, () => Promise<unknown>> = {
+    'the members list': () => root.members.list(),
+    "the report of someone with no member row, whom the log names": () => root.members.get(REFUSED).catch(() => undefined),
+  };
+  const pages = async () => {
+    const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
+    for (const [name, run] of Object.entries(reads)) {
+      await run();
+      app.recorded = [];
+      await run();
+      const statements = [...app.recorded].filter((statement) => /^\s*(select|with)\b/i.test(statement.text)).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+      app.recorded = null;
+      // `missingMembers` names its tables bare, as no other read does.
+      assert.ok(statements.some((statement) => /\bfrom\s+audit_log\b/i.test(statement.text)), `${name} read no missing members`);
+      read[name] = [];
+      for (const statement of statements) {
+        const work = await app.work(statement);
+        read[name].push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
+      }
+    }
+    return read;
+  };
+  let changes = 50_000_000;
+  /** `count` refusals to grant `REFUSED` a place, each older than any entry, and as many changes of 0.15's log that no read lists. */
+  const grow = async (count: number) => {
+    await db.owner.execute(sql`
+      INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, code, subject_principal, project_id, environment_id, secret_id,
+        secret_version_id, operation_id, request_id, source_ip, related_seq, metadata, prev_hash, mac, hash)
+      SELECT (SELECT least(min(seq), 0) FROM audit_log) - g, author, key_id, occurred_at - g, ${ROOT_PRINCIPAL}, 'access.grant', 'deny', 'not_a_member', ${REFUSED},
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{}', prev_hash, mac, hash
+      FROM audit_log CROSS JOIN generate_series(1, ${count}) g WHERE seq = ${vaultEntry.seq}`);
+    await db.owner.execute(sql`
+      INSERT INTO log_changes (number, at, request_id, object, actor, payload, mac)
+      SELECT ${changes} + g, ${changes} + g, 'renewed-' || (${changes} + g), gen_random_uuid(), 'system:load',
+        '{"expiresAt":' || g || ',"op":"credential.renew","ref":{"id":"r","kind":"credential"}}', decode(repeat('00', 16), 'hex')
+      FROM generate_series(1, ${count}) g`);
+    changes += count;
+    await db.owner.execute(sql`VACUUM (ANALYZE, PARALLEL 0) audit_log, log_changes, principals`);
+  };
+  await grow(1_000);
+  const small = await pages();
+  await grow(10_000);
+  const grown = await pages();
+  for (const [name, statements] of Object.entries(small)) {
+    assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
+    for (const [i, { text, pages: before }] of statements.entries()) {
+      const { pages: after, plan } = grown[name]![i]!;
+      assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with 11,000 refusals about someone with no member row, ${before} with 1,000:\n${plan}`);
+    }
+  }
 });
 
 
