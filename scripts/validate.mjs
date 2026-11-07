@@ -289,6 +289,14 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
       kill(pid, signal)
     }
     kill(-active.pid, signal)
+    // A step that handles the signal but hangs while shutting down must not hold the
+    // run: three seconds on, whatever is left of it is killed, so teardown and the
+    // summary are reached.
+    const stuck = active
+    setTimeout(() => {
+      if (active === stuck) kill(-stuck.pid, 'SIGKILL')
+      for (const pid of strays) kill(pid, 'SIGKILL')
+    }, 3000).unref()
   })
 }
 const reap = async () => {
@@ -393,8 +401,8 @@ try {
 
 // The summary vouches for HEAD's tree: it must be what the steps ran on.
 const headAfter = git('rev-parse', 'HEAD')
-const dirty = git('status', '--porcelain', '--untracked-files=no')
-if (headAfter !== head || dirty) results.push({ name: 'tree', status: 'FAIL', why: headAfter !== head ? `HEAD moved to ${headAfter.slice(0, 10)}` : 'tracked files changed during the run' })
+const dirty = git('status', '--porcelain')
+if (headAfter !== head || dirty) results.push({ name: 'tree', status: 'FAIL', why: headAfter !== head ? `HEAD moved to ${headAfter.slice(0, 10)}` : 'files changed or appeared during the run' })
 if (teardownFailed) results.push({ name: 'postgres', status: 'FAIL', why: 'not removed' })
 
 const ok = !interrupted && results.every((r) => r.status === 'pass' || r.status === 'skipped')
