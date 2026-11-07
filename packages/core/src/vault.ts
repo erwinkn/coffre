@@ -9,6 +9,7 @@ export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './check
 export { Deploying, gated, isDeploying, RELEASE, VAULT_METHODS, versioned, type VaultAnswer, type VaultEntry, type VaultMethod } from './vault-entry.ts';
 export * from './proxy.ts';
 import type { ProxyDefinition } from './proxy.ts';
+export { CLOCK_SKEW_MS } from './clock.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
 export {
   answerFrom,

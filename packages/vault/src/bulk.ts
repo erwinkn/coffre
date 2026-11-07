@@ -1,4 +1,4 @@
-import { USE_DEADLINE_MS } from '@coffre/core/vault';
+import { CLOCK_SKEW_MS, USE_DEADLINE_MS } from '@coffre/core/vault';
 
 import type { BulkLimit } from './config.ts';
 
@@ -35,10 +35,10 @@ export { USE_DEADLINE_MS };
 
 /**
  * How far past the database's clock a use may be stamped (`ahead` refuses past it): no use is decided earlier than
- * this before its `at`. A bound the design chose for a Worker's clock (W228, migration 0028; hot-path-one.md, "Amended
- * by W228"), not a measured skew. The functions of 0024 on write it as `+ 60000`, which a test holds to this.
+ * this before its `at`. A Worker's clock against Postgres's, so `CLOCK_SKEW_MS` (W228, migration 0028; hot-path-one.md,
+ * "Amended by W228"). The functions of 0024 on write it as `+ 60000`, which a test holds to this.
  */
-export const USE_AHEAD_MS = 60_000;
+export const USE_AHEAD_MS = CLOCK_SKEW_MS;
 
 /**
  * The bulk refresh (sealed-inputs.md, "`refresh` is a minute, or a tenth of a shorter window"): a hot key writes its

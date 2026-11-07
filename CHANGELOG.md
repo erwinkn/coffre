@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **A token's end may run at most a minute past its longest by the app's
+  clock, not five (W331, limits D3).** The vault held a service or
+  personal token's end to its longest plus 5 minutes, the room for an app
+  whose clock runs ahead of the database's; it now allows one minute,
+  `CLOCK_SKEW_MS` (`@coffre/core/vault`), the bound every check that a
+  time alone makes fresh already used: a Worker's clock against
+  Postgres's (`USE_AHEAD_MS`), a workload session's end and a CI run's
+  sign-in proof (`EXCHANGE_SKEW_SECONDS`). An app host more than a
+  minute ahead of its database has its longest tokens refused; fix its
+  clock. The checks something else makes fresh keep their own bounds:
+  DPoP's 300 s, an AWS proof's 5 minutes, an ID token's 30 s, Access's 0.
+
 - **`path()` redirects: two cases held by a test, one written down (T211).**
   A `Location` with the token's colon encoded twice (`%253A`), in its path or
   its query, is a 502 with nothing of the answer, and a relative one whose
