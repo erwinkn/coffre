@@ -306,7 +306,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | The migrator's lock waits | 500 ms for **each lock** a statement waits for, so one statement that waits for several may wait longer in all; then the run is tried again, up to 5 times, 1 s apart, and a try is the **whole transaction** of the pending migrations: one that gives up on its third migration applies the first two again | `LOCK_WAIT_MS` (Postgres's `lock_timeout` counts each wait); `MIGRATION_LOCK_ATTEMPTS`, `MIGRATION_LOCK_PAUSE_MS` | #508, #538 (`packages/db/src/migrate.ts`, `waitingBriefly`). The migration lock itself and the roles' last statements wait up to 5 min, for another run |
 | The two credential writers that take the uses' lock exclusively, in SQL (`revoke_credential`, `change_bindings`) | 500 ms (from 1 s) | `LOCK_WAIT_MS` | #538 (migration 0076) |
 | `sign_in`, `issue_token` | 1 s | they take only the issue lock, which no use asks for | #538 |
-| A read's deadline (`CALL_DEADLINE_MS`, was `READ_DEADLINE_MS`) | 5 s, nominal: **not from the call's start**, and **not a strict total** after it. Its clock starts once the vault is settled and cut over (`#decideNow`); `unwrap`'s once it has loaded the versions, read the references, settled and read the environments, at `#keys`. That preparation has no bound of its own beyond each statement's. And the transaction sets what is left, once, at its BEGIN, as a `SET LOCAL statement_timeout` that Postgres times per statement: two statements of 2.8 s each end at 5.6 s, neither timed out | a choice: "a caller hears within it" | #356 ⚠ not derived; #538 (`vault.ts`, `#decide`; `store.ts`, `boundLockWaits`). A strict 5 s needs the client to cancel the call's query at the deadline (Postgres's cancel request), not one more `SET` per statement, which a batch sent under one Sync computes before any of it runs |
+| A read's deadline (`CALL_DEADLINE_MS`, was `READ_DEADLINE_MS`) | 5 s, nominal: **not from the call's start**, and **not a strict total** after it. Its clock starts once the vault is settled and cut over (`#decideNow`); `unwrap`'s once it has loaded the versions, read the references, settled and read the environments, at `#keys`. That preparation has no bound of its own beyond each statement's. And the transaction sets, once, at its BEGIN, both `lock_timeout` and `statement_timeout` (`SET LOCAL`) to **min(what is left, 3 s)** (`READ_LOCK_TIMEOUT_MS`), which Postgres times per statement: no read statement runs past 3 s, but two statements of 2.8 s each end at 5.6 s, neither timed out | a choice: "a caller hears within it" | #356 ⚠ not derived; #538 (`vault.ts`, `#decide`; `store.ts`, `boundLockWaits`). A strict 5 s needs the client to cancel the call's query at the deadline (Postgres's cancel request), not one more `SET` per statement, which a batch sent under one Sync computes before any of it runs |
 | A read with a key service | 10 s; 8.1 s once `KEY_BUDGET_MS` is 3,118 ms (below), from `#keys`, after the preparation above | `CALL_DEADLINE_MS` + `KEY_BUDGET_MS` | #538 |
 | A write call | its lock waits retried for up to 5 s from its first attempt; its work itself unbounded | `CALL_DEADLINE_MS` as a retry budget | R75: writes may take longer |
 | Its retry pauses | 25 ms doubling to 400 ms, ×0.5 to ×1.5 | a retry policy, written as one | #538 |
@@ -379,7 +379,7 @@ read call with a key service 11.2 s.
 | Node's limiter keys | 10,000 | the addresses one window's target can come from; about 2 MB | #520 |
 | Exchanges in flight per isolate | **32** ⚠ | none written | stays until a sign-in has a deadline of its own (limits.md #35) |
 | A binding removal's batch, Node (`UNBIND_BATCH`) | 125 | 10 ms ÷ 0.08 ms a credential, measured | the 10 ms is `FENCE_BUDGET_MS` = 10 uses in flight ÷ 1,000 a second: **derived from Q1's 10**, see Q1 and its refusal table |
-| The same, on Workers | 114 a call, 228 a request | (10 ms − 4.85 ms fixed) ÷ 0.045 ms; 2 calls in the request's CPU, within 32 invocations | measured on workerd (#520) |
+| The same, on Workers | 114 a call, 228 a request | (10 ms − 4.85 ms fixed) ÷ 0.045 ms; 2 calls in the request's CPU, within 32 invocations | **estimated, from mixed runtimes** (#520, `removal.ts`): the per-credential costs (0.045 ms, 0.0175 ms) and the calls' own fixed CPU (0.55, 0.75 ms) are Node's, in process; only the 4.3 ms connection and login is workerd's, measured on another operation (the verifier's three statements, `ABOVE_NEWEST`). Whether a removal fits Free's 10 ms is unmeasured: a removal call and request timed on workerd would settle it |
 | A batch's bytes | 4 MiB | half the Node vault socket's 8 MiB message | #520 |
 | Spent sign-in tokens forgotten a beat | 600,000 | 2 × 1,000 a second × 300 s | R44 (#520; was 5,000) |
 | Open bindings per service (`MAX_BINDINGS`) | **16** ⚠ | none written | limits.md §3.6 proposes 256, once a sign-in reads only the bindings that can match |
@@ -638,7 +638,8 @@ Node has no shards: there the count is exact.
 bounds a write's lock waits to 500 ms (section 2.4 lists the longer ones:
 reads 3 s, `sign_in` and `issue_token` 1 s), and the vault's transactions
 that carry a deadline bound each statement by what was left of it at
-BEGIN (`SET LOCAL statement_timeout`, which Postgres counts per
+BEGIN, a read's capped at 3 s (`SET LOCAL statement_timeout` and
+`lock_timeout` to min(left, 3 s), which Postgres counts per
 statement), so the transaction as a whole may run past it (section 2.4). What is left unbounded: every app statement, and vault statements
 outside a deadline's transaction. Postgres runs such a statement until it
 ends or Hyperdrive gives up at 60 s.
@@ -697,7 +698,7 @@ equals a read call's deadline (`CALL_DEADLINE_MS`), and no statement of a
 caller who hears within 5 s needs longer. Writes may take longer (R75), so
 before the migration the suites run with it on, to find any write
 statement that legitimately does. The vault's transactions keep tightening
-it to what their deadline had left at BEGIN, as today: per statement,
+it to what their deadline had left at BEGIN, a read's to at most 3 s, as today: per statement,
 not a bound on the whole (section 2.4 says what a strict one needs). Backups and migrations use
 logins of their own, untouched. *Example:* today a slow vault statement on
 a small database holds one of its config's 6 connections for up to

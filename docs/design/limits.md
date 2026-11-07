@@ -699,7 +699,8 @@ Not settings, and what each needs:
   fence's: 10 ms ÷ 0.08 ms = 125 on Node (below). On Workers it is also
   held to a call's 10 ms of CPU (the Free plan's hard limit: a call over
   it is killed, 1102, on every try): (10 − 4.85 ms fixed) ÷ 0.045 ms =
-  114, and a request makes two such calls ((10 − 5.05 ms) ÷ 2.0 ms per
+  114 (an estimate: Node's costs per credential, workerd's 4.3 ms
+  connection from the verifier; unmeasured on workerd as a whole), and a request makes two such calls ((10 − 5.05 ms) ÷ 2.0 ms per
   batch) within its 32 invocations, counted, then answers 202
   `{ removing: { left } }`; the client asks again until it is done, and
   the scheduled run finishes one abandoned. Measured with a removal of
