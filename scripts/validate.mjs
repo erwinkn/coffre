@@ -41,7 +41,8 @@ const code = (f) => !/\.md$/.test(f) && !f.startsWith('docs/')
 const anyOf = (...prefixes) => (f) => prefixes.some((p) => f.startsWith(p))
 // What every install and every step that runs workspace code depends on.
 const manifests = anyOf('package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.node-version')
-const packages = (f) => anyOf('packages/', 'examples/', 'dev/')(f) || manifests(f)
+// docker-compose.yml: every step that boots Postgres, or builds on one, starts it from this file.
+const packages = (f) => anyOf('packages/', 'examples/', 'dev/', 'docker-compose.yml')(f) || manifests(f)
 const formalModel = (f) =>
   /^formal\/[^/]+\.(tla|cfg)$/.test(f) ||
   ['scripts/formal.sh', 'scripts/formal-trace.mjs'].includes(f)
@@ -86,7 +87,7 @@ const STEPS = [
   { name: 'proofs', job: 'proofs', needs: (f) => leanInputs(f) || manifests(f), run: ['pnpm formal:lean'] },
   { name: 'workers', job: 'workers', build: true, postgres: true, browser: true, needs: packages, run: [`pnpm conformance:workers --browser ${BROWSER}`] },
   { name: 'node', job: 'node', build: true, browser: true, needs: packages, run: [`pnpm conformance:node --browser ${BROWSER}`] },
-  { name: 'terraform', job: 'terraform', build: true, needs: (f) => anyOf('terraform-provider/', 'packages/server/', 'packages/conformance/')(f) || manifests(f), run: ['pnpm test:terraform'] },
+  { name: 'terraform', job: 'terraform', build: true, needs: (f) => packages(f) || f.startsWith('terraform-provider/'), run: ['pnpm test:terraform'] },
   // The consumer script starts Postgres itself (ensure-postgres.sh), so it gets this run's.
   { name: 'consumer', job: 'consumer', build: true, postgres: true, needs: (f) => packages(f) || f === 'scripts/client-smoke.cjs', run: ['pnpm test:consumer'] },
   { name: 'compat', job: 'compat', postgres: true, needs: (f) => anyOf('packages/db/', 'packages/server/', 'packages/vault/', 'packages/conformance/', 'scripts/compat', 'docker-compose.yml')(f) || manifests(f), run: ['pnpm test:compat'] },
@@ -160,7 +161,8 @@ if (diffFiles.includes('package.json')) {
 // test-databases.mjs without the step's command naming it). A file counts as called
 // when another's text holds its name; reading too much only runs a step more often.
 const scriptFiles = (text) => [...text.matchAll(/(?:^|[\s'"=])(?:\.\/)?(scripts\/[A-Za-z0-9_./-]+)/g)].map((m) => m[1])
-const rootScripts = manifest(head).scripts ?? {}
+// A root script the change deleted still names the steps that run it.
+const rootScripts = { ...(manifest(base).scripts ?? {}), ...(manifest(head).scripts ?? {}) }
 // A helper the change deleted still names the steps that call it.
 const tracked = [...new Set([...git('ls-files', 'scripts').split('\n'), ...git('ls-tree', '-r', '--name-only', base, 'scripts').split('\n')])].filter(Boolean)
 const readTracked = (file) => {
@@ -200,12 +202,23 @@ const inputsOf = (step) => {
   return { scripts, files }
 }
 
+const claims = (step, f) => {
+  const { scripts, files } = inputsOf(step)
+  return step.needs(f) || files.has(f) || (f.startsWith('root script ') && scripts.has(f.slice(12)))
+}
+// A changed file that is code, outside the few that cannot affect a run, and that no
+// step claims (the tests take any code file, so they claim nothing here): the rules above missed it, so every step but TLC (its own key) runs,
+// rather than the miss passing as a skip.
+// (The JavaScript tools in scripts/ and their tests are exercised by `tests`; the shell scripts name their steps.)
+const inert = (f) => !code(f) || anyOf('.github/', '.cursor/', '.vscode/', '.gitignore', 'LICENSE', 'scripts/validate.mjs')(f) || /^scripts\/[^/]+\.(mjs|cjs|ts)$/.test(f)
+const unclaimed = changed.find((f) => !inert(f) && !STEPS.some((s) => s.needs && s.needs !== code && claims(s, f)))
+
 // Whether the diff needs a step, apart from what the flags choose.
 const needed = (step) => {
   if (!step.needs) return 'every change'
-  const { scripts, files } = inputsOf(step)
-  const hit = changed.find((f) => step.needs(f) || files.has(f) || (f.startsWith('root script ') && scripts.has(f.slice(12))))
-  return hit ? `${hit} changed` : null
+  const hit = changed.find((f) => claims(step, f))
+  if (hit) return `${hit} changed`
+  return unclaimed && !step.full ? `${unclaimed} changed and no step claims it` : null
 }
 const decide = (step) => {
   if (only.size) return only.has(step.name) ? 'only' : null

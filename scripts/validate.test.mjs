@@ -104,3 +104,32 @@ test('a rename selects the steps of the path it left', () => {
   })
   assert.match(steps.terraform, /terraform-provider\.sh changed/)
 })
+
+test('a root script the change deleted still selects the steps that run it', () => {
+  const steps = selected((dir) => {
+    const { scripts, ...rest } = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+    delete scripts['test:terraform']
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ ...rest, scripts }))
+  })
+  assert.match(steps.terraform, /root script test:terraform changed/)
+  assert.match(steps.consumer, /not run: diff does not touch it/)
+})
+
+test('packages and the compose file select the steps that boot a deployment on them', () => {
+  for (const file of ['packages/core/src/a.ts', 'examples/node/vault.ts', 'packages/db/src/a.ts', 'docker-compose.yml']) {
+    const steps = selected((dir) => {
+      mkdirSync(join(dir, file, '..'), { recursive: true })
+      writeFileSync(join(dir, file), '# changed')
+    })
+    for (const name of ['terraform', 'consumer', 'workers']) assert.match(steps[name], /changed/, `${name} for ${file}`)
+  }
+})
+
+test('a code file no step claims runs every step but TLC', () => {
+  const steps = selected((dir) => writeFileSync(join(dir, 'mystery.config'), '# changed'))
+  assert.match(steps.tests, /mystery\.config changed/)
+  for (const name of ['terraform', 'matrices', 'workers']) assert.match(steps[name], /no step claims it/)
+  assert.match(steps.formal, /not run/)
+  const docs = selected((dir) => writeFileSync(join(dir, 'NOTES.md'), '# changed'))
+  assert.match(docs.tests, /not run: diff does not touch it/)
+})
