@@ -772,6 +772,27 @@ Not settings, and what each needs:
 `MAX_BINDINGS` by the narrower read and 256, or measured; `replicas` up to
 1,000.
 
+### 3.7 Accepted costs an Owner controls
+
+Under Erwin's 2026-11-06 decision (no artificial limits, R70), #533 (W354,
+body bounds) drops the per-field bounds on two pieces of admin-written
+display text and accepts what they cost. Only an Owner or admin writes
+either, so the cost lands on the instance its own admins configure, not on
+what a caller sends.
+
+- **A binding's label, up to ~1 MiB (the API's body bound).** It is copied
+  into every credential a CI sign-in issues and into that sign-in's log
+  entry, so a 1 MiB label is about 1 MiB written per sign-in, at up to R44's
+  1,000 sign-ins a second. Documented in
+  [workload-access.md](workload-access.md).
+- **Role descriptions, up to 32 roles of ~900 KiB each.** The roles config
+  every app and vault isolate holds and parses then reaches ~29.5 MB per
+  isolate, out of Workers' 128 MB. Documented in [roles.md](roles.md).
+
+#533 also replaces the CI sign-in's CPU accounting (`SIGN_IN_WORK_NS` and the
+claim-matching budget, as of its head `b8dc8c73`) with one bound of ~32 KiB
+on the bytes read before sign-in.
+
 ## 4. The inventory
 
 Columns: **Name**, **Value**, **Where** (path from the package root),
