@@ -1122,6 +1122,38 @@ test('a key service\'s intent is accounted for until the call\'s whole budget fr
   assert.ok(left >= 2 * CALL_DEADLINE_MS + 5_000 && left < 2 * CALL_DEADLINE_MS + 5_000 + 1_000, `accounted for ${left} ms`);
 });
 
+test('a vault moved to a new signing key while a read is at the key service logs that read\'s outcome itself: no intent left open (review r2)', async () => {
+  const { keks, seen } = service();
+  const w = await world({ keks });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  let answer = () => {};
+  const until = new Promise<void>((resolve) => (answer = resolve));
+  const reached = new Promise<void>((resolve) => (seen.pause = { reached: resolve, until }));
+  const read = w.vault.unwrap({ principal: ADA, purpose: 'reveal', items }).catch((error: unknown) => error);
+  await reached;
+  // A deploy's new vault, given a new signing key with the old one after it, rotates as it starts: nothing it waits
+  // for is held across the key service, so it lands while the read is there.
+  const newer = randomBytes(32);
+  const config = configure({ keks, signingKeys: [newer, SIGNING_KEY] });
+  const rotated = await openLocalVault(await db.connect(), config);
+  assert.equal((await rotated.access(ROOT)).role, 'owner');
+  answer();
+  const released = await read;
+  assert.ok(released instanceof Error || !(released as { ok: boolean }).ok, 'the read on the retired key releases nothing');
+  for (const key of seen.opened) assert.ok(key.every((byte) => byte === 0), 'the key it opened is wiped');
+  const log = await vaultLog(w);
+  const intent = log.findLast((entry) => entry.action === 'key.intent')!;
+  const rotation = log.find((entry) => entry.action === 'key.rotate')!;
+  const outcome = log.find((entry) => entry.action === 'secret.read' && entry.detail.relatedSeq === String(intent.seq))!;
+  assert.ok(outcome.seq > rotation.seq && outcome.outcome === 'refuse' && outcome.code === 'wrong_kek', 'its outcome logged by the rotation, refused');
+  // Long after the intent's deadline, verification finds every key it named accounted for.
+  const later = await openLocalVault(await db.connect(), config, { clockOffset: () => 3_600_000 });
+  const verified = await later.verifyLog({});
+  assert.ok(verified.ok, JSON.stringify(verified));
+});
+
 test('one member\'s reads at the key service run side by side, not one behind the other', postgresOnly('SQLite runs one writer at a time'), async () => {
   const { keks, seen } = service();
   const w = await world({ keks });

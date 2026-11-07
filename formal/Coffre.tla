@@ -52,7 +52,12 @@ CONSTANTS
     Budget,         \* Budget[p]: how many it runs, one after another
     InitArchived,   \* the places archived at the start
     InitGrants,     \* the grants at the start
-    InitRef         \* the holder's reference at the start, or NoRef
+    InitRef,        \* the holder's reference at the start, or NoRef
+    \* Whether key services' intents and refused outcomes go in the log: what
+    \* only a rotation to a new vault key reads (IntentsAccounted). Scenarios
+    \* with no rotation leave them out, which keeps their states to the
+    \* orders of the entries their invariants read.
+    IntentsLogged
 
 (***************************************************************************)
 (* The protections the code has, each a switch, so a run with one turned   *)
@@ -97,6 +102,13 @@ CONSTANTS
     \* seen here, and the key is withheld (vault vault.ts, #keys: the
     \* outcome's decision runs the check again). Off, only the first check.
     StandingRecheckUnderHead,
+    \* A rotation to a new vault key logs, under the new key, an outcome for
+    \* every key service's intent still open (vault vault.ts, #rotate,
+    \* `closeIntents`): the call that logged it, its key now retired, can
+    \* append nothing more, and holds no lock the rotation would wait for
+    \* (R75). Off, the intent is left with no outcome, which verification
+    \* reports as missing once it is overdue.
+    RotationClosesIntents,
     \* A read through a reference checks again, under the head, that no
     \* `reference.end` committed since it decided (vault vault.ts, unwrap's
     \* `vet`, run again in #keys' `underLock`).
@@ -338,6 +350,48 @@ Refuse(p) ==
 \* is about. A read's names the reference it went through, if any.
 Entry(kind, at, p) == [kind |-> kind, at |-> at, id |-> l[p].id, who |-> op[p].who, via |-> NoRef]
 
+\* What closes a key service's intent: its read released, its wrap logged,
+\* or each of its keys refused (`withheld`, or the refusal's code).
+Outcomes == {"secret.read", "key.wrap", "key.refused"}
+
+\* The intent logged with id, at i, has its outcome in the log: its own, or
+\* a rotation's that closed it.
+Accounted(i) ==
+    \E k \in (i + 1)..Len(log) :
+        \/ log[k].kind \in Outcomes /\ log[k].id = log[i].id
+        \/ log[k].kind = "key.rotate" /\ log[i].id \in log[k].closes
+
+\* The intents still open: logged, with no outcome yet.
+OpenIntents == {log[i].id : i \in {j \in 1..Len(log) : log[j].kind = "key.intent" /\ ~Accounted(j)}}
+
+\* A rotation came since p logged its intent: its vault's key is retired, and
+\* writes nothing more (vault.ts, #append: `superseded`).
+RotatedSince(p) ==
+    \E i \in 1..Len(log) :
+        /\ log[i].kind = "key.intent" /\ log[i].id = l[p].id
+        /\ \E j \in (i + 1)..Len(log) : log[j].kind = "key.rotate"
+
+\* The intent: its check, then its entry, under the head, which it takes and
+\* lets go of in the one step, its own transaction (#keys).
+LogIntent(p, then) ==
+    IF IntentsLogged
+      THEN /\ head = None
+           /\ log' = Append(log, Entry("key.intent", None, p))
+           /\ Goto(p, then)
+           /\ UNCHANGED <<rows, creds, locks, op, l, left, history>>
+      ELSE Read(p, then, l[p])
+
+\* A key operation's outcome refused under the head: each key logged so, then
+\* its transaction ends. A vault whose key a rotation retired since its
+\* intent logs nothing (`superseded`).
+RefuseKeys(p) ==
+    IF RotatedSince(p) \/ ~IntentsLogged
+      THEN Refuse(p)
+      ELSE /\ log' = Append(log, Entry("key.refused", None, p))
+           /\ Release(p)
+           /\ Goto(p, "idle")
+           /\ UNCHANGED <<rows, creds, op, l, left, history>>
+
 -----------------------------------------------------------------------------
 (* Starting an operation *)
 
@@ -420,7 +474,7 @@ ReadCheck(p) ==
     /\ IF /\ MayUse(op[p].who, op[p].at)
           /\ ~Gone("env") /\ ~Gone(op[p].at)
           /\ l[p].ref # NoRef => ~Ended(l[p].ref)
-         THEN Read(p, "read.lock", l[p])
+         THEN LogIntent(p, "read.lock")
          ELSE Refuse(p)
 
 \* The outcome's decision, once the keys are open: the reader's row, shared
@@ -455,10 +509,11 @@ ReadGivesUp(p) ==
 \* statement of its own and reads again), so it reads as of the lock.
 ReadCommit(p) ==
     /\ pc[p] = "read.commit"
-    /\ IF \/ StandingRecheckUnderHead /\ ~MayUse(op[p].who, op[p].at)
-          \/ KeyPlaceRecheckUnderHead /\ (Gone("env") \/ Gone(op[p].at))
-          \/ EndRecheckUnderHead /\ l[p].ref # NoRef /\ Ended(l[p].ref)
-         THEN Refuse(p)
+    /\ IF RotatedSince(p) THEN Refuse(p)
+       ELSE IF \/ StandingRecheckUnderHead /\ ~MayUse(op[p].who, op[p].at)
+               \/ KeyPlaceRecheckUnderHead /\ (Gone("env") \/ Gone(op[p].at))
+               \/ EndRecheckUnderHead /\ l[p].ref # NoRef /\ Ended(l[p].ref)
+         THEN RefuseKeys(p)
          ELSE /\ log' = Append(log, [Entry("secret.read", "env", p) EXCEPT !.via = l[p].ref])
               /\ Release(p)
               /\ Goto(p, "read.answer")
@@ -487,7 +542,7 @@ WriteResolve(p) ==
 WriteCheck(p) ==
     /\ pc[p] = "write.check"
     /\ IF MayUse(op[p].who, "env") /\ ~Gone("env")
-         THEN Read(p, "write.lock", l[p])
+         THEN LogIntent(p, "write.lock")
          ELSE Refuse(p)
 
 WriteLock(p) == pc[p] = "write.lock" /\ ShareNext(p, "write.head")
@@ -498,9 +553,10 @@ WriteHead(p) == pc[p] = "write.head" /\ TakeHead(p, "write.wrap")
 \* appends `key.wrap` and commits; the wrapped key goes to the app.
 WriteWrap(p) ==
     /\ pc[p] = "write.wrap"
-    /\ IF \/ StandingRecheckUnderHead /\ ~MayUse(op[p].who, "env")
-          \/ KeyPlaceRecheckUnderHead /\ Gone("env")
-         THEN Refuse(p)
+    /\ IF RotatedSince(p) THEN Refuse(p)
+       ELSE IF \/ StandingRecheckUnderHead /\ ~MayUse(op[p].who, "env")
+               \/ KeyPlaceRecheckUnderHead /\ Gone("env")
+         THEN RefuseKeys(p)
          ELSE /\ log' = Append(log, Entry("key.wrap", "env", p))
               /\ Release(p)
               /\ Goto(p, "write.tx")
@@ -975,11 +1031,14 @@ RotateLock(p) == pc[p] = "rotate.lock" /\ LockNext(p, "rotate.head")
 
 RotateHead(p) == pc[p] = "rotate.head" /\ TakeHead(p, "rotate.commit")
 
+\* Its first entry under the new key, `key.rotate`, and with it, an outcome
+\* for every intent still open, which no vault on the old key can log now.
 RotateCommit(p) ==
     /\ pc[p] = "rotate.commit"
+    /\ log' = Append(log, [Entry("key.rotate", None, p) EXCEPT !.who = None] @@ [closes |-> IF RotationClosesIntents THEN OpenIntents ELSE {}])
     /\ Release(p)
     /\ Goto(p, "idle")
-    /\ UNCHANGED <<rows, log, creds, op, l, left, history>>
+    /\ UNCHANGED <<rows, creds, op, l, left, history>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -1162,6 +1221,13 @@ TombstonesStayArchived == \A x \in Places : everDeleted[x] => archived[x]
 
 \* A value reaches its caller only once its `secret.read` entry has committed.
 AuditBeforeRelease == \A id \in revealed : \E i \in 1..Len(log) : log[i].kind = "secret.read" /\ log[i].id = id
+
+\* Every key service's intent logged before a rotation has its outcome in
+\* the log: no vault on the retired key can log one after it (vault.ts,
+\* #rotate; accounting.ts, an intent overdue with outcomes missing).
+IntentsAccounted ==
+    \A i \in 1..Len(log) :
+        (log[i].kind = "key.intent" /\ \E j \in (i + 1)..Len(log) : log[j].kind = "key.rotate") => Accounted(i)
 
 \* Every credential was issued at the member's generation as it was when
 \* the credential committed, to an active member.

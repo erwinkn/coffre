@@ -182,6 +182,7 @@ import { engineOf, isUnavailable, isUniqueViolation, lockNotAvailable, SNAPSHOT 
 import { changeName, everyProjectConversion, findingMetadata, newestAccess, newestChangeNames, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
 import { appendEntries, HeadBusy, holdFence, holdIssues, isMovedChange, laterHead, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
+import { KeyAccounting } from './accounting.ts';
 import { addRefusal, callRefusal, openRefusal, refusalRow, writeRefusal } from './refusal.ts';
 import { ADMIT_KINDS, admitStanding, callAdmit, decideAdmit, holdAdmit, openTicket, OWNERS_ONLY, parseAdmitInputs, scopeSlugs, sealTicket, SETS_UP_ONLY, TICKET_MS, validateAdmitRead, type AdmitAsked, type AdmitTicket } from './admit.ts';
 import { admitChange, Changes, changesHold, heldByLog, heldFrom, keptFrom, keptObjects, macsOf, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
@@ -1645,10 +1646,38 @@ class VaultService implements Vault {
         }
       }
       const rotated = { actor: VAULT_ACTOR, action: KEY_ROTATE, decision: 'allow' as const, metadata: JSON.stringify({ from }) };
-      return (await this.#append(tx, [rotated, ...reports])).seqStart;
+      // Each key service's intent still open, under the head every outcome appends under: no vault on the key this
+      // retires can log its outcomes after this, nor does it hold a lock this waits for while its key service answers
+      // (R75). So they are logged here, under the new key, each key refused (formal/Coffre.tla's RotationClosesIntents).
+      const closed = await this.#closeIntents(tx);
+      return (await this.#append(tx, [rotated, ...closed, ...reports])).seqStart;
     });
     this.#reported(reports);
     return since;
+  }
+
+  /**
+   * An outcome for each key of each key service's intent still open and not yet overdue, refused (`wrong_kek`, the
+   * code a superseded vault answers: its call cannot release anything now), `uncertain` since its key service may have
+   * answered, `closedBy` the rotation. Under the head, and the intents read by their MACs: one the vault never wrote is
+   * not closed, nor one already overdue, which is a call that ended without its outcomes, and stays a finding.
+   */
+  async #closeIntents(tx: Transaction): Promise<NewEntry[]> {
+    const at = await this.#now(tx);
+    // The longest an intent is open: its call's budget from its own time, and the margin after it (`#keys`).
+    const entries = await store.recentIntents(tx, at - (2 * CALL_DEADLINE_MS + this.#prepared.options.keyBudgetMs));
+    const accounting = new KeyAccounting();
+    for (const entry of entries) if (this.#authentic(entry)) accounting.add(entry);
+    return accounting.state().intents.filter((intent) => intent.expiresAt > at).flatMap((intent) =>
+      intent.keys.filter((key) => !intent.seen.includes(key.item)).map((key): NewEntry => ({
+        actor: intent.actor,
+        action: intent.operation,
+        decision: 'deny',
+        code: 'wrong_kek',
+        secretId: key.secretId,
+        relatedSeq: BigInt(intent.seq),
+        metadata: JSON.stringify({ subject: key.subject, version: key.version, intent: intent.intentId, item: key.item, uncertain: true, closedBy: KEY_ROTATE }),
+      })));
   }
 
   /**

@@ -20,8 +20,11 @@
   of 25 ms doubled up to 400 ms, for 5 s (`CALL_DEADLINE_MS`, formerly
   `READ_DEADLINE_MS`); an app write answers 503 at once. Such a 503 says
   `Retry-After: 1`, not 5: one lock wait, in whole seconds, rounded up.
-  `formal/Coffre.tla` holds the new order (`StandingRecheckUnderHead`, and
-  any wait may give up, `GivesUp`).
+  A rotation to a new vault key no longer waits for reads at KMS, so it logs
+  an outcome, refused, for each key service's intent still open, which the
+  vault on the retired key can no longer log itself. `formal/Coffre.tla`
+  holds the new order (`StandingRecheckUnderHead`, `RotationClosesIntents`,
+  and any wait may give up, `GivesUp`).
 
 - **A token's end may run at most a minute past its longest by the app's
   clock, not five (W331, limits D3).** The vault held a service or
