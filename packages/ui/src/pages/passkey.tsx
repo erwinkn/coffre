@@ -148,6 +148,12 @@ export function PasskeyPage() {
         window.location.assign(answer.value.next);
         return;
       }
+      if (answer.kind === 'landed') {
+        // Signed in, the answer naming where to go cut off on the way: the new session's home. The page's own `next`
+        // is the server's to hold to its origin (`safeNext`), so it is not followed here.
+        window.location.assign('/');
+        return;
+      }
       if (answer.kind !== 'refused') {
         // No answer to go by: the sign-in still waits, and the next press sends the same answer again.
         setError(

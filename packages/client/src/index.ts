@@ -91,7 +91,8 @@ export type ClientOptions = {
 /**
  * The API's error shape, `{ error, message }`, with the HTTP status. A success whose body did not arrive whole (the
  * connection dropped after the status line) is one too, code `unreadable` with its 2xx status: the server did what was
- * asked, and its answer was lost, which no caller can read as the route's output.
+ * asked, and its answer was lost, which no caller can read as the route's output. `method` says what was asked: a
+ * write so answered was made, a read so answered read nothing.
  */
 export class CoffreError extends Error {
   readonly status: number;
@@ -105,8 +106,10 @@ export class CoffreError extends Error {
    * `navigator.credentials.get()`, and the act is sent again with `{ state, response }`.
    */
   readonly touch: { options: unknown; state: string } | undefined;
+  /** The request's method, `GET` or a write's, when the client sent it; unset on an error made elsewhere. */
+  readonly method: string | undefined;
 
-  constructor(status: number, code: string, message: string, reason?: string, retryAfter?: string, touch?: { options: unknown; state: string }) {
+  constructor(status: number, code: string, message: string, reason?: string, retryAfter?: string, touch?: { options: unknown; state: string }, method?: string) {
     super(message);
     this.name = 'CoffreError';
     this.status = status;
@@ -114,6 +117,7 @@ export class CoffreError extends Error {
     this.reason = reason;
     this.retryAfter = retryAfter;
     this.touch = touch;
+    this.method = method;
   }
 }
 
@@ -175,10 +179,11 @@ export function createClient(options: ClientOptions) {
         typeof error?.reason === 'string' ? error.reason : undefined,
         response.headers.get('retry-after') ?? undefined,
         touch !== null && typeof touch === 'object' && typeof touch.state === 'string' ? { options: touch.options, state: touch.state } : undefined,
+        method,
       );
     }
     if (payload === undefined) {
-      throw new CoffreError(response.status, 'unreadable', `coffre answered ${response.status}, but its answer did not arrive whole`);
+      throw new CoffreError(response.status, 'unreadable', `coffre answered ${response.status}, but its answer did not arrive whole`, undefined, undefined, undefined, method);
     }
     return payload;
   }

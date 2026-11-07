@@ -26,14 +26,24 @@ export function statusOf(error: unknown): number | undefined {
 }
 
 /**
- * A call coffre answered with a success whose answer was cut off on the way
+ * A write coffre answered with a success whose answer was cut off on the way
  * (the client's `unreadable`): what was asked was done, and its answer is
  * lost. Not a refusal: nothing is to be undone, and what it touched is to be
- * read again.
+ * read again. A read so answered is no such thing: it read nothing, and a
+ * change that reads before it writes (an invite looks for the person first)
+ * stopped there, so it failed, and may be retried (review r6 of #539).
  */
 export function landedUnread(error: unknown): boolean {
-  return error instanceof CoffreError && error.code === 'unreadable' && error.status < 400;
+  return (
+    error instanceof CoffreError &&
+    error.code === 'unreadable' &&
+    error.status < 400 &&
+    error.method !== undefined &&
+    !READS.has(error.method)
+  );
 }
+
+const READS = new Set(['GET', 'HEAD']);
 
 /** What to tell the person when a call fails. */
 export function failureMessage(error: unknown): string {

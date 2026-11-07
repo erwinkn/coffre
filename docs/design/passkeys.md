@@ -749,7 +749,13 @@ options offer their retry, and an add or a reset so answered is done
 (`landedUnread`): an optimistic one counts as saved and its list is read
 back, `useAction` reads again what the change touched and says its answer
 was lost, and conformance's probes count it as let through, not as a
-refusal (review r5 of #539). An add whose reply was lost, sent
+refusal (review r5 of #539). A write's, that is: the error names its
+request's `method`, and a read so answered read nothing, so a change
+that reads first (an invite looks for the person before it adds them)
+failed there and may be retried. The passkey page's own POSTs take a
+2xx cut off so too: the removal, the sign-in or the step-up is done
+and its cookie set, so the page goes on rather than send the same
+answer to a step that ended (review r6 of #539). An add whose reply was lost, sent
 again, finds its passkey among the person's live ones before it counts
 them and answers `409 passkey_exists`, which the dialog takes as done
 (review r1 of #539).

@@ -493,7 +493,7 @@ test('a rename and a write whose 200 was cut off on the way landed: the save goe
   const asked: string[] = [];
   const cutOff = (what: string) => async () => {
     asked.push(what);
-    throw new CoffreError(200, 'unreadable', 'coffre answered 200, but its answer did not arrive whole');
+    throw new CoffreError(200, 'unreadable', 'coffre answered 200, but its answer did not arrive whole', undefined, undefined, undefined, 'POST');
   };
   const client = { secrets: { rename: cutOff('rename'), set: cutOff('set') } } as unknown as CoffreClient;
   const entry: SecretKey = {

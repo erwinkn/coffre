@@ -462,9 +462,10 @@ function RemovePasskeyDialog({
         },
         (body) => fetch('/api/auth/passkey', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body }),
       );
-      if (answer.kind === 'ok') {
+      if (answer.kind === 'ok' || answer.kind === 'landed') {
         // A full navigation: the response set this browser's new session, and every page read before it is the old one's.
-        window.location.assign(typeof answer.value.next === 'string' ? answer.value.next : '/account/passkeys');
+        // One whose body was cut off removed the passkey all the same; its `next` is this tab's.
+        window.location.assign(answer.kind === 'ok' && typeof answer.value.next === 'string' ? answer.value.next : '/account/passkeys');
         return;
       }
       if (answer.kind === 'expired' || answer.kind === 'stale') {

@@ -219,3 +219,18 @@ test("the page ends the authenticator's call at the step's deadline, whatever th
   assert.deepEqual(sent, []);
   assert.equal(unsent.asked, false);
 });
+
+test("a POST whose 200 was cut off was taken: landed, its answer forgotten, never sent again (review r6 of #539)", async () => {
+  let asked = 0;
+  const sent: string[] = [];
+  const unsent = { body: null, asked: false };
+  const send = (body: string) => {
+    sent.push(body);
+    return Promise.resolve(new Response('{"next":"/acc', { status: 200 }));
+  };
+  assert.deepEqual(await sendPasskey(unsent, async () => `{"response":"passkey ${++asked}"}`, send), { kind: 'landed' });
+  assert.equal(unsent.body, null, 'nothing kept to send again: the removal, the sign-in or the step-up is done');
+  assert.deepEqual(sent, ['{"response":"passkey 1"}']);
+  // A GET's so cut off is no step to go by.
+  assert.deepEqual(await passkeyAnswer(Promise.resolve(new Response('{"purpose":', { status: 200 }))), { kind: 'unavailable' });
+});

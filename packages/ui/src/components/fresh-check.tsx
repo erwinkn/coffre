@@ -72,8 +72,8 @@ function Touch({ ask }: { ask: FreshAsk }) {
         },
         (body) => fetch('/api/auth/passkey', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body }),
       );
-      if (answer.kind === 'ok') {
-        // The response set the new session's cookie: the act goes again on it.
+      if (answer.kind === 'ok' || answer.kind === 'landed') {
+        // The response set the new session's cookie, its body read or not: the act goes again on it.
         ask.settle(true);
         return;
       }

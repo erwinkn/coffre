@@ -14,6 +14,16 @@
 export type PasskeyAnswer<T> = { kind: 'ok'; value: T } | { kind: 'refused'; code: string | undefined } | { kind: 'unavailable' };
 
 export async function passkeyAnswer<T>(request: Promise<Response>): Promise<PasskeyAnswer<T>> {
+  const answer = await answerOf<T>(request);
+  return answer.kind === 'landed' ? { kind: 'unavailable' } : answer;
+}
+
+/**
+ * `passkeyAnswer`, with a success whose body did not arrive whole told apart: `landed`. A GET's (the step's options)
+ * is no step to go by, so `passkeyAnswer` says `unavailable`; a POST's was taken (`sendPasskey`), its headers, the new
+ * session's cookie among them, having arrived with its status.
+ */
+async function answerOf<T>(request: Promise<Response>): Promise<PasskeyAnswer<T> | { kind: 'landed' }> {
   let response: Response;
   try {
     response = await request;
@@ -22,7 +32,7 @@ export async function passkeyAnswer<T>(request: Promise<Response>): Promise<Pass
   }
   if (response.status >= 500 || response.status === 408 || response.status === 429) return { kind: 'unavailable' };
   const body: unknown = await response.json().catch(() => undefined);
-  if (response.ok) return body === undefined ? { kind: 'unavailable' } : { kind: 'ok', value: body as T };
+  if (response.ok) return body === undefined ? { kind: 'landed' } : { kind: 'ok', value: body as T };
   if (body === undefined && (response.status === 401 || response.status === 409)) return { kind: 'unavailable' };
   const { error, reason } = typeof body === 'object' && body !== null ? body as { error?: unknown; reason?: unknown } : {};
   if (response.status === 409 && error === 'conflict' && reason === 'changed') return { kind: 'unavailable' };
@@ -105,6 +115,11 @@ export type Unsent = { body: string | null; asked?: boolean; ends?: Deadline };
  * challenge. `ask` throws as the browser's `create()` or `get()` does, and its throw forgets the press: no passkey was
  * made.
  *
+ * `landed`: a 2xx whose body did not arrive whole. The server did what was asked: the sign-in, the step-up or the
+ * removal is done, and the response's cookie is this browser's new session. Sent again, the same answer would meet a
+ * step that ended, a refusal of something done (review r6 of #539), so the page goes on as on `ok`, without the
+ * answer's `next`.
+ *
  * `once`: the options may be asked of the authenticator once only, as a `create()`'s are: after a refusal that keeps
  * the step, the press answers `stale`, asking nothing, and the page asks coffre for new options, a user handle of
  * their own. A refusal says nothing of the answers sent before it: tab A's POST commits and its response is lost, tab
@@ -123,7 +138,7 @@ export async function sendPasskey<T>(
   ask: (left: number) => Promise<string>,
   send: (body: string) => Promise<Response>,
   { once = false, clock = browserClock }: { once?: boolean; clock?: Clock } = {},
-): Promise<PasskeyAnswer<T> | { kind: 'stale' } | { kind: 'expired' }> {
+): Promise<PasskeyAnswer<T> | { kind: 'landed' } | { kind: 'stale' } | { kind: 'expired' }> {
   if (unsent.body === null && once && unsent.asked === true) return { kind: 'stale' };
   let body = unsent.body;
   if (body === null) {
@@ -138,7 +153,7 @@ export async function sendPasskey<T>(
   }
   unsent.body = body;
   unsent.asked = true;
-  const answer = await passkeyAnswer<T>(send(body));
+  const answer = await answerOf<T>(send(body));
   // Kept only while the server may still take it; `passkey_failed` added nothing of this answer's, so a touch may
   // ask for another (a new passkey asks for new options first, `once`).
   if (answer.kind !== 'unavailable') unsent.body = null;

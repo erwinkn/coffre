@@ -91,8 +91,8 @@ test('a success whose body is cut off throws `unreadable` with its status, never
       { status: 200, headers: { 'content-type': 'application/json' } },
     );
   const { client } = recording(cut);
-  await assert.rejects(client.passkeys.list('user:ada'), { name: 'CoffreError', status: 200, code: 'unreadable' });
-  await assert.rejects(client.passkeys.reset('user:ada'), { name: 'CoffreError', status: 200, code: 'unreadable' });
+  await assert.rejects(client.passkeys.list('user:ada'), { name: 'CoffreError', status: 200, code: 'unreadable', method: 'GET' });
+  await assert.rejects(client.passkeys.reset('user:ada'), { name: 'CoffreError', status: 200, code: 'unreadable', method: 'DELETE' });
   // A whole JSON body still reads, `null` included.
   const { client: whole } = recording(() => Response.json(null));
   assert.equal(await whole.call('GET /me', {}), null);

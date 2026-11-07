@@ -17,7 +17,7 @@ async function watched(queryKey: string[]) {
   return { queryClient, reads: () => reads, stop };
 }
 
-const cutOff = () => new CoffreError(200, 'unreadable', 'coffre answered 200, but its answer did not arrive whole');
+const cutOff = (method = 'PUT') => new CoffreError(200, 'unreadable', 'coffre answered 200, but its answer did not arrive whole', undefined, undefined, undefined, method);
 
 test('a change whose 200 was cut off reads again what it touched, and says its answer was lost', async () => {
   const { queryClient, reads, stop } = await watched(['settings']);
@@ -43,5 +43,16 @@ test('a refusal reads nothing again', async () => {
   await act(queryClient, () => Promise.reject(new CoffreError(409, 'conflict', 'taken')), { affects: [['settings']] }, (error) => said.push(error));
   assert.equal(reads(), 1);
   assert.deepEqual(said, ['taken']);
+  stop();
+});
+
+test('a read whose 200 was cut off read nothing: a change that reads first failed there, and reads nothing again (review r6 of #539)', async () => {
+  const { queryClient, reads, stop } = await watched(['settings']);
+  const said: (string | null)[] = [];
+  let succeeded = false;
+  await act(queryClient, () => Promise.reject(cutOff('GET')), { affects: [['settings']], onSuccess: () => { succeeded = true; } }, (error) => said.push(error));
+  assert.equal(reads(), 1);
+  assert.equal(succeeded, false);
+  assert.deepEqual(said, ['coffre’s answer was cut off on the way. Reload to see where things stand.']);
   stop();
 });

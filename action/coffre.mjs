@@ -1256,7 +1256,7 @@ function githubEnvironment(entries, nextDelimiter = () => `coffre_${randomUUID()
 	return out;
 }
 //#endregion
-//#region ../client/dist/src-0hk2XrGt.js
+//#region ../client/dist/src-CLKv0l-B.js
 /** Two colons or more, in hex: an IPv6 address, as `::1` or `2001:db8::1:443` with its port. */
 const IPV6 = /[0-9a-f]*:[0-9a-f]*:[0-9a-f:]*/i;
 const TIMEOUT_OR_REFUSAL = /* @__PURE__ */ new Set([
@@ -1369,7 +1369,8 @@ function serviceName(member) {
 /**
 * The API's error shape, `{ error, message }`, with the HTTP status. A success whose body did not arrive whole (the
 * connection dropped after the status line) is one too, code `unreadable` with its 2xx status: the server did what was
-* asked, and its answer was lost, which no caller can read as the route's output.
+* asked, and its answer was lost, which no caller can read as the route's output. `method` says what was asked: a
+* write so answered was made, a read so answered read nothing.
 */
 var CoffreError = class extends Error {
 	status;
@@ -1383,7 +1384,9 @@ var CoffreError = class extends Error {
 	* `navigator.credentials.get()`, and the act is sent again with `{ state, response }`.
 	*/
 	touch;
-	constructor(status, code, message, reason, retryAfter, touch) {
+	/** The request's method, `GET` or a write's, when the client sent it; unset on an error made elsewhere. */
+	method;
+	constructor(status, code, message, reason, retryAfter, touch, method) {
 		super(message);
 		this.name = "CoffreError";
 		this.status = status;
@@ -1391,6 +1394,7 @@ var CoffreError = class extends Error {
 		this.reason = reason;
 		this.retryAfter = retryAfter;
 		this.touch = touch;
+		this.method = method;
 	}
 };
 /** `market/prod/KEY` as route parameters. */
@@ -1437,9 +1441,9 @@ function createClient(options) {
 			throw new CoffreError(response.status, typeof error?.error === "string" ? error.error : "http_error", typeof error?.message === "string" ? error.message : `request failed with status ${response.status}`, typeof error?.reason === "string" ? error.reason : void 0, response.headers.get("retry-after") ?? void 0, touch !== null && typeof touch === "object" && typeof touch.state === "string" ? {
 				options: touch.options,
 				state: touch.state
-			} : void 0);
+			} : void 0, method);
 		}
-		if (payload === void 0) throw new CoffreError(response.status, "unreadable", `coffre answered ${response.status}, but its answer did not arrive whole`);
+		if (payload === void 0) throw new CoffreError(response.status, "unreadable", `coffre answered ${response.status}, but its answer did not arrive whole`, void 0, void 0, void 0, method);
 		return payload;
 	}
 	/** A route key and its parameters as a method and a path. */
@@ -7411,7 +7415,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload-BA-_M-Ym.js
+//#region ../client/dist/workload-CfgtHN41.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;
