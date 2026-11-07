@@ -2,7 +2,9 @@
 // every step it can run is a job of the Validate workflow it stands in for.
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 
 const script = new URL('./validate.mjs', import.meta.url).pathname
@@ -38,4 +40,52 @@ test('--only and --skip name known steps', () => {
   const bad = spawnSync('node', [script, '--list', '--skip', 'nope'], { encoding: 'utf8' })
   assert.equal(bad.status, 2)
   assert.match(bad.stderr, /no step nope/)
+})
+
+// A throwaway repository holding the script and a root package.json: commit a
+// base, then a change, and ask which steps the change selects.
+const selected = (change) => {
+  const dir = mkdtempSync(join(tmpdir(), 'validate-test-'))
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: dir, encoding: 'utf8' }).trim()
+  try {
+    mkdirSync(join(dir, 'scripts'))
+    copyFileSync(script, join(dir, 'scripts/validate.mjs'))
+    for (const file of ['terraform-provider.sh', 'consumer-test.sh', 'client-smoke.cjs']) writeFileSync(join(dir, 'scripts', file), '')
+    const manifest = (extra = {}) => JSON.stringify({ name: 'x', scripts: { 'test:terraform': './scripts/terraform-provider.sh', 'test:consumer': './scripts/consumer-test.sh', build: 'true', ...extra }, ...extra.top })
+    writeFileSync(join(dir, 'package.json'), manifest())
+    git('init', '-q')
+    git('add', '.')
+    git('commit', '-qm', 'base')
+    const base = git('rev-parse', 'HEAD')
+    change(dir, manifest)
+    git('add', '.')
+    git('commit', '-qm', 'change')
+    const out = execFileSync('node', [join(dir, 'scripts/validate.mjs'), '--list', '--base', base], { cwd: dir, encoding: 'utf8' })
+    return Object.fromEntries(out.trim().split('\n').map((line) => [line.slice(0, 10).trim(), line.slice(11)]))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('a change to the script a step runs selects the step', () => {
+  const terraform = selected((dir) => writeFileSync(join(dir, 'scripts/terraform-provider.sh'), '# changed'))
+  assert.match(terraform.terraform, /terraform-provider\.sh changed/)
+  assert.match(terraform.consumer, /not needed/)
+  for (const file of ['consumer-test.sh', 'client-smoke.cjs']) {
+    const steps = selected((dir) => writeFileSync(join(dir, 'scripts', file), '# changed'))
+    assert.match(steps.consumer, new RegExp(`${file.replace('.', '\\.')} changed`))
+    assert.match(steps.terraform, /not needed/)
+  }
+})
+
+test('a change to a root package.json entry selects the steps that name it, the rest of it every package step', () => {
+  const entry = selected((dir, manifest) => writeFileSync(join(dir, 'package.json'), manifest({ 'test:terraform': './scripts/terraform-provider.sh --unit' })))
+  assert.match(entry.terraform, /root script test:terraform changed/)
+  assert.match(entry.consumer, /not needed/)
+  const build = selected((dir, manifest) => writeFileSync(join(dir, 'package.json'), manifest({ build: 'false' })))
+  assert.match(build.consumer, /root script build changed/)
+  assert.match(build.terraform, /root script build changed/)
+  assert.match(build.schema, /not needed/)
+  const deps = selected((dir, manifest) => writeFileSync(join(dir, 'package.json'), manifest({ top: { dependencies: { a: '1.0.0' } } })))
+  for (const name of ['terraform', 'consumer', 'schema', 'compat', 'matrices']) assert.match(deps[name], /package\.json changed/)
 })
