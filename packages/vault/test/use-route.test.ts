@@ -20,9 +20,9 @@ import { callRoute as postgresRoute, callRouteNamed as postgresNamed } from '../
 import { callRoute as sqliteRoute, callRouteNamed as sqliteNamed } from '../src/use.sqlite.ts';
 import type { Names, RouteCall, UseCall } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { ENGINE, HOT_URL, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
+import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
-import { weigh, weighingSession, WORLD_TABLES, type HotCall } from '../../../scripts/matrix-weigh.ts';
+import { deletesSettled, weigh, weighingSession, WORLD_TABLES, type HotCall } from '../../../scripts/matrix-weigh.ts';
 import { change, CONFIG, emptyLog, isolate, LOG_015, seal, SIGNING_KEY, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
@@ -33,6 +33,15 @@ before(async () => {
 });
 after(() => db.close());
 beforeEach(emptyLog);
+
+/**
+ * A use's time and its deadline, 3 s on, from one reading of the clock: two readings may straddle a millisecond, and a
+ * deadline 3001 ms past its time is past the most a use may ask, answered `late` at once (T238).
+ */
+const now = () => {
+  const at = Date.now();
+  return { at, deadline: at + 3000 };
+};
 
 const answered = (outcome: RouteUseOutcome) => {
   assert.ok(outcome.served && outcome.route === 'name', JSON.stringify(outcome));
@@ -510,7 +519,7 @@ test('a workload by its way in at its place: the same route use, its caller deci
   const at = Date.now();
   const input: RouteUseInput = { caller: { kind: 'workload', credential: w.credentialId, place: w.dev }, named: null, stable: 'openai', digests: [], purpose: 'use', at, deadline: at + 3000 };
   assert.deepEqual(values(await vault.useRoute(input)), { [name]: 'sk' });
-  assert.deepEqual(values(await vault.useRoute({ ...input, at: Date.now(), deadline: Date.now() + 3000 })), { [name]: 'sk' });
+  assert.deepEqual(values(await vault.useRoute({ ...input, ...now() })), { [name]: 'sk' });
 });
 
 test('proxyItem: the item a use would find, or every item the place serves, deciding no use and writing nothing; its keys mapped for the use after', async () => {
@@ -779,7 +788,7 @@ test("the chain is the vault's: a fork's parent re-pointed around the log at ano
   assert.deepEqual(answered(await vault.useRoute(atFork)).found, { found: false, fault: null, seals: ['', '', ''] }, 'no level of the chain defines it');
   // dev-eu's parent, the middle of the chain, re-pointed at `other` around the log: its sealed object still names dev.
   await run(db.owner, sql`UPDATE environments SET parent_id = ${other} WHERE id = ${eu}`);
-  const grafted = answered(await vault.useRoute({ ...atFork, at: Date.now(), deadline: Date.now() + 3000 }));
+  const grafted = answered(await vault.useRoute({ ...atFork, ...now() }));
   assert.ok(grafted.found !== null && !grafted.found.found, JSON.stringify(grafted.found));
   assert.equal(grafted.found.fault, 'tampered');
   assert.ok(!grafted.outcome.ok);
@@ -1071,7 +1080,7 @@ test("T200, T205: under a light gate, or the route's named call, the caller is d
   }
 });
 
-test("T200: a caller who stands nowhere there reads nothing of the route, its gate asked light or not: each refusal weighed beside its twin (a route the world never saved), its key's blocks and its buffers alike whatever the route names (NoKeyBeforeStanding; the named matrix's weighing, slack 6)", { skip: ENGINE !== 'postgres' ? 'the hot path\'s statements, weighed' : false }, async () => {
+test("T200: a caller who stands nowhere there reads nothing of the route, its gate asked light or not: each refusal weighed beside its twin (a route the world never saved), its key's blocks and its buffers alike whatever the route names (NoKeyBeforeStanding; the named matrix's weighing, slack 6)", { skip: ENGINE !== 'postgres' ? 'the hot path\'s statements, weighed' : false }, async (t) => {
   const w = await routeWorld(db);
   const held = await w.key('sk');
   const sensitive = await w.key('sens');
@@ -1121,6 +1130,16 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
     assert.ok(asked.slice(0, 3).every(({ call }) => call.query.includes('use_credential') && call.query.includes('p_passkeys =>') && typeof call.args[routeAt(call)] === 'string'), 'the warm map asked the route\'s named call');
     // `p_light` is `use_route`'s last argument but `p_passkeys` (0073).
     assert.ok(asked.slice(3).every(({ call }) => call.query.includes('use_route') && call.args.at(-2) === false), 'the cold map asked use_route, its gate whole');
+    // Every row the file's cases deleted or wrote over dead to every session first: a transaction that could still see
+    // them (an autovacuum worker's ANALYZE of this database, say) keeps their versions from the VACUUM below, and each
+    // scan reads them until it ends; ending between a call and its twin, it left the call 9 to 35 buffers above its twin
+    // (CI, T238; forced, 13 to 42), as T225 found of the matrices' `log_bulk`.
+    const watcher = postgresClient(OWNER_URL, { max: 1 });
+    try {
+      await deletesSettled(watcher, t.signal);
+    } finally {
+      await watcher.end();
+    }
     await run(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
     // The twin: the same call of a route the world never saved (`use_route`'s place reading's route; the named call's route).
     const twinOf = (call: HotCall): HotCall => {
