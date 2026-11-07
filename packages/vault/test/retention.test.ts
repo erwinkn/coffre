@@ -556,15 +556,15 @@ test('the upkeep makes the next days ahead and prunes the bulk cap\'s rows its w
   const { cp, store } = await open();
   // The policy's window, as the change path logs it: 15 minutes.
   await log.change(JSON.stringify({ op: 'genesis', value: { kind: 'policy', bulk: { count: 1000, windowMs: 900_000 } } }), Date.now(), logObject('policy', 'instance'));
-  await run(db.owner, sql`DELETE FROM log_bulk`);
+  await run(db.owner, sql`DELETE FROM bulk_cap`);
   const old = Date.now() - 900_000 - 60_000 - 3000 - 3_600_000 - 60_000;
-  await run(db.owner, sql`INSERT INTO log_bulk (principal, secret, last) VALUES ('token:a', ${randomUUID()}, ${old}), ('token:a', ${randomUUID()}, ${Date.now()})`);
+  await run(db.owner, sql`INSERT INTO bulk_cap (principal, secret, last) VALUES ('token:a', ${randomUUID()}, ${old}), ('token:a', ${randomUUID()}, ${Date.now()})`);
   const alerts: string[] = [];
   const keep = upkeep(cp, store, { keepDays: null, signingKeys: [seed], now, alert: (m) => alerts.push(m) });
   await keep();
   await keep();
   assert.deepEqual(alerts, []);
-  const [bulk] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_bulk`);
+  const [bulk] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM bulk_cap`);
   assert.equal(Number(bulk!.n), 1, 'the old row pruned, the fresh one kept');
   if (ENGINE === 'postgres') {
     for (let d = -1; d <= DAYS_AHEAD; d += 1) assert.ok(await exists(`log_uses_${dayOf(clock + d * DAY_MS).replaceAll('-', '')}`), `day ${d}`);

@@ -106,10 +106,10 @@ function asked(w: World, change: (input: SignInInput) => SignInInput = (input) =
 
 /** How many of each row a sign-in or a revoke writes there are, a credential's changes for its: none written by a refusal. */
 async function written() {
-  const { consumedTokens, credentials, logChanges } = tablesOf(db.owner);
-  const n = async (table: typeof credentials | typeof consumedTokens) => (await db.owner.select({ n: count() }).from(table))[0]!.n;
+  const { spentIdTokens, credentials, logChanges } = tablesOf(db.owner);
+  const n = async (table: typeof credentials | typeof spentIdTokens) => (await db.owner.select({ n: count() }).from(table))[0]!.n;
   const changes = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).filter(({ payload }) => (JSON.parse(payload) as { ref?: { kind?: string } }).ref?.kind === 'credential').length;
-  return { credentials: await n(credentials), spent: await n(consumedTokens), changes };
+  return { credentials: await n(credentials), spent: await n(spentIdTokens), changes };
 }
 
 /** The log replayed: each entry's MAC the vault's, and the credential's row the replay's object, under its newest change's seal. */
@@ -163,7 +163,7 @@ test('a sign-in through a binding is one change of the log, its row the object i
 
 test('a sign-in goes ahead only while the binding is as named and stands, and its account active at its generation (BindingLocked, MemberLocked): else nothing written', async () => {
   const w = await world();
-  const { serviceBindings, vaultMembers } = tablesOf(db.owner);
+  const { serviceBindings, principals } = tablesOf(db.owner);
   const none = await written();
   const refused = async (input: SignInInput, why: 'unbound' | 'unsealed' = 'unbound') => {
     assert.deepEqual(await w.vault.signIn!(input), { ok: false, refused: why });
@@ -183,7 +183,7 @@ test('a sign-in goes ahead only while the binding is as named and stands, and it
   assert.ok((await w.vault.remove({ actor: ROOT, principal: CI })).ok);
   await refused(asked(w));
   assert.ok((await w.vault.admit({ actor: ROOT, principal: CI })).ok);
-  assert.equal((await db.owner.select({ generation: vaultMembers.generation }).from(vaultMembers).where(eq(vaultMembers.principal, CI)))[0]!.generation, 1);
+  assert.equal((await db.owner.select({ generation: principals.generation }).from(principals).where(eq(principals.principal, CI)))[0]!.generation, 1);
   await refused(asked(w));
 });
 
@@ -270,8 +270,8 @@ test("a sign-in that waits on its account's row while a change to it commits goe
     // the vault checked: `moved`; the vault reads it, its MAC holds, and the sign-in goes ahead on it.
     const seal = randomBytes(16);
     await holder.unsafe('BEGIN');
-    await holder.unsafe(`SELECT 1 FROM vault_members WHERE principal = '${CI}' FOR NO KEY UPDATE`);
-    await holder.unsafe(`UPDATE vault_members SET seal = $1 WHERE principal = '${CI}'`, [seal]);
+    await holder.unsafe(`SELECT 1 FROM principals WHERE principal = '${CI}' FOR NO KEY UPDATE`);
+    await holder.unsafe(`UPDATE principals SET seal = $1 WHERE principal = '${CI}'`, [seal]);
     const [last] = await holder.unsafe<{ at: string; object: string; actor: string; payload: string }[]>(`SELECT c.at::text AS at, c.object::text AS object, c.actor, c.payload
       FROM log_changes c WHERE c.object = log_object('principal', '${CI}') ORDER BY c.number DESC LIMIT 1`);
     const row = { at: Number(last!.at), requestId: randomUUID(), object: last!.object, actor: last!.actor, payload: last!.payload, seal };
@@ -428,11 +428,11 @@ test("a revoke goes ahead only on the policy its right was weighed on, read unde
 
 test("a sign-in refuses an account's row put back with a seal its log has moved past: a removed member restored around the vault is no member (MemberLocked, R53)", async () => {
   const w = await world();
-  const { vaultMembers } = tablesOf(db.owner);
-  const [active] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));
+  const { principals } = tablesOf(db.owner);
+  const [active] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
   assert.ok((await w.vault.remove({ actor: ROOT, principal: CI })).ok);
   // A writer puts back the active row, seal and all: the vault's, but not its newest change's.
-  await db.owner.update(vaultMembers).set({ status: active!.status, generation: active!.generation, seal: active!.seal, mac: active!.mac }).where(eq(vaultMembers.principal, CI));
+  await db.owner.update(principals).set({ status: active!.status, generation: active!.generation, seal: active!.seal, mac: active!.mac }).where(eq(principals.principal, CI));
   const none = await written();
   assert.deepEqual(await w.vault.signIn!(asked(w)), { ok: false, refused: 'unbound' });
   assert.deepEqual(await written(), none);

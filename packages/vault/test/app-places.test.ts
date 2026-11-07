@@ -524,7 +524,7 @@ async function deciding() {
   }
   const object = principalObject(row, await grants(db.owner, ROOT));
   const [newest] = await rows<{ seq: string | number | null }>(db.owner, sql`SELECT max(seq) AS seq FROM audit_log WHERE author = 'vault' AND decision = 'allow' AND subject_principal = ${ROOT}`);
-  await change({ kind: 'principal', id: ROOT }, { op: 'genesis', value: object }, object, seal('vault_members', 'principal', ROOT), newest?.seq == null ? undefined : BigInt(newest.seq));
+  await change({ kind: 'principal', id: ROOT }, { op: 'genesis', value: object }, object, seal('principals', 'principal', ROOT), newest?.seq == null ? undefined : BigInt(newest.seq));
   return vault;
 }
 

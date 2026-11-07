@@ -177,7 +177,7 @@ test('GateBeforeKeys: with no standing, one statement refuses on the place, noth
     assert.equal(answer.standing.grants.length, 0);
   }
   assert.equal(await count('log_uses'), 0);
-  assert.equal(await count('log_bulk'), 0);
+  assert.equal(await count('bulk_cap'), 0);
 });
 
 test('AllDecidedFirst: a key refused (a reference ended) refuses the batch at it, entering no key in the set, nothing written', async () => {
@@ -189,7 +189,7 @@ test('AllDecidedFirst: a key refused (a reference ended) refuses the batch at it
   const answer = await vault.useNamedMany!(many(w, [await w.nameOf(held), 'ENDED']));
   assert.deepEqual(refused(answer), { key: 'ENDED', code: 'ended' });
   assert.equal(await count('log_uses'), 0, 'the reference refused on the first statement, which wrote nothing, the sealed key only resolved there');
-  assert.equal(await count('log_bulk'), 0, 'refused reads never insert');
+  assert.equal(await count('bulk_cap'), 0, 'refused reads never insert');
 });
 
 test('the first key refused answers, whatever the map holds: a sealed key not mapped, before one refused on the first statement', async () => {
@@ -207,7 +207,7 @@ test('the first key refused answers, whatever the map holds: a sealed key not ma
   assert.deepEqual(cache.keyed(w.dev, hidden), { id, through: false });
   assert.deepEqual(refused(await vault.useNamedMany!(ask())), first, 'warm');
   assert.equal(await count('log_uses'), 0, 'neither key used');
-  assert.equal(await count('log_bulk'), 0, 'refused reads never insert');
+  assert.equal(await count('bulk_cap'), 0, 'refused reads never insert');
 });
 
 test('LeaveFirst: a read that leaves sensitive values out uses none of them, naming them; the rest are used', async () => {
@@ -279,7 +279,7 @@ test('CountsOwnBatch: past the cap, the batch is refused at the first key over i
   const { vault } = await isolate();
   const names = await Promise.all(ids.map((id) => w.nameOf(id)));
   assert.deepEqual(refused(await vault.useNamedMany!(many(w, names))), { key: names[2], code: 'bulk_limit' });
-  assert.equal(await count('log_bulk'), 2, 'the two before it entered, as lone uses would; a refusal enters nothing');
+  assert.equal(await count('bulk_cap'), 2, 'the two before it entered, as lone uses would; a refusal enters nothing');
   assert.deepEqual(Object.keys(values(await vault.useNamedMany!(many(w, names.slice(0, 2))))), names.slice(0, 2));
 });
 
@@ -377,7 +377,7 @@ test('CutByPlace, the chain cut after the gate read it (around the log): refused
       assert.equal(answer.stands, false, asked);
       assert.deepEqual(refused(answer), { key: null, code: 'stale' }, asked);
       assert.equal(await count('log_uses'), 0, asked);
-      assert.equal(await count('log_bulk'), 0, asked);
+      assert.equal(await count('bulk_cap'), 0, asked);
     } finally {
       await isolate.close();
     }

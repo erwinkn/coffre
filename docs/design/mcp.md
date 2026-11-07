@@ -881,7 +881,7 @@ One migration, adding three tables on both engines. It expands only:
   - Its MAC covers every field that grants something. It is a fifth table
     in [Sign-in rows](../architecture.md#sign-in-rows), and every change
     checks the old MAC, as there.
-  - The principal and generation reference `vault_members`, as
+  - The principal and generation reference `principals`, as
     credentials' do.
 - **`mcp_approvals`**: as in section 7. Not MACed: approving runs nothing
   by itself. A changed row can only make the client report a false

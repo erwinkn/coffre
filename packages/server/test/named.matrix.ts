@@ -42,7 +42,7 @@ import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, contextFor, hotDatabaseUrl, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
-import { logFence } from './db/tables.ts';
+import { checkpointFence } from './db/tables.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 
@@ -251,12 +251,12 @@ const egress = { fetch: async () => new Response(null, { status: 204 }) };
 before(async () => {
   db = await openTestDatabase();
   await resetDatabase(db.owner);
-  await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
+  await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
   const kek = randomBytes(32);
   if (POSTGRES) {
     // No autovacuum on this database's tables: a row's refusals are weighed on statistics only the row's own ANALYZE
     // refreshes, before it is weighed, never while it is, as use.matrix.ts weighs its cells. An autoanalyze landing
-    // mid-row (of `environments`, `vault_members`) had one cell's runs plan `use_credential`'s statements anew, and that
+    // mid-row (of `environments`, `principals`) had one cell's runs plan `use_credential`'s statements anew, and that
     // cell read 60 to 260 buffers above the rest of its row, whatever its key (CI, T170: auto_explain showed the
     // planning, and the places' statement turned from a nested loop to a hash join for every cell after).
     await rowsOf(db.owner, sql.raw(`DO $$ DECLARE t record; BEGIN
@@ -452,13 +452,13 @@ test(`through the app, a person is answered alike for every key they may not hav
       for (const row of phase) {
         const cells: Awaited<ReturnType<typeof cell>>[] = [];
         for (const key of KEYS) cells.push(await cell(row, key));
-        if (row.window === 'passed') for (const c of cells) await rowsOf(db.owner, sql`DELETE FROM log_bulk WHERE principal = ${`user:${c.person}`}`);
+        if (row.window === 'passed') for (const c of cells) await rowsOf(db.owner, sql`DELETE FROM bulk_cap WHERE principal = ${`user:${c.person}`}`);
         const answers: { key: Key; api: unknown; proxy: unknown; work: unknown; sent: { api: HotCall | undefined; proxy: HotCall | undefined }; many: unknown }[] = [];
         try {
           for (const c of cells) {
             // Past the floor: a minute past every request of this cell's, set again for each cell. Once for the row, its
             // later cells were asked after the minute, each cell's several keys the vault's calls by name, slowed (T203).
-            if (row.admission === 'past the floor') await db.owner.update(logFence).set({ atFloor: Date.now() + 60_000 });
+            if (row.admission === 'past the floor') await db.owner.update(checkpointFence).set({ atFloor: Date.now() + 60_000 });
             let release!: () => void;
             const released = new Promise<void>((resolve) => { release = resolve; });
             const held = lockDb === null ? Promise.resolve() : lockDb.transaction(async (tx) => {
@@ -509,7 +509,7 @@ test(`through the app, a person is answered alike for every key they may not hav
             }
           }
         } finally {
-          if (row.admission === 'past the floor') await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
+          if (row.admission === 'past the floor') await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
         }
         const label = labelOf(row);
         // The keys they may not have, each answered alike (D153); a key they may have is theirs to know of.

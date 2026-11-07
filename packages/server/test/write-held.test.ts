@@ -136,7 +136,7 @@ async function world({ fast = true, past = 0n, sealer }: { fast?: boolean; past?
   return { deps, root, runtime, ada, session, write, signOut, client, answers, signingKey: derivedSigningKey(kek), between: (adversary: () => Promise<void>) => void (next = adversary), afterWrap: (adversary: () => Promise<void>) => void (wrapped = adversary) };
 }
 
-const { secrets, secretVersions, vaultMembers, vaultGrants, credentials } = tablesOf(db.owner);
+const { secrets, secretVersions, principals, grants, credentials } = tablesOf(db.owner);
 
 /** A key's row in market/dev, by name: its id and current version, or none. */
 async function keyRow(name: string): Promise<{ id: string; currentVersion: number; currentVersionId: string | null } | undefined> {
@@ -152,7 +152,7 @@ async function versionOf(id: string | null): Promise<{ sensitive: boolean; creat
 
 /** A member's `access_seq`, exactly. */
 async function accessSeq(principal: string): Promise<bigint> {
-  const [row] = await run(db.owner, sql`SELECT CAST(access_seq AS TEXT) AS seq FROM vault_members WHERE principal = ${principal}`) as { seq: string }[];
+  const [row] = await run(db.owner, sql`SELECT CAST(access_seq AS TEXT) AS seq FROM principals WHERE principal = ${principal}`) as { seq: string }[];
   return BigInt(row!.seq);
 }
 
@@ -387,14 +387,14 @@ test('a hold that keeps failing gives up after three tries: 409 `changed`, nothi
 test("Ada's grant taken, then her member row and grants put back and the seal written into the revoke's change: the change's MAC fails, and nothing is written (WritingForge, T190)", { skip: ANY }, async () => {
   const w = await world();
   const before = (await keyRow('API_KEY'))!;
-  const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${ADA}`));
-  const grants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
+  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, `user:${ADA}`));
+  const held = await db.owner.select().from(grants).where(eq(grants.principal, `user:${ADA}`));
   await w.root.access.set(`user:${ADA}`, { 'market/dev': null });
   // A database writer puts the rows back as they were, and the log's newest change of Ada, the revoke, edited to name
   // the row's seal: row and log agree; only that change's MAC, over its seal, says the vault never wrote it.
-  await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
-  await db.owner.insert(vaultGrants).values(grants);
-  await db.owner.update(vaultMembers).set(member!).where(eq(vaultMembers.principal, `user:${ADA}`));
+  await db.owner.delete(grants).where(eq(grants.principal, `user:${ADA}`));
+  await db.owner.insert(grants).values(held);
+  await db.owner.update(principals).set(member!).where(eq(principals.principal, `user:${ADA}`));
   await run(db.owner, sql`UPDATE log_changes SET seal = ${member!.seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${logObject('principal', `user:${ADA}`)})`);
   const wrote = await w.write({ API_KEY: 'fake-ada' });
   assert.notEqual(wrote.status, 200, JSON.stringify(wrote.body));
@@ -538,25 +538,25 @@ async function bothWays(arrange: (w: Awaited<ReturnType<typeof world>>) => Promi
 test("a refusal the vault's read finds (a forged change's MAC, a row its newest change does not seal, a row its 0.4 MAC does not cover) is answered as today's path answers it, status and body, and the vault's call adds nothing to either log (T190; StaleFirst)", { skip: POSTGRES }, async () => {
   const cases: [string, string, (w: Awaited<ReturnType<typeof world>>) => Promise<void>][] = [
     ["Ada's grant taken, her rows put back and the revoke's seal forged (WritingForge)", 'tampered', async (w) => {
-      const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${ADA}`));
-      const grants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
+      const [member] = await db.owner.select().from(principals).where(eq(principals.principal, `user:${ADA}`));
+      const held = await db.owner.select().from(grants).where(eq(grants.principal, `user:${ADA}`));
       await w.root.access.set(`user:${ADA}`, { 'market/dev': null });
-      await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
-      await db.owner.insert(vaultGrants).values(grants);
-      await db.owner.update(vaultMembers).set(member!).where(eq(vaultMembers.principal, `user:${ADA}`));
+      await db.owner.delete(grants).where(eq(grants.principal, `user:${ADA}`));
+      await db.owner.insert(grants).values(held);
+      await db.owner.update(principals).set(member!).where(eq(principals.principal, `user:${ADA}`));
       await run(db.owner, sql`UPDATE log_changes SET seal = ${member!.seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${logObject('principal', `user:${ADA}`)})`);
     }],
     ["Ada's grant taken and her rows put back, the log left as it is (StaleFirst)", 'stale', async (w) => {
-      const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${ADA}`));
-      const grants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
+      const [member] = await db.owner.select().from(principals).where(eq(principals.principal, `user:${ADA}`));
+      const held = await db.owner.select().from(grants).where(eq(grants.principal, `user:${ADA}`));
       await w.root.access.set(`user:${ADA}`, { 'market/dev': null });
-      await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
-      await db.owner.insert(vaultGrants).values(grants);
-      await db.owner.update(vaultMembers).set(member!).where(eq(vaultMembers.principal, `user:${ADA}`));
+      await db.owner.delete(grants).where(eq(grants.principal, `user:${ADA}`));
+      await db.owner.insert(grants).values(held);
+      await db.owner.update(principals).set(member!).where(eq(principals.principal, `user:${ADA}`));
     }],
     // A column only the row's 0.4 MAC covers, which today's path checks first (`#integrity`; review r1 of #474).
     ["Ada's member row edited in its `created_by` alone", 'tampered', async () => {
-      await db.owner.update(vaultMembers).set({ createdBy: 'user:someone@acme.example' }).where(eq(vaultMembers.principal, `user:${ADA}`));
+      await db.owner.update(principals).set({ createdBy: 'user:someone@acme.example' }).where(eq(principals.principal, `user:${ADA}`));
     }],
     ['API_KEY written again, then its row put back to its first version (StaleFirst)', 'stale', async (w) => {
       const [first] = await db.owner.select().from(secrets).where(eq(secrets.key, 'API_KEY'));
@@ -1085,16 +1085,16 @@ test("two retries of one refusal's ticket at once, both finding no record: the s
 test("a refusal's record copied to another object, by a database writer, Ada's row put back to match: its MAC is over its own object, so the vault refuses the member it now stands for, and nothing is written; copied whole under another request id, it is forged in the audit list (PR 6, WritingRefuse)", { skip: POSTGRES }, async () => {
   const w = await world();
   // Ada refused once (no grant at market/dev): the record to copy.
-  const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${ADA}`));
-  const grants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
+  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, `user:${ADA}`));
+  const held = await db.owner.select().from(grants).where(eq(grants.principal, `user:${ADA}`));
   await w.root.access.set(`user:${ADA}`, { 'market/dev': null });
   assert.equal((await w.write({ API_KEY: 'fake-ada' })).status, 403);
   const [record] = await refusalRecords();
   // The writer puts her grant back, her row as it was, and copies the record as her member's newest change, its seal
   // column her row's: row and log agree, and only the record's MAC, over the request's object, says otherwise.
-  await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
-  await db.owner.insert(vaultGrants).values(grants);
-  await db.owner.update(vaultMembers).set(member!).where(eq(vaultMembers.principal, `user:${ADA}`));
+  await db.owner.delete(grants).where(eq(grants.principal, `user:${ADA}`));
+  await db.owner.insert(grants).values(held);
+  await db.owner.update(principals).set(member!).where(eq(principals.principal, `user:${ADA}`));
   await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
     SELECT nextval('log_number'), c.at, ${randomUUID()}, ${logObject('principal', `user:${ADA}`)}::uuid, c.actor, c.payload, ${member!.seal}, c.mac
       FROM log_changes c WHERE c.number = ${record!.number}::bigint`);

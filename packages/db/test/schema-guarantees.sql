@@ -225,11 +225,11 @@ END
 $$;
 
 -- 13. The application reads members and grants, and writes neither.
-SELECT count(*) FROM vault_members;
-SELECT count(*) FROM vault_grants;
+SELECT count(*) FROM principals;
+SELECT count(*) FROM grants;
 DO $$
 BEGIN
-    INSERT INTO vault_members (principal, status, created_at, created_by, status_changed_at, status_changed_by)
+    INSERT INTO principals (principal, status, created_at, created_by, status_changed_at, status_changed_by)
     VALUES ('user:x@acme.example', 'active', 0, 'user:x@acme.example', 0, 'user:x@acme.example');
     RAISE EXCEPTION 'FAIL: coffre_app was able to add a member';
 EXCEPTION
@@ -240,7 +240,7 @@ $$;
 
 DO $$
 BEGIN
-    UPDATE vault_members SET owner = true;
+    UPDATE principals SET owner = true;
     RAISE EXCEPTION 'FAIL: coffre_app was able to change a member';
 EXCEPTION
     WHEN insufficient_privilege THEN
@@ -250,7 +250,7 @@ $$;
 
 DO $$
 BEGIN
-    UPDATE vault_members SET role = 'owner', scope = NULL;
+    UPDATE principals SET role = 'owner', scope = NULL;
     RAISE EXCEPTION 'FAIL: coffre_app was able to change an instance role';
 EXCEPTION
     WHEN insufficient_privilege THEN
@@ -260,7 +260,7 @@ $$;
 
 DO $$
 BEGIN
-    INSERT INTO vault_grants (principal, project_id, role, granted_at, granted_by)
+    INSERT INTO grants (principal, project_id, role, granted_at, granted_by)
     VALUES ('user:x@acme.example', '11111111-1111-1111-1111-111111111111', 'owner', 0, 'user:x@acme.example');
     RAISE EXCEPTION 'FAIL: coffre_app was able to grant';
 EXCEPTION
@@ -275,11 +275,11 @@ DECLARE
     statement text;
 BEGIN
     FOREACH statement IN ARRAY ARRAY[
-        'DELETE FROM vault_members',
-        'TRUNCATE vault_members',
-        'DELETE FROM vault_grants',
-        'TRUNCATE vault_grants',
-        'UPDATE vault_grants SET role = role',
+        'DELETE FROM principals',
+        'TRUNCATE principals',
+        'DELETE FROM grants',
+        'TRUNCATE grants',
+        'UPDATE grants SET role = role',
         'INSERT INTO vault_releases VALUES (''user:admin@acme.example'', ''forged'', 0)',
         'UPDATE vault_releases SET released_at = 0',
         'DELETE FROM vault_releases',
@@ -335,10 +335,10 @@ DECLARE
     statement text;
 BEGIN
     FOREACH statement IN ARRAY ARRAY[
-        'UPDATE consumed_tokens SET hash = hash',
-        'UPDATE consumed_tokens SET consumed_at = consumed_at',
-        'DELETE FROM consumed_tokens',
-        'TRUNCATE consumed_tokens'
+        'UPDATE spent_id_tokens SET hash = hash',
+        'UPDATE spent_id_tokens SET consumed_at = consumed_at',
+        'DELETE FROM spent_id_tokens',
+        'TRUNCATE spent_id_tokens'
     ] LOOP
         BEGIN
             EXECUTE statement;
@@ -380,14 +380,14 @@ $$;
 DO $$
 BEGIN
     BEGIN
-        INSERT INTO consumed_tokens (hash, consumed_at) VALUES
+        INSERT INTO spent_id_tokens (hash, consumed_at) VALUES
             (decode(repeat('a1', 32), 'hex'), now() - interval '2 hours 1 minute'),
             (decode(repeat('a2', 32), 'hex'), now() - interval '1 hour 59 minutes');
         PERFORM prune_consumed_tokens(1000);
-        IF EXISTS (SELECT 1 FROM consumed_tokens WHERE hash = decode(repeat('a1', 32), 'hex')) THEN
+        IF EXISTS (SELECT 1 FROM spent_id_tokens WHERE hash = decode(repeat('a1', 32), 'hex')) THEN
             RAISE EXCEPTION 'FAIL: prune_consumed_tokens kept a token spent over two hours ago';
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM consumed_tokens WHERE hash = decode(repeat('a2', 32), 'hex')) THEN
+        IF NOT EXISTS (SELECT 1 FROM spent_id_tokens WHERE hash = decode(repeat('a2', 32), 'hex')) THEN
             RAISE EXCEPTION 'FAIL: prune_consumed_tokens forgot a token spent within two hours';
         END IF;
         RAISE EXCEPTION 'checked' USING ERRCODE = 'C0FFE';
@@ -518,11 +518,11 @@ BEGIN
         'UPDATE credentials SET enrollment_id = enrollment_id',
         'UPDATE credentials SET kind = kind',
         'UPDATE credentials SET created_by = created_by',
-        'UPDATE enrollments SET scope = scope',
-        'UPDATE enrollments SET expires_at = expires_at',
-        'UPDATE enrollments SET code_hash = code_hash',
-        'DELETE FROM enrollments',
-        'TRUNCATE enrollments'
+        'UPDATE enrollment_codes SET scope = scope',
+        'UPDATE enrollment_codes SET expires_at = expires_at',
+        'UPDATE enrollment_codes SET code_hash = code_hash',
+        'DELETE FROM enrollment_codes',
+        'TRUNCATE enrollment_codes'
     ] LOOP
         BEGIN
             EXECUTE statement;
@@ -532,8 +532,8 @@ BEGIN
         END;
     END LOOP;
     UPDATE credentials SET expires_at = expires_at, approved_at = approved_at, approved_by = approved_by, auth_mac = auth_mac;
-    UPDATE enrollments SET auth_mac = auth_mac;
-    PERFORM count(*) FROM enrollments;
+    UPDATE enrollment_codes SET auth_mac = auth_mac;
+    PERFORM count(*) FROM enrollment_codes;
     RAISE NOTICE 'PASS: coffre_app renews and approves a session, and never rebinds one or changes a code';
 END
 $$;
@@ -573,7 +573,7 @@ BEGIN
     PERFORM count(*) FROM passkeys;
     UPDATE passkeys SET sign_count = sign_count, last_challenge_at = last_challenge_at, name = name,
         last_used_at = last_used_at, removed_at = removed_at, removed_by = removed_by, auth_mac = auth_mac;
-    UPDATE device_authorizations SET passkey_id = passkey_id;
+    UPDATE device_logins SET passkey_id = passkey_id;
     RAISE NOTICE 'PASS: coffre_app keeps a passkey whose it is, with its key, and never deletes one';
 END
 $$;

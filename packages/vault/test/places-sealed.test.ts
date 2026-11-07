@@ -419,7 +419,7 @@ test("an issue weighed on the account's places by slug is refused when one is re
   try {
     // The account's row held: the issue's read is done, its write waits; meanwhile dev is renamed, as the app renames one.
     await holder.unsafe('BEGIN');
-    await holder.unsafe(`SELECT 1 FROM vault_members WHERE principal = '${CI}' FOR NO KEY UPDATE`);
+    await holder.unsafe(`SELECT 1 FROM principals WHERE principal = '${CI}' FOR NO KEY UPDATE`);
     const issuing = w.vault.issueToken!(input);
     const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%issue_token(%'`))[0]!.n;
     for (let tries = 0; (await waits()) === 0; tries += 1) {
@@ -458,9 +458,9 @@ test('a reference is decided on its holder\'s project as the row the decision ch
     // A writer moves the place to billing while the request reads it, then back before its decision does.
     await run(db.owner, sql`UPDATE environments SET project_id = ${billing} WHERE id = ${place}`);
     await holder.unsafe('BEGIN');
-    await holder.unsafe(`SELECT 1 FROM vault_members WHERE principal = '${MAYA}' FOR NO KEY UPDATE`);
+    await holder.unsafe(`SELECT 1 FROM principals WHERE principal = '${MAYA}' FOR NO KEY UPDATE`);
     const referring = refer();
-    const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%vault_members%'`))[0]!.n;
+    const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%principals%'`))[0]!.n;
     for (let tries = 0; (await waits()) === 0; tries += 1) {
       assert.ok(tries < 200, 'the decision waits on her row');
       await sleep(10);

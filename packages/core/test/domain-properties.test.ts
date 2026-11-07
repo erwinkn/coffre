@@ -55,10 +55,10 @@ test(`every generated world satisfies the schema's keys and checks, seed ${setti
   unique(world.dismissals.map((dismissal) => [dismissal.environmentId, dismissal.key]), 'dismissed_keys_pkey', world);
   for (const dismissal of world.dismissals) assert.notEqual(byId.get(dismissal.environmentId)?.parentId ?? null, null, 'a removal is a fork\'s');
   for (const member of [...world.people, ...world.services]) {
-    // `vault_grants_on_project` and `_on_environment`: one grant a place a member.
-    unique(member.grants.map((grant) => [grant.projectId, grant.environmentId]), 'vault_grants_on_project, vault_grants_on_environment', world);
+    // `grants_on_project` and `_on_environment`: one grant a place a member.
+    unique(member.grants.map((grant) => [grant.projectId, grant.environmentId]), 'grants_on_project, grants_on_environment', world);
     for (const grant of member.grants) {
-      assert.match(grant.role, ROLE_ID, 'vault_grants_role_check');
+      assert.match(grant.role, ROLE_ID, 'grants_role_check');
       if (grant.environmentId !== null) assert.equal(byId.get(grant.environmentId)?.projectId, grant.projectId);
     }
   }

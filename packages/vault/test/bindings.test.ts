@@ -294,12 +294,12 @@ test("an account removed, its row put back, its removal's seal column written to
   const w = await world();
   const made = binding(w);
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
-  const { credentials, logChanges, vaultMembers } = tablesOf(db.owner);
-  const [row] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));
+  const { credentials, logChanges, principals } = tablesOf(db.owner);
+  const [row] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
   assert.ok((await w.vault.remove({ actor: ROOT, principal: CI })).ok);
   // The writer: the account's row as it was before its removal, its old seal valid; the removal's log row untouched, so
   // far: its MAC holds, as the app reads it and as the vault checks it.
-  await db.owner.update(vaultMembers).set({ status: row!.status, generation: row!.generation, seal: row!.seal }).where(eq(vaultMembers.principal, CI));
+  await db.owner.update(principals).set({ status: row!.status, generation: row!.generation, seal: row!.seal }).where(eq(principals.principal, CI));
   const removal = (await newestOf({ kind: 'principal', id: CI }))!;
   const forge = async () => { await db.owner.update(logChanges).set({ seal: row!.seal }).where(eq(logChanges.number, BigInt(removal.number))); };
   const signedIn = (await db.owner.select().from(credentials)).length;
@@ -317,14 +317,14 @@ test("an account removed, its row put back with its removal's own seal, still ge
   const w = await world();
   const made = binding(w);
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
-  const { credentials, vaultMembers } = tablesOf(db.owner);
-  const [row] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));
+  const { credentials, principals } = tablesOf(db.owner);
+  const [row] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
   assert.ok((await w.vault.remove({ actor: ROOT, principal: CI })).ok);
   // The writer, with no log tamper at all: the row active again at its old generation, its seal the removal's. The
   // removal ended no binding, so the binding's own seal and newest change are still authentic.
   const removal = (await newestOf({ kind: 'principal', id: CI }))!;
-  await db.owner.update(vaultMembers).set({ status: row!.status, generation: row!.generation, seal: Buffer.from(removal.seal!, 'base64') })
-    .where(eq(vaultMembers.principal, CI));
+  await db.owner.update(principals).set({ status: row!.status, generation: row!.generation, seal: Buffer.from(removal.seal!, 'base64') })
+    .where(eq(principals.principal, CI));
   const signedIn = (await db.owner.select().from(credentials)).length;
   // The gap: the vault does not check the row's columns (and grants) against that seal at sign-in, so a credential is
   // made. Closing it means the app reads the row and its grants too; R64 leaves it, as the row fails closed below.
@@ -335,18 +335,18 @@ test("an account removed, its row put back with its removal's own seal, still ge
 });
 
 test("an account's old, authentic change handed back under the number of its removal, whose seal column a writer made the old one's, signs nobody in: `sign_in` holds the newest change to the one checked whole, not by number and seal (T192, review r2)", async () => {
-  const { credentials, logChanges, vaultMembers } = tablesOf(db.owner);
+  const { credentials, logChanges, principals } = tablesOf(db.owner);
   // Its change before its removal, whose MAC holds, and the removal's number. No MAC covers a number.
   {
     const w = await world();
     const made = binding(w);
     assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
-    const [row] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));
+    const [row] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
     const old = (await newestOf({ kind: 'principal', id: CI }))!;
     assert.ok((await w.vault.remove({ actor: ROOT, principal: CI })).ok);
     const removal = (await newestOf({ kind: 'principal', id: CI }))!;
     // The writer: the row put back, the removal's seal column the old change's; nothing deleted, renumbered or replayed.
-    await db.owner.update(vaultMembers).set({ status: row!.status, generation: row!.generation, seal: row!.seal }).where(eq(vaultMembers.principal, CI));
+    await db.owner.update(principals).set({ status: row!.status, generation: row!.generation, seal: row!.seal }).where(eq(principals.principal, CI));
     await db.owner.update(logChanges).set({ seal: Buffer.from(old.seal!, 'base64') }).where(eq(logChanges.number, BigInt(removal.number)));
     const signedIn = (await db.owner.select().from(credentials)).length;
     const handed = { ...(await newestAsRead(made.id)), member: { ...old, number: removal.number } };
@@ -521,8 +521,8 @@ test("an unbind takes 0.14's head first, which 0.14's use of a credential it end
 
 test("a binding's maker whose access moved since the app weighed it is refused, for the app to weigh again", async () => {
   const w = await world();
-  const { vaultMembers } = tablesOf(db.owner);
-  const [{ accessSeq }] = (await db.owner.select({ accessSeq: vaultMembers.accessSeq }).from(vaultMembers).where(eq(vaultMembers.principal, ROOT))) as [{ accessSeq: bigint }];
+  const { principals } = tablesOf(db.owner);
+  const [{ accessSeq }] = (await db.owner.select({ accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, ROOT))) as [{ accessSeq: bigint }];
   const stale = await w.vault.changeBindings!(change({ make: binding(w), reason: 'replaced', actorAccess: String(BigInt(accessSeq) + 1n) }));
   assert.equal(!stale.ok && stale.refused, 'access');
   const { serviceBindings } = tablesOf(db.owner);

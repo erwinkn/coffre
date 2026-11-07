@@ -11,7 +11,7 @@
 (* writes become visible at its commit, which is one step with its last    *)
 (* statement. Locks are row locks, held to the end of the transaction:     *)
 (*                                                                         *)
-(*   - a member's row, vault_members, FOR NO KEY UPDATE, taken one row at  *)
+(*   - a member's row, principals, FOR NO KEY UPDATE, taken one row at  *)
 (*     a time in principal order (vault store.ts, lockMembers); or FOR     *)
 (*     SHARE by a decision that changes no member, a read or a wrap, which *)
 (*     others like it share and a change to the member waits for. Each     *)
@@ -42,7 +42,7 @@
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
-    Members,        \* principals with a vault_members row
+    Members,        \* principals with a principals row
     Rank,           \* Rank[m]: the principal's place in lock order
     InitOwners,     \* the Owners of the whole instance at the start
     Listed,         \* those the deployment names Owners: nobody demotes or removes them

@@ -16,7 +16,7 @@ import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { patchProject } from '../src/api/projects.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { resolvePath } from '../src/db/queries.ts';
-import { auditLog, environments, logChanges, logFence, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
+import { auditLog, environments, logChanges, checkpointFence, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
 import { clientFor, contextFor, credentialsLogged, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
@@ -46,7 +46,7 @@ function vault015() {
 async function instance(vault: ReturnType<typeof testVault>): Promise<void> {
   await resetDatabase(db.owner);
   // Uses go in today's partition, at or past the floor of `at` (schema 0022), as a deployment's checkpointer keeps them.
-  await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
+  await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
   if (TEST_ENGINE === 'postgres') {
     const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
     await db.owner.execute(sql`SELECT make_day(${day(Date.now() - 86_400_000)}::date), make_day(${day(Date.now())}::date), make_day(${day(Date.now() + 86_400_000)}::date)`);

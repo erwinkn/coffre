@@ -83,7 +83,8 @@ test(`${TAG} keeps every credential and index on SQLite, and takes a workload's 
     assert.ok(indexes.some((index) => index.name === 'credentials_enrollment_roots_idx'));
     assert.deepEqual(await all(after.db, 'PRAGMA foreign_key_check'), []);
     assert.deepEqual(await all(after.db, 'PRAGMA integrity_check'), [{ integrity_check: 'ok' }]);
-    for (const name of ['audit_log_freeze_idx', 'audit_log_supersede_idx', 'enrollments_binding_idx']) {
+    // The codes' index under the name 0037_table_renames gave it with its table.
+    for (const name of ['audit_log_freeze_idx', 'audit_log_supersede_idx', 'enrollment_codes_binding_idx']) {
       assert.equal((await all(after.db, `SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = '${name}'`)).length, 1, name);
     }
     // The freeze index serves the per-request lookup, by its expression.

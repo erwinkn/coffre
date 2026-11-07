@@ -30,7 +30,7 @@ import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, noth
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
-import { logFence } from './db/tables.ts';
+import { checkpointFence } from './db/tables.ts';
 import { inBulkPeriod } from './window-fixture.ts';
 
 const POSTGRES = postgresOnly("counts the app's and the hot path's Postgres statements");
@@ -73,7 +73,7 @@ before(async () => {
   if (POSTGRES.skip) return;
   db = await openTestDatabase();
   await resetDatabase(db.owner);
-  await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
+  await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
   const kek = randomBytes(32);
   deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
   const root = clientFor(deps, ROOT);
@@ -169,7 +169,7 @@ const reveal = (runtime: CoffreRuntime, identity: () => Promise<AuthenticatedIde
 
 const USE = 'SELECT use_credential( $1::uuid,';
 /** `credentialStill`'s read of the way in, after the vault released (`wayInStands`): what a use through it no longer needs. */
-const STILL = 'select "vault_members"."status",';
+const STILL = 'select "principals"."status",';
 
 test('through an MCP connection, a Cloudflare binding, or behind Access, a value is the hot path\'s one call: no check of the way in after it, no vault call but the use, nothing of 0.14\'s head (T147)', POSTGRES, async () => {
   const cases = [

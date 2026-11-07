@@ -64,7 +64,7 @@ Three rules carry it:
 The pieces:
 
 - **One new table**, `passkeys`, and nullable columns: `passkey_id` and
-  `confirmed_at` on `credentials`, `passkey_id` on `device_authorizations`
+  `confirmed_at` on `credentials`, `passkey_id` on `device_logins`
   and `mcp_connections`. All additive: one migration per engine.
 - **Sign-in routes**: `GET` and `POST /auth/passkey`, between the provider's
   callback and the session. Until the passkey answers, coffre writes
@@ -569,7 +569,7 @@ touch and a sealed state naming that code and the approving session; the
 page asks the authenticator and sends Approve again with `touch: { state,
 response }` (section 4.2, as built). The decision's transaction checks the
 assertion, moves the replay mark and records the passkey
-(`device_authorizations.passkey_id`) with the decision. The touch opens no
+(`device_logins.passkey_id`) with the decision. The touch opens no
 window (rule 1): the approving browser's session stays as it was. A fresh
 browser session alone approves nothing; one touch approves one code.
 
@@ -1113,7 +1113,7 @@ their identities: someone removed and added back starts with none.
 passkeyId: uuid('passkey_id'),          // FK passkeys(id)
 confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
 
-// device_authorizations: the passkey that approved this terminal; its decided_at is when.
+// device_logins: the passkey that approved this terminal; its decided_at is when.
 passkeyId: uuid('passkey_id'),          // FK passkeys(id)
 
 // mcp_connections: the passkey touched to connect it (section 4.2), which may be another of the person's than
@@ -1165,7 +1165,7 @@ above, with these choices:
   the counter, the replay mark, the name, last use, removal and the MAC;
   never whose a passkey is, its handle, credential or key
   (`packages/db/test/schema-guarantees.sql`, 22). It also gets `UPDATE
-  (passkey_id)` on `device_authorizations`, which names its passkey when it
+  (passkey_id)` on `device_logins`, which names its passkey when it
   is decided. `credentials` and `mcp_connections` name theirs when they are
   inserted, which the app's `INSERT` already covers.
 - Checks beyond 5.1's: a 16-byte user handle and AAGUID, the counter a

@@ -12,10 +12,10 @@ import { objectKey, type Ref } from './inputs.ts';
  * one past the log's highest.
  */
 export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answer> {
-  const { auditLog, consumedTokens, credentials, logChanges, serviceBindings, vaultMembers } = tablesOf(tx);
+  const { auditLog, spentIdTokens, credentials, logChanges, serviceBindings, principals } = tablesOf(tx);
   const target = objectKey({ kind: 'credential', id: c.credential.id });
   const k = c.credential;
-  const [member] = await tx.select({ status: vaultMembers.status, generation: vaultMembers.generation, seal: vaultMembers.seal }).from(vaultMembers).where(eq(vaultMembers.principal, c.principal));
+  const [member] = await tx.select({ status: principals.status, generation: principals.generation, seal: principals.seal }).from(principals).where(eq(principals.principal, c.principal));
   if (member?.status !== 'active' || member.generation !== c.binding.generation) return { state: 'unbound' };
   // Its newest change the one the vault checked, whole (ChangePinsChecked, ChangePinsWhole, T192): its number, every
   // column its MAC covers, and the MAC, as 0075's `sign_in`; else `moved`. Then its row as that change sealed it: a row
@@ -54,7 +54,7 @@ export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answ
   if (recent.length >= c.rate) return { state: 'busy' };
   if ((c.validUntil !== null && c.validUntil <= now) || k.expiresAt <= now || k.expiresAt > now + c.longest + CLOCK_SKEW_MS || (k.notAfter !== null && (k.notAfter <= now || k.expiresAt > k.notAfter))) return { state: 'expired' };
   if (c.spent !== null) {
-    const spent = await tx.insert(consumedTokens).values({ hash: c.spent }).onConflictDoNothing().returning({ hash: consumedTokens.hash });
+    const spent = await tx.insert(spentIdTokens).values({ hash: c.spent }).onConflictDoNothing().returning({ hash: spentIdTokens.hash });
     if (spent.length === 0) return { state: 'replayed' };
   }
   await tx.insert(credentials).values({
@@ -100,11 +100,11 @@ export async function revokeOnSqlite(tx: Queryable, c: RevokeCall): Promise<Answ
  * their passkeys is another write transaction, before or after this one).
  */
 export async function issueOnSqlite(tx: Queryable, c: IssueCall): Promise<Answer> {
-  const { auditLog, credentials, environments, logChanges, passkeys, projects, vaultMembers } = tablesOf(tx);
+  const { auditLog, credentials, environments, logChanges, passkeys, projects, principals } = tablesOf(tx);
   const { change, input, read } = c;
   const k = input.credential;
   const standing = async (principal: string, generation: number, accessSeq: bigint) => {
-    const [row] = await tx.select({ status: vaultMembers.status, generation: vaultMembers.generation, accessSeq: vaultMembers.accessSeq }).from(vaultMembers).where(eq(vaultMembers.principal, principal));
+    const [row] = await tx.select({ status: principals.status, generation: principals.generation, accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, principal));
     return row?.status === 'active' && row.generation === generation && BigInt(row.accessSeq) === accessSeq;
   };
   if (!(await standing(input.actor, read.actor.generation, read.actor.accessSeq)) || !(await standing(input.principal, input.generation, read.principal.accessSeq))) return { state: 'moved' };
@@ -150,14 +150,14 @@ export async function issueOnSqlite(tx: Queryable, c: IssueCall): Promise<Answer
 
 /** `change_bindings` on SQLite, step for step, in one transaction: SQLite runs one writer at a time. */
 export async function bindingsOnSqlite(tx: Queryable, c: BindingsCall): Promise<Answer> {
-  const { auditLog, credentials, environments, logChanges, mcpConnections, projects, secrets, serviceBindings, vaultMembers } = tablesOf(tx);
+  const { auditLog, credentials, environments, logChanges, mcpConnections, projects, secrets, serviceBindings, principals } = tablesOf(tx);
   const now = Date.now();
   const newest = async (ref: Parameters<typeof objectKey>[0]) =>
     (await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, objectKey(ref))).orderBy(desc(logChanges.number)).limit(1))[0]?.seal ?? null;
   const m = c.make;
   if (m !== null) {
     const standing = async (principal: string, generation: number, accessSeq: bigint) => {
-      const [row] = await tx.select({ status: vaultMembers.status, generation: vaultMembers.generation, accessSeq: vaultMembers.accessSeq }).from(vaultMembers).where(eq(vaultMembers.principal, principal));
+      const [row] = await tx.select({ status: principals.status, generation: principals.generation, accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, principal));
       return row?.status === 'active' && row.generation === generation && BigInt(row.accessSeq) === accessSeq;
     };
     if (!(await standing(c.actor, m.read.actor.generation, m.read.actor.accessSeq)) || !(await standing(c.principal, m.row.generation, m.read.principal.accessSeq))) return { state: 'moved' };

@@ -26,26 +26,26 @@ export async function memberTampering(deployment: Deployment, people: People, ki
   const path = kind === 'grant' ? PROD : DEV;
   const protectedValues = Object.values((await admin.api.secrets.reveal(path)).values);
   await using(deployment.database(), async (sql) => {
-    const [before] = await query(sql, 'SELECT * FROM vault_members WHERE principal = $1', [person.member]);
-    const grants = await query(sql, 'SELECT * FROM vault_grants WHERE principal = $1', [person.member]);
+    const [before] = await query(sql, 'SELECT * FROM principals WHERE principal = $1', [person.member]);
+    const grants = await query(sql, 'SELECT * FROM grants WHERE principal = $1', [person.member]);
     expect(before !== undefined && grants.length === 1, 'the fixture has no member row and grant');
     let restored = before;
     let held = grants;
     if (kind === 'stale') {
       await admin.api.access.set(person.member, { [DEV]: 'developer' });
-      [restored] = await query(sql, 'SELECT * FROM vault_members WHERE principal = $1', [person.member]);
-      held = await query(sql, 'SELECT * FROM vault_grants WHERE principal = $1', [person.member]);
-      await restoreRow(sql, 'vault_members', before, 'principal');
-      await query(sql, 'UPDATE vault_grants SET role = $1, granted_at = $2, granted_by = $3 WHERE principal = $4',
+      [restored] = await query(sql, 'SELECT * FROM principals WHERE principal = $1', [person.member]);
+      held = await query(sql, 'SELECT * FROM grants WHERE principal = $1', [person.member]);
+      await restoreRow(sql, 'principals', before, 'principal');
+      await query(sql, 'UPDATE grants SET role = $1, granted_at = $2, granted_by = $3 WHERE principal = $4',
         [grants[0].role, grants[0].granted_at, grants[0].granted_by, person.member]);
     } else if (kind === 'member') {
       // The instance role, as the database's owner could set it: an Owner reads every value.
-      await query(sql, "UPDATE vault_members SET role = 'owner' WHERE principal = $1", [person.member]);
+      await query(sql, "UPDATE principals SET role = 'owner' WHERE principal = $1", [person.member]);
     } else {
       const [place] = await query<{ id: string }>(sql, `SELECT e.id FROM environments e JOIN projects p ON p.id = e.project_id
         WHERE p.slug = 'conformance' AND e.slug = 'prod'`);
       expect(place !== undefined, 'no prod environment to forge a grant on');
-      await query(sql, `INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by) VALUES ($1, $2, 'viewer', $3, $4)`,
+      await query(sql, `INSERT INTO grants (principal, environment_id, role, granted_at, granted_by) VALUES ($1, $2, 'viewer', $3, $4)`,
         [person.member, place.id, Date.now(), person.member]);
     }
     try {
@@ -60,9 +60,9 @@ export async function memberTampering(deployment: Deployment, people: People, ki
       const verified = await admin.api.audit.verify();
       expect(!verified.ok && verified.author === 'vault' && verified.failedAtSeq === null, 'the tampered member verifies', verified);
     } finally {
-      await restoreRow(sql, 'vault_members', restored, 'principal');
-      await query(sql, 'DELETE FROM vault_grants WHERE principal = $1', [person.member]);
-      for (const grant of held) await insertRow(sql, 'vault_grants', grant);
+      await restoreRow(sql, 'principals', restored, 'principal');
+      await query(sql, 'DELETE FROM grants WHERE principal = $1', [person.member]);
+      for (const grant of held) await insertRow(sql, 'grants', grant);
     }
   });
   expect((await person.api.secrets.reveal(DEV)).values.API_KEY !== undefined, 'restoring the member did not restore legitimate use');
@@ -107,8 +107,8 @@ export async function noAuditNoAccess(deployment: Deployment, people: People): P
   const { admin } = people;
   await using(deployment.database(), async (sql) => {
     const snapshot = async () => ({
-      members: await sql.query('SELECT * FROM vault_members ORDER BY principal'),
-      grants: await sql.query('SELECT * FROM vault_grants ORDER BY principal, project_id, environment_id'),
+      members: await sql.query('SELECT * FROM principals ORDER BY principal'),
+      grants: await sql.query('SELECT * FROM grants ORDER BY principal, project_id, environment_id'),
     });
     const before = await snapshot();
     // Both logs: since 0.16 a first add down the two-trip path appends to 0.15's alone.
@@ -155,7 +155,7 @@ export async function sealingRace(deployment: Deployment, people: People): Promi
             AND usename = $1 AND $2 = ANY(pg_blocking_pids(pid))`, [login.name, owner.pid]);
           return waiting.length > 0;
         }, 10);
-        await query(sql, `INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by)
+        await query(sql, `INSERT INTO grants (principal, environment_id, role, granted_at, granted_by)
           VALUES ($1, $2, 'viewer', $3, $4)`, [person.member, place.id, Date.now(), person.member]);
         forged = place.id;
       } finally {
@@ -178,7 +178,7 @@ export async function sealingRace(deployment: Deployment, people: People): Promi
     // Under 0.15's log a tampered member is not started over until a reseal makes its row the
     // log's again, so the forgery is taken back first, as memberTampering restores its rows.
     if (forged !== undefined) {
-      await using(deployment.database(), (sql) => query(sql, `DELETE FROM vault_grants
+      await using(deployment.database(), (sql) => query(sql, `DELETE FROM grants
         WHERE principal = $1 AND environment_id = $2`, [person.member, forged]));
     }
     await admin.api.members.remove(person.member);

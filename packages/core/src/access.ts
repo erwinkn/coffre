@@ -115,7 +115,7 @@ export const ROLE_NAMES = Object.keys(ROLES) as BuiltinRole[];
  * How long a role's id, name and description may be, in characters. Input bounds chosen with custom roles (W128,
  * 0.10) so a definition stays a small row, never measured: no platform or design document sets them (the limits
  * audit, #501, S68 and C4). The vault checks a definition by them (`definitionProblem`), the database's role check
- * holds the id's (`vault_grants_role_check`), and the API's schema and the UI's fields take them from here.
+ * holds the id's (`grants_role_check`), and the API's schema and the UI's fields take them from here.
  */
 export const ROLE_ID_MAX = 32;
 export const ROLE_NAME_MAX = 40;

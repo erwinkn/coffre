@@ -239,7 +239,7 @@ export type ProofContext = {
 export type MatchedProof = {
   binding: BindingRow;
   claims: Record<string, unknown>;
-  /** What spending it records in `consumed_tokens`, for a bearer proof; none for one that names the key or repeats (section 4.1). */
+  /** What spending it records in `spent_id_tokens`, for a bearer proof; none for one that names the key or repeats (section 4.1). */
   spentKey?: Buffer;
   /** A bearer token's own `exp`, which ends the session it makes (section 5.4). */
   notAfter?: Date;
@@ -307,7 +307,7 @@ export { EXCHANGED_CREDENTIAL_MS, SESSION_MS } from '@coffre/core/identity';
  * a fixed one (Azure's), or the instance's. What is spent follows section
  * 4.1's rule: a token that names the key, or one its platform hands out
  * again (`REPEATING_PROFILES`), never; any other once, in
- * `consumed_tokens`. A token that does not name the key ends the session it
+ * `spent_id_tokens`. A token that does not name the key ends the session it
  * makes at its own `exp`, so a copy of it buys no more than the platform's
  * own lifetime.
  */

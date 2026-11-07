@@ -428,7 +428,7 @@ rollback, when it holds the configured emails root admins again anyway.
 
 ## Where it lives
 
-Two nullable columns on `vault_members`, beside `owner`, from migration
+Two nullable columns on `principals`, beside `owner`, from migration
 `0002_instance_roles` on both engines:
 
 | Column | Holds |

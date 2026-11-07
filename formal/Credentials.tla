@@ -9,7 +9,7 @@
 (* Coffre.tla. Isolation is READ COMMITTED. Two locks matter, each held to *)
 (* the end of its transaction:                                             *)
 (*                                                                         *)
-(*   - the account's row, vault_members, which every vault decision about  *)
+(*   - the account's row, principals, which every vault decision about  *)
 (*     it takes first (vault store.ts, lockMembers): FOR NO KEY UPDATE, or *)
 (*     FOR SHARE for a read, which its other reads share and a change to   *)
 (*     the account waits for, queued behind a change that asked first;     *)
@@ -39,7 +39,7 @@ CONSTANTS
 (***************************************************************************)
 CONSTANTS
     \* The exchange spends the ID token in the transaction that issues its
-    \* credential, an insert into consumed_tokens whose primary key is the
+    \* credential, an insert into spent_id_tokens whose primary key is the
     \* token's hash (server api/workloads.ts, #exchange, exchangeToken). Off,
     \* only the read before it (exchangeCandidates) stands in its way.
     SpentTokenInsertedWithCredential,
@@ -116,7 +116,7 @@ VARIABLES
     \* app rows
     binding,        \* binding[b]: [made, revoked, gen], service_bindings
     creds,          \* the credentials rows: [id, by, gen, revoked]
-    consumed,       \* the ID tokens spent, consumed_tokens
+    consumed,       \* the ID tokens spent, spent_id_tokens
     \* vault rows
     status,         \* the account's status: "active" or "removed"
     gen,            \* its generation

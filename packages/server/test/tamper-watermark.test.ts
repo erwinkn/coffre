@@ -10,7 +10,7 @@ import { and, desc, eq, gt, inArray, max } from 'drizzle-orm';
 
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { withLogUnlocked } from './db/engine.ts';
-import { auditLog, logChanges, vaultGrants, vaultMembers } from './db/tables.ts';
+import { auditLog, logChanges, grants, principals } from './db/tables.ts';
 
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
@@ -41,12 +41,12 @@ beforeEach(async () => {
 
 /** The member's row and grants as they are now, to put back later as the database's owner could. */
 async function snapshot() {
-  const [row] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, MEMBER));
-  const held = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, MEMBER));
+  const [row] = await db.owner.select().from(principals).where(eq(principals.principal, MEMBER));
+  const held = await db.owner.select().from(grants).where(eq(grants.principal, MEMBER));
   return async () => {
-    await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, MEMBER));
-    await db.owner.update(vaultMembers).set(row!).where(eq(vaultMembers.principal, MEMBER));
-    if (held.length > 0) await db.owner.insert(vaultGrants).values(held);
+    await db.owner.delete(grants).where(eq(grants.principal, MEMBER));
+    await db.owner.update(principals).set(row!).where(eq(principals.principal, MEMBER));
+    if (held.length > 0) await db.owner.insert(grants).values(held);
   };
 }
 
@@ -95,8 +95,8 @@ test('a finding stands on every reader until a change after the one it weighed, 
 });
 
 test('a member the log has a change of, with no row and no access entry of 0.14\'s, is missing: their report says tampered, not 404', LOG_015_ONLY, async () => {
-  await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, MEMBER));
-  await db.owner.delete(vaultMembers).where(eq(vaultMembers.principal, MEMBER));
+  await db.owner.delete(grants).where(eq(grants.principal, MEMBER));
+  await db.owner.delete(principals).where(eq(principals.principal, MEMBER));
   await dropAccessEntriesAfter(-1n);
   // Their report, by a change of theirs in 0.15's log and no row. The list of everyone finds the rowless by 0.14's
   // entries alone (PR 4b, with PR 6): it does not list them.

@@ -3,25 +3,25 @@
 -- What log-guarantees.sql decides on, as the owner, after schema-fixture.sql:
 -- a service account with a token and a trust binding, and two secrets in the fixture's
 -- environment. Nothing is sealed yet; the vault seals it there.
-DELETE FROM log_bulk;
+DELETE FROM bulk_cap;
 DELETE FROM log_changes;
 TRUNCATE log_uses;
 DELETE FROM log_config;
 DELETE FROM log_checkpoints;
 DELETE FROM log_tiles;
-UPDATE log_fence SET at_floor = (extract(epoch FROM clock_timestamp()) * 1000)::bigint - 3000;
+UPDATE checkpoint_fence SET at_floor = (extract(epoch FROM clock_timestamp()) * 1000)::bigint - 3000;
 DELETE FROM credentials;
 DELETE FROM service_bindings;
 UPDATE secrets SET current_version_id = NULL;
 DELETE FROM secret_versions;
 DELETE FROM secrets;
-DELETE FROM vault_grants;
-DELETE FROM vault_members;
+DELETE FROM grants;
+DELETE FROM principals;
 
-INSERT INTO vault_members (principal, status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
+INSERT INTO principals (principal, status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
 VALUES ('token:deploy', 'active', false, 1, 1, 'user:admin@acme.example', 1, 'user:admin@acme.example', 1, decode(repeat('01', 32), 'hex'));
 
-INSERT INTO vault_grants (principal, project_id, role, granted_at, granted_by)
+INSERT INTO grants (principal, project_id, role, granted_at, granted_by)
 VALUES ('token:deploy', '11111111-1111-1111-1111-111111111111', 'viewer', 1, 'user:admin@acme.example');
 
 INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at)
@@ -60,4 +60,4 @@ SELECT ('88888888-8888-8888-8888-88888888888' || n)::uuid, '11111111-1111-1111-1
   FROM generate_series(1, 2) AS n;
 
 -- A key no window counts any more: prune_bulk's.
-INSERT INTO log_bulk (principal, secret, last) VALUES ('token:gone', '77777777-7777-7777-7777-777777777777', 0);
+INSERT INTO bulk_cap (principal, secret, last) VALUES ('token:gone', '77777777-7777-7777-7777-777777777777', 0);

@@ -20,7 +20,7 @@ import { sealScopes } from '../src/api/services.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { auditLog, credentials, environments, logChanges, secrets, secretVersions, serviceBindings, vaultMembers } from './db/tables.ts';
+import { auditLog, credentials, environments, logChanges, secrets, secretVersions, serviceBindings, principals } from './db/tables.ts';
 import { clientFor, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -321,7 +321,7 @@ test("a scope changed or cleared around the app fails the row's MAC, and the tok
 /** A token of 0.4, issued for `principal`: no scope, its MAC over 0.4's tuple. Its value. */
 async function legacyToken(principal: string): Promise<{ token: string; id: string }> {
   const token = generateToken('service');
-  const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, principal));
+  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, principal));
   const row = {
     id: randomUUID(),
     kind: 'service',
@@ -448,7 +448,7 @@ test("a token's dry run says what it would reach, checked as issuing it is, and 
 test("0.4's tokens and bindings keep exactly what they reached: sealed with the account's grants once, as coffre migrate lists them, and widened by nothing after", { skip: LOG_014_ONLY }, async () => {
   // A token 0.4 issued: no scope, its MAC over 0.4's tuple.
   const token = generateToken('service');
-  const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, CI));
+  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
   const row = {
     id: randomUUID(),
     kind: 'service',

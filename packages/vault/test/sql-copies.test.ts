@@ -108,10 +108,10 @@ test("the hot login's timeouts are HOT_LOCK_TIMEOUT_MS and HOT_STATEMENT_TIMEOUT
 test("a grant's role check takes a role id as ROLE_ID does: 2 to ROLE_ID_MAX characters", async () => {
   if (ENGINE === 'postgres') {
     const [row] = await rows<{ definition: string }>(db.owner, sql`
-      SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conname = 'vault_grants_role_check'`);
+      SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conname = 'grants_role_check'`);
     assert.ok(row!.definition.includes(`'${ROLE_ID.source}'`), row!.definition);
   } else {
-    const [row] = await rows<{ sql: string }>(db.owner, sql`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vault_grants'`);
+    const [row] = await rows<{ sql: string }>(db.owner, sql`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'grants'`);
     assert.ok(row!.sql.includes(`BETWEEN 2 AND ${ROLE_ID_MAX} AND`), row!.sql);
   }
   assert.equal(ROLE_ID.source, `^[a-z][a-z0-9-]{1,${ROLE_ID_MAX - 1}}$`);

@@ -21,9 +21,9 @@ after(() => db.close());
 /** The step a write of another connection takes between `reader`'s read and its own transaction. */
 async function writeThenBegin(reader: TestDatabase['owner']): Promise<void> {
   await rows(reader, sql`SELECT max(number) FROM log_changes`);
-  await run(db.vault, sql`UPDATE log_fence SET at_floor = at_floor + 1`);
+  await run(db.vault, sql`UPDATE checkpoint_fence SET at_floor = at_floor + 1`);
   await reader.transaction(async (tx) => {
-    await run(tx, sql`UPDATE log_fence SET at_floor = at_floor + 1`);
+    await run(tx, sql`UPDATE checkpoint_fence SET at_floor = at_floor + 1`);
   });
 }
 

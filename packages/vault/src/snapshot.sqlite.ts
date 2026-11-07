@@ -47,13 +47,13 @@ export function snapshotQuery(asked: Asked): SQL {
         ? sql`(SELECT json_group_array(json_object(
             'principal', principal, 'status', status, 'owner', owner, 'role', role, 'scope', scope, 'generation', generation,
             'createdAt', created_at, 'createdBy', created_by, 'statusChangedAt', status_changed_at, 'statusChangedBy', status_changed_by,
-            'accessSeq', access_seq, 'mac', hex(mac))) FROM vault_members WHERE principal IN (SELECT value FROM json_each(${principals})))`
+            'accessSeq', access_seq, 'mac', hex(mac))) FROM principals WHERE principal IN (SELECT value FROM json_each(${principals})))`
         : sql`'[]'`}),
       'grants', json((
         SELECT json_group_array(json_object(
           'principal', g.principal, 'projectId', coalesce(g.project_id, env.project_id), 'environmentId', g.environment_id,
           'environmentSlug', g.environment_slug, 'role', g.role, 'expiresAt', g.expires_at, 'grantedAt', g.granted_at, 'grantedBy', g.granted_by))
-        FROM vault_grants g LEFT JOIN environments env ON env.id = g.environment_id
+        FROM grants g LEFT JOIN environments env ON env.id = g.environment_id
         WHERE g.principal IN (SELECT value FROM json_each(${principals}))
       )),
       'access', json((
@@ -84,7 +84,7 @@ export function snapshotQuery(asked: Asked): SQL {
         WHERE env.id IN (SELECT value FROM json_each(${environments}))
           OR env.id IN (SELECT parent_id FROM environments WHERE id IN (SELECT value FROM json_each(${environments})) AND owner IS NOT NULL)${seals
             ? sql`
-          OR env.id IN (SELECT environment_id FROM vault_grants WHERE principal IN (SELECT value FROM json_each(${principals})) AND environment_id IS NOT NULL)`
+          OR env.id IN (SELECT environment_id FROM grants WHERE principal IN (SELECT value FROM json_each(${principals})) AND environment_id IS NOT NULL)`
             : sql``}
           OR env.id IN (
             SELECT json_extract(place.value, '$.environmentId')
@@ -99,7 +99,7 @@ export function snapshotQuery(asked: Asked): SQL {
         SELECT json_group_array(id) FROM (
           SELECT value AS id FROM json_each(${environments})
           UNION SELECT parent_id FROM environments WHERE id IN (SELECT value FROM json_each(${environments})) AND owner IS NOT NULL
-          UNION SELECT environment_id FROM vault_grants WHERE principal IN (SELECT value FROM json_each(${principals})) AND environment_id IS NOT NULL
+          UNION SELECT environment_id FROM grants WHERE principal IN (SELECT value FROM json_each(${principals})) AND environment_id IS NOT NULL
           UNION SELECT json_extract(place.value, '$.environmentId')
             FROM policy, json_each(policy.metadata, '$.policy.protected') AS place
             WHERE json_valid(policy.metadata) AND json_type(policy.metadata, '$.policy.protected') = 'array' AND place.type = 'object'

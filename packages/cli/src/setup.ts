@@ -636,9 +636,9 @@ const BOUNDARY = [
     // The hot path's, through coffre_vault, as the vault's.
     expected: { app: false, vault: true, hot: true, backup: false },
     // A whole row, so that only a privilege can refuse it.
-    sql: `INSERT INTO vault_members (principal, status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
+    sql: `INSERT INTO principals (principal, status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
           VALUES ('user:coffre-setup@probe.invalid', 'active', false, 0, 0, 'system:coffre-setup', 0, 'system:coffre-setup', 0, decode(repeat('00', 32), 'hex'))`,
-    privilege: "has_table_privilege($1, 'public.vault_members', 'INSERT')",
+    privilege: "has_table_privilege($1, 'public.principals', 'INSERT')",
   },
   {
     what: 'delete log entries',

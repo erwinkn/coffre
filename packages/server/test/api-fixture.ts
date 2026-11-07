@@ -579,30 +579,30 @@ export async function resetDatabase(owner: Database): Promise<void> {
   forgetProxyGates();
   const {
     credentials,
-    deviceAuthorizations,
-    enrollments,
+    deviceLogins,
+    enrollmentCodes,
     environments,
     identities,
     projects,
     secrets,
     secretVersions,
     serviceBindings,
-    consumedTokens,
+    spentIdTokens,
     cappedAlerts,
     secretReferences,
     dismissedKeys,
     mcpApprovals,
     mcpConnections,
     oauthClients,
-    vaultGrants,
-    vaultMembers,
+    grants,
+    principals,
     logChanges,
     logConfig,
     proxyDefinitions,
     proxyReserved,
     passkeys,
     logUses,
-    logBulk,
+    bulkCap,
     logReads,
     logReadDays,
     logReadsCursor,
@@ -611,11 +611,11 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(mcpConnections);
   await owner.delete(oauthClients);
   await owner.delete(credentials);
-  await owner.delete(enrollments);
+  await owner.delete(enrollmentCodes);
   await owner.delete(serviceBindings);
-  await owner.delete(consumedTokens);
+  await owner.delete(spentIdTokens);
   await owner.delete(cappedAlerts);
-  await owner.delete(deviceAuthorizations);
+  await owner.delete(deviceLogins);
   await owner.delete(identities);
   // What names a passkey is gone: its passkeys next, before their members.
   await owner.delete(passkeys);
@@ -630,15 +630,15 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(proxyReserved);
   // Its uses and their cap's rows: a test's reads count from none.
   await owner.delete(logUses);
-  await owner.delete(logBulk);
+  await owner.delete(bulkCap);
   // And their projection (T166), from the start again.
   await owner.delete(logReads);
   await owner.delete(logReadDays);
   // Its one row put back if a test deleted it (review r6).
   const start = { through: 0n, pair: 0n, at: 0, mac: null };
   await owner.insert(logReadsCursor).values({ onlyRow: true, ...start }).onConflictDoUpdate({ target: logReadsCursor.onlyRow, set: start });
-  await owner.delete(vaultGrants);
-  await owner.delete(vaultMembers);
+  await owner.delete(grants);
+  await owner.delete(principals);
   await owner.delete(dismissedKeys);
   await owner.update(secrets).set({ currentVersionId: null });
   await owner.delete(secretVersions);
@@ -705,7 +705,7 @@ export async function credentialsLogged(owner: Database): Promise<void> {
  */
 export async function decisionInputs(owner: Database, except: readonly string[] = []): Promise<Record<string, string[]>> {
   const tables = tablesOf(owner);
-  const inputs = { vaultMembers: tables.vaultMembers, vaultGrants: tables.vaultGrants, credentials: tables.credentials, secrets: tables.secrets,
+  const inputs = { principals: tables.principals, grants: tables.grants, credentials: tables.credentials, secrets: tables.secrets,
     secretVersions: tables.secretVersions, secretReferences: tables.secretReferences, environments: tables.environments, projects: tables.projects, logConfig: tables.logConfig,
     proxyDefinitions: tables.proxyDefinitions, proxyReserved: tables.proxyReserved, serviceBindings: tables.serviceBindings };
   const { auditLog } = tables;

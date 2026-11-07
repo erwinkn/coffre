@@ -45,6 +45,15 @@ for version in "$release" ${schema:+"$schema"}; do
         exit 2
     fi
 done
+# Whether a version predates 0.16.0, whose migrations renamed tables (T178).
+before_renames() {
+    local major minor
+    IFS=. read -r major minor _ <<<"$1"
+    ((major == 0 && minor < 16))
+}
+# The release knows the old names, and the schema it is held to has the new.
+renames=false
+if before_renames "$release" && { [[ -z "$schema" ]] || ! before_renames "$schema"; }; then renames=true; fi
 temporary=false
 if [[ -n "${1:-}" ]]; then
     work="$1"
@@ -127,19 +136,24 @@ quietly "installing @coffre/cli@$release" "$work/cli.log" \
 # Each replaced file moves aside and a new one takes its place, never written
 # through: pnpm links them from its store. All a shim needs is written into
 # it. The owner's URL comes as the release gives it: an argument, or piped in.
+# After the migrations, the SQL files given as arguments, in order.
 migration() {
     cat <<EOF
 url="\${DATABASE_URL:-}"
 for arg in "\$@"; do case "\$arg" in postgres*|file:*) url="\$arg" ;; esac; done
 if [ -z "\$url" ] && [ ! -t 0 ]; then url="\$(cat)"; fi
 $migrator "\$url"
-[ -z "$1" ] || node --conditions=coffre:source '$root/scripts/compat-migrate.mjs' --only "\$url" '$1'
-touch '$work/migrated'
 EOF
+    local file
+    for file in "$@"; do
+        echo "node --conditions=coffre:source '$root/scripts/compat-migrate.mjs' --only \"\$url\" '$file'"
+    done
+    echo "touch '$work/migrated'"
 }
 
 shim_bin() {
-    local bin="$1" extra="$2"
+    local bin="$1"
+    shift
     [[ -e "$bin" || -e "$bin.release" ]] || return 0
     [[ -e "$bin.release" ]] || mv "$bin" "$bin.release"
     rm -f "$bin"
@@ -147,18 +161,19 @@ shim_bin() {
         echo '#!/bin/sh'
         echo "# pnpm test:compat: migrate with $against, not the release's own."
         echo "[ \"\$1\" = migrate ] || exec '$bin.release' \"\$@\""
-        migration "$extra"
+        migration "$@"
     } >"$bin"
     chmod +x "$bin"
 }
 
 shim_cli() {
-    local project="$1" extra="$2" manifest entry
+    local project="$1" manifest entry
+    shift
     manifest="$(cd "$project" && node -e "process.stdout.write(require.resolve('@coffre/cli/package.json'))" 2>/dev/null)" || return 0
     entry="$(dirname "$manifest")/$(node -e "process.stdout.write(require(process.argv[1]).bin.coffre)" "$manifest")"
     [[ -e "${entry%.js}.release.js" ]] || mv "$entry" "${entry%.js}.release.js"
     rm -f "$entry"
-    { echo '#!/bin/sh'; migration "$extra"; } >"$entry.compat.sh"
+    { echo '#!/bin/sh'; migration "$@"; } >"$entry.compat.sh"
     cat >"$entry" <<EOF
 // pnpm test:compat: \`coffre migrate\` migrates with $against; every other command is the release's own.
 if (process.argv[2] === 'migrate') {
@@ -169,9 +184,12 @@ await import('./$(basename "${entry%.js}").release.js');
 EOF
 }
 
+# shim <project> [<sql file>...]
 shim() {
-    shim_bin "$1/node_modules/.bin/coffre-server" "$2"
-    shim_cli "$1" "$2"
+    local project="$1"
+    shift
+    shim_bin "$project/node_modules/.bin/coffre-server" "$@"
+    shim_cli "$project" "$@"
 }
 
 conformance() {
@@ -208,7 +226,21 @@ for kind in "${kinds[@]}"; do
     quietly "installing coffre-$kind" "$work/$kind-install.log" pnpm --dir "$project" install --store-dir "$store"
     engine="$([[ "$kind" == workers ]] && echo postgres || echo sqlite)"
 
-    shim "$project" ''
+    # 0.16.0 renamed tables (T178, postgres/0076_table_renames.sql). On
+    # Postgres a release before it runs through the views kept under the old
+    # names, and its conformance is told the new ones where it names tables
+    # (scripts/compat/renamed-tables.mjs). SQLite keeps no views and no
+    # deployment runs it: there the tables go back under the old names after
+    # migrating (scripts/compat/renamed-tables.sqlite.sql). Delete both once
+    # 0.16.0 is the newest release.
+    renamed=()
+    if [[ "$renames" == true && "$kind" == workers ]]; then
+        node "$root/scripts/compat/renamed-tables.mjs" "$project/node_modules/@coffre/conformance/dist/main.js"
+    elif [[ "$renames" == true ]]; then
+        renamed=("$root/scripts/compat/renamed-tables.sqlite.sql")
+    fi
+
+    shim "$project" ${renamed[@]+"${renamed[@]}"}
     if conformance "$project" "$kind" "$work/$kind.log"; then
         echo "    conformant"
     else
@@ -219,7 +251,7 @@ for kind in "${kinds[@]}"; do
 
     # The check, shown able to fail: a destructive migration on top, which
     # renames a column the release writes at every sign-in.
-    shim "$project" "$root/scripts/compat/destructive.$engine.sql"
+    shim "$project" ${renamed[@]+"${renamed[@]}"} "$root/scripts/compat/destructive.$engine.sql"
     if conformance "$project" "$kind" "$work/$kind-destructive.log"; then
         echo "compat-check: coffre $release passed with a destructive migration applied; the check cannot fail, see $work/$kind-destructive.log" >&2
         exit 1

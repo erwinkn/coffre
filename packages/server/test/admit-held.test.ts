@@ -41,7 +41,7 @@ test.after(async () => {
 });
 
 const run = (on: Queryable, query: ReturnType<typeof sql>) => rowsOf(on, query);
-const { vaultMembers, credentials } = tablesOf(db.owner);
+const { principals, credentials } = tablesOf(db.owner);
 
 /**
  * A fresh instance: projects market and billing, Bob an admin of the whole instance, and his browser session. `fast:
@@ -112,13 +112,13 @@ async function world({ fast = true, past = 0n, sealThrough = sealedNow }: { fast
 
 /** A member's row, by principal: its role and scope columns, or none. */
 async function memberRow(principal: string): Promise<{ role: string | null; createdBy: string } | undefined> {
-  const [row] = await db.owner.select({ role: vaultMembers.role, createdBy: vaultMembers.createdBy }).from(vaultMembers).where(eq(vaultMembers.principal, principal));
+  const [row] = await db.owner.select({ role: principals.role, createdBy: principals.createdBy }).from(principals).where(eq(principals.principal, principal));
   return row;
 }
 
 /** A member's `access_seq`, exactly. */
 async function accessSeq(principal: string): Promise<bigint> {
-  const [row] = await run(db.owner, sql`SELECT CAST(access_seq AS TEXT) AS seq FROM vault_members WHERE principal = ${principal}`) as { seq: string }[];
+  const [row] = await run(db.owner, sql`SELECT CAST(access_seq AS TEXT) AS seq FROM principals WHERE principal = ${principal}`) as { seq: string }[];
   return BigInt(row!.seq);
 }
 
@@ -296,7 +296,7 @@ test("Bob removed and restored as an admin between the read and the write, his s
 test("Bob's member row edited in a column only its 0.4 MAC covers (`created_by`): the read refuses it, and today's path answers it as ever, 401, nothing added (review r1 of #474)", { skip: POSTGRES }, async () => {
   const attempt = async (fast: boolean) => {
     const w = await world({ fast });
-    await db.owner.update(vaultMembers).set({ createdBy: 'user:someone@acme.example' }).where(eq(vaultMembers.principal, `user:${BOB}`));
+    await db.owner.update(principals).set({ createdBy: 'user:someone@acme.example' }).where(eq(principals.principal, `user:${BOB}`));
     const made = await since(() => w.add());
     return { served: served(w.answers), status: made.result.status, body: made.result.body, entries: made.entries, row: await memberRow(NEW) };
   };
@@ -414,9 +414,9 @@ test("Bob's session revoked and its row put back, live: the vault's read refuses
 
 test("Bob demoted, then his row put back and its seal written into the demotion's change: the change's MAC fails, the add goes down today's path, which refuses it too (WritingForge, T190)", { skip: ANY }, async () => {
   const w = await world();
-  const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${BOB}`));
+  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, `user:${BOB}`));
   await w.root.members.add(`user:${BOB}`, { role: 'member' });
-  await db.owner.update(vaultMembers).set(member!).where(eq(vaultMembers.principal, `user:${BOB}`));
+  await db.owner.update(principals).set(member!).where(eq(principals.principal, `user:${BOB}`));
   await run(db.owner, sql`UPDATE log_changes SET seal = ${member!.seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${logObject('principal', `user:${BOB}`)})`);
   const added = await w.add();
   assert.notEqual(added.status, 200, JSON.stringify(added.body));
@@ -549,14 +549,14 @@ test("a first add down the two-trip path, recorded in 0.15's log alone, is liste
   // cannot follow, and 0.15's log holds the rows instead.
   await w.root.members.add(NEW, { role: 'auditor' });
   assert.ok((await w.root.audit.verify()).ok);
-  const [row] = await run(db.owner, sql`SELECT * FROM vault_members WHERE principal = ${NEW}`) as Record<string, unknown>[];
-  await run(db.owner, sql`UPDATE vault_members SET role = 'owner' WHERE principal = ${NEW}`);
+  const [row] = await run(db.owner, sql`SELECT * FROM principals WHERE principal = ${NEW}`) as Record<string, unknown>[];
+  await run(db.owner, sql`UPDATE principals SET role = 'owner' WHERE principal = ${NEW}`);
   const forged = await w.root.audit.verify();
   assert.deepEqual([forged.ok, forged.ok ? null : forged.author], [false, 'vault']);
-  await run(db.owner, sql`UPDATE vault_members SET role = ${row!.role as string} WHERE principal = ${NEW}`);
+  await run(db.owner, sql`UPDATE principals SET role = ${row!.role as string} WHERE principal = ${NEW}`);
   assert.ok((await w.root.audit.verify()).ok);
   // Its row deleted around the vault: the list of everyone finds the member missing.
-  await run(db.owner, sql`DELETE FROM vault_members WHERE principal = ${NEW}`);
+  await run(db.owner, sql`DELETE FROM principals WHERE principal = ${NEW}`);
   assert.deepEqual(await missingMembers(db.runtime), [NEW]);
 });
 
@@ -573,7 +573,7 @@ test("a member added down the two-trip path, then removed down today's path: 0.1
   const verified = await w.root.audit.verify();
   assert.ok(verified.ok, JSON.stringify(verified));
   // Carol, added down today's path before the removal, her row deleted: no replay says she is missing now, 0.15's log does.
-  await run(db.owner, sql`DELETE FROM vault_members WHERE principal = ${CAROL}`);
+  await run(db.owner, sql`DELETE FROM principals WHERE principal = ${CAROL}`);
   const missing = await w.root.audit.verify();
   assert.deepEqual([missing.ok, missing.ok ? null : missing.author, missing.ok ? null : missing.reason], [false, 'vault', "the store's carol@acme.example is older than the log's last change to them: it was put back"], JSON.stringify(missing));
 });
@@ -586,7 +586,7 @@ test("a member added down the two-trip path alone, with no 0.14 entry of them, w
   assert.deepEqual(await run(db.owner, sql`SELECT count(*)::int AS n FROM audit_log WHERE subject_principal = ${NEW}`), [{ n: 0 }]);
   assert.deepEqual(await missingMembers(db.runtime), []);
   assert.ok((await w.root.audit.verify()).ok);
-  await run(db.owner, sql`DELETE FROM vault_members WHERE principal = ${NEW}`);
+  await run(db.owner, sql`DELETE FROM principals WHERE principal = ${NEW}`);
   assert.deepEqual(await missingMembers(db.runtime), [NEW]);
   // And the vault's verification, which no 0.14 entry of theirs tells either.
   const verified = await w.root.audit.verify();

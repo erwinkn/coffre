@@ -243,7 +243,7 @@ try {
     await db.owner.execute(sql`DELETE FROM log_checkpoints`);
     await db.owner.execute(sql`DELETE FROM log_tiles`);
     await db.owner.execute(sql`DELETE FROM log_uses`);
-    await db.owner.execute(sql`UPDATE log_fence SET at_floor = ${Date.now() - 3000}`);
+    await db.owner.execute(sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 3000}`);
     checkpointer = await runCheckpointer({ database: createDatabase(checkpointerPool), signingKeys: [derivedSigningKey(kek)], memory: join(memory, 'memory') });
   }
   const log = checkpointer === null ? { log: '0.14' as const } : { log: '0.15' as const, sealThrough: checkpointer.sealThrough, heldOutside: checkpointer.heldOutside };
@@ -405,7 +405,7 @@ try {
     for (let n = 0; n < Number(values.principals); n += 1) {
       const principal = `token:fleet-${n}`;
       const id = crypto.randomUUID();
-      await db.owner.execute(sql`INSERT INTO vault_members (principal, status, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
+      await db.owner.execute(sql`INSERT INTO principals (principal, status, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
         VALUES (${principal}, 'active', 0, ${Date.now()}, 'system:bench', ${Date.now()}, 'system:bench', 0, ${Buffer.alloc(32)})`);
       await db.owner.execute(sql`INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at)
         VALUES (${id}, 'service', ${Buffer.alloc(32)}, ${randomBytes(32)}, 'h', 0, ${principal}, 'system:bench', ${new Date(Date.now() + 86_400_000)})`);

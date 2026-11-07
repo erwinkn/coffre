@@ -34,7 +34,7 @@ const holding = <T>(lock: ReturnType<typeof sql>, work: () => Promise<T>, owner 
 const slowed = () => slowedVault(db);
 
 const uses = async () => Number((await rows<{ n: number | string }>(db.owner, sql`SELECT count(*) AS n FROM log_uses`))[0]!.n);
-const bulk = async () => Number((await rows<{ n: number | string }>(db.owner, sql`SELECT count(*) AS n FROM log_bulk`))[0]!.n);
+const bulk = async () => Number((await rows<{ n: number | string }>(db.owner, sql`SELECT count(*) AS n FROM bulk_cap`))[0]!.n);
 const served = (outcome: NamedUseOutcome) => {
   assert.equal(outcome.served, true);
   return outcome as Extract<NamedUseOutcome, { served: true }>;
@@ -126,7 +126,7 @@ test('a map out of date is read again once: a key deleted and made again under i
 /** Each of `keys` used once while the caller stands, so that each name is mapped, then its row of the cap's gone, as a window passing leaves it: each key's next use would take the principal's lock. */
 async function mapped(cost: (key: string, purpose?: NamedUseInput['purpose']) => Promise<unknown[]>, keys: string[], purpose?: NamedUseInput['purpose']) {
   for (const key of keys) await cost(key, purpose);
-  await run(db.owner, sql`DELETE FROM log_bulk`);
+  await run(db.owner, sql`DELETE FROM bulk_cap`);
 }
 
 test("a credential revoked around the log (0.14's code, mid-upgrade) leaves no standing kept: a key held and one never made are refused alike, in one statement, before any lock (T158, DecideEachLock; review d1 of #416)", { ...postgresOnly('advisory locks'), timeout: 60_000 }, async () => {
@@ -153,7 +153,7 @@ test("a use allowed is no standing for reading: a Contributor, who may use and n
   try {
     await mapped(cost, [held, 'NEVER_MADE'], 'use');
     assert.deepEqual(await cost(held, 'use'), ['ok', 2], 'its row of the cap\'s gone: decided, then made');
-    await run(db.owner, sql`DELETE FROM log_bulk`);
+    await run(db.owner, sql`DELETE FROM bulk_cap`);
     const answers = await holding(principalLock(w.principal), async () => [await cost(held, 'reveal'), await cost('NEVER_MADE', 'reveal')]);
     assert.deepEqual(answers, [['no_grant', 1], ['no_grant', 1]]);
   } finally {
@@ -168,8 +168,8 @@ test("a use refused on its cover is answered in its one statement, as a key neve
   const grant = { ...w.grant, expiresAt: ends };
   await change({ kind: 'principal', id: w.principal }, { op: 'access.grant', grant },
     { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants: [grant] }, async (tx, value) => {
-      await run(tx, sql`UPDATE vault_grants SET expires_at = ${ends} WHERE principal = ${w.principal}`);
-      await seal('vault_members', 'principal', w.principal)(tx, value);
+      await run(tx, sql`UPDATE grants SET expires_at = ${ends} WHERE principal = ${w.principal}`);
+      await seal('principals', 'principal', w.principal)(tx, value);
     });
   const { cost, end } = await costed(w);
   // Before the grant's end, the uses at one time, so in one of the cap's periods (`onePeriod`'s minute ahead may be past
@@ -527,8 +527,8 @@ for (const lost of ['revoked', 'its grant lapsed'] as const) {
       const grant = { ...w.grant, expiresAt: ends };
       await change({ kind: 'principal', id: w.principal }, { op: 'access.grant', grant },
         { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants: [grant] }, async (tx, value) => {
-          await run(tx, sql`UPDATE vault_grants SET expires_at = ${ends} WHERE principal = ${w.principal}`);
-          await seal('vault_members', 'principal', w.principal)(tx, value);
+          await run(tx, sql`UPDATE grants SET expires_at = ${ends} WHERE principal = ${w.principal}`);
+          await seal('principals', 'principal', w.principal)(tx, value);
         });
     }
     const { vault, cache, last, end } = await slowed();
@@ -572,7 +572,7 @@ test("no use is kept for a later one to take the principal's lock on: each that 
   const a = await w.nameOf(await w.key());
   const { cost, end } = await costed(w);
   // Its row of the cap's gone, as a window passed: its next use would take the principal's lock.
-  const passed = () => run(db.owner, sql`DELETE FROM log_bulk WHERE principal = ${w.principal}`);
+  const passed = () => run(db.owner, sql`DELETE FROM bulk_cap WHERE principal = ${w.principal}`);
   try {
     // Read by its names, then made, decided.
     assert.deepEqual(await cost(a), ['ok', 2]);
@@ -599,8 +599,8 @@ test("past a grant's end, which no change records, the use is decided first, bef
   const grant = { ...w.grant, expiresAt: ends };
   await change({ kind: 'principal', id: w.principal }, { op: 'access.grant', grant },
     { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants: [grant] }, async (tx, value) => {
-      await run(tx, sql`UPDATE vault_grants SET expires_at = ${ends} WHERE principal = ${w.principal}`);
-      await seal('vault_members', 'principal', w.principal)(tx, value);
+      await run(tx, sql`UPDATE grants SET expires_at = ${ends} WHERE principal = ${w.principal}`);
+      await seal('principals', 'principal', w.principal)(tx, value);
     });
   const { cost, end } = await costed(w);
   try {
@@ -608,7 +608,7 @@ test("past a grant's end, which no change records, the use is decided first, bef
     // Past the grant's end: no use kept passes, the use is decided first, and refused, the principal's lock held all the
     // while.
     await sleep(Math.max(0, ends - Date.now()) + 50);
-    await run(db.owner, sql`DELETE FROM log_bulk WHERE principal = ${w.principal}`);
+    await run(db.owner, sql`DELETE FROM bulk_cap WHERE principal = ${w.principal}`);
     assert.deepEqual(await holding(principalLock(w.principal), () => cost(a)), ['expired', 1]);
   } finally {
     await end();
@@ -634,10 +634,10 @@ test('a read of ids left behind at its deadline keeps its place in admission unt
 test("rows the seals do not bear out give no standing: a grant a writer put back after its revoke is the account's, which routes the request to the credential's own check (reviews r1 of #412, r2 of D153)", async () => {
   const w = await named();
   const name = await w.nameOf(await w.key());
-  const { vaultGrants } = tablesOf(db.owner);
-  const grants = await db.owner.select().from(vaultGrants).where(sql`${vaultGrants.principal} = ${w.principal}`);
+  const { grants } = tablesOf(db.owner);
+  const held = await db.owner.select().from(grants).where(sql`${grants.principal} = ${w.principal}`);
   await w.revoke();
-  await db.owner.insert(vaultGrants).values(grants);
+  await db.owner.insert(grants).values(held);
   const { vault } = await isolate();
   const forged = served(await vault.useNamed!(w.ask(name)));
   assert.equal(forged.outcome.ok, false);

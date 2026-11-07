@@ -23,7 +23,7 @@ import type { Access, ObjectChange, Settings, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { KeyRetired } from '@coffre/db/log';
-import { credentials, deviceAuthorizations, identities, mcpConnections } from '@coffre/db/schema';
+import { credentials, deviceLogins, identities, mcpConnections } from '@coffre/db/schema';
 
 import { authMac, AuthRowTampered, issuedBy, issuingBinding } from '../auth-rows.ts';
 import { answerOf, shownActive, type Shows } from '../db/answers.ts';
@@ -2299,7 +2299,7 @@ export class SigninService {
           consumedAt: null,
           passkeyId: null,
         };
-        await insert(db, deviceAuthorizations, { ...row, authMac: authMac(this.#deps.chainKey, 'device_authorizations', row) });
+        await insert(db, deviceLogins, { ...row, authMac: authMac(this.#deps.chainKey, 'device_authorizations', row) });
       } catch (error) {
         if (isUniqueViolation(error) && attempt < 3) continue;
         throw error;
@@ -2356,7 +2356,7 @@ export class SigninService {
           : await updateAuth(
               tx,
               this.#deps.chainKey,
-              deviceAuthorizations,
+              deviceLogins,
               { id: row.id, decidedAt: null },
               approve
                 // The passkey touched for it, which the CLI session it redeems names in turn, confirmed when this was
@@ -2404,7 +2404,7 @@ export class SigninService {
         if (row.decision === null) return { status: 'pending' };
 
         // Consumed only if still unconsumed: of two polls racing, one gets the session.
-        const consumed = await updateAuth(tx, this.#deps.chainKey, deviceAuthorizations, { id: row.id, consumedAt: null }, { consumedAt: now });
+        const consumed = await updateAuth(tx, this.#deps.chainKey, deviceLogins, { id: row.id, consumedAt: null }, { consumedAt: now });
         if (consumed === 0) return { status: 'expired' };
         const principalId = memberOf(row.principal!).id;
         // An approval given before the person was last added is void: someone

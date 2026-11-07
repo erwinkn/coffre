@@ -7,7 +7,7 @@ import { and, asc, eq } from 'drizzle-orm';
 
 import { listMembers } from '../src/api/members.ts';
 import { memberAccess } from '../src/db/queries.ts';
-import { auditLog, vaultMembers } from './db/tables.ts';
+import { auditLog, principals } from './db/tables.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, START_OVER_014, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // A person's instance role and its scope, which project grants add to:
@@ -211,7 +211,7 @@ test('the last Owner of the whole instance stays one: 409, saying what to do fir
   await root.members.add(ADA, { role: 'owner' });
   // Root's row, changed around the vault, owns nothing: Ada is the only Owner it counts. An Owner of one project counts for nothing.
   await root.members.add(LEAD, { role: 'owner', scope: { projects: { only: ['market'] } } });
-  await db.owner.update(vaultMembers).set({ generation: 7 }).where(eq(vaultMembers.principal, `user:${ROOT}`));
+  await db.owner.update(principals).set({ generation: 7 }).where(eq(principals.principal, `user:${ROOT}`));
   await assert.rejects(ada.members.remove(ADA), last);
   await assert.rejects(ada.members.add(ADA, { role: 'admin' }), last);
   // Under 0.15's log nothing starts Root over (START_OVER_014): Ada stays the last Owner until a reseal.
