@@ -276,8 +276,8 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | A write call | its lock waits retried for up to 5 s from its first attempt; its work itself unbounded | `CALL_DEADLINE_MS` as a retry budget | R75: writes may take longer |
 | Its retry pauses | 25 ms doubling to 400 ms, ×0.5 to ×1.5 | a retry policy, written as one | #538 |
 | A read's lock wait (`READ_LOCK_TIMEOUT_MS`) | 3 s, or what is left of the call's deadline if less | a choice | #347 ⚠ |
-| The app's first ask of the vault's `about()` and the proxy's gate: take over a call after (`TAKE_OVER_MS`); give up with 503 after (`WAIT_MS`) | 3 s; 6 s | "longer than a deploy's write and its seal take"; 2 × `TAKE_OVER_MS` | T201 (`packages/server/src/asked-once.ts`) ⚠ the 3 s is not measured |
-| Waiters for the log's head (`READ_HEAD_WAITERS`) | 16 | 2.4 s ÷ 150 ms measured; should also be ≤ the vault's request connections − 2 | Q3 |
+| The app's first ask of the vault's `about()` and the proxy's gate: a request that joins another's attempt takes it over after (`TAKE_OVER_MS`) and gives up with 503 after (`WAIT_MS`) | 3 s; 6 s, for joiners only: the isolate's first request awaits its own call as long as that call takes, with no bound from this helper (only the vault's own deadlines, above) | "longer than a deploy's write and its seal take"; 2 × `TAKE_OVER_MS` | T201 (`packages/server/src/asked-once.ts`) ⚠ the 3 s is not measured; the first request's wait has no bound of its own |
+| Waiters for the log's head (`READ_HEAD_WAITERS`) | 16 | 2.4 s ÷ 150 ms measured; should also be ≤ the vault's request connections − 2, a database-wide count that leaves no connection free on any one Hyperdrive shard | Q3 |
 | A plain 503's `Retry-After` | 1 s (from 5) | `LOCK_WAIT_MS` rounded up to whole seconds | #538 |
 | An app write's lock wait | 500 ms (from unbounded) | `LOCK_WAIT_MS`; then 503 at once | #538 |
 | An AWS KMS attempt's timeout | 706 ms (from 5 s), or what is left of the caller's deadline if less | a measured p99 of a KMS call | #538's stacked KMS PR (its measurement table not yet in a PR) |
@@ -526,6 +526,22 @@ request connections (the checkpointer's 2 are a pool of their own), so 2
 waiters, and two stay free. At 100, 16 on both, as now. One caveat: a
 Hyperdrive config someone set by hand below setup's number makes the vault count more
 connections than it has: the formula assumes setup set the config.
+
+**What the count does not hold on Workers.** The waiters' places are
+advisory locks, counted across the whole database (`lockLogHeadQueued`,
+`packages/db/src/log.ts`), but Hyperdrive splits a config's connections
+among its pool's shards (`docs/deploy.md`, beside setup's numbers). At
+6 connections a location may run them as several shards of one or two
+each, so 4 waiters, all admitted, can each hold the only connection of
+the shard its call landed on, and the requests routed there wait while the
+2 "free" connections sit on other shards. The two free connections are a
+global figure, not a per-shard one. So on Workers the formula is a
+heuristic that caps the damage, not a guarantee: it needs a Workers run at
+setup's minimum share before it ships. Holding the guarantee takes an
+admission that holds no connection while it waits: take a place, try the
+head with `NOWAIT`, and on a miss commit, pause and try again, so a waiter
+gives its shard back between tries (one round trip per try; unmeasured).
+Node has no shards: there the count is exact.
 
 ### Q5. Statement timeouts for the app's and the vault's logins
 
