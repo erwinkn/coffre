@@ -11,6 +11,7 @@ export {
   account,
   accountAppearance,
   accountApps,
+  accountPasskeys,
   accountProfile,
   accountSessions,
   approval,

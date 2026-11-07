@@ -653,7 +653,7 @@ Rename and Remove.
   the provider alone.
 - **At most 10** per person: a list a person can still read.
 
-**As built (PR 6a).** The API's side; the pages are PR 6b's.
+**As built (PR 6a).** The API's side; the pages are PR 6b's, below.
 
 - `GET /api/members/:member/passkeys` lists the person's live passkeys,
   their own (any session of theirs) or, for an Owner of the whole
@@ -702,6 +702,30 @@ Rename and Remove.
   person has had. Security keys publish theirs in FIDO's metadata
   service, which coffre does not read, so a YubiKey is "Passkey <n>"
   until renamed.
+
+**As built (PR 6b): the pages.** Account → Passkeys
+(`/account/passkeys`, `components/passkeys.tsx`) lists them, each with
+Rename and Remove; under `required` a last one's Remove says to add
+another first. Add a passkey asks `…/passkeys/options` as its dialog
+opens, so that the press calls `create()` inside its own click (a
+fresh check, if the window has closed, comes first, over it); its
+options are asked of the authenticator once, and an answer coffre did
+not answer is sent again as it is, never made again, as at sign-in. A
+first passkey is added by signing in again (`?passkey=add`), back to
+the tab. Remove opens the door's `?remove=<id>` as its dialog opens,
+says what ends (`ends`, in words: "Removing YubiKey 5C signs you out of
+3 other sessions and ends 1 personal token"), and the touch's answer
+lands back on `/account/passkeys` on the new session, a full navigation.
+Under `off` the tab stays, and Remove asks no touch: the way to clear
+lost passkeys during recovery (3.7). The reset is a person's ⋯ menu's
+Reset passkeys…, an unscoped Owner's, for anyone but themselves, an
+Owner the deployment names included; its dialog reads the person's
+passkeys first and says what the reset removes and ends. The prompt
+of 3.3 is on Projects; Not now is the `coffre-passkey-later` cookie, a
+preference as the theme is, 30 days, so the server renders the page
+without it from the first byte. The reset notice ("Ada reset your
+passkeys on …") shows on the tab, in the prompt, and on the sign-in's
+step that adds a new one under `required`.
 
 ### 3.7 Recovery
 
@@ -2041,7 +2065,7 @@ running `passkeys: 'required'`:
    with none under `optional` until Account → Passkeys adds one in place.
 6. **Management**: Account → Passkeys, the Owner reset, the prompt under
    `optional`. Built in two: 6a (built), the API's side, as sections 3.6
-   and 3.7 say; 6b, the pages.
+   and 3.7 say; 6b (built), the pages.
 7. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md` (the policy, `rpId`, recovery and its log review, the `optional` takeover
    case) and `docs/offboarding.md`.
 

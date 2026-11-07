@@ -394,6 +394,21 @@ export function createClient(options: ClientOptions) {
       unlink: (id: string) => call('DELETE /identities/:id', { id }),
     },
 
+    /**
+     * A person's passkeys, by their member reference (`user:<email>`): one's own, or, for an Owner of the whole
+     * instance, anyone's, whose reset it weighs. Adding one is two calls, `options` then `add` with what `create()`
+     * gave, from a browser session only. Removing one replaces the browser's session, so it goes through the passkey
+     * page's door (`/api/auth/passkey?remove=<id>`), not here.
+     */
+    passkeys: {
+      list: (member: string) => call('GET /members/:member/passkeys', { member }),
+      options: (member: string) => call('POST /members/:member/passkeys/options', { member }),
+      add: (member: string, input: RouteInput<'POST /members/:member/passkeys'>) => call('POST /members/:member/passkeys', { member }, input),
+      rename: (member: string, id: string, name: string) => call('PATCH /members/:member/passkeys/:id', { member, id }, { name }),
+      /** Someone else's, every one: an Owner's, for a person who lost theirs. */
+      reset: (member: string) => call('DELETE /members/:member/passkeys', { member }),
+    },
+
     /** A `coffre login` waiting for someone to approve it, by the code it shows. */
     deviceLogins: {
       get: (code: string) => call('GET /device-logins/:code', { code }),

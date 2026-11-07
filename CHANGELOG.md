@@ -378,8 +378,22 @@
   else's, `DELETE /api/members/:member/passkeys`, from a fresh session:
   every live passkey removed and everything that person is signed in
   with ended, `passkey.reset` in the log; an Owner demoted while it runs
-  resets no one. To come: the pages (Account →
-  Passkeys, the reset dialog, the prompt under `optional`)
+  resets no one. The pages (PR 6b): Account → Passkeys lists your
+  passkeys (name, provider, synced or this device only, added, last
+  used) with Rename and Remove, and Add a passkey, in place once you
+  hold one, or by signing in again for a first; the Remove dialog says
+  what it signs you out of ("signs you out of 3 other sessions and
+  ends 1 personal token") and asks the touch. An Owner's ⋯ menu on a
+  person (an Owner the deployment names included) has Reset
+  passkeys…, which says what it removes and ends first. Under
+  `optional`, Projects asks a person with none to add one, or Not
+  now, which puts it off in that browser for 30 days (the
+  `coffre-passkey-later` cookie). A person whose passkeys an Owner
+  reset reads who did and when, on Account → Passkeys, the prompt and
+  the sign-in's step that adds a new one. The audit log reads
+  `passkey.remove`, `passkey.reset` and `passkey.rename` in words. A
+  removal now lands back on `/account/passkeys`. `coffre update` adds
+  the tab's route file, `_coffre/account.passkeys.tsx`
   ([docs/design/passkeys.md](docs/design/passkeys.md)). `pnpm dev`
   serves at `http://localhost:3000` now.
 

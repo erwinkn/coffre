@@ -360,6 +360,19 @@ export const accountSessions = {
   },
 };
 
+/**
+ * `/account/passkeys`, your passkeys (docs/design/passkeys.md, section 3.6): a person signed in by coffre's own
+ * sign-in, whose `/me` says the deployment's passkey policy. A removal comes back here, on the session it issued.
+ */
+export const accountPasskeys = {
+  loader: async ({ context }: Loader) => {
+    const { coffre, queryClient } = coffreOf(context);
+    const shell = await loadShell(queryClient, coffre);
+    if (!(await ownSignIn(context)) || shell.passkeys === null || shell.principal?.type !== 'user') throw redirect({ to: '/account' });
+    await queryClient.fetchQuery(queries.passkeys(coffre, memberRef('user', shell.principal.id)));
+  },
+};
+
 /** `/account/apps`, how to connect an MCP client and the ones you connected, where the deployment serves MCP. */
 export const accountApps = {
   loader: async ({ context }: Loader) => {

@@ -27,6 +27,7 @@ import { Route as UseSplatRouteImport } from './routes/use.$'
 import { Route as CoffreAccountIndexRouteImport } from './routes/_coffre/account.index'
 import { Route as CoffreAccountAppearanceRouteImport } from './routes/_coffre/account.appearance'
 import { Route as CoffreAccountAppsRouteImport } from './routes/_coffre/account.apps'
+import { Route as CoffreAccountPasskeysRouteImport } from './routes/_coffre/account.passkeys'
 import { Route as CoffreAccountSessionsRouteImport } from './routes/_coffre/account.sessions'
 import { Route as CoffreProjectsIndexRouteImport } from './routes/_coffre/projects.index'
 import { Route as CoffreProjectsProjectRouteImport } from './routes/_coffre/projects.$project'
@@ -137,6 +138,11 @@ const CoffreAccountAppearanceRoute = CoffreAccountAppearanceRouteImport.update({
 const CoffreAccountAppsRoute = CoffreAccountAppsRouteImport.update({
   id: '/apps',
   path: '/apps',
+  getParentRoute: () => CoffreAccountRoute,
+} as any)
+const CoffreAccountPasskeysRoute = CoffreAccountPasskeysRouteImport.update({
+  id: '/passkeys',
+  path: '/passkeys',
   getParentRoute: () => CoffreAccountRoute,
 } as any)
 const CoffreAccountSessionsRoute = CoffreAccountSessionsRouteImport.update({
@@ -282,6 +288,7 @@ export interface FileRoutesByFullPath {
   '/use/$': typeof UseSplatRoute
   '/account/appearance': typeof CoffreAccountAppearanceRoute
   '/account/apps': typeof CoffreAccountAppsRoute
+  '/account/passkeys': typeof CoffreAccountPasskeysRoute
   '/account/sessions': typeof CoffreAccountSessionsRoute
   '/projects/$project': typeof CoffreProjectsProjectRouteWithChildren
   '/service-accounts/$account': typeof CoffreServiceAccountsAccountRouteWithChildren
@@ -322,6 +329,7 @@ export interface FileRoutesByTo {
   '/use/$': typeof UseSplatRoute
   '/account/appearance': typeof CoffreAccountAppearanceRoute
   '/account/apps': typeof CoffreAccountAppsRoute
+  '/account/passkeys': typeof CoffreAccountPasskeysRoute
   '/account/sessions': typeof CoffreAccountSessionsRoute
   '/approvals/$approval': typeof SoloApprovalsApprovalRoute
   '/auth/device': typeof SoloAuthDeviceRoute
@@ -363,6 +371,7 @@ export interface FileRoutesById {
   '/_coffre/': typeof CoffreIndexRoute
   '/_coffre/account/appearance': typeof CoffreAccountAppearanceRoute
   '/_coffre/account/apps': typeof CoffreAccountAppsRoute
+  '/_coffre/account/passkeys': typeof CoffreAccountPasskeysRoute
   '/_coffre/account/sessions': typeof CoffreAccountSessionsRoute
   '/_coffre/projects/$project': typeof CoffreProjectsProjectRouteWithChildren
   '/_coffre/service-accounts/$account': typeof CoffreServiceAccountsAccountRouteWithChildren
@@ -406,6 +415,7 @@ export interface FileRouteTypes {
     | '/use/$'
     | '/account/appearance'
     | '/account/apps'
+    | '/account/passkeys'
     | '/account/sessions'
     | '/projects/$project'
     | '/service-accounts/$account'
@@ -446,6 +456,7 @@ export interface FileRouteTypes {
     | '/use/$'
     | '/account/appearance'
     | '/account/apps'
+    | '/account/passkeys'
     | '/account/sessions'
     | '/approvals/$approval'
     | '/auth/device'
@@ -486,6 +497,7 @@ export interface FileRouteTypes {
     | '/_coffre/'
     | '/_coffre/account/appearance'
     | '/_coffre/account/apps'
+    | '/_coffre/account/passkeys'
     | '/_coffre/account/sessions'
     | '/_coffre/projects/$project'
     | '/_coffre/service-accounts/$account'
@@ -650,6 +662,13 @@ declare module '@tanstack/react-router' {
       path: '/apps'
       fullPath: '/account/apps'
       preLoaderRoute: typeof CoffreAccountAppsRouteImport
+      parentRoute: typeof CoffreAccountRoute
+    }
+    '/_coffre/account/passkeys': {
+      id: '/_coffre/account/passkeys'
+      path: '/passkeys'
+      fullPath: '/account/passkeys'
+      preLoaderRoute: typeof CoffreAccountPasskeysRouteImport
       parentRoute: typeof CoffreAccountRoute
     }
     '/_coffre/account/sessions': {
@@ -819,6 +838,7 @@ declare module '@tanstack/react-router' {
 interface CoffreAccountRouteChildren {
   CoffreAccountAppearanceRoute: typeof CoffreAccountAppearanceRoute
   CoffreAccountAppsRoute: typeof CoffreAccountAppsRoute
+  CoffreAccountPasskeysRoute: typeof CoffreAccountPasskeysRoute
   CoffreAccountSessionsRoute: typeof CoffreAccountSessionsRoute
   CoffreAccountIndexRoute: typeof CoffreAccountIndexRoute
 }
@@ -826,6 +846,7 @@ interface CoffreAccountRouteChildren {
 const CoffreAccountRouteChildren: CoffreAccountRouteChildren = {
   CoffreAccountAppearanceRoute: CoffreAccountAppearanceRoute,
   CoffreAccountAppsRoute: CoffreAccountAppsRoute,
+  CoffreAccountPasskeysRoute: CoffreAccountPasskeysRoute,
   CoffreAccountSessionsRoute: CoffreAccountSessionsRoute,
   CoffreAccountIndexRoute: CoffreAccountIndexRoute,
 }

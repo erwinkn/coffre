@@ -8,7 +8,7 @@ import { FreshCheck } from './components/fresh-check';
 import { Brand, Shell } from './components/shell';
 import { TooltipProvider } from './components/ui';
 import { ThemeToggle } from './components/theme';
-import { PreferencesContext, rememberSidebar, rememberTheme, type Preferences, type Theme } from './lib/preferences';
+import { PreferencesContext, rememberPasskeyLater, rememberSidebar, rememberTheme, type Preferences, type Theme } from './lib/preferences';
 import type { RouterContext } from './router';
 import { LiveRegion } from './components/row-state';
 import { useShell } from './lib/use-shell';
@@ -49,6 +49,7 @@ export function CoffreProvider({ children }: { children: ReactNode }) {
   const initial = (useRouter().options.context as RouterContext).preferences;
   const [theme, setThemeState] = useState(initial.theme);
   const [sidebar, setSidebarState] = useState(initial.sidebar);
+  const [passkeyPrompt, setPasskeyPrompt] = useState(initial.passkeyPrompt);
   const portal = useRef<HTMLDivElement>(null);
   const preferences = useMemo(
     () => ({
@@ -62,9 +63,14 @@ export function CoffreProvider({ children }: { children: ReactNode }) {
         rememberSidebar(next);
         setSidebarState(next);
       },
+      passkeyPrompt,
+      passkeyLater: () => {
+        rememberPasskeyLater();
+        setPasskeyPrompt('later');
+      },
       portal,
     }),
-    [theme, sidebar],
+    [theme, sidebar, passkeyPrompt],
   );
   return (
     <PreferencesContext.Provider value={preferences}>

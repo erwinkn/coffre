@@ -210,7 +210,7 @@ test('removing a passkey takes a touch of one the person keeps, signs them out e
   assert.deepEqual(await bob.answer({ state: step.body.state, response: await assertion(yubikey, step.body.options) }), { status: 401, body: { error: 'passkey_failed' } });
 
   const before = bob.session!;
-  assert.deepEqual(await bob.answer({ state: step.body.state, response: await assertion(phone, step.body.options) }), { status: 200, body: { next: '/account' } });
+  assert.deepEqual(await bob.answer({ state: step.body.state, response: await assertion(phone, step.body.options) }), { status: 200, body: { next: '/account/passkeys' } });
   assert.notEqual(bob.session, before);
   // This browser: a new session, confirmed now by the passkey touched. Everywhere else, and the old cookie, ended.
   const row = await sessionRow(bob);
@@ -272,7 +272,7 @@ test("the last passkey: under `optional` a touch of it removes it and leaves a s
   dana.runtime = signinDeployment(deps, 'off');
   const off = await dana.step(`?remove=${hers!.id}`);
   assert.equal(off.body.options, null);
-  assert.deepEqual(await dana.answer({ state: off.body.state }), { status: 200, body: { next: '/account' } });
+  assert.deepEqual(await dana.answer({ state: off.body.state }), { status: 200, body: { next: '/account/passkeys' } });
   assert.deepEqual((await listed(dana, DANA)).passkeys, []);
 });
 
