@@ -64,6 +64,7 @@ export const keys = {
   tokenPlan: (member: string, scope: Record<string, string>) => ['token-plan', member, scope],
   identities: ['identities'],
   sessions: ['sessions'],
+  passkeys: (member: string) => ['passkeys', member],
   apps: ['apps'],
   audit: ['audit'],
   auditKeys: ['audit', 'keys'],
@@ -312,6 +313,14 @@ export const queries = {
   /** Where you are signed in, under coffre's own sign-in. */
   sessions: (client: CoffreClient) =>
     queryOptions({ queryKey: keys.sessions, queryFn: () => uiResult(() => client.sessions.list()) }),
+
+  /**
+   * A person's live passkeys (docs/design/passkeys.md, section 3.6), with what removing one would end besides the
+   * session asking (`ends`), the notice of an Owner's reset while they hold none (`reset`), and how many they may hold
+   * (`max`): one's own, or an Owner's read of someone else's, whose reset it weighs.
+   */
+  passkeys: (client: CoffreClient, member: string) =>
+    queryOptions({ queryKey: keys.passkeys(member), queryFn: () => uiResult(() => client.passkeys.list(member)) }),
   /** The MCP clients I connected, where the deployment serves MCP (`features.mcp`). */
   apps: (client: CoffreClient) =>
     queryOptions({ queryKey: keys.apps, queryFn: () => uiResult(() => client.apps.list()) }),
@@ -535,6 +544,11 @@ export function shellOf(
     registrationRequired: me !== null && !me.registered,
     /** A session refused for its passkey: a touch steps it up (`/auth/passkey?step-up=1`). */
     passkeyRequired: asked === 'passkey_required',
+    /**
+     * The deployment's passkey policy, and whether you hold one: null without coffre's own sign-in (behind Cloudflare
+     * Access), or for a caller who is no person signed in.
+     */
+    passkeys: member?.passkeys ?? null,
     /** A member the vault refuses: their record failed its integrity check. */
     accessTampered: me?.tampered === true,
     /** What the deployment's configuration turns on: MCP clients, as their endpoint's URL, and CI runs signing in by their ID tokens; and how long a service token may last. */
@@ -871,6 +885,11 @@ export const affects = {
   /** Unlinking an account also ends the sessions it signed in. */
   identities: (): QueryKey[] => [keys.identities, keys.sessions],
   sessions: (): QueryKey[] => [keys.sessions],
+  /**
+   * A passkey added or renamed, or someone's reset: their list, and what `/me` says of them; a reset ends their
+   * sessions, tokens and apps too, which their pages read again.
+   */
+  passkeys: (member: string): QueryKey[] => [keys.passkeys(member), keys.me, keys.credentials(member), keys.report(member)],
   apps: (): QueryKey[] => [keys.apps],
 };
 

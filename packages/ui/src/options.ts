@@ -46,6 +46,7 @@ import {
 } from './lib/queries';
 import type { Permission } from './shared/models';
 import { loginSearch } from './lib/signin-errors';
+import { readsForPrompt } from './lib/passkeys';
 
 /**
  * What coffre's routes read through the router: the API as the visitor
@@ -89,11 +90,16 @@ export const home = {
   },
 };
 
-/** `/projects`. */
+/**
+ * `/projects`, and, for a person its prompt may ask to add a passkey, their passkeys: an Owner's reset of them, which
+ * the prompt says, is in the page the server renders (section 3.7; review r1 of #539).
+ */
 export const projects = {
-  loader: ({ context }: Loader) => {
+  loader: async ({ context }: Loader) => {
     const { coffre, queryClient } = coffreOf(context);
-    return queryClient.fetchQuery(queries.projects(coffre));
+    // The shell reads the projects, which the page lists.
+    const shell = await loadShell(queryClient, coffre);
+    if (shell.principal?.type === 'user' && readsForPrompt(shell.passkeys)) await queryClient.fetchQuery(queries.passkeys(coffre, memberRef('user', shell.principal.id)));
   },
 };
 
@@ -357,6 +363,19 @@ export const accountSessions = {
       queryClient.fetchQuery(queries.sessions(coffre)),
       ...(principal?.type === 'user' ? [queryClient.fetchQuery(queries.credentials(coffre, memberRef('user', principal.id), true))] : []),
     ]);
+  },
+};
+
+/**
+ * `/account/passkeys`, your passkeys (docs/design/passkeys.md, section 3.6): a person signed in by coffre's own
+ * sign-in, whose `/me` says the deployment's passkey policy. A removal comes back here, on the session it issued.
+ */
+export const accountPasskeys = {
+  loader: async ({ context }: Loader) => {
+    const { coffre, queryClient } = coffreOf(context);
+    const shell = await loadShell(queryClient, coffre);
+    if (!(await ownSignIn(context)) || shell.passkeys === null || shell.principal?.type !== 'user') throw redirect({ to: '/account' });
+    await queryClient.fetchQuery(queries.passkeys(coffre, memberRef('user', shell.principal.id)));
   },
 };
 

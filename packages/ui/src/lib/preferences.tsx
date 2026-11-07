@@ -15,10 +15,10 @@ export function browserPreferences(): Preferences {
   return preferencesIn(document.cookie);
 }
 
-/** Keep a choice for a year; the default, by removing it. */
-function remember(name: string, value: string | null) {
+/** Keep a choice for a year, or as long as `seconds`; the default, by removing it. */
+function remember(name: string, value: string | null, seconds = 31_536_000) {
   document.cookie =
-    value === null ? `${name}=; Path=/; SameSite=Lax; Max-Age=0` : `${name}=${value}; Path=/; SameSite=Lax; Max-Age=31536000`;
+    value === null ? `${name}=; Path=/; SameSite=Lax; Max-Age=0` : `${name}=${value}; Path=/; SameSite=Lax; Max-Age=${seconds}`;
 }
 
 export function rememberTheme(theme: Theme) {
@@ -29,9 +29,16 @@ export function rememberSidebar(sidebar: Preferences['sidebar']) {
   remember(PREFERENCE_COOKIES.sidebar, sidebar === 'collapsed' ? 'collapsed' : null);
 }
 
+/** Not now, on the prompt to add a passkey, pressed `at`: 30 days in this browser, after which the cookie lapses and it shows again. */
+export function rememberPasskeyLater(at: number) {
+  remember(PREFERENCE_COOKIES.passkeyLater, String(at), 30 * 86_400);
+}
+
 type PreferencesValue = Preferences & {
   setTheme(theme: Theme): void;
   setSidebar(sidebar: Preferences['sidebar']): void;
+  /** Put the prompt to add a passkey off, for 30 days. */
+  putPasskeyOff(): void;
   /** coffre's element, which menus, dialogs and tooltips render into, so they are drawn in its theme. */
   portal: RefObject<HTMLDivElement | null>;
 };

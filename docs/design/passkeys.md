@@ -653,7 +653,7 @@ Rename and Remove.
   the provider alone.
 - **At most 10** per person: a list a person can still read.
 
-**As built (PR 6a).** The API's side; the pages are PR 6b's.
+**As built (PR 6a).** The API's side; the pages are PR 6b's, below.
 
 - `GET /api/members/:member/passkeys` lists the person's live passkeys,
   their own (any session of theirs) or, for an Owner of the whole
@@ -702,6 +702,57 @@ Rename and Remove.
   person has had. Security keys publish theirs in FIDO's metadata
   service, which coffre does not read, so a YubiKey is "Passkey <n>"
   until renamed.
+
+**As built (PR 6b): the pages.** Account → Passkeys
+(`/account/passkeys`, `components/passkeys.tsx`) lists them, each with
+Rename and Remove; under `required` a last one's Remove says to add
+another first. Add a passkey asks `…/passkeys/options` as its dialog
+opens, so that the press calls `create()` inside its own click (a
+fresh check, if the window has closed, comes first, over it); its
+options are asked of the authenticator once, and an answer coffre did
+not answer is sent again as it is, never made again, as at sign-in. A
+first passkey is added by signing in again (`?passkey=add`), back to
+the tab. Remove opens the door's `?remove=<id>` as its dialog opens,
+says what ends (`ends`, in words: "Removing YubiKey 5C signs you out of
+3 other sessions and ends 1 personal token"), and the touch's answer
+lands back on `/account/passkeys` on the new session, a full navigation.
+Under `off` the tab stays, and Remove asks no touch: the way to clear
+lost passkeys during recovery (3.7). The reset is a person's ⋯ menu's
+Reset passkeys…, an unscoped Owner's, for anyone but themselves, an
+Owner the deployment names included; its dialog reads the person's
+passkeys first and says what the reset removes and ends. The prompt
+of 3.3 is on Projects; Not now is the `coffre-passkey-later` cookie, a
+preference as the theme is, 30 days, holding when it was pressed, so
+the server renders the page without it from the first byte. The reset
+notice ("Ada reset your passkeys on …") shows on the tab, in the
+prompt, and on the sign-in's step that adds a new one under
+`required`. A reset after a Not now shows the prompt again, to say it,
+and Projects' loader reads the person's passkeys, so the server
+renders the notice too (review r1 of #539).
+
+Another passkey's options last no longer than the session stays fresh
+(`timeout`, at most the five minutes since its touch): its add is held
+to the fresh check too, and a `create()` answered after would meet a
+step-up, which replaces the session the options name, leaving a
+passkey on the device coffre never stored; the page asks for new
+options instead, after the step-up. The page ends the authenticator's
+call at that deadline itself (an `AbortSignal`), since browsers take
+`timeout` as a hint (Chromium raises one under three minutes to
+three); every `create()` and `get()` the pages make is held so
+(`withinDeadline`, review r2 of #539). A 401 or 409 whose body did not
+arrive whole keeps the add's answer for the next press, as the
+sign-in's page does. A 200 whose body did not arrive whole is no
+output at all: the client throws `CoffreError` `unreadable` with the
+status, so a read of the passkeys fails as any read does, the add's
+options offer their retry, and an add or a reset so answered is done
+(review r4 of #539). Every change the pages make takes it so
+(`landedUnread`): an optimistic one counts as saved and its list is read
+back, `useAction` reads again what the change touched and says its answer
+was lost, and conformance's probes count it as let through, not as a
+refusal (review r5 of #539). An add whose reply was lost, sent
+again, finds its passkey among the person's live ones before it counts
+them and answers `409 passkey_exists`, which the dialog takes as done
+(review r1 of #539).
 
 ### 3.7 Recovery
 
@@ -2041,7 +2092,7 @@ running `passkeys: 'required'`:
    with none under `optional` until Account → Passkeys adds one in place.
 6. **Management**: Account → Passkeys, the Owner reset, the prompt under
    `optional`. Built in two: 6a (built), the API's side, as sections 3.6
-   and 3.7 say; 6b, the pages.
+   and 3.7 say; 6b (built), the pages.
 7. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md` (the policy, `rpId`, recovery and its log review, the `optional` takeover
    case) and `docs/offboarding.md`.
 

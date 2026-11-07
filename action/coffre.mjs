@@ -1256,7 +1256,7 @@ function githubEnvironment(entries, nextDelimiter = () => `coffre_${randomUUID()
 	return out;
 }
 //#endregion
-//#region ../client/dist/src-Dj1j2fgO.js
+//#region ../client/dist/src-0hk2XrGt.js
 /** Two colons or more, in hex: an IPv6 address, as `::1` or `2001:db8::1:443` with its port. */
 const IPV6 = /[0-9a-f]*:[0-9a-f]*:[0-9a-f:]*/i;
 const TIMEOUT_OR_REFUSAL = /* @__PURE__ */ new Set([
@@ -1366,7 +1366,11 @@ function apiMember(member) {
 function serviceName(member) {
 	return member.replace(/^(?:service|token):/, "");
 }
-/** The API's error shape, `{ error, message }`, with the HTTP status. */
+/**
+* The API's error shape, `{ error, message }`, with the HTTP status. A success whose body did not arrive whole (the
+* connection dropped after the status line) is one too, code `unreadable` with its 2xx status: the server did what was
+* asked, and its answer was lost, which no caller can read as the route's output.
+*/
 var CoffreError = class extends Error {
 	status;
 	code;
@@ -1426,7 +1430,7 @@ function createClient(options) {
 			headers,
 			body
 		}));
-		const payload = await response.json().catch(() => null);
+		const payload = await response.json().catch(() => void 0);
 		if (!response.ok) {
 			const error = payload;
 			const touch = error?.touch;
@@ -1435,6 +1439,7 @@ function createClient(options) {
 				state: touch.state
 			} : void 0);
 		}
+		if (payload === void 0) throw new CoffreError(response.status, "unreadable", `coffre answered ${response.status}, but its answer did not arrive whole`);
 		return payload;
 	}
 	/** A route key and its parameters as a method and a path. */
@@ -1626,6 +1631,23 @@ set: (member, access) => call("PATCH /access/:member", { member }, access) },
 		identities: {
 			list: () => call("GET /identities", {}),
 			unlink: (id) => call("DELETE /identities/:id", { id })
+		},
+		/**
+		* A person's passkeys, by their member reference (`user:<email>`): one's own, or, for an Owner of the whole
+		* instance, anyone's, whose reset it weighs. Adding one is two calls, `options` then `add` with what `create()`
+		* gave, from a browser session only. Removing one replaces the browser's session, so it goes through the passkey
+		* page's door (`/api/auth/passkey?remove=<id>`), not here.
+		*/
+		passkeys: {
+			list: (member) => call("GET /members/:member/passkeys", { member }),
+			options: (member) => call("POST /members/:member/passkeys/options", { member }),
+			add: (member, input) => call("POST /members/:member/passkeys", { member }, input),
+			rename: (member, id, name) => call("PATCH /members/:member/passkeys/:id", {
+				member,
+				id
+			}, { name }),
+			/** Someone else's, every one: an Owner's, for a person who lost theirs. */
+			reset: (member) => call("DELETE /members/:member/passkeys", { member })
 		},
 		/** A `coffre login` waiting for someone to approve it, by the code it shows. */
 		deviceLogins: {
@@ -7389,7 +7411,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload-DD67ua3B.js
+//#region ../client/dist/workload-BA-_M-Ym.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;

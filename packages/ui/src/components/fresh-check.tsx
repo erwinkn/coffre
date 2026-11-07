@@ -4,7 +4,7 @@ import { Key } from './icons';
 import { ErrorLine, Modal, Spinner } from './ui';
 import { onFreshAsk, type FreshAsk } from '../lib/fresh';
 import { authenticatorError, browserClock, deadlineOf, passkeyAnswer, readClock, sendPasskey, type Unsent } from '../lib/passkey-answer';
-import { requestOptions, toJSON, type RequestJSON } from '../lib/webauthn';
+import { getCredential, toJSON, type RequestJSON } from '../lib/webauthn';
 
 /** What the step-up's door asks of this browser's session: a touch of the person's live passkeys, and its sealed state. */
 type Step = { email: string; options: RequestJSON; state: string };
@@ -67,9 +67,8 @@ function Touch({ ask }: { ask: FreshAsk }) {
       const answer = await sendPasskey<{ next?: unknown }>(
         unsent.current,
         async (left) => {
-          const credential = await navigator.credentials.get({ publicKey: requestOptions({ ...current.options, timeout: Math.min(left, current.options.timeout) }) });
-          if (credential === null) throw new DOMException('no passkey answered', 'NotAllowedError');
-          return JSON.stringify({ state: current.state, response: toJSON(credential as PublicKeyCredential) });
+          const credential = await getCredential({ ...current.options, timeout: Math.min(left, current.options.timeout) });
+          return JSON.stringify({ state: current.state, response: toJSON(credential) });
         },
         (body) => fetch('/api/auth/passkey', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body }),
       );

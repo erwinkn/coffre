@@ -132,6 +132,25 @@ test('an optimistic add shows at once as saving, then as confirmed', async () =>
   stop();
 });
 
+test('an add whose 200 was cut off on the way landed: it counts as saved, and the list read back shows it', async () => {
+  const { client, grants, held } = server([lead]);
+  const queryClient = createQueryClient();
+  const stop = await onScreen(queryClient, client);
+  const add = new MutationObserver(queryClient, changeOptions(queryClient, grantAccess(client, 'market')));
+
+  const done = add.mutate(dev);
+  await settle();
+  grants.push({ ...lead, id: 'g-dev', principalId: dev.principalId, role: 'viewer', roleName: 'Viewer', environmentSlug: 'prod', scope: 'environment' });
+  held[0]!.reject(new CoffreError(200, 'unreadable', 'coffre answered 200, but its answer did not arrive whole'));
+  await done;
+  await settle();
+  assert.deepEqual(itemStatus(changes(queryClient), grantId(dev)), { state: 'idle' }, 'not marked as refused');
+  assert.equal(listed(queryClient).find((grant) => grantId(grant) === grantId(dev))?.id, 'g-dev', 'read back');
+  assert.deepEqual(failedAdds<GrantVars>(changes(queryClient), listed(queryClient).map(grantId)), []);
+  assert.equal(announcements().polite?.text, 'Viewer: prod for dev@acme.example saved');
+  stop();
+});
+
 test('a grant to a new service account makes it in the same call, and its refusal leaves none to show', async () => {
   const { client } = server([lead]);
   const sent: [string, unknown][] = [];

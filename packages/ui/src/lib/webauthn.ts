@@ -2,6 +2,8 @@
 // credential they give, as the verifier reads it (`toJSON()`), written out for the browsers that lack
 // `parseRequestOptionsFromJSON` and its kin.
 
+import { withinDeadline } from './passkey-answer.ts';
+
 export type Descriptor = { type: 'public-key'; id: string; transports?: string[] };
 export type RequestJSON = { challenge: string; rpId: string; allowCredentials: Descriptor[]; userVerification: UserVerificationRequirement; timeout: number };
 export type CreationJSON = {
@@ -74,4 +76,22 @@ export function toJSON(credential: PublicKeyCredential): unknown {
       userHandle: text(assertion.userHandle),
     },
   };
+}
+
+/**
+ * `create()` with these options, ended at their `timeout` (`withinDeadline`), not only asked to end then: the timeout
+ * is the step's time left, and a browser stretches a short one. Throws as `create()` does, `NotAllowedError` for no
+ * answer, and `TimeoutError` once the page ended it.
+ */
+export async function createCredential(options: CreationJSON): Promise<PublicKeyCredential> {
+  const credential = await withinDeadline(options.timeout, (signal) => navigator.credentials.create({ publicKey: creationOptions(options), signal }));
+  if (credential === null) throw new DOMException('no passkey answered', 'NotAllowedError');
+  return credential as PublicKeyCredential;
+}
+
+/** `get()` with these options, ended at their `timeout`, as `createCredential`. */
+export async function getCredential(options: RequestJSON): Promise<PublicKeyCredential> {
+  const credential = await withinDeadline(options.timeout, (signal) => navigator.credentials.get({ publicKey: requestOptions(options), signal }));
+  if (credential === null) throw new DOMException('no passkey answered', 'NotAllowedError');
+  return credential as PublicKeyCredential;
 }

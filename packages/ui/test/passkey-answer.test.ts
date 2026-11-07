@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { authenticatorError, deadlineOf, passkeyAnswer, readClock, sendPasskey, type Clock } from '../src/lib/passkey-answer.ts';
+import { authenticatorError, deadlineOf, lapsed, passkeyAnswer, readClock, sendPasskey, withinDeadline, type Clock } from '../src/lib/passkey-answer.ts';
 
 const json = (body: unknown, status: number) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }));
 
@@ -190,4 +190,32 @@ test("an RP ID the browser refuses names the setting to fix (Sol r15, #500)", ()
   assert.match(authenticatorError(new DOMException('cancelled', 'NotAllowedError'), 'acme.co.uk'), /No passkey answered/);
   assert.match(authenticatorError(new DOMException('held', 'InvalidStateError'), 'acme.co.uk'), /already holds a passkey/);
   assert.match(authenticatorError(new TypeError('no WebAuthn'), 'acme.co.uk'), /could not use a passkey/);
+});
+
+test("the page ends the authenticator's call at the step's deadline, whatever the browser makes of the timeout: Chromium stretches one under three minutes (review r2 of #539)", async () => {
+  // A browser that waits until it is aborted, as Chromium does with `timeout: 1000` and a person still choosing.
+  const waits = (signal: AbortSignal) =>
+    new Promise<string>((_, reject) => signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+  // Held to a second of its own, so a call never ended fails rather than hangs.
+  let guard: ReturnType<typeof setTimeout> | undefined;
+  const never = new Promise<never>((_, reject) => {
+    guard = setTimeout(() => reject(new Error('the call was never ended')), 1000);
+  });
+  await assert.rejects(Promise.race([withinDeadline(20, waits), never]), { name: 'TimeoutError' });
+  clearTimeout(guard);
+  // An answer that came first is kept; a refusal that came first is the browser's own.
+  assert.equal(await withinDeadline(1000, async () => 'answer'), 'answer');
+  await assert.rejects(withinDeadline(1000, async () => Promise.reject(new DOMException('cancelled', 'NotAllowedError'))), { name: 'NotAllowedError' });
+  assert.match(authenticatorError(lapsed(), 'acme.example'), /lapsed/);
+
+  // Ended so, a press is `expired`: nothing sent, and the page asks coffre for new options.
+  const sent: string[] = [];
+  const unsent = { body: null, asked: false };
+  const answer = await sendPasskey(unsent, () => withinDeadline(5, waits), (body) => {
+    sent.push(body);
+    return json({}, 200);
+  }, { once: true });
+  assert.deepEqual(answer, { kind: 'expired' });
+  assert.deepEqual(sent, []);
+  assert.equal(unsent.asked, false);
 });

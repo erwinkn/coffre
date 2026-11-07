@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { createClient } from '@coffre/client';
+import { CoffreError, createClient } from '@coffre/client';
 
 import { bulkLimit } from '../src/checks/access.ts';
 import { noAuditNoValue } from '../src/checks/audit.ts';
+import { personalConfigs } from '../src/checks/environments.ts';
 import { DEV, type People } from '../src/checks/people.ts';
 import { sqlite, using } from '../src/database.ts';
 import type { Deployment } from '../src/harness.ts';
@@ -80,3 +81,44 @@ test('the exact audit failure with its injected cause passes conformance', async
   const { deployment, people, canaries } = await auditFixture(t, 500, 'internal_error');
   await noAuditNoValue(deployment, people, canaries);
 });
+
+for (const [forged, passes] of [
+  [new CoffreError(403, 'forbidden', 'refused', 'not_allowed'), true],
+  // A 200 whose answer was cut off after the value was sent: it went through, and is no refusal.
+  [new CoffreError(200, 'unreadable', 'coffre answered 200, but its answer did not arrive whole'), false],
+] as const) {
+  test(`a forged personal owner answered ${forged.status} ${forged.code} ${passes ? 'passes' : 'fails'} conformance`, async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'coffre-refusal-test-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const file = join(dir, 'app.db');
+    await using(sqlite(file), (sql) => sql.exec("CREATE TABLE environments (owner TEXT, slug TEXT); INSERT INTO environments VALUES ('user:reader', 'dev-reader')"));
+    const mine = `${DEV}@me`;
+    const written: Record<string, string> = {};
+    const reader = {
+      member: 'user:reader',
+      api: {
+        secrets: {
+          set: async (_path: string, values: Record<string, string>) => void Object.assign(written, values),
+          reveal: async () => ({ values: written }),
+        },
+        environments: { delete: async () => {} },
+      },
+    };
+    const admin = {
+      member: 'user:admin',
+      api: {
+        environments: { personal: async () => ({ configs: [{ owner: reader.member, slug: 'dev-reader', keys: Object.keys(written) }] }) },
+        secrets: {
+          reveal: async (path: string) => {
+            if (path === mine) return { values: {} };
+            if (path.startsWith(`${mine}/`)) throw forged;
+            throw new CoffreError(403, 'forbidden', 'refused', 'not_allowed');
+          },
+        },
+      },
+    };
+    const run = personalConfigs({ database: async () => sqlite(file) } as Deployment, { admin, reader } as unknown as People);
+    if (passes) await run;
+    else await assert.rejects(run, /made the admin's in the database opened for them/);
+  });
+}

@@ -151,6 +151,8 @@ async function outcome(call: Promise<unknown>): Promise<string> {
     return 'let through';
   } catch (error) {
     if (!(error instanceof CoffreError)) throw error;
+    // A success whose answer was cut off (the client's `unreadable`) went through all the same: no refusal.
+    if (error.status < 400) return 'let through';
     return `${error.status} ${error.reason ?? error.code}`;
   }
 }

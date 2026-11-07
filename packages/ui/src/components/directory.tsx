@@ -16,6 +16,7 @@ import { RowFailure, RowPending, rowClass } from './row-state';
 import { ConfirmDialog, EmptyState, MenuPopup, Modal, Spinner, Timestamp, Toggletip } from './ui';
 import { PrincipalLink } from './principal';
 import { RoleField } from './role-field';
+import { ResetPasskeysDialog } from './passkeys';
 import { Clock, Folder, GitHub, Key, Link, Lock, MoreHorizontal, Pencil, Plus, ShieldCheck, User, X } from './icons';
 
 /**
@@ -335,8 +336,9 @@ export function PrincipalActions({
 }) {
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [role, setRole] = useState<RoleVars>(roleOf(principal));
-  const { capabilities, principal: me } = useShell();
+  const { capabilities, principal: me, passkeys } = useShell();
   const coffre = useCoffre();
   const saveRole = useChange(changeRole(coffre));
   const remove = useChange(removeMember(coffre));
@@ -346,7 +348,30 @@ export function PrincipalActions({
 
   const self = me?.type === principal.principalType && me.id === principal.principalId;
   const yours = principal.principalType === 'service' && principal.managed === true;
+  // Only an Owner of the whole instance resets someone's passkeys, never their own (they remove those, with a touch),
+  // and an Owner the deployment names like any other (docs/design/passkeys.md, section 3.7).
+  const resets = principal.principalType === 'user' && !self && capabilities.ownsInstance && passkeys !== null;
+  const resetItem = resets && (
+    <Menu.Item className="menu-item" onClick={() => setResetting(true)}>
+      <Key size={14} />
+      Reset passkeys…
+    </Menu.Item>
+  );
+  const resetDialog = resets && <ResetPasskeysDialog person={principal.principalId} open={resetting} onOpenChange={setResetting} />;
   if (!(capabilities.runsInstance || yours)) return null;
+  if (principal.declared === true && resets) {
+    return (
+      <>
+        <Menu.Root>
+          <Menu.Trigger className={trigger} aria-label={`Actions for ${principal.principalId}`}>
+            <MoreHorizontal size={16} />
+          </Menu.Trigger>
+          <MenuPopup align="end">{resetItem}</MenuPopup>
+        </Menu.Root>
+        {resetDialog}
+      </>
+    );
+  }
   if (principal.declared === true) {
     return (
       <Toggletip label="Owner defined by the deployment configuration." align="end">
@@ -392,6 +417,8 @@ export function PrincipalActions({
               <Menu.Separator className="menu-sep" />
             </>
           )}
+          {resetItem}
+          {resets && <Menu.Separator className="menu-sep" />}
           <Menu.Item
             className="menu-item menu-item-danger"
             onClick={() => setConfirming(true)}
@@ -401,6 +428,7 @@ export function PrincipalActions({
           </Menu.Item>
         </MenuPopup>
       </Menu.Root>
+      {resetDialog}
 
       {principal.principalType === 'user' && (
         <Modal
