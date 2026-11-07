@@ -106,7 +106,7 @@ sizes come from the database (Q2), and the `uses` block goes (section 4).
 | `proxy.cacheValues` | `true` | app | `credentialProxy({ cacheSeconds: 0 })` | whether opened values serve later requests at all. `false` keeps today's uncached mode: every request asks the vault, so each one is a fresh decision, and a revocation ends the next request, not one up to R later. It does not give each request an entry in the log: that is `audit.repeatsWithinSeconds`. R still bounds the send window and the tunnels |
 | `proxy.editable` | `false` | app | `credentialProxy({ editable })` | whether an Owner may add and change proxy definitions in the UI, beside those the deployment's code names |
 | `audit.keepUsesDays` | `null`, every day kept, as today | vault | `retainDays`, reachable only by a Node deployment that runs its own checkpointer | Q6 |
-| `audit.repeatsWithinSeconds` | 60, as today; 0 to 3,600 | vault | Workers: `vault({ uses: { coverMs } })`; Node: `serveVault(config, { uses: { coverMs } })`, which T230 (#514) made reach the vault; set by no deployment | the longest a repeat may ride an earlier use's entry. A repeat (the same credential, key, place, purpose and route, in the same vault isolate or process) writes no entry while its cover is younger than this **and** the principal's bulk row for that key is fresh for the current refresh period (`use.ts`, `ready` and the cover's `until`; 0074's `is_covered`: `bulk_last >= period`, on the row every caller of that principal and key shares; `use.test.ts`, "covers", which stays inside one period). `0` gives every use an entry of its own, at about 790 bytes each (section 2.9). See below |
+| `audit.repeatsWithinSeconds` | 60, as today; 0 to 3,600 | vault | Workers: `vault({ uses: { coverMs } })`; Node: `serveVault(config, { uses: { coverMs } })`, which T230 (#514) made reach the vault; set by no deployment | the longest a repeat may ride an earlier use's entry. A repeat (the same credential, key, place, purpose and route, in the same vault isolate or process) writes no entry while its cover is younger than this **and** the principal's bulk row for that key is fresh for the current refresh period (`use.ts`, `ready` and the cover's `until`; 0074's `is_covered`: `bulk_last >= period`, on the row every caller of that principal and key shares; `use.test.ts`, "covers", which stays inside one period). `0` gives every use an entry of its own, at about 800 bytes each (section 2.9). See below |
 
 **`proxy.revokedWithinSeconds` merges two settings that mean one thing.**
 Both bound how long a revoked credential keeps working through the proxy:
@@ -175,7 +175,7 @@ and refused if anything it depends on changed; it only writes no entry. So
 the log answers "did this service use this key in that minute", not "how
 many times". Keeping every day (Q6) cannot bring back the uses a cover left
 out. A deployment that must count each use sets `0`; at a steady 1,000
-uses a second that is the full 68 GB a day of section 2.9, where today's
+uses a second that is the full 69 GB a day of section 2.9, where today's
 60 s makes a hot loop's repeats nearly free.
 
 The field is a ceiling, not the grain itself. A cover is also refused
@@ -490,8 +490,8 @@ read call with a key service 11.2 s.
 | Entries one tick seals (`WINDOW_MAX`) | 10,000 | a backlog is sealed in parts, each a pair, the next tick at once: read whole, a stall of minutes at R44 would pass the tick's bound and stall again | the same
 | Unsealed entries a check reads (`ABOVE_NEWEST`) | 1,000, on `main` | 4.5 ms fixed + 13.4 µs an entry fits 1,150 in R27's 20 ms at the median; 1,000 below it, where the p90 reaches 20 ms. Its floor: one late tick's entries at R44, 1,000 | D6, measured (`packages/vault/src/verifier.ts`). An exception to R27 at p99: the slowest check at 1,000 took 27 to 42 ms, and a cap that held it under 20 ms would sit below the floor. On Free, a check past about 400 entries fails instead |
 | Days of uses made ahead | 3 | – | a use with no day's table fails |
-| What one logged use stores, all of it kept as long as its day | **about 790 bytes**: the use's row 141 (heap and index), its level-0 tiles 47.5, its read in the reads' projection 322 (`log_reads`: heap 186, indexes 136), and the projection's place indexes about 280 | measured each; their sum is not measured as one | the row: [hot-path-one.md](hot-path-one.md) (W211); tiles: [audit-tree.md](audit-tree.md); the projection: [0.15-plan.md](0.15-plan.md) (0049, T175), whose days retention drops with the uses' |
-| The same, per day | about 68 GB at a steady 1,000 uses a second; far less when repeats are covered | 790 B × 86.4 M | derived |
+| What one logged use stores, all of it kept as long as its day | **about 800 bytes**: the use's row 141 (heap and index), its share of the uses' audit tree 57 (every level, as measured; 41 once compacted, W212; level 0 is 47.5 of the 57), its read in the reads' projection 322 (`log_reads`: heap 186, indexes 136), and the projection's place indexes about 280 | measured each; their sum is not measured as one | the row: [hot-path-one.md](hot-path-one.md) (W211); tiles: [audit-tree.md](audit-tree.md); the projection: [0.15-plan.md](0.15-plan.md) (0049, T175), whose days retention drops with the uses' |
+| The same, per day | about 69 GB at a steady 1,000 uses a second; far less when repeats are covered | 800 B × 86.4 M | derived |
 | The uses' row's WAL | 248 bytes a use: about 21.4 GB a day at 1,000 a second, written, then recycled or archived as the database's own WAL settings say. The projection's and the tiles' WAL come on top, unmeasured here | measured | [hot-path-one.md](hot-path-one.md) |
 | Days of uses kept | **every day**, as today | the object's `keepUsesDays` | Q6 |
 | How often retention runs (`RETAIN_EVERY_MS`) | hourly | – | `log-checkpointer.ts` |
@@ -779,17 +779,17 @@ paragraph on T187). `use-days.alone.ts` holds it.
 
 So the days kept are a choice between storage and evidence, nothing else.
 A day kept holds more than its uses' rows: each logged use also leaves its
-level-0 tiles and its row in the reads' projection, with that projection's
-indexes, and retention drops them all together. About 790 bytes a use in
+share of the audit tree's tiles and its row in the reads' projection, with that projection's
+indexes, and retention drops them all together. About 800 bytes a use in
 all (section 2.9: four measurements added up, never measured as one), and
 a backup carries them too.
 
 | uses a second, steady | a day | 30 days | a year |
 |---|---|---|---|
-| 1,000 (R44) | 68 GB | 2.0 TB | 25 TB |
-| 10 | 683 MB | 20.5 GB | 249 GB |
+| 1,000 (R44) | 69 GB | 2.1 TB | 25 TB |
+| 10 | 691 MB | 20.7 GB | 252 GB |
 
-The use's own row is 141 of the 790 bytes (12.2 GB a day at 1,000 a
+The use's own row is 141 of the 800 bytes (12.2 GB a day at 1,000 a
 second); the projection's 602 are most of it. Far less when repeats are
 covered (80% on covers: about a quarter).
 
