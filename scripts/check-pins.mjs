@@ -13,7 +13,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { kindOf, problemsIn } from './pins.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
@@ -44,11 +44,24 @@ const version = read('packages/cli/package.json').version;
 // CI included, and each enforces minimumReleaseAge alike.
 const pnpm = read('package.json').packageManager;
 
+// The one Node: the workspace's .node-version, an exact release, which CI's
+// setup-node reads, and which the examples pin too, so that a deployment
+// `init` writes runs it in CI and on Workers Builds; `coffre update` moves it.
+const nodeVersion = (dir) => {
+    const path = join(root, dir, '.node-version');
+    return existsSync(path) ? readFileSync(path, 'utf8').trim() : undefined;
+};
+const node = nodeVersion('.');
+if (!/^\d+\.\d+\.\d+$/.test(node ?? '')) problems.push(`.node-version: ${node === undefined ? 'missing' : JSON.stringify(node)} is not an exact Node`);
+
 for (const manifest of manifests) {
     const pkg = read(manifest);
     const inWorkspace = !manifest.startsWith('examples/');
     if (!inWorkspace && pkg.packageManager !== pnpm) {
         problems.push(`${manifest}: packageManager ${pkg.packageManager ?? 'missing'} is not ${pnpm}, the workspace's`);
+    }
+    if (!inWorkspace && nodeVersion(dirname(manifest)) !== node) {
+        problems.push(`${dirname(manifest)}/.node-version: ${nodeVersion(dirname(manifest)) ?? 'missing'} is not ${node}, the workspace's`);
     }
     for (const script of INSTALL_SCRIPTS) {
         if (pkg.scripts?.[script] !== undefined) problems.push(`${manifest}: scripts.${script} runs on install`);
@@ -114,7 +127,7 @@ let files = 0;
 for (const path of tracked) {
     if (kindOf(path) === null || !existsSync(join(root, path))) continue;
     files++;
-    problems.push(...problemsIn(path, readFileSync(join(root, path), 'utf8'), { root: path === 'pnpm-workspace.yaml', pnpm: pnpm.replace(/^pnpm@/, '') }));
+    problems.push(...problemsIn(path, readFileSync(join(root, path), 'utf8'), { root: path === 'pnpm-workspace.yaml' }));
 }
 
 if (problems.length > 0) {

@@ -28,7 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         # 20.0.0, the first Node the CLI runs on, and 20.20.2, Node 20's last.
-        node: ['runner', '20.0.0', '20.20.2', '22.23.4', '24.22.1']
+        node: ['runner', '20.0.0', '20.20.2', '22.23.4', '24.22.2', '26.13.0']
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -46,7 +46,7 @@ jobs:
       # would hold an older CLI to the checks below.
       - name: Hold the Action's CLI to this revision's sources
         run: pnpm check:action
-      - name: Keep the Node 24 binary for test tooling
+      - name: Keep the workspace's Node binary for test tooling
         id: tooling
         run: echo "node=$(command -v node)" >> "$GITHUB_OUTPUT"
       - name: Install this revision's packed CLI
@@ -78,7 +78,7 @@ jobs:
           echo 'The fixture did not become ready within three minutes.' >&2
           exit 1
       # Only the test job selects its caller's toolchain. The Action must
-      # use it and leave it intact. Its background fixture stays on Node 24.
+      # use it and leave it intact. Its background fixture stays on the workspace's Node.
       - name: Select the caller's Node
         if: matrix.node != 'runner'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -197,13 +197,14 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 24.22.1
+          node-version-file: .node-version
       - name: Verify masking in the completed smoke job's log
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --jq '.jobs[] | select(.name | startswith("Action smoke (")) | .id' > "$RUNNER_TEMP/coffre-action-job-ids"
-          test "$(wc -l < "$RUNNER_TEMP/coffre-action-job-ids")" -eq 5
+          # One job per entry of the smoke matrix's `node` list.
+          test "$(wc -l < "$RUNNER_TEMP/coffre-action-job-ids")" -eq 6
           while read -r job; do
             gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > "$RUNNER_TEMP/coffre-action-job-$job.log"
             node packages/conformance/scripts/action-test.ts verify-masks "$RUNNER_TEMP/coffre-action-job-$job.log"

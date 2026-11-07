@@ -313,6 +313,16 @@ const CASES: Case[] = [
     },
     run: (i) => owner.proxy.save(`market/routes-${i}`, { seal: seals.get(i)!, items: { maps: { ...ROUTE, name: 'maps', upstream: 'https://maps.example.com' } } }),
   },
+  // An Owner's reset of someone's passkeys (T176 PR 6a): one passkey or ten, the same round trips, the removals asked together.
+  ...[1, 10].map((held): Case => ({
+    name: `passkeys reset, ${held}`,
+    setup: async (i) => {
+      const email = `reset-${held}-${i}@acme.example`;
+      await owner.members.add(`user:${email}`);
+      for (let n = 0; n < held; n++) await addPasskey(db.owner, deps.chainKey, email);
+    },
+    run: (i) => owner.call('DELETE /members/:member/passkeys', { member: `user:reset-${held}-${i}@acme.example` }),
+  })),
   {
     name: 'token revoked',
     setup: async (i) => void tokens.set(i, (await owner.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 })).id),
@@ -376,6 +386,12 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   // settings and places a non-Owner's issue checks, then what sensitive values its places hold, one round trip.
   'token issued': { app: 3, vault: 6 },
   'token issued, by a Developer': { app: 5, vault: 7 },
+  // An Owner's reset (T176 PR 6a), however many passkeys: the session's read; the policy's and the Owner's access's
+  // newest entries, then the vault's answer for them and for the person (`issuerNow`, review r1 of #529); what it will
+  // revoke, read together; then its transaction: the head, the fence's reads and the passkeys in one Sync, every
+  // removal and revocation in a second, the entry with the COMMIT.
+  'passkeys reset, 1': { app: 6, vault: 3 },
+  'passkeys reset, 10': { app: 6, vault: 3 },
   'token revoked': { app: 2, vault: 3 },
   'proxy definitions, first save': { app: 2, vault: 5 },
   'proxy definitions, an item added': { app: 2, vault: 5 },

@@ -21,9 +21,10 @@ export function remainingMs(state: { issuedAt: number }, now = Date.now()): numb
 /**
  * Why a sealed state was made, each opened by its own key (section 7.2, step 1): `signin` and `enroll` ride in the
  * sign-in's cookie, after the provider; `step-up` in the page's JSON, bound to the session it replaces; `create`, in the
- * page's JSON too, the user handle one `create()` of an enrollment was given.
+ * page's JSON too, the user handle one `create()` of an enrollment was given; `act`, a touch for one act; `add` and
+ * `remove`, a passkey added from a session and one removed, each bound to the session (section 3.6).
  */
-export type CeremonyPurpose = 'signin' | 'enroll' | 'step-up' | 'create' | 'act';
+export type CeremonyPurpose = 'signin' | 'enroll' | 'step-up' | 'create' | 'act' | 'add' | 'remove';
 
 /**
  * A sign-in that passed the provider and waits for its passkey (section 3.1), sealed in `__Host-coffre_passkey`: what
@@ -108,7 +109,40 @@ export type ActState = {
   issuedAt: number;
 };
 
-type Sealed = PendingFactor | StepUpState | CreateState | ActState;
+/**
+ * Another passkey added from a session (section 3.6): the options of one `create()`, bound to the session they were
+ * asked on, with the user handle drawn for it (as `CreateState`'s, one per `create()`), and how many passkey rows the
+ * person had, removed ones included, which the add holds still, so that a state answers one `create()` alone.
+ */
+export type AddState = {
+  purpose: 'add';
+  credentialId: string;
+  principal: string;
+  generation: number;
+  userHandle: string;
+  passkeysEver: number;
+  challenge: string;
+  issuedAt: number;
+};
+
+/**
+ * A passkey removed by its person (section 3.6), bound to the browser session it was asked on, which the removal
+ * replaces: the passkey it removes, and what touch it takes. `kept`: of another of their live passkeys, which the new
+ * session names; `last`: under `optional`, of the one removed, their last, and the new session names none; `none`:
+ * under `off`, no touch, and the new session names none either.
+ */
+export type RemoveState = {
+  purpose: 'remove';
+  credentialId: string;
+  principal: string;
+  generation: number;
+  passkeyId: string;
+  touch: 'kept' | 'last' | 'none';
+  challenge: string;
+  issuedAt: number;
+};
+
+type Sealed = PendingFactor | StepUpState | CreateState | ActState | AddState | RemoveState;
 
 /** Each purpose's key, from the chain key, so that one purpose's state never opens as another's. */
 export class CeremonyStates {
@@ -121,6 +155,8 @@ export class CeremonyStates {
       'step-up': deriveKey(chainKey, 'passkey-state/step-up/v1'),
       create: deriveKey(chainKey, 'passkey-state/create/v1'),
       act: deriveKey(chainKey, 'passkey-state/act/v1'),
+      add: deriveKey(chainKey, 'passkey-state/add/v1'),
+      remove: deriveKey(chainKey, 'passkey-state/remove/v1'),
     };
   }
 

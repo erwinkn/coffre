@@ -8,8 +8,7 @@ import { problemsIn } from './pins.mjs';
 
 const SHA = '11d5960a326750d5838078e36cf38b85af677262';
 const DIGEST = 'sha256:' + 'a'.repeat(64);
-const PNPM = '11.8.0';
-const check = (path, text, options) => problemsIn(path, text, { pnpm: PNPM, ...options });
+const check = (path, text, options) => problemsIn(path, text, options);
 const passes = (path, text, options) => assert.deepEqual(check(path, text, options), [], text);
 const fails = (path, text, pattern, options) => {
     const problems = check(path, text, options);
@@ -66,7 +65,7 @@ test('4. only scripts/fetch.sh downloads; a health check of this machine is mark
     // The helper may download; nothing else in it is exempt.
     fails('scripts/fetch.sh', 'npm install some-tool\n', /fetches a package outside the lockfile/);
     fails('scripts/fetch.sh', 'pnpm install\n', /without --frozen-lockfile/);
-    fails('scripts/fetch.sh', 'corepack prepare pnpm@latest --activate\n', /pnpm@latest is not/);
+    fails('scripts/fetch.sh', 'corepack enable\n', /corepack: Node drops it/);
     for (const line of ['curl -fsSL https://example.com/x -o x', 'wget https://example.com/x', '/usr/bin/curl -O "$url"', 'x=$(curl -s "$url")', 'sudo curl "$url"']) {
         fails('scripts/a.sh', `${line}\n`, /scripts\/a\.sh:1: (curl|wget) downloads: use scripts\/fetch\.sh/);
     }
@@ -114,8 +113,8 @@ test('5. nothing fetches a package outside the lockfile', () => {
 });
 
 test('6. pnpm install carries --frozen-lockfile, each command its own', () => {
-    passes('scripts/a.sh', 'pnpm install --frozen-lockfile\ncorepack pnpm install --frozen-lockfile=true\npnpm --filter x i --frozen-lockfile --prod\n');
-    for (const line of ['pnpm install', 'pnpm i', 'pnpm --dir x install', 'pnpm install --frozen-lockfile=false', 'pnpm install; pnpm install --frozen-lockfile', 'corepack pnpm install']) {
+    passes('scripts/a.sh', 'pnpm install --frozen-lockfile\npnpm install --frozen-lockfile=true\npnpm --filter x i --frozen-lockfile --prod\n');
+    for (const line of ['pnpm install', 'pnpm i', 'pnpm --dir x install', 'pnpm install --frozen-lockfile=false', 'pnpm install; pnpm install --frozen-lockfile']) {
         fails('scripts/a.sh', `${line}\n`, /pnpm install without --frozen-lockfile/);
     }
     fails('docker-compose.yml', `services:\n  a:\n    image: a:1@${DIGEST}\n    command: [pnpm, install]\n`);
@@ -127,10 +126,14 @@ test('6. pnpm install carries --frozen-lockfile, each command its own', () => {
     passes('scripts/a.sh', 'pnpm install \\\n  --frozen-lockfile\n');
 });
 
-test('7. Corepack’s pnpm is the workspace’s', () => {
-    passes('Dockerfile', `FROM scratch\nRUN corepack enable && corepack prepare pnpm@${PNPM} --activate\n`);
-    fails('Dockerfile', 'FROM scratch\nRUN corepack prepare pnpm@latest --activate\n', /pnpm@latest is not pnpm@11\.8\.0/);
-    fails('scripts/a.sh', 'corepack pnpm@11 install --frozen-lockfile\n');
+test('7. nothing runs Corepack', () => {
+    fails('Dockerfile', 'FROM scratch\nRUN corepack enable && corepack prepare pnpm@11.28.9 --activate\n', /Dockerfile:2: corepack: Node drops it/);
+    fails('scripts/a.sh', 'corepack pnpm install --frozen-lockfile\n', /scripts\/a\.sh:1: corepack/);
+    fails('scripts/a.sh', 'COREPACK_ENABLE_STRICT=0 /usr/local/bin/corepack use pnpm@11.28.9\n');
+    fails('.github/workflows/a.yml', run('corepack enable && pnpm install --frozen-lockfile'), /steps\[0\]\.run: corepack/);
+    fails('.cursor/environment.json', JSON.stringify({ install: 'corepack pnpm install --frozen-lockfile' }), /install: corepack/);
+    // Its name in a word of another, or an environment variable's, runs nothing.
+    passes('scripts/a.sh', 'echo "$COREPACK_HOME" no-corepack-here\npnpm install --frozen-lockfile # pnpm, never Corepack\n');
 });
 
 test('8. a toolchain an action installs is an exact version, and a runner a named image', () => {

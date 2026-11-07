@@ -5,7 +5,7 @@ import type { Confirmation } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { unknownKeyAlert } from './alerts.ts';
-import { ApiError, notFound, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
+import { ApiError, badRequest, notFound, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import type { SignedInAccount, SigninResult } from './api/signin.ts';
 import { CEREMONY_TTL_SECONDS } from './api/ceremony.ts';
 import { freshEnough, freshPass } from './api/fresh-routes.ts';
@@ -472,17 +472,21 @@ async function signedInCookies(
 }
 
 /** What the passkey step answers a refusal with: a code the page says in words (`signinErrorMessage`). */
-const PASSKEY_REFUSED: Partial<Record<string, number>> = { passkey_failed: 401, session_ended: 401, passkey_required: 401 };
+const PASSKEY_REFUSED: Partial<Record<string, number>> = { passkey_failed: 401, session_ended: 401, passkey_required: 401, last_passkey: 409 };
 
 /**
  * GET /api/auth/passkey: what the passkey page asks the browser for (passkeys.md, section 3.1), `{ purpose, email,
  * options }`, `options` in WebAuthn's JSON form: a touch for the sign-in waiting in this browser's passkey cookie, or a
  * new passkey for it, with its sealed `state`, the user handle this GET drew. `?step-up=1`: a touch for the browser's session, which a person's passkey no longer stands behind
  * (section 6.2), with its sealed `state` too. 404 `state_mismatch` when there is nothing to ask: the sign-in expired,
- * or the session is no step-up's, and signing in again is the way.
+ * or the session is no step-up's, and signing in again is the way. `?remove=<id>`: what removing that passkey of the
+ * session's person asks (section 3.6), `{ purpose: 'remove', email, name, options, state }`, `options` null under `off`,
+ * where it asks no touch; 409 `last_passkey` for their last one under `required`, and 409 `tampered` when one of the
+ * person's passkey rows fails its MAC.
  *
- * POST /api/auth/passkey: the browser's answer, `{ response }` (or `{ state, response }` for a new passkey or a step-up), from coffre's
- * own page: on success the session cookie, and `{ next }`, where to go.
+ * POST /api/auth/passkey: the browser's answer, `{ response }` (or `{ state, response }` for a new passkey, a step-up or
+ * a removal, `{ state }` alone for a removal under `off`), from coffre's own page: on success the session cookie, and
+ * `{ next }`, where to go.
  */
 export async function passkeyStep(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
   const signin = runtime.signin;
@@ -492,6 +496,14 @@ export async function passkeyStep(request: Request, runtime: CoffreRuntime, sour
   const nothing = () => jsonResponse({ error: 'state_mismatch', message: 'this sign-in expired or was finished elsewhere: sign in again' }, 404);
   // GET, or HEAD, which `coffreRoute` lets in as GET and hands on as itself (review r8 of #500): only a POST answers.
   if (request.method !== 'POST') {
+    const removing = url.searchParams.get('remove');
+    if (removing !== null) {
+      const token = readCookie(request, sessionCookieName(auth));
+      const step = token === null ? null : await signin.removeStep(token, removing);
+      // Both refusals, a last passkey under `required` and a passkey row failing its MAC, are 409s, as the passkeys API's.
+      if (step !== null && 'refused' in step) return jsonResponse({ error: step.refused }, 409);
+      return step === null ? nothing() : jsonResponse(step, 200, { 'cache-control': 'no-store' });
+    }
     if (url.searchParams.get('step-up') === '1') {
       const token = readCookie(request, sessionCookieName(auth));
       const step = token === null ? null : await signin.stepUpStep(token, stepUpNext(url.searchParams.get('next'), signin.config));
@@ -511,7 +523,7 @@ export async function passkeyStep(request: Request, runtime: CoffreRuntime, sour
   const refused = (reason: string, cookies: string[] = []) => withCookies(jsonResponse({ error: reason }, PASSKEY_REFUSED[reason] ?? 400), cookies);
   if (state === null && token === null) return refused('state_mismatch', [clear]);
 
-  let body: { response: unknown; state?: string };
+  let body: { response?: Record<string, unknown>; state?: string };
   try {
     // A control-plane request's body, read to the one bound the API reads every body to (R70).
     body = passkeyAnswer.parse(await readLimitedJson(request, API_BODY_BYTES)) as typeof body;
@@ -523,7 +535,18 @@ export async function passkeyStep(request: Request, runtime: CoffreRuntime, sour
     return withCookies(jsonResponse({ next }), [...cookies, ...(await signedInCookies(request, runtime, result, meta))]);
   };
 
-  // A `state` is a step-up's, or, for an enrollment, the user handle its `create()` was given (`CreateState`).
+  // A `state` is a step-up's or a removal's, or, for an enrollment, the user handle its `create()` was given (`CreateState`).
+  const remove = body.state === undefined ? null : signin.ceremonies.open(body.state, ['remove']);
+  if (remove !== null) {
+    if (token === null) return refused('session_ended');
+    // Back to the Passkeys tab, on the session the removal issued.
+    const result = await signin.removePasskey(body.state!, token, body.response, meta);
+    // A tampered row refuses a removal with 409, as the GET and the API do; a sign-in's own `tampered` stays 400.
+    if (result.ok !== true && result.reason === 'tampered') return jsonResponse({ error: 'tampered' }, 409);
+    return answered(result, '/account', []);
+  }
+  // Every other answer is a passkey's.
+  if (body.response === undefined) return errorResponse(badRequest('response: the passkey\'s answer is required'));
   const stepUp = body.state === undefined ? null : signin.ceremonies.open(body.state, ['step-up']);
   if (stepUp !== null || (body.state !== undefined && state?.purpose !== 'enroll')) {
     if (token === null || stepUp === null) return refused('session_ended');
@@ -542,7 +565,7 @@ function withCookies(response: Response, cookies: readonly string[]): Response {
 }
 
 /** A step-up's or a new passkey's state is the server's own seal, which `open` checks; the body's size bounds its length. */
-const passkeyAnswer = z.object({ response: z.record(z.string(), z.unknown()), state: z.string().optional() }).strict();
+const passkeyAnswer = z.object({ response: z.record(z.string(), z.unknown()).optional(), state: z.string().optional() }).strict();
 
 /**
  * What the provider vouched for, under the id coffre knows it by: a provider

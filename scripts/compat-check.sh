@@ -113,7 +113,7 @@ else
     migrator="node --conditions=coffre:source '$root/scripts/compat-migrate.mjs'"
     against="this checkout's migrations"
 fi
-export HOME="$work/home" npm_config_update_notifier=false COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+export HOME="$work/home" npm_config_update_notifier=false
 mkdir -p "$HOME"
 
 # The release's own CLI, to write its deployments.

@@ -18,6 +18,9 @@ import {
   minimumReleaseAge,
   HeldBack,
   install,
+  installed,
+  lockedVersions,
+  packagesLock,
   pinPackageManager,
   removeCleared,
   resolveAgain,
@@ -33,6 +36,8 @@ import { deploymentMigrations, globalCli, HOTLESS, hotless, installOf, migration
 import { cliVersion } from '../src/version.ts';
 
 const examples = fileURLToPath(new URL('../../../examples/', import.meta.url));
+/** The workspace's pnpm, which the examples pin: the 11 these tests run. */
+const PNPM = (JSON.parse(readFileSync(join(examples, '..', 'package.json'), 'utf8')) as { packageManager: string }).packageManager.replace(/^pnpm@/, '');
 
 test('update moves every @coffre/* pin of a deployment, and nothing else', () => {
   for (const kind of ['workers', 'node']) {
@@ -280,6 +285,30 @@ test('a temporary exclusion is named, with its date, and goes once the date has 
   }
 });
 
+test("installed as locked: pnpm 12's copy in node_modules leaves out the document pinning pnpm", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-installed-'));
+  try {
+    const packages = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\npackages:\n\n  esbuild@0.25.0:\n    resolution: {integrity: sha512-x}\n";
+    const pnpm =
+      "---\nlockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    packageManagerDependencies:\n      pnpm:\n        specifier: 12.17.0\n        version: 12.17.0\n\n" +
+      "packages:\n\n  '@pnpm/exe.linux-x64@12.17.0':\n    resolution: {integrity: sha512-y}\n\n---\n";
+    assert.equal(packagesLock(pnpm + packages), packages);
+    assert.equal(packagesLock(packages), packages, "pnpm 11's, as it is");
+    assert.deepEqual([...lockedVersions(pnpm + packages)], [['esbuild', new Set(['0.25.0'])]], "the packages', not pnpm's");
+    writeFileSync(join(dir, 'pnpm-lock.yaml'), pnpm + packages);
+    assert.equal(installed(dir), false, 'no node_modules');
+    mkdirSync(join(dir, 'node_modules', '.pnpm'), { recursive: true });
+    writeFileSync(join(dir, 'node_modules', '.pnpm', 'lock.yaml'), packages);
+    assert.equal(installed(dir), true);
+    writeFileSync(join(dir, 'pnpm-lock.yaml'), packages);
+    assert.equal(installed(dir), true, "pnpm 11's lockfile");
+    writeFileSync(join(dir, 'pnpm-lock.yaml'), pnpm + packages.replace('{}', '{ dependencies: {} }'));
+    assert.equal(installed(dir), false, 'another lockfile');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a deployment pins coffre's pnpm, beside \"private\", whatever it had", () => {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-pnpm-'));
   try {
@@ -506,7 +535,7 @@ test('held back, update on a terminal lets them through by name, until each is o
     assert.equal(run.code, 0, run.output);
     const pins = coffrePins(dir);
     assert.ok(Object.values(pins).every((version) => version === '9.9.9'));
-    assert.equal((JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { packageManager: string }).packageManager, 'pnpm@11.8.0');
+    assert.equal((JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { packageManager: string }).packageManager, `pnpm@${PNPM}`);
     assert.match(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8'), /  - 'pg-protocol@1\.16\.1' # coffre update: until \S+, for coffre 9\.9\.9/);
   } finally {
     close();
@@ -554,6 +583,7 @@ test("an earlier release's CLI moves a deployment with the pages and pins the re
       pages: { changes: [{ path: later, was: null, becomes: '// a page coffre 9.9.9 adds\n' }] },
       start: [{ name: 'react', from: '19.2.7', to: '19.9.0' }],
       packageManager: 'pnpm@11.8.0',
+      node: '24.99.0',
     };
     planner(dir, `console.error('a warning first'); console.log(${JSON.stringify(JSON.stringify(plan))});`);
     const run = await updateIn(dir, env);
@@ -564,6 +594,8 @@ test("an earlier release's CLI moves a deployment with the pages and pins the re
     assert.match(run.stderr, /Changed coffre's page files: app\/src\/routes\/_coffre\/later\.tsx/);
     const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
     assert.equal(manifest.dependencies.react, '19.9.0');
+    assert.equal(readFileSync(join(dir, '.node-version'), 'utf8'), '24.99.0\n');
+    assert.match(run.stderr, /Pinned Node 24\.99\.0 in \.node-version, not \d+\.\d+\.\d+/);
     assert.ok(Object.values(coffrePins(dir)).every((version) => version === '9.9.9'));
   } finally {
     close();
@@ -592,6 +624,7 @@ test("a release's CLI names the pages a deployment gains since its pins, its Sta
     assert.deepEqual(plan.pages, { changes: [{ path: apps, was: null, becomes: readFileSync(join(templateDir('node'), apps), 'utf8') }] });
     assert.deepEqual(plan.start.map(({ name, from }) => [name, from]), [['react', '19.0.0']]);
     assert.equal(plan.packageManager, JSON.parse(readFileSync(join(templateDir('node'), 'package.json'), 'utf8')).packageManager);
+    assert.equal(plan.node, readFileSync(join(templateDir('node'), '.node-version'), 'utf8').trim());
     // At 0.5.0, which first wrote it, the page is one the deployment left out.
     bumpPins(dir, '0.5.0');
     assert.deepEqual(ask().pages, { changes: [] });
@@ -655,6 +688,7 @@ test('a plan that reaches outside the routes, pins another package or names no p
       [`"app/src/routes/../../../${sentinel}" is not a file in app/src/routes/`, { ...valid, pages: { changes: [{ path: `app/src/routes/../../../${sentinel}`, was: null, becomes: 'outside\n' }] } }],
       ["typescript is not one of the Start app's packages", { ...valid, start: [{ name: 'typescript', from: '5.9.3', to: '999.0.0' }] }],
       ['packageManager 42 is not an exact pnpm', { ...valid, packageManager: 42 }],
+      ['node "24" is not an exact Node', { ...valid, node: '24' }],
     ];
     for (const [refused, plan] of plans) {
       planner(dir, `console.log(${JSON.stringify(JSON.stringify(plan))});`);
@@ -686,10 +720,15 @@ test('a plan is taken as this release knows it: fields it does not know left out
       pages: { changes: [{ path: page, was: 'as coffre wrote it\n', becomes: null }] },
       start: [{ name: 'react', from: '19.0.0', to: '19.2.7-rc.1' }],
       packageManager: 'pnpm@11.8.0+sha512.0a1b',
+      node: null,
     });
     assert.deepEqual(parsePlan({ ...valid, pages: { problems: ['moved'] }, packageManager: null }, dir).pages, { problems: ['moved'] });
+    // An earlier release's plan names no Node; a later one's, an exact one.
+    assert.equal(parsePlan({ ...valid, node: '24.22.2' }, dir).node, '24.22.2');
     const refused = (plan: unknown, why: RegExp) => assert.throws(() => parsePlan(plan, dir), why);
     refused(null, /not a plan/);
+    refused({ ...valid, node: 'lts/*' }, /not an exact Node/);
+    refused({ ...valid, node: 24 }, /not an exact Node/);
     refused({ ...valid, packageManager: 'npm@11.0.0' }, /not an exact pnpm/);
     refused({ ...valid, packageManager: 'pnpm@^11' }, /not an exact pnpm/);
     refused({ ...valid, start: [{ name: 'react', from: '19.0.0', to: '^19.0.0' }] }, /not an exact version/);
@@ -764,46 +803,78 @@ test('the release itself moves a deployment by its own template, asking no other
   }
 });
 
+test("a deployment an earlier CLI moved to this release, which knew no .node-version, gets its Node pin from this release's own update", async () => {
+  // 0.15.0's CLI takes a plan as it knows it (above): its packages and pnpm moved, the plan's Node dropped.
+  const { dir, env, close } = await heldDeployment(cliVersion());
+  try {
+    bumpPins(dir, cliVersion());
+    pinPackageManager(dir, (JSON.parse(readFileSync(join(templateDir('workers'), 'package.json'), 'utf8')) as { packageManager: string }).packageManager);
+    rmSync(join(dir, '.node-version'));
+    writeFileSync(join(dir, '.bin', 'pnpm'), '#!/bin/sh\nexit 0\n');
+    const run = await updateIn(dir, env);
+    assert.equal(run.code, 0, run.stderr);
+    assert.ok(!existsSync(join(dir, 'npm-asked')), 'no other CLI was asked');
+    const node = readFileSync(join(templateDir('workers'), '.node-version'), 'utf8');
+    assert.equal(readFileSync(join(dir, '.node-version'), 'utf8'), node);
+    assert.match(run.stderr, new RegExp(`Pinned this deployment to Node ${node.trim().replaceAll('.', '\\.')}, and installed its packages`));
+  } finally {
+    close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // --- with pnpm itself ----------------------------------------------------------------
 
-/** Whether pnpm runs here, at the version a project asks for: online, or from a cache. */
-function pnpmAt(version: string): boolean {
+/** What `pnpm …` says in a project pinning pnpm `version`, which pnpm switches itself to (online, or from its cache). */
+function pnpmIn(version: string, args: string[]) {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-pnpm-probe-'));
   try {
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'probe', private: true, packageManager: `pnpm@${version}` }));
-    const ran = spawnSync('pnpm', ['--version'], { cwd: dir, encoding: 'utf8', env: { ...process.env, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' }, timeout: 60_000 });
-    return ran.status === 0 && ran.stdout.trim() === version;
+    const ran = spawnSync('pnpm', args, { cwd: dir, encoding: 'utf8', timeout: 60_000 });
+    return ran.status === 0 ? ran.stdout.trim() : null;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
+/** Whether pnpm runs here, at the version a project asks for. */
+const pnpmAt = (version: string) => pnpmIn(version, ['--version']) === version;
+
+/**
+ * The path of pnpm `version`'s own command, as pnpm 11 tells what it runs
+ * (`npm_execpath`; pnpm 10 does not): null when it does not run here.
+ */
+function pnpmBinary(version: string): string | null {
+  const path = pnpmIn(version, ['exec', 'node', '-e', 'process.stdout.write(process.env.npm_execpath ?? "")']) ?? '';
+  return path !== '' && spawnSync(path, ['--version'], { encoding: 'utf8', timeout: 60_000 }).stdout?.trim() === version ? path : null;
+}
+
 const needsPnpm = (...versions: string[]) => ({ skip: versions.every(pnpmAt) ? false : `needs pnpm ${versions.join(' and ')}` });
 
-test('a deployment moved from pnpm 10 to 11 installs without a terminal, its node_modules purged', needsPnpm('10.15.0', '11.8.0'), async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'coffre-majors-'));
-  try {
-    mkdirSync(join(dir, 'dep'));
-    writeFileSync(join(dir, 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0' }));
-    const manifest = (pnpm: string) =>
-      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'deployment', private: true, packageManager: `pnpm@${pnpm}`, dependencies: { dep: 'file:./dep' } }));
-    manifest('10.15.0');
-    await install(dir);
-    manifest('11.8.0');
-    // What erwinkn/secrets met: pnpm 11 would remove pnpm 10's node_modules, and without a terminal it stops.
-    // Not as CI, where pnpm removes it unasked: CI=false says so, whatever else the environment holds.
+test("a deployment moved from pnpm 10 or 11 to the template's installs without a terminal, unasked", needsPnpm('10.15.0', '11.28.9', PNPM), async () => {
+  // What erwinkn/secrets met with pnpm 11: it would remove another major's node_modules, and without a
+  // terminal it stopped (ABORTED_REMOVE_MODULES_DIR_NO_TTY), so install's `purge` said yes for the person.
+  // pnpm 12 replaces it unasked. Not as CI, where pnpm 11 removed it unasked too: CI=false says so.
+  for (const from of ['10.15.0', '11.28.9']) {
+    const dir = mkdtempSync(join(tmpdir(), 'coffre-majors-'));
     const ci = process.env.CI;
-    process.env.CI = 'false';
     try {
-      await assert.rejects(install(dir), /ABORTED_REMOVE_MODULES_DIR_NO_TTY/);
+      mkdirSync(join(dir, 'dep'));
+      writeFileSync(join(dir, 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0' }));
+      const manifest = (pnpm: string) =>
+        writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'deployment', private: true, packageManager: `pnpm@${pnpm}`, dependencies: { dep: 'file:./dep' } }));
+      manifest(from);
+      await install(dir);
+      assert.ok(readFileSync(join(dir, 'node_modules', '.modules.yaml'), 'utf8').includes(`pnpm@${from}`), from);
+      manifest(PNPM);
+      process.env.CI = 'false';
+      await install(dir);
+      assert.ok(readFileSync(join(dir, 'node_modules', '.modules.yaml'), 'utf8').includes(`pnpm@${PNPM}`), `${from} to ${PNPM}`);
     } finally {
       if (ci === undefined) delete process.env.CI;
       else process.env.CI = ci;
+      rmSync(dir, { recursive: true, force: true });
     }
-    await install(dir, { purge: true });
-    assert.match(readFileSync(join(dir, 'node_modules', '.modules.yaml'), 'utf8'), /pnpm@11\.8\.0/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -819,7 +890,7 @@ async function lockedYoung(range: string) {
     'pg-like': [{ version: '1.0.0', daysAgo: 30, dependencies: { proto: range, other: '^2.0.0' } }],
   });
   const dir = mkdtempSync(join(tmpdir(), 'coffre-locked-'));
-  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'deployment', private: true, packageManager: 'pnpm@11.8.0', dependencies: { 'pg-like': '1.0.0' } }));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'deployment', private: true, packageManager: `pnpm@${PNPM}`, dependencies: { 'pg-like': '1.0.0' } }));
   writeFileSync(join(dir, '.npmrc'), `registry=${published.origin}/\n`);
   writeFileSync(join(dir, 'pnpm-workspace.yaml'), 'minimumReleaseAge: 0\n');
   await install(dir);
@@ -827,7 +898,7 @@ async function lockedYoung(range: string) {
   return { dir, close: () => (published.close(), rmSync(dir, { recursive: true, force: true })) };
 }
 
-test('held back by an old lockfile, resolving again picks a version old enough, and nothing is let through', needsPnpm('11.8.0'), async () => {
+test('held back by an old lockfile, resolving again picks a version old enough, and nothing is let through', needsPnpm(PNPM), async () => {
   const { dir, close } = await lockedYoung('^1.0.0');
   try {
     await assert.rejects(install(dir), (error: unknown) => error instanceof HeldBack && error.held.map(({ spec }) => spec).join() === 'proto@1.0.1');
@@ -839,7 +910,7 @@ test('held back by an old lockfile, resolving again picks a version old enough, 
   }
 });
 
-test('when no version old enough fits, resolving again says which, and puts the lockfile back', needsPnpm('11.8.0'), async () => {
+test('when no version old enough fits, resolving again says which, and puts the lockfile back', needsPnpm(PNPM), async () => {
   const { dir, close } = await lockedYoung('^1.0.1');
   try {
     const lockfile = readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8');
@@ -850,7 +921,8 @@ test('when no version old enough fits, resolving again says which, and puts the 
   }
 });
 
-test("pnpm 11's own global install, as it lays it out: found by asking pnpm, though it lives in the store's links/", needsPnpm('11.8.0'), () => {
+const pinned = pnpmBinary(PNPM);
+test("the template's pnpm's own global install, as it lays it out: found by asking pnpm, though it lives in the store's links/", { skip: pinned === null ? `needs pnpm ${PNPM}` : false }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-pnpm-global-'));
   try {
     // A stand-in @coffre/cli, which says where it runs from as the real one finds itself: its real path.
@@ -858,21 +930,20 @@ test("pnpm 11's own global install, as it lays it out: found by asking pnpm, tho
     writeFileSync(join(dir, 'cli', 'package', 'package.json'), JSON.stringify({ name: '@coffre/cli', version: '9.9.9', bin: { coffre: 'dist/main.js' } }));
     writeFileSync(join(dir, 'cli', 'package', 'dist', 'main.js'), "#!/usr/bin/env node\nconsole.log(require('node:fs').realpathSync(__filename));\n");
     spawnSync('tar', ['czf', join(dir, 'cli.tgz'), '-C', join(dir, 'cli'), 'package']);
-    // pnpm 11, its home and data of its own, as `pnpm setup` leaves them: its bin directory on PATH.
+    // The template's pnpm, its home and data of its own, as `pnpm setup` leaves them: its bin directory on PATH.
     const home = join(dir, 'home');
     mkdirSync(home);
-    writeFileSync(join(home, 'package.json'), JSON.stringify({ name: 'home', private: true, packageManager: 'pnpm@11.8.0' }));
+    writeFileSync(join(home, 'package.json'), JSON.stringify({ name: 'home', private: true, packageManager: `pnpm@${PNPM}` }));
     const pnpmHome = join(dir, 'pnpm');
-    // `pnpm add -g` ignores a project's packageManager pin: on a host whose own pnpm is another major (12 lays a
-    // global out in global/v11/…/node_modules/.pnpm, not the store's links/), the layout below would be that one's.
-    // So `pnpm` here is 11.8.0 itself, through corepack, wherever the host's pnpm is from.
+    // `pnpm add -g` ignores a project's packageManager pin: on a host whose own pnpm is another release (12.11
+    // lays a global out in global/v11/…/node_modules/.pnpm, not the store's links/), the layout below would be that
+    // one's. So `pnpm` here is the workspace's own, the command pnpm switches to, wherever the host's pnpm is from.
     mkdirSync(join(dir, 'shim'));
-    writeFileSync(join(dir, 'shim', 'pnpm'), '#!/bin/sh\nexec corepack pnpm@11.8.0 "$@"\n');
+    writeFileSync(join(dir, 'shim', 'pnpm'), `#!/bin/sh\nexec ${JSON.stringify(pinned)} "$@"\n`);
     chmodSync(join(dir, 'shim', 'pnpm'), 0o755);
     const base = {
       ...process.env,
       PATH: `${join(dir, 'shim')}:${process.env.PATH}`,
-      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0',
       PNPM_HOME: pnpmHome,
       XDG_DATA_HOME: join(dir, 'data'),
       XDG_CONFIG_HOME: join(dir, 'config'),

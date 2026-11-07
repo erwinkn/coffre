@@ -1,6 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,11 +9,11 @@ import { fileURLToPath } from 'node:url';
 
 import { postgresClient } from '@coffre/db/connect';
 
-import { AfterMigrations, LockWaitsExhausted, managedObjects, migrateDatabase, MIGRATION_LOCK_ATTEMPTS, MIGRATION_LOCK_WAIT_MS, migrationsFolder, NotOwner } from '@coffre/db/migrate';
+import { AfterMigrations, HandOverFailed, LockWaitsExhausted, managedObjects, migrateDatabase, MIGRATION_LOCK_ATTEMPTS, MIGRATION_LOCK_WAIT_MS, migrationsFolder, NotOwner } from '@coffre/db/migrate';
 
 import { describeEveryProject, describeFirstRun, describeIssuers, describeUnsealed, migrationFailure, pinProblem } from '../src/migrate.ts';
 import { cliVersion } from '../src/version.ts';
-import { asSuperuser, database, emptyCluster, needsCluster } from './cluster.ts';
+import { asSuperuser, CLUSTER, database, emptyCluster, needsCluster } from './cluster.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 const journal = JSON.parse(readFileSync(join(migrationsFolder('postgres'), 'meta', '_journal.json'), 'utf8')) as {
@@ -293,6 +294,47 @@ test("a login that cannot change coffre's tables is told whose they are, and the
   );
   assert.match(new NotOwner('deployer', [{ name: 'owner', member: true }], { grantsInherit: false, inherits: false }).message, /does not inherit its privileges: .* run ALTER ROLE "deployer" INHERIT$/);
   assert.match(new NotOwner('deployer', [{ name: 'owner', member: false }], { grantsInherit: false, inherits: true }).message, /run GRANT "owner" TO "deployer"$/);
+  // One that inherits the ledger's owner's privileges but may not become it, which handing it an object asks (T193).
+  assert.equal(
+    new NotOwner('deployer', [{ name: 'owner', member: true }], { ...sixteen, settable: false }).message,
+    "coffre's tables are owned by owner, and this login, deployer, inherits its privileges but may not become it (SET ROLE), which handing it what the migrations make asks: " +
+      'migrate with owner\'s connection string, or, as a role that administers it, run GRANT "owner" TO "deployer" WITH SET TRUE',
+  );
+  // The ledger's owner, whose member made objects of coffre's before T193: granting the member to it would be a cycle.
+  assert.equal(
+    new NotOwner('owner', [{ name: 'deployer', member: false, memberOfLogin: true }], sixteen).message,
+    "coffre's tables are owned by deployer, and this login, owner, is neither it nor a member of it: " +
+      "migrate once with deployer's connection string, or a superuser's, which hands its objects to the owner of coffre's ledger",
+  );
+  // A member that owns the ledger, as its first run of a fresh database makes it: migrating as it would hand it all again.
+  assert.equal(
+    new NotOwner('owner', [{ name: 'deployer', member: false, memberOfLogin: true, ownsLedger: true }], sixteen).message,
+    "coffre's tables are owned by deployer, and this login, owner, is neither it nor a member of it: " +
+      "coffre's ledger, the drizzle schema, is deployer's, a member of this login, which makes deployer the owner of coffre's objects: migrate with deployer's connection string",
+  );
+  // That member, and another owner it cannot act for: migrating as the member alone would be refused again, so a superuser's run hands it the rest first.
+  assert.equal(
+    new NotOwner('owner', [{ name: 'admin', member: false }, { name: 'deployer', member: false, memberOfLogin: true, ownsLedger: true }], sixteen).message,
+    "coffre's tables are owned by admin and deployer, and this login, owner, is neither one nor a member of one: " +
+      "coffre's ledger, the drizzle schema, is deployer's, a member of this login, which makes deployer the owner of coffre's objects: " +
+      "migrate once with a superuser's connection string, which hands admin's objects to deployer, then with deployer's",
+  );
+  // Owners that can be granted and one that cannot: the GRANT, and the run that hands the other's over.
+  assert.equal(
+    new NotOwner('owner', [{ name: 'admin', member: false }, { name: 'deployer', member: false, memberOfLogin: true }], sixteen).message,
+    "coffre's tables are owned by admin and deployer, and this login, owner, is neither one nor a member of one: " +
+      'migrate with admin\'s connection string, or, as a role that administers it, run GRANT "admin" TO "owner" WITH INHERIT TRUE; ' +
+      "and, for deployer, a member of this login, migrate once with deployer's connection string, or a superuser's, which hands its objects to the owner of coffre's ledger",
+  );
+});
+
+test('a hand-over Postgres refuses says it was the hand-over, and what it was moving', () => {
+  const refused = Object.assign(new Error('permission denied for schema public'), { code: '42501' });
+  assert.equal(
+    migrationFailure(new HandOverFailed('ALTER TABLE log_uses_20370103 OWNER TO "owner"', refused)),
+    'handing coffre\'s objects to the owner of its ledger failed, at ALTER TABLE log_uses_20370103 OWNER TO "owner": permission denied for schema public. ' +
+      'Nothing was changed: the migrations run in one transaction.',
+  );
 });
 
 test("coffre's objects are what its migrations make, by name, as Postgres folds it", () => {
@@ -301,11 +343,16 @@ test("coffre's objects are what its migrations make, by name, as Postgres folds 
       'CREATE TABLE "audit_log" (\n "id" bigint);\nCREATE TABLE IF NOT EXISTS public."Mixed" ();\n--> statement-breakpoint\nCREATE UNLOGGED TABLE Folded ();',
       'CREATE MATERIALIZED VIEW "totals" AS SELECT 1;\nCREATE SEQUENCE "public"."numbers";\nCREATE FUNCTION audit_log_append_only() RETURNS trigger\nCREATE OR REPLACE FUNCTION "Quoted" ()\nALTER TABLE "audit_log" ADD COLUMN "scope" text;',
       'ALTER TABLE "totals" RENAME TO "Sums";\nALTER TABLE public.folded RENAME TO Kept;\nALTER TABLE "audit_log" RENAME CONSTRAINT "a" TO "b";',
+      'CREATE TYPE use_row AS (state text);\nCREATE TYPE "public"."Kind" AS ENUM (\'a\');\nALTER TYPE use_row ADD ATTRIBUTE at bigint;',
     ]),
-    { relations: ['audit_log', 'Mixed', 'folded', 'totals', 'numbers', 'Sums', 'kept'], functions: ['audit_log_append_only', 'Quoted'] },
+    { relations: ['audit_log', 'Mixed', 'folded', 'totals', 'numbers', 'Sums', 'kept'], functions: ['audit_log_append_only', 'Quoted'], types: ['use_row', 'Kind'] },
   );
   const made = managedObjects(readdirSync(migrationsFolder('postgres')).filter((file) => file.endsWith('.sql')).map((file) => readFileSync(join(migrationsFolder('postgres'), file), 'utf8')));
-  assert.ok(made.relations.includes('principals') && made.relations.includes('mcp_approvals') && made.functions.includes('secret_versions_erase_only'), JSON.stringify(made));
+  assert.ok(made.relations.includes('vault_members') && made.relations.includes('principals') && made.relations.includes('mcp_approvals') && made.functions.includes('secret_versions_erase_only'), JSON.stringify(made));
+  assert.deepEqual(made.types.toSorted(), ['use_row', 'use_view'], JSON.stringify(made));
+  // A name followed by a dot is a schema: the SQL that 0022's and 0049's functions run makes no table named public.
+  assert.ok(!made.relations.includes('public'), JSON.stringify(made));
+  assert.deepEqual(managedObjects(["EXECUTE format('CREATE TABLE public.%I (LIKE public.log_uses)', name);\nCREATE TABLE drizzle.ledger ();\nCREATE TABLE \"public\".made ();"]).relations, ['made']);
 });
 
 test("in a deployment's folder, a CLI that is not the version it pins refuses, before asking for anything", async () => {
@@ -547,4 +594,229 @@ test('a member of the owner that does not inherit its privileges is told so, and
   // What it says to run, run as it says.
   await asSuperuser('postgres', (client) => client.unsafe(refused.message.slice(refused.message.lastIndexOf('run ') + 4)));
   await migrateDatabase(deployer.href);
+});
+
+/**
+ * coffre's objects in public and drizzle that `owner` does not own, with their owners: relations but indexes, a
+ * composite type among them, statistics objects, functions, and the other types but arrays, comma-separated, or
+ * null when there is none.
+ */
+async function notTheOwners(databaseName: string, owner: string): Promise<string | null> {
+  return asSuperuser(databaseName, async (client) => {
+    const [{ names }] = await client.unsafe<[{ names: string | null }]>(
+      `SELECT string_agg(name, ', ' ORDER BY name) AS names FROM (
+        SELECT c.oid::regclass::text || '=' || pg_get_userbyid(c.relowner) AS name FROM pg_class c
+         WHERE c.relnamespace IN ('public'::regnamespace, 'drizzle'::regnamespace) AND c.relowner <> $1::regrole AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f', 'c')
+        UNION ALL SELECT s.stxname || '=' || pg_get_userbyid(s.stxowner) FROM pg_statistic_ext s
+         WHERE s.stxnamespace IN ('public'::regnamespace, 'drizzle'::regnamespace) AND s.stxowner <> $1::regrole
+        UNION ALL SELECT p.oid::regprocedure::text || '=' || pg_get_userbyid(p.proowner) FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proowner <> $1::regrole
+        UNION ALL SELECT t.oid::regtype::text || '=' || pg_get_userbyid(t.typowner) FROM pg_type t
+         WHERE t.typnamespace = 'public'::regnamespace AND t.typowner <> $1::regrole AND t.typrelid = 0 AND t.typelem = 0
+      ) AS objects`,
+      [owner],
+    );
+    return names;
+  });
+}
+
+/** Apply this version's migrations to `url` up to `last`, as a release that stopped there did, in one transaction. */
+async function migrateThrough(url: string, last: string): Promise<void> {
+  const client = postgresClient(url, { max: 1 });
+  try {
+    await client.begin(async (tx) => {
+      await tx.unsafe('CREATE SCHEMA IF NOT EXISTS drizzle');
+      await tx.unsafe('CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at bigint)');
+      for (const { tag, when } of journal.entries.slice(0, KNOWN.indexOf(last) + 1)) {
+        const text = readFileSync(join(migrationsFolder('postgres'), `${tag}.sql`), 'utf8');
+        for (const statement of text.split('--> statement-breakpoint')) await tx.unsafe(statement);
+        await tx.unsafe('INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ($1, $2)', [createHash('sha256').update(text).digest('hex'), when]);
+      }
+    });
+  } finally {
+    await client.end();
+  }
+}
+
+test("a member of the owner hands it, before the migrations commit, what it made, partitions and detached tables included, and nothing when they fail; one that may not become the owner is told the GRANT that lets it", needsCluster, async () => {
+  await emptyCluster();
+  const owned = await database('setup_migrate_as_owner', 'owner');
+  const owner = postgresClient(owned, { max: 1 });
+  try {
+    await owner.unsafe('CREATE ROLE coffre_runtime LOGIN');
+    await owner.unsafe('CREATE ROLE coffre_vault_runtime LOGIN');
+  } finally {
+    await owner.end();
+  }
+  await migrateDatabase(owned);
+  // A member that inherits, as a managed host's admin login, which made a table, functions and a type of coffre's
+  // itself, as its migrations did before T193, and with them a day of uses and a range of tiles, partitions. Each of
+  // those then detached, as retention's first step leaves it, which a later run drops (0027's `drop_day`, `drop_tiles`).
+  await asSuperuser('postgres', (client) => client.unsafe("CREATE ROLE setup_deployer LOGIN PASSWORD 'deployer-only-p4ss' IN ROLE setup_owner"));
+  const deployer = new URL(owned);
+  deployer.username = 'setup_deployer';
+  deployer.password = 'deployer-only-p4ss';
+  await asSuperuser('setup_migrate_as_owner', async (client) => {
+    await client.unsafe('ALTER TABLE principals OWNER TO setup_deployer');
+    await client.unsafe('ALTER FUNCTION make_day(date) OWNER TO setup_deployer');
+    await client.unsafe('ALTER FUNCTION make_tiles(bigint, bigint) OWNER TO setup_deployer');
+    await client.unsafe('ALTER TYPE use_row OWNER TO setup_deployer');
+    // A statistics object is its maker's, which an ALTER of its table leaves (0065).
+    await client.unsafe('ALTER STATISTICS log_changes_records_stats OWNER TO setup_deployer');
+    await client.unsafe("SET ROLE setup_deployer; SELECT make_day(date '2031-01-01'), make_day(date '2031-01-02'), make_tiles(4294967296, 4294967552); RESET ROLE");
+    await client.unsafe('ALTER TABLE log_uses DETACH PARTITION log_uses_20310101');
+    await client.unsafe('ALTER TABLE log_tiles_uses_leaves DETACH PARTITION log_tiles_uses_4294967296');
+  });
+  const made = 'log_changes_records_stats=setup_deployer, log_tiles_uses_4294967296=setup_deployer, log_uses_20310101=setup_deployer, log_uses_20310102=setup_deployer, ' +
+    'make_day(date)=setup_deployer, make_tiles(bigint,bigint)=setup_deployer, principals=setup_deployer, use_row=setup_deployer';
+  assert.equal(await notTheOwners('setup_migrate_as_owner', 'setup_owner'), made, 'the indexes and the sequences move with their table');
+
+  // The hand-over is the migrations' transaction's: a run that fails, here waiting for a table another session reads,
+  // hands over nothing, as it applies nothing.
+  await asSuperuser('setup_migrate_as_owner', (client) =>
+    client.begin(async (tx) => {
+      await tx.unsafe('LOCK TABLE principals IN ACCESS SHARE MODE');
+      await assert.rejects(migrateDatabase(deployer.href), (error) => error instanceof LockWaitsExhausted);
+    }),
+  );
+  assert.equal(await notTheOwners('setup_migrate_as_owner', 'setup_owner'), made);
+
+  await migrateDatabase(deployer.href);
+  assert.equal(await notTheOwners('setup_migrate_as_owner', 'setup_owner'), null, "every one of them is the owner's");
+  await asSuperuser('setup_migrate_as_owner', async (client) => {
+    const [{ inherited }] = await client.unsafe<[{ inherited: string }]>("SELECT pg_get_userbyid(relowner) AS inherited FROM pg_class WHERE oid = 'principals_pkey'::regclass");
+    assert.equal(inherited, 'setup_owner');
+    // Retention's second step, as the owner its functions run as: it drops what it detached.
+    await client.unsafe('SET ROLE setup_owner; DROP TABLE public.log_uses_20310101; DROP TABLE public.log_tiles_uses_4294967296; RESET ROLE');
+  });
+
+  // A membership that inherits the owner's privileges but may not become it: what it made would be its own.
+  await asSuperuser('postgres', (client) => client.unsafe('GRANT setup_owner TO setup_deployer WITH SET FALSE'));
+  const refusal = 'coffre\'s tables are owned by setup_owner, and this login, setup_deployer, inherits its privileges but may not become it (SET ROLE), which handing it what the migrations make asks: ' +
+    'migrate with setup_owner\'s connection string, or, as a role that administers it, run GRANT "setup_owner" TO "setup_deployer" WITH SET TRUE';
+  const refused = await migrateDatabase(deployer.href).then(
+    () => assert.fail('migrated as a member that may not become the owner'),
+    (error: unknown) => error as NotOwner,
+  );
+  assert.ok(refused instanceof NotOwner, String(refused));
+  assert.equal(refused.message, refusal);
+  const dir = deploymentFolder(pinnedAt(cliVersion()));
+  const told = await migrateIn(dir, deployer.href);
+  assert.equal(told.code, 0, told.output);
+  assert.ok(told.output.includes(`The next migration needs another login: ${refusal}`), told.output);
+  // What it says to run, run as it says.
+  await asSuperuser('postgres', (client) => client.unsafe(refusal.slice(refusal.lastIndexOf('run ') + 4)));
+  await migrateDatabase(deployer.href);
+});
+
+test("a superuser migrates with its own attributes, 0019's and 0022's roles included, and hands the owner what a member made, which the owner itself is told to have handed", needsCluster, async () => {
+  await emptyCluster();
+  // A release before 0019, whose owner then lost CREATEROLE: 0019 and 0022 make roles, which only the superuser may.
+  const owned = await database('setup_migrate_superuser', 'owner');
+  const owner = postgresClient(owned, { max: 1 });
+  try {
+    await owner.unsafe('CREATE ROLE coffre_runtime LOGIN');
+    await owner.unsafe('CREATE ROLE coffre_vault_runtime LOGIN');
+  } finally {
+    await owner.end();
+  }
+  await migrateThrough(owned, '0018_rotate_app_key');
+  await asSuperuser('postgres', (client) => client.unsafe("CREATE ROLE setup_deployer LOGIN PASSWORD 'deployer-only-p4ss' IN ROLE setup_owner"));
+  await asSuperuser('setup_migrate_superuser', (client) => client.unsafe('ALTER TABLE vault_members OWNER TO setup_deployer'));
+
+  // The owner lacks its member's privileges, and granting them to it would be a cycle: it is told whose login, or a
+  // superuser's, hands them over, and nothing changes.
+  const refused = await migrateDatabase(owned).then(
+    () => assert.fail("the owner migrated over its member's table"),
+    (error: unknown) => error as NotOwner,
+  );
+  assert.ok(refused instanceof NotOwner, String(refused));
+  assert.equal(
+    refused.message,
+    "coffre's tables are owned by setup_deployer, and this login, setup_owner, is neither it nor a member of it: " +
+      "migrate once with setup_deployer's connection string, or a superuser's, which hands its objects to the owner of coffre's ledger",
+  );
+  assert.equal(await applied(owned), KNOWN.indexOf('0018_rotate_app_key') + 1);
+
+  await asSuperuser('postgres', (client) => client.unsafe('ALTER ROLE setup_owner NOCREATEROLE'));
+  await migrateDatabase(`${CLUSTER}/setup_migrate_superuser`);
+  assert.equal(await applied(owned), KNOWN.length);
+  assert.equal(await notTheOwners('setup_migrate_superuser', 'setup_owner'), null, "what the superuser made and the member's table are the owner's");
+  await asSuperuser('postgres', async (client) => {
+    const roles = await client.unsafe<{ rolname: string }[]>("SELECT rolname FROM pg_roles WHERE rolname IN ('coffre_backup', 'coffre_vault_hot') ORDER BY rolname");
+    assert.deepEqual(roles.map(({ rolname }) => rolname), ['coffre_backup', 'coffre_vault_hot']);
+    await client.unsafe('ALTER ROLE setup_owner CREATEROLE');
+  });
+  // The owner, and its member, migrate on.
+  await migrateDatabase(owned);
+  const deployer = new URL(owned);
+  deployer.username = 'setup_deployer';
+  deployer.password = 'deployer-only-p4ss';
+  await migrateDatabase(deployer.href);
+});
+
+test("a day of uses that a call under way when the hand-over committed makes as the member stays the member's until a run after its transaction commits hands it over, and a table of the database's own named public stays the member's", needsCluster, async () => {
+  await emptyCluster();
+  const owned = await database('setup_migrate_meanwhile', 'owner');
+  const owner = postgresClient(owned, { max: 1 });
+  try {
+    await owner.unsafe('CREATE ROLE coffre_runtime LOGIN');
+    await owner.unsafe('CREATE ROLE coffre_vault_runtime LOGIN');
+  } finally {
+    await owner.end();
+  }
+  await migrateDatabase(owned);
+  await asSuperuser('postgres', (client) => client.unsafe("CREATE ROLE setup_deployer LOGIN PASSWORD 'deployer-only-p4ss' IN ROLE setup_owner"));
+  const deployer = new URL(owned);
+  deployer.username = 'setup_deployer';
+  deployer.password = 'deployer-only-p4ss';
+  // make_day as a member made it before T193, and, beside coffre's, a table of the database's own, public.public.
+  await asSuperuser('setup_migrate_meanwhile', async (client) => {
+    await client.unsafe('ALTER FUNCTION make_day(date) OWNER TO setup_deployer');
+    await client.unsafe('CREATE TABLE public.public (id int); ALTER TABLE public.public OWNER TO setup_deployer');
+  });
+
+  // A call of make_day enters as the member, then waits for the uses' table, which another session holds, to make its
+  // day: the hand-over commits meanwhile, and the call, let go once it has, makes the day as the role it entered as.
+  // The run does not wait for it (docs/deploy.md): the day is the member's until the next run, which hands it over.
+  const caller = postgresClient(deployer.href, { max: 1 });
+  try {
+    await asSuperuser('setup_migrate_meanwhile', async (holder) => {
+      await holder.unsafe('BEGIN; LOCK TABLE public.log_uses IN ACCESS EXCLUSIVE MODE');
+      // A query of postgres.js's is sent once it is awaited, or then'd.
+      const day = caller.unsafe("SELECT make_day(date '2037-01-03')").then(() => undefined);
+      const waits = async (query: string) => {
+        for (let tries = 0; (await asSuperuser('setup_migrate_meanwhile', (other) => other.unsafe(query))).length === 0; tries += 1) {
+          assert.ok(tries < 200, `never: ${query}`);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      };
+      await waits("SELECT 1 FROM pg_locks WHERE relation = 'public.log_uses'::regclass AND NOT granted");
+      const migrated = migrateDatabase(deployer.href);
+      await waits("SELECT 1 FROM pg_proc WHERE oid = 'make_day(date)'::regprocedure AND proowner = 'setup_owner'::regrole");
+      await holder.unsafe('COMMIT');
+      await Promise.all([day, migrated]);
+    });
+  } finally {
+    await caller.end();
+  }
+  assert.equal(await notTheOwners('setup_migrate_meanwhile', 'setup_owner'), 'log_uses_20370103=setup_deployer, public=setup_deployer', "the day the call made is the member's");
+  await migrateDatabase(deployer.href);
+  assert.equal(await notTheOwners('setup_migrate_meanwhile', 'setup_owner'), 'public=setup_deployer', "the next run, with nothing to apply, hands the owner the day, and leaves the database's own table its own");
+
+  // A call that has made its day but whose transaction is still open when the runs hand over: no run sees the day
+  // until that transaction commits, so a run meanwhile, however many, misses it, and the first one after hands it over.
+  await asSuperuser('setup_migrate_meanwhile', (client) => client.unsafe('ALTER FUNCTION make_day(date) OWNER TO setup_deployer'));
+  const open = postgresClient(deployer.href, { max: 1 });
+  try {
+    await open.unsafe("BEGIN; SELECT make_day(date '2037-01-04')");
+    await migrateDatabase(deployer.href);
+    await migrateDatabase(deployer.href);
+    assert.equal(await notTheOwners('setup_migrate_meanwhile', 'setup_owner'), 'public=setup_deployer', "no other session sees the open transaction's day yet");
+    await open.unsafe('COMMIT');
+  } finally {
+    await open.end();
+  }
+  assert.equal(await notTheOwners('setup_migrate_meanwhile', 'setup_owner'), 'log_uses_20370104=setup_deployer, public=setup_deployer', "committed after the runs, the day is the member's");
+  await migrateDatabase(deployer.href);
+  assert.equal(await notTheOwners('setup_migrate_meanwhile', 'setup_owner'), 'public=setup_deployer', 'the first run after the commit hands it over');
 });

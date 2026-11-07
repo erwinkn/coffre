@@ -21,6 +21,34 @@
   proxy's docs say so, with the one accepted cost: a key made only of escapes
   can make a redirect to `/tg/keep////next` fail shut.
 
+- **What a migration makes is the owner's, whichever login applies it
+  (T193).** A login that migrates as a member of the role that owns
+  coffre's objects, as a managed host's admin login may, made the
+  functions and tables of each migration its own, so that the owner's
+  functions could not call them without a grant (0057, 0058, 0060,
+  0064 and 0073 made those grants, T187). `coffre migrate` and `coffre setup` still
+  apply the migrations as the login, and now, in the same transaction,
+  before it commits, hand the owner of the `drizzle` schema each of
+  coffre's objects whose owner's privileges the login has: what the run
+  made, and what a member made before, its tables, their partitions (the
+  log's days and tile ranges, retention's detached ones included), the
+  statistics objects on them (0065, 0067), functions and types. A superuser's run hands over every one of them.
+  Once, on the run that first hands over a member's functions, a call of
+  one under way still runs as the member, and a day of the log it makes
+  meanwhile, or made before the run in a transaction still open, is the
+  member's until a run after that transaction commits hands it over (at worst,
+  a run as the owner is refused with the login to use; nothing is
+  exposed or lost). A
+  failed run hands over nothing, as it applies nothing. The grants stay,
+  folded into the owner's own. A member that inherits the owner's
+  privileges but may not become it (`WITH SET FALSE`), which handing it
+  an object asks, is refused, with the `GRANT` that lets it; the owner,
+  over a member's objects, is told to migrate once with the member's
+  login or a superuser's, unless the member owns the `drizzle` schema, as
+  its first run of a fresh database makes it: then the member is coffre's
+  owner, and the one to migrate as. A hand-over Postgres refuses says so,
+  and which object it was moving.
+
 - **The UI and the CLI no longer tell anyone to remove a tampered member to
   start over (T195).** 0.15's log refuses that removal. The Users page, the
   signed-in member's own page, `coffre members` and `coffre access` now say
@@ -115,6 +143,29 @@
   `coffre verify instance` and conformance fail that check as the
   checkpointer behind, as they did past 2,000. A checkpointer on time
   holds at most a tick's worth, 500 entries at 1,000 uses a second.
+
+- **No Corepack: a deployment pins its pnpm and its Node exactly, and
+  `coffre update` moves both (T234).** Node is dropping Corepack. `coffre
+  init` now writes `.node-version` (Node 26.13.0, the latest release of
+  the LTS line, which the deploy workflow's setup-node and Workers Builds
+  read) beside `packageManager` (now pnpm 12.17.0, the latest release of
+  pnpm 12 past the week deployments wait: 11.8.0 has three advisories,
+  fixed in 11.11.0), and the deploy workflow installs pnpm with
+  pnpm/action-setup 6.1.0, pinned by commit, where it ran `corepack
+  enable`. pnpm 12 installs a lockfile pnpm 11 wrote as it stands,
+  resolving nothing anew, and writes a document pinning pnpm itself ahead
+  of it (`packageManagerDependencies`); it fails a command on a
+  `pnpm-workspace.yaml` setting it does not know, where pnpm 11 ignored it. `coffre update` pins both to its
+  release's, as it already did pnpm; a plan from an earlier release names
+  no Node and leaves `.node-version` alone, and an earlier CLI drops the
+  Node a later plan names: after updating from 0.15.0 or before, run
+  `coffre update` again, now this release's CLI, to pin Node. Setup and
+  update no longer fall back to `corepack pnpm` when pnpm is missing:
+  install pnpm (https://pnpm.io/installation), and it switches itself to
+  the version a deployment pins. A deployment `init` wrote before this keeps its
+  `deploy.yml`: replace its `corepack enable && ` with the template's
+  pnpm/action-setup step, and its `node-version` with `node-version-file:
+  .node-version`.
 
 - **`serveVault` passes its options to the vault it runs (T230).** On Node
   a vault in a process of its own ignored a deployment's `uses`
@@ -281,8 +332,27 @@
   (`/auth/signin/<provider>?passkey=add`). A touch for one act opens no
   window: approving a terminal leaves the browser's own five minutes as
   they were. `GET /api/me` says `passkeys: { policy, enrolled,
-  confirmedUntil }`. Under `off`, and for services, nothing is asked. To
-  come: Account → Passkeys and the Owner's reset
+  confirmedUntil }`. Under `off`, and for services, nothing is asked.
+  Managing passkeys, the API's side (PR 6a): `GET
+  /api/members/:member/passkeys` lists a person's own (name, provider,
+  synced, added, last used), what removing one ends, and an Owner's
+  reset of them while they hold none since; `POST …/passkeys/options`
+  then `POST …/passkeys` add another from a session a touch confirmed in
+  the last five minutes, ten at most (a first one is added at sign-in,
+  `?passkey=add`); `PATCH …/passkeys/:id` renames one, no check. A new
+  passkey is named by its provider where its AAGUID names one
+  ("1Password", "Google Password Manager"), else "Passkey <n>". Removing
+  one goes through the passkey page's door, as a step-up does (`GET
+  /api/auth/passkey?remove=<id>`, then the `POST`): a touch of one the
+  person keeps, or of the last one under `optional` (none under `off`;
+  under `required` the last one stays), and it ends everything they are
+  signed in with, the session it came in on included, and gives this
+  browser a new one. An Owner of the whole instance resets someone
+  else's, `DELETE /api/members/:member/passkeys`, from a fresh session:
+  every live passkey removed and everything that person is signed in
+  with ended, `passkey.reset` in the log; an Owner demoted while it runs
+  resets no one. To come: the pages (Account →
+  Passkeys, the reset dialog, the prompt under `optional`)
   ([docs/design/passkeys.md](docs/design/passkeys.md)). `pnpm dev`
   serves at `http://localhost:3000` now.
 

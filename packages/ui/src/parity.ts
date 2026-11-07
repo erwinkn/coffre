@@ -251,4 +251,9 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'PUT /settings': { ui: [{ does: 'Settings › General › Service accounts › Edit, beside who creates them', in: 'pages/settings.tsx', call: 'settings.set' }] },
   'GET /audit/keys': { ui: [{ does: 'Settings › Keys: what the keys you keep are checked against', in: 'pages/settings.tsx', call: 'audit.keys' }] },
   'POST /audit/loss': { not: "an Owner's acceptance of lost audit entries is rare and irreversible: `coffre audit accept-loss`, never a button" },
+  'GET /members/:member/passkeys': { inFlight: 'docs/design/passkeys.md (#441), T176 PR 6b (W324): Account › Passkeys' },
+  'POST /members/:member/passkeys/options': { inFlight: 'docs/design/passkeys.md (#441), T176 PR 6b (W324): Account › Passkeys' },
+  'POST /members/:member/passkeys': { inFlight: 'docs/design/passkeys.md (#441), T176 PR 6b (W324): Account › Passkeys' },
+  'PATCH /members/:member/passkeys/:id': { inFlight: 'docs/design/passkeys.md (#441), T176 PR 6b (W324): Account › Passkeys' },
+  'DELETE /members/:member/passkeys': { inFlight: 'docs/design/passkeys.md (#441), T176 PR 6b (W324): Account › Passkeys' },
 };

@@ -12,13 +12,13 @@ const root = resolve(import.meta.dirname, '..');
 function checkout(t) {
     const dir = mkdtempSync(join(tmpdir(), 'coffre-action-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const files = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', '.npmrc', 'dev/package.json', 'action/action.yml', 'action/coffre.mjs', 'CHANGELOG.md',
+    const files = ['package.json', '.node-version', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', '.npmrc', 'dev/package.json', 'action/action.yml', 'action/coffre.mjs', 'CHANGELOG.md',
         'scripts/bump.mjs', 'scripts/check-pins.mjs', 'scripts/pins.mjs', 'scripts/changelog.mjs', 'scripts/lockfile.mjs',
         'packages/cli/src/deployment.ts', 'packages/cli/src/init.ts'];
     for (const base of ['packages', 'examples']) {
         for (const name of readdirSync(join(root, base))) files.push(`${base}/${name}/package.json`);
     }
-    for (const name of readdirSync(join(root, 'examples'))) files.push(`examples/${name}/pnpm-workspace.yaml`);
+    for (const name of readdirSync(join(root, 'examples'))) files.push(`examples/${name}/pnpm-workspace.yaml`, `examples/${name}/.node-version`);
     for (const file of files) {
         mkdirSync(dirname(join(dir, file)), { recursive: true });
         cpSync(join(root, file), join(dir, file));
@@ -63,6 +63,26 @@ test('bump moves the packages and examples and leaves the Action, which names no
         const checked = run(dir, 'check-pins.mjs');
         assert.equal(checked.status, 1);
         assert.match(checked.stderr, /examples\/node\/package.json/);
+    }
+});
+
+test("check:pins holds the workspace's Node to one exact release, and each example to it", (t) => {
+    const dir = checkout(t);
+    assert.equal(run(dir, 'check-pins.mjs').status, 0);
+    const node = readFileSync(join(dir, '.node-version'), 'utf8');
+    writeFileSync(join(dir, 'examples/workers/.node-version'), '24.0.0\n');
+    let checked = run(dir, 'check-pins.mjs');
+    assert.equal(checked.status, 1);
+    assert.match(checked.stderr, new RegExp(`examples/workers/\\.node-version: 24\\.0\\.0 is not ${node.trim().replaceAll('.', '\\.')}, the workspace's`));
+    rmSync(join(dir, 'examples/workers/.node-version'));
+    checked = run(dir, 'check-pins.mjs');
+    assert.match(checked.stderr, /examples\/workers\/\.node-version: missing is not/);
+    writeFileSync(join(dir, 'examples/workers/.node-version'), node);
+    for (const loose of ['24\n', 'lts/krypton\n']) {
+        writeFileSync(join(dir, '.node-version'), loose);
+        checked = run(dir, 'check-pins.mjs');
+        assert.equal(checked.status, 1);
+        assert.match(checked.stderr, /\.node-version: "[^"]+" is not an exact Node/);
     }
 });
 
