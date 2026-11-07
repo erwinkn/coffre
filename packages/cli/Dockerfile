@@ -1,5 +1,5 @@
 # The coffre CLI's image, ghcr.io/erwinkn/coffre-cli: a release's
-# @coffre/cli on Node 24, as a non-root user, for `coffre serve` (a
+# @coffre/cli on Node 26, as a non-root user, for `coffre serve` (a
 # workload's sidecar, docs/workloads.md) or any other command:
 #
 #   docker run --rm ghcr.io/erwinkn/coffre-cli:<version> --version
@@ -18,7 +18,7 @@ ADD coffre-cli.tgz /
 # Distroless: Node and CA certificates, no shell and no package manager, so
 # a process that took over the sidecar finds few tools. Its index's digest
 # pins every platform's image.
-FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:cb606325b7ec4af55462cb0b424a53b452a5b4a894ffe841fcf1048d216fb9f8
+FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:9b945e92c1b5463a4b75f11e8417515e4bea7355f6adfd79ec220fbbe905dda8
 # Owned by root: the user the CLI runs as cannot change it.
 COPY --from=cli /package /usr/local/lib/node_modules/@coffre/cli
 # dist/main.js starts with `#!/usr/bin/env node`, and there is no env here:

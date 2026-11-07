@@ -19,7 +19,8 @@ trap 'rm -rf "$work"; docker image rm -f "$image-amd64" "$image-arm64" >/dev/nul
 # The CLI bundles core, client and db: their builds first, core's and
 # client's in a run of their own, as `pnpm build` orders them.
 pnpm -r --filter ./packages/core --filter ./packages/client run build
-pnpm -r --filter ./packages/db --filter ./packages/cli run build
+pnpm --filter ./packages/db run build
+pnpm --filter ./packages/cli run build
 pnpm --filter @coffre/cli pack --pack-destination "$work" >/dev/null
 mv "$work/coffre-cli-$version.tgz" "$work/coffre-cli.tgz"
 

@@ -54,7 +54,18 @@ Running a package's `.ts` with plain `node` outside those scripts needs the flag
 
 ## Setup
 
-**Toolchain.** Node **>= 24** and pnpm 11.8.0 (via corepack). Node 24 is a hard requirement
+**Toolchain.** Node **26.13.0**, as `.node-version` pins it (CI's setup-node reads it),
+and pnpm **12.17.0**, as `package.json`'s `packageManager` pins it: install any pnpm
+(https://pnpm.io/installation), which switches itself to that release, checked against
+npm's registry signature, once the release is past the 7-day `minimumReleaseAge` (a
+younger pin only warns, and the pnpm you have runs). Each is the latest release of the
+latest major (Node's, of its latest LTS line) with no known vulnerability and at least
+7 days old; a move picks the same way. No Corepack, which Node drops: CI installs pnpm with
+pnpm/action-setup (6.1 or later, which knows pnpm 12's native executable) and
+`.cursor/Dockerfile` from npm's `@pnpm/exe.linux-<arch>` tarball by its SHA-256, and
+`check:pins` rejects `corepack` anywhere. The examples pin the same two, as every
+deployment `init` writes does, and `coffre update` moves them with coffre's packages.
+Node 24 is the floor, and a hard requirement
 for workspace source, not just an `engines` field: the CLI, dev IdP, migrations, and the
 `node --test` suite all execute TypeScript source (`*.ts`) directly with plain `node`,
 which relies on native type-stripping (default only in Node 23.6+/24). The
@@ -259,10 +270,11 @@ unsupported diff select full validation.
   one. Postgres only.
 - `pnpm build` builds every package in dependency order (core and client first). The
   UI builds as a library, `vite build`, each page a module of its own
-  (`@coffre/ui/pages/<name>`), which the examples' file routes name, and Start splits. Core and client build
-  in a run of their own: core's tests use conformance's dev IdP, and
-  conformance runs the CLI, which bundles core, so the graph has a cycle that
-  pnpm would order as it likes. The CLI's build fails on an import it cannot
+  (`@coffre/ui/pages/<name>`), which the examples' file routes name, and Start splits. Core's tests use
+  conformance's dev IdP, and conformance runs the CLI, which bundles core,
+  so the graph has a cycle, which pnpm refuses in a run (`ERR_PNPM_TASK_CYCLE`,
+  through packages outside the run too): the build runs core and client,
+  then db, then the CLI, then the rest, each run free of it. The CLI's build fails on an import it cannot
   resolve rather than ship it. Conformance, the examples' typecheck and
   `test:consumer` want it first.
 - `pnpm conformance:workers` / `pnpm conformance:node` run an example's own
@@ -345,7 +357,7 @@ unsupported diff select full validation.
   package runner or install outside the lockfile (npx, `npm install`, `pnpm
   dlx` or `add`, `gh … download`, `git clone`, `nvm install`, `apt-get
   install`, …), and `pnpm install` with `--frozen-lockfile`; an action's
-  `*-version` input and Corepack's pnpm exact; pnpm's 7-day age gate and
+  `*-version` input exact; no `corepack`; pnpm's 7-day age gate and
   `strictDepBuilds`. YAML it reads with js-yaml (a root dependency), each
   string's lines as a shell's. A health check of this machine is curl marked
   `# pins: local`, every URL on the line 127.0.0.1, localhost or [::1]; a
@@ -367,7 +379,8 @@ unsupported diff select full validation.
   ends. The commands run `pg_dump` and `pg_restore` from `PATH`, which must be
   PostgreSQL 16's, the compose server's: a newer `pg_restore` cannot restore into
   it. `packages/cli/test/backup.test.ts` skips without them.
-- `pnpm typecheck` covers every package, `dev/deployment` and both examples. It does
+- `pnpm typecheck` covers every package, `dev/deployment` and both examples, unsorted
+  (`--no-sort`: each reads the `dist/` the build wrote, and the cycle above would stop a sorted run). It does
   not need Postgres, but on a fresh checkout it fails until `pnpm build` has run:
   that writes the `dist/` the deployments typecheck against.
 - Run an example's scripts from the root, `pnpm --filter coffre-workers <script>`, not
@@ -394,7 +407,7 @@ with `@coffre/*` exempt so that a coffre fix is not held back a week.
 ## Cursor
 
 The Cloud Agent environment is defined in-repo by `.cursor/environment.json` and
-`.cursor/Dockerfile` (Node 24 via nvm, pnpm 11.8.0 via corepack, and a Docker engine set
+`.cursor/Dockerfile` (Node 26.13.0 via nvm, pnpm 12.17.0's native executable from npm's tarball, and a Docker engine set
 up for the nested VM). Two things worth knowing:
 
 - **Docker and Postgres** come up each boot via `.cursor/start.sh`
@@ -406,6 +419,6 @@ up for the nested VM). Two things worth knowing:
   `docker.sock`. If `docker info` fails or `:55432` is down, re-run that
   script. Web and the dev IdP are started by `pnpm dev`, or by hand.
 - **Node on PATH.** The Cloud runtime injects its own Node 22 ahead on `PATH`, so the
-  image prepends the nvm-managed Node 24 in `~/.bashrc` (above the stock interactive-guard
+  image prepends the nvm-managed Node 26 in `~/.bashrc` (above the stock interactive-guard
   early return, since the runtime sources it for non-interactive shells too) and in
   `/etc/profile.d`. If `node -v` ever shows 22, that prepend did not run.

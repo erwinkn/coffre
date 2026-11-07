@@ -201,12 +201,18 @@ every migration lets it ([expand, then contract](architecture.md#expand-then-con
    CLI, update with the new release's own: `npx @coffre/cli@latest update`.
 
    It also pins the deployment's pnpm, `packageManager` in its package.json,
-   to the one coffre installs with, as `coffre init` writes it: then your
-   machine, CI and Workers Builds install with the same pnpm, and each holds
+   and its Node, `.node-version`, to the ones coffre installs and runs with,
+   as `coffre init` writes them: then your machine, CI and Workers Builds
+   install with the same pnpm and run the same Node, and each holds
    `minimumReleaseAge` alike. Without it, Workers Builds picks a pnpm of its
    own, and a lockfile one pnpm wrote can fail another's check. Moving to
    another pnpm major makes pnpm rebuild `node_modules` from scratch, which
    `coffre update` lets it do without asking again.
+   A CLI from 0.15.0 or before knows no `.node-version`: it moves the
+   packages and pnpm as the new release's CLI says, and leaves Node
+   alone. Run `pnpm exec coffre update` once more, now the new release's
+   own CLI, and it pins Node too (or update with `npx
+   @coffre/cli@latest update` the first time).
 
    If pnpm holds a package back, as when a lockfile an older pnpm wrote has
    `pg-protocol@1.16.1`, a day old, `coffre update` first resolves the
@@ -370,7 +376,7 @@ Nothing serves 0.16 before step 4.
    it would take 0.14.5 straight there, so don't run it: bring the
    deployment by hand to that release's `examples/workers` (Git tag
    `v0.16.N`), which is what its `coffre init` writes. That is every `@coffre/*` pin, the Start
-   app's packages and `packageManager` in `package.json`, and the pages in
+   app's packages and `packageManager` in `package.json`, `.node-version`, and the pages in
    `app/src/routes/` with `app/src/routeTree.gen.ts`; then `pnpm install`.
 
    Either way, then bring to that example what `coffre update` leaves:

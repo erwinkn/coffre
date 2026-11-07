@@ -20,7 +20,8 @@ Two processes, configured in code:
 Run them as two users that share a group, and the process facing the network
 never holds the vault key. For local development, the server can run the vault
 in its own process instead; see the comment in `app/src/coffre.ts`. Everything below runs
-from this directory, on Node 24 or later.
+from this directory, on the Node `.node-version` pins, with the pnpm
+`package.json` pins (any pnpm switches itself to it).
 
 ## 1. Settings
 

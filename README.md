@@ -617,7 +617,7 @@ writes, which has no lockfile yet.
 
 Two traps, both noted in `pnpm-workspace.yaml`:
 
-- **pnpm 11 reads only auth and registry settings from `.npmrc`**, and
+- **pnpm (11 and later) reads only auth and registry settings from `.npmrc`**, and
   ignores the rest without a word. Our hardening did nothing until it moved
   to `pnpm-workspace.yaml`.
 - **`savePrefix: ''` is read but not applied by `pnpm add`**, which still

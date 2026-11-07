@@ -130,6 +130,29 @@
   checkpointer behind, as they did past 2,000. A checkpointer on time
   holds at most a tick's worth, 500 entries at 1,000 uses a second.
 
+- **No Corepack: a deployment pins its pnpm and its Node exactly, and
+  `coffre update` moves both (T234).** Node is dropping Corepack. `coffre
+  init` now writes `.node-version` (Node 26.13.0, the latest release of
+  the LTS line, which the deploy workflow's setup-node and Workers Builds
+  read) beside `packageManager` (now pnpm 12.17.0, the latest release of
+  pnpm 12 past the week deployments wait: 11.8.0 has three advisories,
+  fixed in 11.11.0), and the deploy workflow installs pnpm with
+  pnpm/action-setup 6.1.0, pinned by commit, where it ran `corepack
+  enable`. pnpm 12 installs a lockfile pnpm 11 wrote as it stands,
+  resolving nothing anew, and writes a document pinning pnpm itself ahead
+  of it (`packageManagerDependencies`); it fails a command on a
+  `pnpm-workspace.yaml` setting it does not know, where pnpm 11 ignored it. `coffre update` pins both to its
+  release's, as it already did pnpm; a plan from an earlier release names
+  no Node and leaves `.node-version` alone, and an earlier CLI drops the
+  Node a later plan names: after updating from 0.15.0 or before, run
+  `coffre update` again, now this release's CLI, to pin Node. Setup and
+  update no longer fall back to `corepack pnpm` when pnpm is missing:
+  install pnpm (https://pnpm.io/installation), and it switches itself to
+  the version a deployment pins. A deployment `init` wrote before this keeps its
+  `deploy.yml`: replace its `corepack enable && ` with the template's
+  pnpm/action-setup step, and its `node-version` with `node-version-file:
+  .node-version`.
+
 - **`serveVault` passes its options to the vault it runs (T230).** On Node
   a vault in a process of its own ignored a deployment's `uses`
   (`inFlight`, `connections`, `coverMs`, `names`, `batch`) and kept the

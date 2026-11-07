@@ -331,8 +331,10 @@ test('nothing is written to disk or the environment, and SIGTERM logs every sess
   `;
   const home = mkdtempSync(join(tmpdir(), 'coffre-sdk-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
-  // Node's permission model: any write to the file system throws.
-  const child = spawn(process.execPath, ['--conditions=coffre:source', '--permission', '--allow-fs-read=*', '--input-type=module', '-e', script], {
+  // Node's permission model: any write to the file system throws. Since Node 25 it
+  // also refuses the network unless --allow-net, which Node 24 does not know.
+  const net = process.allowedNodeEnvironmentFlags.has('--allow-net') ? ['--allow-net'] : [];
+  const child = spawn(process.execPath, ['--conditions=coffre:source', '--permission', '--allow-fs-read=*', ...net, '--input-type=module', '-e', script], {
     env: { PATH: process.env.PATH, HOME: home, TMPDIR: home, COFFRE_ENROLL: code },
     cwd: new URL('.', import.meta.url).pathname,
     stdio: ['ignore', 'pipe', 'pipe'],
