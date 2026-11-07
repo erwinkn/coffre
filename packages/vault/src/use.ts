@@ -1164,13 +1164,16 @@ function readyFor(path: UsePath, asked: Asked, names: Names, seals: typeof seale
   return ready(path, asked, requestOf(asked, names), names, false, seals);
 }
 
+const PASSKEY_POLICIES: readonly CredentialAcceptance['passkeys'][] = ['off', 'optional', 'required'];
+
 /** What the app's config accepts of a credential, as a named call carries it, checked. */
 function acceptsOf(input: { accepts: CredentialAcceptance }): CredentialAcceptance {
   const { accepts } = input;
-  if (typeof accepts?.signin !== 'boolean' || !Array.isArray(accepts.issuers) || accepts.issuers.some((issuer) => typeof issuer !== 'string')) {
-    throw new Error('a named use says what credentials the app accepts: whether it signs in, and its providers\' issuers');
+  if (typeof accepts?.signin !== 'boolean' || !Array.isArray(accepts.issuers) || accepts.issuers.some((issuer) => typeof issuer !== 'string')
+    || !PASSKEY_POLICIES.includes(accepts.passkeys)) {
+    throw new Error('a named use says what credentials the app accepts: whether it signs in, its providers\' issuers and its passkey policy');
   }
-  return { signin: accepts.signin, issuers: [...accepts.issuers] };
+  return { signin: accepts.signin, issuers: [...accepts.issuers], passkeys: accepts.passkeys };
 }
 
 /** The engine's `use_named_batch`. */

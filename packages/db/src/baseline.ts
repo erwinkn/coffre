@@ -27,7 +27,7 @@ import * as sqlite from './schema.sqlite.ts';
  * as drizzle-kit splits one at its comma on SQLite.
  *
  * The template is held to 0000_baseline.sql, so it keeps 0.4.0's names: a
- * table later renamed (0073's `vault_members`, now `principals`) is granted
+ * table later renamed (0074's `vault_members`, now `principals`) is granted
  * under its old name here, and the migration that renames it moves its grants.
  *
  * `pnpm db:generate` runs this file and appends pending schema changes.

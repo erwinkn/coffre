@@ -1,781 +1,29 @@
--- 0.16.0, T178: the tables renamed as Erwin approved them (2026-10-31): the vault's members are principals, people and
--- service accounts alike, and their grants are grants; the one-shot sign-in tables say what each row is (a terminal's
--- login, an enrollment code, a CI run's ID token spent); the bulk cap's rows and the checkpoints' fence are named for
--- what they hold. Each constraint and index takes its table's new name. Nothing else changes: no column, no row, no grant.
--- Expand (AGENTS.md, "Migrations: expand, then contract"): 0.15.0's code serves on this schema until the deploy, and
--- names the tables as it knows them. Each old name stays one release as a plain view of its table, which Postgres
--- writes through (an automatically updatable view: inserts, upserts by their columns, updates, deletes, row locks,
--- RETURNING and row counts as on the table). `security_invoker`: a login reads and writes through it only what the
--- table grants it, and the view grants each login what the table does, column by column, so neither is wider. The
--- release after 0.16.0 drops the views. The functions that name these tables are made again with the new names, each as
--- its last migration left it but for them; the use's and the route's warm-up marks move to `0073`, so that a session
--- warmed by the last ones plans these before the fence (T131). `CREATE OR REPLACE` keeps their owners and grants.
-ALTER TABLE "vault_members" RENAME TO "principals";--> statement-breakpoint
-ALTER TABLE "vault_grants" RENAME TO "grants";--> statement-breakpoint
-ALTER TABLE "device_authorizations" RENAME TO "device_logins";--> statement-breakpoint
-ALTER TABLE "enrollments" RENAME TO "enrollment_codes";--> statement-breakpoint
-ALTER TABLE "consumed_tokens" RENAME TO "spent_id_tokens";--> statement-breakpoint
-ALTER TABLE "log_bulk" RENAME TO "bulk_cap";--> statement-breakpoint
-ALTER TABLE "log_fence" RENAME TO "checkpoint_fence";--> statement-breakpoint
-ALTER TABLE "principals" RENAME CONSTRAINT "vault_members_pkey" TO "principals_pkey";--> statement-breakpoint
-ALTER TABLE "principals" RENAME CONSTRAINT "vault_members_generation_check" TO "principals_generation_check";--> statement-breakpoint
-ALTER TABLE "principals" RENAME CONSTRAINT "vault_members_mac_check" TO "principals_mac_check";--> statement-breakpoint
-ALTER TABLE "principals" RENAME CONSTRAINT "vault_members_owner_check" TO "principals_owner_check";--> statement-breakpoint
-ALTER TABLE "principals" RENAME CONSTRAINT "vault_members_principal_check" TO "principals_principal_check";--> statement-breakpoint
-ALTER TABLE "principals" RENAME CONSTRAINT "vault_members_seal_check" TO "principals_seal_check";--> statement-breakpoint
-ALTER TABLE "principals" RENAME CONSTRAINT "vault_members_status_check" TO "principals_status_check";--> statement-breakpoint
-ALTER TABLE "principals" RENAME CONSTRAINT "vault_members_user_lowercase" TO "principals_user_lowercase";--> statement-breakpoint
-ALTER TABLE "grants" RENAME CONSTRAINT "vault_grants_environment_id_fkey" TO "grants_environment_id_fkey";--> statement-breakpoint
-ALTER TABLE "grants" RENAME CONSTRAINT "vault_grants_environment_slug_check" TO "grants_environment_slug_check";--> statement-breakpoint
-ALTER TABLE "grants" RENAME CONSTRAINT "vault_grants_on_environment" TO "grants_on_environment";--> statement-breakpoint
-ALTER TABLE "grants" RENAME CONSTRAINT "vault_grants_on_environment_slug" TO "grants_on_environment_slug";--> statement-breakpoint
-ALTER TABLE "grants" RENAME CONSTRAINT "vault_grants_on_project" TO "grants_on_project";--> statement-breakpoint
-ALTER TABLE "grants" RENAME CONSTRAINT "vault_grants_one_place" TO "grants_one_place";--> statement-breakpoint
-ALTER TABLE "grants" RENAME CONSTRAINT "vault_grants_principal_fkey" TO "grants_principal_fkey";--> statement-breakpoint
-ALTER TABLE "grants" RENAME CONSTRAINT "vault_grants_project_id_fkey" TO "grants_project_id_fkey";--> statement-breakpoint
-ALTER TABLE "grants" RENAME CONSTRAINT "vault_grants_role_check" TO "grants_role_check";--> statement-breakpoint
-ALTER TABLE "device_logins" RENAME CONSTRAINT "device_authorizations_approval_names_principal" TO "device_logins_approval_names_principal";--> statement-breakpoint
-ALTER TABLE "device_logins" RENAME CONSTRAINT "device_authorizations_auth_mac_check" TO "device_logins_auth_mac_check";--> statement-breakpoint
-ALTER TABLE "device_logins" RENAME CONSTRAINT "device_authorizations_decision_check" TO "device_logins_decision_check";--> statement-breakpoint
-ALTER TABLE "device_logins" RENAME CONSTRAINT "device_authorizations_device_code_hash_key" TO "device_logins_device_code_hash_key";--> statement-breakpoint
-ALTER TABLE "device_logins" RENAME CONSTRAINT "device_authorizations_passkey_check" TO "device_logins_passkey_check";--> statement-breakpoint
-ALTER TABLE "device_logins" RENAME CONSTRAINT "device_authorizations_passkey_id_fkey" TO "device_logins_passkey_id_fkey";--> statement-breakpoint
-ALTER TABLE "device_logins" RENAME CONSTRAINT "device_authorizations_pkey" TO "device_logins_pkey";--> statement-breakpoint
-ALTER TABLE "device_logins" RENAME CONSTRAINT "device_authorizations_principal_fkey" TO "device_logins_principal_fkey";--> statement-breakpoint
-ALTER TABLE "device_logins" RENAME CONSTRAINT "device_authorizations_user_code_key" TO "device_logins_user_code_key";--> statement-breakpoint
-ALTER TABLE "enrollment_codes" RENAME CONSTRAINT "enrollments_auth_mac_check" TO "enrollment_codes_auth_mac_check";--> statement-breakpoint
-ALTER TABLE "enrollment_codes" RENAME CONSTRAINT "enrollments_binding_id_fkey" TO "enrollment_codes_binding_id_fkey";--> statement-breakpoint
-ALTER TABLE "enrollment_codes" RENAME CONSTRAINT "enrollments_code_hash_check" TO "enrollment_codes_code_hash_check";--> statement-breakpoint
-ALTER TABLE "enrollment_codes" RENAME CONSTRAINT "enrollments_code_hash_key" TO "enrollment_codes_code_hash_key";--> statement-breakpoint
-ALTER TABLE "enrollment_codes" RENAME CONSTRAINT "enrollments_pkey" TO "enrollment_codes_pkey";--> statement-breakpoint
-ALTER TABLE "enrollment_codes" RENAME CONSTRAINT "enrollments_scope_check" TO "enrollment_codes_scope_check";--> statement-breakpoint
-ALTER TABLE "spent_id_tokens" RENAME CONSTRAINT "consumed_tokens_hash_check" TO "spent_id_tokens_hash_check";--> statement-breakpoint
-ALTER TABLE "spent_id_tokens" RENAME CONSTRAINT "consumed_tokens_pkey" TO "spent_id_tokens_pkey";--> statement-breakpoint
-ALTER TABLE "bulk_cap" RENAME CONSTRAINT "log_bulk_pkey" TO "bulk_cap_pkey";--> statement-breakpoint
-ALTER TABLE "checkpoint_fence" RENAME CONSTRAINT "log_fence_only_row_check" TO "checkpoint_fence_only_row_check";--> statement-breakpoint
-ALTER TABLE "checkpoint_fence" RENAME CONSTRAINT "log_fence_pkey" TO "checkpoint_fence_pkey";--> statement-breakpoint
-ALTER INDEX "vault_grants_on_every_project" RENAME TO "grants_on_every_project";--> statement-breakpoint
-ALTER INDEX "enrollments_binding_idx" RENAME TO "enrollment_codes_binding_idx";--> statement-breakpoint
--- The old names, one release, each granting what its table grants.
-DO $$
-DECLARE
-    t record;
-    g record;
-BEGIN
-    FOR t IN SELECT * FROM (VALUES ('principals', 'vault_members'), ('grants', 'vault_grants'), ('device_logins', 'device_authorizations'), ('enrollment_codes', 'enrollments'), ('spent_id_tokens', 'consumed_tokens'), ('bulk_cap', 'log_bulk'), ('checkpoint_fence', 'log_fence')) AS v (name, old) LOOP
-        EXECUTE format('CREATE VIEW public.%I WITH (security_invoker = true) AS SELECT * FROM public.%I', t.old, t.name);
-        FOR g IN SELECT a.privilege_type, CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END AS grantee
-                   FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
-                  WHERE c.oid = format('public.%I', t.name)::regclass AND a.grantee <> c.relowner LOOP
-            EXECUTE format('GRANT %s ON public.%I TO %s', g.privilege_type, t.old, g.grantee);
-        END LOOP;
-        FOR g IN SELECT a.privilege_type, CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END AS grantee, c.attname
-                   FROM pg_attribute c CROSS JOIN LATERAL aclexplode(c.attacl) a
-                  WHERE c.attrelid = format('public.%I', t.name)::regclass AND c.attnum > 0 AND NOT c.attisdropped LOOP
-            EXECUTE format('GRANT %s (%I) ON public.%I TO %s', g.privilege_type, g.attname, t.old, g.grantee);
-        END LOOP;
-    END LOOP;
-END
-$$;--> statement-breakpoint
--- The functions that name them, by their new names.
-CREATE OR REPLACE FUNCTION public.admit_inputs(p_token_hash bytea, p_principal text, p_scope text[])
- RETURNS text
- LANGUAGE plpgsql
- STABLE
- SET search_path TO 'pg_catalog', 'pg_temp'
- SET bytea_output TO 'hex'
- SET "TimeZone" TO 'UTC'
-AS $function$
-DECLARE
-    v jsonb;
-BEGIN
-    SELECT jsonb_build_object(
-        'credential', CASE WHEN c.id IS NOT NULL THEN jsonb_build_object(
-            'row', to_jsonb(c) - 'last_used_at' - 'last_used_ip',
-            'expires', floor(extract(epoch FROM least(c.expires_at, c.not_after)) * 1000)::bigint,
-            'newest', (SELECT to_jsonb(x) FROM public.log_changes x WHERE x.object = public.log_object('credential', c.id::text) ORDER BY x.number DESC LIMIT 1)) END,
-        'identity', to_jsonb(i) - 'last_sign_in_at',
-        'principal', CASE WHEN c.id IS NOT NULL THEN jsonb_build_object(
-            'row', to_jsonb(m),
-            -- Every grant, lapsed ones too, an environment's with its project, in one order (`write_inputs`'s).
-            'grants', (SELECT coalesce(jsonb_agg(to_jsonb(g) || jsonb_build_object('resolved_project', coalesce(g.project_id, ge.project_id))
-                                 ORDER BY g.project_id, g.environment_id, g.environment_slug, g.role, g.expires_at), '[]'::jsonb)
-                         FROM public.grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id WHERE g.principal = c.principal),
-            -- 0.14's newest access entry about the caller (UsesSeeOldWrites), as a use reads it.
-            'access', (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.subject_principal = c.principal AND a.decision = 'allow'
-                AND a.action IN ('member.add', 'member.restore', 'member.owner', 'member.role', 'member.remove', 'access.grant', 'access.revoke') ORDER BY a.seq DESC LIMIT 1),
-            'newest', (SELECT to_jsonb(x) FROM public.log_changes x WHERE x.object = public.log_object('principal', c.principal) ORDER BY x.number DESC LIMIT 1)) END,
-        'roles', jsonb_build_object('value', cfg.r_value, 'seal', cfg.r_seal,
-            'newest', (SELECT to_jsonb(x) FROM public.log_changes x WHERE x.object = public.log_object('roles', 'instance') ORDER BY x.number DESC LIMIT 1)),
-        'policy', jsonb_build_object('value', cfg.p_value, 'seal', cfg.p_seal,
-            'newest', (SELECT to_jsonb(x) FROM public.log_changes x WHERE x.object = public.log_object('policy', 'instance') ORDER BY x.number DESC LIMIT 1)),
-        'policy14', (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1),
-        -- The member asked for, whatever the token resolves to: none, for a first add. An add that committed first makes
-        -- its row, its object's newest change and its 0.14 entry, each of which moves the digest (AddsFlip).
-        'subject', jsonb_build_object(
-            'row', to_jsonb(sm),
-            'grants', (SELECT coalesce(jsonb_agg(to_jsonb(g) ORDER BY g.project_id, g.environment_id, g.environment_slug, g.role, g.expires_at), '[]'::jsonb)
-                         FROM public.grants g WHERE g.principal = p_principal),
-            'access', (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.subject_principal = p_principal AND a.decision = 'allow'
-                AND a.action IN ('member.add', 'member.restore', 'member.owner', 'member.role', 'member.remove', 'access.grant', 'access.revoke') ORDER BY a.seq DESC LIMIT 1),
-            'newest', (SELECT to_jsonb(x) FROM public.log_changes x WHERE x.object = public.log_object('principal', p_principal) ORDER BY x.number DESC LIMIT 1)),
-        -- Each project the role's scope names, by its slug, in the order asked: standing slugs only, as `app_read`
-        -- resolves them (a tombstone's is no project). A rename, and another made under the old slug, moves what a slug
-        -- finds (Writing.tla's `scope`): the digest with it.
-        'projects', (SELECT coalesce(jsonb_agg(jsonb_build_object('slug', k.slug, 'row', to_jsonb(p)) ORDER BY k.ord), '[]'::jsonb)
-              FROM unnest(coalesce(p_scope, '{}'::text[])) WITH ORDINALITY k (slug, ord)
-              LEFT JOIN LATERAL (SELECT * FROM public.projects x WHERE x.slug = k.slug AND x.slug NOT LIKE '%~%' LIMIT 1) p ON true)
-    ) INTO v
-      FROM (SELECT 1) one
-      LEFT JOIN public.credentials c ON c.token_hash = p_token_hash
-      LEFT JOIN public.identities i ON i.id = c.identity_id
-      LEFT JOIN public.principals m ON m.principal = c.principal
-      LEFT JOIN public.principals sm ON sm.principal = p_principal
-      LEFT JOIN LATERAL (
-          SELECT max(g.value) FILTER (WHERE g.name = 'roles') AS r_value, (array_agg(g.seal) FILTER (WHERE g.name = 'roles'))[1] AS r_seal,
-                 max(g.value) FILTER (WHERE g.name = 'policy') AS p_value, (array_agg(g.seal) FILTER (WHERE g.name = 'policy'))[1] AS p_seal
-            FROM public.log_config g
-      ) cfg ON true;
-    RETURN v::text;
-END
-$function$;
+-- 0.16, T216: a person's named reveal, key write and member's add run the passkey check in the vault's own call, not in a statement of the app's before or beside it. Since T176 PR 4a, the three paths whose credential the vault reads in its own call (a use by name, `use_credential` and `use_named_batch`; a key write, `write_request`; an add, `admit_read`) ran `passkeyByToken` for a person's credential with passkeys not `off`: a statement before a reveal's call, and one beside a write's or an add's (docs/design/passkeys.md, sections 6.2 and 6.4). Now:
+-- - `use_credential` takes `p_passkeys`, the app's policy, and holds a named call's credential to the check with what its config accepts (Probing.tla, AcceptedFirst), first, under the fence, before anything of the place or the key: a person's session or token that names a passkey is taken while that passkey is live, theirs, at the credential's generation; one that names none, under `optional`, while they hold no live passkey, never under `required`. Refused, it is `unknown`, as a token no credential has: the app's own check then answers it, 401 `passkey_required`, as before. Its answer's app rows carry what it read (`passkey`, `passkey_held`), whose MACs the app checks, reading nothing itself. `use_named_batch` and `use_route` pass it to their gates: a route's handle call names its credential as any named call does, and the check goes by the credential's kind, not the call's.
+-- - `write_request` and `admit_read` answer the same rows with the app's. They decide nothing of passkeys: what they read and prepare commits only with the app's transaction, which the app's check of those rows, after the call, refuses before it begins, as it refused it after its own statement.
+-- The vault's logins still read no passkey: these functions run as their owner. Additive (AGENTS.md, "expand, then contract"): without `p_passkeys` (the previous release's vault, whose app runs the check itself first), each call is 0071's, and every other answer is unchanged. `use_credential`, `use_named_batch` and `use_route` gain a parameter, so each is dropped and made again with its grants, as 0060 did. Their warm-up marks move to `0073` (T131), `use_route`'s with `use_credential`'s, which says the session planned its statements too. `write_request` and `admit_read` keep their settings as 0068 left them.
+DROP FUNCTION use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean, text, boolean);
 --> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.change_bindings(p_at bigint, p_actor text, p_make boolean, p_principal text, p_generation integer, p_principal_seq bigint, p_actor_generation integer, p_actor_seq bigint, p_via uuid, p_via_seal bytea, p_via_end bigint, p_connection uuid, p_connection_generation integer, p_policy_seq bigint, p_protected uuid[], p_slugs text[], p_app_key text, p_max integer, p_live uuid[], p_read_keys uuid[], p_read_names text[], p_id uuid, p_auth_mac bytea, p_profile text, p_issuer text, p_jwks_uri text, p_jwks text, p_claims text, p_scope text, p_policy text, p_origin text, p_label text, p_created_by text, p_created_at bigint, p_seal bytea, p_ends uuid[], p_end_mac_from bytea[], p_end_seal_from bytea[], p_end_auth_mac bytea[], p_end_seal bytea[], p_creds uuid[], p_cred_binding uuid[], p_cred_mac_from bytea[], p_cred_seal_from bytea[], p_cred_auth_mac bytea[], p_cred_seal bytea[], p_revoked_at bigint, p_revoked_by text, p_change_request text[], p_change_object uuid[], p_change_payload text[], p_change_seal bytea[], p_change_mac bytea[])
- RETURNS json
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pg_temp'
- SET lock_timeout TO '1s'
-AS $function$
-DECLARE
-    n bigint;
-    -- A value, not `clock_timestamp()` in a predicate: volatile there, it bounds no index.
-    now_ts timestamptz := clock_timestamp();
-    ended timestamptz := timestamptz 'epoch' + p_revoked_at * interval '1 millisecond';
-BEGIN
-    IF p_make = (p_id IS NULL) OR (NOT p_make AND cardinality(p_ends) = 0) OR cardinality(p_creds) <> cardinality(p_cred_binding)
-       OR p_make = (p_live IS NULL) OR cardinality(p_read_keys) <> cardinality(p_read_names)
-       OR cardinality(p_change_request) <> (CASE WHEN p_make THEN 1 ELSE 0 END) + (SELECT count(*) FROM unnest(p_end_seal) AS s WHERE s IS NOT NULL)
-                                          + (SELECT count(*) FROM unnest(p_cred_seal) AS s WHERE s IS NOT NULL) THEN
-        RAISE EXCEPTION 'a change of bindings makes one, ends some, or both, with a change for each object' USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    IF p_make THEN
-        -- IssuerLocked, IssuerCAS, as `issue_token`, by principal: the account's row first (`token:` sorts before `user:`),
-        -- its update lock, so that two binds of it take turns over its count of bindings (a sign-in through one of its
-        -- bindings waits for the statement too); then the maker's, shared. Then both compared.
-        IF p_principal >= p_actor THEN RAISE EXCEPTION 'a binding is a service account''s, made by a person' USING ERRCODE = 'invalid_parameter_value'; END IF;
-        PERFORM 1 FROM public.principals m WHERE m.principal = p_principal FOR NO KEY UPDATE;
-        PERFORM 1 FROM public.principals m WHERE m.principal = p_actor FOR SHARE;
-        -- 0.14's head, when it ends any, after the members' rows and before any row of the app's (row, head, issue lock, fence).
-        IF cardinality(p_ends) > 0 THEN PERFORM 1 FROM public.audit_chain_head WHERE only_row FOR UPDATE; END IF;
-        IF NOT EXISTS (SELECT 1 FROM public.principals m WHERE m.principal = p_actor AND m.status = 'active' AND m.generation = p_actor_generation AND m.access_seq = p_actor_seq)
-           OR NOT EXISTS (SELECT 1 FROM public.principals m WHERE m.principal = p_principal AND m.status = 'active' AND m.generation = p_generation AND m.access_seq = p_principal_seq) THEN
-            RETURN json_build_object('state', 'moved');
-        END IF;
-        IF p_via IS NOT NULL THEN
-            PERFORM 1 FROM public.credentials c WHERE c.id = p_via FOR SHARE;
-            IF NOT EXISTS (SELECT 1 FROM public.credentials c
-                            WHERE c.id = p_via AND c.principal = p_actor AND c.revoked_at IS NULL AND c.seal = p_via_seal
-                              AND floor(extract(epoch FROM least(c.expires_at, coalesce(c.not_after, c.expires_at))) * 1000)::bigint = p_via_end)
-               -- The clock once the locks are had, not when the statement began: one that ended while it waited has ended.
-               OR p_via_end <= (extract(epoch FROM clock_timestamp()) * 1000)::bigint
-               OR p_via_seal IS DISTINCT FROM (SELECT c.seal FROM public.log_changes c WHERE c.object = public.log_object('credential', p_via::text) ORDER BY c.number DESC LIMIT 1) THEN
-                RETURN json_build_object('state', 'ended');
-            END IF;
-        END IF;
-        -- The MCP connection it came through, still connected at the caller's generation (as `credentialStill`): shared,
-        -- so a disconnect waits for this, or is seen (review r3).
-        IF p_connection IS NOT NULL THEN
-            PERFORM 1 FROM public.mcp_connections k WHERE k.id = p_connection AND k.revoked_at IS NULL AND k.generation = p_connection_generation FOR SHARE;
-            IF NOT FOUND THEN RETURN json_build_object('state', 'ended'); END IF;
-        END IF;
-        -- An id the log holds already is no binding to make, even once its row is gone: its object stands (review r3).
-        IF EXISTS (SELECT 1 FROM public.log_changes l WHERE l.object = public.log_object('binding', p_id::text)) THEN
-            RETURN json_build_object('state', 'stale');
-        END IF;
-    END IF;
-    -- An unbind alone: 0.14's head first, as above.
-    IF NOT p_make THEN PERFORM 1 FROM public.audit_chain_head WHERE only_row FOR UPDATE; END IF;
-    -- The bindings it ends, then the credentials they issued: each row locked, by id, then held to its MAC and seal as
-    -- read. Every live credential they issued must be named, so one that a sign-in made meanwhile is read again (`moved`),
-    -- never left live.
-    PERFORM 1 FROM public.service_bindings b WHERE b.id = ANY(p_ends) ORDER BY b.id FOR UPDATE;
-    IF (SELECT count(*) FROM unnest(p_ends, p_end_mac_from, p_end_seal_from) AS e(id, mac, seal)
-          JOIN public.service_bindings b ON b.id = e.id AND b.principal = p_principal AND b.revoked_at IS NULL AND b.auth_mac = e.mac AND b.seal IS NOT DISTINCT FROM e.seal)
-       <> cardinality(p_ends) THEN
-        RETURN json_build_object('state', 'moved');
-    END IF;
-    -- A credential 0.14 made, or one written around the vault, has no seal: ended with its binding all the same, its row
-    -- revoked with no change, the log holding no object of it.
-    PERFORM 1 FROM public.credentials c WHERE c.id = ANY(p_creds) ORDER BY c.id FOR UPDATE;
-    IF (SELECT count(*) FROM unnest(p_creds, p_cred_binding, p_cred_mac_from, p_cred_seal_from) AS x(id, binding, mac, seal)
-          JOIN public.credentials c ON c.id = x.id AND x.binding = ANY(p_ends) AND c.created_by = 'binding:' || x.binding::text
-                                   AND c.revoked_at IS NULL AND c.auth_mac = x.mac AND c.seal IS NOT DISTINCT FROM x.seal)
-       <> cardinality(p_creds)
-       OR EXISTS (SELECT 1 FROM unnest(p_ends) AS e(id) JOIN public.credentials c
-                    ON c.principal = p_principal AND c.created_by = 'binding:' || e.id::text AND c.revoked_at IS NULL AND c.expires_at > now_ts
-                   WHERE NOT (c.id = ANY(p_creds))) THEN
-        RETURN json_build_object('state', 'moved');
-    END IF;
-    IF p_make THEN
-        -- The account's live bindings as the app read them, which it weighed this one beside (an issuer's keys moved, the
-        -- bindings it replaces): another made or ended since is read again. Under the account's row's lock, which every
-        -- bind takes, so two binds take turns. At most `p_max`, those it ends left out.
-        IF ARRAY(SELECT b.id FROM public.service_bindings b WHERE b.principal = p_principal AND b.generation = p_generation AND b.revoked_at IS NULL ORDER BY b.id)
-           IS DISTINCT FROM ARRAY(SELECT l FROM unnest(p_live) AS l ORDER BY l) THEN
-            RETURN json_build_object('state', 'moved');
-        END IF;
-        IF cardinality(p_live) - (SELECT count(*) FROM unnest(p_live) AS l WHERE l = ANY(p_ends)) >= p_max THEN
-            RETURN json_build_object('state', 'full');
-        END IF;
-    END IF;
-    -- IssuePolicyHeld: the issue lock, shared; then, under it, the policy and the slugs this change was weighed on, and the numbers.
-    PERFORM pg_advisory_xact_lock_shared(1668244070, 1);
-    IF (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1)
-            IS DISTINCT FROM p_policy_seq
-        OR EXISTS (
-            SELECT 1 FROM unnest(p_protected, p_slugs) AS p(id, slug)
-             WHERE (SELECT e.slug FROM public.environments e JOIN public.projects q ON q.id = e.project_id
-                     WHERE e.id = p.id AND strpos(e.slug, '~') = 0 AND strpos(q.slug, '~') = 0) IS DISTINCT FROM p.slug
-        ) THEN
-        RETURN json_build_object('state', 'policy');
-    END IF;
-    IF EXISTS (SELECT 1 FROM public.audit_log a WHERE a.author = 'app' AND a.subject_principal = p_app_key AND a.action IN ('key.reseal', 'key.rotate')) THEN
-        RETURN json_build_object('state', 'retired');
-    END IF;
-    -- What it ends is a use's input: the fence exclusive (RevokeTakesFence), after the issue lock (PolicyIssueFirst), for
-    -- the statement's work only. A bind that ends nothing takes none.
-    IF cardinality(p_ends) > 0 THEN PERFORM pg_advisory_xact_lock(1668244070, 0); END IF;
-    -- The keys a binding it makes reads, by the names they were asked by: still those names (a rename meanwhile names
-    -- another). Compared, not locked (a key's writer takes the fence before its row: a share lock here, held into the
-    -- fence, would be a cycle; review r3), and once the fence is had, which a rename takes too: one that committed while
-    -- this waited is seen (review r4). With no fence, one that commits after this is a rename after the bind.
-    IF p_make AND (SELECT count(*) FROM unnest(p_read_keys, p_read_names) AS r(id, name) JOIN public.secrets x ON x.id = r.id AND x.key = r.name) <> cardinality(p_read_keys) THEN
-        RETURN json_build_object('state', 'moved');
-    END IF;
-    -- ChangeChecksSeal: each row it ends is its object's newest change's; one put back is stale. A row with no seal is one
-    -- the log never held, or none at all once a seal it had was cleared around the vault: that one is stale too, so the
-    -- log's binding is never ended with no change of it (review r2).
-    IF EXISTS (SELECT 1 FROM unnest(p_ends, p_end_seal_from) AS e(id, seal)
-                WHERE e.seal IS DISTINCT FROM (SELECT l.seal FROM public.log_changes l WHERE l.object = public.log_object('binding', e.id::text) ORDER BY l.number DESC LIMIT 1))
-       OR EXISTS (SELECT 1 FROM unnest(p_creds, p_cred_seal_from) AS x(id, seal)
-                WHERE x.seal IS DISTINCT FROM (SELECT l.seal FROM public.log_changes l WHERE l.object = public.log_object('credential', x.id::text) ORDER BY l.number DESC LIMIT 1)) THEN
-        RETURN json_build_object('state', 'stale');
-    END IF;
-    IF p_make THEN
-        -- Again, now that no lock is left to wait for: a make of the same id that committed meanwhile, its row deleted since,
-        -- is seen; one not yet committed holds the id's key, which this insert then waits for and fails on (review r4).
-        IF EXISTS (SELECT 1 FROM public.log_changes l WHERE l.object = public.log_object('binding', p_id::text)) THEN
-            RETURN json_build_object('state', 'stale');
-        END IF;
-        INSERT INTO public.service_bindings (id, auth_mac, principal, generation, profile, issuer, jwks_uri, jwks, claims, scope, policy, origin, label, created_by, created_at, seal)
-            VALUES (p_id, p_auth_mac, p_principal, p_generation, p_profile, p_issuer, p_jwks_uri, p_jwks, p_claims, p_scope, p_policy, p_origin, p_label, p_created_by,
-                    timestamptz 'epoch' + p_created_at * interval '1 millisecond', p_seal);
-    END IF;
-    UPDATE public.service_bindings b SET revoked_at = ended, revoked_by = p_revoked_by, auth_mac = e.mac, seal = e.seal
-      FROM unnest(p_ends, p_end_auth_mac, p_end_seal) AS e(id, mac, seal) WHERE b.id = e.id;
-    UPDATE public.credentials c SET revoked_at = ended, revoked_by = p_revoked_by, auth_mac = x.mac, seal = x.seal
-      FROM unnest(p_creds, p_cred_auth_mac, p_cred_seal) AS x(id, mac, seal) WHERE c.id = x.id;
-    -- Each object's change, numbered in the order named: the binding made, those ended, their credentials.
-    FOR i IN 1 .. cardinality(p_change_request) LOOP
-        INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
-            VALUES (nextval('public.log_number'), p_at, p_change_request[i], p_change_object[i], p_actor, p_change_payload[i], p_change_seal[i], p_change_mac[i])
-            RETURNING number INTO n;
-    END LOOP;
-    -- Only rows the log never held, ended: no change, nothing to seal.
-    RETURN json_build_object('number', coalesce(n::text, '0'));
-END
-$function$;
---> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.change_input(p_kind text, p_id text, p_request text, p_at bigint, p_actor text, p_payload text, p_value text, p_seal_from bytea, p_seal bytea, p_mac bytea)
- RETURNS bigint
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pg_temp'
-AS $function$
-DECLARE
-    op jsonb := p_payload::jsonb;
-    v jsonb := p_value::jsonb;
-    change text := op ->> 'op';
-    target uuid := public.log_object(p_kind, p_id);
-    n bigint;
-    done integer;
-    member text;
-    held bytea;
-    newest bytea;
-    config jsonb;
-BEGIN
-    -- Its locks in the order 0.14's writers take theirs, so that none waits on the other in a circle until 0.16 (row,
-    -- head, fence: Migration015.tla's RowFirst, ChangeHeadFirst): the member's queue (MEMBER_QUEUE, 0x636f666d) and row
-    -- first, a principal's own or a credential's (0.14's vault locks them before the head, lockMembers; a change made
-    -- inside a 0.14 decision holds them already), then 0.14's head (its app takes it before its rows), then the fence
-    -- (0.14's appends take it after the head, audit_log_fence). The head held, no 0.14 write lands between this change
-    -- and its entry.
-    member := CASE p_kind
-        WHEN 'principal' THEN p_id
-        WHEN 'credential' THEN coalesce(
-            (SELECT c.principal FROM public.credentials c WHERE c.id = p_id::uuid),
-            (SELECT b.principal FROM public.service_bindings b WHERE b.id = p_id::uuid))
-        WHEN 'connection' THEN (SELECT k.principal FROM public.mcp_connections k WHERE k.id = p_id::uuid)
-    END;
-    IF member IS NOT NULL THEN
-        PERFORM pg_advisory_xact_lock(1668245101, hashtext(m.principal)) FROM public.principals m WHERE m.principal = member FOR NO KEY UPDATE;
-    END IF;
-    PERFORM 1 FROM public.audit_chain_head WHERE only_row FOR UPDATE;
-    -- ChangeLocks: exclusive, so that it waits for every use in flight, and every use after it waits for its commit.
-    PERFORM pg_advisory_xact_lock(1668244070, 0);
-    SELECT c.number INTO n FROM public.log_changes c WHERE c.request_id = p_request;
-    IF FOUND THEN
-        IF NOT EXISTS (
-            SELECT 1 FROM public.log_changes c
-             WHERE c.request_id = p_request AND c.object = target AND c.payload = p_payload AND c.seal IS NOT DISTINCT FROM p_seal
-        ) THEN
-            RAISE EXCEPTION 'request % names another change', p_request USING ERRCODE = 'unique_violation';
-        END IF;
-        RETURN n;
-    END IF;
-    IF NOT (change = 'genesis'
-        OR (p_kind = 'principal' AND change IN ('member.add', 'member.role', 'member.remove', 'member.restore', 'access.grant', 'access.revoke'))
-        OR (p_kind = 'environment' AND change IN ('environment.protect', 'environment.rename', 'environment.archive'))
-        OR (p_kind = 'secret' AND change IN ('secret.write', 'secret.delete'))
-        OR (p_kind = 'roles' AND change = 'role.define')
-        OR (p_kind = 'policy' AND change = 'bulk.limit')
-        OR (p_kind = 'proxy' AND change IN ('proxy.save', 'proxy.code'))
-        OR (p_kind = 'proxy-reserved' AND change IN ('proxy.code', 'proxy.release'))) THEN
-        RAISE EXCEPTION 'this schema knows no change % to a %', coalesce(change, 'without an op'), p_kind USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    -- The proxy's objects are 0.16's, after every cutover: each is made by its first change, never a genesis.
-    IF change = 'genesis' AND p_kind IN ('proxy', 'proxy-reserved') THEN
-        RAISE EXCEPTION 'a % object has no genesis', p_kind USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    -- The payload names its object (`ref`), so that a replay knows what each change is to: the column holds only its
-    -- key. The cutover's genesis may leave it out, its value naming it.
-    IF (change <> 'genesis' OR op ? 'ref') AND (op -> 'ref' ->> 'kind' IS DISTINCT FROM p_kind OR op -> 'ref' ->> 'id' IS DISTINCT FROM p_id) THEN
-        RAISE EXCEPTION 'a change names the object it is to: %, %', p_kind, p_id USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    -- A value is the object as this function writes it: an environment's, which a genesis may leave out to seal the
-    -- row as it is; a key's, the end of its reference (`secret.write`, the one change of a key the vault makes), and
-    -- none at its genesis; the roles' and the policy's, but at their genesis, whose payload holds it. The others' rows
-    -- are written by whoever keeps them, and carry none.
-    IF (CASE
-        WHEN p_kind = 'environment' THEN change <> 'genesis' AND v IS NULL
-        WHEN p_kind = 'secret' THEN (change = 'secret.write') = (v IS NULL)
-        WHEN p_kind IN ('roles', 'policy') THEN (change = 'genesis') = (v IS NOT NULL)
-        WHEN p_kind IN ('proxy', 'proxy-reserved') THEN v IS NULL
-        ELSE v IS NOT NULL
-    END) THEN
-        RAISE EXCEPTION 'a % change % carries the object it leaves exactly when this function writes it', p_kind, change USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    newest := (SELECT c.seal FROM public.log_changes c WHERE c.object = target ORDER BY c.number DESC LIMIT 1);
-    -- ChangeChecksSeal: the row's seal is its object's newest change's, or the object has neither yet (one probe, as
-    -- a use makes). A row deleted outright, or a seal no change wrote, is stale too. Not the proxy's (0.16): the vault
-    -- writes each of its rows whole from its value, so a row a writer moved is replaced, never carried on; its change
-    -- moves only from the newest change's seal (below), which the vault decided on.
-    held := CASE p_kind
-        WHEN 'principal' THEN (SELECT m.seal FROM public.principals m WHERE m.principal = p_id)
-        WHEN 'credential' THEN coalesce(
-            (SELECT c.seal FROM public.credentials c WHERE c.id = p_id::uuid),
-            (SELECT b.seal FROM public.service_bindings b WHERE b.id = p_id::uuid))
-        WHEN 'connection' THEN (SELECT k.seal FROM public.mcp_connections k WHERE k.id = p_id::uuid)
-        WHEN 'environment' THEN (SELECT e.seal FROM public.environments e WHERE e.id = p_id::uuid)
-        WHEN 'secret' THEN (SELECT x.seal FROM public.secrets x WHERE x.id = p_id::uuid)
-        WHEN 'policy' THEN (SELECT g.seal FROM public.log_config g WHERE g.name = 'policy')
-        WHEN 'roles' THEN (SELECT g.seal FROM public.log_config g WHERE g.name = 'roles')
-        WHEN 'proxy' THEN newest
-        WHEN 'proxy-reserved' THEN newest
-    END;
-    IF held IS DISTINCT FROM newest THEN
-        RAISE EXCEPTION 'the % object''s row is not its newest change''s: stale', p_kind USING ERRCODE = 'data_corrupted';
-    END IF;
-    -- ChangeCAS: each write moves the row only from the seal the vault read.
-    CASE p_kind
-        WHEN 'principal' THEN
-            UPDATE public.principals SET seal = p_seal WHERE principal = p_id AND seal IS NOT DISTINCT FROM p_seal_from;
-        WHEN 'credential' THEN
-            -- A token's row, or a trust binding's: one kind of object, ids that never meet.
-            UPDATE public.credentials SET seal = p_seal WHERE id = p_id::uuid AND seal IS NOT DISTINCT FROM p_seal_from;
-            GET DIAGNOSTICS done = ROW_COUNT;
-            IF done = 0 THEN
-                UPDATE public.service_bindings SET seal = p_seal WHERE id = p_id::uuid AND seal IS NOT DISTINCT FROM p_seal_from;
-            END IF;
-        WHEN 'connection' THEN
-            -- An MCP connection's genesis, the cutover's (T147): its row sealed as it is. The app's changes make and end the others.
-            UPDATE public.mcp_connections SET seal = p_seal WHERE id = p_id::uuid AND seal IS NOT DISTINCT FROM p_seal_from;
-        WHEN 'environment' THEN
-            IF v IS NULL THEN
-                UPDATE public.environments SET seal = p_seal WHERE id = p_id::uuid AND seal IS NOT DISTINCT FROM p_seal_from;
-            ELSE
-                -- A deleted environment's row keeps its tombstone, `dev~deleted-…` (@coffre/core/schemas's isTombstone),
-                -- and its object the slug before it (objects.ts, environmentObject): an environment deleted stays so,
-                -- its slug is never written again, and none is deleted here; an object's slug holds no tombstone.
-                UPDATE public.environments e
-                   SET slug = CASE WHEN strpos(e.slug, '~') > 0 THEN e.slug ELSE v ->> 'slug' END,
-                       protected = (v ->> 'protected')::boolean,
-                       archived_at = CASE WHEN (v ->> 'archived')::boolean THEN coalesce(e.archived_at, to_timestamp(p_at / 1000.0)) END,
-                       seal = p_seal
-                 WHERE e.id = p_id::uuid AND e.seal IS NOT DISTINCT FROM p_seal_from
-                   AND v ->> 'kind' = 'environment' AND v ->> 'id' = p_id
-                   AND e.project_id = (v ->> 'projectId')::uuid
-                   AND e.parent_id IS NOT DISTINCT FROM (v ->> 'parentId')::uuid
-                   AND e.owner IS NOT DISTINCT FROM v ->> 'owner'
-                   AND (strpos(e.slug, '~') > 0) = (v ->> 'deleted')::boolean
-                   -- Its project's archival is the project's row's, which the app writes, and none once deleted (objects.ts): held,
-                   -- never written here.
-                   AND (v ->> 'projectArchived')::boolean = (strpos(e.slug, '~') = 0 AND EXISTS (SELECT 1 FROM public.projects p WHERE p.id = e.project_id AND p.archived_at IS NOT NULL))
-                   AND strpos(v ->> 'slug', '~') = 0
-                   AND (NOT (v ->> 'deleted')::boolean OR split_part(e.slug, '~', 1) = v ->> 'slug');
-            END IF;
-        WHEN 'secret' THEN
-            IF v IS NULL THEN
-                UPDATE public.secrets SET seal = p_seal WHERE id = p_id::uuid AND seal IS NOT DISTINCT FROM p_seal_from;
-            ELSE
-                -- A reference's end, in the vault's decision that appends 0.14's `reference.end` (EndInRow, EndWithEntry:
-                -- formal/SealedObjects.tla): the holder, a key with no version of its own, left with no source. Live, from
-                -- its seal, its newest reference row ended. That row must stand: its seal, which the check above held to
-                -- the newest change, says the holder reads its source; a row ended or gone under it is not the log's.
-                -- Archived, from none (EndWhileArchived): the object its unarchive would restore, ended, then deleted
-                -- again by the next call (`secret.delete`); its row was ended by its id (`end_reference`).
-                UPDATE public.secrets x SET seal = p_seal
-                 WHERE x.id = p_id::uuid AND x.seal IS NOT DISTINCT FROM p_seal_from AND (x.archived_at IS NULL) = (p_seal_from IS NOT NULL)
-                   AND x.current_version_id IS NULL
-                   AND v ->> 'kind' = 'secret' AND v ->> 'id' = p_id AND x.project_id = (v ->> 'projectId')::uuid AND x.environment_id = (v ->> 'environmentId')::uuid
-                   AND v ->> 'version' = '' AND v ->> 'nature' = 'secret' AND v -> 'key' = 'null'::jsonb AND v -> 'digest' = 'null'::jsonb AND v -> 'source' = 'null'::jsonb
-                   AND v -> 'reference' = 'null'::jsonb;
-                GET DIAGNOSTICS done = ROW_COUNT;
-                IF done > 0 AND p_seal_from IS NOT NULL THEN
-                    UPDATE public.secret_references y SET ended_at = to_timestamp(p_at / 1000.0)
-                     WHERE y.id = (SELECT CASE WHEN z.secret_id = p_id::uuid THEN z.id END FROM public.secret_references z
-                                   WHERE z.secret_id <= p_id::uuid ORDER BY z.secret_id DESC, z.created_seq DESC LIMIT 1) AND y.ended_at IS NULL;
-                    GET DIAGNOSTICS done = ROW_COUNT;
-                    IF done = 0 THEN
-                        RAISE EXCEPTION 'the secret object''s reference has no standing row: stale' USING ERRCODE = 'data_corrupted';
-                    END IF;
-                END IF;
-            END IF;
-        WHEN 'policy', 'roles' THEN
-            config := CASE change WHEN 'genesis' THEN op -> 'value' ELSE v END;
-            IF p_id <> 'instance' OR config IS NULL OR jsonb_typeof(config) <> 'object' OR (change = 'genesis' AND p_seal_from IS NOT NULL) THEN
-                RAISE EXCEPTION 'the % object is one, made once from its value and changed from its seal', p_kind USING ERRCODE = 'invalid_parameter_value';
-            END IF;
-            -- Made by its first change (genesis, or the first role defined, the first cap set); moved after from its seal.
-            IF p_seal_from IS NULL THEN
-                INSERT INTO public.log_config (name, value, seal) VALUES (p_kind, config::text, p_seal) ON CONFLICT (name) DO NOTHING;
-            ELSE
-                UPDATE public.log_config SET value = config::text, seal = p_seal WHERE log_config.name = p_kind AND seal = p_seal_from;
-            END IF;
-        WHEN 'proxy', 'proxy-reserved' THEN
-            -- An environment's proxy definitions, or the instance's reserved names (0.16, T186; docs/design/proxy-ui.md,
-            -- section 2): the whole row from its value, and only from the newest change's seal (ChangeCAS on the log, not
-            -- the row): one the vault did not decide on is no change of its. An environment's, its items by name and
-            -- their index, which its seal covers; the reserved set's, the whole set.
-            IF p_seal_from IS DISTINCT FROM newest THEN RETURN NULL; END IF;
-            IF p_kind = 'proxy' THEN
-                IF jsonb_typeof(v -> 'items') IS DISTINCT FROM 'object' OR jsonb_typeof(v -> 'digests') IS DISTINCT FROM 'string' THEN
-                    RAISE EXCEPTION 'a proxy object is its items and their index' USING ERRCODE = 'invalid_parameter_value';
-                END IF;
-                INSERT INTO public.proxy_definitions AS d (environment_id, items, digests, seal)
-                    VALUES (p_id::uuid, v -> 'items', decode(v ->> 'digests', 'base64'), p_seal)
-                    ON CONFLICT (environment_id) DO UPDATE SET items = EXCLUDED.items, digests = EXCLUDED.digests, seal = EXCLUDED.seal;
-            ELSE
-                IF p_id <> 'instance' OR jsonb_typeof(v -> 'names') IS DISTINCT FROM 'array' THEN
-                    RAISE EXCEPTION 'the reserved names are one object, the whole set' USING ERRCODE = 'invalid_parameter_value';
-                END IF;
-                INSERT INTO public.proxy_reserved AS r (id, names, seal) VALUES (1, v -> 'names', p_seal)
-                    ON CONFLICT (id) DO UPDATE SET names = EXCLUDED.names, seal = EXCLUDED.seal;
-            END IF;
-        ELSE
-            RAISE EXCEPTION 'no object kind %', p_kind USING ERRCODE = 'invalid_parameter_value';
-    END CASE;
-    -- A row gone, a row whose seal is no longer the one read, an environment that is not what the value says it
-    -- stays, or an object made already: nothing was done.
-    GET DIAGNOSTICS done = ROW_COUNT;
-    IF done = 0 THEN RETURN NULL; END IF;
-    INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
-        VALUES (nextval('public.log_number'), p_at, p_request, target, p_actor, p_payload, p_seal, p_mac)
-        RETURNING number INTO n;
-    RETURN n;
-END
-$function$;
---> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.close_one()
- RETURNS TABLE(upto bigint, at_floor bigint, floor_found bigint)
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pg_temp'
-AS $function$
-DECLARE
-    found_floor bigint;
-BEGIN
-    PERFORM pg_advisory_xact_lock(1668244070, 1);
-    PERFORM pg_advisory_xact_lock(1668244070, 0);
-    SELECT f.at_floor INTO found_floor FROM public.checkpoint_fence f WHERE f.only_row;
-    UPDATE public.checkpoint_fence f SET at_floor = greatest(f.at_floor, (extract(epoch FROM clock_timestamp()) * 1000)::bigint - public.deadline_max()) WHERE f.only_row;
-    RETURN QUERY SELECT pg_sequence_last_value('public.log_number'), f.at_floor, found_floor FROM public.checkpoint_fence f WHERE f.only_row;
-END
-$function$;
---> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.issue_token(p_request text, p_at bigint, p_actor text, p_payload text, p_mac bytea, p_seal bytea, p_principal text, p_generation integer, p_principal_seq bigint, p_actor_generation integer, p_actor_seq bigint, p_via uuid, p_via_seal bytea, p_via_end bigint, p_policy_seq bigint, p_protected uuid[], p_slugs text[], p_app_key text, p_id uuid, p_kind text, p_auth_mac bytea, p_token_hash bytea, p_token_hint text, p_label text, p_created_by text, p_scope text, p_places text, p_expires bigint, p_passkey uuid)
- RETURNS json
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pg_temp'
- SET lock_timeout TO '1s'
-AS $function$
-DECLARE
-    n bigint;
-BEGIN
-    IF p_kind NOT IN ('service', 'personal', 'handle') OR (p_kind = 'service') = (p_principal = p_actor) THEN
-        RAISE EXCEPTION 'the vault issues a service account a token, or a person one of their own' USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    IF p_passkey IS NOT NULL AND p_via IS NULL THEN
-        RAISE EXCEPTION 'a passkey is carried from the credential an issue came in on' USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    -- FactorFirst: the issuer's factor lock, before any row's. A change to their passkeys holds it from before it reads
-    -- what to end until it commits: it commits before this reads `via`, which it then finds revoked, or waits for this
-    -- issue's commit and reads what it wrote.
-    PERFORM pg_advisory_xact_lock(1717658484, hashtext(p_actor));
-    -- IssuerLocked: the members' rows, then the credential's, shared; a lock not had within `lock_timeout` raises `lock_not_available`, busy.
-    PERFORM 1 FROM public.principals m WHERE m.principal IN (p_actor, p_principal) ORDER BY m.principal FOR SHARE;
-    -- IssuerCAS, once the locks are had.
-    IF NOT EXISTS (SELECT 1 FROM public.principals m WHERE m.principal = p_actor AND m.status = 'active' AND m.generation = p_actor_generation AND m.access_seq = p_actor_seq)
-       OR NOT EXISTS (SELECT 1 FROM public.principals m WHERE m.principal = p_principal AND m.status = 'active' AND m.generation = p_generation AND m.access_seq = p_principal_seq) THEN
-        RETURN json_build_object('state', 'moved');
-    END IF;
-    IF p_via IS NOT NULL THEN
-        PERFORM 1 FROM public.credentials c WHERE c.id = p_via FOR SHARE;
-        -- Its end as the vault authenticated it (`p_via_end`, the earlier of its expiry and its hard end, which its seal
-        -- covers): the columns still say so, and it is still ahead. A seal compares bytes, never the columns it was made of.
-        -- And the passkey it names, the one this issue carries, still the actor's at the generation checked above, and not
-        -- removed: live as `passkeys_live_idx` defines it (a member's removal moves their generation past their passkeys).
-        IF NOT EXISTS (SELECT 1 FROM public.credentials c
-                        WHERE c.id = p_via AND c.principal = p_actor AND c.revoked_at IS NULL AND c.seal = p_via_seal
-                          AND floor(extract(epoch FROM least(c.expires_at, coalesce(c.not_after, c.expires_at))) * 1000)::bigint = p_via_end
-                          AND c.passkey_id IS NOT DISTINCT FROM p_passkey)
-           OR p_via_end <= (extract(epoch FROM clock_timestamp()) * 1000)::bigint
-           OR p_via_seal IS DISTINCT FROM (SELECT c.seal FROM public.log_changes c WHERE c.object = public.log_object('credential', p_via::text) ORDER BY c.number DESC LIMIT 1)
-           OR (p_passkey IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.passkeys k WHERE k.id = p_passkey AND k.principal = p_actor AND k.generation = p_actor_generation AND k.removed_at IS NULL)) THEN
-            RETURN json_build_object('state', 'ended');
-        END IF;
-    END IF;
-    -- IssuePolicyHeld: the issue lock shared before the policy is compared, and the number under it. A policy change, or a
-    -- write that moves a protected environment's slug, takes it exclusive before the fence (`holdIssues`): it commits
-    -- before this compares, and is seen, or waits for this issue's commit.
-    PERFORM pg_advisory_xact_lock_shared(1668244070, 1);
-    IF (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1)
-            IS DISTINCT FROM p_policy_seq
-        OR EXISTS (
-            SELECT 1 FROM unnest(p_protected, p_slugs) AS p(id, slug)
-             WHERE (SELECT e.slug FROM public.environments e JOIN public.projects q ON q.id = e.project_id
-                     WHERE e.id = p.id AND strpos(e.slug, '~') = 0 AND strpos(q.slug, '~') = 0) IS DISTINCT FROM p.slug
-        ) THEN
-        RETURN json_build_object('state', 'policy');
-    END IF;
-    IF EXISTS (SELECT 1 FROM public.audit_log a WHERE a.author = 'app' AND a.subject_principal = p_app_key AND a.action IN ('key.reseal', 'key.rotate')) THEN
-        RETURN json_build_object('state', 'retired');
-    END IF;
-    IF p_expires <= (extract(epoch FROM clock_timestamp()) * 1000)::bigint THEN
-        RETURN json_build_object('state', 'expired');
-    END IF;
-    INSERT INTO public.credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, identity_id, scope, places, label, created_by,
-                                    expires_at, revoked_at, seal, passkey_id)
-        VALUES (p_id, p_kind, p_auth_mac, p_token_hash, p_token_hint, p_generation, p_principal, NULL, p_scope, p_places, p_label, p_created_by,
-                timestamptz 'epoch' + p_expires * interval '1 millisecond', NULL, p_seal, p_passkey);
-    INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
-        VALUES (nextval('public.log_number'), p_at, p_request, public.log_object('credential', p_id::text), p_actor, p_payload, p_seal, p_mac)
-        RETURNING number INTO n;
-    RETURN json_build_object('number', n::text);
-END
-$function$;
---> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.log_refuse_retired()
- RETURNS trigger
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pg_temp'
-AS $function$
-BEGIN
-    IF EXISTS (SELECT 1 FROM public.checkpoint_fence f WHERE f.only_row AND substring(NEW.mac FROM 1 FOR 4) = ANY(f.retired)) THEN
-        RAISE EXCEPTION 'the log moved on from the signing key this entry is under: a vault given a newer key replaced this one, and a replaced key writes nothing more (ask again)'
-            USING ERRCODE = 'object_not_in_prerequisite_state';
-    END IF;
-    RETURN NEW;
-END
-$function$;
---> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.log_rotate(p_number bigint, p_request text, p_at bigint, p_payload text, p_mac bytea, p_from bytea)
- RETURNS bigint
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pg_temp'
-AS $function$
-BEGIN
-    IF p_payload::jsonb ->> 'op' IS DISTINCT FROM 'rotate' OR p_payload::jsonb ->> 'at' IS DISTINCT FROM p_number::text
-       OR octet_length(p_from) <> 4 OR octet_length(p_mac) <> 16 OR substring(p_mac FROM 1 FOR 4) = p_from THEN
-        RAISE EXCEPTION 'not a rotation: %', p_payload USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    -- The number this transaction's log_rotate_number took, its locks still held (taking them again is a no-op).
-    PERFORM pg_advisory_xact_lock(1668244070, 1);
-    PERFORM pg_advisory_xact_lock(1668244070, 0);
-    IF p_number IS DISTINCT FROM currval('public.log_number') OR EXISTS (SELECT 1 FROM public.checkpoint_fence f WHERE f.only_row AND p_from = ANY(f.retired)) THEN
-        RAISE EXCEPTION 'not the rotation this transaction numbered' USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
-    VALUES (p_number, p_at, p_request, public.log_object('log', 'key'), 'system:vault', p_payload, NULL, p_mac);
-    UPDATE public.checkpoint_fence SET retired = array_append(retired, p_from) WHERE only_row;
-    -- No fence row (a damaged or partial restore): no key retired, so the whole rotation fails, closed.
-    IF NOT FOUND THEN RAISE EXCEPTION 'the log''s fence row is gone' USING ERRCODE = 'object_not_in_prerequisite_state'; END IF;
-    RETURN p_number;
-END
-$function$;
---> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.log_rotate_number(p_from bytea)
- RETURNS bigint
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pg_temp'
-AS $function$
-BEGIN
-    IF octet_length(p_from) <> 4 THEN RAISE EXCEPTION 'a key''s tag is 4 bytes' USING ERRCODE = 'invalid_parameter_value'; END IF;
-    PERFORM pg_advisory_xact_lock(1668244070, 1);
-    PERFORM pg_advisory_xact_lock(1668244070, 0);
-    IF EXISTS (SELECT 1 FROM public.checkpoint_fence f WHERE f.only_row AND p_from = ANY(f.retired)) THEN RETURN NULL; END IF;
-    RETURN nextval('public.log_number');
-END
-$function$;
---> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.prune_bulk(p_limit integer)
- RETURNS integer
- LANGUAGE sql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pg_temp'
- SET lock_timeout TO '3s'
-AS $function$
-    WITH bound AS (
-        SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint - w.window_ms - least(60000, w.window_ms / 10) - public.deadline_max() - 3600000 AS before
-          FROM (
-              SELECT (x.payload::jsonb #>> '{value,bulk,windowMs}')::bigint AS window_ms FROM public.log_changes x
-               WHERE x.object = public.log_object('policy', 'instance') ORDER BY x.number DESC LIMIT 1
-          ) w
-         WHERE w.window_ms IS NOT NULL
-    ),
-    pruned AS (
-        DELETE FROM public.bulk_cap
-         WHERE last < (SELECT before FROM bound)
-           AND ctid IN (SELECT ctid FROM public.bulk_cap WHERE last < (SELECT before FROM bound) LIMIT p_limit FOR UPDATE SKIP LOCKED)
-        RETURNING 1
-    )
-    SELECT count(*)::integer FROM pruned;
-$function$;
---> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.prune_consumed_tokens(at_most integer)
- RETURNS integer
- LANGUAGE sql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pg_temp'
-AS $function$
-    WITH pruned AS (
-        DELETE FROM public.spent_id_tokens
-         WHERE hash IN (SELECT hash FROM public.spent_id_tokens WHERE consumed_at < now() - interval '2 hours' LIMIT at_most)
-        RETURNING 1
-    )
-    SELECT count(*)::integer FROM pruned;
-$function$;
---> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.sign_in(p_request text, p_at bigint, p_actor text, p_payload text, p_mac bytea, p_seal bytea, p_binding uuid, p_principal text, p_generation integer, p_binding_profile text, p_binding_scope text, p_binding_policy text, p_binding_issuer text, p_binding_jwks_uri text, p_binding_claims text, p_binding_seal bytea, p_spent bytea, p_valid_until bigint, p_frozen boolean, p_rate integer, p_window bigint, p_longest bigint, p_id uuid, p_kind text, p_auth_mac bytea, p_token_hash bytea, p_token_hint text, p_label text, p_created_by text, p_scope text, p_places text, p_expires bigint, p_not_after bigint, p_jkt text, p_app_key text)
- RETURNS json
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pg_temp'
- SET lock_timeout TO '1s'
-AS $function$
-DECLARE
-    n bigint;
-    held record;
-    now_ms bigint;
-    since timestamptz;
-    target uuid := public.log_object('credential', p_id::text);
-BEGIN
-    IF p_created_by IS DISTINCT FROM 'binding:' || p_binding::text OR p_kind NOT IN ('service', 'workload') THEN
-        RAISE EXCEPTION 'a sign-in makes a credential of its binding''s, a service''s or a workload''s' USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    -- A lock not had within `lock_timeout` raises `lock_not_available`, which the vault answers as busy: no subtransaction to catch it here.
-    -- The account's row, locked, then held to its newest change's seal in a statement of its own, which reads what committed
-    -- while it waited: a recheck under the lock sees the row's new version beside the snapshot's older changes, and would
-    -- refuse an account a grant just changed. A row put back is none; 0.14's has neither seal nor change (before the cutover).
-    SELECT m.seal INTO held FROM public.principals m
-     WHERE m.principal = p_principal AND m.status = 'active' AND m.generation = p_generation
-       FOR SHARE;
-    IF NOT FOUND THEN RETURN json_build_object('state', 'unbound'); END IF;
-    IF held.seal IS DISTINCT FROM (SELECT c.seal FROM public.log_changes c WHERE c.object = public.log_object('principal', p_principal) ORDER BY c.number DESC LIMIT 1) THEN
-        RETURN json_build_object('state', 'unbound');
-    END IF;
-    -- The binding as the vault checked its seal (BindingSealed): its every column its object takes, and that seal; then, in
-    -- a statement of its own once locked, that seal its object's newest change's. A row put back after its end, or edited
-    -- around the vault, is none.
-    PERFORM 1 FROM public.service_bindings b
-     WHERE b.id = p_binding AND b.principal = p_principal AND b.generation = p_generation AND b.revoked_at IS NULL AND b.profile = p_binding_profile
-       AND b.scope IS NOT DISTINCT FROM p_binding_scope AND b.policy IS NOT DISTINCT FROM p_binding_policy
-       AND b.issuer = p_binding_issuer AND b.jwks_uri = p_binding_jwks_uri AND b.claims = p_binding_claims AND b.seal = p_binding_seal
-       FOR UPDATE;
-    IF NOT FOUND THEN RETURN json_build_object('state', 'unbound'); END IF;
-    IF p_binding_seal IS DISTINCT FROM (SELECT c.seal FROM public.log_changes c WHERE c.object = public.log_object('binding', p_binding::text) ORDER BY c.number DESC LIMIT 1) THEN
-        RETURN json_build_object('state', 'unbound');
-    END IF;
-    -- The app's key, not one it rotated from (audit_log_subject_idx).
-    IF EXISTS (SELECT 1 FROM public.audit_log a WHERE a.author = 'app' AND a.subject_principal = p_app_key AND a.action IN ('key.reseal', 'key.rotate')) THEN
-        RETURN json_build_object('state', 'retired');
-    END IF;
-    -- A freeze of the whole instance, the account or the binding: its newest freeze or lift (audit_log_freeze_idx).
-    IF p_frozen AND EXISTS (
-        SELECT 1 FROM unnest(ARRAY['instance', p_principal, 'binding:' || p_binding::text]) t(target)
-         WHERE (SELECT a.action FROM public.audit_log a
-                 WHERE a.author = 'app' AND a.action IN ('workload.freeze', 'workload.unfreeze') AND a.decision = 'allow'
-                   AND (a.metadata::jsonb ->> 'target') = t.target
-                 ORDER BY a.seq DESC LIMIT 1) = 'workload.freeze'
-    ) THEN
-        RETURN json_build_object('state', 'frozen');
-    END IF;
-    -- Its rate, under the binding's row (credentials_issued_by_idx: the last window's, never the history). Its start a
-    -- value, not `clock_timestamp()`, which is volatile: compared with that, the index bounds nothing, and the window's
-    -- count would read the binding's every credential.
-    since := clock_timestamp() - p_window * interval '1 millisecond';
-    IF (SELECT count(*) FROM (
-            SELECT 1 FROM public.credentials c
-             WHERE c.principal = p_principal AND c.created_by = p_created_by AND c.created_at > since
-             LIMIT p_rate
-        ) z) >= p_rate THEN
-        RETURN json_build_object('state', 'busy');
-    END IF;
-    now_ms := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
-    IF p_valid_until <= now_ms OR p_expires <= now_ms OR p_expires > now_ms + p_longest + 60000 OR (p_not_after IS NOT NULL AND (p_not_after <= now_ms OR p_expires > p_not_after)) THEN
-        RETURN json_build_object('state', 'expired');
-    END IF;
-    -- The token spent (SpentChecked): the primary key decides between two runs presenting it at once.
-    IF p_spent IS NOT NULL THEN
-        INSERT INTO public.spent_id_tokens (hash) VALUES (p_spent) ON CONFLICT DO NOTHING;
-        IF NOT FOUND THEN RETURN json_build_object('state', 'replayed'); END IF;
-    END IF;
-    INSERT INTO public.credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, identity_id, scope, places, label, created_by,
-                                    expires_at, revoked_at, jkt, not_after, seal)
-        VALUES (p_id, p_kind, p_auth_mac, p_token_hash, p_token_hint, p_generation, p_principal, NULL, p_scope, p_places, p_label, p_created_by,
-                timestamptz 'epoch' + p_expires * interval '1 millisecond', NULL, p_jkt,
-                CASE WHEN p_not_after IS NULL THEN NULL ELSE timestamptz 'epoch' + p_not_after * interval '1 millisecond' END, p_seal);
-    UPDATE public.service_bindings SET last_used_at = clock_timestamp() WHERE id = p_binding;
-    PERFORM pg_advisory_xact_lock_shared(1668244070, 1);
-    INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
-        VALUES (nextval('public.log_number'), p_at, p_request, target, p_actor, p_payload, p_seal, p_mac)
-        RETURNING number INTO n;
-    RETURN json_build_object('number', n::text);
-END
-$function$;
---> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.use_credential(p_credential uuid, p_secret uuid, p_request bigint, p_at bigint, p_purpose smallint, p_place uuid, p_mac bytea, p_deadline bigint, p_cover bigint DEFAULT NULL::bigint, p_cover_at bigint DEFAULT NULL::bigint, p_cover_request bigint DEFAULT NULL::bigint, p_known bigint DEFAULT NULL::bigint, p_known_mac bytea DEFAULT NULL::bytea, p_cap_count integer DEFAULT NULL::integer, p_cap_window bigint DEFAULT NULL::bigint, p_token_hash bytea DEFAULT NULL::bytea, p_project text DEFAULT NULL::text, p_environment text DEFAULT NULL::text, p_key text DEFAULT NULL::text, p_decided boolean DEFAULT false, p_handle boolean DEFAULT false, p_unless text[] DEFAULT NULL::text[], p_signin boolean DEFAULT NULL::boolean, p_issuers text[] DEFAULT NULL::text[], p_roles jsonb DEFAULT NULL::jsonb, p_way smallint DEFAULT 0, p_principal text DEFAULT NULL::text, p_forks boolean DEFAULT false, p_route text DEFAULT NULL::text, p_gate boolean DEFAULT false)
- RETURNS json
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pg_temp'
- SET bytea_output TO 'hex'
-AS $function$
+-- `use_credential` as 0071 made it, but for `p_passkeys` (above) and its warm-up's mark.
+CREATE FUNCTION use_credential(
+    p_credential uuid, p_secret uuid, p_request bigint, p_at bigint, p_purpose smallint, p_place uuid, p_mac bytea, p_deadline bigint,
+    p_cover bigint DEFAULT NULL, p_cover_at bigint DEFAULT NULL, p_cover_request bigint DEFAULT NULL, p_known bigint DEFAULT NULL, p_known_mac bytea DEFAULT NULL,
+    p_cap_count integer DEFAULT NULL, p_cap_window bigint DEFAULT NULL,
+    p_token_hash bytea DEFAULT NULL, p_project text DEFAULT NULL, p_environment text DEFAULT NULL, p_key text DEFAULT NULL,
+    p_decided boolean DEFAULT false,
+    p_handle boolean DEFAULT false,
+    p_unless text[] DEFAULT NULL,
+    p_signin boolean DEFAULT NULL,
+    p_issuers text[] DEFAULT NULL,
+    p_roles jsonb DEFAULT NULL,
+    p_way smallint DEFAULT 0,
+    p_principal text DEFAULT NULL,
+    p_forks boolean DEFAULT false,
+    p_route text DEFAULT NULL,
+    p_gate boolean DEFAULT false,
+    p_passkeys text DEFAULT NULL
+) RETURNS json
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET bytea_output = 'hex' AS $$
 DECLARE
     r public.use_row;
     -- The principal's lock held: exclusive (`locked`), to enter its key in the cap's set; shared (`moving`), to move it on.
@@ -806,6 +54,16 @@ DECLARE
     v_right boolean := true;
     v_named text;
     v_accepted boolean;
+    -- What stands behind a person's credential (T216; docs/design/passkeys.md, sections 6.2 and 6.4), read with it under
+    -- the fence and answered in the app's rows: its kind, generation and the passkey it names; that passkey's row, and
+    -- whether its person holds a live passkey at its generation (2), has rows but none live at it (1), or none ever
+    -- (null), as the app's own statement reads them (`heldSql`); and whether that passkey is live and theirs.
+    v_kind text;
+    v_generation integer;
+    v_passkey_id uuid;
+    v_passkey json;
+    v_passkey_held smallint;
+    v_backed boolean;
     v_np uuid;
     v_np_project uuid;
     v_places text;
@@ -879,6 +137,11 @@ BEGIN
     IF p_route IS NOT NULL AND ((p_token_hash IS NOT NULL AND (p_key IS NOT NULL OR p_gate OR NOT p_forks)) OR p_route !~ '^[a-z][a-z0-9-]{0,31}$') THEN
         RAISE EXCEPTION 'a route use is by ids, or a handle''s named call of its route, and names its route as a credential is named' USING ERRCODE = 'invalid_parameter_value';
     END IF;
+    -- What the app's config says of passkeys (T216): one of its three policies, or none (an app before T216, which runs
+    -- the check itself before the call).
+    IF p_passkeys IS NOT NULL AND p_passkeys NOT IN ('off', 'optional', 'required') THEN
+        RAISE EXCEPTION 'a named call''s passkey policy is off, optional or required' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     IF p_deadline IS NULL OR p_deadline > p_at + public.deadline_max() THEN r.state := 'late'; RETURN CASE WHEN v_routed THEN json_build_object('row', to_json(r), 'route', v_route) ELSE to_json(r) END; END IF;
     -- Its Worker's clock ahead by over a minute (0022 says why): checked here at no cost, and again in the statement.
     IF p_at > (extract(epoch FROM clock_timestamp()) * 1000)::bigint + 60000 THEN r.state := 'ahead'; RETURN CASE WHEN v_routed THEN json_build_object('row', to_json(r), 'route', v_route) ELSE to_json(r) END; END IF;
@@ -912,11 +175,27 @@ BEGIN
             -- session's identity names a provider it configures, as the app's own check has it (`#liveCredential`). One it
             -- would refuse is answered as a token no credential has, `unknown`, here: no place, no key, no lock read or
             -- taken, whatever the request names.
-            SELECT c.id, c.places, c.principal,
+            SELECT c.id, c.places, c.principal, c.kind, c.generation, c.passkey_id,
                    coalesce(p_signin, false) AND (c.kind <> 'browser' OR (x.provider || ':' || x.issuer_hash) = ANY (coalesce(p_issuers, '{}')))
-              INTO v_credential, v_places, v_principal, v_accepted
+              INTO v_credential, v_places, v_principal, v_kind, v_generation, v_passkey_id, v_accepted
               FROM public.credentials c LEFT JOIN public.identities x ON x.id = c.identity_id
              WHERE c.token_hash = p_token_hash;
+            -- Then the passkey behind a person's session or token, with passkeys not `off` (`p_passkeys`; T216;
+            -- passkeys.md, section 6.2, `passkeyStands`), as the app's own check has it: one that names a passkey is
+            -- taken while that passkey is live, its person's at the credential's generation; one that names none, under
+            -- `optional`, while its person holds no live passkey, never under `required`. Refused, it is `unknown` too,
+            -- before anything else is read. Two probes of the passkeys' indexes and one by id, which nothing a request
+            -- names moves; never for a handle, a service's token or a workload's, which the check exempts (R44). The
+            -- MACs are the app's, which it checks on the rows answered (`app`), so that it reads none itself (a row a
+            -- database writer forged is accepted here and refused there, 401, D154).
+            IF v_credential IS NOT NULL AND coalesce(v_accepted, false) AND v_kind IN ('browser', 'cli', 'personal') AND p_passkeys IN ('optional', 'required') THEN
+                SELECT to_json(k), coalesce(k.removed_at IS NULL AND k.principal = v_principal AND k.generation = v_generation, false),
+                       CASE WHEN EXISTS (SELECT 1 FROM public.passkeys h WHERE h.principal = v_principal AND h.generation = v_generation AND h.removed_at IS NULL) THEN 2
+                            WHEN EXISTS (SELECT 1 FROM public.passkeys h WHERE h.principal = v_principal) THEN 1 END
+                  INTO v_passkey, v_backed, v_passkey_held
+                  FROM (SELECT 1) one LEFT JOIN public.passkeys k ON k.id = v_passkey_id;
+                v_accepted := CASE WHEN v_passkey_id IS NOT NULL THEN v_backed ELSE p_passkeys = 'optional' AND v_passkey_held IS DISTINCT FROM 2 END;
+            END IF;
             IF v_credential IS NULL OR NOT coalesce(v_accepted, false) THEN r.state := 'unknown'; RETURN CASE WHEN v_routed THEN json_build_object('row', to_json(r), 'route', v_route) ELSE to_json(r) END; END IF;
             IF p_handle THEN
                 -- Unchecked yet, so parsed without raising, each step in turn (a CASE's order, which AND does not promise).
@@ -1059,11 +338,11 @@ BEGIN
                                lm.number
                           INTO editor, v_number
                           FROM (SELECT 1) one
-                          LEFT JOIN public.principals m ON m.principal = v_editor
+                          LEFT JOIN public.vault_members m ON m.principal = v_editor
                           LEFT JOIN LATERAL (
                               SELECT array_agg(coalesce(g.project_id, ge.project_id)) AS g_project, array_agg(g.environment_id) AS g_environment,
                                      array_agg(g.environment_slug) AS g_slug, array_agg(g.role) AS g_role, array_agg(g.expires_at::text) AS g_expires
-                                FROM public.grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
+                                FROM public.vault_grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
                                WHERE g.principal = v_editor
                           ) gr ON m.status IS NOT NULL
                           LEFT JOIN LATERAL (
@@ -1134,7 +413,7 @@ BEGIN
                 r.n_cut := false;
                 -- The app's rows of the request, as the whole form answers them for a named call of no key at the place.
                 r.app := json_build_object(
-                    'now', CURRENT_TIMESTAMP, 'credential', (SELECT to_json(c) FROM public.credentials c WHERE c.id = v_credential),
+                    'now', CURRENT_TIMESTAMP, 'passkey', v_passkey, 'passkey_held', v_passkey_held, 'credential', (SELECT to_json(c) FROM public.credentials c WHERE c.id = v_credential),
                     'identity', (SELECT to_json(x) FROM public.credentials c JOIN public.identities x ON x.id = c.identity_id WHERE c.id = v_credential),
                     'policy', (SELECT a.seq::text FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1),
                     'project', (SELECT to_json(q) FROM public.projects q WHERE q.id = v_np_project),
@@ -1174,7 +453,7 @@ BEGIN
                     public.log_object('environment', (CASE WHEN e2.owner IS NOT NULL THEN e2.parent_id END)::text) AS k_e4
                   FROM (SELECT 1) one
                   LEFT JOIN LATERAL (SELECT x.number, x.mac FROM public.log_changes x ORDER BY x.number DESC LIMIT 1) n ON true
-                  LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.checkpoint_fence y WHERE y.only_row LIMIT 1) f ON true
+                  LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.log_fence y WHERE y.only_row LIMIT 1) f ON true
                   -- The roles and the policy, both rows in one read of their one-page table.
                   LEFT JOIN LATERAL (
                       SELECT max(g.value) FILTER (WHERE g.name = 'roles') AS r_value, (array_agg(g.seal) FILTER (WHERE g.name = 'roles'))[1] AS r_seal,
@@ -1202,14 +481,14 @@ BEGIN
                              -- A binding's object is its whole row (objects.ts, bindingObject), its seal checked over it.
                              CASE WHEN p_way = 2 AND wb.id IS NOT NULL THEN to_json(wb) END AS row
                   ) w
-                  LEFT JOIN public.principals m ON m.principal = w.principal
+                  LEFT JOIN public.vault_members m ON m.principal = w.principal
                   -- An archived key is gone (`secret.delete`): no object.
                   LEFT JOIN public.secrets s ON s.id = v_secret AND s.archived_at IS NULL
                   -- The key's own version, its own environment, and that environment's parent when it is a personal config.
                   LEFT JOIN public.secret_versions sv ON sv.id = s.current_version_id
                   LEFT JOIN public.environments e2 ON e2.id = s.environment_id
                   LEFT JOIN public.environments e4 ON e4.id = e2.parent_id AND e2.owner IS NOT NULL
-                  LEFT JOIN public.bulk_cap b ON b.principal = w.principal AND b.secret = v_secret
+                  LEFT JOIN public.log_bulk b ON b.principal = w.principal AND b.secret = v_secret
                  WHERE NOT dry
             ),
             v AS MATERIALIZED (
@@ -1241,7 +520,7 @@ BEGIN
                     -- The other keys in the set, up to the cap: read only under the principal's lock, for a key not in it.
                     CASE WHEN locked AND i.p IS NOT NULL AND NOT coalesce(i.bulk_last > p_at - i.cap_window - cap.refresh, false) THEN (
                         SELECT count(*)::integer FROM (
-                            SELECT 1 FROM public.bulk_cap o
+                            SELECT 1 FROM public.log_bulk o
                              WHERE o.principal = i.p AND o.secret <> v_secret AND o.last > p_at - i.cap_window - cap.refresh - public.deadline_max() - 60000
                              LIMIT i.cap_count
                         ) z
@@ -1284,7 +563,7 @@ BEGIN
                 v.e4_id, v.e4_project, v.e4_slug, v.e4_owner, v.e4_parent, v.e4_protected, v.e4_archived, v.e4_seal, v.e4_last,
                 v.is_in, v.n_others, v.v_plaintext, v.e1_project_archived, v.e2_project_archived, v.e3_project_archived, v.e4_project_archived, v.s_reference, v.x_reference, v.c_generation, v.m_generation, v.c_token_hash,
                 CASE WHEN p_token_hash IS NOT NULL THEN json_build_object(
-                    'now', CURRENT_TIMESTAMP, 'credential', v.c_row, 'identity', (SELECT to_json(x) FROM public.identities x WHERE x.id = (v.c_row ->> 'identity_id')::uuid),
+                    'now', CURRENT_TIMESTAMP, 'passkey', v_passkey, 'passkey_held', v_passkey_held, 'credential', v.c_row, 'identity', (SELECT to_json(x) FROM public.identities x WHERE x.id = (v.c_row ->> 'identity_id')::uuid),
                     'policy', (SELECT a.seq::text FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1),
                     'project', (SELECT to_json(q) FROM public.projects q WHERE q.id = coalesce(v.e1_project, v.e2_project)),
                     'environment', (SELECT to_json(e) FROM public.environments e WHERE e.id = coalesce(v.e1_id, v.e2_id)),
@@ -1299,7 +578,7 @@ BEGIN
               LEFT JOIN LATERAL (
                   SELECT array_agg(coalesce(g.project_id, ge.project_id)) AS g_project, array_agg(g.environment_id) AS g_environment,
                          array_agg(g.environment_slug) AS g_slug, array_agg(g.role) AS g_role, array_agg(g.expires_at) AS g_expires
-                    FROM public.grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
+                    FROM public.vault_grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
                    WHERE g.principal = v.p
               ) gr ON v.m_status IS NOT NULL;
         ELSIF probe THEN
@@ -1335,7 +614,7 @@ BEGIN
                     public.log_object('environment', (CASE WHEN ve.owner IS NOT NULL THEN ve.parent END)::text) AS k_e4
                   FROM (SELECT 1) one
                   LEFT JOIN LATERAL (SELECT x.number, x.mac FROM public.log_changes x ORDER BY x.number DESC LIMIT 1) n ON true
-                  LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.checkpoint_fence y WHERE y.only_row LIMIT 1) f ON true
+                  LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.log_fence y WHERE y.only_row LIMIT 1) f ON true
                   -- The roles and the policy, both rows in one read of their one-page table.
                   LEFT JOIN LATERAL (
                       SELECT max(g.value) FILTER (WHERE g.name = 'roles') AS r_value, (array_agg(g.seal) FILTER (WHERE g.name = 'roles'))[1] AS r_seal,
@@ -1363,7 +642,7 @@ BEGIN
                              -- A binding's object is its whole row (objects.ts, bindingObject), its seal checked over it.
                              CASE WHEN p_way = 2 AND wb.id IS NOT NULL THEN to_json(wb) END AS row
                   ) w
-                  LEFT JOIN public.principals m ON m.principal = w.principal
+                  LEFT JOIN public.vault_members m ON m.principal = w.principal
                   -- An archived key is gone (`secret.delete`): no object.
                   LEFT JOIN public.secrets s ON s.id = v_secret AND s.archived_at IS NULL
                   -- A key with no version of its own is a reference while its newest reference row names a source and has not ended (`ended_at`): an ended one's holder reads as no value, no source (`ended`).
@@ -1398,7 +677,7 @@ BEGIN
                                   WHEN ref.source_secret_id IS NULL OR (src.id IS NOT NULL AND ids.e3 IS NULL) THEN e2.parent_id ELSE e3.parent_id END AS parent
                   ) ve ON true
                   LEFT JOIN public.environments e4 ON e4.id = ve.parent AND ve.owner IS NOT NULL
-                  LEFT JOIN public.bulk_cap b ON b.principal = w.principal AND b.secret = v_secret
+                  LEFT JOIN public.log_bulk b ON b.principal = w.principal AND b.secret = v_secret
                  WHERE NOT dry
             ),
             v AS MATERIALIZED (
@@ -1429,7 +708,7 @@ BEGIN
                     -- The other keys in the set, up to the cap: read only under the principal's lock, for a key not in it.
                     CASE WHEN locked AND i.p IS NOT NULL AND NOT coalesce(i.bulk_last > p_at - i.cap_window - cap.refresh, false) THEN (
                         SELECT count(*)::integer FROM (
-                            SELECT 1 FROM public.bulk_cap o
+                            SELECT 1 FROM public.log_bulk o
                              WHERE o.principal = i.p AND o.secret <> v_secret AND o.last > p_at - i.cap_window - cap.refresh - public.deadline_max() - 60000
                              LIMIT i.cap_count
                         ) z
@@ -1475,7 +754,7 @@ BEGIN
                 v.e4_id, v.e4_project, v.e4_slug, v.e4_owner, v.e4_parent, v.e4_protected, v.e4_archived, v.e4_seal, v.e4_last,
                 v.is_in, v.n_others, v.v_plaintext, v.e1_project_archived, v.e2_project_archived, v.e3_project_archived, v.e4_project_archived, v.s_reference, v.x_reference, v.c_generation, v.m_generation, v.c_token_hash,
                 CASE WHEN p_token_hash IS NOT NULL THEN json_build_object(
-                    'now', CURRENT_TIMESTAMP, 'credential', v.c_row, 'identity', (SELECT to_json(x) FROM public.identities x WHERE x.id = (v.c_row ->> 'identity_id')::uuid),
+                    'now', CURRENT_TIMESTAMP, 'passkey', v_passkey, 'passkey_held', v_passkey_held, 'credential', v.c_row, 'identity', (SELECT to_json(x) FROM public.identities x WHERE x.id = (v.c_row ->> 'identity_id')::uuid),
                     'policy', (SELECT a.seq::text FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1),
                     'project', (SELECT to_json(q) FROM public.projects q WHERE q.id = coalesce(v.e1_project, v.e2_project)),
                     'environment', (SELECT to_json(e) FROM public.environments e WHERE e.id = coalesce(v.e1_id, v.e2_id)),
@@ -1490,7 +769,7 @@ BEGIN
               LEFT JOIN LATERAL (
                   SELECT array_agg(coalesce(g.project_id, ge.project_id)) AS g_project, array_agg(g.environment_id) AS g_environment,
                          array_agg(g.environment_slug) AS g_slug, array_agg(g.role) AS g_role, array_agg(g.expires_at) AS g_expires
-                    FROM public.grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
+                    FROM public.vault_grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
                    WHERE g.principal = v.p
               ) gr ON v.m_status IS NOT NULL;
         ELSIF NOT whole THEN
@@ -1518,7 +797,7 @@ BEGIN
                     b.last AS bulk_last
                   FROM (SELECT 1) one
                   LEFT JOIN LATERAL (SELECT x.number, x.mac FROM public.log_changes x ORDER BY x.number DESC LIMIT 1) n ON true
-                  LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.checkpoint_fence y WHERE y.only_row LIMIT 1) f ON true
+                  LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.log_fence y WHERE y.only_row LIMIT 1) f ON true
                   -- The roles and the policy, both rows in one read of their one-page table.
                   LEFT JOIN LATERAL (
                       SELECT max(g.value) FILTER (WHERE g.name = 'roles') AS r_value, (array_agg(g.seal) FILTER (WHERE g.name = 'roles'))[1] AS r_seal,
@@ -1542,14 +821,14 @@ BEGIN
                              -- A binding's object is its whole row (objects.ts, bindingObject), its seal checked over it.
                              CASE WHEN p_way = 2 AND wb.id IS NOT NULL THEN to_json(wb) END AS row
                   ) w
-                  LEFT JOIN public.principals m ON m.principal = w.principal
+                  LEFT JOIN public.vault_members m ON m.principal = w.principal
                   -- An archived key is gone (`secret.delete`): no object.
                   LEFT JOIN public.secrets s ON s.id = v_secret AND s.archived_at IS NULL
                   -- The key's own version, its own environment, and that environment's parent when it is a personal config.
                   LEFT JOIN public.secret_versions sv ON sv.id = s.current_version_id
                   LEFT JOIN public.environments e2 ON e2.id = s.environment_id
                   LEFT JOIN public.environments e4 ON e4.id = e2.parent_id AND e2.owner IS NOT NULL
-                  LEFT JOIN public.bulk_cap b ON b.principal = w.principal AND b.secret = v_secret
+                  LEFT JOIN public.log_bulk b ON b.principal = w.principal AND b.secret = v_secret
                  WHERE NOT dry
             ),
             v AS MATERIALIZED (
@@ -1575,7 +854,7 @@ BEGIN
                     -- The other keys in the set, up to the cap: read only under the principal's lock, for a key not in it.
                     CASE WHEN locked AND i.p IS NOT NULL AND NOT coalesce(i.bulk_last > p_at - p_cap_window - c_refresh, false) THEN (
                         SELECT count(*)::integer FROM (
-                            SELECT 1 FROM public.bulk_cap o
+                            SELECT 1 FROM public.log_bulk o
                              WHERE o.principal = i.p AND o.secret <> v_secret AND o.last > p_at - p_cap_window - c_refresh - public.deadline_max() - 60000
                              LIMIT p_cap_count
                         ) z
@@ -1609,7 +888,7 @@ BEGIN
                 v.e4_id, v.e4_project, v.e4_slug, v.e4_owner, v.e4_parent, v.e4_protected, v.e4_archived, v.e4_seal, NULL::bytea,
                 v.is_in, v.n_others, v.v_plaintext, v.e1_project_archived, v.e2_project_archived, v.e3_project_archived, v.e4_project_archived, v.s_reference, v.x_reference, v.c_generation, v.m_generation, v.c_token_hash,
                 CASE WHEN p_token_hash IS NOT NULL THEN json_build_object(
-                    'now', CURRENT_TIMESTAMP, 'credential', v.c_row, 'identity', (SELECT to_json(x) FROM public.identities x WHERE x.id = (v.c_row ->> 'identity_id')::uuid),
+                    'now', CURRENT_TIMESTAMP, 'passkey', v_passkey, 'passkey_held', v_passkey_held, 'credential', v.c_row, 'identity', (SELECT to_json(x) FROM public.identities x WHERE x.id = (v.c_row ->> 'identity_id')::uuid),
                     'policy', (SELECT a.seq::text FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1),
                     'project', (SELECT to_json(q) FROM public.projects q WHERE q.id = coalesce(v.e1_project, v.e2_project)),
                     'environment', (SELECT to_json(e) FROM public.environments e WHERE e.id = coalesce(v.e1_id, v.e2_id)),
@@ -1624,7 +903,7 @@ BEGIN
               LEFT JOIN LATERAL (
                   SELECT array_agg(coalesce(g.project_id, ge.project_id)) AS g_project, array_agg(g.environment_id) AS g_environment,
                          array_agg(g.environment_slug) AS g_slug, array_agg(g.role) AS g_role, array_agg(g.expires_at) AS g_expires
-                    FROM public.grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
+                    FROM public.vault_grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
                    WHERE g.principal = v.p
               ) gr ON v.m_status IS NOT NULL;
         ELSE
@@ -1650,7 +929,7 @@ BEGIN
                     b.last AS bulk_last
                   FROM (SELECT 1) one
                   LEFT JOIN LATERAL (SELECT x.number, x.mac FROM public.log_changes x ORDER BY x.number DESC LIMIT 1) n ON true
-                  LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.checkpoint_fence y WHERE y.only_row LIMIT 1) f ON true
+                  LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.log_fence y WHERE y.only_row LIMIT 1) f ON true
                   -- The roles and the policy, both rows in one read of their one-page table.
                   LEFT JOIN LATERAL (
                       SELECT max(g.value) FILTER (WHERE g.name = 'roles') AS r_value, (array_agg(g.seal) FILTER (WHERE g.name = 'roles'))[1] AS r_seal,
@@ -1674,7 +953,7 @@ BEGIN
                              -- A binding's object is its whole row (objects.ts, bindingObject), its seal checked over it.
                              CASE WHEN p_way = 2 AND wb.id IS NOT NULL THEN to_json(wb) END AS row
                   ) w
-                  LEFT JOIN public.principals m ON m.principal = w.principal
+                  LEFT JOIN public.vault_members m ON m.principal = w.principal
                   -- An archived key is gone (`secret.delete`): no object.
                   LEFT JOIN public.secrets s ON s.id = v_secret AND s.archived_at IS NULL
                   -- A key with no version of its own is a reference while its newest reference row names a source and has not ended (`ended_at`): an ended one's holder reads as no value, no source (`ended`).
@@ -1709,7 +988,7 @@ BEGIN
                                   WHEN ref.source_secret_id IS NULL OR (src.id IS NOT NULL AND ids.e3 IS NULL) THEN e2.parent_id ELSE e3.parent_id END AS parent
                   ) ve ON true
                   LEFT JOIN public.environments e4 ON e4.id = ve.parent AND ve.owner IS NOT NULL
-                  LEFT JOIN public.bulk_cap b ON b.principal = w.principal AND b.secret = v_secret
+                  LEFT JOIN public.log_bulk b ON b.principal = w.principal AND b.secret = v_secret
                  WHERE NOT dry
             ),
             v AS MATERIALIZED (
@@ -1734,7 +1013,7 @@ BEGIN
                     -- The other keys in the set, up to the cap: read only under the principal's lock, for a key not in it.
                     CASE WHEN locked AND i.p IS NOT NULL AND NOT coalesce(i.bulk_last > p_at - p_cap_window - c_refresh, false) THEN (
                         SELECT count(*)::integer FROM (
-                            SELECT 1 FROM public.bulk_cap o
+                            SELECT 1 FROM public.log_bulk o
                              WHERE o.principal = i.p AND o.secret <> v_secret AND o.last > p_at - p_cap_window - c_refresh - public.deadline_max() - 60000
                              LIMIT p_cap_count
                         ) z
@@ -1768,7 +1047,7 @@ BEGIN
                 v.e4_id, v.e4_project, v.e4_slug, v.e4_owner, v.e4_parent, v.e4_protected, v.e4_archived, v.e4_seal, NULL::bytea,
                 v.is_in, v.n_others, v.v_plaintext, v.e1_project_archived, v.e2_project_archived, v.e3_project_archived, v.e4_project_archived, v.s_reference, v.x_reference, v.c_generation, v.m_generation, v.c_token_hash,
                 CASE WHEN p_token_hash IS NOT NULL THEN json_build_object(
-                    'now', CURRENT_TIMESTAMP, 'credential', v.c_row, 'identity', (SELECT to_json(x) FROM public.identities x WHERE x.id = (v.c_row ->> 'identity_id')::uuid),
+                    'now', CURRENT_TIMESTAMP, 'passkey', v_passkey, 'passkey_held', v_passkey_held, 'credential', v.c_row, 'identity', (SELECT to_json(x) FROM public.identities x WHERE x.id = (v.c_row ->> 'identity_id')::uuid),
                     'policy', (SELECT a.seq::text FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1),
                     'project', (SELECT to_json(q) FROM public.projects q WHERE q.id = coalesce(v.e1_project, v.e2_project)),
                     'environment', (SELECT to_json(e) FROM public.environments e WHERE e.id = coalesce(v.e1_id, v.e2_id)),
@@ -1783,7 +1062,7 @@ BEGIN
               LEFT JOIN LATERAL (
                   SELECT array_agg(coalesce(g.project_id, ge.project_id)) AS g_project, array_agg(g.environment_id) AS g_environment,
                          array_agg(g.environment_slug) AS g_slug, array_agg(g.role) AS g_role, array_agg(g.expires_at) AS g_expires
-                    FROM public.grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
+                    FROM public.vault_grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
                    WHERE g.principal = v.p
               ) gr ON v.m_status IS NOT NULL;
         END IF;
@@ -1859,16 +1138,16 @@ BEGIN
             LOOP
                 b_lock := hashtextextended(r.c_principal || '/' || p_secret::text || '/' || b_period::text || '/' || b_round::text, 1668244066);
                 IF pg_try_advisory_xact_lock(b_lock) THEN
-                    UPDATE public.bulk_cap SET last = b_period WHERE principal = r.c_principal AND secret = p_secret AND last < b_period;
+                    UPDATE public.log_bulk SET last = b_period WHERE principal = r.c_principal AND secret = p_secret AND last < b_period;
                     EXIT;
                 END IF;
                 PERFORM pg_advisory_xact_lock_shared(b_lock);
-                EXIT WHEN NOT EXISTS (SELECT 1 FROM public.bulk_cap WHERE principal = r.c_principal AND secret = p_secret AND last < b_period);
+                EXIT WHEN NOT EXISTS (SELECT 1 FROM public.log_bulk WHERE principal = r.c_principal AND secret = p_secret AND last < b_period);
                 b_round := b_round + 1;
             END LOOP;
         ELSIF r.others < r.cap_count THEN
-            INSERT INTO public.bulk_cap (principal, secret, last) VALUES (r.c_principal, p_secret, b_period)
-                ON CONFLICT ON CONSTRAINT bulk_cap_pkey DO UPDATE SET last = greatest(bulk_cap.last, EXCLUDED.last);
+            INSERT INTO public.log_bulk (principal, secret, last) VALUES (r.c_principal, p_secret, b_period)
+                ON CONFLICT ON CONSTRAINT log_bulk_pkey DO UPDATE SET last = greatest(log_bulk.last, EXCLUDED.last);
         END IF;
     END IF;
     -- The deadline holds in Postgres to the end: a call that ran past it rolls back and writes nothing. The hot login's lock_timeout and statement_timeout bound the waits.
@@ -1887,15 +1166,189 @@ BEGIN
     END IF;
     RETURN CASE WHEN v_routed THEN json_build_object('row', to_json(r), 'route', v_route) ELSE to_json(r) END;
 END
-$function$;
+$$;
 --> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.use_route(p_token_hash bytea, p_project text, p_environment text, p_named text, p_stable text, p_reading smallint, p_signin boolean, p_issuers text[], p_roles jsonb, p_credential uuid, p_way smallint, p_principal text, p_place uuid, p_at bigint, p_purpose smallint, p_deadline bigint, p_read_mac bytea, p_secrets uuid[], p_places uuid[], p_requests bigint[], p_macs bytea[], p_covers bigint[], p_cover_ats bigint[], p_cover_requests bigint[], p_decided boolean[], p_offset integer, p_limit integer, p_lock text, p_use boolean, p_light boolean DEFAULT false)
- RETURNS json
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pg_temp'
- SET bytea_output TO 'hex'
-AS $function$
+REVOKE ALL ON FUNCTION use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean, text, boolean, text) FROM PUBLIC;
+--> statement-breakpoint
+GRANT EXECUTE ON FUNCTION use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean, text, boolean, text) TO coffre_vault;
+--> statement-breakpoint
+DROP FUNCTION use_named_batch(bytea, text, text, boolean, text[], boolean, text[], jsonb, bigint, smallint, bigint, bytea, text[], uuid[], uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], smallint, text, integer);
+--> statement-breakpoint
+-- `use_named_batch` as 0068 made it, but for `p_passkeys`, which its gate's named call holds the credential to.
+CREATE FUNCTION use_named_batch(
+    p_token_hash bytea, p_project text, p_environment text, p_handle boolean, p_unless text[], p_signin boolean, p_issuers text[], p_roles jsonb,
+    p_at bigint, p_purpose smallint, p_deadline bigint, p_read_mac bytea,
+    p_keys text[], p_credentials uuid[], p_secrets uuid[], p_places uuid[], p_requests bigint[], p_macs bytea[],
+    p_covers bigint[], p_cover_ats bigint[], p_cover_requests bigint[],
+    p_knowns bigint[], p_known_macs bytea[], p_cap_counts integer[], p_cap_windows bigint[], p_way smallint, p_principal text,
+    p_limit integer,
+    p_passkeys text DEFAULT NULL
+) RETURNS json
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET bytea_output = 'hex' AS $$
+DECLARE
+    n integer := coalesce(cardinality(p_keys), 0);
+    gate json;
+    names text[];
+    answers json[] := '{}';
+    by_ids boolean[] := '{}';
+    v_by boolean;
+    v_id uuid;
+    v_holder uuid;
+    v_rows json;
+    aheads json[] := '{}';
+    v_np uuid;
+    v_project uuid;
+    v_layers uuid[];
+    v_cut boolean;
+    v_ids uuid[];
+    v_holders uuid[];
+    v_sealed json[];
+BEGIN
+    IF p_token_hash IS NULL OR p_limit IS NULL OR p_limit < 1 OR p_read_mac IS NULL
+       OR (p_keys IS NULL AND (p_credentials IS NOT NULL OR p_secrets IS NOT NULL OR p_places IS NOT NULL OR p_requests IS NOT NULL OR p_macs IS NOT NULL
+                               OR p_covers IS NOT NULL OR p_cover_ats IS NOT NULL OR p_cover_requests IS NOT NULL
+                               OR p_knowns IS NOT NULL OR p_known_macs IS NOT NULL OR p_cap_counts IS NOT NULL OR p_cap_windows IS NOT NULL))
+       OR (p_keys IS NOT NULL AND (n = 0 OR n > p_limit
+           OR cardinality(p_credentials) IS DISTINCT FROM n OR cardinality(p_secrets) IS DISTINCT FROM n OR cardinality(p_places) IS DISTINCT FROM n
+           OR cardinality(p_requests) IS DISTINCT FROM n OR cardinality(p_macs) IS DISTINCT FROM n
+           OR cardinality(p_covers) IS DISTINCT FROM n OR cardinality(p_cover_ats) IS DISTINCT FROM n OR cardinality(p_cover_requests) IS DISTINCT FROM n
+           OR cardinality(p_knowns) IS DISTINCT FROM n OR cardinality(p_known_macs) IS DISTINCT FROM n
+           OR cardinality(p_cap_counts) IS DISTINCT FROM n OR cardinality(p_cap_windows) IS DISTINCT FROM n
+           OR (SELECT count(DISTINCT k) FROM unnest(p_keys) k) <> n OR array_position(p_keys, NULL) IS NOT NULL)) THEN
+        RAISE EXCEPTION 'a named batch names its token, and each key once, with one entry a key in each of its lists, at most its limit; or no key, for every one the place holds' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- The gate: the caller's standing at the place, by the request's names, from rows no key decides (0051's named call
+    -- with no key, read by names alone: it writes and locks nothing). It takes the fence, shared, held to the commit.
+    -- It holds the credential to the passkey check too (`p_passkeys`, T216), once: a change to the person's passkeys
+    -- that leaves no passkey behind the credential revokes it (passkeys.md, section 6.1), a change that waits for this
+    -- fence, so what the gate found stands for each key's named call below, which reads the credential again under it.
+    gate := public.use_credential(
+        NULL::uuid, NULL::uuid, 0::bigint, p_at, p_purpose, NULL::uuid, p_read_mac, p_deadline,
+        NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint, NULL::bytea, NULL::integer, NULL::bigint,
+        p_token_hash, p_project, p_environment, NULL::text,
+        false, p_handle, p_unless, p_signin, p_issuers, p_roles,
+        0::smallint, NULL::text, true, p_passkeys => p_passkeys
+    );
+    -- Anything but a place she stands at, its chain whole, by names read in full: answered on the gate's row alone.
+    IF (gate ->> 'state') IS DISTINCT FROM 'moved' OR (gate ->> 'n_standing') IS DISTINCT FROM 'true' OR (gate ->> 'n_cut') IS DISTINCT FROM 'false' THEN
+        RETURN json_build_object('gate', gate, 'keys', NULL, 'rows', '[]'::json, 'by_ids', '[]'::json, 'aheads', '[]'::json);
+    END IF;
+    -- The place, then what it inherits from, nearest first (0051's chain, which the gate found whole).
+    v_np := (gate ->> 'n_place')::uuid;
+    SELECT e.project_id INTO v_project FROM public.environments e WHERE e.id = v_np;
+    WITH RECURSIVE chain (id, parent, cut, depth, seen) AS (
+        SELECT e.id, e.parent_id, false, 0, ARRAY[e.id] FROM public.environments e WHERE e.id = v_np
+        UNION ALL
+        SELECT chain.parent, p.parent_id, p.id IS NULL OR p.archived_at IS NOT NULL OR p.slug LIKE '%~%' OR chain.parent = ANY (chain.seen) OR chain.depth >= 3,
+               chain.depth + 1, chain.seen || chain.parent
+          FROM chain LEFT JOIN public.environments p ON p.id = chain.parent
+         WHERE chain.parent IS NOT NULL AND NOT chain.cut
+    )
+    SELECT array_agg(chain.id ORDER BY chain.depth), coalesce(bool_or(chain.cut), false) INTO v_layers, v_cut FROM chain;
+    -- Cut since the gate read it, around the log (the fence holds every change back): nothing read, and no names listed
+    -- either, so that the vault cannot take it for a place she stands at that holds no key (review r1 of T165 PR 2).
+    IF v_cut OR v_layers IS NULL THEN
+        RETURN json_build_object('gate', gate, 'keys', NULL, 'rows', '[]'::json, 'by_ids', '[]'::json, 'aheads', '[]'::json);
+    END IF;
+    IF p_keys IS NULL THEN
+        -- Every key the place holds, as `resolveValues` lists them: a key held live in a layer is the place's unless a
+        -- nearer layer but the last removed it (a dismissal not restored). By name, sorted, as the app lists them.
+        WITH l AS (SELECT l.id, l.depth FROM unnest((SELECT v_layers)) WITH ORDINALITY l (id, depth)),
+        live AS (
+            SELECT x.key, min(l.depth) AS depth FROM l JOIN public.secrets x ON x.project_id = v_project AND x.environment_id = l.id AND x.archived_at IS NULL
+             GROUP BY x.key
+        ),
+        removed AS (
+            SELECT d.key, min(l.depth) AS depth FROM l JOIN public.dismissed_keys d ON d.environment_id = l.id AND d.restored_at IS NULL
+             WHERE l.depth < cardinality(v_layers) GROUP BY d.key
+        )
+        SELECT coalesce(array_agg(live.key ORDER BY live.key COLLATE "C"), '{}') INTO names
+          FROM live LEFT JOIN removed ON removed.key = live.key
+         WHERE removed.depth IS NULL OR live.depth <= removed.depth;
+    ELSE
+        names := p_keys;
+    END IF;
+    -- Each key, in order. Its name first, as 0051 resolves it: the nearest layer that holds it live, or but the last that
+    -- removed it. A key with a sealed value of its own is then a use by ids: made here when the vault passed its ids and
+    -- they are the name's now (the gate's credential; a key it inherits, through the place, 0051), else left to the
+    -- vault's batch by ids, which decides it next (its row null here, its ids in its `aheads`): a key's named call costs
+    -- its place, standing and chain read again, five times a use by ids (T165, PR 2's CI: 1,001 keys took 2.3 s, the
+    -- use's deadline 3). A use by ids logs its request whatever it finds; a plain value, a reference or a key the place
+    -- does not hold is no use's, and its named call decides it here, writing nothing (`useMany` never passed one either).
+    -- Its rows, for the app, which then reads nothing itself (`NamedKey.app`).
+    -- Every key's name resolved at once, in one statement, in the statement's order, with the rows of each sealed one.
+    WITH q AS (SELECT q.key, q.k FROM unnest((SELECT names[1:p_limit])) WITH ORDINALITY q (key, k)),
+    held AS (
+        SELECT q.k, h.id, h.holder FROM q LEFT JOIN LATERAL (
+            SELECT x.id, l.id AS holder
+              FROM unnest((SELECT v_layers)) WITH ORDINALITY l (id, depth)
+              LEFT JOIN public.secrets x ON x.project_id = v_project AND x.environment_id = l.id AND x.key = q.key AND x.archived_at IS NULL
+             WHERE x.id IS NOT NULL
+                OR (l.depth < cardinality(v_layers)
+                    AND EXISTS (SELECT 1 FROM public.dismissed_keys d WHERE d.environment_id = l.id AND d.key = q.key AND d.restored_at IS NULL))
+             ORDER BY l.depth LIMIT 1
+        ) h ON true
+    )
+    SELECT array_agg(held.id ORDER BY held.k), array_agg(held.holder ORDER BY held.k),
+           array_agg(CASE WHEN sv.id IS NOT NULL THEN json_build_object('id', s.id, 'sensitive', sv.sensitive, 'secret', to_json(s), 'version', to_json(sv),
+                                     'held', CASE WHEN held.holder IS DISTINCT FROM v_np THEN json_build_object('environmentId', held.holder, 'slug', e.slug) END) END
+                     ORDER BY held.k)
+      INTO v_ids, v_holders, v_sealed
+      FROM held
+      LEFT JOIN public.secrets s ON s.id = held.id
+      LEFT JOIN public.secret_versions sv ON sv.id = s.current_version_id AND sv.plaintext IS NULL
+      LEFT JOIN public.environments e ON e.id = held.holder AND held.holder IS DISTINCT FROM v_np;
+    FOR k IN 1 .. least(coalesce(cardinality(names), 0), p_limit) LOOP
+        v_id := v_ids[k];
+        v_holder := v_holders[k];
+        v_rows := v_sealed[k];
+        v_by := v_rows IS NOT NULL AND p_keys IS NOT NULL AND p_credentials[k] IS NOT NULL
+            AND p_credentials[k] = (gate ->> 'n_credential')::uuid AND p_secrets[k] = v_id
+            AND p_places[k] IS NOT DISTINCT FROM (CASE WHEN v_holder IS DISTINCT FROM v_np THEN v_np END);
+        IF v_by THEN
+            answers := answers || public.use_credential(
+                p_credentials[k], p_secrets[k], p_requests[k], p_at, p_purpose, p_places[k], p_macs[k], p_deadline,
+                p_covers[k], p_cover_ats[k], p_cover_requests[k], p_knowns[k], p_known_macs[k], p_cap_counts[k], p_cap_windows[k],
+                NULL::bytea, NULL::text, NULL::text, NULL::text,
+                false, false, NULL::text[], NULL::boolean, NULL::text[], NULL::jsonb,
+                p_way, p_principal
+            );
+        ELSIF v_rows IS NOT NULL THEN
+            answers := array_append(answers, NULL::json);
+        ELSE
+            answers := answers || public.use_credential(
+                NULL::uuid, NULL::uuid, 0::bigint, p_at, p_purpose, NULL::uuid, p_read_mac, p_deadline,
+                NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint, NULL::bytea, NULL::integer, NULL::bigint,
+                p_token_hash, p_project, p_environment, names[k],
+                false, p_handle, p_unless, p_signin, p_issuers, p_roles,
+                0::smallint, NULL::text, true
+            );
+        END IF;
+        by_ids := by_ids || v_by;
+        aheads := array_append(aheads, v_rows);
+    END LOOP;
+    RETURN json_build_object('gate', gate, 'keys', CASE WHEN p_keys IS NULL THEN to_json(names) END, 'rows', array_to_json(answers), 'by_ids', array_to_json(by_ids), 'aheads', array_to_json(aheads));
+END
+$$;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION use_named_batch(bytea, text, text, boolean, text[], boolean, text[], jsonb, bigint, smallint, bigint, bytea, text[], uuid[], uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], smallint, text, integer, text) FROM PUBLIC;
+--> statement-breakpoint
+GRANT EXECUTE ON FUNCTION use_named_batch(bytea, text, text, boolean, text[], boolean, text[], jsonb, bigint, smallint, bigint, bytea, text[], uuid[], uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], smallint, text, integer, text) TO coffre_vault;
+--> statement-breakpoint
+DROP FUNCTION use_route(bytea, text, text, text, text, smallint, boolean, text[], jsonb, uuid, smallint, text, uuid, bigint, smallint, bigint, bytea, uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], boolean[], integer, integer, text, boolean, boolean);
+--> statement-breakpoint
+-- `use_route` as 0071 made it, but for `p_passkeys`, which its gates' named calls hold a handle's credential to, as
+-- `use_named_batch`'s (review r4 of #528), and its warm-up's mark, which moves with `use_credential`'s.
+CREATE FUNCTION use_route(
+    p_token_hash bytea, p_project text, p_environment text, p_named text, p_stable text, p_reading smallint,
+    p_signin boolean, p_issuers text[], p_roles jsonb,
+    p_credential uuid, p_way smallint, p_principal text, p_place uuid,
+    p_at bigint, p_purpose smallint, p_deadline bigint, p_read_mac bytea,
+    p_secrets uuid[], p_places uuid[], p_requests bigint[], p_macs bytea[],
+    p_covers bigint[], p_cover_ats bigint[], p_cover_requests bigint[], p_decided boolean[],
+    p_offset integer, p_limit integer, p_lock text, p_use boolean, p_light boolean DEFAULT false, p_passkeys text DEFAULT NULL
+) RETURNS json
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET bytea_output = 'hex' AS $$
 DECLARE
     v_handle boolean := p_token_hash IS NOT NULL;
     -- 1: the place reading; 2: the stable reading (a workload's, `proxyItem`'s at a handle's own place).
@@ -1999,7 +1452,7 @@ BEGIN
             false, v_reading = 2,
             CASE WHEN v_reading = 2 AND p_project IS NOT NULL THEN ARRAY[p_project || '/' || p_environment] ELSE '{}'::text[] END,
             p_signin, p_issuers, p_roles,
-            0::smallint, NULL::text, true, NULL::text, v_light
+            0::smallint, NULL::text, true, NULL::text, v_light, p_passkeys => p_passkeys
         );
         v_gated := v_reading;
         EXIT WHEN p_named IS NULL OR v_attempt = 2;
@@ -2114,11 +1567,11 @@ BEGIN
                        lm.number
                   INTO editor, v_number
                   FROM (SELECT 1) one
-                  LEFT JOIN public.principals m ON m.principal = v_editor
+                  LEFT JOIN public.vault_members m ON m.principal = v_editor
                   LEFT JOIN LATERAL (
                       SELECT array_agg(coalesce(g.project_id, ge.project_id)) AS g_project, array_agg(g.environment_id) AS g_environment,
                              array_agg(g.environment_slug) AS g_slug, array_agg(g.role) AS g_role, array_agg(g.expires_at::text) AS g_expires
-                        FROM public.grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
+                        FROM public.vault_grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
                        WHERE g.principal = v_editor
                   ) gr ON m.status IS NOT NULL
                   LEFT JOIN LATERAL (
@@ -2189,7 +1642,7 @@ BEGIN
             false, v_reading = 2,
             CASE WHEN v_reading = 2 AND p_project IS NOT NULL THEN ARRAY[p_project || '/' || p_environment] ELSE '{}'::text[] END,
             p_signin, p_issuers, p_roles,
-            0::smallint, NULL::text, true, NULL::text, false
+            0::smallint, NULL::text, true, NULL::text, false, p_passkeys => p_passkeys
         );
     END IF;
     -- The handle's places by path, as named now, for the vault's map to pick the next reading by (`made_for`): on an
@@ -2225,126 +1678,123 @@ BEGIN
         'made', coalesce(v_right, false), 'rows', array_to_json(answers)
     );
 END
-$function$;
+$$;
 --> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.use_stands(p_credential uuid, p_place uuid, p_purpose smallint, p_at bigint, p_roles jsonb)
- RETURNS boolean
- LANGUAGE plpgsql
- STABLE PARALLEL SAFE
-AS $function$
-BEGIN
-    RETURN coalesce((
-        SELECT k.live AND (k.c_scope IS NULL OR EXISTS (
-                    SELECT 1 FROM jsonb_array_elements(k.c_scope) g
-                     WHERE g.value ->> 'projectId' = k.e_project::text AND (g.value ->> 'environmentId' IS NULL OR g.value ->> 'environmentId' = k.e_id::text)
-                       AND coalesce(CASE WHEN g.value ? 'permissions' THEN g.value -> 'permissions' -> CASE WHEN k.guarded THEN 'protected' ELSE 'normal' END
-                                         ELSE p_roles -> 'roles' -> (g.value ->> 'role') -> CASE WHEN k.guarded THEN 'protected' ELSE 'permissions' END END @> k.wanted, false)))
-           AND ((public.use_admits(k.m_scope -> 'projects', k.e_project::text) AND public.use_admits(k.m_scope -> 'environments', k.e_slug)
-                 AND coalesce(coalesce(k.r_value -> 'instanceRoles' -> k.role, p_roles -> 'instanceRoles' -> k.role) -> CASE WHEN k.guarded THEN 'protected' ELSE 'permissions' END @> k.wanted, false))
-             OR EXISTS (
-                    SELECT 1 FROM public.grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
-                     WHERE g.principal = k.principal AND (g.expires_at IS NULL OR g.expires_at > p_at)
-                       AND coalesce(g.project_id, ge.project_id) = k.e_project AND (g.environment_id IS NULL OR g.environment_id = k.e_id)
-                       AND coalesce(coalesce(k.r_value -> 'roles' -> g.role, p_roles -> 'roles' -> g.role) -> CASE WHEN k.guarded THEN 'protected' ELSE 'permissions' END @> k.wanted, false)))
-          FROM (
-              -- Each row by its key alone, what ends the credential weighed here: a condition on `revoked_at` would
-              -- let a generic plan take the live credentials' partial index and read them all (R48).
-              SELECT c.revoked_at IS NULL AND m.status = 'active' AND m.generation = c.generation
-                       AND coalesce(p_at < floor(extract(epoch FROM least(c.expires_at, c.not_after)) * 1000)::bigint, true) AS live,
-                     c.principal, e.id AS e_id, e.project_id AS e_project, e.slug AS e_slug,
-                     c.principal LIKE 'user:%' AND coalesce(e.protected, false) AS guarded,
-                     to_jsonb(CASE WHEN p_purpose % 256 = 4 THEN 'secret.use' ELSE 'secret.read' END) AS wanted,
-                     -- A scope that is no list stands as none: the rule reads it as nothing, and refuses.
-                     CASE WHEN c.scope IS NOT NULL AND pg_input_is_valid(c.scope, 'jsonb') AND jsonb_typeof(c.scope::jsonb) = 'array' THEN c.scope::jsonb END AS c_scope,
-                     CASE WHEN r.value IS NOT NULL AND pg_input_is_valid(r.value, 'jsonb') THEN r.value::jsonb END AS r_value,
-                     -- `storedRole` (@coffre/db/grants) for a person: their role, and its scope; one that does not parse, everywhere.
-                     sr.role,
-                     CASE WHEN sr.role = 'member' OR m.scope IS NULL OR NOT pg_input_is_valid(m.scope, 'jsonb') THEN '{"projects": "all", "environments": "all"}'::jsonb
-                          ELSE m.scope::jsonb END AS m_scope
-                FROM public.credentials c
-                JOIN public.principals m ON m.principal = c.principal
-                JOIN public.environments e ON e.id = p_place
-                LEFT JOIN public.log_config r ON r.name = 'roles'
-                CROSS JOIN LATERAL (
-                    SELECT CASE WHEN c.principal NOT LIKE 'user:%' THEN 'member'
-                                WHEN m.role IS NULL THEN CASE WHEN m.owner THEN 'admin' ELSE 'member' END
-                                WHEN p_roles -> 'instanceRoles' ? m.role THEN m.role
-                                ELSE 'member' END AS role
-                ) sr
-               WHERE c.id = p_credential
-          ) k
-    ), false);
-END
-$function$;
+REVOKE ALL ON FUNCTION use_route(bytea, text, text, text, text, smallint, boolean, text[], jsonb, uuid, smallint, text, uuid, bigint, smallint, bigint, bytea, uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], boolean[], integer, integer, text, boolean, boolean, text) FROM PUBLIC;
 --> statement-breakpoint
-CREATE OR REPLACE FUNCTION public.write_inputs(p_token_hash bytea, p_project text, p_environment text, p_keys text[])
- RETURNS text
- LANGUAGE plpgsql
- STABLE
- SET search_path TO 'pg_catalog', 'pg_temp'
- SET bytea_output TO 'hex'
- SET "TimeZone" TO 'UTC'
-AS $function$
+GRANT EXECUTE ON FUNCTION use_route(bytea, text, text, text, text, smallint, boolean, text[], jsonb, uuid, smallint, text, uuid, bigint, smallint, bigint, bytea, uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], boolean[], integer, integer, text, boolean, boolean, text) TO coffre_vault;
+--> statement-breakpoint
+-- `write_request` as 0061 made it (its settings as 0068 left them), but for the passkey rows in the app's.
+CREATE OR REPLACE FUNCTION write_request(p_at bigint, p_token_hash bytea, p_project text, p_environment text, p_keys text[]) RETURNS json
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET bytea_output = 'hex' AS $$
 DECLARE
-    v jsonb;
+    v_inputs text;
+    v_app text;
+    v_number bigint;
 BEGIN
-    SELECT jsonb_build_object(
-        'credential', CASE WHEN c.id IS NOT NULL THEN jsonb_build_object(
-            'row', to_jsonb(c) - 'last_used_at' - 'last_used_ip',
-            'expires', floor(extract(epoch FROM least(c.expires_at, c.not_after)) * 1000)::bigint,
-            'newest', (SELECT to_jsonb(x) FROM public.log_changes x WHERE x.object = public.log_object('credential', c.id::text) ORDER BY x.number DESC LIMIT 1)) END,
-        'identity', to_jsonb(i) - 'last_sign_in_at',
-        'principal', CASE WHEN c.id IS NOT NULL THEN jsonb_build_object(
-            'row', to_jsonb(m),
-            -- Every grant, lapsed ones too, an environment's with its project, in one order.
-            'grants', (SELECT coalesce(jsonb_agg(to_jsonb(g) || jsonb_build_object('resolved_project', coalesce(g.project_id, ge.project_id))
-                                 ORDER BY g.project_id, g.environment_id, g.environment_slug, g.role, g.expires_at), '[]'::jsonb)
-                         FROM public.grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id WHERE g.principal = c.principal),
-            -- 0.14's newest access entry about the principal (UsesSeeOldWrites), as a use reads it.
-            'access', (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.subject_principal = c.principal AND a.decision = 'allow'
-                AND a.action IN ('member.add', 'member.restore', 'member.owner', 'member.role', 'member.remove', 'access.grant', 'access.revoke') ORDER BY a.seq DESC LIMIT 1),
-            'newest', (SELECT to_jsonb(x) FROM public.log_changes x WHERE x.object = public.log_object('principal', c.principal) ORDER BY x.number DESC LIMIT 1)) END,
-        'roles', jsonb_build_object('value', cfg.r_value, 'seal', cfg.r_seal,
-            'newest', (SELECT to_jsonb(x) FROM public.log_changes x WHERE x.object = public.log_object('roles', 'instance') ORDER BY x.number DESC LIMIT 1)),
-        'policy', jsonb_build_object('value', cfg.p_value, 'seal', cfg.p_seal,
-            'newest', (SELECT to_jsonb(x) FROM public.log_changes x WHERE x.object = public.log_object('policy', 'instance') ORDER BY x.number DESC LIMIT 1)),
-        'policy14', (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1),
-        'project', to_jsonb(p),
-        'environment', CASE WHEN e.id IS NOT NULL THEN jsonb_build_object(
-            'row', to_jsonb(e),
-            'newest', (SELECT to_jsonb(x) FROM public.log_changes x WHERE x.object = public.log_object('environment', e.id::text) ORDER BY x.number DESC LIMIT 1)) END,
-        -- Each key named, in the order asked, by its name in the place: its row (archived or not) and its current
-        -- version, or none; and its object's newest change. A probe each, by the key's index (LIMIT 1: a lateral the
-        -- planner keeps a probe, as `app_read`'s).
-        'secrets', (SELECT coalesce(jsonb_agg(jsonb_build_object(
-                'key', k.key,
-                'row', to_jsonb(s),
-                'version', CASE WHEN sv.id IS NOT NULL THEN jsonb_build_object(
-                    'id', sv.id, 'version', sv.version, 'sensitive', sv.sensitive, 'kek_provider', sv.kek_provider, 'kek_id', sv.kek_id, 'kek_version', sv.kek_version,
-                    'wrapped_dek', encode(sv.wrapped_dek, 'hex'),
-                    -- A plain value by its digest, as its object holds it (`plainDigest`), in hex (Postgres's base64 breaks
-                    -- its lines): its text stays out of the read.
-                    'digest', CASE WHEN sv.plaintext IS NOT NULL THEN encode(sha256(convert_to(sv.plaintext, 'UTF8')), 'hex') END) END,
-                'newest', CASE WHEN s.id IS NOT NULL THEN (SELECT to_jsonb(x) FROM public.log_changes x WHERE x.object = public.log_object('secret', s.id::text) ORDER BY x.number DESC LIMIT 1) END
-            ) ORDER BY k.ord), '[]'::jsonb)
-              FROM unnest(p_keys) WITH ORDINALITY k (key, ord)
-              LEFT JOIN LATERAL (
-                  SELECT * FROM public.secrets x WHERE x.project_id = e.project_id AND x.environment_id = e.id AND x.key = k.key LIMIT 1
-              ) s ON e.id IS NOT NULL
-              LEFT JOIN public.secret_versions sv ON sv.id = s.current_version_id)
-    ) INTO v
-      FROM (SELECT 1) one
-      LEFT JOIN public.credentials c ON c.token_hash = p_token_hash
-      LEFT JOIN public.identities i ON i.id = c.identity_id
-      LEFT JOIN public.principals m ON m.principal = c.principal
-      LEFT JOIN LATERAL (
-          SELECT max(g.value) FILTER (WHERE g.name = 'roles') AS r_value, (array_agg(g.seal) FILTER (WHERE g.name = 'roles'))[1] AS r_seal,
-                 max(g.value) FILTER (WHERE g.name = 'policy') AS p_value, (array_agg(g.seal) FILTER (WHERE g.name = 'policy'))[1] AS p_seal
-            FROM public.log_config g
-      ) cfg ON true
-      -- Standing slugs only, as `app_read` resolves them: a tombstone's is no place.
-      LEFT JOIN public.projects p ON p.slug = p_project AND p.slug NOT LIKE '%~%'
-      LEFT JOIN public.environments e ON e.project_id = p.id AND e.slug = p_environment AND e.slug NOT LIKE '%~%';
-    RETURN v::text;
+    IF p_token_hash IS NULL OR p_project IS NULL OR p_environment IS NULL OR p_keys IS NULL OR cardinality(p_keys) = 0 THEN
+        RAISE EXCEPTION 'a write names its token, its place and its keys' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- Its Worker's clock ahead by over a minute (0022 says why): nothing read.
+    IF p_at IS NULL OR p_at > (extract(epoch FROM clock_timestamp()) * 1000)::bigint + 60000 THEN RETURN json_build_object('state', 'ahead'); END IF;
+    PERFORM pg_advisory_xact_lock_shared(1668244070, 0);
+    -- A statement of its own, after the lock: its snapshot is taken now, and sees every change committed before the
+    -- fence was held; none is numbered until this one's transaction ends.
+    SELECT public.write_inputs(p_token_hash, p_project, p_environment, p_keys),
+           (public.app_read(p_token_hash, p_project, p_environment, p_keys)::jsonb || jsonb_build_object('now', CURRENT_TIMESTAMP)
+               -- What stands behind a person's credential, read with it (T216): the passkey it names and whether its
+               -- person holds a live one, as the app's own statement reads them (`credentialRow`); none for a kind the
+               -- check exempts. The app holds them to its check and their MACs before anything commits.
+               || coalesce((SELECT jsonb_build_object('passkey', to_jsonb(k), 'passkey_held',
+                                CASE WHEN EXISTS (SELECT 1 FROM public.passkeys h WHERE h.principal = c.principal AND h.generation = c.generation AND h.removed_at IS NULL) THEN 2
+                                     WHEN EXISTS (SELECT 1 FROM public.passkeys h WHERE h.principal = c.principal) THEN 1 END)
+                              FROM public.credentials c LEFT JOIN public.passkeys k ON k.id = c.passkey_id
+                             WHERE c.token_hash = p_token_hash AND c.kind IN ('browser', 'cli', 'personal')), '{}'::jsonb))::text,
+           nextval('public.log_number')
+      INTO v_inputs, v_app, v_number;
+    RETURN json_build_object('state', 'read', 'number', v_number::text, 'inputs', v_inputs,
+        'digest', encode(sha256(convert_to(v_inputs, 'UTF8')), 'hex'), 'app', v_app);
 END
-$function$;
+$$;
+--> statement-breakpoint
+-- `admit_read` as 0062 made it (its settings as 0068 left them), but for the passkey rows in the app's.
+CREATE OR REPLACE FUNCTION admit_read(p_at bigint, p_token_hash bytea, p_principal text, p_scope text[]) RETURNS json
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET bytea_output = 'hex' AS $$
+DECLARE
+    v_inputs text;
+    v_app text;
+BEGIN
+    IF p_token_hash IS NULL OR p_principal IS NULL THEN
+        RAISE EXCEPTION 'an add names its token and the member it adds' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- Its Worker's clock ahead by over a minute (0022 says why): nothing read.
+    IF p_at IS NULL OR p_at > (extract(epoch FROM clock_timestamp()) * 1000)::bigint + 60000 THEN RETURN json_build_object('state', 'ahead'); END IF;
+    -- One statement, one snapshot: the read and the app's rows of the same moment.
+    SELECT public.admit_inputs(p_token_hash, p_principal, p_scope),
+           (public.app_read(p_token_hash, NULL, NULL, NULL)::jsonb || jsonb_build_object('now', CURRENT_TIMESTAMP)
+               -- What stands behind a person's credential, read with it (T216): the passkey it names and whether its
+               -- person holds a live one, as the app's own statement reads them (`credentialRow`); none for a kind the
+               -- check exempts. The app holds them to its check and their MACs before anything commits.
+               || coalesce((SELECT jsonb_build_object('passkey', to_jsonb(k), 'passkey_held',
+                                CASE WHEN EXISTS (SELECT 1 FROM public.passkeys h WHERE h.principal = c.principal AND h.generation = c.generation AND h.removed_at IS NULL) THEN 2
+                                     WHEN EXISTS (SELECT 1 FROM public.passkeys h WHERE h.principal = c.principal) THEN 1 END)
+                              FROM public.credentials c LEFT JOIN public.passkeys k ON k.id = c.passkey_id
+                             WHERE c.token_hash = p_token_hash AND c.kind IN ('browser', 'cli', 'personal')), '{}'::jsonb))::text
+      INTO v_inputs, v_app;
+    RETURN json_build_object('state', 'read', 'inputs', v_inputs, 'digest', encode(sha256(convert_to(v_inputs, 'UTF8')), 'hex'), 'app', v_app);
+END
+$$;
+--> statement-breakpoint
+-- As 0060's: each use function runs as its owner, and each it calls must be that owner's to execute, granted by name,
+-- caller to callee. The three made again here are the login's that runs this, a member of the owner where the owner
+-- migrated before (`scripts/test-schema-owner.sh`), and the drop took each grant made to the old ones: `use_batch`,
+-- 0048's, would lose `use_credential`, and every batch read, the previous release's included, would fail.
+DO $$
+DECLARE
+    v_credential regprocedure := 'public.use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean, text, boolean, text)';
+    v_call record;
+    v_owner name;
+BEGIN
+    FOR v_call IN SELECT * FROM (VALUES
+        (v_credential, 'public.use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid, text)'::regprocedure),
+        (v_credential, 'public.use_stands(uuid, uuid, smallint, bigint, jsonb)'::regprocedure),
+        (v_credential, 'public.use_stands_personal(uuid, uuid, bigint, jsonb)'::regprocedure),
+        (v_credential, 'public.use_admits(jsonb, text)'::regprocedure),
+        (v_credential, 'public.use_scope_holds(uuid, uuid, text, jsonb)'::regprocedure),
+        ('public.use_batch(uuid, uuid[], bigint[], bigint, smallint, uuid[], bytea[], bigint, bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], boolean[], smallint, text, text)'::regprocedure, v_credential),
+        ('public.use_named_batch(bytea, text, text, boolean, text[], boolean, text[], jsonb, bigint, smallint, bigint, bytea, text[], uuid[], uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], smallint, text, integer, text)'::regprocedure, v_credential),
+        ('public.use_route(bytea, text, text, text, text, smallint, boolean, text[], jsonb, uuid, smallint, text, uuid, bigint, smallint, bigint, bytea, uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], boolean[], integer, integer, text, boolean, boolean, text)'::regprocedure, v_credential)
+    ) AS calls(caller, callee) LOOP
+        v_owner := (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = v_call.caller);
+        IF NOT has_function_privilege(v_owner, v_call.callee, 'EXECUTE') THEN
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', v_call.callee, v_owner);
+        END IF;
+    END LOOP;
+END
+$$;
+--> statement-breakpoint
+-- The three that now read `passkeys` run as their owners too, and each must be able to read it. `write_request` and
+-- `admit_read` keep 0061's and 0062's owner, which need not be the login that made `passkeys` in 0063: where the owner
+-- migrated through 0062 and a member of it ran the rest (`scripts/test-schema-owner.sh`), the table is the member's,
+-- the old owner may not read it, and every key write and member add, the previous release's included, would fail.
+DO $$
+DECLARE
+    v_reader regprocedure;
+    v_owner name;
+BEGIN
+    FOREACH v_reader IN ARRAY ARRAY[
+        'public.use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean, text, boolean, text)'::regprocedure,
+        'public.write_request(bigint, bytea, text, text, text[])'::regprocedure,
+        'public.admit_read(bigint, bytea, text, text[])'::regprocedure
+    ] LOOP
+        v_owner := (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = v_reader);
+        IF NOT has_table_privilege(v_owner, 'public.passkeys', 'SELECT') THEN
+            EXECUTE format('GRANT SELECT ON public.passkeys TO %I', v_owner);
+            -- A login that may not grant it only gets a warning: stop here rather than leave every key write failing.
+            IF NOT has_table_privilege(v_owner, 'public.passkeys', 'SELECT') THEN
+                RAISE EXCEPTION '% runs as %, who cannot read passkeys and cannot be granted it by %', v_reader, v_owner, current_user;
+            END IF;
+        END IF;
+    END LOOP;
+END
+$$;

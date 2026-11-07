@@ -2945,7 +2945,8 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
     // Read as a URL before anything in it changes, so a swap never makes a scheme or a host of it. Each byte beyond ASCII
     // as its `%XX`, the same bytes to a URL, which would encode the character instead: decoded once, below, it is as it came.
     const bytes = raw.replace(/[\u0080-\u00ff]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
-    // A `Location` no URL reads, `//` say, is nowhere under the upstream. A relative one is the app's URL's, not the target's.
+    // A `Location` no URL reads, `//` say, is nowhere under the upstream. A relative one is the app's URL's, not the target's;
+    // one whose first segment has a raw colon (`bot123:AAE/getMe`) parses as a scheme, so it is not under the upstream: a 502.
     const to = URL.canParse(bytes, asSent) ? new URL(bytes, asSent) : null;
     const inside = to !== null && to.origin === credential.base.origin && (to.pathname === under || to.pathname.startsWith(`${under}/`));
     if (inside) {

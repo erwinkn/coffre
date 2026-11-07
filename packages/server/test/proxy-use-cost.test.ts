@@ -297,21 +297,19 @@ test("a reveal of one key is the vault's one call, as a /use is; a reveal of sev
   const batch = 'SELECT use_batch( $1::uuid, $2::';
   // What the app reads itself of a place's keys with no value of their own: whether a reference holds one (`valuesIn`).
   const references = ['select "secret_references"."id",', 'select "secrets"."id", "secrets"'];
-  // A person's credential, with passkeys not off: the passkey check, one statement before the vault's call, which reads
-  // the credential and its person's passkeys and nothing of the key (passkeys.md, section 6.4; `passkeyAhead`). A
-  // service's credential holds no passkey, and runs none.
-  const passkey = ['select "credentials"."kind", "cr'];
+  // A person's credential, with passkeys not off, alike: the vault's call holds it to the passkey check and answers
+  // its passkey rows with the rest, which the app checks, reading nothing itself (T216; passkeys.md, section 6.4).
   const cases = [
     // One key, by its path or as a list of one: the vault's use by name, warm, which answers the rows the app checks.
-    ['a reveal of one key', personal, { path: 'market/dev/API_KEY' }, passkey, [use]],
-    ['a reveal of its one named key', personal, { path: 'market/dev', keys: ['API_KEY'] }, passkey, [use]],
+    ['a reveal of one key', personal, { path: 'market/dev/API_KEY' }, [], [use]],
+    ['a reveal of its one named key', personal, { path: 'market/dev', keys: ['API_KEY'] }, [], [use]],
     ['a reveal of one key, as a service', service, { path: 'market/dev/API_KEY' }, [], [use]],
     // Several: the vault's one call by name (T165), its gate and each key's named read in one statement, warm (asked
     // once before, every key in the caller's cap's set). A person's read leaves sensitive values out, so its first
     // statement passes no ids and writes nothing: its uses are a batch by ids after it, as an environment's are, whose
     // keys the vault lists itself (use-named-many.test.ts).
-    ['a reveal of an environment', personal, { path: 'market/dev' }, [...passkey, ...references], [named, batch]],
-    ['a reveal of its named keys', personal, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }, passkey, [named, batch]],
+    ['a reveal of an environment', personal, { path: 'market/dev' }, references, [named, batch]],
+    ['a reveal of its named keys', personal, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }, [], [named, batch]],
     ['an export, as a service', service, { path: 'market/dev' }, references, [named, batch]],
     ['an export of named keys, as a service, mapped', service, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }, [], [named]],
   ] as const;

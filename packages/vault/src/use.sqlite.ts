@@ -1,6 +1,6 @@
 
 import { personalOf } from '@coffre/core/schemas';
-import { ACCESS_ACTIONS } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, type CredentialAcceptance } from '@coffre/core/vault';
 import type { Database, Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql, type SQL } from 'drizzle-orm';
@@ -608,6 +608,17 @@ class Batched implements Rows {
   }
 }
 
+/**
+ * Whether the passkey check takes a named call's credential (T216; docs/design/passkeys.md, section 6.2), as 0073's
+ * `use_credential` decides it: a person's session or token, under a policy not `off`, that names a live passkey of
+ * theirs; or names none, under `optional`, while they hold no live one. Any other kind, or `off`: taken.
+ */
+function passkeyBacks(policy: CredentialAcceptance['passkeys'], credential: { kind: string; passkey_id: string | null; backed: number | null; holds: number }): boolean {
+  if (policy === 'off' || !['browser', 'cli', 'personal'].includes(credential.kind)) return true;
+  if (credential.passkey_id !== null) return credential.backed === 1;
+  return policy === 'optional' && credential.holds === 0;
+}
+
 async function useOnce(tx: Queryable, call: UseCall, rows: Rows, routed?: { read: RouteRead | null }): Promise<UseRow> {
   const one = async <T>(query: SQL): Promise<T | undefined> => (await rowsOf<T>(tx, query))[0];
   const once = <T>(key: string, query: SQL) => rows.read(key, () => one<T>(query));
@@ -615,13 +626,23 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows, routed?: { read
   const nothing = (state: string): UseRow => ({ state } as UseRow);
   if (call.deadline > call.at + USE_DEADLINE_MS) return nothing('late');
   if (call.at > now + USE_AHEAD_MS) return nothing('ahead');
-  // A named call's credential first, held to what the app's config accepts (0045, reviews r6 and r7 of D153): one the
-  // app would refuse is answered as a token no credential has, before the place, the key or anything else is read.
+  // A named call's credential first, held to what the app's config accepts (0045, reviews r6 and r7 of D153), its
+  // passkey policy among it (0073, T216): one the app would refuse is answered as a token no credential has, before the
+  // place, the key or anything else is read. What stands behind a person's credential is read with it: whether the
+  // passkey it names is live and its person's at its generation (`backed`), and whether its person holds a live one
+  // (`holds`). Their MACs are the app's, which reads its own rows on SQLite.
   const names = call.names;
-  const credential = names === undefined ? undefined : await one<{ id: string; places: string | null; principal: string; kind: string; provider: string | null; issuer_hash: string | null }>(sql`SELECT
-    c.id, c.places, c.principal, c.kind, x.provider, x.issuer_hash FROM credentials c LEFT JOIN identities x ON x.id = c.identity_id WHERE c.token_hash = ${names.tokenHash}`);
+  const credential = names === undefined ? undefined : await one<{
+    id: string; places: string | null; principal: string; kind: string; provider: string | null; issuer_hash: string | null;
+    passkey_id: string | null; backed: number | null; holds: number;
+  }>(sql`SELECT
+    c.id, c.places, c.principal, c.kind, x.provider, x.issuer_hash, c.passkey_id,
+    k.removed_at IS NULL AND k.principal = c.principal AND k.generation = c.generation AS backed,
+    EXISTS (SELECT 1 FROM passkeys h WHERE h.principal = c.principal AND h.generation = c.generation AND h.removed_at IS NULL) AS holds
+    FROM credentials c LEFT JOIN identities x ON x.id = c.identity_id LEFT JOIN passkeys k ON k.id = c.passkey_id WHERE c.token_hash = ${names.tokenHash}`);
   if (names !== undefined && (credential === undefined || !names.accepts.signin
-    || (credential.kind === 'browser' && !names.accepts.issuers.includes(`${credential.provider}:${credential.issuer_hash}`)))) return nothing('unknown');
+    || (credential.kind === 'browser' && !names.accepts.issuers.includes(`${credential.provider}:${credential.issuer_hash}`))
+    || !passkeyBacks(names.accepts.passkeys, credential))) return nothing('unknown');
   const newestOf = (kind: Kind, id: string | null) =>
     id === null ? Promise.resolve(undefined) : once<Changed>(`newest\n${objectKey({ kind, id })}`, sql`SELECT ${CHANGED} FROM log_changes c WHERE c.object = ${objectKey({ kind, id })} ORDER BY c.number DESC LIMIT 1`);
   const n = await once<{ number: string; mac: Buffer }>('head', sql`SELECT CAST(c.number AS TEXT) AS number, c.mac FROM log_changes c ORDER BY c.number DESC LIMIT 1`);

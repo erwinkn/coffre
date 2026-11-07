@@ -22,7 +22,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, entryOf, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
-import { steppedUp } from './passkey-rows.ts';
+import { addPasskey, removePasskey, steppedUp } from './passkey-rows.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 
 const POSTGRES = postgresOnly("counts the app's and the vault's Postgres round trips");
@@ -31,6 +31,11 @@ const ROOT = 'admin@acme.example';
 const SERVICE = 'token:ci-web';
 /** A Viewer of market/dev, who runs no instance: refused a key write there, and any add. */
 const VIEWER = 'viewer@acme.example';
+/**
+ * An Admin, measured on a deployment of its own under the policy `off`, with a session that names no passkey and only a
+ * removed passkey behind them: nothing behind the credential is read, as nothing decides on it (review r1 of #528).
+ */
+const ADMIN = 'admin-off@acme.example';
 
 /** A client whose statements go to the pool of the request under way: on Workers, each request opens its own. */
 class PerRequest {
@@ -59,6 +64,7 @@ let appClient: PerRequest;
 let runtime: CoffreRuntime;
 let owner: CoffreClient;
 let viewer: CoffreClient;
+let admin: CoffreClient;
 let calls = 0;
 let statements: string[] = [];
 const background: Promise<unknown>[] = [];
@@ -79,6 +85,9 @@ before(async () => {
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
   await root.members.add(`user:${VIEWER}`);
   await root.access.set(`user:${VIEWER}`, { 'market/dev': 'viewer' });
+  await root.members.add(`user:${ADMIN}`, { role: 'admin' });
+  await root.access.set(`user:${ADMIN}`, { 'market/dev': 'developer' });
+  await removePasskey(db.owner, deps.chainKey, await addPasskey(db.owner, deps.chainKey, ADMIN));
 
   // Each Sync's statements, in the trace a failure prints; with `COFFRE_CHANGE_COST_RTT_MS`, each held that long, as
   // Hyperdrive far from its database holds it, for what a change takes end to end.
@@ -102,34 +111,40 @@ before(async () => {
     },
   });
   appClient = new PerRequest();
-  const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] });
-  runtime = {
+  const deployment = (passkeys?: 'off'): CoffreRuntime => ({
     ...createRuntime(
       // The credential proxy, its Proxy tab writing (0.16): what a save of an environment's definitions costs.
-      resolveConfig({ publicUrl: ORIGIN, vault: entryOf(counted), auth, auditChainKey: deps.chainKey.toString('base64'), plugins: [credentialProxy({ credentials: {}, editable: true })] }),
+      resolveConfig({
+        publicUrl: ORIGIN, vault: entryOf(counted), auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], passkeys }),
+        auditChainKey: deps.chainKey.toString('base64'), plugins: [credentialProxy({ credentials: {}, editable: true })],
+      }),
       createDatabase(appClient.client),
       counted,
       { json: async (url) => { throw new Error(`no fetch in this test: ${url.href}`); } },
     ),
     // What a request leaves running, waited for within it: its statements are its own.
     waitUntil: (promise) => void background.push(promise),
-  };
+  });
+  runtime = deployment();
+  const off = deployment('off');
   // The Owner's browser session, as a page's calls send it; and the Viewer's. Each stepped up with a touch a moment
   // ago, as a session that changes access is (a fresh check, docs/design/passkeys.md, section 4).
-  const browser = async (subject: string, email: string): Promise<CoffreClient> => {
+  const browser = async (subject: string, email: string, on = runtime): Promise<CoffreClient> => {
     const session = await asRequest(async () => {
-      const signed = await runtime.signin!.completeSignin({ provider: 'github', subject, emails: [email], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox on macOS' });
+      const signed = await on.signin!.completeSignin({ provider: 'github', subject, emails: [email], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox on macOS' });
       if (!('credential' in signed)) throw new Error(`${email} was not signed in`);
-      return (await steppedUp(runtime.signin!, db.owner, deps.chainKey, email, signed.credential.token)).token;
+      // Under `off`, as the provider signed them in: nothing is asked.
+      return on === runtime ? (await steppedUp(on.signin!, db.owner, deps.chainKey, email, signed.credential.token)).token : signed.credential.token;
     });
     return createClient({
       url: ORIGIN,
-      headers: () => ({ cookie: `${sessionCookieName(runtime.auth)}=${session}`, 'sec-fetch-site': 'same-origin' }),
-      transport: (request) => fetchApi(request, runtime, { sourceIp: null }),
+      headers: () => ({ cookie: `${sessionCookieName(on.auth)}=${session}`, 'sec-fetch-site': 'same-origin' }),
+      transport: (request) => fetchApi(request, on, { sourceIp: null }),
     });
   };
   owner = await browser('root', ROOT);
   viewer = await browser('viewer', VIEWER);
+  admin = await browser('admin-off', ADMIN, off);
 });
 
 after(async () => {
@@ -257,6 +272,9 @@ const CASES: Case[] = [
   { name: 'member added, a role', run: (i) => owner.members.add(`user:dev-${i}@acme.example`, { role: 'developer', scope: { projects: { only: ['market'] } } }) },
   { name: 'service account added', run: (i) => owner.members.add(`token:ci-${i}`) },
   { name: 'member added, refused', run: (i) => refused(viewer.members.add(`user:turned-${i}@acme.example`)) },
+  // Under `off`, by a person whose only passkey was removed (`ADMIN`): as the Owner's, nothing more read.
+  { name: 'key set, under off', run: () => admin.secrets.set('market/dev', { [fresh().toUpperCase()]: 'fake-value' }) },
+  { name: 'member added, under off', run: (i) => admin.members.add(`user:off-${i}@acme.example`) },
   {
     name: 'access granted',
     setup: async (i) => void (await owner.members.add(`user:granted-${i}@acme.example`)),
@@ -303,17 +321,14 @@ const seals = new Map<number, string | null>();
 const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   // A key write decided on one read (T179; docs/design/two-trips.md): the vault's statement, then the app's one Sync, the
   // head (a lock alone) and everything with the COMMIT, however many keys. No 0.14 entry since 0.16.0's contraction:
-  // the changes record the write, in 0.15's log alone. One more of the app's, on purpose: what stands behind the
-  // person's credential (`passkeyAhead`, docs/design/passkeys.md, section 6.4), read beside the vault's statement on
-  // the request's own connection, so it costs a round trip but no wait. Not under `passkeys: 'off'`, nor for a
-  // service's token.
-  'key set, one': { app: 2, vault: 1 },
-  'key set, existing': { app: 2, vault: 1 },
-  'key set, five': { app: 2, vault: 1 },
+  // the changes record the write, in 0.15's log alone. What stands behind the person's credential comes with the
+  // vault's read, as its passkey rows (T216; docs/design/passkeys.md, section 6.4), so the app reads nothing first.
+  'key set, one': { app: 1, vault: 1 },
+  'key set, existing': { app: 1, vault: 1 },
+  'key set, five': { app: 1, vault: 1 },
   // Refused on the vault's read (PR 6): the read, then the vault's record of the refusal, which stands for 0.14's deny
-  // entry; the app answers it as today's path would, from what the read answered, reading nothing but the passkey
-  // beside the read.
-  'key set, refused': { app: 1, vault: 2 },
+  // entry; the app answers it as today's path would, from what the read answered, reading nothing itself.
+  'key set, refused': { app: 0, vault: 2 },
   'key archived': { app: 12, vault: 2 },
   'key restored (a version)': { app: 13, vault: 8 },
   'key renamed': { app: 9, vault: 1 },
@@ -330,12 +345,14 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'environment archived': { app: 10, vault: 2 },
   // A first add decided on one read (T179; docs/design/two-trips.md, "A member add"): the vault's read; then its write,
   // one Sync: the members' rows and 0.14's head (a lock alone), the hold, the row, the change and the COMMIT. No 0.14
-  // `member.add` entry since 0.16.0's contraction: the change records the add. The app's one statement, on purpose:
-  // the passkey read beside the vault's read, as a key write's (`passkeyAhead`): a round trip, no wait.
-  'member added': { app: 1, vault: 2 },
-  'member added, a role': { app: 1, vault: 2 },
-  'service account added': { app: 1, vault: 2 },
-  'member added, refused': { app: 1, vault: 2 },
+  // `member.add` entry since 0.16.0's contraction: the change records the add. The passkey rows come with the vault's
+  // read, as a key write's (T216): the app reads nothing itself.
+  'member added': { app: 0, vault: 2 },
+  'member added, a role': { app: 0, vault: 2 },
+  'service account added': { app: 0, vault: 2 },
+  'member added, refused': { app: 0, vault: 2 },
+  'key set, under off': { app: 1, vault: 1 },
+  'member added, under off': { app: 0, vault: 2 },
   'access granted': { app: 3, vault: 8 },
   // Its answer is their report, which asks the vault for the proxy items they saved (T186 PR D): one read, after the commit.
   'member removed': { app: 10, vault: 9 },

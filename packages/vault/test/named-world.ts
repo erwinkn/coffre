@@ -28,7 +28,7 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
   const ask = (key: string, extra: Partial<NamedUseInput> = {}): NamedUseInput => {
     const at = Date.now();
     return {
-      tokenHash: tokenHash.toString('base64'), place: { project: project!.slug, environment: 'dev' }, key, accepts: { signin: true, issuers: [] }, purpose: 'use',
+      tokenHash: tokenHash.toString('base64'), place: { project: project!.slug, environment: 'dev' }, key, accepts: { signin: true, issuers: [], passkeys: 'off' as const }, purpose: 'use',
       requestId: newRequestId(), at, deadline: at + 3000, ...extra,
     };
   };
@@ -280,7 +280,7 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
     const warming = openVault(db.vault, prepared, createDatabase(client));
     await warming.useNamedMany!({
       tokenHash: randomBytes(32).toString('base64'), place: { project: 'warm', environment: 'dev' }, keys: ['WARM'],
-      accepts: { signin: true, issuers: [] }, purpose: 'use', at, deadline: at + 3000,
+      accepts: { signin: true, issuers: [], passkeys: 'off' as const }, purpose: 'use', at, deadline: at + 3000,
     });
   };
   return { vault, cache: prepared.uses, statements: () => statements, last: () => last, slow: (ms: number) => { delay = ms; }, connect, end: () => pool.end() };

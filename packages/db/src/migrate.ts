@@ -384,7 +384,7 @@ type Managed = { relations: string[]; functions: string[] };
  * The names a migration's SQL makes: CREATE TABLE, VIEW, MATERIALIZED VIEW
  * and SEQUENCE, the new name of ALTER TABLE … RENAME TO, and CREATE
  * FUNCTION, in public. Unquoted, a name is folded to lower case, as Postgres
- * folds it. A renamed table's old name stays among them: 0073 keeps it, a
+ * folds it. A renamed table's old name stays among them: 0074 keeps it, a
  * view, one release (T178).
  */
 export function managedObjects(sqlTexts: readonly string[]): Managed {

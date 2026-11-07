@@ -18,9 +18,10 @@
 #   scripts/formal.sh Deletion        one, and its runs without a protection
 #   scripts/formal.sh Deletion Locks  several
 #   scripts/formal.sh --shard rest    one of CI's shards (shard_of): tampering,
-#                                     large, rest, hotpath, hotpath-policy,
-#                                     hotpath-bulk, hotpath-skew, seal,
-#                                     seal-plugin or seal-retention
+#                                     large, probing, routing, rest, hotpath,
+#                                     hotpath-policy, hotpath-bulk,
+#                                     hotpath-skew, seal, seal-plugin or
+#                                     seal-retention
 #   scripts/formal.sh --workers 4     TLC's worker threads (default 2)
 #   scripts/formal.sh --heap 4g       TLC's JVM heap (default 1g)
 #   scripts/formal.sh --list          what would run, not running TLC
@@ -674,10 +675,19 @@ EXPECTED=(
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,
-# `--workers 4 --heap 4g`): Tampering alone about 410, `large` about 400, and
-# `rest`, every other scenario, about 260. On CI by 2026-11-02, `rest` took 39
-# minutes of its 45 and `large` 4 to 7: T165's ProbingMany scenarios, about
-# 10 minutes of CI (ProbingManyFork 7 of them), are in `large`. 0.15's models (HotPathOne, Seal,
+# `--workers 4 --heap 4g`): Tampering alone about 410, and `large` about 400.
+# `rest`, every other scenario, took 39 minutes of its 45 on CI by 2026-11-02 and
+# was cancelled at 45 from 2026-11-06 on, with identical state counts but each
+# scenario about 1.75 times slower (Probing 361 s against 201 s): run 42220741374
+# of #515 timed 96 scenarios at 40 minutes and their runs without a protection
+# at 5 more. So it is three, each 11 to 18 minutes there, none dominated by a
+# scenario that could not move:
+#   probing   Probing, ProbingFork and ProbingFallback: 17 minutes;
+#   routing   Routing's six and the other Probing variants: 17 minutes;
+#   rest      every other scenario, the Writing ones' 63 and 59 seconds the
+#             largest: 11 to 13 minutes.
+# T165's ProbingMany scenarios, about 10 minutes of CI (ProbingManyFork 7 of
+# them), are in `large`. 0.15's models (HotPathOne, Seal,
 # Migration015) have seven of their own, each about 5 minutes of TLC with 4
 # workers on a shared host, which CI's runners took about twice as long to
 # run: hotpath, hotpath-policy (the policy, liveness and stale-bulk
@@ -685,12 +695,15 @@ EXPECTED=(
 # slack and clock-skew scenarios), seal (Seal and Migration015),
 # seal-plugin (SealPlugin and SealCore) and seal-retention (SealRetention,
 # SealRetentionCrash and the key's Rotation scenarios). A scenario in no case
-# below is in `rest`.
-SHARDS="tampering large rest hotpath hotpath-policy hotpath-bulk hotpath-skew seal seal-plugin seal-retention"
+# below is in `rest`; `scripts/formal-shards.test.mjs` holds the shards to a
+# partition of every scenario and every run without a protection.
+SHARDS="tampering large probing routing rest hotpath hotpath-policy hotpath-bulk hotpath-skew seal seal-plugin seal-retention"
 shard_of() {
   case "$1" in
     Tampering) echo tampering ;;
     Overtaking|Walking|Sharing|Rows|Mixed|ProbingMany*) echo large ;;
+    Probing|ProbingFork|ProbingFallback) echo probing ;;
+    Routing*|Probing*) echo routing ;;
     HotPathOneBulkSkew|HotPathOneBulkSlack) echo hotpath-skew ;;
     HotPathOneBulk) echo hotpath-bulk ;;
     HotPathOneLive|HotPathOneStallLive|HotPathOnePolicy|HotPathOnePolicyWindow|HotPathOneStaleBulk) echo hotpath-policy ;;

@@ -431,7 +431,7 @@ test("a credential the app's config does not accept is answered as a token no cr
       return answered;
     };
     const [entries, rowsOfCap] = [await uses(), await bulk()];
-    for (const accepts of [{ signin: false, issuers: ['github:f00d'] }, { signin: true, issuers: ['google:beef'] }]) {
+    for (const accepts of [{ signin: false, issuers: ['github:f00d'], passkeys: 'off' as const }, { signin: true, issuers: ['google:beef'], passkeys: 'off' as const }]) {
       const answers = ENGINE === 'postgres' ? await holding(principalLock(w.principal), () => asked(accepts)) : await asked(accepts);
       // Each the credential's own check's (401), in one statement, none waiting for the lock it holds.
       assert.deepEqual(answers.map(({ route, statements: n }) => [route, n]), [['credential', 1], ['credential', 1]], JSON.stringify({ accepts, answers }));
@@ -439,9 +439,84 @@ test("a credential the app's config does not accept is answered as a token no cr
     }
     assert.deepEqual([await uses(), await bulk()], [entries, rowsOfCap], 'nothing written');
     // Accepted, its provider configured: served by name.
-    assert.equal(codeOf(await vault.useNamed!(w.ask(held, { accepts: { signin: true, issuers: ['github:f00d'] } }))), 'ok');
+    assert.equal(codeOf(await vault.useNamed!(w.ask(held, { accepts: { signin: true, issuers: ['github:f00d'], passkeys: 'off' as const } }))), 'ok');
   } finally {
     await end();
+  }
+});
+
+test("a person's credential no live passkey stands behind, as the app's policy says, is answered as a token no credential has, in one statement, before its place, its key or any lock; the app's rows carry what it read of their passkeys (T216; docs/design/passkeys.md, section 6.2; Probing.tla, AcceptedFirst)", { timeout: 60_000 }, async () => {
+  const w = await named({ caller: 'person' });
+  const held = await w.nameOf(await w.key());
+  const passkey = randomUUID();
+  const { passkeys } = tablesOf(db.owner);
+  // The vault reads the rows, never their MACs, which are the app's to check on the rows it answers.
+  await db.owner.insert(passkeys).values({
+    id: passkey, principal: w.principal, generation: 0, userHandle: randomBytes(16), credentialId: randomBytes(32), publicKey: randomBytes(65), algorithm: -7,
+    synced: true, name: 'YubiKey 5C', createdBy: w.principal, authMac: randomBytes(32),
+  });
+  const names = async (passkeyId: string | null) => run(db.owner, sql`UPDATE credentials SET passkey_id = ${passkeyId} WHERE id = ${w.credentialId}`);
+  const { vault, statements, end } = await slowed();
+  try {
+    const route = async (policy: NamedUseInput['accepts']['passkeys']) => {
+      const answered: { key: string; route: string; statements: number }[] = [];
+      for (const key of [held, 'NEVER_MADE']) {
+        const before = statements();
+        answered.push({ key, route: served(await vault.useNamed!(w.ask(key, { accepts: { signin: true, issuers: [], passkeys: policy } }))).route, statements: statements() - before });
+      }
+      return answered.every(({ route: r }) => r === 'name') ? 'name' : answered;
+    };
+    const refused = [['credential', 1], ['credential', 1]];
+    const refusedBy = async (policy: NamedUseInput['accepts']['passkeys']) => {
+      const answers = ENGINE === 'postgres' ? await holding(principalLock(w.principal), () => route(policy)) : await route(policy);
+      assert.notEqual(answers, 'name', policy);
+      assert.deepEqual((answers as { route: string; statements: number }[]).map(({ route: r, statements: n }) => [r, n]), refused, policy);
+    };
+    const [entries, rowsOfCap] = [await uses(), await bulk()];
+    // Ada's session names no passkey and she holds a live one: refused under `optional` and `required`, taken under `off`.
+    await refusedBy('optional');
+    await refusedBy('required');
+    assert.deepEqual([await uses(), await bulk()], [entries, rowsOfCap], 'nothing written');
+    assert.equal(await route('off'), 'name');
+    // Sent as a handle's call, naming no place (`handle`): the credential's kind decides, never the call's shape.
+    // Refused at the credential under `required`; under `off`, past it (her token binds no place, so nothing served).
+    const asHandle = async (policy: NamedUseInput['accepts']['passkeys']) => {
+      const outcome = await vault.useNamed!(w.ask(held, { place: null, accepts: { signin: true, issuers: [], passkeys: policy } }));
+      return outcome.served ? outcome.route : 'unserved';
+    };
+    assert.equal(await asHandle('required'), 'credential');
+    assert.equal(await asHandle('off'), 'unserved');
+    // Naming it: taken while it is live, hers, at her credential's generation.
+    await names(passkey);
+    assert.equal(await route('optional'), 'name');
+    assert.equal(await route('required'), 'name');
+    if (ENGINE === 'postgres') {
+      // What it read of her passkeys, with her credential's rows: the app checks them, reading nothing itself.
+      const app = JSON.parse(byName(await vault.useNamed!(w.ask(held, { accepts: { signin: true, issuers: [], passkeys: 'optional' } }))).app!) as { passkey: { id: string } | null; passkey_held: number | null };
+      assert.deepEqual([app.passkey?.id, app.passkey_held], [passkey, 2]);
+    }
+    // Removed, or of another generation: it stands behind nothing.
+    await run(db.owner, sql`UPDATE passkeys SET removed_at = ${new Date()}, removed_by = ${w.principal} WHERE id = ${passkey}`);
+    await refusedBy('optional');
+    await refusedBy('required');
+    await run(db.owner, sql`UPDATE passkeys SET removed_at = NULL, removed_by = NULL, generation = 1 WHERE id = ${passkey}`);
+    await refusedBy('optional');
+    // Naming none again, she holds no live passkey at her generation: taken under `optional` alone.
+    await names(null);
+    assert.equal(await route('optional'), 'name');
+    await refusedBy('required');
+    assert.equal(await route('off'), 'name');
+  } finally {
+    await end();
+  }
+});
+
+test("a service's credential holds no passkey: the check takes it under every policy (T216)", async () => {
+  const w = await named();
+  const held = await w.nameOf(await w.key());
+  const { vault } = await isolate();
+  for (const passkeys of ['off', 'optional', 'required'] as const) {
+    assert.equal(byName(await vault.useNamed!(w.ask(held, { accepts: { signin: true, issuers: [], passkeys } }))).route, 'name', passkeys);
   }
 });
 

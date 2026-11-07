@@ -1258,32 +1258,49 @@ without it, the previous release's sign-in during a rollout serves a
 session no passkey stands behind (`ServedBacked`).
 
 Three kinds of request read their credential in the vault's own call
-rather than the app's statement, and the vault answers nothing of
-passkeys: a use by name, one key or several (`useByName`, `useManyByName`),
-a key write (`writeAhead`, T179) and a member's add (`admitAhead`). For a
-person's credential, with passkeys not `off`, each runs the check as one
-statement of its own (`passkeyByToken`: the credential by its token's hash,
-the passkey it names and the person's, nothing of what the request asks).
-A use by name runs it before the vault's call (section 6.4); a key write
-and an add, whose first call releases nothing and writes nothing that
-commits without the app's transaction, run it beside that call, on the
-request's own client, so it costs a statement and no time. Refused, or
-unanswered (a passkey row that fails its MAC, a read that fails), the
-request goes today's path, as one the vault does not serve does, and is
-answered as any request is (`401`, `503`), never from the check itself: its
-credential check, the app's statement, refuses it `401 passkey_required`
-before the route's transaction, so nothing is written in either log, and
-what the vault prepared is dropped. A try the vault's read refused (T179
-PR 6, a Developer's member add) goes the same way: the passkey's `401`
-answers it, as on today's path, whose credential check comes before the
-route's, and the vault's refusal is never recorded, its ticket left to
-expire (`passkey-check.test.ts` holds both paths, the fast one served on
-Postgres, and the refusal unrecorded). Each is one
-round trip more on the request's side: `key set` 1 to 2, `member added`
-0 to 1, and their refusals' 0 to 1 in `change-cost.test.ts`, and a person's reveal one statement before
-its use in `proxy-use-cost.test.ts`. Teaching the vault's statements the
-check would save it, through `accepts` as `named-use.ts` asks of any new
-check; that is a task of its own.
+rather than the app's statement: a use by name, one key or several
+(`useByName`, `useManyByName`), a key write (`writeAhead`, T179) and a
+member's add (`admitAhead`). Since T216 (migration 0073) that call reads
+what stands behind a person's credential too, with passkeys not `off`, in
+the same statement and as the app's own statement reads it: the passkey
+the credential names, by its primary key, and whether its person holds a
+live one, `passkeys_live_idx` then `passkeys_principal_idx`. It answers
+those rows with the credential's, and the app's check decides on them,
+their MACs included, reading nothing itself (`credentialRow`'s
+`passkeyOf`, through the rows read ahead). A handle, a service's token and
+a workload read none, as the check exempts them.
+
+- **A use by name** releases values and logs their use, so its call
+  decides first, before anything of the place or the key: the app's
+  policy goes in `accepts` (`NamedUseInput.accepts.passkeys`), and the
+  statement holds the credential to the table above, without the MACs,
+  under the fence, as it holds it to the rest of what the app's config
+  accepts (`Probing.tla`, `AcceptedFirst`). Refused, the credential is
+  answered as a token no credential has: the request goes today's path,
+  whose credential check refuses it `401 passkey_required`, before
+  anything reads the key (section 6.4). A row a database writer forged
+  (a passkey put back live, its MAC broken) is taken there and refused
+  401 by the app's check after, as any forged row is (D154, R64).
+- **A key write and an add** decide nothing of passkeys in the vault: their
+  first call releases nothing and writes nothing that commits without the
+  app's transaction. It answers the rows (`write_request`, `admit_read`),
+  and the app's check of the credential on them, before that transaction,
+  refuses one no passkey stands behind `401 passkey_required` (or `401`
+  for a row that fails its MAC, `503` for a read that fails), so nothing
+  is written in either log and what the vault prepared is dropped. A try
+  the vault's read refused (T179 PR 6, a Developer's member add) goes the
+  same way: the passkey's `401` answers it, as on today's path, whose
+  credential check comes before the route's, and the vault's refusal is
+  never recorded, its ticket left to expire (`passkey-check.test.ts` holds
+  both paths, the fast one served on Postgres, and the refusal
+  unrecorded).
+
+So the check costs these requests no statement: `key set` and `member
+added` take the round trips they took before passkeys (1 and 0 of the
+app's, in `change-cost.test.ts`), and a person's reveal is the vault's one
+call (`proxy-use-cost.test.ts`). From PR 4a to T216 each ran it as a
+statement of its own (`passkeyByToken`), before a use by name and beside
+a write's or an add's first call.
 
 What a request issues names its credential's passkey, copied, never its
 touch (`confirmed_at` null): personal tokens, handles and service tokens,
@@ -1363,20 +1380,23 @@ first, before anything that hangs on the key, and its one answer for every
 refusal (D153, `formal/Probing.tla`). The ordinary path does not: it
 resolves the key before it decides on the caller.
 
-So the named path stays, for people too, and the passkey check goes before
-it: for a person's credential, while passkeys are not `off`, the app runs
-the check of 6.2 in one statement before the vault call, for one key and
-for several (`passkeyAhead`, which `named-use.ts` calls). Refused, the request goes
-the ordinary way, whose credential check refuses it `401 passkey_required`
-with the same statement, before anything reads the key. The statement
-reads the credential and the person's passkeys, nothing about the key, so
-a refusal says nothing about the key and costs the same whatever was
-asked. A passkey removed between that statement and the vault's call
-revoked the credential (6.1), which the vault checks itself
-(`credentialStill`). The cost is one statement before a person's one-key
-reveal; the later way to save it is to teach the vault's named statement
-the check, through `accepts`, as `named-use.ts` asks of any new check, with
-`Probing.tla`'s `AcceptedFirst`.
+So the named path stays, for people too, and the passkey check goes first
+in it: for a person's credential, while passkeys are not `off`, the vault's
+named statement holds the credential to the check of 6.2, for one key and
+for several, with the rest of what the app's config accepts (`accepts`,
+T216; `Probing.tla`'s `AcceptedFirst`). It reads the credential and the
+person's passkeys before anything about the key, so a refusal says
+nothing about the key and costs the same whatever was asked: answered as a
+token no credential has, the request goes the ordinary way, whose
+credential check refuses it `401 passkey_required`. Taken, the use
+answers the passkey rows with the credential's, which the app's check
+holds to their MACs. The check is in the call that uses, under its
+fence: a change to the person's passkeys that leaves none behind the
+credential revokes it (6.1), a change of the log's, which waits for that
+fence, and one that committed before the call is in what it reads, the
+credential revoked, which the vault checks itself (`credentialStill`). Until T216 the app ran the check in a
+statement of its own before the vault's call, one more round trip a
+person's reveal.
 
 ### 6.5 Fresh, and replacing a session
 
@@ -1619,7 +1639,12 @@ writes personal tokens, handles and service tokens itself (`issueToken`,
 `IssuedTokenRow`), so its issue contract grows to copy the issuing
 credential's `passkey_id` onto them, with its statement and its model
 (R45), a PR of its own (section 14). The audit entries of every guarded act
-name the passkey and the time it confirmed.
+name the passkey and the time it confirmed. As built, one call of the
+vault's applies the app's passkey rule too (T216, section 6.2): a use by
+name, which releases values before the app sees its rows, holds a
+person's credential to the policy the app sends, as it holds it to the
+rest of what the app's config accepts. The rule stays the app's; the
+vault applies it where the app's own check would come too late.
 
 - Catches: stolen provider accounts, phishing, stolen cookies (section 1).
 - Misses: an app that forgets the check. `FRESH_ROUTES` is typed over the
@@ -1750,9 +1775,9 @@ person.
 **Every other request**: no query more. The statement that reads the
 credential gains a primary-key join on `passkeys` and an indexed `NOT
 EXISTS`, for the four kinds of section 6 only; the decision is a
-comparison. The exception: a person's one-key reveal runs that check as a
-statement of its own before its named vault call (section 6.4). Issues take
-the person's lock, an advisory lock no other request waits on.
+comparison. Where the vault's call reads the credential (a use by name, a
+key write, an add), that call reads them too (section 6.2, T216). Issues
+take the person's lock, an advisory lock no other request waits on.
 
 **`/use`, CI and workload sign-in**: nothing. Their statements do not
 change.

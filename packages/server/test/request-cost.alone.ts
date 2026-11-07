@@ -1619,6 +1619,14 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     await db.owner.execute(sql`ANALYZE log_changes`);
   };
   try {
+    // No autovacuum on the log while it is planted (T227). A VACUUM tells the free space map of the room each page kept,
+    // too little for the rows that filled it but enough for a smaller kind's (a page of key writes keeps a refused
+    // add's), and the batch planted next fills that room first, a row a page. So where an autovacuum landed decided
+    // which rows lay scattered: one late in the 50,000 newer refused adds left the newest 100 a page each, and their
+    // first page read 103 pages, where it read 8 before. The only VACUUMs are then this one, of the room the file's
+    // earlier cases left, and `settle`'s, so every run clusters each kind's rows the same way.
+    await db.owner.execute(sql`ALTER TABLE log_changes SET (autovacuum_enabled = off)`);
+    await db.owner.execute(sql`VACUUM (PARALLEL 0) log_changes`);
     // A log whose indexes are as deep as they get for long (a probe of each is its depth's pages): 60,000 changes of
     // members, 20,000 sign-ins of another service, 20,000 records of another person's, and the service's and Ada's own.
     await plant(0, 60_000, 'user:admin@acme.example', 'member');
@@ -1736,7 +1744,11 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     assert.deepEqual(credentials.map((id) => origins.get(id)?.kind), credentials.map(() => 'signIn'));
     assert.deepEqual(tokens.map((id) => origins.get(id)), tokens.map(() => ({ kind: 'personal', label: 'l1', principal: ADA })));
   } finally {
-    await db.owner.execute(sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
+    try {
+      await db.owner.execute(sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
+    } finally {
+      await db.owner.execute(sql`ALTER TABLE log_changes RESET (autovacuum_enabled)`);
+    }
   }
 });
 

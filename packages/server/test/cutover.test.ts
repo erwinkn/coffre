@@ -342,8 +342,10 @@ test("the door tries a due cutover once at a time, and holds a failure as a refu
     throw new Error('canceling statement due to lock timeout');
   };
   const failed = 'the cutover failed: canceling statement due to lock timeout';
-  // Both ask whether it is due; one tries it, the other answers from the hold.
-  assert.deepEqual(await Promise.all([now.cutover(), now.cutover()]), [failed, CUTTING_OVER_NOW]);
+  // Both ask whether it is due; one tries it, the other answers from the hold. Whichever probe
+  // answers first is the one that tries, so the two answers come in either order.
+  const answers = await Promise.all([now.cutover(), now.cutover()]);
+  assert.deepEqual([...answers].sort(), [CUTTING_OVER_NOW, failed].sort());
   assert.equal(tries, 1);
   const before = asked;
   // Held as failed, which the door says apart from a refusal (T170).
@@ -540,7 +542,7 @@ test("an access entry forged in the vault's name holds no use: its check writes 
   await db.owner.transaction((tx) => appendEntries(tx, deriveLogKey('vault', randomBytes(32)), [{ actor: 'system:vault', action: 'access.grant', decision: 'allow', subjectPrincipal: CI, metadata: '{}' }], undefined, undefined, [], true));
   const named = (deadline = 3000): Promise<NamedUseOutcome> => {
     const at = Date.now();
-    return now.vault.useNamed!({ tokenHash: hashToken(token.token).toString('base64'), place: { project: 'market', environment: 'dev' }, key: 'A', accepts: { signin: true, issuers: [] }, purpose: 'use', requestId: newUseRequestId(), at, deadline: at + deadline });
+    return now.vault.useNamed!({ tokenHash: hashToken(token.token).toString('base64'), place: { project: 'market', environment: 'dev' }, key: 'A', accepts: { signin: true, issuers: [], passkeys: 'off' as const }, purpose: 'use', requestId: newUseRequestId(), at, deadline: at + deadline });
   };
   const reports = async () => (await db.owner.select({ code: auditLog.code }).from(auditLog).where(sql`${auditLog.action} = 'vault.tampered' AND ${auditLog.subjectPrincipal} = ${CI}`)).length;
   // 0.14's head held, as an old isolate's write holds it, around a named use: answered, and served, well within its deadline.

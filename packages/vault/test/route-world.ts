@@ -124,7 +124,7 @@ export async function routeWorld(db: TestDatabase) {
   const ask = (route: string, extra: Partial<RouteUseInput> = {}): RouteUseInput => {
     const at = Date.now();
     return {
-      caller: { kind: 'handle', tokenHash: w.tokenHash.toString('base64'), accepts: { signin: true, issuers: [] } },
+      caller: { kind: 'handle', tokenHash: w.tokenHash.toString('base64'), accepts: { signin: true, issuers: [], passkeys: 'off' as const } },
       named: { place: { project: w.slug, environment: 'dev' }, route }, stable: null, digests: [], purpose: 'use', at, deadline: at + 3000, ...extra,
     };
   };

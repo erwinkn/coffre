@@ -2,11 +2,34 @@
 
 ## Unreleased
 
+- **`path()` redirects: two cases held by a test, one written down (T211).**
+  A `Location` with the token's colon encoded twice (`%253A`), in its path or
+  its query, is a 502 with nothing of the answer, and a relative one whose
+  first segment has a raw colon parses as a scheme and is a 502 too; the
+  proxy's docs say so, with the one accepted cost: a key made only of escapes
+  can make a redirect to `/tg/keep////next` fail shut.
+
 - **The UI and the CLI no longer tell anyone to remove a tampered member to
   start over (T195).** 0.15's log refuses that removal. The Users page, the
   signed-in member's own page, `coffre members` and `coffre access` now say
   that removing does not clear it and that the record is put back from a
   backup (`docs/restore.md`, "A member refused as tampered").
+
+- **With passkeys on, a reveal by name, a key write and a member add check
+  the caller's passkey in the vault's own call (T216).** Each read the
+  credential's passkey in a statement of its own beside the vault's call:
+  one more statement per request whenever `signin({ passkeys })` was not
+  `off`. The vault's call now reads it with the credential, under its
+  fence, and refuses a person's session or token no live passkey of theirs
+  stands behind before it reads the place or the key, as a token no
+  credential has; the app answers `401 passkey_required` as before, and
+  checks the passkey rows' MACs on what the vault answered. A key write
+  makes one app statement, not two, and a refused one or a member add
+  none. A UI route's handle call holds its credential to the same check,
+  by the credential's kind, on both engines. Postgres migration 0073
+  replaces `use_credential`, `use_named_batch`, `use_route`,
+  `write_request` and `admit_read`; the previous release's calls, which
+  pass no policy, are answered as before.
 
 - **Seven tables renamed (T178).** `vault_members` is `principals` (people
   and service accounts alike), `vault_grants` is `grants`,

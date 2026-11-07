@@ -28,7 +28,7 @@ import { TEST_ENGINE } from './engine.ts';
 
 const TAGS: Record<Engine, string> = { postgres: '0022_log_015', sqlite: '0018_log_015' };
 const SEALED = ['credentials', 'environments', 'secrets', 'service_bindings', 'vault_members'];
-// What 0.16 renamed (0073_table_renames, T178): read under 0.14.5's names before, under these after.
+// What 0.16 renamed (0074_table_renames, T178): read under 0.14.5's names before, under these after.
 const RENAMED: Record<string, string> = { vault_members: 'principals', vault_grants: 'grants' };
 const hex = (byte: number, length = 32) => Buffer.alloc(length, byte).toString('hex');
 

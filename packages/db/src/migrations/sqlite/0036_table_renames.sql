@@ -1,4 +1,4 @@
--- 0.16.0, T178: the tables renamed (postgres/0073_table_renames.sql says why). SQLite, which serves tests and local
+-- 0.16.0, T178: the tables renamed (postgres/0074_table_renames.sql says why). SQLite, which serves tests and local
 -- development and no deployment, keeps no view under the old names: it cannot upsert into a view, and a write through
 -- one counts no row changed, so no view would hold the previous release's code anyway (`pnpm test:compat` renames
 -- them back for a release that predates this, scripts/compat-check.sh). Each table is renamed, which moves every

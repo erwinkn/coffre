@@ -14,7 +14,6 @@ import type { SecretValue } from './api/secrets.ts';
 import { findCredential, type ResolvedPath } from './db/queries.ts';
 import { namedAhead } from './db/read-ahead.ts';
 import { acceptance } from './named-use.ts';
-import { passkeyAhead } from './passkey-check.ts';
 import { RefusalRecord } from './refused.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
@@ -232,8 +231,7 @@ export async function writeAhead(
       throw error;
     }
   };
-  // What stands behind a person's credential, read beside the vault's call, which only reads and prepares (`passkeyAhead`).
-  const [first, passkey] = await Promise.all([ask(), passkeyAhead(runtime, token, kind)]);
+  const first = await ask();
   // The caller's credential not as its log has it (put back, or its change forged): refused, as an unknown one is, and
   // never down today's path, whose check of its MAC alone would take it.
   if (first === 'forged') return { identity: unauthenticated(runtime.auth), written: null };
@@ -241,21 +239,16 @@ export async function writeAhead(
   // today's path, whose second read of the row would take one put back meanwhile (formal/Writing.tla, Today).
   if (first === 'ended') return { identity: endedCredential(), written: null };
   if (typeof first === 'string') return null;
-  // No live passkey behind it, or no answer: today's path, whose credential check decides again and refuses it, 401
-  // `passkey_required` (or 401, 503, as it answers any), before its transaction (docs/design/passkeys.md, section 6.4).
-  // Nothing was written; what the vault prepared is dropped.
-  if (passkey === 'ordinary') {
-    wipeTry(first);
-    return null;
-  }
   const rows = (tried: Tried) => namedAhead(runtime.db, answerOf(tried).app);
   const ahead = rows(first);
   let touched: Touch | null = null;
   // The credential checked on the rows the vault answered, its MAC and token's hash among them, its expiry at the
-  // vault's `at` (one clock), its standing as the vault decided it (AuthChecked: before anything commits).
+  // vault's `at` (one clock), its standing as the vault decided it (AuthChecked: before anything commits), and what
+  // stands behind a person's, the passkey rows the read answered with it (T216; docs/design/passkeys.md, section 6.4):
+  // refused, 401 `passkey_required` (or 401, 503, as it answers any), nothing written and what the vault prepared
+  // dropped, its refusal, if it refused, never recorded.
   const identity = await authenticateRequest(request, runtime, requestId, token, sourceIp, {
     standing: answerOf(first).standing, at: answerOf(first).at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
-    ...(passkey === undefined ? {} : { passkey }),
     touch: (touch) => {
       touched = touch;
     },
@@ -265,12 +258,13 @@ export async function writeAhead(
     return { identity, written: null };
   }
   const credentialId = identity.credentialId;
-  // A later try's rows, checked as the first's were: the same credential, its rows' MACs whole (`findCredential` reads nothing given them).
+  // A later try's rows, checked as the first's were: the same credential, its rows' MACs whole (`findCredential` reads
+  // nothing given them, nor what stands behind it, which the first try's check decided on).
   const still = async (tried: Tried): Promise<boolean> => {
     const credential = rows(tried)?.credential;
     if (credential == null) return false;
     try {
-      const row = await findCredential(runtime.db, runtime.chainKey, { tokenHash }, credential);
+      const row = await findCredential(runtime.db, runtime.chainKey, { tokenHash }, credential, false);
       return row !== null && row.id === credentialId;
     } catch {
       return false;

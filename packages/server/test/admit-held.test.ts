@@ -479,7 +479,7 @@ test("a ticket is the vault's own: one edited, its role or its time, is refused 
   const w = await world();
   const answer = await w.runtime.vault.admitRead!({
     tokenHash: (await db.owner.select({ tokenHash: credentials.tokenHash }).from(credentials).where(eq(credentials.id, w.bob.id)))[0]!.tokenHash.toString('base64'),
-    accepts: { signin: true, issuers: [] }, principal: NEW,
+    accepts: { signin: true, issuers: [], passkeys: 'off' as const }, principal: NEW,
   });
   // A browser session's issuer is the app's to accept: none named, none served.
   assert.deepEqual(answer, { served: false, why: 'credential' });
