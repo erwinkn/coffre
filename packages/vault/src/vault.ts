@@ -928,8 +928,7 @@ class VaultService implements Vault {
     const retries = how.reads === true ? null : due.deadline ?? Date.now() + CALL_DEADLINE_MS;
     for (let attempt = 1; ; attempt += 1) {
       try {
-        const once = () => this.#decideOnce(principals, decide, reports, due);
-        return await (retries === null ? once() : retryingLocks(once, retries));
+        return await this.#decideOnce(principals, decide, reports, due, retries);
       } catch (error) {
         // A member who had no row when this decision locked theirs, and has
         // one now: another decision admitted them meanwhile. Again, with it.
@@ -940,11 +939,15 @@ class VaultService implements Vault {
     }
   }
 
-  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], { asked = {}, reads: shared = false, deadline, queue, first }: How<T>): Promise<Outcome<T>> {
+  /**
+   * One attempt of `#decide`. A change's transaction (`retries`, a time) is tried again while a lock wait of its gave
+   * up, rolled back (`retryingLocks`): the transaction alone, never what follows its commit, the seal wait among it.
+   */
+  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], { asked = {}, reads: shared = false, deadline, queue, first }: How<T>, retries: number | null = null): Promise<Outcome<T>> {
     // The changes of the attempt under way, whose failure, heard as the transaction's, they say (`Changes.failed`).
     let staged: Changes | null = null;
     try {
-      const committed = await this.#db.transaction(async (tx) => {
+      const transaction = () => this.#db.transaction(async (tx) => {
         const answered = first === undefined ? null : await first(tx);
         if (answered !== null) return { result: answered, numbers: null };
         // The bound on lock waits, the members' rows, then the head and everything the decision reads, in one statement
@@ -1003,6 +1006,7 @@ class VaultService implements Vault {
         const numbers = d.changes === null ? null : await d.changes.commit(tx, at, written);
         return { result, numbers };
       });
+      const committed = await (retries === null ? transaction() : retryingLocks(transaction, retries));
       this.#reported(reports);
       // A change answers once its entries are sealed (R51; HotPathOne's CommitBeforeAnswer): the newest of them, with
       // every number below it.
@@ -1776,14 +1780,9 @@ class VaultService implements Vault {
           const key = await this.#open(wrapped, contextOf(secret), operation);
           return key && { key, wipe: () => key.fill(0) };
         }),
+      // Each key as text, its buffer left whole: `#keys` wipes it once no attempt of the decision can answer again.
       (opened) => ({
-        keys: opened.map(({ key }) => {
-          try {
-            return base64(key);
-          } finally {
-            key.fill(0);
-          }
-        }),
+        keys: opened.map(({ key }) => base64(key)),
         // Named back: the read was decided on that answer, which this vault checked.
         ...(input.accessRevision === undefined ? {} : { accessRevision: input.accessRevision }),
         // And the use, appended with the read: the app has nothing left to append.
@@ -2017,7 +2016,8 @@ class VaultService implements Vault {
     for (const secret of secrets) entry(secret, 'allow', null);
     // One deadline for the call: the record of the KEK's check, the decisions, the intent's and the keys', and, with a
     // key service, its own budget besides, spent from it too.
-    const deadline = Date.now() + CALL_DEADLINE_MS + (call.remote ? this.#prepared.options.keyBudgetMs : 0);
+    const budget = CALL_DEADLINE_MS + (call.remote ? this.#prepared.options.keyBudgetMs : 0);
+    const deadline = Date.now() + budget;
     const wrongKek = await this.#kekMismatch(deadline);
     if (wrongKek !== null) {
       return this.#decide([], async () => {
@@ -2099,9 +2099,10 @@ class VaultService implements Vault {
             intent: intentId,
             operation: action,
             // When accounting for it is overdue: its outcomes commit by the call's deadline, each of their statements
-            // bound by what is left of it (`#decideOnce`, a read's); the COMMIT after the last, which nothing bounds, is
-            // given one more call's deadline, a margin, not a measured bound.
-            expiresAt: at + Math.max(0, deadline - Date.now()) + CALL_DEADLINE_MS,
+            // bound by what is left of it (`#decideOnce`, a read's), and the call began before `at` was read, so its
+            // whole budget from `at` covers it; the COMMIT after the last statement, which nothing bounds, is given one
+            // more call's deadline, a margin, not a measured bound (review r1).
+            expiresAt: at + budget + CALL_DEADLINE_MS,
             ...(call.input.purpose === undefined ? {} : { purpose: call.input.purpose }),
             ...traced(call.input),
             keys: secrets.map((secret, item) => ({ item, subject: secret.path, secretId: secret.secretId, version: secret.version })),
