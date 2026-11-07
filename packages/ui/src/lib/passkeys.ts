@@ -98,6 +98,19 @@ export function nameProblem(name: string): string | null {
   return null;
 }
 
+export type AddOptions = RouteOutput<'POST /members/:member/passkeys/options'>;
+
+/**
+ * The add's options as the client read them, or a throw: a 200 whose body did not arrive whole reads as null (the
+ * client's `send`), and the dialog's failure path takes it as `unavailable`, with its retry (review r3 of #539).
+ */
+export function readAddOptions(answer: AddOptions | null): AddOptions {
+  if (answer === null || typeof answer !== 'object' || typeof answer.state !== 'string' || answer.options === null || typeof answer.options !== 'object') {
+    throw new TypeError('the options did not arrive whole');
+  }
+  return answer;
+}
+
 /**
  * What a failed add means for its dialog (`POST /members/:member/passkeys`):
  * - `unavailable`: no answer to go by (the network, a 5xx, a 408 or 429, a 409 `changed`, a 401 or 409 unread). The server may have added

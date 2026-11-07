@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { CoffreError } from '@coffre/client';
 
-import { addOutcome, addsInPlace, endsList, kindOf, nameProblem, promptsForPasskey, readsForPrompt, removable, removalSentence, resetSentence } from '../src/lib/passkeys.ts';
+import { addOutcome, addsInPlace, readAddOptions, endsList, kindOf, nameProblem, promptsForPasskey, readsForPrompt, removable, removalSentence, resetSentence } from '../src/lib/passkeys.ts';
 
 const none = { sessions: 0, tokens: 0, handles: 0, apps: 0 };
 const optional = (enrolled: boolean) => ({ policy: 'optional' as const, enrolled, confirmedUntil: null });
@@ -78,4 +78,17 @@ test("what a failed add means: the same answer again, done, new options, or the 
   assert.equal(addOutcome(error(409, 'http_error')), 'unavailable', 'a 409 unread');
   assert.equal(addOutcome(error(401, 'http_error')), 'unavailable', 'a 401 unread');
   assert.equal(addOutcome(error(403, 'http_error')), 'refused');
+});
+
+test('add options that did not arrive whole reject, so the dialog offers a retry (review r3 of #539)', () => {
+  const read = { options: { challenge: 'c', timeout: 60_000 }, state: 's' } as unknown as Parameters<typeof readAddOptions>[0];
+  assert.equal(readAddOptions(read), read);
+  for (const unread of [null, {}, { state: 's' }, { options: null, state: 's' }, { options: {}, state: 1 }]) {
+    assert.throws(() => readAddOptions(unread as Parameters<typeof readAddOptions>[0]), TypeError);
+    try {
+      readAddOptions(unread as Parameters<typeof readAddOptions>[0]);
+    } catch (thrown) {
+      assert.equal(addOutcome(thrown), 'unavailable');
+    }
+  }
 });

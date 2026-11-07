@@ -16,6 +16,7 @@ import {
   kindOf,
   nameProblem,
   promptsForPasskey,
+  readAddOptions,
   readsForPrompt,
   removable,
   removalSentence,
@@ -244,7 +245,8 @@ function AddPasskeyDialog({ open, onOpenChange, member }: { open: boolean; onOpe
     setStep(null);
     unsent.current = { answer: null, asked: false };
     const sent = readClock(browserClock);
-    client.passkeys.options(member).then(
+    // An unreadable 200 rejects too (`readAddOptions`), so that it ends in `unavailable`, with a retry.
+    client.passkeys.options(member).then(readAddOptions).then(
       ({ options, state }) => {
         if (current) setStep({ options: options as CreationJSON, state, ends: deadlineOf(sent, options.timeout) });
       },
@@ -598,7 +600,8 @@ export function ResetPasskeysDialog({ person, open, onOpenChange }: { person: st
         void client.passkeys.reset(member).then(
           async (result) => {
             await refresh(queryClient, affects.passkeys(member));
-            toast.success(`Reset ${person}’s passkeys: ${result.reset} removed`);
+            // A 200 whose body did not arrive whole is null (the client's `send`): reset all the same.
+            toast.success(typeof result?.reset === 'number' ? `Reset ${person}’s passkeys: ${result.reset} removed` : `Reset ${person}’s passkeys`);
           },
           (failure: unknown) => toast.error(`Not reset. ${failureMessage(failure)}`),
         );
