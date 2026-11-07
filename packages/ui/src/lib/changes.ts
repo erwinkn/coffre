@@ -2,7 +2,7 @@ import type { CoffreClient, ConnectedApp, IdentityRow, MissingKey, OffboardingRe
 import { EVERYWHERE, unscoped, type InstanceRole, type Role, type Scope } from '@coffre/core/access';
 import type { QueryKey } from '@tanstack/react-query';
 
-import { failureMessage, memberRef, Refusal } from './coffre.ts';
+import { failureMessage, landedUnread, memberRef, Refusal } from './coffre.ts';
 import { projectAccessLabel } from './project-access.ts';
 import type { Change, ListShape, Target, Words } from './optimistic.ts';
 import { affects, keys } from './queries.ts';
@@ -631,6 +631,8 @@ export function saveSecrets(
             try {
               await client.secrets.rename(`${path}/${key}`, nextKey);
             } catch (error) {
+              // Renamed, its answer cut off on the way: the batch goes on.
+              if (landedUnread(error)) return;
               // A refused rename names the key it stopped at.
               throw new Refusal(`${key}: ${failureMessage(error)}`);
             }
@@ -639,6 +641,7 @@ export function saveSecrets(
             try {
               await client.secrets.set(path, patch);
             } catch (error) {
+              if (landedUnread(error)) return;
               throw new Refusal(failureMessage(error));
             }
           },

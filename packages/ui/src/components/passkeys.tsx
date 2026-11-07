@@ -1,4 +1,3 @@
-import { CoffreError } from '@coffre/client';
 import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -9,7 +8,7 @@ import { ResetNotice } from './reset-notice';
 import { RowFailure, RowPending, rowClass } from './row-state';
 import { ConfirmDialog, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp, Toggletip } from './ui';
 import { renamePasskey } from '../lib/changes';
-import { failureMessage, memberRef, useCoffre } from '../lib/coffre';
+import { failureMessage, landedUnread, memberRef, useCoffre } from '../lib/coffre';
 import { authenticatorError, browserClock, deadlineOf, leftOf, passkeyAnswer, readClock, sendPasskey, type Deadline, type Unsent } from '../lib/passkey-answer';
 import {
   addOutcome,
@@ -606,7 +605,7 @@ export function ResetPasskeysDialog({ person, open, onOpenChange }: { person: st
           (result) => done(result.reset),
           // A 200 whose body did not arrive whole (the client's `unreadable`) was a reset all the same.
           async (failure: unknown) => {
-            if (failure instanceof CoffreError && failure.code === 'unreadable') await done(null);
+            if (landedUnread(failure)) await done(null);
             else toast.error(`Not reset. ${failureMessage(failure)}`);
           },
         );
