@@ -23,7 +23,8 @@
 // every job does. A step also runs when the diff changes a file its commands run
 // or the entry of root package.json that names them. The local COFFRE_TEST_* and
 // COFFRE_DEV_* settings are dropped (they would shard or redirect the suites), and
-// the summary says so. Postgres is the script's own container (a compose project
+// the summary says so. The Pins step needs GH_TOKEN or a logged-in `gh`, to audit the pinned
+// actions against GitHub as CI does, and fails without. Postgres is the script's own container (a compose project
 // and a free port of its own, never the shared :55432), removed when it ends. The
 // image step is not here: `pnpm test:image` builds for two architectures and is
 // the release's (Validate on the tagged commit runs it).
@@ -270,6 +271,17 @@ for (const candidate of ['google-chrome', 'chromium']) {
   } catch {}
 }
 env.COFFRE_VALIDATE_BROWSER = browser
+// The Pins step asks GitHub whether each pinned action commit belongs to its repository, as CI
+// does with the workflow's token (scripts/zizmor.sh runs that audit only with GH_TOKEN set).
+// Without one it would run offline and pass a pin CI rejects, so the step takes GH_TOKEN or
+// `gh auth token`, and fails when it has neither. Only that step gets it.
+let pinsToken = env.GH_TOKEN || ''
+delete env.GH_TOKEN
+if (!pinsToken) {
+  try {
+    pinsToken = execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+  } catch {}
+}
 
 // The child of the step now running, so that a signal reaches it: each runs in a
 // process group of its own, and the signal goes to the whole group.
@@ -405,6 +417,10 @@ try {
       results.push({ name: step.name, status: 'not run', why: interrupted })
       continue
     }
+    if (step.name === 'pins' && !pinsToken) {
+      results.push({ name: step.name, status: 'FAIL', why: 'no GH_TOKEN and no `gh auth token`: the pinned actions cannot be checked against GitHub, as CI does' })
+      continue
+    }
     if (step.browser && !browser) {
       results.push({ name: step.name, status: 'FAIL', why: 'no google-chrome or chromium on PATH' })
       continue
@@ -419,7 +435,7 @@ try {
     for (const command of code === 0 ? step.run : []) {
       if (interrupted) break
       console.log(`\n== ${step.name}: ${command}`)
-      code = await sh(command, step.env)
+      code = await sh(command, step.name === 'pins' ? { GH_TOKEN: pinsToken } : step.env)
       if (code !== 0) break
     }
     const partial = step.name === 'consumer' ? clientNodes() : ''
