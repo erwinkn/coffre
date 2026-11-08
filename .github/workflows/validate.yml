@@ -1,40 +1,31 @@
 name: Validate
 
+# No pull request runs this (R46): a change is merged on the checks its author ran on its exact
+# head (`pnpm validate`), and this workflow gates releases. A release's tagged commit needs a
+# green run of it (release.yml, "Require a full Validate run on this commit"), and a nightly run
+# of main shows a breakage within a day, not when a release is cut.
+#
+#   gh workflow run validate.yml --ref main
+#
+# `full-formal` runs TLC even for inputs a green run already held (docs/formal.md, "In CI").
 on:
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      full-formal:
+        description: Run TLC again, even for inputs a green run already held
+        type: boolean
+        default: false
+  schedule:
+    # Once a day, on main's head.
+    - cron: '17 3 * * *'
 
 permissions:
   contents: read
 
 jobs:
-  changes:
-    name: Classify release changes
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      version_only: ${{ steps.diff.outputs.version_only }}
-    steps:
-      - name: Check out the selected revision and its base
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version-file: .node-version
-      - name: Hold the detector and gate to their contracts
-        run: node --test scripts/version-only.test.mjs scripts/validate-gate.test.mjs
-      - name: Prove a version-only diff or select all checks
-        id: diff
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: node scripts/version-only.mjs "$BASE_SHA" HEAD
-
-  # On every change, a release's bump included: the Action's CLI is what
-  # this revision's sources build. Two changes merged side by side can each
-  # hold a rebuilt file and leave main a third, which no build made, that a
-  # bump would otherwise carry into a tag.
+  # The Action's CLI is what this revision's sources build. Two changes merged
+  # side by side can each hold a rebuilt file and leave main a third, which no
+  # build made, that a bump would otherwise carry into a tag.
   action:
     name: Action's CLI
     runs-on: ubuntu-24.04
@@ -48,8 +39,7 @@ jobs:
       - name: Hold action/coffre.mjs to the sources
         run: pnpm check:action
 
-  # On every change, a release's bump included: nothing CI, a Dockerfile or a
-  # script fetches may move under it. Needs no Postgres, and of the install
+  # Nothing CI, a Dockerfile or a script fetches may move under it. Needs no Postgres, and of the install
   # only the root's own dependencies: js-yaml, which check:pins reads YAML
   # with, and @coffre/db's few.
   pins:
@@ -90,8 +80,6 @@ jobs:
         run: scripts/zizmor.sh
 
   checks:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: Checks
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -110,8 +98,6 @@ jobs:
           pnpm check:docs
 
   tests:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: Tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -128,8 +114,6 @@ jobs:
         run: pnpm test
 
   tests-014:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     # The whole suite again on 0.14's log alone (docs/design/0.15-plan.md: each PR runs it on both settings), beside
     # the other, which runs 0.15's, the default since plan PR 10: until 0.16 removes the 0.14 path.
     name: Tests on 0.14's log
@@ -154,8 +138,6 @@ jobs:
   # database, set up and analysed as the whole run's is, and reports which cases it ran; `Use matrices` is the one job
   # Validate asks about, which holds them to running every case exactly once (`scripts/matrix-coverage.mjs`).
   matrices-shard:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: Use matrices shard (${{ matrix.engine }} ${{ matrix.shard }})
     strategy:
       # Every shard's failures in one run, rather than the first's.
@@ -201,8 +183,8 @@ jobs:
           overwrite: true
 
   matrices:
-    needs: [changes, matrices-shard]
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
+    needs: matrices-shard
+    if: ${{ !cancelled() }}
     name: Use matrices
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -229,8 +211,6 @@ jobs:
         run: node scripts/matrix-coverage.mjs "$RUNNER_TEMP/matrix-shards" postgres sqlite
 
   schema:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: Database schema
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -250,15 +230,12 @@ jobs:
   # hash; eleven shards run TLC when there is none; `Formal model` is the one
   # job Validate asks about. docs/formal.md, "In CI".
   formal-plan:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: Formal model plan
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
       actions: read
-      pull-requests: read
     outputs:
       key: ${{ steps.plan.outputs.key }}
       hit: ${{ steps.plan.outputs.hit }}
@@ -280,24 +257,22 @@ jobs:
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
+          FULL_FORMAL: ${{ inputs.full-formal }}
         run: |
           scripts/formal-key.sh | tee "$RUNNER_TEMP/manifest.txt"
           key="$(tail -n 1 "$RUNNER_TEMP/manifest.txt")"
           echo "key=$key" >> "$GITHUB_OUTPUT"
           # A green run saves "<key>-<run id>" (the last step of `Formal model`). The cache API
-          # lists every ref's caches, where a restore sees only this PR's and main's: a model
-          # merged from a PR is a hit for the next one.
+          # lists every ref's caches, where a restore sees only this ref's and the default
+          # branch's: the nightly run of main, or a dispatch on a branch, is a hit for the next.
           hit=false
           run=""
-          # A lookup that fails is a full run, the safe way.
-          labels="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')" || labels=full-formal
-          if grep -qx full-formal <<< "$labels"; then
-            echo "The full-formal label asks for a full run."
+          if [ "$FULL_FORMAL" = true ]; then
+            echo "The full-formal input asks for a full run."
           else
             # Newest first. A key counts only if the run in it is one of this workflow's; in
             # some attempt, its `Formal model` job ran the step named for this very key, run
-            # and merge commit (the last step below, which runs only after every shard held);
+            # and commit (the last step below, which runs only after every shard held);
             # and that commit holds the very files the key hashes, so a doctored workflow's
             # run, which saved a key of its choosing, is no source. Jobs of every attempt.
             candidates="$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$key-" -f per_page=100 -f sort=created_at -f direction=desc |
@@ -309,6 +284,8 @@ jobs:
               [ -n "$id" ] || continue
               [[ "$id" =~ ^[0-9]+$ ]] || { echo "Cache $id: not a run id."; continue; }
               path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" --jq .path)" || { echo "Run $id: not readable."; continue; }
+              # Some events name the ref after the file, as `validate.yml@refs/heads/main`.
+              path="${path%%@*}"
               [ "$path" = .github/workflows/validate.yml ] || { echo "Run $id: $path, not validate.yml."; continue; }
               step="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=all" --jq '.jobs[] | select(.name == "Formal model") | .steps[] | select(.conclusion == "success") | .name' | grep -m 1 -xE "Save it as $key-$id at [0-9a-f]{40}")" || step=""
               [ -n "$step" ] || { echo "Run $id: no passed step saved $key."; continue; }
@@ -372,8 +349,8 @@ jobs:
         run: scripts/formal.sh --workers 4 --heap 4g --shard ${{ matrix.shard }}
 
   formal:
-    needs: [changes, formal-plan, formal-shard]
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
+    needs: [formal-plan, formal-shard]
+    if: ${{ !cancelled() }}
     name: Formal model
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -400,8 +377,6 @@ jobs:
           key: ${{ needs.formal-plan.outputs.key }}-${{ github.run_id }}
 
   proofs:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: Formal proofs
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -419,8 +394,6 @@ jobs:
         run: pnpm formal:lean
 
   workers:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: Workers conformance
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -436,8 +409,6 @@ jobs:
           pnpm conformance:workers --browser /usr/bin/google-chrome
 
   node:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: Node conformance
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -454,8 +425,6 @@ jobs:
   # The Terraform provider (terraform-provider/, docs/design/terraform-provider.md, section 8): Go and both CLIs
   # pinned by version and SHA-256 in the script, its acceptance tests against a local coffre, the Node example on SQLite.
   terraform:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: Terraform provider
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -469,8 +438,6 @@ jobs:
         run: pnpm test:terraform
 
   consumer:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: Packed consumer (${{ matrix.kind }})
     strategy:
       fail-fast: false
@@ -519,8 +486,6 @@ jobs:
         run: pnpm test:consumer --kind ${{ matrix.kind }}
 
   compat:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: Previous release on this schema (${{ matrix.kind }})
     strategy:
       fail-fast: false
@@ -541,8 +506,6 @@ jobs:
         run: pnpm test:compat --kind ${{ matrix.kind }}
 
   image:
-    needs: changes
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
     name: CLI image
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -563,16 +526,11 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [changes, action, pins, checks, tests, tests-014, matrices, schema, formal, proofs, workers, node, terraform, consumer, compat, image]
+    needs: [action, pins, checks, tests, tests-014, matrices, schema, formal, proofs, workers, node, terraform, consumer, compat, image]
     if: always()
     steps:
-      - name: Require full validation or a proven version-only bump
+      - name: Require every job
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          jq -e '
-            .changes.result == "success" and .action.result == "success" and .pins.result == "success" and
-            ((.changes.outputs.version_only == "true") as $fast
-              | del(.changes, .action, .pins)
-              | all(.[]; .result == (if $fast then "skipped" else "success" end)))
-          ' <<< "$RESULTS"
+          jq -e 'all(.[]; .result == "success")' <<< "$RESULTS"

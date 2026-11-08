@@ -12,7 +12,7 @@
 // the migrations (setup, update, migrate, backup, restore), stays out, as an
 // import of a file that is not there: the Action runs none of them. No
 // package.json goes in, so the bundle names no version, and a release's bump
-// leaves it as it is, as the version-only gate needs.
+// leaves it as it is.
 //
 // Nothing else is loaded from outside it. ws asks for its optional native
 // addons, bufferutil and utf-8-validate, when it loads, and uses plain

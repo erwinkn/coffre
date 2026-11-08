@@ -38,8 +38,10 @@ them all, the examples' pins and their `pnpm-lock.yaml` specifiers, heads
 `CHANGELOG.md`'s `## Unreleased` notes `## <version> (<date>)` under a new,
 empty `## Unreleased`, and says whether any dependency the release pins is
 younger than the week deployments wait, for the release notes. A release is
-that bump, a commit and a PR, with no `pnpm install` or hand edit: its diff is
-exactly what Validate's version-only fast path accepts. `pnpm check:pins`
+that bump, a commit and a PR, with no `pnpm install` or hand edit. Then the
+order is bump, merge, Validate (and the Action test) green on the merge commit,
+tag: the release refuses a tag whose commit has no green run of both
+(`.github/workflows/release.yml`). `pnpm check:pins`
 fails on any drift, including the examples' `packageManager`, which must be
 the workspace's pnpm.
 
@@ -226,15 +228,28 @@ caller, whom the app reads from the vault's rows, unchecked, and no other
 route takes such a caller (`docs/architecture.md`, "The API").
 
 **Tests / checks.**
-`Validate` runs the full CI suite except for a proven, synchronized version
-bump. `scripts/version-only.mjs` compares Git objects and rejects any edit
-beyond package versions, example pins, their lockfile specifiers and the
-release notes' heading for the new version. The Action names no version: its
+No pull request runs CI (Erwin, 11-07). A change merges on the checks its
+author ran locally on its exact head, rebased on `main`: `pnpm validate` runs
+the jobs of `Validate` that the diff against `origin/main` can change (all of
+them with `--all`, the image's aside; `--list` shows which and why), on a
+Postgres of its own (a compose project and a free port, never :55432), and
+prints the commit, its tree, the base and each step's result, for the pull
+request. When `main` moves after a gate and the rebase is mechanical (clean, or
+conflicting only in a migration or `CHANGELOG.md`, with `git range-diff` showing
+the patch unchanged), rerun only install, build, typecheck, lint, `check:*`,
+`test`, `test:sqlite`, `test:schema` and `test:compat`, plus the matrices,
+formal, conformance, consumer or Terraform steps when the new commits touch their
+inputs; the earlier run still counts for the rest. Any other conflict gets a
+scoped review of the changes and the full gate. The pull request's comment lists
+each check with the exact head it passed on, and the range-diff verdict.
+`Validate` (`.github/workflows/validate.yml`) itself runs when
+dispatched on any ref (`gh workflow run validate.yml --ref main`) and nightly
+on `main`; it runs everything, TLC when the model's inputs have no green run
+yet, and gates releases: a tag's commit needs a green run of it and of the
+Action test. The Action names no version: its
 CLI, `action/coffre.mjs`, is this checkout's, which a change to the CLI or
 anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
 `pnpm check:action` holds it to what the sources build.
-The detector and gate tests run even on that fast path. Parse errors or an
-unsupported diff select full validation.
 
 - `pnpm test` = lint + migrate a scratch template + `node --test --test-concurrency=4`.
   Each file gets a private Postgres clone or SQLite copy; cases within a file remain
@@ -253,14 +268,17 @@ unsupported diff select full validation.
 - `pnpm test:matrices` runs the generated matrices of 0.15's use by name
   (every `packages/*/test/*.matrix.ts`: `packages/vault/test/use.matrix.ts`,
   `packages/vault/test/forks.matrix.ts`, `packages/vault/test/many.matrix.ts`, `packages/server/test/named.matrix.ts`): every key a caller may not have
-  answered alike, whatever the vault's map holds, each statement slowed. They
-  take about three quarters of an hour, so `pnpm test` leaves them out;
-  `pnpm test:matrices:sqlite` runs them on SQLite. Needs Postgres. CI runs
+  answered alike, whatever the vault's map holds, each statement slowed. On
+  Postgres the server's alone takes 7,600 s on CI and 8,800 s on a busy host,
+  past its own 7,200 s timeout, so `pnpm test` leaves them out and an unsharded
+  Postgres run never passes (`pnpm test:matrices:sqlite` runs them on SQLite, about
+  20 minutes). Needs Postgres. CI runs
   them in shards, six on Postgres and two on SQLite, each from a database of
   its own: `COFFRE_TEST_SHARD=<k>/<n>` runs the k-th of n, case i in shard
   i mod n + 1 (`scripts/matrix-shard.ts`), and `COFFRE_TEST_SHARD_REPORT=<dir>`
   writes which cases each matrix ran, which `Use matrices` holds to every case
-  run exactly once (`scripts/matrix-coverage.mjs`). A new matrix passes its
+  run exactly once (`scripts/matrix-coverage.mjs`); `pnpm validate` runs the same
+  eight shards one at a time, then that check. A new matrix passes its
   generated cases through `shardOf`, or that check fails.
 - `pnpm test:schema` verifies both runtime logins' privileges. It also runs the
   full migration as a non-superuser owner in a disposable Postgres cluster,
@@ -368,8 +386,8 @@ unsupported diff select full validation.
   maintainer's, and review's, and is not enforced. `check:workflows` runs zizmor
   (`scripts/zizmor.sh`, `.github/zizmor.yml`), downloaded once and checked
   against its pinned SHA-256; with `GH_TOKEN` set, as in CI, it also asks
-  GitHub whether each pinned commit is its repository's. Validate runs both
-  on every change, a release's bump included (`Pins`).
+  GitHub whether each pinned commit is its repository's. `pnpm validate` and
+  `Validate` run both (`Pins`).
 - `scripts/restore-drill.sh` (after `pnpm build`) backs up a seeded Workers
   stack with `coffre backup`, restores it with `coffre restore --keys`, and
   checks it came back, then the wrong-key cases, on ports 3400 to 3402 and 8481

@@ -11,6 +11,7 @@
     "build": "pnpm -r --filter ./packages/core --filter ./packages/client run build && pnpm --filter ./packages/db run build && pnpm --filter ./packages/cli run build && pnpm -r --filter \"./packages/*\" --filter \"!./packages/core\" --filter \"!./packages/client\" --filter \"!./packages/db\" --filter \"!./packages/cli\" run build",
     "typecheck": "pnpm -r --no-sort --filter \"./packages/*\" --filter \"./examples/*\" --filter ./dev run typecheck",
     "dev": "./dev/start.sh",
+    "validate": "node scripts/validate.mjs",
     "test": "pnpm lint && ./scripts/test-suite.sh",
     "test:sqlite": "pnpm lint && COFFRE_TEST_ENGINE=sqlite ./scripts/test-suite.sh",
     "test:all": "pnpm test && pnpm test:sqlite",

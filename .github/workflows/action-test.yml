@@ -1,21 +1,14 @@
 name: Test the GitHub Action
 
+# Not run on pull requests (R46): the release gate asks for it beside Validate (release.yml),
+# and a nightly run of main shows a breakage within a day.
+#
+#   gh workflow run action-test.yml --ref main
 on:
-  pull_request:
-    paths:
-      - 'action/**'
-      - '.github/workflows/action-test.yml'
-      - '.github/actions/prepare/**'
-      - 'packages/cli/**'
-      - 'packages/core/src/dotenv.ts'
-      - 'packages/server/**'
-      - 'packages/vault/**'
-      - 'packages/db/**'
-      - 'packages/conformance/**'
-      - 'examples/node/**'
-      - 'scripts/action.test.mjs'
-      - 'scripts/bump.mjs'
-      - 'scripts/check-pins.mjs'
+  workflow_dispatch:
+  schedule:
+    # Once a day, on main's head.
+    - cron: '47 3 * * *'
 
 permissions:
   contents: read

@@ -5,8 +5,6 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 
-import { versionOnly } from './version-only.mjs';
-
 const root = resolve(import.meta.dirname, '..');
 
 function checkout(t) {
@@ -86,7 +84,7 @@ test("check:pins holds the workspace's Node to one exact release, and each examp
     }
 });
 
-test('a release is bump and a commit: pnpm takes its lockfile as it is, and the version-only gate its diff', (t) => {
+test('a release is bump and a commit: pnpm takes its lockfile as it is', (t) => {
     const dir = checkout(t);
     const git = (...args) => execFileSync('git', ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Bump test', '-c', 'user.email=bump@example.test', ...args], { cwd: dir, encoding: 'utf8' }).trim();
     writeFileSync(join(dir, '.gitignore'), 'node_modules\n');
@@ -96,7 +94,6 @@ test('a release is bump and a commit: pnpm takes its lockfile as it is, and the 
     const bumped = run(dir, 'bump.mjs', '9.8.7');
     assert.equal(bumped.status, 0, bumped.stderr);
     git('commit', '-qam', 'bump');
-    assert.deepEqual(versionOnly('HEAD~1', 'HEAD', dir), { versionOnly: true, version: '9.8.7', reason: 'Only synchronized release versions changed' });
     // A frozen install fails on any manifest the lockfile disagrees with.
     const install = spawnSync('pnpm', ['install', '--frozen-lockfile', '--lockfile-only'], { cwd: dir, encoding: 'utf8', timeout: 60_000 });
     assert.equal(install.status, 0, install.stdout + install.stderr);

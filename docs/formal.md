@@ -68,8 +68,9 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
   counterexample one step per line.
 
-CI runs it in the *Formal model* job of `validate.yml`, and skips TLC when
-the model's inputs are unchanged ([below](#in-ci)).
+`Validate` runs it in the *Formal model* job of `validate.yml`, and skips TLC when
+the model's inputs are unchanged ([below](#in-ci)); `pnpm validate` runs it for a
+diff that changes them.
 
 ## What it checks
 
@@ -2873,8 +2874,16 @@ shards 10.9 (5.8 and 5.5 here).
 | seal-plugin | 5.8 min | 29 min | about 12 min (estimated) |
 | seal-retention | 6.5 min, Rotation's 2.6 of it | not measured | about 13 min (estimated) |
 
-Two things cut that, and `Formal model` is still the one job `Validate` asks about, on
-every pull request that is not a version-only bump:
+No pull request runs `Validate` (R46): it runs when someone dispatches it
+(`gh workflow run validate.yml --ref main`) and nightly on `main`'s head, and
+a release's tagged commit needs a green run of it. A change to the model is
+checked before it merges by `pnpm validate`, which runs `scripts/formal.sh`
+when the diff touches a model, its configuration or the script
+(`--full-formal` always). A run that is cancelled saves no key, as only a run
+whose every shard held does.
+
+Two things cut the cost of a run, and `Formal model` is still the one job
+`Validate` asks about:
 
 - **A green run of the same inputs is not run again.** TLC's answer depends
   on what it is given and nothing else, so `Formal model plan` hashes that,
@@ -2886,18 +2895,18 @@ every pull request that is not a version-only bump:
   only after every shard has held. The next run of a key that has one logs
   "TLC skipped" with the key and the run that held, and finishes in
   seconds. The plan reads the repository's whole cache list, not a restore,
-  which would see only the pull request's own and `main`'s: a model merged
-  from a pull request is a hit for the next. GitHub drops a cache a week
+  which would see only the ref's own and `main`'s: the nightly run of `main`,
+  or a dispatch on a branch, is a hit for the next. GitHub drops a cache a week
   after it was made, so after a quiet week the first run is a full one. To
-  trust nothing, label the pull request `full-formal` and re-run the plan.
+  trust nothing, dispatch with `full-formal` set (`gh workflow run validate.yml
+  --ref main -f full-formal=true`).
   A cache counts only if the run it names is one of
   `validate.yml`'s, at a commit whose model, script and workflow files are
   the ones hashed, and its *Formal model* job ran the step named for that
   key and run, which only happens after every shard held; each shard
   checks that its own Java gives the plan's key. Anyone who can push a
-  branch could already make `Validate` pass by editing the workflow in their
-  own pull request, so this guards against mistakes and stale answers, not
-  against them.
+  branch could already make `Validate` pass by editing the workflow on it,
+  so this guards against mistakes and stale answers, not against them.
 - **A run is thirteen jobs in parallel.** `scripts/formal.sh --shard
   <name>` runs the scenarios of one
   (`shard_of`), each with its runs without a protection, balanced by what
