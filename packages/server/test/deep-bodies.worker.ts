@@ -13,6 +13,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { coffreRoute } from '../src/app.ts';
 import { MAX_BODY_NODES } from '../src/http.ts';
 import { McpService } from '../src/mcp/service.ts';
+import { TOOL_BY_NAME } from '../src/mcp/tools.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 
@@ -103,8 +104,8 @@ const deepAnswers: Answer[] = [];
 for (const [what, path, init] of sent) deepAnswers.push(await answer(what, path, init));
 
 // Then a walk that does run out, had inside each entry point: a genuine stack overflow, as one of a value too deep for
-// it throws, where the vault takes a value the API writes, where sign-in starts a device login, and where MCP admits a
-// connection's call.
+// it throws, where the vault takes a value the API writes, where sign-in starts a device login, and where MCP runs a
+// connection's call (its tool: a connection's calls have no rate of their own to admit since W331, D177).
 function overflow(depth = 0): never {
   return overflow(depth + 1);
 }
@@ -126,7 +127,7 @@ for (const each of restores) each();
 let restore = stubbed(service as unknown as Record<string, unknown>, 'startDevice');
 overflowAnswers.push(await answer('sign-in', '/api/auth/device', { method: 'POST', headers: json, body: '{"client_label":"laptop"}' }));
 restore();
-restore = stubbed(mcp as unknown as Record<string, unknown>, 'admitCall');
+restore = stubbed(TOOL_BY_NAME.get('list_secrets')! as unknown as Record<string, unknown>, 'run');
 overflowAnswers.push(await answer('MCP', '/mcp', {
   method: 'POST',
   headers: { ...json, authorization: `Bearer ${access}`, accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/call', 'mcp-name': 'list_secrets' },

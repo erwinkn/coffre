@@ -533,6 +533,20 @@
       "when": 1794090575180,
       "tag": "0078_short_fence_waits",
       "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1794134951720,
+      "tag": "0079_sign_in_shares",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1794134952480,
+      "tag": "0080_spent_tokens_pruned",
+      "breakpoints": true
     }
   ]
 }

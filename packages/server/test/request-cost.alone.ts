@@ -373,7 +373,7 @@ before(async () => {
     const input = `${part({ alg: 'RS256', kid: 'rs-1', typ: 'JWT' })}.${part({ iss: ISSUER, aud: ORIGIN, sub: 'repo:acme/market:ref:refs/heads/main', iat: now - 5, exp: now + 295, jti: randomUUID(), run_id: '7001', ...claims })}`;
     return `${input}.${signWith('sha256', Buffer.from(input), privateKey).toString('base64url')}`;
   };
-  const workloadsAuth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits({ perSource: 1000, total: 1000 }) } }).resolve(ORIGIN);
+  const workloadsAuth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits({ perSource: 1000 }) } }).resolve(ORIGIN);
   if (workloadsAuth.mode !== 'signin' || workloadsAuth.signin.workloads === null) throw new Error('unreachable');
   const workloads = new WorkloadService({ db: deps.db, chainKey: deps.chainKey, vault, config: workloadsAuth.signin.workloads, transport, signin: signinService, publicUrl: ORIGIN });
   const made = await workloads.bind(await contextFor(deps, ROOT), 'ci-web', { profile: 'github', issuer: null, claims, label: 'build', replaces: [] }, { dryRun: false });
@@ -427,7 +427,7 @@ before(async () => {
   const proxy = () => ({
     ...runtime,
     waitUntil: (promise: Promise<unknown>) => void background.push(promise),
-    auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits({ perSource: 10, total: 10 }) } }).resolve(ORIGIN),
+    auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits({ perSource: 10 }) } }).resolve(ORIGIN),
     gates: () => gate,
     plugins: checkPlugins([credentialProxy({ credentials, verifiers })]),
   }) satisfies CoffreRuntime;

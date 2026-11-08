@@ -73,6 +73,62 @@ test('an error answer throws a CoffreError with its code and message', async () 
   });
 });
 
+test("a binding's removal under way (a 202) is asked again, the same request, until it is done (W331)", async () => {
+  const answers = [
+    Response.json({ removing: { left: 300 } }, { status: 202 }),
+    Response.json({ removing: { left: 72 } }, { status: 202 }),
+    Response.json({ binding: { id: 'b2' }, replaced: ['b1'] }),
+  ];
+  const told: number[] = [];
+  const requests: { method: string; url: string; type: string | null; body: string }[] = [];
+  const client = createClient({
+    url: 'https://coffre.acme.example',
+    onRemoving: (left) => told.push(left),
+    transport: async (request) => {
+      requests.push({ method: request.method, url: request.url, type: request.headers.get('content-type'), body: await request.text() });
+      return answers.shift()!;
+    },
+  });
+  const input = { profile: 'github', issuer: null, claims: { repository_id: '1' }, label: null, replaces: ['b1'] } as never;
+  assert.deepEqual(await client.bindings.create('token:api', input), { binding: { id: 'b2', removing: null }, replaced: ['b1'] });
+  assert.equal(requests.length, 3);
+  assert.deepEqual(new Set(requests.map((request) => JSON.stringify(request))).size, 1, 'each the same request');
+  assert.equal(requests[0].type, 'application/json');
+  assert.deepEqual(told, [300, 72]);
+});
+
+test("a server older than 0.16 says nothing of a binding's removal: its views read as none under way (review r10)", async () => {
+  const view = { id: 'b1', profile: 'github', issuer: 'https://token.actions.githubusercontent.com', claims: {}, scope: null, label: null, createdAt: '2026-11-01T00:00:00.000Z', createdBy: 'ada@acme.example', lastUsedAt: null };
+  const { client } = recording(() => Response.json({ bindings: [view] }));
+  const [listed] = (await client.bindings.list('token:api')).bindings;
+  assert.equal(listed!.removing, null);
+});
+
+test('a removal under way that asking again does not move on throws, rather than asking for ever (W331)', async () => {
+  // As a request made from inside another one does, once that request has spent its calls: no further along.
+  let asked = 0;
+  const client = createClient({
+    url: 'https://coffre.acme.example',
+    transport: async () => {
+      asked += 1;
+      return Response.json({ removing: { left: 500 } }, { status: 202 });
+    },
+  });
+  await assert.rejects(client.bindings.remove('token:api', 'b1'), { name: 'CoffreError', status: 202, code: 'removal_under_way' });
+  assert.equal(asked, 2);
+  // One that made no call, though what is left falls (credentials ending on their own): no further along either.
+  let falling = 400;
+  const idle = createClient({
+    url: 'https://coffre.acme.example',
+    transport: async () => Response.json({ removing: { left: (falling -= 1), progressed: false } }, { status: 202 }),
+  });
+  await assert.rejects(idle.bindings.remove('token:api', 'b1'), { name: 'CoffreError', status: 202, code: 'removal_under_way' });
+  assert.equal(falling, 399, 'asked once');
+  // Any other 202 is an answer like any.
+  const { client: plain } = recording(() => Response.json({ queued: true }, { status: 202 }));
+  assert.deepEqual(await plain.me(), { queued: true });
+});
+
 test('an error that is not JSON still throws with its status', async () => {
   const { client } = recording(() => new Response('<html>', { status: 502 }));
   await assert.rejects(client.me(), { name: 'CoffreError', status: 502, code: 'http_error' });

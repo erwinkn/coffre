@@ -29,7 +29,7 @@ With the switch on, `POST /api/auth/oidc` (`WorkloadService.#exchange`):
 | 3 | app → vault | `access(member)` | |
 | 4 | app → vault | `prepare`: seals the `credential.issue` the app proposes; reads nothing, weighs no right | |
 | 5 | app → Postgres | `BEGIN` and the head | yes |
-| 6 | app → Postgres | `exchangeStill`: member, binding, rate | yes |
+| 6 | app → Postgres | `exchangeStill`: member, binding (and, until W331, its rate) | yes |
 | 7 | app → Postgres | `exchangeToken`: token spent, credential inserted, binding stamped | yes |
 | 8 | app → Postgres | the head again, then `token.exchange` with `app_change` | yes |
 | 9 | app → Postgres | `COMMIT` | yes |
@@ -57,16 +57,23 @@ binding's columns the app names (its scope, and a workload's reads with it,
    none). Compared after the lock, not in its `WHERE`: a recheck there sees
    the row's new version beside the snapshot's older changes, and would refuse
    a sign-in that waited behind a grant (Fable's review);
-2. the binding's row `FOR UPDATE`, as named: principal, generation, profile,
-   scope, policy, not revoked (BindingLocked); and no tombstone;
+2. the binding's row `FOR KEY SHARE`, as named: principal, generation,
+   profile, scope, policy, not revoked (BindingLocked); and no tombstone.
+   Shared with the binding's other sign-ins, which run together; an
+   unbind's `FOR UPDATE` waits for them, or they for it (UnbindExclusive;
+   W331, migration 0079: until then `FOR UPDATE`, one sign-in at a time);
 3. a workload's: no freeze of the instance, the account or the binding;
-4. the rate, 60 a minute, counted under the binding's row;
+4. no count (W331, D177; until then 60 a minute, counted under the row):
+   each ID token buys one credential, step 6;
 5. the proof's own times (`validUntil`: the ID token's `exp`, its `iat`'s
    hour) and the credential's end, by the database's clock;
 6. the token spent, by the primary key of `spent_id_tokens` (SpentChecked),
    once the app's key is known not to be one it rotated from (as 0.14's
    append refuses one, KeyRetired);
-7. the credential inserted with its seal, the binding stamped;
+7. the credential inserted with its seal; the binding's `last_used_at`
+   stamped when a minute old, by the row's update lock, which `FOR KEY
+   SHARE` shares, skipped when another sign-in holds it (`SKIP LOCKED`,
+   TouchSkipsLocked);
 8. the issue lock shared, the change numbered under it (IssueOffFence).
 
 Then the vault waits for the seal (R51) and answers. Locks are the order every
@@ -192,7 +199,28 @@ the vault's to change, in one call, `Vault.changeBindings`:
   and MAC; the statement holds the set to the rows, so one a sign-in made
   meanwhile is read again. One with no seal, written around the vault, is
   ended too, with no change: a binding the log holds is always the vault's
-  to end, so its object never stands past its end (review r1);
+  to end, so its object never stands past its end (review r1). Past
+  `UNBIND_BATCH` (125) live credentials, more than one call should carry
+  (W331: the fence each revoke holds, about 0.08 ms a credential, for no
+  longer than the 10 uses a process takes in flight arrive in at R44's
+  1,000 a second, 10 ms, so that none is refused behind it; and the
+  vault's 8 MiB message), the app first sweeps: a call that closes the
+  binding (`closed_at`, which `sign_in` refuses) and revokes a batch, again
+  until a batch or fewer is left, which the end then names with the
+  binding. An end refused as `moved` closes it too, and asks again
+  (formal/Unbinding.tla). The close ends the binding's sessions and
+  Cloudflare calls at once (their statements read its row first and
+  refuse it closed); the bearer credentials it exchanged end at their
+  batch or their own end, five minutes at most, as a use by name asks the
+  vault first (named-use.ts). On Workers a
+  request makes two calls of 114 at most (`removal.ts`: 32 invocations a
+  request, 10 ms of CPU a call, from the CPU each was measured to cost),
+  then answers 202 `{ removing: { left } }`, the binding closed; the
+  client asks again, the same request, until it is done, and the
+  scheduled run goes on with any binding left closed, as
+  `system:schedule`, each change naming the removal it continues. A
+  replacement makes its new binding in the first call, which closes the
+  old one, and answers then; the old one's removal is what is left;
 - a bind holds the account's bindings not revoked to the set the app
   weighed it beside (an issuer's keys moved, the cap), under the account's
   row, and the keys its policy reads to the names they were asked by,
@@ -266,8 +294,8 @@ the binding's keys come from, which its seal says (`jwks_uri`):
     to a key of its own, as the DPoP proof that picks that key is whoever
     sends it: once, as such tokens are spent once, the run's or the pod's
     own sign-in then failing; for Azure, whose tokens its platform hands
-    out again (`REPEATING_PROFILES`), as often as the binding's rate
-    allows, until the token's `exp`.
+    out again (`REPEATING_PROFILES`), as often as it likes, until the
+    token's `exp` (W331 dropped the binding's rate of 60 a minute).
 
   Only a key-naming audience would close that, and none of these lets its
   caller name the key: a projected token cannot carry a per-pod
@@ -280,17 +308,17 @@ the binding's keys come from, which its seal says (`jwks_uri`):
   moves that one into the vault). The sign-in carries no token. Everything
   else the vault still decides itself, in the same one call: the binding
   is one it sealed and not ended, the account's standing and generation,
-  the scope the binding seals, its rate, the token spent once (by the hash
-  the app names).
+  the scope the binding seals, the token spent once (by the hash the app
+  names).
 
 So the boundary, plainly: **a compromised app can mint CI credentials and
 sessions for an account bound to GitHub, GitLab, a generic OIDC issuer or
-AWS, within its bindings' limits** (the scope each seals, 60 sign-ins a
-minute each), and for no account the vault never bound. Through a binding
+AWS, within its bindings' limits** (the scope each seals; since W331 no
+count of sign-ins), and for no account the vault never bound. Through a binding
 of uploaded keys, which the vault verifies, it mints nothing without a
 genuine token for this instance; one it receives that names no key it can
 spend for itself: once (a CI run's, a Kubernetes pod's), and, for Azure's
-repeating tokens, within the binding's rate until the token expires. The vault itself makes
+repeating tokens, as often as it likes until the token expires. The vault itself makes
 no call to an issuer: a Node deployment's vault reaches Postgres and, if
 its KEK is remote (AWS KMS), that KEK, nothing else.
 
@@ -335,9 +363,10 @@ every protection on; each protection removed breaks the invariant beside it
 | `SignInsTakeNoHead` (R44), `IssuesHoldNoLockBetween` | no sign-in takes 0.14's head; an issue holds nothing between its two statements | (by construction) |
 | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential` | rights never widen: a token is numbered before its issuer's demotion, a policy change that takes the right from her role, and her credential's revoke | IssuerLocked, IssuerCAS (each); IssuePolicyHeld (the policy change) |
 | `UsesNeverWaitOnIssues`, `UsesTakeNoIssueLock` (R58) | a use never waits on an issue, nor behind a change that waits for one, and never takes the issue lock | IssueOffFence; PolicyIssueFirst |
-| `RateHeld`, `SpentOnce` | a binding's rate holds; an ID token buys one credential | BindingLocked; SpentChecked |
+| `SpentOnce` | an ID token buys one credential (`RateHeld`, a binding's rate, went with it in W331) | SpentChecked |
+| `SignInsRunTogether` (R44, W331) | a sign-in never waits for another through its binding: not for its row, not to stamp its last use | SignInsShare; TouchSkipsLocked |
 | `AllowedAtCurrentGeneration` | removed, an account's credentials end | MemberLocked and UseChecksGeneration (each covers the other) |
-| `EndedBindingEndsCredentials` | unbound, a binding's credentials serve nothing after | BindingLocked; SweepAfterLock |
+| `EndedBindingEndsCredentials` | unbound, a binding's credentials serve nothing after | BindingLocked; UnbindExclusive; SweepAfterLock |
 | `AllowedOnSealed` | a row a writer put back, forged or edited serves nothing | SealChecked |
 | `AllowedAsPresented` | a use serves the credential whose token was presented | HashSealed and AppChecksMac (each suffices) |
 | `SignInsOnValidTokens` | the app's code, hostile, mints no run's credential through a binding whose keys the vault holds | VaultVerifiesToken; AudienceSealed; BindingSealed |
@@ -382,11 +411,11 @@ Two results drove the design:
 | the app computes the row's APP_KEY MAC, the vault writes it verbatim | the vault holding APP_KEY | the vault never holds the app's key; the MAC covers id, hash, kind, principal, generation, identity, expiry and revoke, all of which the vault checks or decides |
 | the vault's own scope rule (`sealedSessionScope`, `storedScope`, `readScope`) moved to `@coffre/core/access` | the vault trusting the app's scope | one rule on both sides; the app's scope must equal the vault's, or the call fails |
 | `validUntil`, the proof's own times, held to in the statement | trusting the app's check before the call | 0.14 checked the token's times again after its wait under the head; the vault does the same, by the database's clock. PR 3 computes it itself |
-| `lock_timeout = '1s'` on both functions, refused as busy | `NOWAIT` (review r1) | R44: overload refused fast. The binding's row lock is what holds its rate (BindingLocked); `NOWAIT` would refuse every sign-in of a burst on one binding but the first, which R44 asks to serve. Each holder keeps the row for its statement's work, a few ms, and a backend waits only behind those; one second bounds the rare long holder (an unbind's transaction) |
+| `lock_timeout = '1s'` on both functions, refused as busy | `NOWAIT` (review r1) | R44: overload refused fast. Since W331 a binding's sign-ins share its row and never wait for each other; a sign-in waits only behind an unbind or a removal of its account, and an unbind behind the sign-ins in flight, each a statement's work (about 0.5 ms). One second bounds the rare long holder; `NOWAIT` would refuse a sign-in for every unbind in flight. Under a flood near Postgres's own ceiling (28,000 a second on one binding, measured) an unbind's `FOR UPDATE` may wait past a second, as new sharers keep the row (it is asked again: `busy`) |
 | no 0.14 `token.exchange` entry (D147), and, extending it, no 0.14 `token.revoke` or `sign_out` allow entry: the change records it | the app appending 0.14's entry after the call | the same reason as D147; the change carries who, the binding, the proof, the issuer, the run, a session's key and end, and for a revoke why, the credential it came in on, and whose credential of what kind; an issue's and a revoke's also whose act it was as 0.14's entry named it, a run's credential, a personal token or an MCP app and its approval (`trace`, T164). Refusals are still 0.14 entries. **For Erwin: reversible** |
 | seal the token hash in the credential's object (option (a)), in PR 3 | the app's MAC check alone (option (b)) | with W242's B1 the vault finds a use's credential by its hash, so the hash is a decision input (R53). The model shows each stops a writer who moves a hash; only (a) holds when the app's check does not run. It lands after B1 |
 | a workload proof with a `commit` keeps the old path | moving the enrollment's capacity into SQL | no such proof is registered yet |
-| every sign-in through a binding goes through the vault, one 0.4 made sealed first | the old path for those | a binding's rate is counted under its row; a sign-in that counted it under the head beside one under the row could pass it by one (review r2) |
+| every sign-in through a binding goes through the vault, one 0.4 made sealed first | the old path for those | a binding's rate was counted under its row; a sign-in that counted it under the head beside one under the row could pass it by one (review r2). W331 dropped the rate; one path still keeps one lock discipline |
 | the app's key checked in the statement, not under the fence | the fence, or nothing | a credential the app signed under a key it rotated from is refused, as 0.14 refuses its entry. A rotation that commits during the statement leaves a row its new key refuses at once: a dead credential, never a live one, and R41's rotation signs every session out anyway. The model leaves this out for that reason: no outcome of it widens anything |
 | an issue is one call, a read and one write, holding nothing between (PR 2) | one statement, as D146 asked | the vault weighs the issuer's rights, which it has to read and check first: the app's `Access` answer carries no MAC the vault could take back. The write holds what the read decided on (IssuerLocked, IssuerCAS), which the model shows enough. **For Erwin: a deviation from D146** |
 | a row moved under the write: the vault reads and weighs again, up to three times, then `moved` (409) | answering `moved` at once, for the app to ask again | the vault reads everything it weighs, so it can weigh again itself, as the model's IssueCheck does; the app reads nothing more |

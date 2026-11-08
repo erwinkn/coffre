@@ -19,6 +19,14 @@ import { join, resolve } from 'node:path';
  * a caller sends; this harness sends only bodies that end. The entry and its
  * config are written beside the build, which the next `vite build`
  * replaces: nothing of them deploys.
+ *
+ * Its rate-limiting bindings allow at most `LOCAL_RATE_LIMIT` a window:
+ * the examples' `SIGN_IN_PER_SOURCE` takes 10,000 per 10 s (W331, D177),
+ * more than a local `wrangler dev` answers in 10 s (20,016 sent, none
+ * refused), so conformance's `exchangesLimited` could never see the
+ * binding refuse. What it holds is that the binding counts every exchange
+ * before any work, not the number. The Node harness sets the same limit
+ * (`SIGN_IN_PER_SOURCE`, harness.ts).
  */
 export function drainingConfig(server: string): string {
   writeFileSync(
@@ -38,10 +46,17 @@ export function drainingConfig(server: string): string {
       '',
     ].join('\n'),
   );
-  const config = JSON.parse(readFileSync(join(server, 'wrangler.json'), 'utf8')) as Record<string, unknown>;
+  const config = JSON.parse(readFileSync(join(server, 'wrangler.json'), 'utf8')) as Record<string, unknown> & { ratelimits?: RateLimitBinding[] };
   const path = join(server, 'conformance.json');
-  writeFileSync(path, JSON.stringify({ ...config, main: 'conformance.js' }));
+  const ratelimits = config.ratelimits?.map((binding) => ({ ...binding, simple: { ...binding.simple, limit: Math.min(binding.simple.limit, LOCAL_RATE_LIMIT) } }));
+  writeFileSync(path, JSON.stringify({ ...config, main: 'conformance.js', ...(ratelimits === undefined ? {} : { ratelimits }) }));
   return path;
 }
+
+/** A rate-limiting binding, as wrangler's config writes one. */
+type RateLimitBinding = { name: string; namespace_id: string; simple: { limit: number; period: number } };
+
+/** What a local run's rate-limiting bindings allow a window, at most: well within what conformance sends in one. */
+export const LOCAL_RATE_LIMIT = 100;
 
 if (import.meta.main) console.log(drainingConfig(resolve(process.argv[2]!)));

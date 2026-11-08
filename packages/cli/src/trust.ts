@@ -918,7 +918,11 @@ export function describeBindings(member: string, bindings: BindingView[]): strin
   const blocks = bindings.map((binding) => {
     const used = binding.lastUsedAt === null ? 'never used' : `last used ${binding.lastUsedAt.slice(0, 16).replace('T', ' ')}`;
     const head = `${binding.id}${binding.label === null ? '' : `  ${binding.label}`}  (added by ${binding.createdBy} ${binding.createdAt.slice(0, 10)}, ${used})`;
-    return [head, ...describeBinding(binding)].join('\n');
+    // Closed, its credentials still being revoked (W331): `coffre untrust --apply` again, or the scheduled run, finishes it.
+    const removing = binding.removing === null
+      ? []
+      : [`being removed since ${binding.removing.since.slice(0, 16).replace('T', ' ')}: refused already, its credentials still being revoked`];
+    return [head, ...removing, ...describeBinding(binding)].join('\n');
   });
   return `${blocks.join('\n\n')}\n`;
 }

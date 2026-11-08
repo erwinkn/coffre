@@ -108,12 +108,13 @@ export type PasskeysConfig = { policy: PasskeyPolicy; rpId: string; origin: stri
  */
 export type WorkloadsOptions = {
   /**
-   * The two limits every exchange passes before coffre does any work for
-   * it: one per source address, and one for all sources together. On
-   * Workers, two rate-limiting bindings (`env.WORKLOADS_PER_SOURCE`,
-   * `env.WORKLOADS_TOTAL`), which Cloudflare counts per location; on Node,
-   * `processLimits()` from `@coffre/server/node`, which counts per process.
-   * Required: an exchange is never without them.
+   * The limit every sign-in passes before coffre does any work for it
+   * (`/api/auth/oidc`, `/api/auth/workload`): requests one source address
+   * may make to each, counted apart. On Workers, a rate-limiting binding
+   * (`env.SIGN_IN_PER_SOURCE`, 10,000 per 10 s), which Cloudflare counts
+   * per location; on Node, `processLimits()` from `@coffre/server/node`,
+   * which counts per process. The same one may serve `mcp.limits`.
+   * Required: a sign-in is never without it.
    */
   limits: WorkloadLimits;
   /**
@@ -148,11 +149,21 @@ export type WorkloadsOptions = {
 /** Cloudflare's rate-limiting binding, as coffre calls it; `processLimits()` has the same shape. */
 export type RateLimiter = { limit(options: { key: string }): Promise<{ success: boolean }> };
 
-export type WorkloadLimits = { perSource: RateLimiter; total: RateLimiter };
+/**
+ * `perSource`: what one address may ask of an entry point that takes
+ * anyone, before coffre knows who: each entry point counted apart, as the
+ * key names it (`exchange:<address>`, `oauth:token:<address>`, …), so one
+ * limiter serves them all (W331, D177).
+ */
+export type WorkloadLimits = {
+  perSource: RateLimiter;
+  /** @deprecated 0.15's limit for all sources together, gone in 0.16 (W331, D177): read no more, and refused in 0.17. Remove it. */
+  total?: RateLimiter;
+};
 
 export type WorkloadsConfig = {
   allowLoopback: boolean;
-  limits: WorkloadLimits;
+  limits: { perSource: RateLimiter };
   github: GitHubApp | null;
   useOnly: boolean;
   noReads: boolean;
@@ -166,11 +177,13 @@ export type WorkloadsConfig = {
  */
 export type McpOptions = {
   /**
-   * The limits every unauthenticated OAuth request passes before coffre does
-   * any work for it, one per source address and one for all together, and
-   * the one each connection's tool calls pass. On Workers, three
-   * rate-limiting bindings; on Node, `processLimits()` from
-   * `@coffre/server/node`. Required.
+   * The limit every unauthenticated OAuth request passes before coffre does
+   * any work for it: requests one source address may make to each OAuth
+   * endpoint, counted apart. On Workers, a rate-limiting binding, the one
+   * `workloads.limits` takes (`env.SIGN_IN_PER_SOURCE`); on Node,
+   * `processLimits()` from `@coffre/server/node`. A connection's tool calls
+   * pass none: they act as the person who approved it, whose own requests
+   * have no rate either. Required.
    */
   limits: McpLimits;
   /**
@@ -181,9 +194,15 @@ export type McpOptions = {
   allowLoopbackClientsForDevelopment?: boolean;
 };
 
-export type McpLimits = { perSource: RateLimiter; perConnection: RateLimiter; total: RateLimiter };
+export type McpLimits = {
+  perSource: RateLimiter;
+  /** @deprecated 0.15's limit on a connection's tool calls, gone in 0.16 (W331, D177): read no more, and refused in 0.17. Remove it. */
+  perConnection?: RateLimiter;
+  /** @deprecated 0.15's limit for all sources together, gone in 0.16 (W331, D177): read no more, and refused in 0.17. Remove it. */
+  total?: RateLimiter;
+};
 
-export type McpConfig = { allowLoopback: boolean; limits: McpLimits };
+export type McpConfig = { allowLoopback: boolean; limits: { perSource: RateLimiter } };
 
 const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const BRANDS: readonly SigninBrand[] = ['github', 'google', 'microsoft', 'oidc'];
@@ -477,13 +496,11 @@ function isDomainName(host: string): boolean {
   return host.split('.').every((label) => LABEL.test(label));
 }
 
-/** MCP, checked: its three limits given, each one a limiter; loopback clients only on a loopback instance. */
+/** MCP, checked: its limit per source given, a limiter; loopback clients only on a loopback instance. */
 function mcpConfig(options: McpOptions, publicUrl: string): McpConfig {
   const limiter = (value: unknown) => typeof (value as RateLimiter | undefined)?.limit === 'function';
-  if (!limiter(options.limits?.perSource) || !limiter(options.limits?.perConnection) || !limiter(options.limits?.total)) {
-    throw new Error(
-      'mcp needs its limits, per source, per connection and in total: on Workers, three rate-limiting bindings; on Node, processLimits()',
-    );
+  if (!limiter(options.limits?.perSource)) {
+    throw new Error('mcp needs its limit per source, limits: { perSource }: on Workers, a rate-limiting binding; on Node, processLimits()');
   }
   const loopback = options.allowLoopbackClientsForDevelopment === true;
   if (loopback && !isLoopback(new URL(publicUrl))) {
@@ -491,16 +508,14 @@ function mcpConfig(options: McpOptions, publicUrl: string): McpConfig {
       `mcp.allowLoopbackClientsForDevelopment is for an instance on loopback, and ${publicUrl} is not one: turn it off`,
     );
   }
-  return { allowLoopback: loopback, limits: options.limits };
+  return { allowLoopback: loopback, limits: { perSource: options.limits.perSource } };
 }
 
-/** Workloads, checked: both limits given, each one a limiter; loopback issuers only on a loopback instance. */
+/** Workloads, checked: the limit per source given, a limiter; loopback issuers only on a loopback instance. */
 function workloadsConfig(options: WorkloadsOptions, publicUrl: string): WorkloadsConfig {
   const limiter = (value: unknown) => typeof (value as RateLimiter | undefined)?.limit === 'function';
-  if (!limiter(options.limits?.perSource) || !limiter(options.limits?.total)) {
-    throw new Error(
-      'workloads need their limits, per source and in total: on Workers, two rate-limiting bindings; on Node, processLimits()',
-    );
+  if (!limiter(options.limits?.perSource)) {
+    throw new Error('workloads need their limit per source, limits: { perSource }: on Workers, a rate-limiting binding; on Node, processLimits()');
   }
   const loopback = options.allowLoopbackIssuersForDevelopment === true;
   if (loopback && !isLoopback(new URL(publicUrl))) {
@@ -522,7 +537,7 @@ function workloadsConfig(options: WorkloadsOptions, publicUrl: string): Workload
   if (options.alert !== undefined && typeof options.alert !== 'function') throw new Error('workloads.alert is a function, given each alert');
   return {
     allowLoopback: loopback,
-    limits: options.limits,
+    limits: { perSource: options.limits.perSource },
     github: app ?? null,
     useOnly: options.useOnly === true,
     noReads: options.noReads === true,

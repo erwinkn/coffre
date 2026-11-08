@@ -38,7 +38,7 @@ import { ApiError, vaultRefused } from './errors.ts';
 /** The actor of the app's own changes, made for no one's request: a key rotation's revokes, an unknown token signed out. */
 export const COFFRE_ACTOR = 'coffre';
 
-type Kept = { log: boolean; uses: boolean; batches: boolean; namedBatches: boolean; sealing: boolean; credentials: boolean; issues: boolean; binds: boolean; writes: boolean; admits: boolean; owners: readonly string[] };
+type Kept = { log: boolean; uses: boolean; batches: boolean; namedBatches: boolean; sealing: boolean; credentials: boolean; issues: boolean; binds: boolean; sweeps: boolean; writes: boolean; admits: boolean; owners: readonly string[] };
 
 /**
  * What the vault keeps of 0.15, as it says (`about()`): asked once per vault (asked-once.ts), then kept, settled. An
@@ -65,6 +65,7 @@ async function asked015(vault: Vault): Promise<Kept> {
     credentials: log && about.credentials === true && vault.signIn !== undefined && vault.revokeCredential !== undefined,
     issues: log && about.issues === true && vault.issueToken !== undefined,
     binds: log && about.binds === true && vault.changeBindings !== undefined,
+    sweeps: log && about.binds === true && about.sweeps === true && vault.changeBindings !== undefined,
     writes: log && about.writes === true && vault.writeKeys !== undefined,
     admits: log && about.admits === true && vault.admitRead !== undefined && vault.admitWrite !== undefined,
     // The deployment's configuration, which a vault re-applies at its start and an isolate never sees change (R3).
@@ -471,10 +472,10 @@ export function sealedBinding(row: BindingRow, publicUrl: string): { columns: Bi
 }
 
 /** A binding the vault makes (`changeBindings`) on `origin`, this instance's public URL: its row, as `insertBinding` writes it, and the app's MAC over it. */
-export function madeBinding(chainKey: Buffer, origin: string, row: Omit<BindingRow, 'authMac' | 'lastUsedAt' | 'revokedAt' | 'revokedBy' | 'seal' | 'origin'>): MadeBinding {
+export function madeBinding(chainKey: Buffer, origin: string, row: Omit<BindingRow, 'authMac' | 'lastUsedAt' | 'revokedAt' | 'revokedBy' | 'seal' | 'origin' | 'closedAt' | 'closedBy'>): MadeBinding {
   const signed = { ...row, revokedAt: null };
   return {
-    ...sealedBinding({ ...row, origin, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null }, origin).columns,
+    ...sealedBinding({ ...row, origin, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null, closedAt: null, closedBy: null }, origin).columns,
     jwks: row.jwks ?? null, label: row.label ?? null, createdBy: row.createdBy, createdAt: row.createdAt.getTime(), authMac: authMac(chainKey, 'service_bindings', signed).toString('base64'),
   };
 }
@@ -503,6 +504,11 @@ export function endedBinding(chainKey: Buffer, publicUrl: string, row: BindingRo
 /** Whether the vault makes and ends bindings itself, and signs in through none it did not seal (`about().binds`, PR 3a). */
 export async function vaultBinds(vault: Vault): Promise<boolean> {
   return (await about015(vault)).binds;
+}
+
+/** Whether the vault ends a binding in batches too, closing it first (`changeBindings`' `sweep`, `about().sweeps`; W331). */
+export async function vaultSweeps(vault: Vault): Promise<boolean> {
+  return (await about015(vault)).sweeps;
 }
 
 /**

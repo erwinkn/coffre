@@ -44,14 +44,13 @@ const transport: WorkloadTransport = {
   },
 };
 
-/** Limiters that let everything through, until a test closes one. */
-const open = { source: true, total: true };
-const limiter = (which: 'source' | 'total' | 'connection'): RateLimiter => ({
-  limit: async () => ({ success: which === 'connection' ? true : open[which] }),
-});
+/** The limit per source, open until a test closes it to one key; every key it was asked, in order. */
+const open: { closed: string | null } = { closed: null };
+const asked: string[] = [];
+const limiter: RateLimiter = { limit: async ({ key }) => (asked.push(key), { success: key !== open.closed }) };
 const auth = signin({
   providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })],
-  mcp: { limits: { perSource: limiter('source'), perConnection: limiter('connection'), total: limiter('total') } },
+  mcp: { limits: { perSource: limiter } },
 }).resolve(ORIGIN);
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
@@ -78,8 +77,8 @@ beforeEach(async () => {
   await resetDatabase(db.owner);
   forgetDocuments();
   fetched = [];
-  open.source = true;
-  open.total = true;
+  open.closed = null;
+  asked.length = 0;
   const root = clientFor(deps, ROOT);
   for (const email of [DEV, OTHER]) await root.members.add(`user:${email}`);
   await root.projects.create('market', { name: 'Market' });
@@ -461,15 +460,19 @@ test('registration keeps the redirects coffre accepts and leaves out the rest, a
   }
 });
 
-test('the unauthenticated endpoints pass their limits first, and a JSON token request is refused', async () => {
-  open.source = false;
+test('the unauthenticated endpoints pass their limit per source first, each counted apart, and a JSON token request is refused', async () => {
+  open.closed = 'oauth:token:203.0.113.7';
   const limited = await route('/api/oauth/token', tokenRequest({ grant_type: 'refresh_token', refresh_token: 'x', client_id: CLAUDE_CODE }));
   assert.equal(limited.status, 429);
-  assert.equal(limited.headers.get('retry-after'), '60');
-  open.source = true;
-  open.total = false;
+  // Asked again once the window has moved on: 10 s, not a minute (W331).
+  assert.equal(limited.headers.get('retry-after'), '10');
+  // The same address's registration and revocation are counted apart from its token requests; none counts them all.
+  assert.equal((await route('/api/oauth/register', { method: 'POST', body: '{}' })).status, 400);
+  assert.equal((await route('/api/oauth/revoke', tokenRequest({ token: 'x', client_id: CLAUDE_CODE }))).status, 200);
+  assert.deepEqual(asked, ['oauth:token:203.0.113.7', 'oauth:register:203.0.113.7', 'oauth:revoke:203.0.113.7']);
+  open.closed = 'oauth:register:203.0.113.7';
   assert.equal((await route('/api/oauth/register', { method: 'POST', body: '{}' })).status, 429);
-  open.total = true;
+  open.closed = null;
   const json = await route('/api/oauth/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   assert.equal(((await json.json()) as { error: string }).error, 'invalid_request');
   const twice = await route('/api/oauth/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=a&grant_type=b' });

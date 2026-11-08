@@ -52,15 +52,13 @@
   ],
   // The heartbeat and audit checkpoints.
   "triggers": { "crons": ["*/5 * * * *"] },
-  // What a CI run's exchange of its ID token passes first: per address, and
-  // for everyone. Cloudflare counts each per location.
+  // What a sign-in that takes anyone passes first, a CI run's or a
+  // workload's, or an MCP client's OAuth request: the requests one address
+  // makes to each, counted apart. 10,000 per 10 s is 1,000 a second, the
+  // CI sign-in rate coffre is built for, which a fleet behind one NAT may
+  // send from one address. Cloudflare counts per location, and takes a
+  // period of 10 or 60 seconds.
   "ratelimits": [
-    { "name": "WORKLOADS_PER_SOURCE", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } },
-    { "name": "WORKLOADS_TOTAL", "namespace_id": "1002", "simple": { "limit": 300, "period": 60 } },
-    // MCP: its OAuth requests, per address and for everyone, and each
-    // connection's tool calls.
-    { "name": "MCP_PER_SOURCE", "namespace_id": "1003", "simple": { "limit": 30, "period": 60 } },
-    { "name": "MCP_PER_CONNECTION", "namespace_id": "1004", "simple": { "limit": 120, "period": 60 } },
-    { "name": "MCP_TOTAL", "namespace_id": "1005", "simple": { "limit": 300, "period": 60 } }
+    { "name": "SIGN_IN_PER_SOURCE", "namespace_id": "1006", "simple": { "limit": 10000, "period": 10 } }
   ]
 }

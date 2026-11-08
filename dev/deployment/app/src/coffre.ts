@@ -23,11 +23,7 @@ export type Env = {
   COFFRE_APP_KEY: string;
   /** The dev IdP's GitHub App's private key, which dev/start.sh makes. */
   COFFRE_DEV_GITHUB_APP_KEY: string;
-  WORKLOADS_PER_SOURCE: RateLimiter;
-  WORKLOADS_TOTAL: RateLimiter;
-  MCP_PER_SOURCE: RateLimiter;
-  MCP_PER_CONNECTION: RateLimiter;
-  MCP_TOTAL: RateLimiter;
+  SIGN_IN_PER_SOURCE: RateLimiter;
   /** The Durable Object that hosts the tunnel's WebSockets, `CoffreSockets` (src/server.ts). */
   SOCKETS: SocketsNamespace;
   /** The Durable Object that holds each workload's gate, `CoffreGates` (src/server.ts). */
@@ -86,13 +82,13 @@ export const coffre = createCoffre((env: Env) => {
       passkeys: env.COFFRE_DEV_PASSKEYS,
       // CI runs signing in as services; the dev IdP is plain HTTP on loopback.
       workloads: {
-        limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL },
+        limits: { perSource: env.SIGN_IN_PER_SOURCE },
         allowLoopbackIssuersForDevelopment: loopback,
         github: app,
       },
       // MCP clients at /mcp; a client's metadata document may be plain HTTP on loopback here.
       mcp: {
-        limits: { perSource: env.MCP_PER_SOURCE, perConnection: env.MCP_PER_CONNECTION, total: env.MCP_TOTAL },
+        limits: { perSource: env.SIGN_IN_PER_SOURCE },
         allowLoopbackClientsForDevelopment: loopback,
       },
     }),

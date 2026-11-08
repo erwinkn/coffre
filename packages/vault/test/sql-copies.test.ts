@@ -18,6 +18,7 @@ import { sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 
 import { periodOf, phaseOf, REFRESH_MAX_MS, REFRESH_WINDOW_SHARE, USE_AHEAD_MS } from '../src/bulk.ts';
+import { BINDING_LAST_USED_MS } from '../src/credentials.ts';
 import { HELD_PAST_DEADLINE_MS } from '../src/use.ts';
 import { ENGINE, openTestDatabase, postgresOnly, rows, type TestDatabase } from './database.ts';
 
@@ -95,6 +96,12 @@ test('no function holds another copy of the minute or the deadline than the ones
     + found(/least\(60000, /g).length + signIn.length;
   assert.equal(minutes, counted, 'a new copy of 60000 in a function: take it from a constant, and add it here');
   assert.deepEqual(found(/\b(3000)\b/g).map(({ name }) => name), ['deadline_max'], 'the deadline is deadline_max(), written once');
+});
+
+test("sign_in stamps a binding's last use when BINDING_LAST_USED_MS old, written once in each of its overloads", POSTGRES, () => {
+  const stamp = found(/last_used_at < stamped - interval '(\d+) minute'/g);
+  const overloads = functions.filter(({ name }) => name === 'sign_in').length;
+  assert.deepEqual(stamp.map(({ name, groups }) => [name, Number(groups[0]) * 60_000]), Array(overloads).fill(['sign_in', BINDING_LAST_USED_MS]));
 });
 
 test("the hot login's timeouts are HOT_LOCK_TIMEOUT_MS and HOT_STATEMENT_TIMEOUT_MS, the ones a place's lapse is counted from", POSTGRES, async () => {

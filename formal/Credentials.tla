@@ -31,8 +31,7 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 CONSTANTS
     Procs,          \* concurrent requests, each one a process
     Ops,            \* Ops[p]: the operations process p may run
-    Budget,         \* Budget[p]: how many it runs, one after another
-    RateCap         \* how many credentials a binding issues within the minute
+    Budget          \* Budget[p]: how many it runs, one after another
 
 (***************************************************************************)
 (* The protections the code has, each a switch, as in Coffre.tla.          *)
@@ -48,9 +47,6 @@ CONSTANTS
     BindingRecheckUnderHead,
     \* And the account's standing and generation (#exchange, exchangeStill).
     MemberRecheckInExchange,
-    \* The binding's rate, credentials it issued in the last minute, is
-    \* counted under the head (#exchange, exchangeStill), not before it.
-    RateCountUnderHead,
     \* Untrusting or replacing a binding revokes the live credentials it
     \* issued (workloads.ts, #revoke, revokeLiveCredentials).
     RevokeIssuedCredentials,
@@ -175,7 +171,6 @@ L0 == [id |-> <<None, 0>>,
        b |-> None,            \* the binding an exchange matched
        bgen |-> 0,            \* its generation, as read
        gen |-> 0,             \* the account's generation, as the vault answered
-       rate |-> 0,            \* the binding's credentials, counted before the head
        cred |-> NoCred,       \* the credential a use came in on
        at |-> 0,              \* where its `secret.read` is in the log
        recalled |-> FALSE,    \* a use decided on a kept answer, not one it asked for
@@ -253,16 +248,14 @@ Begin(p) ==
 
 \* The account's live bindings on the token's issuer, oldest first, one
 \* read and no lock (db/queries.ts, exchangeCandidates): the oldest that
-\* matches is taken. With them, here, what the binding issued in the last
-\* minute, as the rate would be counted without the head.
+\* matches is taken. No count of what the binding issued (W331, D177).
 ExCandidates(p) ==
     /\ pc[p] = "ex.candidates"
     /\ LET live == {b \in Bindings : Stands(b, gen)}
            b == IF "b1" \in live THEN "b1" ELSE "b2"
        IN IF live = {}
             THEN Refuse(p)
-            ELSE Read(p, "ex.spent", [l[p] EXCEPT !.b = b, !.bgen = binding[b].gen,
-                                                  !.rate = Cardinality({r \in creds : r.by = b})])
+            ELSE Read(p, "ex.spent", [l[p] EXCEPT !.b = b, !.bgen = binding[b].gen])
 
 \* Whether the token was spent already: in the code, read in the same statement as the bindings
 \* (db/queries.ts, exchangeCandidates); here a step of its own, which allows more interleavings, not fewer.
@@ -280,16 +273,13 @@ ExAccess(p) ==
 
 ExHead(p) == pc[p] = "ex.head" /\ TakeHead(p, "ex.commit")
 
-\* Under the head: the account and the binding again, the rate, the token
-\* spent, the credential issued and `token.exchange` logged, or none of it.
+\* Under the head: the account and the binding again, the token spent, the credential issued and `token.exchange` logged, or none of it.
 ExCommit(p) ==
     /\ pc[p] = "ex.commit"
     /\ LET b == l[p].b
-           rate == IF RateCountUnderHead THEN Cardinality({r \in creds : r.by = b}) ELSE l[p].rate
            new == [id |-> l[p].id, by |-> b, gen |-> l[p].bgen, revoked |-> FALSE]
        IN IF \/ MemberRecheckInExchange /\ ~(status = "active" /\ gen = l[p].gen)
              \/ BindingRecheckUnderHead /\ ~Stands(b, l[p].bgen)
-             \/ rate >= RateCap
              \/ SpentTokenInsertedWithCredential /\ op[p].token \in consumed
             THEN Refuse(p)
             ELSE /\ consumed' = consumed \cup {op[p].token}
@@ -594,9 +584,6 @@ NoExchangeAfterUnbind ==
 \* An exchange issues to an active account, at its generation as it is
 \* when the credential commits.
 ExchangedAtCurrentGeneration == \A c \in issued : c.current
-
-\* A binding issues no more than its rate.
-RateHeld == \A b \in Bindings : Cardinality({r \in creds : r.by = b}) <= RateCap
 
 \* Whether the entry at i ends credential r: its `token.revoke`, its
 \* binding's `token.unbind`, or a removal moving the account past its

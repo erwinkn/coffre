@@ -16,7 +16,6 @@ import { coffreRoute } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
 import { vaultKv } from '../src/plugins/vault-kv.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, signInsLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
 
@@ -87,7 +86,7 @@ beforeEach(async () => {
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault: deps.vault,
-    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: { perSource: limiter, total: processLimits({ perSource: 1000, total: 1000 }).total } } }),
+    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: { perSource: limiter } } }),
     auditChainKey: deps.chainKey.toString('base64'),
     plugins: [vaultKv()],
   });

@@ -18,6 +18,7 @@ import {
   type AuthenticatedIdentity,
 } from './auth.ts';
 import { dpopToken, SessionRefused, signedUrl, standingSession } from './workload-sessions.ts';
+import { SOURCE_RETRY_AFTER } from './workloads/limits.ts';
 import { apiCaller } from './fetch-api.ts';
 import { errorResponse, jsonResponse, readJson, readLimitedJson, SIGN_IN_BODY_BYTES, validate } from './http.ts';
 import { logged } from './logged.ts';
@@ -143,6 +144,7 @@ const exchangeBody = z.object({ service: z.string(), token: z.string() }).strict
 
 const REFUSED_CODE = { 401: 'unauthenticated', 429: 'too_many_requests', 503: 'unavailable' } as const;
 
+
 /** An exchange refused, as its client reads it: 401 with the reason, or 429 and 503 with when to come back (`Retry-After`). */
 function refuseExchange(error: ExchangeRefused, headers: Record<string, string> = {}): Response {
   // A 503 is coffre, or what it asked, not answering for a moment (`errorResponse`): a limiter that could not count, STS.
@@ -155,17 +157,18 @@ function refuseExchange(error: ExchangeRefused, headers: Record<string, string> 
 }
 
 /**
- * Both exchanges' admission, before anything else: one limit per source
- * address and one for all. A limiter that fails refuses, and never lets a
+ * A sign-in's admission, before anything else: the requests its source
+ * address made to this entry point (`exchange`, `/api/auth/oidc` and a
+ * plugin's login made of it; `workload`, `/api/auth/workload`), counted
+ * apart from every other's (W331, D177). Refused, it is asked again when
+ * the limiter's window has moved on: 10 s (`processLimits`, and the
+ * examples' binding). A limiter that fails refuses, and never lets a
  * request through. Null when admitted.
  */
-async function admission(workloads: WorkloadService, sourceIp: string | null): Promise<Response | null> {
+async function admission(workloads: WorkloadService, entry: 'exchange' | 'workload', sourceIp: string | null): Promise<Response | null> {
   try {
-    const [source, total] = await Promise.all([
-      workloads.limits.perSource.limit({ key: `source:${sourceIp ?? 'unknown'}` }),
-      workloads.limits.total.limit({ key: 'total' }),
-    ]);
-    return source.success && total.success ? null : refuseExchange(new ExchangeRefused('busy', 'too many exchanges: try again in a minute', 429));
+    const { success } = await workloads.limits.perSource.limit({ key: `${entry}:${sourceIp ?? 'unknown'}` });
+    return success ? null : refuseExchange(new ExchangeRefused('busy', 'too many sign-ins from this address: try again in a few seconds', 429, SOURCE_RETRY_AFTER));
   } catch (error) {
     console.error('workload limiter failed', logged(error));
     return refuseExchange(new ExchangeRefused('busy', 'coffre cannot count exchanges right now: try again shortly', 503));
@@ -182,8 +185,8 @@ function useOnly(runtime: CoffreRuntime): boolean {
  * the service it names (docs/design/oidc.md). `{ service, token }` answers
  * `{ token, expiresAt }`.
  *
- * Admission comes before anything else: both limits, one per source address
- * and one for all, then the body, read only to its limit. A limiter that
+ * Admission comes before anything else, its source address's limit
+ * (`admission`), then the body, read only to its limit. A limiter that
  * fails refuses, and never lets a request through. `asked` says what the
  * body asks for, for a plugin whose clients write it in their own words, a
  * Vault login's `{ role, jwt }` (`PluginContext.exchange`): read past
@@ -201,7 +204,7 @@ export async function exchangeWorkloadToken(
   if (useOnly(runtime)) {
     return jsonResponse({ error: 'gone', reason: 'use_only', message: 'this instance signs services in at /api/auth/workload, with a key (useOnly): it issues no bearer credential' }, 410);
   }
-  const refused = await admission(workloads, sourceIp);
+  const refused = await admission(workloads, 'exchange', sourceIp);
   if (refused !== null) return refused;
   try {
     const body = validate(exchangeBody, asked(await readLimitedJson(request, SIGN_IN_BODY_BYTES)));
@@ -241,7 +244,7 @@ export async function exchangeWorkloadSession(request: Request, runtime: CoffreR
   if (workloads === null) return errorResponse(notFound('this instance trusts no workloads'));
   // No gate, no session that could be used: nothing is spent for one.
   if (runtime.gates === undefined) return errorResponse(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session', 'no_gate'));
-  const refused = await admission(workloads, sourceIp);
+  const refused = await admission(workloads, 'workload', sourceIp);
   if (refused !== null) return refused;
   try {
     const body = validate(sessionBody, await readLimitedJson(request, SIGN_IN_BODY_BYTES));

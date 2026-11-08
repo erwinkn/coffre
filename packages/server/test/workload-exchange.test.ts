@@ -6,24 +6,29 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { shownMember, SIGN_IN_BODY_BYTES } from '@coffre/core/schemas';
 import type { Role } from '@coffre/core/access';
-import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
+import { createClient } from '@coffre/client';
+import { github, MAX_BINDINGS, signin, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
 import { createDatabase, type Client, type Database } from '@coffre/db';
 import type { PostgresClient } from '@coffre/db/connect';
-import type { Vault } from '@coffre/core/vault';
-import { asc, desc, eq, isNotNull, sql, type SQL } from 'drizzle-orm';
+import { versioned, type Vault, type VaultEntry } from '@coffre/core/vault';
+import { asc, desc, eq, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
 
 import { auditLog, spentIdTokens, credentials, logChanges, projects, serviceBindings } from './db/tables.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { resolveConfig } from '../src/config.ts';
-import { runScheduled } from '../src/app.ts';
-import { exchangeCandidates, exchangesSince, exchangeStill, exchangeToken, pruneSpentTokens } from '../src/db/queries.ts';
+import { runScheduled, SPENT_TOKENS_PER_BEAT } from '../src/app.ts';
+import { AFTER_REMOVAL_CALLS, UNBIND_BATCH } from '../src/api/workloads.ts';
+import { countedEntry, countingCalls, WORKERS_BATCH, workersRemovalBudget } from '../src/removal.ts';
+import { serveApi } from '../src/api/router.ts';
+import { drainBackgroundTasks } from './background-tasks.ts';
+import { exchangeCandidates, exchangeStill, exchangeToken, issuedSoonest, pruneSpentTokens } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
-import { clientFor, contextFor, decisionInputs, holdSomething, LOG, openTestDatabase, resetDatabase, revokesLogged, signInsLogged, speaking, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, entryOf, decisionInputs, holdSomething, LOG, openTestDatabase, resetDatabase, revokesLogged, signInsLogged, speaking, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { keeps015 } from '../src/api/changes.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
@@ -89,7 +94,9 @@ let ec: Key;
 /** What the issuer publishes, by URL; `down` makes it unreachable, `hold` keeps a fetch waiting. */
 let published: Map<string, unknown>;
 let issuer: { down: boolean; fetches: number; hold?: () => Promise<void> };
-let limits: { perSource: RateLimiter; total: RateLimiter };
+let limits: { perSource: RateLimiter };
+/** Every key the limiter was asked to count, in order. */
+let keysAsked: string[];
 let vaultCalls: number;
 /** Waited for before the vault is asked about the member: the last step before the commit. */
 let beforeAccess: (() => Promise<void>) | undefined;
@@ -124,7 +131,8 @@ beforeEach(async () => {
     [`${ISSUER}/.well-known/openid-configuration`, { issuer: ISSUER, jwks_uri: KEYS }],
     [KEYS, { keys: [rsa.jwk, ec.jwk] }],
   ]);
-  limits = processLimits({ perSource: 1000, total: 1000 });
+  limits = processLimits({ perSource: 1000 });
+  keysAsked = [];
   deps = testDeps(db.runtime, [ROOT]);
   vaultCalls = 0;
   beforeAccess = undefined;
@@ -150,7 +158,7 @@ beforeEach(async () => {
   config = resolveConfig({
     publicUrl: ORIGIN,
     vault: deps.vault,
-    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: { perSource: { limit: (o) => limits.perSource.limit(o) }, total: { limit: (o) => limits.total.limit(o) } } } }),
+    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: { perSource: { limit: (o) => (keysAsked.push(o.key), limits.perSource.limit(o)) } } } }),
     auditChainKey: deps.chainKey.toString('base64'),
     plugins: [auditWatch({ anchor: deps.anchor })],
   });
@@ -293,7 +301,7 @@ test('a binding 0.4 makes after the app sealed is sealed by its first exchange, 
   const first = (await trade(token(rsa))).body.token!;
   assert.notEqual(await scope(), null, 'sealed as it exchanged, before the run used its credential');
   assert.deepEqual(await seals(), [[bound]]);
-  // With 0.15's log, the vault made it all the same, once sealed: every sign-in through a binding counts its rate under its row.
+  // With 0.15's log, the vault made it all the same, once sealed: every sign-in through a binding goes there.
   if (LOG === '0.15') assert.equal((await signInsLogged(db.owner)).at(-1)!.record.signIn !== undefined, true);
   // A run's credential whose binding carries no scope, as one 0.4's binding issued: its first check seals the binding.
   await unseal(bound);
@@ -352,6 +360,28 @@ test('the scheduled beat forgets a token two hours after it was spent, never soo
   assert.equal(await left(), '4', 'the beat took the third, and the young one stays');
   assert.equal(await pruneSpentTokens(db.runtime, 10), 0);
   assert.equal((await trade(jwt)).body.reason, 'replayed', 'the token just spent stays spent');
+});
+
+test("the beat forgets spent tokens in one scan of the table, deleting them by their place, not through the primary key (0080)", postgresOnly('it reads Postgres scan counts'), async () => {
+  // 50,000 spent within the two hours, three before.
+  await run(sql`INSERT INTO spent_id_tokens (hash, consumed_at) SELECT sha256(int8send(i)), now() - interval '1 hour' FROM generate_series(1, 50000) i`);
+  await run(sql`INSERT INTO spent_id_tokens (hash, consumed_at) SELECT sha256(int8send(-i)), now() - interval '3 hours' FROM generate_series(1, 3) i`);
+  await run(sql`ANALYZE spent_id_tokens`);
+  // The scans the prune made, on one backend: its counts not yet flushed, before and after (they include earlier
+  // statements' until the backend flushes them, so the difference).
+  const scans = await db.owner.transaction(async (tx) => {
+    const execute = (tx as unknown as { execute: (q: SQL) => Promise<{ seq: string; indexed: string }[]> }).execute.bind(tx);
+    const stats = sql`SELECT seq_scan::text AS seq, idx_scan::text AS indexed FROM pg_stat_xact_user_tables WHERE relname = 'spent_id_tokens'`;
+    const [before] = await execute(stats);
+    await execute(sql`SELECT prune_consumed_tokens(${SPENT_TOKENS_PER_BEAT})`);
+    const [after] = await execute(stats);
+    return { seq: Number(after!.seq) - Number(before!.seq), indexed: Number(after!.indexed) - Number(before!.indexed) };
+  });
+  // 50,000 primary-key lookups were the 0.15 prune's cost on a full table (1.85 s on 7.5 million): none now.
+  assert.deepEqual(scans, { seq: 1, indexed: 0 });
+  assert.equal((await db.owner.select().from(spentIdTokens)).length, 50_000);
+  // Twice what R44's 1,000 sign-ins a second spend in a five-minute beat.
+  assert.equal(SPENT_TOKENS_PER_BEAT, 600_000);
 });
 
 test('refusals say why, never what a binding expects, and a stranger never reaches the vault', async () => {
@@ -559,34 +589,6 @@ test("an exchange's first read visits the live bindings only, whatever the retir
     const plan = await planOf(pool, seen.find((statement) => /from "service_bindings"/i.test(statement.text))!, 'service_bindings');
     assert.ok(plan.indexes.includes('service_bindings_live_idx'), plan.indexes.join(', '));
     assert.ok(plan.visited <= 2, `visited ${plan.visited} binding rows for one live binding`);
-  } finally {
-    await pool.end();
-  }
-});
-
-test("a binding's rate is counted over its last minute, whatever the credentials it issued before", postgresOnly('it reads Postgres query plans'), async () => {
-  const [binding] = await db.owner.select().from(serviceBindings);
-  // 50,000 runs a month ago, each with its credential, expired since; then one now.
-  await run(sql`INSERT INTO credentials (kind, auth_mac, token_hash, token_hint, generation, principal, created_by, created_at, expires_at)
-    SELECT 'service', decode(repeat('00', 32), 'hex'), sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'coffre_svc_…', ${binding!.generation}, ${MEMBER},
-      ${`binding:${binding!.id}`}, now() - interval '30 days', now() - interval '30 days' + interval '5 minutes'
-    FROM generate_series(1, 50000)`);
-  await run(sql`ANALYZE credentials`);
-  assert.equal((await trade(token(rsa))).status, 200);
-  const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
-  const seen: Statement[] = [];
-  try {
-    // As the exchange counts it, with its member and binding, and as a workload's sign-in does, on its own.
-    const counting = createDatabase(counted(pool, seen));
-    const since = new Date(Date.now() - 60_000);
-    assert.deepEqual(standsAndRecent(await exchangeStill(counting, deps.chainKey, binding!, since, 60)), { stands: true, recent: 1 });
-    assert.equal(await exchangesSince(counting, MEMBER, `binding:${binding!.id}`, since, 60), 1);
-    assert.equal(seen.length, 2);
-    for (const statement of seen) {
-      const plan = await planOf(pool, statement, 'credentials');
-      assert.ok(plan.indexes.includes('credentials_issued_by_idx'), plan.indexes.join(', '));
-      assert.ok(plan.visited <= 2, `visited ${plan.visited} credential rows for one recent credential`);
-    }
   } finally {
     await pool.end();
   }
@@ -820,15 +822,14 @@ test('the spend writes the credential and stamps the binding only when it spent 
 });
 
 test("the re-check under the head stands only for the binding's own principal and a binding whose MAC is the app's", async () => {
-  const since = new Date(Date.now() - 60_000);
   const [binding] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
-  assert.deepEqual(standsAndRecent(await exchangeStill(db.runtime, deps.chainKey, binding!, since, 60)), { stands: true, recent: 0 });
+  assert.equal((await exchangeStill(db.runtime, deps.chainKey, binding!)).stands, true);
   // Another principal than the binding's: refused (a foreign key keeps a member row for every binding; the member's status and
   // generation are driven to refusals through the exchange itself, in the test above).
-  assert.deepEqual(standsAndRecent(await exchangeStill(db.runtime, deps.chainKey, { ...binding!, principal: 'token:ghost' }, since, 60)), { stands: false, recent: 0 });
+  assert.equal((await exchangeStill(db.runtime, deps.chainKey, { ...binding!, principal: 'token:ghost' })).stands, false);
   // The member's binding, its MAC not the app's.
   await db.owner.update(serviceBindings).set({ authMac: Buffer.alloc(32) }).where(eq(serviceBindings.id, bound));
-  assert.deepEqual(standsAndRecent(await exchangeStill(db.runtime, deps.chainKey, binding!, since, 60)), { stands: false, recent: 0 });
+  assert.equal((await exchangeStill(db.runtime, deps.chainKey, binding!)).stands, false);
 });
 
 test('one binding trusts a workflow on several events: a pull request into its branch, by its own run, and the push, but no other event', async () => {
@@ -936,18 +937,19 @@ test("two first exchanges at once each fetch the issuer's keys, rather than one 
   assert.equal(issuer.fetches, 2);
 });
 
-test('admission comes first: both limits, a limiter that fails, and the body\'s size', async () => {
-  limits = processLimits({ perSource: 1, total: 1000 });
+test('admission comes first: the address\'s limit at this entry point, a limiter that fails, and the body\'s size', async () => {
+  limits = processLimits({ perSource: 1 });
   assert.equal((await trade(token(rsa))).status, 200);
   vaultCalls = 0;
   const limited = await trade(token(rsa));
-  assert.deepEqual([limited.status, limited.body.reason, limited.retryAfter], [429, 'busy', '60']);
-  // Another address has its own allowance, under the same total.
-  assert.equal((await exchange({ service: MEMBER, token: token(rsa) }, '198.51.100.4')).status, 200);
-  limits = { perSource: processLimits().perSource, total: processLimits({ total: 1 }).total };
-  assert.equal((await trade(token(rsa))).status, 200);
-  assert.equal((await exchange({ service: MEMBER, token: token(rsa) }, '198.51.100.5')).status, 429);
-  limits = { perSource: { limit: async () => { throw new Error('binding gone'); } }, total: processLimits().total };
+  // Asked again once the window has moved on: 10 s, not a minute (W331).
+  assert.deepEqual([limited.status, limited.body.reason, limited.retryAfter], [429, 'busy', '10']);
+  assert.equal(vaultCalls, 0);
+  // Another address has its own allowance, and no limit counts them all together (W331, D177).
+  for (let i = 4; i < 10; i++) assert.equal((await exchange({ service: MEMBER, token: token(rsa) }, `198.51.100.${i}`)).status, 200);
+  // Each entry point counted apart, the key naming it.
+  assert.deepEqual(new Set(keysAsked), new Set([`exchange:${IP}`, ...Array.from({ length: 6 }, (_, n) => `exchange:198.51.100.${n + 4}`)]));
+  limits = { perSource: { limit: async () => { throw new Error('binding gone'); } } };
   const failing = await trade(token(rsa));
   // A limiter that could not count is coffre not answering for a moment: back in 5 s, not a minute.
   assert.deepEqual([failing.status, failing.body.reason, failing.retryAfter], [503, 'busy', '1']);
@@ -968,10 +970,10 @@ test('an hour at most, exactly, at the commit too: a token in time when verified
   assert.equal((await trade(token(rsa, { iat: seconds() - 3590 }))).status, 200);
 });
 
-test('a binding issues at most 60 credentials a minute', async () => {
+test('a binding issues as many credentials as its runs ask: 61 in a minute, each made (W331, D177)', async () => {
   const outcomes = [];
   for (let i = 0; i < 61; i++) outcomes.push((await trade(token(rsa))).status);
-  assert.deepEqual([outcomes.filter((status) => status === 200).length, outcomes.at(-1)], [60, 429]);
+  assert.deepEqual(outcomes, Array.from({ length: 61 }, () => 200));
 });
 
 /** Raw SQL as the owner, on either engine. */
@@ -1276,7 +1278,8 @@ test("with 0.15's log, replacing keys asks each binding's change on its own: one
   const done = await replaceKeys([rsa, ec]);
   assert.ok('bindings' in done);
   assert.deepEqual(done.replaced, [first.binding.id, other.binding.id]);
-  assert.equal(calls, 3, 'the first once, the second twice');
+  // The second moved, so closed (a sweep of none: no sign-in through it while it ends, W331), then asked again.
+  assert.equal(calls, 4, 'the first once, the second three times');
   assert.equal((await db.owner.select().from(serviceBindings)).filter((row) => row.revokedAt === null && row.issuer === first.binding.issuer).length, 2);
 });
 
@@ -1457,11 +1460,6 @@ test("/api/auth/oidc takes only a binding of today's five profiles with no polic
   assert.deepEqual([workload.status, workload.body.reason], [401, 'no_match']);
 });
 
-/** What `exchangeStill` answers of the binding's standing and rate, leaving out the scope it reads with them. */
-function standsAndRecent({ stands, recent }: { stands: boolean; recent: number }): { stands: boolean; recent: number } {
-  return { stands, recent };
-}
-
 test("a token with fractional times, and one with every claim a run records, sign in as any other (the record's bounds are runClaims')", async () => {
   // Times in fractional seconds, which the token's checks take: the proof's end is whole ms, down.
   assert.equal((await trade(token(rsa, { iat: seconds() - 5.5, exp: seconds() + 295.0001 }))).status, 200);
@@ -1473,3 +1471,595 @@ test("a token with fractional times, and one with every claim a run records, sig
   assert.equal(status, 200, JSON.stringify(body));
   assert.equal(Object.keys((await signInsLogged(db.owner)).at(-1)!.run).length > 16, true, 'more than 16 claims recorded');
 });
+
+test('no limit counts every address together: 301 exchanges in a minute, from 301 addresses, all past admission (W331, D177)', async () => {
+  limits = processLimits();
+  // One after another: 32 at once is the isolate's bound on exchanges in flight, which stays (#35).
+  const answers = [];
+  for (let n = 0; n < 301; n++) answers.push(await exchange({ service: MEMBER, token: 'not.a.token' }, `198.51.${n >> 8}.${n & 255}`));
+  // Each refused for its token, after admission: none for a count.
+  assert.deepEqual(new Set(answers.map(({ status, body }) => `${status} ${body.reason}`)), new Set(['401 malformed']));
+});
+
+test("one binding's sign-ins share its row: one goes through while another holds it, and waits only for an unbind's lock (W331)", {
+  skip: TEST_ENGINE === 'sqlite' ? 'SQLite runs one writer at a time, its locks implicit' : LOG === '0.15' ? false : "0.14's sign-ins take its head, one at a time",
+}, async () => {
+  /** The binding's row held in a transaction of the owner's, `mode`, until `release`; the hold once it has the row. */
+  const hold = async (mode: 'KEY SHARE' | 'UPDATE') => {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let locked!: () => void;
+    const holding = new Promise<void>((resolve) => (locked = resolve));
+    const done = db.owner.transaction(async (tx) => {
+      await (tx as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(sql`SELECT 1 FROM service_bindings WHERE id = ${bound} FOR ${sql.raw(mode)}`);
+      locked();
+      await released;
+    });
+    await holding;
+    return { release: async () => (release(), await done) };
+  };
+  // As another sign-in in flight holds it: this one does not wait for it (it did, FOR UPDATE, until W331).
+  const shared = await hold('KEY SHARE');
+  const started = performance.now();
+  assert.equal((await trade(token(rsa))).status, 200);
+  assert.ok(performance.now() - started < 900, `a sign-in waited ${(performance.now() - started).toFixed(0)} ms behind another's share of its binding`);
+  await shared.release();
+  // As an unbind holds it: the sign-in waits, and goes ahead once the unbind lets go.
+  const ending = await hold('UPDATE');
+  let settled = false;
+  const waiting = trade(token(rsa)).finally(() => (settled = true));
+  await sleep(300);
+  assert.equal(settled, false, "a sign-in went ahead under an unbind's lock on its binding");
+  await ending.release();
+  assert.equal((await waiting).status, 200);
+  // Held past the statement's `lock_timeout`: refused as a moment's wait, asked again in a second.
+  const long = await hold('UPDATE');
+  const busy = await trade(token(rsa));
+  await long.release();
+  assert.deepEqual([busy.status, busy.body.reason, busy.retryAfter], [503, 'busy', '1']);
+});
+
+test('sign-ins racing an unbind of their binding: every credential it issued ends, made before the unbind or refused after it', async () => {
+  const runs = Array.from({ length: 8 }, () => trade(token(rsa)));
+  const unbound = runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound);
+  const outcomes = await Promise.all(runs);
+  await unbound;
+  for (const { status, body } of outcomes) assert.ok(status === 200 || (status === 401 && body.reason === 'no_match'), `${status} ${body.reason}`);
+  const live = (await db.owner.select({ revokedAt: credentials.revokedAt }).from(credentials).where(eq(credentials.createdBy, `binding:${bound}`)))
+    .filter(({ revokedAt }) => revokedAt === null);
+  assert.deepEqual(live, [], 'a credential the binding issued outlived its unbind');
+  for (const { status, body } of outcomes) if (status === 200) assert.equal(await caller(body.token!), 401);
+});
+
+test("a binding's last use is stamped at most once a minute, whatever its sign-ins (W331, D177)", {
+  skip: LOG === '0.15' ? false : "0.14's sign-ins stamp it under its head, every one",
+}, async () => {
+  const lastUsed = async () => (await db.owner.select({ at: serviceBindings.lastUsedAt }).from(serviceBindings).where(eq(serviceBindings.id, bound)))[0]!.at;
+  assert.equal((await trade(token(rsa))).status, 200);
+  const first = await lastUsed();
+  assert.notEqual(first, null, 'a first sign-in stamps it');
+  await Promise.all(Array.from({ length: 4 }, () => trade(token(rsa))));
+  assert.equal((await lastUsed())!.getTime(), first!.getTime(), 'stamped again within the minute');
+  // A minute on: the next sign-in stamps it.
+  const old = new Date(Date.now() - 61_000);
+  await db.owner.update(serviceBindings).set({ lastUsedAt: old }).where(eq(serviceBindings.id, bound));
+  assert.equal((await trade(token(rsa))).status, 200);
+  assert.ok((await lastUsed())!.getTime() > old.getTime() + 60_000);
+});
+
+
+/** `count` sign-ins through the binding, 16 at a time: their credentials, each live. */
+async function signIns(count: number): Promise<string[]> {
+  const made: string[] = [];
+  for (let n = 0; n < count; n += 16) {
+    for (const { status, body } of await Promise.all(Array.from({ length: Math.min(16, count - n) }, () => trade(token(rsa))))) {
+      assert.equal(status, 200, JSON.stringify(body));
+      made.push(body.token!);
+    }
+  }
+  return made;
+}
+
+/** The binding's credentials not revoked, and whether its row is closed and ended. */
+async function bindingState(id: string): Promise<{ live: number; closed: boolean; ended: boolean }> {
+  const rows = await db.owner.select({ revokedAt: credentials.revokedAt }).from(credentials).where(eq(credentials.createdBy, `binding:${id}`));
+  const [row] = await db.owner.select({ closedAt: serviceBindings.closedAt, revokedAt: serviceBindings.revokedAt }).from(serviceBindings).where(eq(serviceBindings.id, id));
+  return { live: rows.filter(({ revokedAt }) => revokedAt === null).length, closed: row!.closedAt !== null, ended: row!.revokedAt !== null };
+}
+
+test(`a binding with more live credentials than one call revokes (${UNBIND_BATCH}) is removed in batches: closed first, every credential revoked, then ended (W331)`, {
+  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 600_000,
+}, async () => {
+  limits = processLimits();
+  // Past what one Node vault message carries (about 15,000), as a binding signing in at 1,000 a second has in 30 s.
+  const count = Number(process.env.UNBIND_COUNT ?? 31_000);
+  await signIns(count);
+  const calls: { sweep: boolean; credentials: number }[] = [];
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  deps.vault.changeBindings = async (input) => {
+    calls.push({ sweep: input.sweep === true, credentials: input.ends.reduce((sum, end) => sum + end.credentials.length, 0) });
+    return change(input);
+  };
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound);
+  assert.deepEqual(await bindingState(bound), { live: 0, closed: true, ended: true });
+  assert.ok(calls.every(({ credentials: n }) => n <= UNBIND_BATCH), 'a call named more than a batch');
+  assert.equal(calls.filter(({ sweep }) => sweep).length, Math.ceil((count - UNBIND_BATCH) / UNBIND_BATCH));
+  assert.deepEqual(calls.at(-1), { sweep: false, credentials: count - calls.filter(({ sweep }) => sweep).length * UNBIND_BATCH });
+  assert.equal((await trade(token(rsa))).body.reason, 'no_match');
+});
+
+/** The vault calls made through the isolate's counted entry, in order (`workersRequest`). */
+const askedOfVault: string[] = [];
+/** The isolate's entry of the suite's vault, each call named in `askedOfVault`: one for every request, as on Workers. */
+const isolateEntries = new WeakMap<object, VaultEntry>();
+
+/**
+ * One Worker request's coffre (cloudflare-handler.ts, `runtimeFor`): the isolate's vault, through its counted entry as
+ * a service binding's calls are, and a removal held to what one invocation may spend (removal.ts); `run` its work, for
+ * its calls to count as its own. `asked` names the calls it made.
+ */
+function workersRequest() {
+  let entry = isolateEntries.get(deps.vault);
+  if (entry === undefined) {
+    const inner = entryOf(deps.vault);
+    entry = { call: (release, method, args) => (askedOfVault.push(method), inner.call(release, method, args)) } satisfies VaultEntry;
+    isolateEntries.set(deps.vault, entry);
+  }
+  const vault = versioned(countedEntry(entry));
+  const counter = countingCalls();
+  const runtime = createRuntime(config, deps.db, vault, transport, undefined, undefined, workersRemovalBudget(counter.calls));
+  const from = askedOfVault.length;
+  return {
+    runtime, vault, run: counter.run, calls: counter.calls, asked: () => askedOfVault.slice(from),
+    context: (id: string) => contextFor({ ...deps, vault: vault as never, workloads: runtime.workloads! }, id),
+  };
+}
+
+/** A request to the API as ROOT, each one a Worker request of its own. */
+async function asWorker(request: Request): Promise<Response> {
+  const worker = workersRequest();
+  return worker.run(async () => serveApi(request, await worker.context(ROOT)));
+}
+
+test("a Worker's requests share the isolate's vault, for its caches, and each counts only its own calls, run at once (review r8)", async () => {
+  const [one, two] = [workersRequest(), workersRequest()];
+  assert.equal(one.vault, two.vault, 'one vault for the isolate');
+  await Promise.all([
+    one.run(async () => { await one.vault.about(); await one.vault.about(); }),
+    two.run(async () => { await two.vault.about(); }),
+  ]);
+  assert.deepEqual([one.calls(), two.calls()], [2, 1]);
+});
+
+test("on Workers, a removal past what one request revokes answers 202 with what is left, its binding closed; the client asks again until it is done (W331)", {
+  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+}, async () => {
+  limits = processLimits();
+  const count = 5 * WORKERS_BATCH + 7;
+  await signIns(count);
+  const remove = () => new Request(`https://coffre.test/api/members/${encodeURIComponent(MEMBER)}/bindings/${bound}`, { method: 'DELETE' });
+  const first = await asWorker(remove());
+  assert.equal(first.status, 202);
+  // Two batches a request (removal.ts, `WORKERS_BATCHES`), each a vault call; left, the credentials and the binding to end.
+  assert.deepEqual(await first.json(), { removing: { left: count - 2 * WORKERS_BATCH + 1, progressed: true } });
+  assert.deepEqual(await bindingState(bound), { live: count - 2 * WORKERS_BATCH, closed: true, ended: false });
+  assert.equal((await trade(token(rsa))).body.reason, 'no_match');
+  // Shown as being removed, by whom and since when.
+  const listed = (await createClient({ url: 'https://coffre.test', transport: asWorker }).bindings.list(MEMBER)).bindings.find(({ id }) => id === bound)!;
+  assert.equal(listed.removing?.by, `user:${ROOT}`);
+  assert.ok(listed.removing !== null && Date.parse(listed.removing.since) <= Date.now());
+
+  const told: number[] = [];
+  const client = createClient({ url: 'https://coffre.test', transport: asWorker, onRemoving: (left) => told.push(left) });
+  await client.bindings.remove(MEMBER, bound);
+  assert.deepEqual(await bindingState(bound), { live: 0, closed: true, ended: true });
+  assert.deepEqual(told, [count - 4 * WORKERS_BATCH + 1]);
+  assert.deepEqual((await appEntries('token.unbind')).map(({ actor }) => actor), [`user:${ROOT}`]);
+});
+
+test("a removal left under way is finished by the scheduled run, as the system, each change naming whom it continues (W331)", {
+  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+}, async () => {
+  limits = processLimits();
+  const count = 3 * WORKERS_BATCH;
+  await signIns(count);
+  const before = (await db.owner.select({ number: logChanges.number }).from(logChanges)).length;
+  const response = await asWorker(new Request(`https://coffre.test/api/members/${encodeURIComponent(MEMBER)}/bindings/${bound}`, { method: 'DELETE' }));
+  assert.equal(response.status, 202);
+  const [{ closedAt }] = await db.owner.select({ closedAt: serviceBindings.closedAt }).from(serviceBindings).where(eq(serviceBindings.id, bound));
+  // Each beat goes on as far as a Worker's invocation may, two batches; this one ends it.
+  const beat = workersRequest();
+  await beat.run(() => runScheduled(beat.runtime));
+  assert.deepEqual(await bindingState(bound), { live: 0, closed: true, ended: true });
+  const changes = (await db.owner.select({ payload: logChanges.payload }).from(logChanges).orderBy(asc(logChanges.number))).slice(before)
+    .map(({ payload }) => JSON.parse(payload) as { op: string; unbind?: { by: string; continues?: unknown }; revoke?: { continues?: { by: string; at: number } } });
+  const continued = { by: `user:${ROOT}`, at: closedAt!.getTime() };
+  const ending = changes.filter(({ op }) => op === 'binding.revoke');
+  assert.deepEqual(ending.map(({ unbind }) => unbind), [{ by: 'system:schedule', reason: 'unbound', replacedBy: null, continues: continued }]);
+  const revokes = changes.filter(({ revoke }) => revoke !== undefined);
+  assert.equal(revokes.length, count);
+  assert.equal(revokes.filter(({ revoke }) => revoke!.continues?.by === continued.by && revoke!.continues.at === continued.at).length, count - 2 * WORKERS_BATCH);
+  const [unbound] = await appEntries('token.unbind');
+  assert.equal(unbound!.actor, 'system:schedule');
+  assert.deepEqual([unbound!.metadata.removedBy, unbound!.metadata.closedAt], [`user:${ROOT}`, closedAt!.toISOString()]);
+  // Nothing left: the next beat finds no removal to go on with.
+  const next = workersRequest();
+  await next.run(() => runScheduled(next.runtime));
+  assert.equal((await appEntries('token.unbind')).length, 1);
+});
+
+test("on Workers, a replacement of keys of more bindings than a request replaces is asked again until every one is on the new keys, runs signing in on those not yet replaced (reviews r8, r9)", {
+  skip: LOG === '0.15' ? false : "0.14's replacement is one transaction", timeout: 300_000,
+}, async () => {
+  limits = processLimits();
+  const jobs = Array.from({ length: 5 }, (_, n) => ({ sub: `system:serviceaccount:ci:job-${n}` }));
+  for (const job of jobs) assert.ok('binding' in await bindCluster([rsa], job));
+  // Each with more credentials than a call revokes, so that each one's make is a sweep's.
+  for (const job of jobs) {
+    for (let n = 0; n < 2 * WORKERS_BATCH; n += 16) {
+      for (const { status, body } of await Promise.all(Array.from({ length: 16 }, () => trade(projected(rsa, job))))) assert.equal(status, 200, JSON.stringify(body));
+    }
+  }
+  // The last one's runs keep signing in, adding to what is left of it, until its own turn comes.
+  let signing = true;
+  const runs = (async () => { while (signing) await trade(projected(rsa, jobs[4]!)); })();
+  const told: number[] = [];
+  const client = createClient({ url: 'https://coffre.test', transport: asWorker, onRemoving: (left) => told.push(left) });
+  await client.bindings.replaceKeys(MEMBER, { issuer: CLUSTER, jwks: { keys: [rsa.jwk, ec.jwk] } } as never);
+  signing = false;
+  await runs;
+  // A request replaces two, each its one call; what is left is the bindings not yet replaced.
+  assert.deepEqual(told, [3, 1]);
+  const rows = (await db.owner.select().from(serviceBindings)).filter((row) => row.issuer === CLUSTER);
+  const fresh = rows.filter((row) => row.closedAt === null && row.revokedAt === null);
+  assert.equal(fresh.length, 5);
+  assert.equal(new Set(fresh.map(({ jwksUri }) => jwksUri)).size, 1, 'every one on the new keys');
+  // The old ones closed, signing nobody in; the scheduled run ends them, a beat at a time.
+  for (let beat = 0; beat < 10 && rows.some((row) => row.closedAt !== null && row.revokedAt === null); beat += 1) {
+    const worker = workersRequest();
+    await worker.run(() => runScheduled(worker.runtime));
+    rows.splice(0, rows.length, ...(await db.owner.select().from(serviceBindings)).filter((row) => row.issuer === CLUSTER));
+  }
+  assert.ok(rows.every((row) => row.closedAt === null || row.revokedAt !== null), 'every old one ended');
+});
+
+test("on Workers, a replacement answers once its first call has made the new binding, as it closes the old one: the scheduled run ends that (reviews r8, r9)", {
+  skip: LOG === '0.15' ? false : "0.14's bind is one transaction under its head", timeout: 300_000,
+}, async () => {
+  limits = processLimits();
+  const tokens = await signIns(3 * WORKERS_BATCH);
+  const release = { ...DEPLOY, ref: 'refs/heads/release', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/release' };
+  const path = `https://coffre.test/api/members/${encodeURIComponent(MEMBER)}/bindings`;
+  // One request, as MCP's trust_workload makes it from inside its own: no 202 to ask again on.
+  const answered = await asWorker(new Request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ profile: 'github', issuer: null, claims: release, label: null, replaces: [bound] }) }));
+  assert.equal(answered.status, 200, await answered.clone().text());
+  const made = (await answered.json()) as { binding: { id: string }; replaced: string[] };
+  assert.deepEqual(made.replaced, [bound]);
+  assert.equal((await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, made.binding.id))).length, 1);
+  assert.deepEqual(await bindingState(bound), { live: 2 * WORKERS_BATCH, closed: true, ended: false });
+  assert.equal((await trade(token(rsa, release))).status, 200, 'the new binding signs its runs in');
+  assert.equal((await trade(token(rsa))).body.reason, 'no_match', 'the old one none');
+  // No tombstone of the old one before its end (review r10): a credential of it not yet revoked reads as the vault,
+  // which a use by name asks first, still takes it, and the app refuses nothing the vault does not.
+  assert.deepEqual((await appEntries('token.unbind')).length, 0);
+  assert.equal(await caller(tokens.at(-1)!), `service:${SERVICE}`);
+  const beat = workersRequest();
+  await beat.run(() => runScheduled(beat.runtime));
+  assert.deepEqual(await bindingState(bound), { live: 0, closed: true, ended: true });
+  assert.deepEqual((await appEntries('token.unbind')).map(({ actor }) => actor), ['system:schedule']);
+  assert.equal(await caller(tokens.at(-1)!), 401);
+});
+
+test("a service at the cap replaces one binding in another's place, its old one closed and not yet ended, and then another: the cap counts open bindings (review r10)", {
+  skip: LOG === '0.15' ? false : "0.14's bind is one transaction under its head", timeout: 300_000,
+}, async () => {
+  limits = processLimits();
+  const others: string[] = [];
+  for (let n = 1; n < MAX_BINDINGS; n += 1) others.push(await bind({ ...DEPLOY, ref: `refs/heads/b${n}`, workflow_ref: `acme/api/.github/workflows/deploy.yml@refs/heads/b${n}` }));
+  await signIns(3 * WORKERS_BATCH);
+  const path = `https://coffre.test/api/members/${encodeURIComponent(MEMBER)}/bindings`;
+  const replace = (replaces: string, ref: string) => asWorker(new Request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+    profile: 'github', issuer: null, claims: { ...DEPLOY, ref, workflow_ref: `acme/api/.github/workflows/deploy.yml@${ref}` }, label: null, replaces: [replaces],
+  }) }));
+  const first = await replace(bound, 'refs/heads/next');
+  assert.equal(first.status, 200, await first.clone().text());
+  assert.deepEqual((await bindingState(bound)).closed, true);
+  const second = await replace(others[0]!, 'refs/heads/after');
+  assert.equal(second.status, 200, await second.text());
+});
+
+test("a removal asked again once the scheduled run has finished it is done, not unknown: answered once its end is sealed (review r9)", {
+  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+}, async () => {
+  limits = processLimits();
+  await signIns(3 * WORKERS_BATCH);
+  const remove = () => new Request(`https://coffre.test/api/members/${encodeURIComponent(MEMBER)}/bindings/${bound}`, { method: 'DELETE' });
+  assert.equal((await asWorker(remove())).status, 202);
+  const beat = workersRequest();
+  await beat.run(() => runScheduled(beat.runtime));
+  assert.deepEqual(await bindingState(bound), { live: 0, closed: true, ended: true });
+  const again = await asWorker(remove());
+  assert.equal(again.status, 200, await again.text());
+  // One whose columns a writer set around coffre, with no end the app logged: unknown still (review r10).
+  const forged = await bind({ ...DEPLOY, ref: 'refs/heads/forged', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/forged' });
+  await db.owner.update(serviceBindings).set({ closedAt: new Date(), revokedAt: new Date(), closedBy: `user:${ROOT}` }).where(eq(serviceBindings.id, forged));
+  assert.equal((await asWorker(new Request(`https://coffre.test/api/members/${encodeURIComponent(MEMBER)}/bindings/${forged}`, { method: 'DELETE' }))).status, 404);
+  // One never closed, and ended, is still unknown.
+  const other = await bind({ ...DEPLOY, ref: 'refs/heads/other', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/other' });
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, other);
+  assert.equal((await asWorker(new Request(`https://coffre.test/api/members/${encodeURIComponent(MEMBER)}/bindings/${other}`, { method: 'DELETE' }))).status, 404);
+});
+
+test("the scheduled run reads a removal again when another remover moved it, and one the vault refuses stops no other (Fable on #520)", {
+  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head",
+}, async (t) => {
+  limits = processLimits();
+  const other = await bind({ ...DEPLOY, ref: 'refs/heads/other', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/other' });
+  await signIns(3);
+  // Both closed by removals left under way, the first one earlier.
+  await db.owner.update(serviceBindings).set({ closedAt: new Date(Date.now() - 60_000), closedBy: `user:${ROOT}` }).where(eq(serviceBindings.id, bound));
+  await db.owner.update(serviceBindings).set({ closedAt: new Date(), closedBy: `user:${ROOT}` }).where(eq(serviceBindings.id, other));
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  let movedOnce = false;
+  t.mock.method(deps.vault as Required<Vault>, 'changeBindings', async (input: Parameters<typeof change>[0]) => {
+    // The first, edited around the vault: refused for good. The second, moved once by a request revoking beside it.
+    if (input.ends.some((end) => end.before.columns.id === bound)) return { ok: false as const, refused: 'stale' as const };
+    if (!movedOnce) {
+      movedOnce = true;
+      return { ok: false as const, refused: 'moved' as const };
+    }
+    return change(input);
+  });
+  const logged = t.mock.method(console, 'error', () => {});
+  // And, closed before both, one whose close a writer left without its remover (review r12).
+  const malformed = await bind({ ...DEPLOY, ref: 'refs/heads/malformed', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/malformed' });
+  await db.owner.update(serviceBindings).set({ closedAt: new Date(Date.now() - 120_000), closedBy: null }).where(eq(serviceBindings.id, malformed));
+  const { resumed, failed } = await runtime.workloads!.resumeRemovals();
+  assert.deepEqual(resumed, [other]);
+  assert.deepEqual(failed.map(({ id }) => id), [malformed, bound]);
+  assert.ok(logged.mock.calls.length >= 1);
+  assert.deepEqual(await bindingState(other), { live: 0, closed: true, ended: true });
+  assert.deepEqual((await bindingState(bound)).ended, false);
+  await assert.rejects(runScheduled(runtime), new RegExp(`removal could not be gone on with: ${malformed}: its close names no remover`));
+});
+
+test("a removal the scheduled run cannot read again after a move is its failure alone: the next one ends all the same (review r13)", {
+  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head",
+}, async (t) => {
+  limits = processLimits();
+  const other = await bind({ ...DEPLOY, ref: 'refs/heads/other', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/other' });
+  await signIns(3);
+  await db.owner.update(serviceBindings).set({ closedAt: new Date(Date.now() - 60_000), closedBy: `user:${ROOT}` }).where(eq(serviceBindings.id, bound));
+  await db.owner.update(serviceBindings).set({ closedAt: new Date(), closedBy: `user:${ROOT}` }).where(eq(serviceBindings.id, other));
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  t.mock.method(deps.vault as Required<Vault>, 'changeBindings', async (input: Parameters<typeof change>[0]) =>
+    input.ends.some((end) => end.before.columns.id === bound) ? { ok: false as const, refused: 'moved' as const } : change(input));
+  // The first one's read again fails: its row is gone from under the read (a dropped connection, say).
+  const drop = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
+  let reads = 0;
+  t.mock.method(console, 'error', () => {});
+  const original = deps.db.select.bind(deps.db);
+  t.mock.method(deps.db, 'select', ((...args: Parameters<typeof original>) => {
+    const query = original(...args);
+    return new Proxy(query, {
+      get(target, key, receiver) {
+        const value = Reflect.get(target, key, receiver);
+        if (key !== 'from' || typeof value !== 'function') return value;
+        return (table: unknown, ...rest: unknown[]) => {
+          if (table === serviceBindings && drop.length > 0) {
+            reads += 1;
+            // The first read is `closedBindings`'; the next is the retry's, which fails.
+            if (reads === 2) throw new Error('the connection went away');
+          }
+          return (value as (...a: unknown[]) => unknown).call(target, table, ...rest);
+        };
+      },
+    });
+  }) as typeof original);
+  const { resumed, failed } = await runtime.workloads!.resumeRemovals();
+  t.mock.restoreAll();
+  assert.deepEqual(failed.map(({ id, error }) => [id, error]), [[bound, 'the connection went away']]);
+  assert.deepEqual(resumed, [other]);
+  assert.deepEqual(await bindingState(other), { live: 0, closed: true, ended: true });
+});
+
+test("a removal reads what is live on the database's clock, which the end names on: an app clock ahead of it ends the binding all the same (Fable on #520)", postgresOnly('the app and the vault share the clock on SQLite'), async (t) => {
+  limits = processLimits();
+  // Credentials ending within the two minutes the app's clock is ahead: live on the database's, expired on the app's.
+  await run(sql`INSERT INTO credentials (kind, auth_mac, token_hash, token_hint, generation, principal, created_by, created_at, expires_at)
+    SELECT 'service', decode(repeat('00', 32), 'hex'), sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'coffre_svc_…', 0, ${MEMBER}, ${`binding:${bound}`}, now(), now() + n * interval '1 second'
+    FROM generate_series(1, 60) n`);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 120_000 });
+  try {
+    await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound);
+  } finally {
+    t.mock.timers.reset();
+  }
+  assert.deepEqual((await bindingState(bound)).ended, true);
+});
+
+test(`a binding change's request counts its vault calls: after its removal's last, it makes ${AFTER_REMOVAL_CALLS} (W331, removal.ts)`, {
+  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+}, async () => {
+  limits = processLimits();
+  const after = async (request: Request) => {
+    const worker = workersRequest();
+    const response = await worker.run(async () => {
+      const answered = await serveApi(request, await worker.context(ROOT));
+      await drainBackgroundTasks();
+      return answered;
+    });
+    assert.ok(response.status < 300, `${response.status} ${await response.text()}`);
+    const asked = worker.asked();
+    const last = asked.lastIndexOf('changeBindings');
+    assert.ok(last >= 0, asked.join(', '));
+    return asked.length - 1 - last;
+  };
+  const path = `https://coffre.test/api/members/${encodeURIComponent(MEMBER)}/bindings`;
+  const json = (body: unknown) => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  await signIns(3);
+  const release = { ...DEPLOY, ref: 'refs/heads/release', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/release' };
+  const counts = [
+    // A binding made in place of another, which issued three credentials.
+    await after(new Request(path, json({ profile: 'github', issuer: null, claims: release, label: null, replaces: [bound] }))),
+  ];
+  const [made] = await db.owner.select({ id: serviceBindings.id }).from(serviceBindings).where(isNull(serviceBindings.revokedAt));
+  // And removed.
+  counts.push(await after(new Request(`${path}/${made!.id}`, { method: 'DELETE' })));
+  assert.deepEqual(counts.map((n) => n <= AFTER_REMOVAL_CALLS), counts.map(() => true), `calls after the last: ${counts.join(', ')}`);
+  assert.equal(Math.max(...counts), AFTER_REMOVAL_CALLS, 'the constant is no larger than any route needs');
+});
+
+test('a removal that fails midway leaves its binding closed, signing nobody in, and run again ends it (W331)', {
+  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+}, async () => {
+  limits = processLimits();
+  const tokens = await signIns(3 * UNBIND_BATCH);
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  let calls = 0;
+  deps.vault.changeBindings = async (input) => {
+    if (++calls === 3) throw new Error('the app went away');
+    return change(input);
+  };
+  await assert.rejects(runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound), /the app went away/);
+  // Two sweeps done: closed, a batch or two revoked, the rest still live; no run signs in through it any more.
+  const midway = await bindingState(bound);
+  assert.deepEqual([midway.closed, midway.ended, midway.live], [true, false, 3 * UNBIND_BATCH - 2 * UNBIND_BATCH]);
+  assert.deepEqual([(await trade(token(rsa))).status, (await trade(token(rsa))).body.reason], [401, 'no_match']);
+  // The credentials it exchanged not yet revoked still read until their batch (or their own end, five minutes at most):
+  // the vault decides a use by name before the app reads the binding, so the app may refuse nothing it does not
+  // (`bindingStands`, review r8). Its sessions it refuses at once (workload-sessions.test.ts).
+  const reading = async () => (await Promise.all(tokens.map((credential) => caller(credential)))).filter((who) => who === `service:${SERVICE}`).length;
+  assert.equal(await reading(), UNBIND_BATCH);
+  deps.vault.changeBindings = change;
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound);
+  assert.deepEqual(await bindingState(bound), { live: 0, closed: true, ended: true });
+  assert.equal(await reading(), 0);
+});
+
+test('a removal ends a binding that runs keep signing in through: closed, it stops taking them, rather than being moved forever (W331)', {
+  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+}, async () => {
+  limits = processLimits();
+  await signIns(2 * UNBIND_BATCH);
+  let signing = true;
+  const refused: string[] = [];
+  const runs = Array.from({ length: 8 }, async () => {
+    while (signing) {
+      const { status, body } = await trade(token(rsa));
+      if (status !== 200) refused.push(`${status} ${body.reason}`);
+    }
+  });
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  const asked: string[] = [];
+  deps.vault.changeBindings = async (input) => {
+    const answer = await change(input);
+    asked.push(`${input.sweep === true ? 'sweep' : 'end'} ${answer.ok ? 'ok' : answer.refused}`);
+    return answer;
+  };
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound);
+  signing = false;
+  await Promise.all(runs);
+  assert.deepEqual(await bindingState(bound), { live: 0, closed: true, ended: true });
+  assert.ok(asked.length <= 6, `${asked.length} calls: ${asked.join(', ')}`);
+  assert.equal(asked.at(-1), 'end ok');
+  assert.ok(refused.length > 0 && refused.every((why) => why === '401 no_match'), refused.slice(0, 5).join(', '));
+});
+
+test('a bind that ends nothing, moved by another bind, is asked again as it was, closing nothing (W331)', {
+  skip: LOG === '0.15' ? false : "0.14's bind is one transaction under its head",
+}, async (t) => {
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  const asked: boolean[] = [];
+  t.mock.method(deps.vault as Required<Vault>, 'changeBindings', async (input: Parameters<typeof change>[0]) => {
+    asked.push(input.sweep === true);
+    return asked.length === 1 ? { ok: false as const, refused: 'moved' as const } : change(input);
+  });
+  await bind({ ...DEPLOY, ref: 'refs/heads/release', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/release' });
+  assert.deepEqual(asked, [false, false]);
+  assert.deepEqual(await bindingState(bound), { live: 0, closed: false, ended: false });
+});
+
+
+test('a removal cuts its batches by bytes too: credentials reaching a hundred places go a few hundred a call, each call well inside a vault message (review r4)', {
+  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+}, async () => {
+  limits = processLimits();
+  // The account holds a hundred projects more, which a binding made now reaches, and each credential it issues names.
+  const ids = Array.from({ length: 100 }, () => crypto.randomUUID());
+  await db.owner.insert(projects).values(ids.map((id, n) => ({ id, slug: `wide-${n}`, name: `wide ${n}` })));
+  const granted = await speaking(deps.vault).setAccess({ actor: `user:${ROOT}`, principal: MEMBER, changes: ids.map((projectId) => ({ projectId, environmentId: null, role: 'viewer' as Role, expiresAt: null })) });
+  assert.ok(granted.ok);
+  const release = { ref: 'refs/heads/release', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/release' };
+  const wide = await bind({ ...DEPLOY, ...release });
+  for (let n = 0; n < 800; n += 16) {
+    for (const { status, body } of await Promise.all(Array.from({ length: 16 }, () => trade(token(rsa, release))))) assert.equal(status, 200, JSON.stringify(body));
+  }
+  const calls: { credentials: number; bytes: number }[] = [];
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  deps.vault.changeBindings = async (input) => {
+    calls.push({ credentials: input.ends.reduce((sum, end) => sum + end.credentials.length, 0), bytes: JSON.stringify(input).length });
+    return change(input);
+  };
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, wide);
+  assert.deepEqual(await bindingState(wide), { live: 0, closed: true, ended: true });
+  assert.ok(calls.length > 2 && calls.every(({ credentials, bytes }) => credentials < UNBIND_BATCH && bytes < 5 * 1024 * 1024), JSON.stringify(calls));
+  assert.equal(calls.reduce((sum, { credentials }) => sum + credentials, 0), 800);
+});
+
+test("a removal's batch read walks live credentials only, soonest to end, past the last batch: never the binding's history, and another binding's that end sooner once a removal (reviews r5, r6)", postgresOnly('it reads Postgres query plans'), async () => {
+  // 50,000 long expired; 3,000 live; and 20,000 live of another binding of the service, each ending before any of these.
+  const insert = (count: number, by: string, ends: SQL) => run(sql`INSERT INTO credentials (kind, auth_mac, token_hash, token_hint, generation, principal, created_by, created_at, expires_at)
+    SELECT 'service', decode(repeat('00', 32), 'hex'), sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'coffre_svc_…', 0, ${MEMBER}, ${by}, now(), ${ends}
+    FROM generate_series(1, ${count}) n`);
+  await insert(50_000, `binding:${bound}`, sql`now() - interval '30 days'`);
+  await insert(3_000, `binding:${bound}`, sql`now() + n * interval '1 millisecond' + interval '2 minutes'`);
+  await insert(20_000, 'binding:00000000-0000-4000-8000-000000000000', sql`now() + n * interval '1 millisecond' + interval '1 minute'`);
+  await run(sql`ANALYZE credentials`);
+  const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
+  const read = async (after: Date | null) => {
+    const seen: Statement[] = [];
+    const soonest = await issuedSoonest(createDatabase(counted(pool, seen)), MEMBER, [bound], new Date(), UNBIND_BATCH + 1, after);
+    return { soonest, plan: await planOf(pool, seen[0]!, 'credentials') };
+  };
+  try {
+    // The first walks the other binding's, which end sooner, once.
+    const first = await read(null);
+    assert.equal(first.soonest.length, UNBIND_BATCH + 1);
+    assert.ok(first.plan.indexes.includes('credentials_live_idx'), first.plan.indexes.join(', '));
+    assert.ok(first.plan.visited <= 20_000 + 2 * (UNBIND_BATCH + 1), `visited ${first.plan.visited} credential rows for the first batch`);
+    // A batch revoked, as a sweep does; the next read from where it ended: about a batch, whatever ended sooner.
+    const batch = first.soonest.slice(0, UNBIND_BATCH);
+    await run(sql`UPDATE credentials SET revoked_at = now() WHERE id = ANY(${sql.param(batch.map(({ id }) => id))}::uuid[])`);
+    const next = await read(batch.at(-1)!.expiresAt);
+    assert.equal(next.soonest.length, UNBIND_BATCH + 1);
+    assert.ok(!next.soonest.some(({ id }) => batch.some((done) => done.id === id)));
+    assert.ok(next.plan.visited <= 2 * (UNBIND_BATCH + 1), `visited ${next.plan.visited} credential rows for the next batch`);
+  } finally {
+    await pool.end();
+  }
+});
+
+test("a binding a removal closed shadows no other: a run another binding takes signs in through it while the removal is under way (review r6)", {
+  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+}, async () => {
+  limits = processLimits();
+  // A second binding, made later, that takes the same runs: the older wins while both are live.
+  const newer = await bind({ ...DEPLOY, event_name: ['push', 'workflow_dispatch'] } as unknown as BindingClaims);
+  await signIns(2 * UNBIND_BATCH);
+  const change = deps.vault.changeBindings!.bind(deps.vault);
+  let calls = 0;
+  deps.vault.changeBindings = async (input) => {
+    if (++calls === 2) throw new Error('the app went away');
+    return change(input);
+  };
+  await assert.rejects(runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound), /the app went away/);
+  deps.vault.changeBindings = change;
+  assert.equal((await bindingState(bound)).closed, true);
+  // The closed one passed over: the newer signs the run in.
+  const run = await trade(token(rsa));
+  assert.equal(run.status, 200, JSON.stringify(run.body));
+  const [made] = await db.owner.select({ createdBy: credentials.createdBy }).from(credentials).orderBy(desc(credentials.createdAt)).limit(1);
+  assert.equal(made!.createdBy, `binding:${newer}`);
+});
+

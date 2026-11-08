@@ -635,6 +635,8 @@ export const serviceBindings = sqliteTable(
     lastUsedAt: time('last_used_at'),
     revokedAt: time('revoked_at'),
     revokedBy: text('revoked_by'),
+    closedAt: time('closed_at'),
+    closedBy: text('closed_by'),
     // 0.15's seal (schema.ts).
     seal: bytes('seal'),
   },

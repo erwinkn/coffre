@@ -114,7 +114,7 @@ let deps: FixtureDeps;
 let runtime: CoffreRuntime;
 let gate: TestGate;
 let published: Map<string, unknown>;
-let limits: { perSource: RateLimiter; total: RateLimiter };
+let limits: { perSource: RateLimiter };
 let vaultCalls: number;
 const ui = {} as Pages;
 
@@ -132,7 +132,7 @@ function makeRuntime(options: { useOnly?: boolean; noReads?: boolean; plugins?: 
     auth: signin({
       providers: [github({ clientId: 'a', clientSecret: 'b' })],
       workloads: {
-        limits: { perSource: { limit: (o) => limits.perSource.limit(o) }, total: { limit: (o) => limits.total.limit(o) } },
+        limits: { perSource: { limit: (o) => limits.perSource.limit(o) } },
         ...(options.useOnly === undefined ? {} : { useOnly: options.useOnly }),
         ...(options.noReads === undefined ? {} : { noReads: options.noReads }),
       },
@@ -161,7 +161,7 @@ beforeEach(async () => {
     published.set(`${issuer}/.well-known/openid-configuration`, { issuer, jwks_uri: `${issuer}/keys` });
     published.set(`${issuer}/keys`, { keys: [signer.jwk] });
   }
-  limits = processLimits({ perSource: 1000, total: 1000 });
+  limits = processLimits({ perSource: 1000 });
   gate = new TestGate();
   deps = testDeps(db.runtime, [ROOT]);
   vaultCalls = 0;
@@ -621,6 +621,27 @@ test('a session whose binding is removed, or whose row is changed around the app
   assert.equal((await me(held)).status, 200);
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, binding);
   assert.equal((await me(held)).status, 401);
+});
+
+test("a binding a removal closed stands for none of its sessions, renewal included, nor for a Cloudflare call, from the close on (W331)", async () => {
+  const binding = await bindGithub();
+  const held = await githubSession();
+  // Closed as a removal's first sweep closes it (`closed_at`, which no MAC covers), its credentials not yet revoked.
+  const close = (at: Date | null) => db.owner.update(serviceBindings).set({ closedAt: at, closedBy: at === null ? null : `user:${ROOT}` }).where(eq(serviceBindings.id, binding));
+  await close(new Date());
+  assert.equal((await me(held)).status, 401);
+  assert.equal((await call(held, 'POST', '/api/auth/workload/renew')).status, 401);
+  // Its close alone: opened again (no removal does), the session stands as it did.
+  await close(null);
+  assert.equal((await me(held)).status, 200);
+
+  runtime = makeRuntime({ plugins: checkPlugins([probe({})]) });
+  await marketProd();
+  const cloudflare = await bind('cloudflare', null, {});
+  const request = () => new Request(`${ORIGIN}/use/-/stripe/v1/charges`, { method: 'POST' });
+  assert.equal((await read((await bindingRoute(request(), runtime, MEMBER))!)).status, 200);
+  await db.owner.update(serviceBindings).set({ closedAt: new Date(), closedBy: `user:${ROOT}` }).where(eq(serviceBindings.id, cloudflare));
+  assert.equal((await read((await bindingRoute(request(), runtime, MEMBER))!)).status, 401);
 });
 
 test("a binding's sources hold a session to its addresses, at the exchange and on every request", async () => {

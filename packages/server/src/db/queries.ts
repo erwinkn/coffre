@@ -1837,15 +1837,90 @@ export async function bindingRow(db: Queryable, principal: string, id: string): 
 }
 
 /**
- * Every credential binding `bindingId` issued that is neither revoked nor
- * past its end at `at`, as the rows are, MAC or not: what the vault's end
- * of the binding must name, every one, to end it (PR 3a). A row whose MAC
- * fails is dead to the app's checks, and still one the statement counts.
+ * Every credential these bindings issued that is neither revoked nor past
+ * its end at `at`, as the rows are, MAC or not: what the vault's end of the
+ * bindings must name, every one, to end them (PR 3a). A row whose MAC fails
+ * is dead to the app's checks, and still one the statement counts. For a
+ * vault older than the batches (`about().sweeps`), which ends a binding in
+ * one call; the batches read `issuedSoonest`, then `credentialRows`.
  */
-export async function issuedCredentials(db: Queryable, principal: string, bindingId: string, at: Date): Promise<CredentialRow[]> {
+/**
+ * Live at `at`: on Postgres, at the database's own clock as this statement starts (`now()`, stable, so that it still bounds
+ * the index's range), never the app's: the end's check names every credential live on that clock a moment later
+ * (`change_bindings`' `clock_timestamp()`), and an app clock ahead of it would leave some out, each end `moved` (Fable on
+ * #520). On SQLite the app and the vault share the process's clock.
+ */
+function liveAt(db: Queryable, at: Date): SQL | Date {
+  return dialect.engineOf(db) === 'postgres' ? sql`now()` : at;
+}
+
+export async function issuedCredentials(db: Queryable, principal: string, bindingIds: readonly string[], at: Date): Promise<CredentialRow[]> {
   const { credentials } = tablesOf(db);
+  if (bindingIds.length === 0) return [];
   return db.select().from(credentials)
-    .where(and(eq(credentials.principal, principal), eq(credentials.createdBy, `binding:${bindingId}`), isNull(credentials.revokedAt), gt(credentials.expiresAt, at)));
+    .where(and(eq(credentials.principal, principal), inArray(credentials.createdBy, bindingIds.map((id) => `binding:${id}`)), isNull(credentials.revokedAt), gt(credentials.expiresAt, liveAt(db, at))));
+}
+
+/**
+ * The first `atMost` of those (`issuedCredentials`), soonest to end first,
+ * by id and the bytes of what they carry of any length (their scope and
+ * places), not the rows (W331, review r5): a removal's batch is chosen from
+ * this, and only its rows are read whole, so what an isolate holds is one
+ * batch's, however wide their scopes. Through `credentials_live_idx`, in its
+ * order: a credential a sweep revoked leaves that partial index, so the next
+ * batch's read starts past the last's, and none walks the binding's history.
+ */
+export async function issuedSoonest(
+  db: Queryable, principal: string, bindingIds: readonly string[], at: Date, atMost: number, after: Date | null,
+): Promise<{ id: string; bytes: number; expiresAt: Date }[]> {
+  const { credentials } = tablesOf(db);
+  if (bindingIds.length === 0) return [];
+  const length = (column: AnyColumn) => (dialect.engineOf(db) === 'postgres' ? sql`coalesce(octet_length(${column}), 0)` : sql`coalesce(length(CAST(${column} AS BLOB)), 0)`);
+  return db.select({ id: credentials.id, bytes: sql<number | string>`${length(credentials.scope)} + ${length(credentials.places)}`.mapWith(Number), expiresAt: credentials.expiresAt })
+    .from(credentials)
+    .where(and(
+      eq(credentials.principal, principal), inArray(credentials.createdBy, bindingIds.map((id) => `binding:${id}`)), isNull(credentials.revokedAt), gt(credentials.expiresAt, liveAt(db, at)),
+      // From the last batch's end (review r6): the index's range starts there, so another binding's credentials that
+      // end sooner are walked once a removal, not once a batch. The batch itself, revoked, has left the index; an `id`
+      // tie-break here would cost the ordered scan its limit (a bitmap scan of all that follow, sorted). One of these
+      // bindings' ending sooner, made since, is the end's: it reads from the start.
+      ...(after === null ? [] : [gte(credentials.expiresAt, after)]),
+    ))
+    .orderBy(asc(credentials.expiresAt), asc(credentials.id))
+    .limit(atMost);
+}
+
+/** How many credentials these bindings issued are still live at `at` (`issuedCredentials`): what a removal under way has left. */
+export async function liveIssued(db: Queryable, principal: string, bindingIds: readonly string[], at: Date): Promise<number> {
+  const { credentials } = tablesOf(db);
+  if (bindingIds.length === 0) return 0;
+  const [row] = await db.select({ n: count() }).from(credentials)
+    .where(and(eq(credentials.principal, principal), inArray(credentials.createdBy, bindingIds.map((id) => `binding:${id}`)), isNull(credentials.revokedAt), gt(credentials.expiresAt, liveAt(db, at))));
+  return Number(row?.n ?? 0);
+}
+
+/**
+ * Whether the app's log holds a binding's tombstone, its `token.unbind`: what the app trusts of an end, as it does when
+ * it reads a binding (`standingBinding`). Written once the vault's end was answered, which waits for its seal.
+ */
+export async function bindingTombstoned(db: Queryable, bindingId: string): Promise<boolean> {
+  const [row] = await db.select({ tombstoned: truth(hasTombstone(db, bindingId)) }).from(sql`(SELECT 1) AS one`);
+  return row?.tombstoned === true;
+}
+
+/**
+ * Every binding a removal closed and did not end (W331): what the scheduled run goes on with (`resumeRemovals`). Its
+ * row as it is, MAC or not, as a removal's end names the rows it ends whatever their MAC (Fable on PR 3a).
+ */
+export async function closedBindings(db: Queryable, _chainKey: Buffer): Promise<BindingRow[]> {
+  const { serviceBindings } = tablesOf(db);
+  return db.select().from(serviceBindings).where(and(isNotNull(serviceBindings.closedAt), isNull(serviceBindings.revokedAt))).orderBy(asc(serviceBindings.closedAt));
+}
+
+/** These credentials' rows, as they are, MAC or not: a removal's batch, read whole once chosen (`issuedSoonest`). */
+export async function credentialRows(db: Queryable, ids: readonly string[]): Promise<CredentialRow[]> {
+  const { credentials } = tablesOf(db);
+  return ids.length === 0 ? [] : db.select().from(credentials).where(inArray(credentials.id, [...ids]));
 }
 
 /**
@@ -1940,6 +2015,8 @@ export async function exchangeCandidates(
       eq(serviceBindings.principal, principal),
       eq(serviceBindings.issuer, issuer),
       isNull(serviceBindings.revokedAt),
+      // Closed by a removal under way (W331): it signs nobody in, so it shadows no binding that would (review r6).
+      isNull(serviceBindings.closedAt),
       isNull(serviceBindings.policy),
       inArray(serviceBindings.profile, [...BEARER_PROFILES]),
       sql`NOT ${hasTombstone(db, id)}`,
@@ -2030,7 +2107,14 @@ export async function standingBinding(db: Queryable, chainKey: Buffer, bindingId
   return row !== undefined && bindingStands(chainKey, row, principal, generation) ? row.binding : null;
 }
 
-/** Whether a binding's row, read with its tombstone, still stands for `principal` in `generation` (`standingBinding`). */
+/**
+ * Whether a binding's row, read with its tombstone, still stands for `principal` in `generation` (`standingBinding`).
+ * One a removal closed still does, for the credentials it exchanged (W331): a use by name asks the vault before this is
+ * read, and the vault refuses first whatever the app would (named-use.ts), so a check here alone would tell a caller
+ * what the vault looked up (review r8). They end at their batch, or at their own end, five minutes after their sign-in
+ * at most (`EXCHANGED_CREDENTIAL_MS`), whichever comes first. A session of it, which lives hours, the app refuses first
+ * (`sessionRowsFor`).
+ */
 function bindingStands(chainKey: Buffer, row: { binding: BindingRow; tombstoned: boolean }, principal: string, generation: number): boolean {
   return !row.tombstoned && row.binding.revokedAt === null
     && row.binding.principal === principal && row.binding.generation === generation
@@ -2039,34 +2123,29 @@ function bindingStands(chainKey: Buffer, row: { binding: BindingRow; tombstoned:
 
 /**
  * What an exchange checks again under the log's head, in one read: that
- * its member is still active in `generation` (`memberStanding`), that its
- * binding still stands (`standingBinding`), and how many credentials the
- * binding issued since `since`, up to `atMost` (`exchangesSince`).
+ * its member is still active in `generation` (`memberStanding`), and that
+ * its binding still stands (`standingBinding`).
  */
 export async function exchangeStill(
   db: Queryable,
   chainKey: Buffer,
   binding: { id: string; principal: string; generation: number },
-  since: Date,
-  atMost: number,
-): Promise<{ stands: boolean; recent: number; scope: string | null }> {
+): Promise<{ stands: boolean; scope: string | null }> {
   const { serviceBindings, principals } = tablesOf(db);
-  const recent = issuedSince(db, binding.principal, issuedBy(binding.id), since, atMost);
   const [row] = await db
     .select({
       binding: serviceBindings,
       tombstoned: truth(hasTombstone(db, binding.id)),
       status: principals.status,
       generation: principals.generation,
-      recent: sql`(SELECT count(*) FROM ${recent} AS recent)`.mapWith(Number),
       now: clock(db),
     })
     .from(serviceBindings)
     .leftJoin(principals, eq(principals.principal, binding.principal))
     .where(eq(serviceBindings.id, binding.id));
-  if (row === undefined) return { stands: false, recent: 0, scope: null };
+  if (row === undefined) return { stands: false, scope: null };
   const member = row.status === 'active' && row.generation === binding.generation;
-  return { stands: member && bindingStands(chainKey, row, binding.principal, binding.generation), recent: row.recent, scope: row.binding.scope };
+  return { stands: member && bindingStands(chainKey, row, binding.principal, binding.generation), scope: row.binding.scope };
 }
 
 /**
@@ -2443,25 +2522,6 @@ export async function pruneSpentTokens(db: Queryable, atMost: number): Promise<n
 
 /** How long a spent token's record is kept: prune_consumed_tokens's two hours, which SQLite applies here. */
 export const SPENT_TOKENS_KEPT_MS = 2 * 60 * 60 * 1000;
-
-/**
- * How many credentials a binding issued since `since`, up to `atMost`: the
- * count stops there. Through `credentials_issued_by_idx`, it visits that
- * binding's last minute, not the expired history a CI service runs up.
- */
-export async function exchangesSince(db: Queryable, principal: string, createdBy: string, since: Date, atMost: number): Promise<number> {
-  return (await issuedSince(db, principal, createdBy, since, atMost)).length;
-}
-
-/** `exchangesSince`'s query, to run or to count inside another (`exchangeStill`). */
-function issuedSince(db: Queryable, principal: string, createdBy: string, since: Date, atMost: number) {
-  const { credentials } = tablesOf(db);
-  return db
-    .select({ id: credentials.id })
-    .from(credentials)
-    .where(and(eq(credentials.principal, principal), eq(credentials.createdBy, createdBy), gt(credentials.createdAt, since)))
-    .limit(atMost);
-}
 
 /**
  * Spend a token and, only if this spent it, insert the credential its

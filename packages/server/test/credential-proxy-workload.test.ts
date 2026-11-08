@@ -105,7 +105,7 @@ function makeRuntime(options: { recheckSeconds?: number; plugins?: ReturnType<ty
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault: options.vault ?? deps.vault,
-    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000, total: 1000 }), alert: (alert) => void alerts.push(alert) } }),
+    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000 }), alert: (alert) => void alerts.push(alert) } }),
     auditChainKey: deps.chainKey.toString('base64'),
     plugins: options.plugins ?? checkPlugins([proxy(options)]),
   });

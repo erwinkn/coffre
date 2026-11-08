@@ -176,6 +176,69 @@
   owner, and the one to migrate as. A hand-over Postgres refuses says so,
   and which object it was moving.
 
+- **CI sign-ins have one limit, per address, and one binding's sign-ins
+  run together (W331, D177).** A sign-in that takes anyone (a CI run's
+  `/api/auth/oidc`, a workload's `/api/auth/workload`, MCP's OAuth
+  registration, token, revocation and metadata fetch) passes one limit:
+  the requests its address made to that entry point, each counted apart,
+  10,000 per 10 seconds by default (1,000 a second, the CI sign-in rate
+  coffre is built for, which a fleet behind one NAT sends from one
+  address), refused with 429 and `Retry-After: 10`. Gone: the 300 a minute
+  for all addresses (workloads and MCP), the 60 sign-ins a minute per
+  binding (in the app, the vault and `sign_in`), and MCP's 120 tool calls a
+  minute per connection (a connection acts as the person who approved it,
+  whose other requests have no rate). `sign_in` now holds the binding's
+  row `FOR KEY SHARE`, which its other sign-ins share and an unbind's
+  `FOR UPDATE` excludes, so removing a binding still ends everything it
+  issued (formal/Lifecycle.tla); its `last_used_at` is written at most once
+  a minute. One binding's sign-ins, 50 at once, on the compose Postgres:
+  1,412 a second at 35 ms each before, 27,937 at 1.8 ms after (migration
+  0079, additive: the previous release's vault calls it unchanged). A
+  sign-in the vault refuses as `busy`, now only a lock not had in time,
+  answers 503 with `Retry-After: 1` (was 429). A binding with more live
+  credentials than one vault call carries is removed in batches (migration
+  0079, formal/Unbinding.tla): the first closes it, so it signs nobody in
+  from then on (`unbound`), and each revokes up to 125 of its credentials
+  and half a vault message's bytes, so each holds the fence uses take for
+  at most about 10 ms, as long as a process's 10 uses in flight take to
+  arrive at 1,000 a second, so that none is refused behind it; the last
+  ends it. The close ends the binding's workload sessions (no use, no
+  renewal) and Cloudflare calls at once; the bearer credentials it
+  exchanged end at their batch or their own end, five minutes at most.
+  On Workers a request revokes
+  228 at most (two calls of 114: a request's 32 invocations, and a call's
+  10 ms of CPU on the Free plan), then answers 202 `{ removing: { left }
+  }`; `@coffre/client` asks again, the same request, until it is done (so
+  the UI and the CLI do; MCP's `untrust_workload`, inside one request,
+  says the binding is closed and left to the scheduled run), and the
+  scheduled run goes on with any removal left under way, as
+  `system:schedule`. A replacement (a binding made in another's place,
+  or new keys) makes the new binding in the call that closes the old one
+  and answers then, the old one's removal left to finish (the 16-binding
+  cap counts open bindings, so the closed one takes no slot). A client of the API's own reads a 202 as under way,
+  not done, and asks again. A binding being removed
+  shows as such (`removing: { since, by }` on its view; the UI, `coffre
+  trust`). A removal that fails midway leaves the binding closed, and run
+  again, or by the scheduled run, it finishes. Spent tokens are forgotten
+  as fast as they are now spent: the scheduled run forgets up to 600,000 a
+  beat (was 5,000), twice what 1,000 sign-ins a second spend in five
+  minutes, in one scan of the table, deleted by `ctid` (migration 0080:
+  under a second on the 7.5 million records two hours at that rate
+  leaves, 1.4 GB).
+
+  **To do, on upgrade.** Workers: replace the five rate-limiting bindings
+  in `app/wrangler.jsonc` (`WORKLOADS_PER_SOURCE`, `WORKLOADS_TOTAL`,
+  `MCP_PER_SOURCE`, `MCP_PER_CONNECTION`, `MCP_TOTAL`) with one,
+  `{ "name": "SIGN_IN_PER_SOURCE", "namespace_id": "1006", "simple": {
+  "limit": 10000, "period": 10 } }`, and pass it as `limits: { perSource:
+  env.SIGN_IN_PER_SOURCE }` to both `workloads` and `mcp` (the examples
+  show it). Node: `const limits = processLimits()`, passed to both;
+  `processLimits`' window is now 10 seconds, so a `perSource` you set
+  counts per 10 s, not per minute. The old fields (`limits.total`, MCP's
+  `limits.perConnection`, `processLimits({ total, perConnection })`) are
+  still taken, and read no more, so a deployment that has not changed yet
+  still builds and starts, on its old per-address binding; 0.17 refuses
+  them.
 - **The UI and the CLI no longer tell anyone to remove a tampered member to
   start over (T195).** 0.15's log refuses that removal. The Users page, the
   signed-in member's own page, `coffre members` and `coffre access` now say

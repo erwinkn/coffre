@@ -26,6 +26,12 @@ const client = {
 const app = process.env.GITHUB_APP_ID
   ? githubApp({ ...client, appId: process.env.GITHUB_APP_ID, privateKey: process.env.GITHUB_APP_PRIVATE_KEY ?? '' })
   : undefined;
+// What a sign-in that takes anyone passes first, a CI run's or an MCP
+// client's OAuth request: the requests one address makes to each, counted
+// apart, in this process. SIGN_IN_PER_SOURCE a 10-second window, 10,000
+// (1,000 a second) unless it says otherwise; conformance sets it lower, to
+// fill a window it can.
+const limits = processLimits(process.env.SIGN_IN_PER_SOURCE ? { perSource: Number(process.env.SIGN_IN_PER_SOURCE) } : {});
 
 export const coffre = createCoffre({
   publicUrl: env('PUBLIC_URL'),
@@ -44,11 +50,11 @@ export const coffre = createCoffre({
     // through the trust bindings owners make (docs/design/oidc.md), into
     // key-bound sessions or, for now, bearer credentials; `useOnly: true`
     // leaves them key-bound sessions only (docs/design/workload-access.md,
-    // section 6.3). Each exchange passes
-    // these limits first, and each session's requests its gate; both are
-    // this process's, so run one.
+    // section 6.3). Each sign-in passes its address's limit first, 10,000
+    // per 10 s (1,000 a second), and each session's requests its gate; both
+    // are this process's, so run one.
     workloads: {
-      limits: processLimits({ perSource: 30, total: 300 }),
+      limits,
       // Set by conformance only: a binding's issuer may then be plain HTTP on
       // loopback. Refused unless PUBLIC_URL is loopback too.
       allowLoopbackIssuersForDevelopment: process.env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
@@ -56,7 +62,8 @@ export const coffre = createCoffre({
     },
     // MCP clients, Claude among them, may connect at <PUBLIC_URL>/mcp as the
     // people who approve them (docs/mcp.md). Remove this to turn it off.
-    mcp: { limits: processLimits({ perSource: 30, perConnection: 120, total: 300 }) },
+    // Its OAuth requests pass the same limit, each endpoint counted apart.
+    mcp: { limits },
   }),
   auditChainKey: env('APP_KEY'),
   // The audit watch: every five minutes, the log walked from what it last
