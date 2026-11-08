@@ -17,8 +17,19 @@ import * as sqlite from '../src/schema.sqlite.ts';
  * second until `pnpm db:generate` has appended the migrations.
  *
  * Row types are checked at compile time, in portable.ts. Check constraints
- * are compared by name only: their bodies are each dialect's own.
+ * are compared by name only: their bodies are each dialect's own. So are
+ * the indexes `KEYED_APART` names, each keyed for its engine's planner.
  */
+
+/**
+ * The indexes keyed apart on each engine, compared by name, and why.
+ * `audit_log_access_idx` (T239): by principal on Postgres, which takes
+ * `author = 'vault'`, implied by its condition, for no bound, so `author`
+ * first would leave each step past a principal to scan from the start; and
+ * `author` first on SQLite, as the subject index, which SQLite's planner
+ * otherwise picks over it for matching more equalities.
+ */
+const KEYED_APART = new Set(['audit_log_access_idx']);
 
 type Config = ReturnType<typeof postgresConfig>;
 type AnyColumn = Config['columns'][number];
@@ -38,7 +49,7 @@ function shape(config: Config) {
   ];
   const indexes = config.indexes.map((index) => {
     const { name, unique: isUnique, columns } = index.config as { name: string; unique: boolean; columns: { name: string }[] };
-    return `${isUnique ? 'unique ' : ''}${name}(${names(columns)})`;
+    return `${isUnique ? 'unique ' : ''}${name}${KEYED_APART.has(name) ? '' : `(${names(columns)})`}`;
   });
   const foreignKeys = config.foreignKeys.map((foreignKey) => {
     const { columns, foreignColumns, foreignTable } = foreignKey.reference();

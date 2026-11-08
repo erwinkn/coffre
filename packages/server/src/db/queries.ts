@@ -5,7 +5,7 @@ import { ACCESS_ACTIONS, MAX_PARENTS, settingsFrom, type Checkpoint, type Enviro
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
+import { accessAllowed, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -1134,17 +1134,18 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
 /**
  * The vault retains removed members too: a member the log has changed
  * with no row means tampering. Of one member, a change of theirs in 0.15's
- * log (one probe of its object's index) or an access entry of 0.14's
- * (through the log's subject index), as the vault's check weighs both
- * (`#onLog`): the adds of 0.16 write no access entry (T179 PR 4a). Of
- * everyone, by the principals the vault's entries name, each found by one
- * step down that index (a skip scan), and an access entry looked for only
- * of those without a row: as many steps as there are principals, however
- * long their histories grow (R48). A change's object names its member by
- * a hash alone, which a scan cannot turn back into a principal; but a first
- * add down the two-trip path, which since 0.16.0 writes no access entry,
- * names them in its payload: those too, one entry each of
- * `log_changes_admitted_idx`, as many as were added so.
+ * log (one probe of its object's index) or an allowed access entry of
+ * 0.14's (one probe of `audit_log_access_idx`), as the vault's check weighs
+ * both (`#onLog`): the adds of 0.16 write no access entry (T179 PR 4a). Of
+ * everyone, the principals the vault's allowed access entries name, each
+ * found by one step down that index (a skip scan), those with a row passed
+ * over: as many steps as there are principals, however many entries, its
+ * refusals included, the log holds about them (R48, T239). A change's
+ * object names its member by a hash alone, which a scan cannot turn back
+ * into a principal; but a first add down the two-trip path, which since
+ * 0.16.0 writes no access entry, names them in its payload: those too, one
+ * entry each of `log_changes_admitted_idx`, as many as were added so (a
+ * principal's first add is its only one, made where no row names them).
  */
 export async function missingMembers(db: Queryable, member?: { type: string; id: string }): Promise<string[]> {
   if (member !== undefined) {
@@ -1152,11 +1153,10 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
     const rows = await dialect.rowsOf<{ principal: string }>(db, sql`SELECT CAST(${principal} AS text) AS principal
       WHERE NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = ${principal})
         AND (EXISTS (SELECT 1 FROM log_changes WHERE log_changes.object = ${logObject('principal', principal)})
-          OR EXISTS (SELECT 1 FROM audit_log WHERE author = 'vault' AND subject_principal = ${principal} AND decision = 'allow'
-            AND action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)})))`);
+          OR EXISTS (SELECT 1 FROM audit_log WHERE ${accessAllowed()} AND subject_principal = ${principal}))`);
     return rows.map((row) => row.principal);
   }
-  const next = (after: SQL | null) => sql`(SELECT subject_principal FROM audit_log WHERE author = 'vault' AND subject_principal ${after === null ? sql`IS NOT NULL` : sql`> ${after}`} ORDER BY subject_principal LIMIT 1)`;
+  const next = (after: SQL | null) => sql`(SELECT subject_principal FROM audit_log WHERE ${accessAllowed()} AND subject_principal ${after === null ? sql`IS NOT NULL` : sql`> ${after}`} ORDER BY subject_principal LIMIT 1)`;
   const engine = dialect.engineOf(db);
   // Whom a first add down the two-trip path added: its payload's `ref`, `{"id": principal, "kind": "principal"}`.
   const added = engine === 'postgres' ? sql.raw(`(log_changes.payload::jsonb -> 'ref' ->> 'id')`) : sql.raw(`json_extract(log_changes.payload, '$.ref.id')`);
@@ -1166,19 +1166,10 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
       SELECT ${next(null)}
       UNION ALL
       SELECT ${next(sql`named.principal`)} FROM named WHERE named.principal IS NOT NULL
-    ),
-    -- Those without a row, found before any access entry is looked for: left to the planner, it may look for one of
-    -- every principal first, a step down the subject index and a scan of the members for each (T233).
-    rowless (principal) AS MATERIALIZED (
-      SELECT principal FROM named
-      WHERE (principal LIKE 'user:%' OR principal LIKE 'token:%')
-        AND NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = named.principal)
     )
-    SELECT principal FROM rowless
-    WHERE EXISTS (
-      SELECT 1 FROM audit_log WHERE author = 'vault' AND subject_principal = rowless.principal AND decision = 'allow'
-        AND action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)})
-    )
+    SELECT principal FROM named
+    WHERE (principal LIKE 'user:%' OR principal LIKE 'token:%')
+      AND NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = named.principal)
     UNION
     SELECT a.principal FROM (SELECT ${added} AS principal FROM log_changes WHERE ${recorded(engine, sql.raw('log_changes.payload'), 'admitted')}) AS a
     WHERE NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = a.principal)

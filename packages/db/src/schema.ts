@@ -20,6 +20,7 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
+import { accessAllowed } from './access-entries.ts';
 import { ACTIVE_SUBJECT } from './active-subject.ts';
 import { recordField, recorded } from './change-records.ts';
 
@@ -449,6 +450,10 @@ export const auditLog = pgTable(
     index('audit_log_releases_idx').on(table.author, table.actor, table.action, table.decision, table.occurredAt),
     // What the vault logged about one member, in order.
     index('audit_log_subject_idx').on(table.author, table.subjectPrincipal, table.seq),
+    // Of those, the allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
+    // however many refusals the log holds about them (T239, R48). No `author` in its key, which the condition fixes:
+    // Postgres takes a clause the condition implies for no bound, so a step past a principal would scan from the start.
+    index('audit_log_access_idx').on(table.subjectPrincipal, table.seq).where(accessAllowed()),
     // A binding's tombstone: the app's successful `token.unbind` naming it.
     index('audit_log_unbind_idx')
       .on(sql`((${table.metadata})::jsonb ->> 'bindingId')`)
