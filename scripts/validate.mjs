@@ -24,15 +24,17 @@
 // or the entry of root package.json that names them. The local COFFRE_TEST_* and
 // COFFRE_DEV_* settings are dropped (they would shard or redirect the suites), and
 // the summary says so. The Pins step needs GH_TOKEN or a logged-in `gh`, to audit the pinned
-// actions against GitHub as CI does, and fails without. Postgres is the script's own container (a compose project
+// actions against GitHub as CI does, and fails without. The matrices step runs the use matrices as CI's shards do
+// (Postgres in sixths, SQLite in halves, one at a time, then the coverage check). Postgres is the script's own container (a compose project
 // and a free port of its own, never the shared :55432), removed when it ends. The
 // image step is not here: `pnpm test:image` builds for two architectures and is
 // the release's (Validate on the tagged commit runs it).
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { resolve } from 'node:path'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
 const root = resolve(import.meta.dirname, '..')
@@ -53,6 +55,17 @@ const formalModel = (f) =>
   ['scripts/formal.sh', 'scripts/formal-trace.mjs'].includes(f)
 const leanInputs = (f) => f.startsWith('formal/lean/') || anyOf('packages/core/src/', 'packages/vault/src/', 'scripts/formal-lean')(f)
 const BROWSER = '"$COFFRE_VALIDATE_BROWSER"'
+// The use matrices as CI runs them (validate.yml, `matrices-shard`): Postgres in sixths, SQLite in halves, one
+// shard at a time (each takes the slots of a stock Postgres, so none runs beside another), each from a database of
+// its own, then `matrix-coverage.mjs` holds the reports to every case run exactly once. Unsharded, the server's
+// matrix alone outlasts its own 7,200 s timeout on Postgres, so no unsharded run can pass.
+const MATRIX_SHARDS = { postgres: 6, sqlite: 2 }
+const matrixCommands = [
+  ...Object.entries(MATRIX_SHARDS).flatMap(([engine, of]) =>
+    Array.from({ length: of }, (_, i) => `COFFRE_TEST_ENGINE=${engine} COFFRE_TEST_SHARD=${i + 1}/${of} COFFRE_TEST_SHARD_REPORT="$COFFRE_VALIDATE_REPORTS/${engine}-${i + 1}" pnpm test:matrices`),
+  ),
+  `node scripts/matrix-coverage.mjs "$COFFRE_VALIDATE_REPORTS" ${Object.keys(MATRIX_SHARDS).join(' ')}`,
+]
 
 /**
  * Each step is a job of validate.yml (`job`), its commands, whether it needs the
@@ -84,8 +97,7 @@ const STEPS = [
     job: 'matrices-shard',
     postgres: true,
     needs: (f) => workspace(f) || anyOf('scripts/matrix', 'docker-compose.yml')(f) || manifests(f),
-    // CI splits these over eight runners; one machine runs them whole (about three quarters of an hour on Postgres).
-    run: ['pnpm test:matrices', 'pnpm test:matrices:sqlite'],
+    run: matrixCommands,
   },
   { name: 'schema', job: 'schema', postgres: true, needs: (f) => workspace(f) || anyOf('scripts/setup-test-database', 'scripts/test-setup', 'scripts/test-backup-role', 'docker-compose.yml')(f) || manifests(f), run: ['pnpm test:schema'] },
   { name: 'formal', job: 'formal', needs: formalModel, run: ['./scripts/formal.sh --workers 4 --heap 4g'], full: true },
@@ -375,7 +387,9 @@ const freePort = () =>
 
 let database = false
 let teardownFailed = false
+let reports = ''
 const teardown = async () => {
+  if (reports) rmSync(reports, { recursive: true, force: true })
   if (!database || opt['keep-db']) return
   active = null
   if ((await sh('docker compose down --volumes --remove-orphans')) !== 0) {
@@ -427,6 +441,7 @@ try {
     }
     const at = Date.now()
     let code = 0
+    if (step.name === 'matrices') env.COFFRE_VALIDATE_REPORTS = reports = mkdtempSync(join(tmpdir(), 'coffre-validate-matrices-'))
     if (step.build && !built) {
       console.log('\n== build')
       code = await sh('pnpm build')

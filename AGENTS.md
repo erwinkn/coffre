@@ -260,14 +260,17 @@ anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
 - `pnpm test:matrices` runs the generated matrices of 0.15's use by name
   (every `packages/*/test/*.matrix.ts`: `packages/vault/test/use.matrix.ts`,
   `packages/vault/test/forks.matrix.ts`, `packages/vault/test/many.matrix.ts`, `packages/server/test/named.matrix.ts`): every key a caller may not have
-  answered alike, whatever the vault's map holds, each statement slowed. They
-  take about three quarters of an hour, so `pnpm test` leaves them out;
-  `pnpm test:matrices:sqlite` runs them on SQLite. Needs Postgres. CI runs
+  answered alike, whatever the vault's map holds, each statement slowed. On
+  Postgres the server's alone takes 7,600 s on CI and 8,800 s on a busy host,
+  past its own 7,200 s timeout, so `pnpm test` leaves them out and an unsharded
+  Postgres run never passes (`pnpm test:matrices:sqlite` runs them on SQLite, about
+  20 minutes). Needs Postgres. CI runs
   them in shards, six on Postgres and two on SQLite, each from a database of
   its own: `COFFRE_TEST_SHARD=<k>/<n>` runs the k-th of n, case i in shard
   i mod n + 1 (`scripts/matrix-shard.ts`), and `COFFRE_TEST_SHARD_REPORT=<dir>`
   writes which cases each matrix ran, which `Use matrices` holds to every case
-  run exactly once (`scripts/matrix-coverage.mjs`). A new matrix passes its
+  run exactly once (`scripts/matrix-coverage.mjs`); `pnpm validate` runs the same
+  eight shards one at a time, then that check. A new matrix passes its
   generated cases through `shardOf`, or that check fails.
 - `pnpm test:schema` verifies both runtime logins' privileges. It also runs the
   full migration as a non-superuser owner in a disposable Postgres cluster,

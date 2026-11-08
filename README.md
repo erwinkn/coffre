@@ -111,7 +111,7 @@ The checks:
 ```sh
 pnpm test              # lint, then every test on Postgres (needs it up: pnpm db:up)
 pnpm test:sqlite       # the same suite on SQLite
-pnpm test:matrices     # 0.15's use by name: every key a caller may not have, answered alike (three quarters of an hour; CI shards them)
+pnpm test:matrices     # 0.15's use by name: every key a caller may not have, answered alike (hours on Postgres, so only in shards: CI's, or `pnpm validate`'s)
 pnpm test:properties   # bounded Hegel properties; --long for 100x cases (docs/property-tests.md)
 pnpm test:properties:server  # modeled server operations; --long for 40 sequences
 pnpm test:schema       # what the restricted logins may and may not do
