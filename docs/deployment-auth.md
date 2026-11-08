@@ -316,10 +316,15 @@ for `publicUrl`'s host unless `passkeys: { policy, rpId }` names a parent
 of it (`rpId: 'acme.example'` for `secrets.acme.example`): the origin must
 still be `publicUrl`'s, so `evil.acme.example` gets no answer either way.
 A `publicUrl` that is an IP address does not start with passkeys on:
-browsers make none there, so use `http://localhost:<port>` locally. Moving
-coffre to another host leaves every passkey behind unless `rpId` was a
-parent of both from the start; under `required` that signs everyone out.
-Set `rpId` before a move, or recover as below.
+browsers make none there, so use `http://localhost:<port>` locally. A passkey
+is made for the `rpId` in force then and answers only for it, so changing
+`rpId` is itself a move: from `secrets.acme.example` to `acme.example`,
+every passkey made before is refused at once, on the same host. Moving
+coffre to another host keeps the passkeys only if `rpId` was a parent of
+both before the first one was made. So choose the parent before anyone
+enrolls; otherwise every person adds a new passkey after the change, under
+`required` everyone is signed out until then, and the Owners recover as
+below.
 
 ### Lost passkeys
 

@@ -100,7 +100,8 @@ export async function redeem(deployment: Deployment, clientId: string, { code, v
   return body as unknown as Tokens;
 }
 
-async function refused(deployment: Deployment, what: string, fields: Record<string, string>): Promise<void> {
+/** A grant at the token endpoint that must be refused: `400 invalid_grant`. */
+export async function refused(deployment: Deployment, what: string, fields: Record<string, string>): Promise<void> {
   const answer = await token(deployment, fields);
   const body = await json(answer);
   expect(answer.status === 400 && body.error === 'invalid_grant', `${what} answered ${answer.status}, not invalid_grant`, body);

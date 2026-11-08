@@ -1642,9 +1642,12 @@ credential", which the check above needs.
   `topOrigin` absent.
 - **Moving coffre to another host orphans its passkeys** unless `rpId` was
   a parent that covers both from the start. Under `required` that locks
-  everyone out; the way back is `off`, then everyone re-adds. The config
-  docs say so where `rpId` is described, and a deployment planning a move
-  sets `rpId` first.
+  everyone out; the way back is `off`, then everyone re-adds. Changing
+  `rpId` is a move of its own: a passkey answers only for the `rpId` it was
+  made for, so `secrets.acme.example` to `acme.example` refuses every
+  passkey made before, on the same host. The config docs say so where
+  `rpId` is described: a deployment that may move chooses the parent before
+  anyone enrolls.
 - **Custom domains on Workers**: `publicUrl` is the one origin coffre
   answers to, as for its cookies; a request through `*.workers.dev` fails
   the origin check as it fails sign-in today.

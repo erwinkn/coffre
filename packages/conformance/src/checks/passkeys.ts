@@ -8,8 +8,8 @@ import { bearer, Browser } from '../browser.ts';
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
-import { connect, modern, redeem, register } from './mcp.ts';
-import { BULK, canary, ceremonyOf, deviceLogin, DEV, keepPasskey, passkeyOf, personaOn, PROJECT, provider, signIn, signInAdmin, stepUp, withPasskey, type Canaries, type People, type Person, type Touch } from './people.ts';
+import { connect, discovers, modern, redeem, refused, register } from './mcp.ts';
+import { BULK, canary, ceremonyOf, deviceLogin, DEV, keepPasskey, passkeyOf, personaOn, PROJECT, provider, signIn, signInAdmin, stepUp, touching, withPasskey, type Canaries, type People, type Person, type Touch } from './people.ts';
 import { pollDevice, startDevice } from './signin.ts';
 import { query } from './storage.ts';
 
@@ -25,6 +25,11 @@ async function bodyOf(response: Response): Promise<Body> {
 /** `401 passkey_failed`, and the like: what a refusal said, for a failure's detail. */
 async function said(response: Response): Promise<string> {
   return `${response.status} ${(await bodyOf(response)).error ?? (await response.clone().text())}`;
+}
+
+/** Whether the answer is this refusal exactly: `401 passkey_failed`, and the like. */
+async function refusedAs(response: Response, status: number, error: string): Promise<boolean> {
+  return response.status === status && (await bodyOf(response)).error === error;
 }
 
 /** A call the client made that must be refused: the error it threw. */
@@ -164,7 +169,7 @@ export async function ceremonies(deployment: Deployment, { admin }: People): Pro
   for (const [what, tweak] of [...tweaks, ['by another member\'s passkey', {}] as [string, Tweak]]) {
     const signer = what.startsWith('by another') ? adminKey : ada.key;
     const refused = await answer(ada.browser, await stepUpAnswer(deployment, ada.browser, signer, tweak));
-    expect(refused.status === 401, `a step-up assertion ${what} answered ${await said(refused)}, not 401`);
+    expect(await refusedAs(refused, 401, 'passkey_failed'), `a step-up assertion ${what} answered ${await said(refused)}, not 401 passkey_failed`);
   }
   expect(await signedIn(ada.browser), 'a refused step-up ended the session it came in on');
 
@@ -178,7 +183,7 @@ export async function ceremonies(deployment: Deployment, { admin }: People): Pro
     const page = await passkeyPage(signing);
     const signer = what.startsWith('by another') ? adminKey : ada.key;
     const refused = await answer(signing, { response: await signer.assert(ceremonyOf(deployment, page.options!.challenge), tweak) });
-    expect(refused.status === 401 && !(await signedIn(signing)), `a sign-in assertion ${what} answered ${await said(refused)}, not 401`);
+    expect((await refusedAs(refused, 401, 'passkey_failed')) && !(await signedIn(signing)), `a sign-in assertion ${what} answered ${await said(refused)}, not 401 passkey_failed`);
   }
 
   // 3 at a sign-in: the same assertion, sent again with the same sealed state from a copy, signs in once. Signed by a
@@ -206,7 +211,7 @@ export async function ceremonies(deployment: Deployment, { admin }: People): Pro
   const before = ada.browser.copy();
   expect((await answer(ada.browser, step)).ok, 'an honest step-up was refused');
   const stepReplayed = await answer(before, step);
-  expect(!stepReplayed.ok && !(await signedIn(before)), `a step-up answer sent twice was taken twice: ${await said(stepReplayed)}`);
+  expect((await refusedAs(stepReplayed, 401, 'session_ended')) && !(await signedIn(before)), `a step-up answer sent twice, from the session it ended, answered ${await said(stepReplayed)}, not 401 session_ended`);
 
   // 20: two fresh checks on one session, at once: one new session, one 401.
   const [one, two] = [await stepUpAnswer(deployment, ada.browser, ada.key), await stepUpAnswer(deployment, ada.browser, ada.key)];
@@ -224,17 +229,20 @@ export async function ceremonies(deployment: Deployment, { admin }: People): Pro
   const sealed = pending.cookies().find(([name]) => name.includes('passkey'))?.[1];
   expect(sealed !== undefined, 'a sign-in stopped at the passkey left no sealed cookie', pending.cookies().map(([name]) => name));
   const crossed = await answer(ada.browser, { state: decodeURIComponent(sealed!), response: await ada.key.assert(ceremonyOf(deployment, pendingPage.options!.challenge)) });
-  expect(!crossed.ok, `a sign-in's state completed a step-up: ${await said(crossed)}`);
+  // A state that opens as no step-up of this session's is answered as one whose session ended: `401 session_ended`.
+  expect((await refusedAs(crossed, 401, 'session_ended')) && (await signedIn(ada.browser)),
+    `a sign-in's state, as a step-up's, answered ${await said(crossed)}, not 401 session_ended, or ended the session it came in on`);
+  // A touch for another act, or no act's, counts as none: `403 touch_required`, with a challenge for this one.
   // a step-up's state and answer, as a terminal's approval:
   const terminal = await startDevice(deployment);
   const asStepUp = await stepUpAnswer(deployment, ada.browser, ada.key);
   const crossedDevice = await refusal(ada.api.deviceLogins.decide(terminal.user_code, true, asStepUp as Touch));
-  expect(crossedDevice.status === 403, `a step-up's answer approved a terminal: ${crossedDevice.status} ${crossedDevice.code}`);
+  expect(crossedDevice.status === 403 && crossedDevice.code === 'touch_required', `a step-up's answer, as a terminal's touch, answered ${crossedDevice.status} ${crossedDevice.code}, not 403 touch_required`);
   // and one terminal's touch, as another's:
   const other = await startDevice(deployment);
   const touch = await touchOf(deployment, await refusal(ada.api.deviceLogins.decide(terminal.user_code, true)), ada.key);
   const crossedCode = await refusal(ada.api.deviceLogins.decide(other.user_code, true, touch));
-  expect(crossedCode.status === 403, `one terminal's touch approved another: ${crossedCode.status} ${crossedCode.code}`);
+  expect(crossedCode.status === 403 && crossedCode.code === 'touch_required', `one terminal's touch, as another's, answered ${crossedCode.status} ${crossedCode.code}, not 403 touch_required`);
   expect((await polled(deployment, other.device_code)) === 'authorization_pending', 'a terminal approved with another\'s touch is not pending');
   await ada.api.deviceLogins.decide(terminal.user_code, true, touch);
   expect((await polled(deployment, terminal.device_code)) === 'token', 'the touch for its own terminal did not approve it');
@@ -248,7 +256,7 @@ export async function ceremonies(deployment: Deployment, { admin }: People): Pro
   const register = async (key: SoftAuthenticator, tweak: Tweak = {}) =>
     key.register({ ...ceremonyOf(deployment, enroll.options!.challenge), userHandle: new Uint8Array(Buffer.from(enroll.options!.user!.id, 'base64url')) }, tweak);
   const unverified = await answer(cy.browser, { state: enroll.state, response: await register(await SoftAuthenticator.create(), { flags: FLAGS.UP }) });
-  expect(unverified.status === 401, `an enroll without user verification answered ${await said(unverified)}, not 401`);
+  expect(await refusedAs(unverified, 401, 'passkey_failed'), `an enroll without user verification answered ${await said(unverified)}, not 401 passkey_failed`);
   const cyKey = await SoftAuthenticator.create();
   const enrolled = await answer(cy.browser, { state: enroll.state, response: await register(cyKey) });
   expect(enrolled.ok, `the honest enroll was refused: ${await said(enrolled)}`);
@@ -324,19 +332,27 @@ export async function passkeyChanges(deployment: Deployment, { admin }: People):
   const elsewhere = new Browser(deployment.origin);
   expect((await signIn(deployment, elsewhere, fay.email)).ok, 'fay could not sign in elsewhere');
   const fayHandle = await fay.api.handles.create({ label: 'conformance', paths: [DEV] });
+  // An MCP client connected with the first passkey's touch: its access token and its refresh token end with it too.
+  const fayClient = await register(deployment);
+  const fayApp = await redeem(deployment, fayClient, await connect(deployment, fay, fayClient));
+  expect(await discovers(deployment, fayApp.access_token), "fay's MCP client does not reach /mcp before the removal");
   const pendingCode = await startDevice(deployment);
   await fay.api.deviceLogins.decide(pendingCode.user_code, true, await touchOf(deployment, await refusal(fay.api.deviceLogins.decide(pendingCode.user_code, true)), fay.key));
   const removed = await removePasskey(deployment, fay.browser, first.id, second.key);
   expect(removed.ok && (await signedIn(fay.browser)), `removing a passkey with a touch of another answered ${await said(removed)}`);
-  expect((await polled(deployment, pendingCode.device_code)) !== 'token', 'a terminal approved with a passkey redeemed a token after it was removed');
-  expect((await refusal(fayCli.me())).status === 401 && (await refusal(personal.me())).status === 401 && !(await signedIn(elsewhere)),
-    'a credential the removed passkey confirmed still answers');
+  const deniedRemoved = await polled(deployment, pendingCode.device_code);
+  expect(deniedRemoved === 'access_denied', `a terminal approved with a passkey since removed answered ${deniedRemoved}, not access_denied`);
+  const elsewhereAnswered = await elsewhere.fetch('/api/projects');
+  expect((await refusal(fayCli.me())).status === 401 && (await refusal(personal.me())).status === 401 && elsewhereAnswered.status === 401,
+    `a credential the removed passkey confirmed still answers, or answers other than 401 (the browser elsewhere: ${await said(elsewhereAnswered)})`);
   expect((await used(deployment, fayHandle.token)) === 401, 'a handle still reaches /use after its person removed a passkey');
+  expect(!(await discovers(deployment, fayApp.access_token)), 'an MCP client connected before a passkey was removed still reaches /mcp');
+  await refused(deployment, "an MCP client's refresh token, after a passkey was removed", { grant_type: 'refresh_token', refresh_token: fayApp.refresh_token, client_id: fayClient });
   const withRemoved = new Browser(deployment.origin);
   await provider(deployment, withRemoved, fay.email);
   const removedPage = await passkeyPage(withRemoved);
   const signedRemoved = await answer(withRemoved, { response: await fay.key.assert(ceremonyOf(deployment, removedPage.options!.challenge)) });
-  expect(signedRemoved.status === 401 && !(await signedIn(withRemoved)), `a removed passkey signed its person in: ${await said(signedRemoved)}`);
+  expect((await refusedAs(signedRemoved, 401, 'passkey_failed')) && !(await signedIn(withRemoved)), `a removed passkey's sign-in answered ${await said(signedRemoved)}, not 401 passkey_failed`);
   keepPasskey(fay.email, second.key);
 
   // 35: a handle issued while a removal runs is refused, or revoked with the rest: never live after.
@@ -381,7 +397,8 @@ export async function passkeyChanges(deployment: Deployment, { admin }: People):
   await admin.api.access.set('token:conformance-touched', { [DEV]: 'viewer' });
   const next = await ask('conformance-touched');
   const reused = await refusal(admin.api.approvals.decide(next.id, { approve: true, digest: next.digest, basis: next.basis, touch }));
-  expect(reused.status === 403 && (await admin.api.approvals.get(next.id)).approval.status === 'pending',
+  // Counted as no touch: `403 touch_required`, asking one for this approval.
+  expect(reused.status === 403 && reused.code === 'touch_required' && (await admin.api.approvals.get(next.id)).approval.status === 'pending',
     `one approval's touch approved another: ${reused.status} ${reused.code} ${reused.message}`);
   await admin.api.approvals.decide(next.id, { approve: false, digest: next.digest, basis: next.basis });
   const apps = async () => (await admin.api.apps.list()).apps.length;
@@ -401,12 +418,12 @@ export async function passkeyChanges(deployment: Deployment, { admin }: People):
   const consentTouch = await touchOf(deployment, askedTouch, second.key);
   expect((await removePasskey(deployment, fay.browser, doomed.id, second.key)).ok, 'the removal during a consent was refused');
   const ended = await refusal(consenting.client().oauth.decide({ request, approve: true, scopes: ['read'], touch: consentTouch }));
-  expect(ended.status === 401 || ended.status === 403, `a consent whose session a removal ended answered ${ended.status} ${ended.code}`);
+  expect(ended.status === 401 && ended.code === 'unauthenticated', `a consent whose session a removal ended answered ${ended.status} ${ended.code}, not 401 unauthenticated`);
   expect((await fay.api.apps.list()).apps.length === 0, 'a consent whose session a removal ended connected a client');
 
   return 'a first passkey ended the CLI session, the approved terminal and the handle no passkey confirmed, and a reset brought none back; ' +
     'an unscoped Owner adds one at sign-in, a Developer does not; a terminal, an MCP approval and a consent each need a touch of their own, which approves that act alone; ' +
-    `a removal ends every credential the passkey confirmed, its terminal's code, its handles, and it signs nobody in; ${3 - raced} of 3 handles raced against a removal refused, the rest revoked; a consent a removal ended connects nothing`;
+    `a removal ends every credential the passkey confirmed, its terminal's code, its handles, its MCP client's tokens, and it signs nobody in; ${3 - raced} of 3 handles raced against a removal refused, the rest revoked; a consent a removal ended connects nothing`;
 }
 
 /** An MCP client's authorization request, as the consent page reads it. */
@@ -511,6 +528,25 @@ export async function staleSession(deployment: Deployment, people: People, alone
   const placeholder = await SoftAuthenticator.create();
   const registration = await placeholder.register({ ...ceremonyOf(deployment, Buffer.alloc(32).toString('base64url')), userHandle: new Uint8Array(32) });
   const [project, environment] = DEV.split('/') as [string, string];
+  // What the acts below would change, read by the admin's own browser before and after: the members, the reader's
+  // grants, both people's passkeys, the service's tokens and bindings (where the deployment trusts workloads), the
+  // settings, the roles, the projects and their environments, the freezes.
+  const workloads = (await admin.api.me()).features.workloads;
+  const reads = [
+    '/api/members', `/api/members/${reader.member}/access`, `/api/members/${admin.member}/passkeys`, `/api/members/${reader.member}/passkeys`,
+    `/api/members/${service}/tokens`, ...(workloads ? [`/api/members/${service}/bindings`] : []), '/api/settings', '/api/roles', '/api/projects', '/api/freezes',
+  ];
+  // A read this deployment does not serve (`501 not_implemented`: freezes, on Node) has nothing to change.
+  const served = await Promise.all(reads.map(async (path) => ((await admin.browser.fetch(path)).status === 501 ? null : path)));
+  const watched = served.filter((path) => path !== null);
+  const snapshot = async () => Promise.all(watched.map(async (path) => {
+    const read = await admin.browser.fetch(path);
+    expect(read.status === 200, `the admin could not read ${path}: ${await said(read)}`);
+    // The members list's `reads` says how far the instance has counted reads, which moves on its own.
+    const { reads: _counted, ...body } = (await read.json()) as Record<string, unknown>;
+    return [path, JSON.stringify(body)] as const;
+  }));
+  const was = await snapshot();
   const acts: [string, string, unknown?][] = [
     ['PUT', '/api/members/user:stale-new@conformance.example', {}],
     ['PUT', '/api/members/user:stale-new@conformance.example?dryRun=1', {}],
@@ -545,14 +581,11 @@ export async function staleSession(deployment: Deployment, people: People, alone
   }
   expect(answered.length === 0, 'a route that takes a fresh check let a stale session through', answered);
 
-  const members = (await admin.api.members.list()).members.map((member) => member.member);
-  expect(!members.some((id) => id.includes('stale-new')) && members.includes(reader.member),
-    'a refused member change changed the members', members);
-  expect((await admin.api.passkeys.list(reader.member)).passkeys.length > 0, "a refused reset removed the reader's passkeys");
-  const { bindings } = await admin.api.bindings.list(service);
-  expect(bindings.length === 0, 'a refused binding bound', bindings);
+  const now = await snapshot();
+  const changed = now.filter(([, read], at) => read !== was[at]![1]).map(([path, read]) => ({ path, was: was.find(([each]) => each === path)![1], now: read }));
+  expect(changed.length === 0, `a route refused a stale session changed what ${changed.map(({ path }) => path).join(', ')} reads`, changed);
   expect((await admin.api.secrets.list(DEV)).keys.some((key) => key.key === 'STALE_LOOSE'), 'a refused erase erased an environment');
-  return `${acts.length} acts of routes that take a fresh check, ?dryRun=1 on two that take none, refused a session touched over five minutes ago, changing nothing; ` +
+  return `${acts.length} acts of routes that take a fresh check, ?dryRun=1 on two that take none, refused a session touched over five minutes ago, changing nothing ${watched.length} reads show; ` +
     'a link it started while fresh refused at its callback, and another sent to a fresh check; a loosening refused, the same write keeping the nature taken';
 }
 
@@ -574,7 +607,33 @@ export async function readsStayReads(deployment: Deployment, { admin }: People, 
   const pat = bearer(deployment.origin, (await hal.api.tokens.issue(hal.member, { label: 'conformance', expiresInMinutes: 60, scope: { [place]: 'contributor' } })).token);
   const token = await refusal(pat.secrets.reveal(place));
   expect(fresh.status === 403 && token.status === 403, `a use-only role revealed a protected value: ${fresh.status} from a fresh session, ${token.status} from a personal token`);
-  return `a contributor on ${place}, protected, reveals nothing there, from a session touched a moment ago or a personal token`;
+
+  // Through MCP, connected with Reveal values and Hal's touch: neither into the conversation nor on coffre's page.
+  const clientId = await register(deployment);
+  const { access_token: access } = await redeem(deployment, clientId, await connect(deployment, hal, clientId, 'read reveal'));
+  const answers: string[] = [];
+  const call = async (tool: string, args: Record<string, unknown>) => {
+    const { body } = await modern(deployment, access, 'tools/call', { name: tool, arguments: args }, tool);
+    answers.push(JSON.stringify(body));
+    return body.result as { isError?: boolean; structuredContent?: { status?: string; approval?: { id: string } } } | undefined;
+  };
+  const revealed = await call('reveal_secret_values', { path: place });
+  expect(revealed?.isError === true, `a use-only role's MCP client was not refused reveal_secret_values on ${place}`, revealed);
+  const shown = await call('show_secret_value', { secret: `${place}/USED` });
+  const id = shown?.structuredContent?.approval?.id;
+  let page = 'refused at the tool';
+  if (id !== undefined) {
+    // An approval opened: pressing Reveal on it, with Hal's touch, shows no value either.
+    const approval = (await hal.api.approvals.get(id)).approval;
+    const decided = await touching(hal.browser, (touch) => hal.api.approvals.decide(id, { approve: true, digest: approval.digest, basis: approval.basis, ...(touch === undefined ? {} : { touch }) }))
+      .then((done) => JSON.stringify(done), (error: unknown) => (error instanceof CoffreError ? `${error.status} ${error.code}` : String(error)));
+    answers.push(decided);
+    page = `its approval, pressed, answered ${decided.startsWith('{') ? 'without the value' : decided}`;
+  } else {
+    expect(shown?.isError === true, `show_secret_value on ${place}/USED neither refused nor opened an approval`, shown);
+  }
+  expect(!answers.some((each) => each.includes(value)), `a use-only role's MCP client, or its approval page, held ${place}/USED's value`);
+  return `a contributor on ${place}, protected, reveals nothing there, from a session touched a moment ago, a personal token, or an MCP client with Reveal values (show_secret_value ${page})`;
 }
 
 /**
