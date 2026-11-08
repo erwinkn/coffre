@@ -146,7 +146,7 @@ export async function requiredFromCold(deployment: Deployment) {
   const again = new Browser(deployment.origin);
   const signed = await signIn(deployment, again, deployment.owner);
   expect(signed.ok && passkeyOf(deployment.owner) === key && (await signedIn(again)), `the Owner did not sign in again with the passkey added: ${'error' in signed ? signed.error : ''}`);
-  await deployment.restart();
+  await deployment.restart({ PASSKEYS: 'optional' });
   return { detail: `under required, from cold: a stopped sign-in left no session and no row (${Object.entries(before).map(([table, n]) => `${table} ${n}`).join(', ')}); the configured Owner added a passkey, landed, and signed in again with it`, value: admin };
 }
 
@@ -623,12 +623,25 @@ export async function readsStayReads(deployment: Deployment, { admin }: People, 
   const id = shown?.structuredContent?.approval?.id;
   let page = 'refused at the tool';
   if (id !== undefined) {
-    // An approval opened: pressing Reveal on it, with Hal's touch, shows no value either.
-    const approval = (await hal.api.approvals.get(id)).approval;
-    const decided = await touching(hal.browser, (touch) => hal.api.approvals.decide(id, { approve: true, digest: approval.digest, basis: approval.basis, ...(touch === undefined ? {} : { touch }) }))
-      .then((done) => JSON.stringify(done), (error: unknown) => (error instanceof CoffreError ? `${error.status} ${error.code}` : String(error)));
-    answers.push(decided);
-    page = `its approval, pressed, answered ${decided.startsWith('{') ? 'without the value' : decided}`;
+    // An approval opened: pressing Reveal on it, with Hal's touch, shows no value either. Each answer is read whole,
+    // the page's GET and every decision's, a refusal's body too, before anything reads what it says.
+    const whole = async (method: string, path: string, body?: unknown) => {
+      const response = await hal.browser.send(method, path, body);
+      const text = await response.text();
+      answers.push(text);
+      let parsed: { error?: string; touch?: { options: unknown; state: string }; approval?: { digest: string; basis: string } } | null = null;
+      try { parsed = JSON.parse(text); } catch { /* said as it came, in `answers` */ }
+      return { status: response.status, body: parsed };
+    };
+    const opened = await whole('GET', `/api/approvals/${encodeURIComponent(id)}`);
+    const approval = opened.body?.approval;
+    expect(opened.status === 200 && approval !== undefined, `Hal's approval page for show_secret_value answered ${opened.status}`, opened.body);
+    const decided = await touching(hal.browser, async (touch) => {
+      const sent = await whole('POST', `/api/approvals/${encodeURIComponent(id)}`, { approve: true, digest: approval!.digest, basis: approval!.basis, ...(touch === undefined ? {} : { touch }) });
+      if (sent.status === 403 && sent.body?.error === 'touch_required' && sent.body.touch !== undefined) throw new CoffreError(403, 'touch_required', 'touch required', undefined, undefined, sent.body.touch, 'POST');
+      return sent.status < 400 ? `${sent.status}` : `${sent.status} ${sent.body?.error ?? 'unreadable'}`;
+    });
+    page = `its approval, pressed, answered ${decided}, without the value`;
   } else {
     expect(shown?.isError === true, `show_secret_value on ${place}/USED neither refused nor opened an approval`, shown);
   }
@@ -689,8 +702,8 @@ export async function passkeysRequired(deployment: Deployment, { admin, bulk }: 
 
 /** The deployment back to `optional`, after the workload checks ran under `required` (16). */
 export async function backToOptional(deployment: Deployment): Promise<string> {
-  await deployment.restart();
-  return 'restarted as booted';
+  await deployment.restart({ PASSKEYS: 'optional' });
+  return 'restarted under optional';
 }
 
 /**
@@ -704,13 +717,13 @@ export async function issuerReplaced(deployment: Deployment, { admin }: People):
   const response = await passkeyOf(admin.email)!.assert(ceremonyOf(deployment, page.options!.challenge));
   const idp = new URL(deployment.idp.origin);
   idp.hostname = idp.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
-  await deployment.restart({ GITHUB_API_URL: `${idp.origin}/github/api` });
+  await deployment.restart({ PASSKEYS: 'optional', GITHUB_API_URL: `${idp.origin}/github/api` });
   try {
     const answered = await answer(pending, { response });
     expect(answered.status === 400 && (await bodyOf(answered)).error === 'state_mismatch' && !(await signedIn(pending)),
       `a sign-in whose issuer was replaced answered ${await said(answered)}, not 400 state_mismatch`);
   } finally {
-    await deployment.restart();
+    await deployment.restart({ PASSKEYS: 'optional' });
   }
   const again = new Browser(deployment.origin);
   expect((await signIn(deployment, again, admin.email)).ok, 'the admin could not sign in once the issuer was put back');
@@ -720,7 +733,7 @@ export async function issuerReplaced(deployment: Deployment, { admin }: People):
 /** 33: a deployment whose public URL is an IP address, with passkeys not off, does not start. */
 export async function ipPublicUrl(deployment: Deployment): Promise<string> {
   const port = new URL(deployment.origin).port;
-  const said = await deployment.refusesToStart({ PUBLIC_URL: `http://127.0.0.1:${port}` });
+  const said = await deployment.refusesToStart({ PASSKEYS: 'optional', PUBLIC_URL: `http://127.0.0.1:${port}` });
   expect(/browsers make no passkey there|passkeys need a public URL/.test(said), 'a deployment at an IP address did not say why it refused to start', said);
   return 'at http://127.0.0.1, with passkeys optional, it refused to start, and said why';
 }

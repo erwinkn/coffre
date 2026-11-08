@@ -2115,8 +2115,9 @@ default, with restarts under `required` where the check needs it: section
 7. **Conformance** (built) checks of section 13, and docs: `docs/deployment-auth.md` (the policy, `rpId`, recovery and its log review, the `optional` takeover
    case) and `docs/offboarding.md`.
 
-**As built (PR 7): conformance.** The deployment runs as booted,
-`optional`, as `coffre init` writes it, which now reads the policy from the
+**As built (PR 7): conformance.** The deployment boots under its own
+policy, `optional` as `coffre init` writes it, and every restart after
+the first sign-in names `optional` again, whatever it booted with. `init`'s template now reads the policy from the
 app's `PASSKEYS` var (`app/wrangler.jsonc`, `.env`): the policy stays code
 (`signin({ passkeys })`), and the template hands it a var so that the last
 Owner's recovery (section 3.7) is a var and a deploy, and so that

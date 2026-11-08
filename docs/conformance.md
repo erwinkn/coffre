@@ -74,7 +74,8 @@ behind Access, or with only other providers, cannot be booted as it is. Nothing 
 `COFFRE_*` reaches it.
 
 The deployment runs with its own passkey policy, `optional` as `init`
-writes it. A few checks restart it with other settings and then as booted:
+writes it. A few checks restart it with other settings and then under `optional`,
+named at each restart, whatever the deployment was booted with:
 `PASSKEYS=required` (the first sign-in, and from `passkeys required` to
 `back to optional`), GitHub's API under another name (`issuer replaced`),
 and a public URL that is an IP address (`IP public URL`). So a deployment
@@ -121,7 +122,7 @@ In order, since each builds on the ones before:
 |---|---|
 | health | `/livez` answers. On Workers, `/readyz` fails before any heartbeat, and passes once the Cron trigger has run and the vault has checkpointed it |
 | browser bundle | Nothing of the server in what the browser loads: every text file of the build's `app/dist/client`, read as the browser gets it, holds no database layer, driver, table only the server knows or `COFFRE_*` read. A page importing across the line otherwise just grows by the database layer, with no error |
-| sign-in | Under `required`, from cold (restarted so, on the empty database): the Owner's GitHub sign-in stopped at the passkey sets no session (`/api/me` 401) and writes no person, account, credential, passkey or terminal's code. Then the admin signs in through GitHub, the first to, adds a passkey and lands, the Owner of the whole instance, and signs in again with that passkey. The rest runs as booted |
+| sign-in | Under `required`, from cold (restarted so, on the empty database): the Owner's GitHub sign-in stopped at the passkey sets no session (`/api/me` 401) and writes no person, account, credential, passkey or terminal's code. Then the admin signs in through GitHub, the first to, adds a passkey and lands, the Owner of the whole instance, and signs in again with that passkey. The rest runs under `optional` |
 | setup, personas | The admin creates the project, its values and the people above |
 | pages in a browser | Signed in as the admin, `/projects`, the project and `/audit`, in headless Chrome, over the DevTools protocol: each shows its heading once its scripts have run and settled, with no uncaught error, console error or failed load. Run between setup and personas. It is what caught wrangler's `keep_names` wrapping the functions seroval writes into a signed-in page in an `__name` only the Worker has |
 | pasted values | In Chrome, a multi-line PEM key pasted into a new secret's value field, and over part of an existing value being edited: each time the field is a textarea after, focused, its caret right after the paste, and the values saved are the PEM byte for byte, and the old value with the paste in place of the selection, its `\r\n` saved as `\n`. A text input drops a paste's line breaks, so without the page's handling the key would be saved on one line. A value typed with Shift+Enter between two words turns the field into a focused textarea, its caret after the break, and saves as two lines. In an environment of its own, `conformance/pasted` |
@@ -167,7 +168,7 @@ In order, since each builds on the ones before:
 | run unbound | Removing the binding ends the credential it issued at once, and the next run's token buys none |
 | exchanges limited | Malformed tokens from one address get 429 `busy`, with `Retry-After: 60`, within 200 a minute: the limit counts before anything is read. Last of these, since it spends the address's minute |
 | tokens unlogged | No ID token or credential these checks used is in the processes' output, nor any service credential |
-| back to optional, issuer replaced | Restarted as booted. A sign-in pending at its passkey, GitHub's API renamed meanwhile (its issuer), completes nothing; with the name put back, the admin signs in |
+| back to optional, issuer replaced | Restarted under `optional`. A sign-in pending at its passkey, GitHub's API renamed meanwhile (its issuer), completes nothing; with the name put back, the admin signs in |
 | IP public URL | Started at `http://127.0.0.1:<port>` with passkeys `optional`, it refuses to start, and says why |
 | checkpoints | Each Cron run has the vault sign the log up to its last entry, in an `audit.checkpoint` entry of its own that covers the one before, and the log verifies through it |
 | keys behind writes | Every `secret.write`, `secret.restore` and `secret.loosen` names, by `related_seq`, the vault's `key.wrap` (a new value) or `key.rewrap` (a restore, a mark, a loosening) for the same member, request, operation, secret and version; and no value read is logged by the app, only by the vault |
