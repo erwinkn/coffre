@@ -234,7 +234,15 @@ the jobs of `Validate` that the diff against `origin/main` can change (all of
 them with `--all`, the image's aside; `--list` shows which and why), on a
 Postgres of its own (a compose project and a free port, never :55432), and
 prints the commit, its tree, the base and each step's result, for the pull
-request. `Validate` (`.github/workflows/validate.yml`) itself runs when
+request. When `main` moves after a gate and the rebase is mechanical (clean, or
+conflicting only in a migration or `CHANGELOG.md`, with `git range-diff` showing
+the patch unchanged), rerun only install, build, typecheck, lint, `check:*`,
+`test`, `test:sqlite`, `test:schema` and `test:compat`, plus the matrices,
+formal, conformance, consumer or Terraform steps when the new commits touch their
+inputs; the earlier run still counts for the rest. Any other conflict gets a
+scoped review of the changes and the full gate. The pull request's comment lists
+each check with the exact head it passed on, and the range-diff verdict.
+`Validate` (`.github/workflows/validate.yml`) itself runs when
 dispatched on any ref (`gh workflow run validate.yml --ref main`) and nightly
 on `main`; it runs everything, TLC when the model's inputs have no green run
 yet, and gates releases: a tag's commit needs a green run of it and of the
