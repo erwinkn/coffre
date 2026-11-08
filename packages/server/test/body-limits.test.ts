@@ -106,10 +106,17 @@ test('a path of a long run of slashes is read in a pass: trimmed at either end, 
   assert.equal(trimSlashes('///'), '');
   assert.deepEqual(parsePath('/market/dev/KEY/'), { project: 'market', environment: 'dev', key: 'KEY' });
   // 50,000 slashes inside, as long as a body lets a path be: once seconds of a regular expression's retries.
-  const started = process.cpuUsage();
-  assert.throws(() => parsePath(`x${'/'.repeat(50_000)}y`), /name a project/);
-  const spent = process.cpuUsage(started);
-  assert.ok((spent.user + spent.system) / 1000 < 20, `took ${(spent.user + spent.system) / 1000} ms`);
+  // The least CPU of five reads, the read's own: the first also compiles it, and the process's CPU counts V8's
+  // threads (packages/core/test/linear-inputs.test.ts). A regular expression's retries cost as much in every read.
+  const slashes = `x${'/'.repeat(50_000)}y`;
+  let least = Infinity;
+  for (let i = 0; i < 5; i++) {
+    const started = process.cpuUsage();
+    assert.throws(() => parsePath(slashes), /name a project/);
+    const spent = process.cpuUsage(started);
+    least = Math.min(least, (spent.user + spent.system) / 1000);
+  }
+  assert.ok(least < 20, `took ${least} ms`);
 });
 
 test('validation answers the first issue alone, as safeParse would name it, however many entries fail', () => {

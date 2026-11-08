@@ -6,16 +6,23 @@ import { randomBytes } from 'node:crypto';
 
 import { openState, sealState } from '../src/mcp/tokens.ts';
 
+// The least CPU of five calls, which is what the code itself costs: a first call also compiles it, and the process's
+// CPU counts V8's compiler threads and a collection's helpers, which only ever add to a call
+// (packages/core/test/linear-inputs.test.ts). Splitting a million dots costs as much in every call.
 const cpu = <T>(run: () => T) => {
-  const started = process.cpuUsage();
-  let result: T | Error;
-  try {
-    result = run();
-  } catch (error) {
-    result = error as Error;
+  let least = Infinity;
+  let result!: T | Error;
+  for (let i = 0; i < 5; i++) {
+    const started = process.cpuUsage();
+    try {
+      result = run();
+    } catch (error) {
+      result = error as Error;
+    }
+    const spent = process.cpuUsage(started);
+    least = Math.min(least, (spent.user + spent.system) / 1000);
   }
-  const spent = process.cpuUsage(started);
-  return { result, ms: (spent.user + spent.system) / 1000 };
+  return { result, ms: least };
 };
 
 test("an MCP call's request state of a million dots is refused by its length, before it is split", () => {
