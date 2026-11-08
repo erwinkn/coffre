@@ -324,12 +324,14 @@ coffre to another host keeps the passkeys only if `rpId` was a parent of
 both before the first one was made. So choose the parent before anyone
 enrolls. Otherwise nobody is signed out by the change itself: sessions,
 terminals and tokens already issued stand on their passkey's row, which
-names no RP ID, and keep working. What fails is every ceremony after it:
-a sign-in's passkey, a step-up, a terminal's or an MCP client's touch,
-adding a passkey, and an Owner's reset, each of which takes a touch of an
-old one. So the way back is the last Owner's, below, for everyone: `off`
-for minutes, each person removes their old passkeys, then the policy back,
-and each adds a new one at their next sign-in.
+names no RP ID, and keep working. What fails is every touch of an old
+passkey after it: a sign-in's, a step-up's, a terminal's or an MCP client's,
+and a removal's. A session touched in the last five minutes still stands
+on that touch, so for those minutes its person can add a passkey, made for
+the new `rpId`, and an Owner can reset someone's. Once no session is that
+fresh, the way back is the last Owner's, below, for everyone: `off` for
+minutes, each person removes their old passkeys, then the policy back, and
+each adds a new one at their next sign-in.
 
 ### Lost passkeys
 

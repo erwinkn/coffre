@@ -1641,8 +1641,10 @@ credential", which the check above needs.
   `evil.acme.example` fails. `crossOrigin` must be false or absent, and
   `topOrigin` absent.
 - **Moving coffre to another host orphans its passkeys** unless `rpId` was
-  a parent that covers both from the start. Under `required` that locks
-  everyone out; the way back is `off`, then everyone re-adds. Changing
+  a parent that covers both from the start. Under `required` nobody signs
+  in again once their sessions end (those already issued keep working, and
+  one touched in the last five minutes can still add a new passkey); the
+  way back is `off`, then everyone re-adds. Changing
   `rpId` is a move of its own: a passkey answers only for the `rpId` it was
   made for, so `secrets.acme.example` to `acme.example` refuses every
   passkey made before, on the same host. The config docs say so where
