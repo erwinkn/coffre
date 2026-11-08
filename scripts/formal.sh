@@ -165,6 +165,9 @@ REMOVALS=(
   "Bulk CountsTheRequest CapHolds"
   "Bulk PerPrincipal CapHolds"
   "Bulk StampedWhenCounted CapHolds"
+  # R75: each call's KMS requests take turns among themselves alone; one pool for the isolate lets a use wait behind a read's hung requests.
+  "KeyService SlotsPerCall WaitsOnlyBehindItsOwn"
+  "KeyService SlotsPerCall UsesNeverWait"
   "WorkloadReplay KeyCheckedAgainstRow CopyIsUseless"
   "WorkloadReplay RequestDigestChecked ForwardedIsSigned"
   "WorkloadReplay OnlySignedHeadersForwarded ForwardedIsSigned"

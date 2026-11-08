@@ -206,16 +206,22 @@ re-encrypting anything, and the key material itself cannot be copied out.
 
 **Cost and speed.** Each data key opened is one Decrypt, and each value
 written one Encrypt. AWS charges about $1 a month per key and $0.03 per
-10,000 calls. The vault sends up to eight requests at once, so a `coffre run`
-of 50 secrets is 50 Decrypts in about seven round trips. On Workers, each is
+10,000 calls. One call sends up to six requests at once, as many as a Worker
+lets one invocation have waiting for their answers, so a `coffre run` of 50
+secrets is 50 Decrypts in about nine round trips: a few ms each next to the
+key's region, about 124 ms across an ocean (measured, W331). One call's
+requests take turns among themselves, never behind another call's. On Workers, each is
 a subrequest: the Free plan allows 50 per invocation, so an environment
 larger than that cannot be read in one call there. The Paid plan allows
 10,000.
 
 **When KMS fails.** Before it asks KMS anything, the vault commits a
 `key.intent` entry naming every key of the call; afterwards, it logs each
-key's outcome against it. A throttled or failed request is retried twice,
-and the whole call has 5 seconds. If KMS still has not answered, refuses
+key's outcome against it. A throttled or failed request is retried twice;
+an attempt KMS does not answer within 706 ms is taken for lost and tried
+again (the slowest p99 measured, 506 ms across an ocean on a new
+connection, and one TCP retransmission, 200 ms); and the whole call has 5
+seconds, a use 3, each attempt cut at what is left of them. If KMS still has not answered, refuses
 coffre's credentials, or the key is disabled, the call fails (the API answers
 500, and the server log names the KMS error) and each key is logged with what
 happened to it: `kms_unavailable`, `kms_uncertain` when a request may have

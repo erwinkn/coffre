@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import type { SecretContext } from '../src/context.ts';
-import { awsKms, AwsKmsKekProvider, type AwsKmsOptions } from '../src/kek/aws-kms.ts';
+import { awsKms, AwsKmsKekProvider, KMS_ATTEMPT_MS, KMS_ATTEMPTS, KMS_REQUEST_MAX_MS, type AwsKmsOptions } from '../src/kek/aws-kms.ts';
 import { operationSignal } from '../src/kek/cancellation.ts';
 import { signV4 } from '../src/kek/sigv4.ts';
-import { KekUnavailableError } from '../src/kek/types.ts';
+import { KekCancelledError, KekUnavailableError } from '../src/kek/types.ts';
 
 const ARN = 'arn:aws:kms:eu-west-3:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab';
 const CREDENTIALS = { accessKeyId: 'AKIAEXAMPLE123', secretAccessKey: 'abc/def+ghi' };
@@ -214,12 +214,82 @@ test('credentials may be a function, asked before each call, and may carry a ses
   });
 });
 
-test('at most eight calls are in flight at once', async () => {
+test("at most six of one operation's requests are in flight at once, and calls apart each have their own", async () => {
   const fake = fakeKms();
   const kek = kms(fake);
-  await Promise.all(Array.from({ length: 30 }, () => kek.wrap(randomBytes(32), context())));
+  const operation = { deadline: Date.now() + 10_000, signal: new AbortController().signal };
+  await Promise.all(Array.from({ length: 30 }, () => kek.wrap(randomBytes(32), context(), operation)));
   assert.equal(fake.calls.length, 30);
-  assert.equal(fake.mostInFlight(), 8);
+  assert.equal(fake.mostInFlight(), 6, "Workers' simultaneous open connections of one invocation");
+  // Thirty calls, each its own (as many requests of an isolate are): none waits for another's slot.
+  const apart = fakeKms();
+  const kek2 = kms(apart);
+  await Promise.all(Array.from({ length: 30 }, () => kek2.wrap(randomBytes(32), context(), { deadline: Date.now() + 10_000, signal: new AbortController().signal })));
+  assert.equal(apart.mostInFlight(), 30);
+});
+
+test("a call never waits behind another call's hung requests: a use's key opens while a read's six hang (formal/KeyService.tla)", async () => {
+  const fake = fakeKms();
+  let hang = 6;
+  const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async (input, init) => {
+    if (hang > 0 && --hang >= 0) return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+    return fake.fetch(input, init);
+  } });
+  const read = { deadline: Date.now() + 5_000, signal: new AbortController().signal };
+  const hung = Array.from({ length: 6 }, () => kek.wrap(randomBytes(32), context(), read).catch(() => 'cancelled'));
+  const started = Date.now();
+  const ctx = context();
+  const wrapped = await kek.wrap(randomBytes(32), ctx, { deadline: Date.now() + 5_000, signal: new AbortController().signal });
+  assert.ok(Date.now() - started < 1_000, `the use's request waited ${Date.now() - started} ms behind the read's`);
+  assert.equal(wrapped.kekId, ARN);
+  const alive = setInterval(() => {}, 1000);
+  await Promise.all(hung).finally(() => clearInterval(alive));
+});
+
+test('an attempt KMS does not answer is cut at KMS_ATTEMPT_MS and tried again; with no deadline, the request ends within KMS_REQUEST_MAX_MS', async () => {
+  assert.equal(KMS_ATTEMPT_MS, 706);
+  assert.equal(KMS_REQUEST_MAX_MS, 3_118);
+  let sent = 0;
+  const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async (_input, init) => {
+    sent++;
+    return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+  } });
+  const alive = setInterval(() => {}, 1000);
+  const started = Date.now();
+  await assert.rejects(kek.wrap(randomBytes(32), context()), (error: unknown) => error instanceof KekUnavailableError && /3 times/.test((error as Error).message)).finally(() => clearInterval(alive));
+  const took = Date.now() - started;
+  assert.equal(sent, KMS_ATTEMPTS);
+  // Three attempts of 706 ms and two pauses of at least 100 and 400 ms; a watchdog above the bound, for a loaded host.
+  assert.ok(took >= KMS_ATTEMPTS * KMS_ATTEMPT_MS + 500 && took < KMS_REQUEST_MAX_MS + 5_000, `it took ${took} ms`);
+});
+
+test("a hung KMS answers by its operation's deadline: each attempt cut at what is left of it, no attempt nor pause started past it", async () => {
+  let sent = 0;
+  const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async (_input, init) => {
+    sent++;
+    return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+  } });
+  const alive = setInterval(() => {}, 1000);
+  // A use's deadline: 3 s (`USE_DEADLINE_MS`), though one request's attempts and pauses could take 3,118 ms.
+  const started = Date.now();
+  const deadline = started + 3_000;
+  await assert.rejects(kek.unwrap({ kekProvider: 'aws-kms', kekId: ARN, kekVersion: '1', bytes: randomBytes(48) }, context(), { deadline, signal: new AbortController().signal }),
+    // Cancelled at its deadline, or out of attempts just before it: either way an outage, answered by then.
+    KekUnavailableError).finally(() => clearInterval(alive));
+  const ended = Date.now();
+  assert.ok(ended >= started + 2 * KMS_ATTEMPT_MS, `it gave up after ${ended - started} ms`);
+  assert.ok(ended < deadline + 250, `it answered ${ended - deadline} ms past its deadline`);
+  assert.ok(sent >= 2 && sent <= KMS_ATTEMPTS, `${sent} attempts`);
+});
+
+test('no pause before another try starts when it would end past the deadline: the call is cancelled at once', async () => {
+  let sent = 0;
+  const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async () => (sent++, kmsError('ThrottlingException')) });
+  const started = Date.now();
+  // The first pause is at least 100 ms; 90 ms are left.
+  await assert.rejects(kek.wrap(randomBytes(32), context(), { deadline: started + 90, signal: new AbortController().signal }), KekCancelledError);
+  assert.equal(sent, 1);
+  assert.ok(Date.now() - started < 90, 'cancelled before its deadline, not at it');
 });
 
 test('every call of one operation shares its deadline, so the deadline cancels them all at once', async () => {
@@ -240,13 +310,13 @@ test('no key queued behind a batch at the deadline is ever sent', async () => {
   } });
   // Only the deadline cancels: nobody aborts the operation's own signal.
   const operation = { deadline: Date.now() + 50, signal: new AbortController().signal };
-  const calls = Array.from({ length: 9 }, () => kek.wrap(randomBytes(32), context(), operation));
+  const calls = Array.from({ length: 7 }, () => kek.wrap(randomBytes(32), context(), operation));
   // The deadline's timer is AbortSignal.timeout's, which does not keep Node running: this one does,
   // or a loaded runner can find nothing left to wait for and cancel the file.
   const alive = setInterval(() => {}, 1000);
   const outcomes = await Promise.allSettled(calls).finally(() => clearInterval(alive));
   assert.ok(outcomes.every((outcome) => outcome.status === 'rejected' && outcome.reason instanceof KekUnavailableError));
-  assert.equal(sent, 8, 'the ninth key waited for a slot, and was cancelled, not sent');
+  assert.equal(sent, 6, 'the seventh key waited for a slot of its operation, and was cancelled, not sent');
 });
 
 test('the key is named by its ARN, whose region is where coffre calls', async () => {

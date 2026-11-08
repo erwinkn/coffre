@@ -1,6 +1,6 @@
 import { NOTHING } from '@coffre/core/access';
 import { ownerKey, type SecretContext } from '@coffre/core/envelope';
-import { KekBadClaimError, KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
+import { KekBadClaimError, KekCancelledError, KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
 import { CREDENTIAL_NAME } from '@coffre/core/identity';
 import { USES_IN_FLIGHT } from '@coffre/core/memory';
 import { HOT_STATEMENT_TIMEOUT_MS, MAX_PARENTS } from '@coffre/core/vault';
@@ -1675,7 +1675,8 @@ async function open(path: UsePath, view: UseView, row: UseRow, deadline: number)
     dek = await path.keks.unwrap({ ...wrapped, bytes: Buffer.from(wrapped.bytes, 'base64') }, context, { deadline, signal: controller.signal });
   } catch (error) {
     if (error instanceof KekBadClaimError) return 'bad_claim';
-    if (error instanceof KekUnavailableError && controller.signal.aborted) return 'late';
+    // Cancelled by its deadline: by the timer here, or by the key service's own, which starts no try it cannot finish.
+    if (error instanceof KekCancelledError || (error instanceof KekUnavailableError && controller.signal.aborted)) return 'late';
     throw error;
   } finally {
     clearTimeout(timer);

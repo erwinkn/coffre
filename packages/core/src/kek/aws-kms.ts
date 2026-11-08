@@ -30,10 +30,46 @@ export type AwsKmsOptions = {
 
 const KEY_ARN = /^arn:(aws|aws-cn|aws-us-gov):kms:([a-z0-9-]+):\d{12}:key\/[A-Za-z0-9-]{1,128}$/;
 
-const ATTEMPTS = 3;
-const TIMEOUT_MS = 5_000;
-/** Calls in flight at once. A Worker opens at most six connections anyway. */
-const CONCURRENCY = 8;
+/** How many times one KMS request is tried, while KMS throttles, fails on its side or does not answer: a retry policy. */
+export const KMS_ATTEMPTS = 3;
+
+/**
+ * How long one attempt waits for KMS's answer, at most; less when its operation's deadline comes first (each attempt
+ * is cut at what is left of it). From a measurement (W331, 2026-11-07; #538's thread): coffre's own requests to a key in
+ * us-east-2, p50 / p95 / p99 / max in ms, 475-500 calls each of Encrypt, Decrypt and GenerateDataKey:
+ *
+ *   a Worker placed next to the key (ORD)     19-20 / 23-64 / 60-70 / 70-92
+ *   a Worker an ocean away (WAW)              124 / 128-487 / 132-506 / 299-517
+ *   a host in Helsinki, a new connection each 362-365 / 388-406 / 410-413 / 412-415
+ *
+ * A request on a connection kept is one round trip and a few ms of KMS's; on a new one about four (TCP, TLS, the
+ * request). So: the slowest p99 measured, 506 ms (a far Worker's Encrypt on a new connection), and one lost segment's
+ * retransmission at Linux's least retransmission timeout, 200 ms (`TCP_RTO_MIN`, include/net/tcp.h; Cloudflare's and
+ * Node's hosts taken to use Linux's, not checked): 706 ms. Past it the request is taken for lost, and tried again.
+ */
+export const KMS_ATTEMPT_MS = 506 + 200;
+
+/** The pause before the `attempt`th try after a failure, at most: 100 ms × 4^(attempt-1), jittered up to twice. */
+const backoffMs = (attempt: number) => 100 * 4 ** (attempt - 1) * (1 + Math.random());
+
+/**
+ * The longest one KMS request may take, all its attempts and pauses, on a path with no deadline of its own: 3 × 706 ms
+ * and pauses of at most 200 and 800 ms, 3,118 ms. Every path the vault takes has a deadline (its operation's), which cuts
+ * each attempt and starts no attempt nor pause past it: a use's, 3 s (`USE_DEADLINE_MS`), answers by it. Not a bound
+ * of a use's, nor one anyone waits on: what a key read or write without a deadline would take at worst.
+ */
+export const KMS_REQUEST_MAX_MS = KMS_ATTEMPTS * KMS_ATTEMPT_MS + Array.from({ length: KMS_ATTEMPTS - 1 }, (_, i) => 200 * 4 ** i).reduce((a, b) => a + b, 0);
+
+/**
+ * How many of one call's KMS requests are in flight at once (an operation's: a read of many keys, a wrap of many):
+ * Workers lets an invocation have six connections waiting for their response headers, a service binding's callee
+ * sharing its caller's, and queues the seventh (developers.cloudflare.com/workers/platform/limits, "Simultaneous open
+ * connections"). A vault call's own Hyperdrive socket counts only while it opens, before the call's first KMS request
+ * (every path queries first). The same six on Node. Each call's requests wait for each other alone, never another
+ * call's (formal/KeyService.tla, SlotsPerCall): no request waits behind another request's hung KMS calls, nor for a
+ * promise another settles (AGENTS.md, "What an isolate keeps").
+ */
+const CONCURRENCY = 6;
 /** What KMS says when the ciphertext does not open under this key and context: a bad claim, not an outage. */
 const NOT_THIS_KEY = new Set(['InvalidCiphertextException', 'IncorrectKeyException']);
 
@@ -59,7 +95,8 @@ export class AwsKmsKekProvider implements KekProvider {
   readonly #url: URL;
   readonly #credentials: () => Promise<AwsCredentials>;
   readonly #fetch: typeof fetch;
-  readonly #slots = new Slots(CONCURRENCY);
+  /** Each operation's own slots (`CONCURRENCY`), kept while it lives: one call's requests take turns among themselves. */
+  readonly #slots = new WeakMap<KeyOperation, Slots>();
 
   constructor(options: AwsKmsOptions) {
     const match = KEY_ARN.exec(options.keyArn);
@@ -121,7 +158,10 @@ export class AwsKmsKekProvider implements KekProvider {
   async #call(action: 'Encrypt' | 'Decrypt', request: object, operation?: KeyOperation): Promise<Record<string, string>> {
     const body = JSON.stringify(request);
     const signal = operationSignal(operation);
-    return this.#slots.run(async () => {
+    // A request with no operation is a call of its own: one request, nothing to take turns with.
+    const slots = operation === undefined ? new Slots(CONCURRENCY) : this.#slots.get(operation) ?? new Slots(CONCURRENCY);
+    if (operation !== undefined) this.#slots.set(operation, slots);
+    return slots.run(async () => {
       checkOperation(operation);
       let credentials: AwsCredentials;
       try {
@@ -143,11 +183,15 @@ export class AwsKmsKekProvider implements KekProvider {
           if (uncertain) throw new KekUnavailableError(`KMS ${action}: ${answer.type} after an unanswered request`, true);
           throw new KekBadClaimError(`KMS ${action}: ${answer.type}`);
         }
-        if (!answer.retry || attempt === ATTEMPTS) {
+        if (!answer.retry || attempt === KMS_ATTEMPTS) {
           throw new KekUnavailableError(`KMS ${action} failed${attempt > 1 ? ` ${attempt} times` : ''}: ${answer.failure}`, uncertain);
         }
+        // No pause that would end past the deadline: no attempt could start after it, so the call ends now, cancelled by
+        // its deadline as it would be at it (`KekCancelledError`), rather than wait for it.
+        const pause = backoffMs(attempt);
+        if (operation !== undefined && Date.now() + pause >= operation.deadline) throw new KekCancelledError(uncertain);
         try {
-          await delay(100 * 4 ** (attempt - 1) * (1 + Math.random()), signal);
+          await delay(pause, signal);
         } catch (error) {
           if (error instanceof KekCancelledError) throw new KekCancelledError(uncertain);
           throw error;
@@ -182,7 +226,11 @@ export class AwsKmsKekProvider implements KekProvider {
       sent = true;
       response = await this.#fetch(this.#url, {
         method: 'POST', headers, body,
-        signal: AbortSignal.any([AbortSignal.timeout(TIMEOUT_MS), ...(signal === undefined ? [] : [signal])]),
+        // An attempt waits `KMS_ATTEMPT_MS` at most, and no longer than what is left of its operation's deadline.
+        signal: AbortSignal.any([
+          AbortSignal.timeout(operation === undefined ? KMS_ATTEMPT_MS : Math.max(0, Math.min(KMS_ATTEMPT_MS, operation.deadline - Date.now()))),
+          ...(signal === undefined ? [] : [signal]),
+        ]),
       });
       text = await response.text();
     } catch (error) {
