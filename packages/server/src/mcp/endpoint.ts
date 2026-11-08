@@ -255,8 +255,8 @@ function elicitsUrl(capabilities: Record<string, unknown>): boolean {
 const WAIT_MS = 25_000;
 
 /**
- * One tool's call: admitted against its connection's limit, held to its
- * scopes, run as API calls in its person's name, and logged with the client.
+ * One tool's call: held to its scopes, run as API calls in its person's
+ * name, and logged with the client.
  * A refusal the API gives is the tool's result, an error the model reads; a
  * scope the connection lacks is a 403 that starts the client's step-up,
  * whose body is such a result too, for a client that does not. A
@@ -272,11 +272,8 @@ async function call(
   answer: (result: Record<string, unknown>) => Response,
   client: ClientSays,
 ): Promise<Response> {
-  const mcp = runtime.mcp!;
+  // No rate of its own: a connection acts as the person who approved it, whose other ways in have none (W331, D177).
   const requestId = crypto.randomUUID();
-  if (!(await mcp.admitCall(connection.id, requestId))) {
-    return failure(id, 429, { code: CODE.internal, message: 'Too many calls: try again in a minute' }, { 'retry-after': '60' });
-  }
   const params = check(CallParams, message.params ?? {});
   if (!params.success) return rpc(id, { error: { code: CODE.invalidParams, message: 'Invalid params: tools/call takes a name and its arguments' } });
   const tool = TOOL_BY_NAME.get(params.data.name);

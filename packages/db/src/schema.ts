@@ -709,6 +709,10 @@ export const serviceBindings = pgTable(
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     revokedBy: text('revoked_by'),
+    // Closed by a removal under way, in batches (0079): no sign-in through it, until its end. By whom, for the scheduled
+    // run to name when it goes on with it. Under neither its MAC nor its seal.
+    closedAt: timestamp('closed_at', { withTimezone: true }),
+    closedBy: text('closed_by'),
     // 0.15's seal (0022_log_015): the vault's MAC over the object this row is part of, HMAC-SHA256 cut to 16
     // bytes, the same seal its newest change in `log_changes` records. Null until the row is sealed.
     seal: bytea(),

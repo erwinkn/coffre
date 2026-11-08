@@ -3,7 +3,7 @@ import { CLOCK_SKEW_MS } from '@coffre/core/vault';
 import { tablesOf, type Queryable } from '@coffre/db';
 import { and, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 
-import type { Answer, BindingsCall, IssueCall, RevokeCall, SignInCall, SignInPin } from './credentials.ts';
+import { BINDING_LAST_USED_MS, type Answer, type BindingsCall, type IssueCall, type RevokeCall, type SignInCall, type SignInPin } from './credentials.ts';
 import { objectKey, type Ref } from './inputs.ts';
 
 /**
@@ -29,7 +29,8 @@ export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answ
   if (!same(member.seal ?? null, c.pins.member.seal)) return { state: 'unbound' };
   // The binding as the vault checked its seal, and its object's newest change the one the vault checked, of that seal (BindingSealed).
   const [binding] = await tx.select().from(serviceBindings).where(eq(serviceBindings.id, c.binding.id));
-  if (binding === undefined || binding.principal !== c.principal || binding.generation !== c.binding.generation || binding.revokedAt !== null || binding.profile !== c.binding.profile
+  // Closed by a removal under way (0079), as ended: no sign-in through it.
+  if (binding === undefined || binding.principal !== c.principal || binding.generation !== c.binding.generation || binding.revokedAt !== null || binding.closedAt !== null || binding.profile !== c.binding.profile
     || binding.scope !== c.binding.scope || binding.policy !== c.binding.policy || binding.issuer !== c.binding.issuer || binding.jwksUri !== c.binding.jwksUri
     || binding.claims !== c.binding.claims || !same(binding.seal ?? null, c.bindingSeal)) {
     return { state: 'unbound' };
@@ -48,10 +49,6 @@ export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answ
     }
   }
   const now = Date.now();
-  const recent = await tx.select({ id: credentials.id }).from(credentials)
-    .where(and(eq(credentials.principal, c.principal), eq(credentials.createdBy, k.createdBy), gt(credentials.createdAt, new Date(now - c.window))))
-    .limit(c.rate);
-  if (recent.length >= c.rate) return { state: 'busy' };
   if ((c.validUntil !== null && c.validUntil <= now) || k.expiresAt <= now || k.expiresAt > now + c.longest + CLOCK_SKEW_MS || (k.notAfter !== null && (k.notAfter <= now || k.expiresAt > k.notAfter))) return { state: 'expired' };
   if (c.spent !== null) {
     const spent = await tx.insert(spentIdTokens).values({ hash: c.spent }).onConflictDoNothing().returning({ hash: spentIdTokens.hash });
@@ -62,7 +59,10 @@ export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answ
     principal: c.principal, identityId: null, scope: k.scope, places: k.places, label: k.label, createdBy: k.createdBy,
     expiresAt: new Date(k.expiresAt), revokedAt: null, jkt: k.jkt, notAfter: k.notAfter === null ? null : new Date(k.notAfter), seal: c.seal,
   });
-  await tx.update(serviceBindings).set({ lastUsedAt: new Date(now) }).where(eq(serviceBindings.id, c.binding.id));
+  // Its last use, when a minute old, as on Postgres (0079).
+  if (binding.lastUsedAt === null || binding.lastUsedAt.getTime() < now - BINDING_LAST_USED_MS) {
+    await tx.update(serviceBindings).set({ lastUsedAt: new Date(now) }).where(eq(serviceBindings.id, c.binding.id));
+  }
   const number = await nextNumber(tx);
   await tx.insert(logChanges).values({ number, at: c.at, requestId: c.requestId, object: target, actor: c.actor, payload: c.payload, seal: c.seal, mac: c.mac });
   return { number: number.toString() };
@@ -182,10 +182,11 @@ export async function bindingsOnSqlite(tx: Queryable, c: BindingsCall): Promise<
   }
   // The account's live bindings as the app read them, at most `MAX_BINDINGS` besides those it ends; the keys it reads by their names.
   if (m !== null) {
-    const live = await tx.select({ id: serviceBindings.id }).from(serviceBindings)
+    const live = await tx.select({ id: serviceBindings.id, closedAt: serviceBindings.closedAt }).from(serviceBindings)
       .where(and(eq(serviceBindings.principal, c.principal), eq(serviceBindings.generation, m.row.generation), isNull(serviceBindings.revokedAt)));
     if (live.map(({ id }) => id).sort().join() !== [...(c.live ?? [])].sort().join()) return { state: 'moved' };
-    if (live.filter(({ id }) => !c.ends.some((end) => end.id === id)).length >= MAX_BINDINGS) return { state: 'full' };
+    // Counted among the open ones, as 0079's: a closed one is on its way out (review r10).
+    if (live.filter(({ id, closedAt }) => closedAt === null && !c.ends.some((end) => end.id === id)).length >= MAX_BINDINGS) return { state: 'full' };
     for (const read of c.reads) {
       const [row] = await tx.select({ key: secrets.key }).from(secrets).where(eq(secrets.id, read.id));
       if (row?.key !== read.key) return { state: 'moved' };
@@ -196,6 +197,9 @@ export async function bindingsOnSqlite(tx: Queryable, c: BindingsCall): Promise<
     const [row] = await tx.select({ principal: serviceBindings.principal, revokedAt: serviceBindings.revokedAt, authMac: serviceBindings.authMac, seal: serviceBindings.seal })
       .from(serviceBindings).where(eq(serviceBindings.id, end.id));
     if (row === undefined || row.principal !== c.principal || row.revokedAt !== null || !same(row.authMac, end.macFrom) || !same(row.seal ?? null, end.sealFrom)) return { state: 'moved' };
+    // A sweep names a batch, its other live ones left to the next call, and reads none of them (review r5); the end
+    // names them all (0079).
+    if (c.sweep) continue;
     const live = await tx.select({ id: credentials.id }).from(credentials)
       .where(and(eq(credentials.principal, c.principal), eq(credentials.createdBy, `binding:${end.id}`), isNull(credentials.revokedAt), gt(credentials.expiresAt, new Date(now))));
     const named = new Set(c.credentials.filter((x) => x.binding === end.id).map((x) => x.id));
@@ -222,6 +226,8 @@ export async function bindingsOnSqlite(tx: Queryable, c: BindingsCall): Promise<
   // ChangeChecksSeal: each row it ends its object's newest change's.
   for (const end of c.ends) if (!same(await newest({ kind: 'binding', id: end.id }), end.sealFrom)) return { state: 'stale' };
   for (const x of c.credentials) if (!same(await newest({ kind: 'credential', id: x.id }), x.sealFrom)) return { state: 'stale' };
+  // A replacement's sweep makes its binding as it closes those it replaces, as 0079's (reviews r8, r9): weighed as the make
+  // it is (review r4).
   if (m !== null) {
     const b = m.row;
     await tx.insert(serviceBindings).values({
@@ -231,7 +237,10 @@ export async function bindingsOnSqlite(tx: Queryable, c: BindingsCall): Promise<
   }
   const ended = new Date(c.revokedAt);
   for (const end of c.ends) {
-    await tx.update(serviceBindings).set({ revokedAt: ended, revokedBy: c.revokedBy, authMac: end.authMac, seal: end.seal }).where(eq(serviceBindings.id, end.id));
+    // A sweep closes the binding (once: the first close stands); the end ends it.
+    // The first close stands (its remover's name, for the scheduled run's `continues`).
+    if (c.sweep) await tx.update(serviceBindings).set({ closedAt: new Date(now), closedBy: c.actor }).where(and(eq(serviceBindings.id, end.id), isNull(serviceBindings.closedAt)));
+    else await tx.update(serviceBindings).set({ revokedAt: ended, revokedBy: c.revokedBy, authMac: end.authMac, seal: end.seal }).where(eq(serviceBindings.id, end.id));
   }
   for (const x of c.credentials) {
     await tx.update(credentials).set({ revokedAt: ended, revokedBy: c.revokedBy, authMac: x.authMac, seal: x.seal }).where(eq(credentials.id, x.id));

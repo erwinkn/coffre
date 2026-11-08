@@ -9,6 +9,7 @@ import { bearerToken } from '../auth.ts';
 import { errorResponse, jsonResponse, readLimitedJson, readLimitedText, SIGN_IN_BODY_BYTES } from '../http.ts';
 import { logged } from '../logged.ts';
 import type { CoffreRuntime } from '../runtime.ts';
+import { SOURCE_RETRY_AFTER } from '../workloads/limits.ts';
 import { OAuthError, type McpConnection, type McpService } from './service.ts';
 
 
@@ -64,7 +65,7 @@ function oauthError(error: unknown): Response {
   if (error instanceof OAuthError) {
     return jsonResponse({ error: error.error, error_description: error.message }, error.status, {
       ...NO_STORE,
-      ...(error.status === 429 ? { 'retry-after': '60' } : error.status === 503 ? { 'retry-after': UNAVAILABLE_RETRY_AFTER } : {}),
+      ...(error.status === 429 ? { 'retry-after': SOURCE_RETRY_AFTER } : error.status === 503 ? { 'retry-after': UNAVAILABLE_RETRY_AFTER } : {}),
     });
   }
   // Anything else as the API maps and logs it (`toErrorBody`): coffre not answering for a moment, a lock or a connection
@@ -100,13 +101,13 @@ async function form(request: Request): Promise<URLSearchParams> {
 
 /**
  * `POST /api/oauth/token`: a code, then refresh tokens, for access tokens.
- * Admission first, both limits, before the body or the database.
+ * Admission first, its source address's limit, before the body or the database.
  */
 export async function oauthToken(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response> {
   const mcp = mcpOf(runtime);
   if (mcp instanceof Response) return mcp;
   try {
-    await mcp.admit(sourceIp);
+    await mcp.admit('token', sourceIp);
     const answer = await mcp.token(await form(request), { requestId: crypto.randomUUID(), sourceIp });
     return jsonResponse(answer, 200, NO_STORE);
   } catch (error) {
@@ -119,7 +120,7 @@ export async function oauthRegister(request: Request, runtime: CoffreRuntime, so
   const mcp = mcpOf(runtime);
   if (mcp instanceof Response) return mcp;
   try {
-    await mcp.admit(sourceIp);
+    await mcp.admit('register', sourceIp);
     const body = await readLimitedJson(request, SIGN_IN_BODY_BYTES).catch((error: unknown) => {
       throw error instanceof ApiError && error.code !== 'too_large' ? new OAuthError('invalid_client_metadata', error.message) : error;
     });
@@ -134,7 +135,7 @@ export async function oauthRevoke(request: Request, runtime: CoffreRuntime, sour
   const mcp = mcpOf(runtime);
   if (mcp instanceof Response) return mcp;
   try {
-    await mcp.admit(sourceIp);
+    await mcp.admit('revoke', sourceIp);
     await mcp.revoke(await form(request), { requestId: crypto.randomUUID(), sourceIp });
     return new Response(null, { status: 200, headers: NO_STORE });
   } catch (error) {

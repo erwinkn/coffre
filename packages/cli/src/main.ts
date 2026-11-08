@@ -359,6 +359,8 @@ function client(to: Target = target(), hint?: Hint, handled: readonly number[] =
     url: to.origin,
     headers: () => headersFor(to).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error))),
     transport: (request) => send(request, to, hint, handled, ask),
+    // A binding with many credentials is removed over several requests on Workers, the client asking again (W331).
+    onRemoving: (left) => void process.stderr.write(`Removing the binding, its credentials revoked a batch at a time: ${left} left to do\n`),
   });
 }
 

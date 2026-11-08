@@ -5,7 +5,11 @@ import { sql } from 'drizzle-orm';
 
 import type { Answer, BindingsCall, IssueCall, RevokeCall, SignInCall } from './credentials.ts';
 
-/** `sign_in` (migration 0075, 0037's with the pins): one statement, its own transaction, its answer one JSON value. */
+/**
+ * `sign_in` (migration 0075, 0037's with the pins; 0079's since, W331, D177: the binding's row shared, no count): one
+ * statement, its own transaction, its answer one JSON value. Its `p_rate` and `p_window` it reads no more: null here,
+ * and dropped a release after.
+ */
 export async function signInOnPostgres(db: Queryable, c: SignInCall): Promise<Answer> {
   const k = c.credential;
   const { member: m, binding: b } = c.pins;
@@ -13,7 +17,7 @@ export async function signInOnPostgres(db: Queryable, c: SignInCall): Promise<An
     ${c.requestId}::text, ${String(c.at)}::bigint, ${c.actor}::text, ${c.payload}::text, ${c.mac}::bytea, ${c.seal}::bytea,
     ${c.binding.id}::uuid, ${c.principal}::text, ${c.binding.generation}::integer, ${c.binding.profile}::text, ${c.binding.scope}::text, ${c.binding.policy}::text,
     ${c.binding.issuer}::text, ${c.binding.jwksUri}::text, ${c.binding.claims}::text, ${c.bindingSeal}::bytea,
-    ${c.spent}::bytea, ${c.validUntil === null ? null : String(c.validUntil)}::bigint, ${c.frozen}::boolean, ${c.rate}::integer, ${String(c.window)}::bigint, ${String(c.longest)}::bigint,
+    ${c.spent}::bytea, ${c.validUntil === null ? null : String(c.validUntil)}::bigint, ${c.frozen}::boolean, ${null}::integer, ${null}::bigint, ${String(c.longest)}::bigint,
     ${k.id}::uuid, ${k.kind}::text, ${k.authMacBytes}::bytea, ${k.tokenHashBytes}::bytea, ${k.tokenHint}::text, ${k.label}::text, ${k.createdBy}::text,
     ${k.scope}::text, ${k.places}::text, ${String(k.expiresAt)}::bigint, ${k.notAfter === null ? null : String(k.notAfter)}::bigint, ${k.jkt}::text, ${c.appKey}::text,
     ${m.number.toString()}::bigint, ${String(m.at)}::bigint, ${m.requestId}::text, ${m.actor}::text, ${m.payload}::text, ${m.seal}::bytea, ${m.mac}::bytea,
@@ -52,7 +56,7 @@ export async function issueOnPostgres(db: Queryable, c: IssueCall): Promise<Answ
   return JSON.parse(row!.answer) as Answer;
 }
 
-/** `change_bindings` (migrations 0037, 0040): one statement, its own transaction, its answer one JSON value. */
+/** `change_bindings` (migrations 0037, 0040, 0047; 0075's overload, with its sweep): one statement, its own transaction, its answer one JSON value. */
 export async function bindingsOnPostgres(db: Queryable, c: BindingsCall): Promise<Answer> {
   const m = c.make;
   const r = m?.read ?? null;
@@ -75,7 +79,8 @@ export async function bindingsOnPostgres(db: Queryable, c: BindingsCall): Promis
     ${array(c.credentials.map((x) => x.sealFrom))}::bytea[], ${array(c.credentials.map((x) => x.authMac))}::bytea[], ${array(c.credentials.map((x) => x.seal))}::bytea[],
     ${String(c.revokedAt)}::bigint, ${c.revokedBy}::text,
     ${array(c.changes.map((x) => x.requestId))}::text[], ${array(c.changes.map((x) => x.object))}::uuid[], ${array(c.changes.map((x) => x.payload))}::text[],
-    ${array(c.changes.map((x) => x.seal))}::bytea[], ${array(c.changes.map((x) => x.mac))}::bytea[]
+    ${array(c.changes.map((x) => x.seal))}::bytea[], ${array(c.changes.map((x) => x.mac))}::bytea[],
+    ${c.sweep}::boolean
   )::text AS answer`);
   return JSON.parse(row!.answer) as Answer;
 }

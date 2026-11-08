@@ -1,4 +1,5 @@
 import { proxyCodeOf } from './proxy-code.ts';
+import type { RemovalBudget } from './removal.ts';
 import { AccessIdentityVerifier, type AccessVerifierConfig, type IdentityVerifier } from '@coffre/core/identity';
 import type { Confirmation, Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
@@ -90,6 +91,8 @@ export function createRuntime(
   },
   /** Each workload's gate: none on Workers without a `GATES` binding. */
   gates?: Gates,
+  /** What a binding's removal may spend in this request or scheduled run (removal.ts): a Worker's; none on Node. */
+  removal?: RemovalBudget,
 ): CoffreRuntime {
   let signin: SigninService | null = null;
   let workloads: WorkloadService | null = null;
@@ -108,7 +111,7 @@ export function createRuntime(
     verifier = signin;
     const trusted = config.auth.signin.workloads;
     if (trusted !== null) {
-      workloads = new WorkloadService({ db, chainKey: config.auditChainKey, vault, config: trusted, transport, signin, publicUrl: config.publicUrl });
+      workloads = new WorkloadService({ db, chainKey: config.auditChainKey, vault, config: trusted, transport, signin, publicUrl: config.publicUrl, removal: removal ?? null });
     }
     const connected = config.auth.signin.mcp;
     if (connected !== null) {

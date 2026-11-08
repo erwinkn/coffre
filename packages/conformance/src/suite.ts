@@ -92,7 +92,7 @@ export async function conform(
   // Under `required` from here to `back to optional`: the workload checks too, which no passkey touches.
   const signedOut = await report.check('passkeys required', { people, live, canaries }, ({ people, live, canaries }) => passkeysRequired(deployment, people, live, canaries));
   // A CI run signing in with its ID token, through a binding. The limit
-  // comes last of these: it spends this address's exchanges for the minute.
+  // comes last of these: it spends this address's exchanges for the window, 10 s.
   const binding = await report.check('trust a run', { admin }, ({ admin }) => trustRun(deployment, admin));
   const credential = await report.check('run signs in', { admin, canaries, binding }, ({ admin, canaries }) => runSignsIn(deployment, admin, canaries));
   await report.check('run token spent', { binding }, () => spentOnce(deployment));

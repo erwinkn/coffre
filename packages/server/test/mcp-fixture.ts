@@ -38,17 +38,11 @@ const transport: WorkloadTransport = {
   },
 };
 
-/** Whether a connection's calls pass its limit: a test closes it to see the 429, or breaks it to see a limiter fail. */
-export const calls: { open: boolean | 'broken' } = { open: true };
-const limiter = (which: 'other' | 'connection'): RateLimiter => ({
-  limit: async () => {
-    if (which === 'connection' && calls.open === 'broken') throw new Error('rate limiter unreachable');
-    return { success: which === 'other' || calls.open === true };
-  },
-});
+/** The OAuth endpoints' limit per source, open: mcp-oauth.test.ts holds them to it. */
+const limiter: RateLimiter = { limit: async () => ({ success: true }) };
 const deployment = (passkeys?: PasskeyPolicy, serviceTokenMaxDays?: number) => signin({
   providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })],
-  mcp: { limits: { perSource: limiter('other'), perConnection: limiter('connection'), total: limiter('other') } },
+  mcp: { limits: { perSource: limiter } },
   ...(passkeys === undefined ? {} : { passkeys }),
   ...(serviceTokenMaxDays === undefined ? {} : { serviceTokenMaxDays }),
 }).resolve(ORIGIN);
@@ -79,7 +73,6 @@ export function useMcp(seed: () => Promise<void>, options: { approvalWaitMs?: nu
   });
   beforeEach(async () => {
     await resetDatabase(db.owner);
-    calls.open = true;
     documents.clear();
     fetched.length = 0;
     await seed();

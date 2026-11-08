@@ -917,7 +917,17 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         ];
       },
       apply: async (api, { service, id }) => {
-        await api.bindings.remove(serviceMember(service), id);
+        try {
+          await api.bindings.remove(serviceMember(service), id);
+        } catch (error) {
+          // More credentials than one request revokes on Workers (W331): the binding is closed, so no run signs in with it,
+          // and the scheduled run, every few minutes, revokes the rest and ends it (`resumeRemovals`).
+          if (!(error instanceof CoffreError && error.code === 'removal_under_way')) throw error;
+          return {
+            result: { service: shownService(service), id, removed: false, closed: true },
+            text: "The binding is closed: those CI runs are refused from now on. It had issued more credentials than one call revokes, and coffre's scheduled run revokes the rest within minutes; describe_member shows the binding as being removed until then.",
+          };
+        }
         return { result: { service: shownService(service), id, removed: true }, text: 'The binding is removed: those CI runs are refused from now on.' };
       },
     },

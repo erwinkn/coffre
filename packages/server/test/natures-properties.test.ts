@@ -188,7 +188,7 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault,
-    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1_000_000, total: 1_000_000 }) } }),
+    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1_000_000 }) } }),
     auditChainKey: deps.chainKey.toString('base64'),
   });
   const runtime: CoffreRuntime = createRuntime(config, deps.db, vault, transport, waitUntil);

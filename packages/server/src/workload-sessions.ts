@@ -370,8 +370,10 @@ async function sessionRowsFor(runtime: Pick<CoffreRuntime, 'db' | 'chainKey'>, t
   const { credential: row, binding, now } = own;
   if (!checkAuthRow(runtime.chainKey, 'credentials', row) || !live(row, now)) throw unknown();
   if (own.memberStatus !== 'active' || own.memberGeneration !== row.generation) throw unknown();
+  // A binding a removal closed (W331) stands for none of its sessions from then on, renewal included: they end as its
+  // sign-ins do, at the close, not when the removal reaches their batch, which on Workers may be a scheduled run later.
   if (
-    binding === null || own.bindingTombstoned || binding.revokedAt !== null || binding.policy === null
+    binding === null || own.bindingTombstoned || binding.revokedAt !== null || binding.closedAt !== null || binding.policy === null
     || binding.principal !== row.principal || binding.generation !== row.generation || !checkAuthRow(runtime.chainKey, 'service_bindings', binding)
   ) {
     throw unknown();

@@ -113,7 +113,7 @@ before(async () => {
     const input = `${part({ alg: 'RS256', kid: 'rs-1', typ: 'JWT' })}.${part({ iss: ISSUER, aud: ORIGIN, sub: 'repo:acme/market:ref:refs/heads/main', iat: now - 5, exp: now + 295, jti: randomUUID(), run_id: '7001', ...CLAIMS })}`;
     return `${input}.${signWith('sha256', Buffer.from(input), privateKey).toString('base64url')}`;
   };
-  const auth = signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000, total: 1000 }) } });
+  const auth = signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000 }) } });
   const setup = createRuntime(resolveConfig({ publicUrl: ORIGIN, vault: deps.vault, auth, auditChainKey: deps.chainKey.toString('base64') }), deps.db, deps.vault, transport);
   const made = await setup.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: CLAIMS, label: 'build', replaces: [] }, { dryRun: false });
   assert.ok('binding' in made);

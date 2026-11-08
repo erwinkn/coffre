@@ -145,9 +145,12 @@ service's bindings are read. In order:
 
 1. **Admission.** The body is read as a stream and cut off at the bound of
    every body sent before sign-in, 128 KiB (`SIGN_IN_BODY_BYTES`, 413 past
-   it), which bounds the token too. Two
-   limits apply before any database, crypto or network work, one per source
-   address and one for all sources together, answered 429 beyond.
+   it), which bounds the token too. One limit applies before any database,
+   crypto or network work: the requests one source address made to this
+   entry point, 10,000 per 10 seconds by default (1,000 a second, R44's CI
+   sign-in rate, which a fleet behind one NAT sends from one address),
+   answered 429 beyond, with `Retry-After: 10`. No limit counts all sources
+   together (W331, D177).
    - **The limits are approximate.** On Workers they are Cloudflare's
      rate-limiting binding, which counts per location and lets bursts
      through. On Node, they are counters per process, with a bound on
@@ -175,8 +178,13 @@ service's bindings are read. In order:
      credential and append `token.exchange`.
 
    Unbinding takes the same head, so an exchange and a removal can't cross.
-   A binding issues at most 60 credentials a minute, counted here. A refusal
-   at this step rolls everything back, and the token stays unspent.
+   Nothing counts a binding's credentials (W331, D177; 0.15 counted 60 a
+   minute): each ID token buys one. A refusal at this step rolls
+   everything back, and the token stays unspent. With 0.15's log, the
+   vault's `sign_in` makes it in one statement, holding the binding's row
+   shared with its other sign-ins (`FOR KEY SHARE`), so they run together,
+   and an unbind's `FOR UPDATE` waits for them, or they for it
+   (formal/Lifecycle.tla, `EndedBindingEndsCredentials`).
 
 **The credential** is an ordinary service credential, plus its binding.
 - It has kind `service` and the member's principal and generation, plus
@@ -470,7 +478,7 @@ Rows 1 to 12 answer the review, and R1 to R6 its re-review.
 | 1 | ES256 twins defeat a whole-token hash | Accepted: the signing input's hash is consumed, in its own table; a test presents the twin (section 3). |
 | 2 | Minimums accept unrelated workloads | Accepted: profiles enforced on the server, GitHub's events listed, the job's own code under threats (sections 1, 5). |
 | 3 | A reusable workflow's name isn't its identity | Accepted: `job_workflow_sha` required; organization-wide trust only by explicit choice (section 1). |
-| 4 | Anonymous requests reach the vault | Accepted, in the PM's order: admission first, the vault last; issuance bounded per binding; refusal logs sampled; fetch cooldowns (sections 2, 4). |
+| 4 | Anonymous requests reach the vault | Accepted, in the PM's order: admission first, the vault last; issuance bounded per binding (until W331: each ID token buys one); refusal logs sampled; fetch cooldowns (sections 2, 4). |
 | 5 | An edited binding rolls back undetected | Accepted: bindings are immutable; a change is a new ID (sections 1, 6). |
 | 6 | Exchange races unbinding | Accepted: sign-in's commit discipline; the credential's MAC and foreign key carry its binding, read on every check; races tested on both engines (section 2). |
 | 7 | The public-address policy is undefined | Accepted: globally routable unicast, per address, in the resolver; the Workers transport named (section 4). |
