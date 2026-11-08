@@ -105,6 +105,9 @@ The people:
 | ada, cy, dee, fay | developers or viewers on dev, each signing in and adding passkeys for the passkey checks |
 | eve | made an Owner of the whole instance before her first sign-in, then removed |
 | hal | a contributor on `conformance/vaulted`, protected: may use its keys, not read them |
+| ivy | a viewer on dev with no passkey, whose handle, made under `optional`, must still reach `/use` under `required` |
+| `token:conformance-touched` | a viewer on dev, whose token an MCP client asks for after the service's: the approval wants a touch of its own, not the one before |
+| `token:conformance-stale` | a service with no access, on which a stale session's workload acts are tried and must change nothing |
 
 Every value set is a canary, `coffre-canary-<random>`, never to be seen
 outside a reveal by someone allowed to.

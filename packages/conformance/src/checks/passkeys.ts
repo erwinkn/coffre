@@ -491,7 +491,7 @@ export async function leaveAlone(deployment: Deployment, admin: Person) {
  * while it was fresh is refused at its callback, and another at its start; a write that loosens a key's nature is
  * refused, the same write keeping it goes.
  */
-export async function staleSession(deployment: Deployment, people: People, alone: LeftAlone): Promise<string> {
+export async function staleSession(deployment: Deployment, people: People, alone: LeftAlone, canaries: Canaries): Promise<string> {
   const { admin, reader } = people;
   const left = alone.at + FRESH_MS + 5_000 - Date.now();
   if (left > 0) await new Promise((done) => setTimeout(done, left));
@@ -511,7 +511,8 @@ export async function staleSession(deployment: Deployment, people: People, alone
     `a link from a stale session was not sent to a fresh check: ${start.status} ${start.headers.get('location')}`);
 
   // 32 first, whose key is made by the admin's own, fresh, browser.
-  await admin.api.secrets.set(DEV, { STALE_LOOSE: { value: canary(), sensitivity: 'sensitive' } });
+  const loose = canaries[`${DEV}/STALE_LOOSE`] = canary();
+  await admin.api.secrets.set(DEV, { STALE_LOOSE: { value: loose, sensitivity: 'sensitive' } });
   const loosened = await browser.send('PATCH', `/api/secrets/${DEV}`, { STALE_LOOSE: { sensitivity: 'secret' } });
   expect(loosened.status === 403 && (await bodyOf(loosened)).error === 'fresh_check_required', `a stale session made a sensitive value a secret: ${await said(loosened)}`);
   const kept = (await admin.api.secrets.list(DEV)).keys.find((key) => key.key === 'STALE_LOOSE');
@@ -653,9 +654,13 @@ export async function readsStayReads(deployment: Deployment, { admin }: People, 
  * 8, 16 and 19, under `required`: a browser session no passkey stands behind reaches nothing but its way out; a
  * one-key reveal it asks is refused alike whether the key exists, is sensitive or was never made, and logs no use;
  * services read as they did. The deployment stays `required` for the workload checks after, until `backToOptional`.
+ * The way out is shown from a second session of the bulk reader's, so that `bulk.browser` stays signed in for the
+ * canary scan's signed-in viewer once `backToOptional` lets it read again.
  */
-export async function passkeysRequired(deployment: Deployment, { admin, bulk }: People, live: { token: string; canary: { project: string; environment: string; key: string; value: string } }): Promise<string> {
-  await admin.api.secrets.set(BULK, { REQUIRED_SENSITIVE: { value: canary(), sensitivity: 'sensitive' } });
+export async function passkeysRequired(deployment: Deployment, { admin, bulk }: People, live: { token: string; canary: { project: string; environment: string; key: string; value: string } }, canaries: Canaries): Promise<string> {
+  const sensitive = canaries[`${BULK}/REQUIRED_SENSITIVE`] = canary();
+  const write = canaries[`${BULK}/REQUIRED_WRITE`] = canary();
+  await admin.api.secrets.set(BULK, { REQUIRED_SENSITIVE: { value: sensitive, sensitivity: 'sensitive' } });
   const existing = (await admin.api.secrets.list(BULK)).keys.find((key) => key.key !== 'REQUIRED_SENSITIVE')?.key;
   expect(existing !== undefined, `${BULK} holds no key to ask for`);
   // 16: a handle of a person with no passkey, made under `optional`, which `/use` takes the same under `required`.
@@ -663,6 +668,9 @@ export async function passkeysRequired(deployment: Deployment, { admin, bulk }: 
   const handle = await ivy.api.handles.create({ label: 'conformance required', paths: [DEV] });
   const usedFirst = await used(deployment, handle.token);
   expect(usedFirst === 200, `a handle made under optional answered ${usedFirst} at /use, not 200`);
+  // Bulk holds no passkey: GitHub alone signs this second session in, under optional.
+  const leaving = new Browser(deployment.origin);
+  expect((await signIn(deployment, leaving, bulk.email)).ok, 'the bulk reader could not sign in a second session');
   const since = new Date().toISOString();
   await deployment.restart({ PASSKEYS: 'required' });
 
@@ -671,7 +679,7 @@ export async function passkeysRequired(deployment: Deployment, { admin, bulk }: 
   const reached: string[] = [];
   for (const [method, path, body] of [
     ['GET', '/api/me'], ['GET', '/api/projects'], ['GET', '/api/members'], ['GET', '/api/sessions'], ['GET', `/api/secrets/${BULK}`],
-    ['PATCH', `/api/secrets/${BULK}`, { REQUIRED_WRITE: { value: canary() } }], ['POST', '/api/handles', { label: 'x', paths: [BULK] }],
+    ['PATCH', `/api/secrets/${BULK}`, { REQUIRED_WRITE: { value: write } }], ['POST', '/api/handles', { label: 'x', paths: [BULK] }],
   ] as [string, string, unknown?][]) {
     const response = await bulk.browser.send(method, path, body);
     if (!(await required(response))) reached.push(`${method} ${path}: ${await said(response)}`);
@@ -689,8 +697,9 @@ export async function passkeysRequired(deployment: Deployment, { admin, bulk }: 
   const uses = entries.filter((entry) => entry.occurredAt >= since && entry.action.startsWith('secret.') && entry.decision === 'allow');
   expect(uses.length === 0, 'a refused credential has a use of a key in the log', uses);
 
-  const out = await bulk.browser.send('POST', '/auth/signout');
+  const out = await leaving.send('POST', '/auth/signout');
   expect(out.status === 303 || out.status === 302, `signing out a session no passkey stands behind answered ${out.status}`);
+  expect(!(await signedIn(leaving)), 'a session no passkey stands behind, signed out, still read', await said(await leaving.fetch('/api/projects')));
 
   // 16: a service, with no passkey anywhere, reads as it did; the handle reaches /use as it did.
   const read = await bearer(deployment.origin, live.token).secrets.reveal(`${live.canary.project}/${live.canary.environment}`);
@@ -700,10 +709,11 @@ export async function passkeysRequired(deployment: Deployment, { admin, bulk }: 
   return 'under required, a session no passkey stands behind answered 401 passkey_required to every call, /api/me too, but signing out; a one-key reveal refused alike for a key that exists, a sensitive one and one never made, no use logged; a service read as before, and a handle reached /use as before';
 }
 
-/** The deployment back to `optional`, after the workload checks ran under `required` (16). */
-export async function backToOptional(deployment: Deployment): Promise<string> {
+/** The deployment back to `optional`, after the workload checks ran under `required` (16): the session `required` refused reads again. */
+export async function backToOptional(deployment: Deployment, { bulk }: People): Promise<string> {
   await deployment.restart({ PASSKEYS: 'optional' });
-  return 'restarted under optional';
+  expect(await signedIn(bulk.browser), "back under optional, the bulk reader's session, refused under required, did not read", await said(await bulk.browser.fetch('/api/projects')));
+  return "restarted under optional; the bulk reader's session, refused under required, reads again";
 }
 
 /**
