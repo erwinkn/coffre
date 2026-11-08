@@ -77,7 +77,11 @@ test('the outermost of a list of paths, and two lists intersected, are what ever
     }
   }
   // Two lists as long as a body lets them be: a sort each, not every pair (which was 2.5 million comparisons).
+  // Timed warm: the first call, not yet compiled, costs 17-22 ms on CI's runners and this host, about the wall
+  // itself; warm it costs 6-8 ms, and every pair compared costs 165-200 ms.
   const wide = (tag: string) => Array.from({ length: 1500 }, (_, i) => `/${tag}${i % 40}/x${i}`);
-  const { ms } = cpu(() => intersect(checkConstraints({ paths: wide('a') }), checkConstraints({ paths: [...wide('a'), ...wide('b')].slice(0, 1500) })));
+  const both = () => intersect(checkConstraints({ paths: wide('a') }), checkConstraints({ paths: [...wide('a'), ...wide('b')].slice(0, 1500) }));
+  both();
+  const { ms } = cpu(both);
   assert.ok(ms < 20, `took ${ms} ms`);
 });
