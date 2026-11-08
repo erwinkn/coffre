@@ -8,11 +8,22 @@ import { checkConstraints, ConstraintsInvalid, intersect } from '@coffre/core/id
 import { parseScopes } from '@coffre/core/mcp';
 import { MAX_BODY_NODES, splitAtMost } from '@coffre/core/schemas';
 
+// The least CPU of five calls, which is what the code itself costs. The process's CPU counts all its threads, and
+// V8 compiles a hot function again on threads of its own: one call after a first one cost 6-26 ms here, beside 3
+// other files and 4 busy loops on 4 cores, though the code's own work was 3-9 ms; with V8 kept to the main thread
+// (--single-threaded), that call alone cost 20 ms. A collection, another thread or a busy core only ever adds to a
+// call, so the least of five is the code's cost, and quadratic code costs as much in every call. The costs below
+// are ranges of that least, over runs of this file beside the same load.
 const cpu = <T>(run: () => T) => {
-  const started = process.cpuUsage();
-  const result = run();
-  const spent = process.cpuUsage(started);
-  return { result, ms: (spent.user + spent.system) / 1000 };
+  let least = Infinity;
+  let result!: T;
+  for (let i = 0; i < 5; i++) {
+    const started = process.cpuUsage();
+    result = run();
+    const spent = process.cpuUsage(started);
+    least = Math.min(least, (spent.user + spent.system) / 1000);
+  }
+  return { result, ms: least };
 };
 
 let seed = 3;
@@ -25,17 +36,19 @@ test('a string is split only once its parts are counted, and not past them', () 
   assert.deepEqual(splitAtMost('', ' '), ['']);
   assert.deepEqual(splitAtMost('a::b::c', '::', 3), ['a', 'b', 'c']);
   assert.equal(splitAtMost('x'.repeat(10) + ' '.repeat(MAX_BODY_NODES), ' '), null);
-  // A mebibyte of separators: counted to the cap, never split.
-  const { result, ms } = cpu(() => splitAtMost('.'.repeat(1024 * 1024), '.'));
+  // A mebibyte of separators: counted to the cap, never split. Counting costs at most 0.1 ms, splitting 9-12 ms.
+  const dots = '.'.repeat(1024 * 1024);
+  const { result, ms } = cpu(() => splitAtMost(dots, '.'));
   assert.equal(result, null);
-  assert.ok(ms < 5, `took ${ms} ms`);
+  assert.ok(ms < 1, `took ${ms} ms`);
 });
 
 test('scopes: past as many words as a body holds values, refused, never split into a set first', () => {
   const many = Array.from({ length: 120_000 }, (_, i) => `scope${i}`).join(' ');
+  // Counted to the cap, at most 0.1 ms; split into a set first, 47-69 ms.
   const { result, ms } = cpu(() => parseScopes(many));
   assert.deepEqual(result, { scopes: [], unknown: [`more than ${MAX_BODY_NODES} scopes`] });
-  assert.ok(ms < 5, `took ${ms} ms`);
+  assert.ok(ms < 1, `took ${ms} ms`);
   assert.deepEqual(parseScopes('read write nope'), { scopes: ['read', 'write'], unknown: ['nope'] });
 });
 
@@ -77,11 +90,9 @@ test('the outermost of a list of paths, and two lists intersected, are what ever
     }
   }
   // Two lists as long as a body lets them be: a sort each, not every pair (which was 2.5 million comparisons).
-  // Timed warm: the first call, not yet compiled, costs 17-22 ms on CI's runners and this host, about the wall
-  // itself; warm it costs 6-8 ms, and every pair compared costs 165-200 ms.
+  // A sort each costs 3-9 ms, and every pair compared 86-98 ms.
   const wide = (tag: string) => Array.from({ length: 1500 }, (_, i) => `/${tag}${i % 40}/x${i}`);
-  const both = () => intersect(checkConstraints({ paths: wide('a') }), checkConstraints({ paths: [...wide('a'), ...wide('b')].slice(0, 1500) }));
-  both();
-  const { ms } = cpu(both);
+  const [parentPaths, childPaths] = [wide('a'), [...wide('a'), ...wide('b')].slice(0, 1500)];
+  const { ms } = cpu(() => intersect(checkConstraints({ paths: parentPaths }), checkConstraints({ paths: childPaths })));
   assert.ok(ms < 20, `took ${ms} ms`);
 });
