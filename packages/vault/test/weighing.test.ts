@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import { postgresClient } from '@coffre/db/connect';
 
-import { deletesSettled, horizonHeld } from '../../../scripts/matrix-weigh.ts';
+import { deletesSettled, horizonHeld, removeDeleted } from '../../../scripts/matrix-weigh.ts';
 import { ENGINE, OWNER_URL } from './database.ts';
 
 const skip = ENGINE !== 'postgres' ? 'Postgres horizons' : false;
@@ -106,6 +106,61 @@ test("a session of this database that took its snapshot while such a transaction
       assert.equal(after, before, `${before} buffers while the late snapshot was open, ${after} after it ended`);
     } finally {
       await local.end();
+    }
+  });
+});
+
+test("rows taken out once settled are read alike by every session, however other databases' transactions come and go (removeDeleted, T240: bulk_cap 9 and 11 blocks beside 8)", { skip }, async (t) => {
+  await deletedBeside(t, async ({ owner, foreign, weighed }) => {
+    // A row left, on a page the VACUUM would make all-visible. No hold: what a session takes the deleted rows for,
+    // maybe seen or dead, no longer matters once they are gone.
+    await owner.unsafe("INSERT INTO weighed_rows VALUES (1, 'left')");
+    await removeDeleted(owner, 'weighed_rows', t.signal);
+    const before = await weighed();
+    await foreign.end();
+    const after = await weighed();
+    // Left in, 66 buffers beside 7, as unheld above.
+    assert.equal(after, before, `${before} buffers while the other database's transaction ran, ${after} after it ended`);
+    const [{ visible }] = await owner.unsafe(`SELECT count(*)::int AS visible FROM pg_visibility_map('weighed_rows') WHERE all_visible`) as unknown as { visible: number }[];
+    assert.equal(visible, 0, 'no page all-visible, as before the VACUUM');
+  });
+});
+
+test("a session of this database that takes its snapshot once deletesSettled has returned, while such a transaction runs, leaves no deleted row in (removeDeleted waits for it, Sol's review r1 of T240: all five left)", { skip }, async (t) => {
+  await deletedBeside(t, async ({ owner, foreign, weighed }) => {
+    // Its snapshot, taken after `deletesSettled` looked, reaches back to the other database's transaction, which still
+    // runs: a VACUUM while it is open leaves every deleted row, as an autovacuum's ANALYZE of the catalogs, or a session
+    // starting, would.
+    const local = postgresClient(OWNER_URL, { max: 1 });
+    // A session of another database, which watches `owner`'s: `elsewhere`'s one connection holds that database's transaction.
+    const seer = postgresClient(OWNER_URL.replace(/\/[^/?]+$/, '/postgres'), { max: 1 });
+    try {
+      const late = await opened(local, false);
+      // `owner`'s last statement other than the wait's, so that the wait is told from `deletesSettled`'s, before.
+      const [{ pid }] = await owner.unsafe('SELECT pg_backend_pid() AS pid') as unknown as { pid: number }[];
+      // It ends once `removeDeleted` is seen waiting on it, or else once `removeDeleted` returned without waiting: the
+      // rows a VACUUM beside it left are then counted below.
+      let lateEnded = false;
+      const endLate = async () => { lateEnded = true; await late.end(); };
+      const watching = (async () => {
+        while (!lateEnded) {
+          const [{ waiting }] = await seer.unsafe("SELECT count(*)::int AS waiting FROM pg_stat_activity WHERE pid = $1 AND query LIKE '%FROM pg_stat_activity%'", [pid]) as unknown as { waiting: number }[];
+          if (waiting > 0) return endLate();
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      })();
+      await removeDeleted(owner, 'weighed_rows', t.signal);
+      if (!lateEnded) await endLate();
+      await watching;
+      const [{ left }] = await owner.unsafe("SELECT dead_tuple_count::int AS left FROM pgstattuple('weighed_rows')") as unknown as { left: number }[];
+      assert.equal(left, 0, `${left} deleted rows left in`);
+      const before = await weighed();
+      await foreign.end();
+      const after = await weighed();
+      assert.equal(after, before, `${before} buffers while the other database's transaction ran, ${after} after it ended`);
+    } finally {
+      await local.end();
+      await seer.end();
     }
   });
 });

@@ -33,7 +33,7 @@ import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
 import { shardOf } from '../../../scripts/matrix-shard.ts';
-import { deletesSettled, horizonHeld, WORLD_TABLES } from '../../../scripts/matrix-weigh.ts';
+import { deletesSettled, horizonHeld, removeDeleted, WORLD_TABLES } from '../../../scripts/matrix-weigh.ts';
 import type { Input } from '../src/inputs.ts';
 import { ENGINE, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
 import { holding, keyBlocksOf, namedWorld, principalLocks, slowed, turnsApart, weighed, weighedInTurn, weighingSession, type HotCall, type Weighed } from './named-world.ts';
@@ -348,17 +348,20 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
    */
   const weigh = async <T extends { sent: HotCall | null; buffers: number | null; keyBlocks: number | null; blocks: Weighed['blocks'] | null; cold: HotCall | null; coldBuffers: number | null; coldKeyBlocks: number | null; coldBlocks: Weighed['blocks'] | null; early: boolean; turns: { asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null }>(results: T[]) => {
     if (ENGINE !== 'postgres') return;
-    // The rows the batch deleted (the window passed: its principals' rows of the cap's) dead to every session first, so
-    // that no transaction of this database (an autovacuum's ANALYZE, say), ending as the batch is weighed, moves a block
-    // of `bulk_cap` from one call to the next (T225, `deletesSettled`); then weighed with the horizon held where it is,
-    // so that one of another database (another file's, in CI) ending meanwhile moves none either (`horizonHeld`, T238).
+    // The rows the batch deleted (the window passed: its principals' rows of the cap's) dead to every session of this
+    // database first (T225, `deletesSettled`), then gone (`removeDeleted`): left in, they were read by whichever of a
+    // cell's call, twin or control first knew them dead, a block or three of `bulk_cap` more (T240). Then weighed with
+    // the horizon held where it is, so that a transaction of another database (another file's, in CI) ending meanwhile
+    // moves no other table's row from maybe seen to dead (`horizonHeld`, T238).
     const watcher = postgresClient(OWNER_URL, { max: 1 });
     try {
       await deletesSettled(watcher, t.signal);
+      await removeDeleted(watcher, 'bulk_cap', t.signal);
       // The statistics as the batch left them, before it is weighed, and none changing while it is (autovacuum is off on
       // this database's tables, `before`): an ANALYZE mid-batch would make the session plan anew, and one cell of a row
-      // read hundreds of buffers above the rest (CI, W268). The key's relations as they are: vacuumed, their all-visible
-      // pages would let a probe skip the heap and hide work of a key's history (review r4 of W268).
+      // read hundreds of buffers above the rest (CI, W268). The key's relations as they are, but for the rows taken out
+      // above: vacuumed, their all-visible pages would let a probe skip the heap and hide work of a key's history (review
+      // r4 of W268).
       await run(db.owner, sql`ANALYZE`);
       // Each cell is a world of its own, whose own rows its setup wrote over a few times: their tables vacuumed, the key's
       // own relations not (`WORLD_TABLES`).
