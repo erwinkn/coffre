@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
@@ -265,72 +265,103 @@ test("a call never waits behind another call's hung requests: a use's key opens 
   await Promise.all(hung).finally(() => clearInterval(alive));
 });
 
-test('an attempt KMS does not answer is cut at KMS_ATTEMPT_MS and tried again; with no deadline, the request ends within KMS_REQUEST_MAX_MS', async () => {
+// The adapter's timing, on a clock the test drives (`mock.timers`: `setTimeout`, `Date` and `AbortSignal.timeout`): the
+// host's scheduling cannot stall it, so each attempt's start and end is held to the millisecond, and an attempt the
+// deadline must cut always exists when the rule says it does (review r6 of #549). Math.random is 0: each pause at its
+// least, 100 × 4^(attempt-1) ms.
+// The clock's timers: Node 26 mocks `AbortSignal.timeout` beside them, which @types/node 26.1.1 does not list yet.
+const CLOCK = ['setTimeout', 'Date', 'AbortSignal.timeout'] as unknown as ('setTimeout' | 'Date')[];
+type Attempt = { started: number; ended?: number };
+
+/** A KMS that never answers, recording when each attempt starts and when its signal ends it, on the mocked clock. */
+function hungKms(attempts: Attempt[], at: () => number) {
+  return awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async (_input, init) => {
+    const attempt: Attempt = { started: at() };
+    attempts.push(attempt);
+    return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => { attempt.ended = at(); reject(new Error('aborted')); }, { once: true }));
+  } });
+}
+
+/** Drive the mocked clock a millisecond at a time, every promise settled between ticks, until `work` settles. */
+async function settleOnClock(t: TestContext, work: Promise<unknown>, at: () => number): Promise<{ error: unknown; at: number }> {
+  let outcome: { error: unknown; at: number } | undefined;
+  work.then(() => (outcome = { error: undefined, at: at() }), (error: unknown) => (outcome = { error, at: at() }));
+  for (let ms = 0; ms <= 60_000; ms++) {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (outcome !== undefined) return outcome;
+    t.mock.timers.tick(1);
+  }
+  throw new Error('still pending after 60 s on the clock');
+}
+
+/**
+ * What the rule says a hung KMS's attempts are, for a deadline `deadline` ms from the start: each cut at the sooner of
+ * `KMS_ATTEMPT_MS` and the deadline; no attempt, nor a pause that would end at the deadline or past it, starts.
+ */
+function expectedAttempts(deadline: number): Attempt[] {
+  const attempts: Attempt[] = [];
+  let at = 0;
+  for (let attempt = 1; attempt <= KMS_ATTEMPTS && at < deadline; attempt++) {
+    const ended = Math.min(at + KMS_ATTEMPT_MS, deadline);
+    attempts.push({ started: at, ended });
+    const pause = 100 * 4 ** (attempt - 1);
+    if (ended >= deadline || ended + pause >= deadline) break;
+    at = ended + pause;
+  }
+  return attempts;
+}
+
+test('an attempt KMS does not answer is cut at KMS_ATTEMPT_MS and tried again; with no deadline, the request ends within KMS_REQUEST_MAX_MS', async (t) => {
   assert.equal(KMS_ATTEMPT_MS, 878);
   assert.equal(KMS_REQUEST_MAX_MS, 3_634);
-  let sent = 0;
-  const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async (_input, init) => {
-    sent++;
-    return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
-  } });
-  const alive = setInterval(() => {}, 1000);
-  const random = Math.random;
-  Math.random = () => 0; // the pauses at their least, 100 and 400 ms
-  const started = Date.now();
-  await assert.rejects(kek.wrap(randomBytes(32), context()), (error: unknown) => error instanceof KekUnavailableError && /3 times/.test((error as Error).message))
-    .finally(() => { clearInterval(alive); Math.random = random; });
-  const took = Date.now() - started;
-  assert.equal(sent, KMS_ATTEMPTS);
-  // Three attempts of 878 ms and pauses of 100 and 400 ms: 3,134 ms at least; the upper bound a watchdog for a hang.
-  assert.ok(took >= KMS_ATTEMPTS * KMS_ATTEMPT_MS + 500 - 5, `it took ${took} ms`);
-  assert.ok(took < KMS_REQUEST_MAX_MS + 30_000, `it took ${took} ms`);
+  t.mock.timers.enable({ apis: CLOCK, now: 0 });
+  t.mock.method(Math, 'random', () => 0);
+  const attempts: Attempt[] = [];
+  const { error, at } = await settleOnClock(t, hungKms(attempts, Date.now).wrap(randomBytes(32), context()), Date.now);
+  assert.ok(error instanceof KekUnavailableError && /3 times/.test(error.message), String(error));
+  // Three attempts of 878 ms, pauses of 100 and 400 ms between: 3,134 ms, the least of KMS_REQUEST_MAX_MS's pauses.
+  assert.deepEqual(attempts, [{ started: 0, ended: 878 }, { started: 978, ended: 1_856 }, { started: 2_256, ended: 3_134 }]);
+  assert.equal(at, 3_134);
+  assert.ok(at <= KMS_REQUEST_MAX_MS);
 });
 
-// When the third attempt starts at the earliest, its pauses at their least (100 and 400 ms).
-const THIRD_ATTEMPT_MS = 2 * KMS_ATTEMPT_MS + 100 + 400;
-
-test("a hung KMS answers by its operation's deadline: each attempt cut at what is left of it, no attempt nor pause started past it", async () => {
-  const attempts: { started: number; ended?: number }[] = [];
-  const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async (_input, init) => {
-    const attempt: { started: number; ended?: number } = { started: Date.now() };
-    attempts.push(attempt);
-    return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => { attempt.ended = Date.now(); reject(new Error('aborted')); }, { once: true }));
-  } });
-  const alive = setInterval(() => {}, 1000);
-  const random = Math.random;
-  Math.random = () => 0; // pauses of 100 and 400 ms: the third attempt starts at 2,256 ms at the earliest
-  // A deadline halfway through the third attempt, 2,695 ms: it must be cut there, where an attempt left its own
-  // 878 ms would end at 3,134 ms at the earliest; half an attempt of slack for the host's scheduling before it starts.
-  const started = Date.now();
-  const deadline = started + THIRD_ATTEMPT_MS + KMS_ATTEMPT_MS / 2;
-  await assert.rejects(kek.unwrap({ kekProvider: 'aws-kms', kekId: ARN, kekVersion: '1', bytes: randomBytes(48) }, context(), { deadline, signal: new AbortController().signal }),
-    KekCancelledError).finally(() => { clearInterval(alive); Math.random = random; });
-  const ended = Date.now();
-  // However the host schedules it (a stall in a pause leaves no time for the third attempt, which then never starts):
-  // every attempt that could not finish before the deadline was cut at it, never let run its own 878 ms past it.
-  assert.ok(attempts.length >= 2 && attempts.length <= 3, `${attempts.length} attempts`);
-  const late = attempts.filter((attempt) => attempt.started + KMS_ATTEMPT_MS > deadline);
-  for (const attempt of late) {
-    assert.ok(attempt.ended !== undefined && attempt.ended - attempt.started < KMS_ATTEMPT_MS, `an attempt ran ${attempt.ended! - attempt.started} ms past the deadline: not cut at it`);
+test("a hung KMS answers by its operation's deadline: each attempt cut at what is left of it, no attempt nor pause started past it", async (t) => {
+  // Deadlines in each attempt and each pause, and at their edges: 439 (the first attempt, under KMS_ATTEMPT_MS from the
+  // start, with no timer of its own), 878 and 900 (a pause that would end past it), 1,400 (the second attempt), 2,200
+  // (the second pause would end past it), 2,256 (the third attempt would start at it), 2,300 and 2,695 (the third,
+  // cut), 3,134 (it ends as the deadline comes), and 60,000 (the attempts' own timers alone, then an outage).
+  for (const deadline of [439, 878, 900, 1_400, 2_200, 2_256, 2_300, 2_695, 3_134, 60_000]) {
+    await t.test(`a deadline at ${deadline} ms`, async (t) => {
+      t.mock.timers.enable({ apis: CLOCK, now: 0 });
+      t.mock.method(Math, 'random', () => 0);
+      const attempts: Attempt[] = [];
+      const work = hungKms(attempts, Date.now).unwrap({ kekProvider: 'aws-kms', kekId: ARN, kekVersion: '1', bytes: randomBytes(48) }, context(),
+        { deadline, signal: new AbortController().signal });
+      const { error, at } = await settleOnClock(t, work, Date.now);
+      const expected = expectedAttempts(deadline);
+      assert.deepEqual(attempts, expected);
+      const last = expected.at(-1)!;
+      if (last.ended! >= deadline || expected.length < KMS_ATTEMPTS) {
+        // Cut by the deadline, or no time left for a pause and another attempt: cancelled, at the deadline or before it.
+        assert.ok(error instanceof KekCancelledError, String(error));
+        assert.ok(at <= deadline, `answered at ${at} ms`);
+      } else {
+        assert.ok(error instanceof KekUnavailableError, String(error));
+      }
+      assert.equal(at, last.ended);
+    });
   }
-  assert.ok(ended < deadline + 30_000, 'a watchdog for a hang');
 });
 
-test('no pause before another try starts when it would end past the deadline: the call is cancelled at once', async () => {
+test('no pause before another try starts when it would end past the deadline: the call is cancelled at once', async (t) => {
+  t.mock.timers.enable({ apis: CLOCK, now: 0 });
   let sent = 0;
   const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async () => (sent++, kmsError('ThrottlingException')) });
-  // Every timer started meanwhile: a pause is one of at least 100 ms (`backoffMs`). The deadline is under it from the
-  // start, so none may start, however the host schedules this (a stall before the first try cancels it unsent).
-  const started: number[] = [];
-  const real = globalThis.setTimeout;
-  globalThis.setTimeout = ((handler: () => void, ms?: number, ...rest: unknown[]) => (started.push(ms ?? 0), real(handler, ms, ...rest))) as typeof setTimeout;
-  try {
-    await assert.rejects(kek.wrap(randomBytes(32), context(), { deadline: Date.now() + 99, signal: new AbortController().signal }), KekCancelledError);
-  } finally {
-    globalThis.setTimeout = real;
-  }
-  assert.ok(sent <= 1, `${sent} requests`);
-  assert.deepEqual(started.filter((ms) => ms >= 100), [], 'no pause started');
+  // A pause is at least 100 ms (`backoffMs`), and the deadline 99 ms off: the throttled try's pause may not start.
+  const { error, at } = await settleOnClock(t, kek.wrap(randomBytes(32), context(), { deadline: 99, signal: new AbortController().signal }), Date.now);
+  assert.ok(error instanceof KekCancelledError, String(error));
+  assert.equal(sent, 1);
+  assert.equal(at, 0, 'cancelled at once, not at its deadline');
 });
 
 test('every call of one operation shares its deadline, so the deadline cancels them all at once', async () => {

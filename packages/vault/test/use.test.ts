@@ -12,7 +12,7 @@ import { verifyEntries, type StoredEntry } from '@coffre/core/audit';
 import { decrypt } from '@coffre/core/envelope';
 import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog } from '@coffre/core/merkle';
 import { USE_DEADLINE_MS, type UseOutcome } from '@coffre/core/vault';
-import { awsKms, KMS_ATTEMPT_MS, KMS_REQUEST_MAX_MS } from '@coffre/core/kek';
+import { awsKms, KMS_REQUEST_MAX_MS, type KeyOperation } from '@coffre/core/kek';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
 import { newestAccess } from '@coffre/db/grants';
 import { appendEntries } from '@coffre/db/log';
@@ -235,42 +235,39 @@ test('DeadlineChecked, in Postgres: a use held past its deadline by its principa
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 0);
 });
 
-test('a use whose key service never answers is answered late at its deadline: its last attempt cut there, though one request may take KMS_REQUEST_MAX_MS (W331)', async () => {
-  // AWS KMS that wraps, then hangs on every Decrypt: each attempt is cut at what is left of the use's deadline, and no
-  // attempt nor pause starts past it (core kek/aws-kms.ts, KMS_ATTEMPT_MS, KMS_REQUEST_MAX_MS).
+test("a use whose key service never answers is answered late by its 3 s: its deadline is the key service's (W331)", async () => {
+  // AWS KMS that wraps, then hangs on every Decrypt. The adapter's timing against a deadline, each attempt cut at what
+  // is left of it and no attempt nor pause started past it, is held on a mocked clock (core kek-aws-kms.test.ts); here,
+  // that a use hands the key service its own deadline, one operation for the call, and is answered late by it.
   const arn = 'arn:aws:kms:eu-west-3:123456789012:key/hung';
   const blob = randomBytes(48).toString('base64');
-  const attempts: { started: number; ended?: number }[] = [];
+  const attempts: { ended: boolean }[] = [];
   const kms = awsKms({ keyArn: arn, credentials: { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'secret' }, fetch: async (_input, init) => {
     if (new Headers(init?.headers).get('x-amz-target') === 'TrentService.Encrypt') return Response.json({ CiphertextBlob: blob, KeyId: arn });
-    const attempt: { started: number; ended?: number } = { started: Date.now() };
+    const attempt = { ended: false };
     attempts.push(attempt);
-    return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => { attempt.ended = Date.now(); reject(new Error('aborted')); }, { once: true }));
+    return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => { attempt.ended = true; reject(new Error('aborted')); }, { once: true }));
   } });
+  const operations: (KeyOperation | undefined)[] = [];
+  const unwrap = kms.unwrap.bind(kms);
+  kms.unwrap = (wrapped, context, operation) => (operations.push(operation), unwrap(wrapped, context, operation));
   const config = resolveVaultConfig({ kek: kms, previousKeks: [KEK], signingKey: SIGNING_KEY.toString('base64'), owners: ['root@acme.example'] });
   const w = await world();
   const id = await w.key('hung', false, w.dev, null, config.keks);
   const { use } = await isolate({}, config);
-  const alive = setInterval(() => {}, 1000);
-  const random = Math.random;
-  // The pauses at their least, 100 and 400 ms, so the third attempt starts at 2,256 ms at the earliest; a deadline
-  // halfway through it, 2,695 ms, under a use's 3 s: cut there, the use is late. An attempt left its own 878 ms would
-  // end at 3,134 ms at the earliest.
-  Math.random = () => 0;
-  const third = 2 * KMS_ATTEMPT_MS + 100 + 400;
-  const left = third + KMS_ATTEMPT_MS / 2;
-  const at = Date.now();
-  const outcome = await use(ask(w, id, { at, deadline: at + left })).finally(() => { clearInterval(alive); Math.random = random; });
-  assert.ok(left < USE_DEADLINE_MS && USE_DEADLINE_MS < KMS_REQUEST_MAX_MS);
+  const input = ask(w, id);
+  assert.equal(input.deadline - input.at, USE_DEADLINE_MS);
+  const outcome = await use(input);
+  const answered = Date.now();
   assert.deepEqual(outcome, { ok: false, busy: 'late', retryAfter: 1 });
-  // However the host schedules it (a stall in a pause leaves no time for the third attempt, which then never starts):
-  // every attempt that could not finish before the deadline was cut at it, never let run its own 878 ms past it.
-  assert.ok(attempts.length >= 2 && attempts.length <= 3, `${attempts.length} attempts`);
-  const late = attempts.filter((attempt) => attempt.started + KMS_ATTEMPT_MS > at + left);
-  for (const attempt of late) {
-    assert.ok(attempt.ended !== undefined && attempt.ended - attempt.started < KMS_ATTEMPT_MS, `an attempt ran ${attempt.ended! - attempt.started} ms past the deadline: not cut at it`);
-  }
-  assert.ok(Date.now() < at + 30_000, 'a watchdog for a hang');
+  // The key service had the use's deadline, and nothing of the call was left at KMS when it was answered.
+  assert.equal(operations.length, 1);
+  assert.equal(operations[0]?.deadline, input.deadline);
+  assert.ok(attempts.length >= 1 && attempts.every((attempt) => attempt.ended), `${attempts.length} attempts, ${attempts.filter((a) => !a.ended).length} still at KMS`);
+  // How soon, by the host's clock: at its deadline, and the outcome's log entry, well before one request's worst case
+  // (KMS_REQUEST_MAX_MS) would have it. A loose bound, a check of responsiveness rather than of the timing above.
+  assert.ok(USE_DEADLINE_MS < KMS_REQUEST_MAX_MS);
+  assert.ok(answered - input.at < USE_DEADLINE_MS + 1_000, `answered ${answered - input.at} ms after it was asked`);
 });
 
 test('FloorChecked: a use stamped below the floor of `at` writes nothing', async () => {

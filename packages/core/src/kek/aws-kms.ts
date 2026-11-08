@@ -51,9 +51,11 @@ export const KMS_ATTEMPTS = 3;
  * 200 ms (`TCP_RTO_MIN`, include/net/tcp.h; `__tcp_set_rto`), and a new connection's first sample, its handshake's,
  * sets that term to twice the round trip (`tcp_rtt_estimator`, net/ipv4/tcp_input.c): 124 + max(2 × 124, 200) =
  * 372 ms on that path, whose measured round trip is 124 ms (Cloudflare's and Node's hosts taken to use Linux's, not
- * checked). 506 + 372 = 878 ms. Past it the request is taken for lost, and tried again. What it does not cover: a lost
- * SYN, which Linux retries after 1 s (`TCP_TIMEOUT_INIT`), and a path whose round trip is much longer than 124 ms,
- * which the next attempt retries (Fable's review of #549, and Sol's r5).
+ * checked). 506 + 372 = 878 ms. Past it the request is taken for lost, and tried again. What it does not cover, each
+ * retried by the next attempt: a lost SYN, which Linux retries after 1 s (`TCP_TIMEOUT_INIT`); a path whose round trip
+ * is much longer than 124 ms; a host whose cached metrics for KMS's address hold a longer round trip, which Linux
+ * puts in place of the handshake's (`tcp_init_metrics`, net/ipv4/tcp_metrics.c: a cached 400 ms makes it 1,200 ms);
+ * and a route that raises `rto_min` (`tcp_rto_min`) (Fable's review of #549, Sol's r5 and r6).
  */
 export const KMS_ATTEMPT_MS = 506 + (FAR_RTT_MS + Math.max(2 * FAR_RTT_MS, 200));
 
