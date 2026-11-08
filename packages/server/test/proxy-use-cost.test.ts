@@ -271,7 +271,10 @@ test("a handle's /use of a UI route is the vault's one call too, at either URL a
   // section 6, "URLs of one or two segments").
   for (const url of [`${ORIGIN}/use/market/dev/ui/charges`, `${ORIGIN}/use/ui/v1/charges`, `${ORIGIN}/use/ui/charges`]) assert.deepEqual(one[url]!.hot, [route1], url);
   // 255 more definitions in the environment, each its own route: the use reads its own item, as many rows.
-  await save(Object.fromEntries([['ui', route('ui')], ...Array.from({ length: 255 }, (_, i) => [`route-${i}`, route(`route-${i}`)] as const)]));
+  // In parts, as a body holds 1,600 values at most (`MAX_BODY_NODES`), and the Proxy tab saves only what changed.
+  for (let from = 0; from < 255; from += 64) {
+    await save(Object.fromEntries(Array.from({ length: Math.min(64, 255 - from) }, (_, i) => [`route-${from + i}`, route(`route-${from + i}`)] as const)));
+  }
   assert.deepEqual(await measure(), one);
 });
 

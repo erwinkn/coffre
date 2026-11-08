@@ -4,7 +4,7 @@ import { generateKeyPairSync, randomBytes, sign as signWith, type KeyObject } fr
 import { setTimeout as sleep } from 'node:timers/promises';
 
 
-import { shownMember } from '@coffre/core/schemas';
+import { shownMember, SIGN_IN_BODY_BYTES } from '@coffre/core/schemas';
 import type { Role } from '@coffre/core/access';
 import { github, signin, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
 import { createDatabase, type Client, type Database } from '@coffre/db';
@@ -952,7 +952,9 @@ test('admission comes first: both limits, a limiter that fails, and the body\'s 
   // A limiter that could not count is coffre not answering for a moment: back in 5 s, not a minute.
   assert.deepEqual([failing.status, failing.body.reason, failing.retryAfter], [503, 'busy', '5']);
   limits = processLimits();
-  assert.equal((await exchange(JSON.stringify({ service: MEMBER, token: 'x'.repeat(17 * 1024) }))).status, 400);
+  // Past the bound of every body before sign-in (`SIGN_IN_BODY_BYTES`), which bounds the token too: 413.
+  const over = await exchange(JSON.stringify({ service: MEMBER, token: 'x'.repeat(SIGN_IN_BODY_BYTES) }));
+  assert.deepEqual([over.status, over.body.error], [413, 'too_large']);
   assert.equal((await exchange({ service: MEMBER, token: token(rsa), extra: true })).status, 400);
 });
 

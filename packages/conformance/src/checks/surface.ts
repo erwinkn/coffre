@@ -3,7 +3,7 @@
 // headers among it, `coffre verify instance` checks, here as anywhere.
 import { clientFiles, serverCodeIn } from '../bundle.ts';
 import type { Deployment } from '../harness.ts';
-import type { Person } from './people.ts';
+import { DEV, type Person } from './people.ts';
 import { expect, until } from '../report.ts';
 
 export async function health(deployment: Deployment): Promise<string> {
@@ -98,4 +98,40 @@ export async function browserBundle(deployment: Deployment): Promise<string> {
   const found = serverCodeIn(files);
   expect(found.length === 0, 'what the browser loads holds server code: a page imports something of the server', found.join('\n'));
   return `${files.length} files the browser loads, none with server code in it`;
+}
+
+/**
+ * What every body is read to, before anything is done with it
+ * (`@coffre/core/schemas`' `SIGN_IN_BODY_BYTES`, `API_BODY_BYTES` and
+ * `MAX_BODY_NODES`): before sign-in, past 128 KiB, 413; after, past 1 MiB,
+ * 413; past 1,600 values, 400 before it is parsed; and nested as deep as
+ * that count lets it, answered 400 by its route, never 5xx, whatever walks it
+ * on the way on this platform's stack. Its numbers are this release's: a
+ * body of the next one's bounds is still refused, as these are under any
+ * bound that may come.
+ */
+export async function bodies(deployment: Deployment, admin: Person): Promise<string> {
+  const anonymous = (path: string, body: string) =>
+    fetch(`${deployment.origin}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+  const asAdmin = (method: string, path: string, body: string) =>
+    admin.browser.fetch(path, { method, headers: { origin: deployment.origin, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, body });
+  const refused = async (what: string, response: Response, pattern?: RegExp, status = 400) => {
+    const text = await response.text();
+    expect(response.status === status, `${what} answered ${response.status}`, text.slice(0, 500));
+    if (pattern !== undefined) expect(pattern.test(text), `${what} was refused, but not for what it is`, text.slice(0, 500));
+  };
+  await refused('a device login of more than 128 KiB', await anonymous('/api/auth/device', `{"client_label":"${'x'.repeat(128 * 1024)}"}`), /"too_large".*larger than 131072 bytes/, 413);
+  await refused('a write of more than 1 MiB', await asAdmin('PATCH', `/api/secrets/${DEV}`, `{"KEY":"${'x'.repeat(1024 * 1024)}"}`), /"too_large".*larger than 1048576 bytes/, 413);
+  const many = `{${Array.from({ length: 1600 }, (_, i) => `"KEY_${i}":"v"`).join(',')}}`;
+  await refused('a write of 1,600 keys, 1,601 values', await asAdmin('PATCH', `/api/secrets/${DEV}`, many), /more than \d+ values/);
+  // As deep as 1,580 values let a body be, an object in each: written as text, which no walk of this side's makes.
+  const deep = `${'{"a":'.repeat(1580)}0${'}'.repeat(1580)}`;
+  for (const [what, response] of [
+    ["a device login's label", await anonymous('/api/auth/device', `{"client_label":${deep}}`)],
+    ['a value written', await asAdmin('PATCH', `/api/secrets/${DEV}`, `{"KEY":${deep}}`)],
+    ['a reveal', await asAdmin('POST', '/api/reveals', `{"path":${deep}}`)],
+  ] as const) {
+    await refused(`${what}, nested 1,580 deep,`, response);
+  }
+  return 'past 128 KiB before sign-in and 1 MiB after, 413; past 1,600 values, 400; nested 1,580 deep, 400 at each, never 5xx';
 }

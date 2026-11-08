@@ -357,15 +357,15 @@ the credential ID's and the user handle's are the spec's, the signature's
 the longest key coffre takes (RSA of 4,096 bits); the fields the spec
 leaves open, the client data, the authenticator data and the attestation
 object, have none of their own, and the request they come in is read to
-the bound the API reads every control-plane body to (`API_BODY_BYTES`),
-once the cookie it must carry has opened. Their CBOR is read with a list of
+the bound of every body sent before sign-in, 128 KiB (`SIGN_IN_BODY_BYTES`,
+413 past it), once the cookie it must carry has opened. Their CBOR is read with a list of
 what is open, not the call stack, so however deep it nests it costs no
 stack (RFC 8949, section 10), and needs no depth limit. What it decodes to
 is counted, though: every item and map key of the attestation object, the
 authenticator data's CBOR and the COSE key, and every value of the decoded
 client data's JSON, whose unknown members are ignored (5.8.1), together, is
 held to the count
-the API holds a body's JSON values to (`MAX_BODY_NODES`, 20,000, R27's CPU
+the API holds a body's JSON values to (`MAX_BODY_NODES`, 1,600, R27's CPU
 budget), counted again on what the body's strings decode to, so a response
 costs at most twice what a body's JSON may (Fable review). Without it, a megabyte of maps
 nested one byte apiece, in an attestation statement the verifier ignores,

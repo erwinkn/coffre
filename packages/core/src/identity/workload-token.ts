@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 
 import { createLocalJWKSet, errors, importJWK, jwtVerify, type JSONWebKeySet, type JWK, type JWTPayload } from 'jose';
 
+import { countValues, MAX_BODY_NODES, MAX_KEYS } from '../schemas.ts';
+
 export type { JSONWebKeySet };
 
 /**
@@ -10,8 +12,6 @@ export type { JSONWebKeySet };
  * refusal says which, as a reason a CI user can act on.
  */
 
-/** A compact JWS is three base64url parts; the whole token at most this long. */
-export const MAX_TOKEN_BYTES = 8 * 1024;
 /** Each side of every time check of a CI run's ID token: 30 s, kept by Erwin (#501 D3). */
 export const CLOCK_TOLERANCE_SECONDS = 30;
 /** The oldest token accepted, by its `iat`: tokens handed to a job at its start fit, day-old ones do not. */
@@ -65,14 +65,18 @@ const PART = /^[A-Za-z0-9_-]+$/;
 export function decodeWorkloadToken(token: string): DecodedToken {
   const malformed = (why: string) => new WorkloadTokenRefused('malformed', `the token ${why}`);
   if (typeof token !== 'string' || token.length === 0) throw malformed('is empty');
-  if (token.length > MAX_TOKEN_BYTES) throw malformed(`is longer than ${MAX_TOKEN_BYTES} bytes`);
   const parts = token.split('.');
   if (parts.length !== 3 || !parts.every((part) => PART.test(part))) throw malformed('is not a compact JWS');
   const json = (part: string): Record<string, unknown> => {
+    let text: string;
     let value: unknown;
     try {
-      value = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
-    } catch {
+      text = Buffer.from(part, 'base64url').toString('utf8');
+      // Counted before it is parsed, as a body is (`MAX_BODY_NODES`): a token's few kilobytes cannot hide a tree a body could not carry.
+      if (countValues(text, MAX_BODY_NODES) > MAX_BODY_NODES) throw malformed(`has a part of more than ${MAX_BODY_NODES} values`);
+      value = JSON.parse(text);
+    } catch (error) {
+      if (error instanceof WorkloadTokenRefused) throw error;
       throw malformed('has a part that is not JSON');
     }
     if (typeof value !== 'object' || value === null || Array.isArray(value)) throw malformed('has a part that is not an object');
@@ -153,14 +157,33 @@ export function issuedRefusal(iat: number, now: number, maxAge = MAX_TOKEN_AGE_S
 /**
  * A token that names no key, or one several keys share, verified by
  * whichever of them signed it: a set may hold several, as while its issuer
- * rotates. At most `MAX_KEYS` tries, each a signature check alone.
+ * rotates. At most `MAX_KEYS` tries, each a signature check alone, over the
+ * signing input made once: jose's own verification parses the token's
+ * protected header again and copies it at each call, which a stranger's
+ * header of a thousand members made 32 times dearer, 27 to 45 ms where a
+ * plain one costs 8 (review r8 of #533). Its first call parsed the header
+ * once and held it to jose's checks (`crit`, `b64`, the algorithm's
+ * allow-list) before it found several keys; the key whose signature
+ * verifies is then held to the whole of them once more, claims included.
+ * The signature check only picks that key: jose's verification alone
+ * accepts a token, so a check that passed what jose would not costs a
+ * failed sign-in, never a wrong one (a test holds a signature, an expiry and
+ * an issuer the check passes and jose refuses).
  */
 async function anyKey(token: string, matching: errors.JWKSMultipleMatchingKeys, options: Parameters<typeof jwtVerify>[2]): Promise<JWTPayload> {
-  for await (const key of matching) {
+  const dot = token.lastIndexOf('.');
+  const signingInput = new TextEncoder().encode(token.slice(0, dot));
+  const signature = new Uint8Array(Buffer.from(token.slice(dot + 1), 'base64url'));
+  for await (const key of matching as AsyncIterable<CryptoKey>) {
+    const { name, modulusLength } = key.algorithm as RsaHashedKeyAlgorithm;
+    // As jose refuses an RSA key under 2,048 bits, before its signature is checked.
+    if (name === 'RSASSA-PKCS1-v1_5' && modulusLength < 2048) throw new WorkloadTokenRefused('signature', 'the token does not verify');
+    const algorithm = name === 'ECDSA' ? { name, hash: 'SHA-256' } : { name };
+    if (!(await crypto.subtle.verify(algorithm, key, signature, signingInput).catch(() => false))) continue;
     try {
       return (await jwtVerify(token, key, options)).payload;
     } catch (error) {
-      if (!(error instanceof errors.JWSSignatureVerificationFailed)) throw refusalOf(error);
+      throw refusalOf(error);
     }
   }
   throw new WorkloadTokenRefused('signature', "the token's signature does not verify");
@@ -189,8 +212,8 @@ function refusalOf(error: unknown): WorkloadTokenRefused {
   return new WorkloadTokenRefused('signature', 'the token does not verify');
 }
 
-/** At most this many keys in a set, fetched or uploaded. */
-export const MAX_KEYS = 32;
+/** At most this many keys in a set, fetched or uploaded (`@coffre/core/schemas`, beside the sign-in body it bounds the work of). */
+export { MAX_KEYS };
 
 /** One key of an uploaded set, as an owner sees it: its `kid`, its algorithm, and its RFC 7638 thumbprint. */
 export type KeySummary = { kid: string | null; alg: (typeof WORKLOAD_ALGORITHMS)[number]; thumbprint: string };

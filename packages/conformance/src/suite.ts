@@ -17,7 +17,7 @@ import { canaryScan } from './checks/canaries.ts';
 import { Cli, cliLogin, manageByCli, verifyAsOwner, verifyAsUser, verifyInterrupted, verifyKeys, verifyLeftovers, verifyWithToken } from './checks/cli.ts';
 import { pageLoad, personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
 import { pagesInBrowser, pastedValues, signinErrorOnce } from './checks/pages.ts';
-import { browserBundle, headers, health } from './checks/surface.ts';
+import { bodies, browserBundle, headers, health } from './checks/surface.ts';
 import { cliSignsIn, exchangesLimited, keysUploaded, runSignsIn, runsRefused, runUnbound, spentOnce, tokensUnlogged, trustRun } from './checks/workloads.ts';
 
 /** The names of the checks that failed, and `afterwards`, what the run ends with when one did (`Report`). */
@@ -32,6 +32,7 @@ export async function conform(
   await report.check('page load', { admin }, ({ admin }) => pageLoad(admin));
   await report.check('security headers', { admin }, ({ admin }) => headers(deployment, admin));
   const canaries = await report.check('setup', { admin }, ({ admin }) => setUp(admin));
+  await report.check('bodies', { admin, canaries }, ({ admin }) => bodies(deployment, admin));
   await report.check('pages in a browser', { admin, canaries }, ({ admin }) => pagesInBrowser(deployment, admin, options.browser));
   await report.check('pasted values', { admin }, ({ admin }) => pastedValues(deployment, admin, options.browser));
   await report.check('sign-in error, once', { admin }, ({ admin }) => signinErrorOnce(deployment, admin, options.browser));

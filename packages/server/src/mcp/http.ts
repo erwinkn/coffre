@@ -6,13 +6,11 @@ import { MCP_SCOPES } from '@coffre/core/mcp';
 
 import { ApiError, notFound, toErrorBody, UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { bearerToken } from '../auth.ts';
-import { errorResponse, jsonResponse, readLimitedJson, readLimitedText } from '../http.ts';
+import { errorResponse, jsonResponse, readLimitedJson, readLimitedText, SIGN_IN_BODY_BYTES } from '../http.ts';
 import { logged } from '../logged.ts';
 import type { CoffreRuntime } from '../runtime.ts';
 import { OAuthError, type McpConnection, type McpService } from './service.ts';
 
-/** What any OAuth endpoint reads of a body: a few short fields. */
-const BODY_BYTES = 16 * 1024;
 
 const NO_STORE = { 'cache-control': 'no-store', pragma: 'no-cache' };
 
@@ -77,7 +75,8 @@ function oauthError(error: unknown): Response {
     const later = body.error !== 'unavailable' ? undefined : own ?? (body.reason === undefined ? UNAVAILABLE_RETRY_AFTER : undefined);
     return jsonResponse({ error: 'temporarily_unavailable', error_description: body.message }, 503, later === undefined ? NO_STORE : { ...NO_STORE, 'retry-after': later });
   }
-  if (status === 400) return jsonResponse({ error: 'invalid_request', error_description: body.message }, 400, NO_STORE);
+  // A body past its bound keeps its 413, as the API's does: an invalid request all the same, to OAuth.
+  if (status === 400 || status === 413) return jsonResponse({ error: 'invalid_request', error_description: body.message }, status, NO_STORE);
   // `toErrorBody` logged what it did not know; a refusal of the API's has no place here, and is logged as a failure.
   if (status !== 500) console.error('oauth endpoint failed', logged(error));
   return jsonResponse({ error: 'server_error', error_description: 'something went wrong; see the server log' }, 500, NO_STORE);
@@ -89,9 +88,12 @@ async function form(request: Request): Promise<URLSearchParams> {
   if (!/^application\/x-www-form-urlencoded\b/i.test(type)) {
     throw new OAuthError('invalid_request', 'send the request as application/x-www-form-urlencoded');
   }
-  const params = new URLSearchParams(await readLimitedText(request, BODY_BYTES));
-  for (const name of new Set(params.keys())) {
-    if (params.getAll(name).length > 1) throw new OAuthError('invalid_request', `${name} appears more than once`);
+  // Read before anyone has signed in, so to `SIGN_IN_BODY_BYTES`; each name looked for twice in one pass, not each against all.
+  const params = new URLSearchParams(await readLimitedText(request, SIGN_IN_BODY_BYTES));
+  const seen = new Set<string>();
+  for (const name of params.keys()) {
+    if (seen.has(name)) throw new OAuthError('invalid_request', `${name} appears more than once`);
+    seen.add(name);
   }
   return params;
 }
@@ -118,8 +120,8 @@ export async function oauthRegister(request: Request, runtime: CoffreRuntime, so
   if (mcp instanceof Response) return mcp;
   try {
     await mcp.admit(sourceIp);
-    const body = await readLimitedJson(request, BODY_BYTES).catch((error: unknown) => {
-      throw error instanceof ApiError ? new OAuthError('invalid_client_metadata', error.message) : error;
+    const body = await readLimitedJson(request, SIGN_IN_BODY_BYTES).catch((error: unknown) => {
+      throw error instanceof ApiError && error.code !== 'too_large' ? new OAuthError('invalid_client_metadata', error.message) : error;
     });
     return jsonResponse(await mcp.register(body, { requestId: crypto.randomUUID(), sourceIp }), 201, NO_STORE);
   } catch (error) {

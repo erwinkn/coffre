@@ -8,7 +8,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { apiMember, CoffreError, shownMember, type CoffreClient, type RouteInput } from '@coffre/client';
-import { CREDENTIAL_LABEL_MAX, credentialScopeInWords, INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProjects, MAX_SCOPE_PLACES, MAX_SERVICE_TOKEN_DAYS, ROLE_NAMES, runsInstance, scopeInWords, type InstanceRole, type Permission } from '@coffre/core/access';
+import { credentialScopeInWords, INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProjects, MAX_SERVICE_TOKEN_DAYS, ROLE_NAMES, runsInstance, scopeInWords, type InstanceRole, type Permission } from '@coffre/core/access';
 import {
   BEARER_PROFILES,
   claimValues,
@@ -20,9 +20,10 @@ import {
   type WorkloadProfile,
 } from '@coffre/core/identity';
 import type { McpScope } from '@coffre/core/mcp';
-import { instanceRole, roleId, scopeInput, secretKey, slug } from '@coffre/core/schemas';
+import { instanceRole, roleId, scopeInput, secretKey, slug, splitAtMost } from '@coffre/core/schemas';
 import { z } from 'zod';
 
+import { trimSlashes } from '../api/paths.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import type { Tool, ToolContext } from './tools.ts';
 
@@ -81,17 +82,17 @@ export type Change<I extends z.ZodObject = z.ZodObject> = {
   apply: (api: CoffreClient, args: z.infer<I>, given: { value?: string; replaced?: Replaced }) => Promise<Applied>;
 };
 
-const secret = z.string().min(1).max(300).describe('A secret, as project/environment/KEY: market/prod/STRIPE_KEY');
-const environment = z.string().min(1).max(200).describe('An environment, as project/environment: market/prod');
-const member = z.string().min(1).max(320).describe('A member: user:ada@acme.example, or service:ci-deploy for a service account');
-const service = z.string().min(1).max(200).describe('A service account: service:ci-deploy, or ci-deploy');
+const secret = z.string().min(1).describe('A secret, as project/environment/KEY: market/prod/STRIPE_KEY');
+const environment = z.string().min(1).describe('An environment, as project/environment: market/prod');
+const member = z.string().min(1).describe('A member: user:ada@acme.example, or service:ci-deploy for a service account');
+const service = z.string().min(1).describe('A service account: service:ci-deploy, or ci-deploy');
 // A project or environment goes by its slug since 0.6.2. A call made before
 // takes a name still, so that it matches the approval it asked for.
-const name = z.string().trim().min(1).max(100).optional().describe('Ignored: it goes by its slug');
+const name = z.string().trim().min(1).optional().describe('Ignored: it goes by its slug');
 
 /** `market/prod/KEY` as its environment and key, or why not. */
 function splitSecret(path: string): { environment: string; key: string } {
-  const parts = path.replace(/^\/+|\/+$/g, '').split('/');
+  const parts = splitAtMost(trimSlashes(path), '/', 3) ?? [];
   if (parts.length !== 3 || !slug.safeParse(parts[0]).success || !slug.safeParse(parts[1]).success || !secretKey.safeParse(parts[2]).success) {
     throw new CoffreError(400, 'bad_request', `"${path}" is not a secret: name one as project/environment/KEY`);
   }
@@ -99,7 +100,7 @@ function splitSecret(path: string): { environment: string; key: string } {
 }
 
 function splitEnvironment(path: string): { project: string; environment: string } {
-  const parts = path.replace(/^\/+|\/+$/g, '').split('/');
+  const parts = splitAtMost(trimSlashes(path), '/', 2) ?? [];
   if (parts.length !== 2 || !slug.safeParse(parts[0]).success || !slug.safeParse(parts[1]).success) {
     throw new CoffreError(400, 'bad_request', `"${path}" is not an environment: name one as project/environment`);
   }
@@ -378,17 +379,16 @@ function pinned(replaced: Replaced | undefined): CredentialScope {
 /** A token's or a binding's scope (`POST /api/members/<member>/tokens`). */
 type CredentialScope = RouteInput<'POST /members/:member/tokens'>['scope'] & {};
 const credentialScope = z
-  .record(z.string().max(200), role)
-  .refine((scope) => Object.keys(scope).length <= MAX_SCOPE_PLACES, `a scope names at most ${MAX_SCOPE_PLACES} places`)
+  .record(z.string(), role)
   .optional()
   .describe('What it reaches, each project or environment by path and its role, as {"market/dev": "developer"}; at most what the account holds. Left out: all it holds now. Nothing the account is given later reaches it.');
 
-const accessChange = z.union([role, z.object({ role, until: z.string().max(40).nullable() }).strict(), z.null()]);
+const accessChange = z.union([role, z.object({ role, until: z.string().nullable() }).strict(), z.null()]);
 type AccessChange = z.infer<typeof accessChange>;
 const shownAccess = (to: AccessChange) => (to === null ? 'nothing' : typeof to === 'string' ? to : `${to.role}${to.until === null ? '' : ` until ${to.until}`}`);
 
 // A place as the API reads one, without spaces or slashes around it: market, or market/prod.
-const placeOf = (raw: string) => raw.trim().replace(/^\/+|\/+$/g, '');
+const placeOf = (raw: string) => trimSlashes(raw.trim());
 
 /** What `set_access` replaces: the role a member holds at each place, and until when, or nothing. */
 async function heldAt(api: CoffreClient, member: string, changes: Record<string, AccessChange>): Promise<Replaced> {
@@ -441,7 +441,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     description: `Set a secret to a value the person types on coffre's page: neither you nor this conversation ever see it. Use it whenever a value is needed; never ask for one in the conversation. ${approved}`,
     idempotent: false,
     destructive: true,
-    input: z.object({ secret, note: z.string().trim().min(1).max(500).optional().describe('What the value is for, shown to the person on the page') }).strict(),
+    input: z.object({ secret, note: z.string().trim().min(1).optional().describe('What the value is for, shown to the person on the page') }).strict(),
     change: {
       fresh: 'never',
       summary: ({ secret }) => `set ${secret} to a value you type on coffre`,
@@ -630,8 +630,8 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       .object({
         member,
         changes: z
-          .record(z.string().min(1).max(200), accessChange)
-          .refine((changes) => Object.keys(changes).length > 0 && Object.keys(changes).length <= 50, 'name from 1 to 50 places')
+          .record(z.string().min(1), accessChange)
+          .refine((changes) => Object.keys(changes).length > 0, 'name a place')
           .describe(`Each place, a project or project/environment, with the role to hold there (${ROLE_NAMES.join(', ')}, or one the instance's Owners made; { role, until } for one that ends), or null to revoke it`),
       })
       .strict(),
@@ -646,7 +646,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       // A service account's manager gives it what they hold, which the API decides on Approve.
       check: async (ctx, { member, changes }) => {
         const places = Object.keys(changes).map(placeOf);
-        if (places.some((place) => place.split('/')[0] === '*')) {
+        if (places.some((place) => place === '*' || place.startsWith('*/'))) {
           throw new CoffreError(400, 'bad_request', 'grants are on a project or an environment: a person reaches every project by their instance role (admit_member)');
         }
         if (apiMember(member).startsWith('token:') && !runsInstance(ctx.connection.caller)) return manages(ctx.api, apiMember(member));
@@ -676,8 +676,8 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       role: instanceRole.optional().describe('A person\'s instance role; left out, a new member is a member and an existing one keeps theirs'),
       scope: scopeInput.optional().describe('Where the role applies: projects and environments (by slug), each "all", { only: [...] } or { except: [...] }; left out, everywhere'),
       access: z
-        .record(z.string().min(1).max(200), accessChange)
-        .refine((access) => Object.keys(access).length > 0 && Object.keys(access).length <= 50, 'name from 1 to 50 places')
+        .record(z.string().min(1), accessChange)
+        .refine((access) => Object.keys(access).length > 0, 'name a place')
         .optional()
         .describe(`A service account's first grants, as set_access takes them: each place, a project or project/environment, with its role (${ROLE_NAMES.join(', ')}, or one the instance's Owners made; { role, until } for one that ends)`),
     }).strict(),
@@ -776,7 +776,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     scope: 'manage-access',
     idempotent: false,
     destructive: false,
-    input: z.object({ service, label: z.string().trim().min(1).max(CREDENTIAL_LABEL_MAX).optional(), expiresInDays: z.number().int().min(1).max(MAX_SERVICE_TOKEN_DAYS), scope: credentialScope }).strict(),
+    input: z.object({ service, label: z.string().trim().min(1).optional(), expiresInDays: z.number().int().min(1).max(MAX_SERVICE_TOKEN_DAYS), scope: credentialScope }).strict(),
     names: ({ service }) => [serviceMember(service)],
     change: {
       fresh: 'always',
@@ -846,12 +846,12 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       .object({
         service,
         profile: z.enum(BEARER_PROFILES),
-        issuer: z.string().max(400).optional().describe("The issuer's URL, for a custom profile"),
+        issuer: z.string().optional().describe("The issuer's URL, for a custom profile"),
         claims: z
-          .record(z.string().max(64), z.union([z.string().max(1024), z.array(z.string().max(64)).min(1).max(16)]))
+          .record(z.string(), z.union([z.string(), z.array(z.string()).min(1)]))
           .describe('The ID token claims a run must carry, such as repository_id and ref; event_name or pipeline_source may be a list, as ["push", "pull_request"]; environment, on GitHub, the GitHub environment the job runs in, as "production", matched whatever its case'),
         scope: credentialScope,
-        label: z.string().trim().min(1).max(CREDENTIAL_LABEL_MAX).optional(),
+        label: z.string().trim().min(1).optional(),
       })
       .strict(),
     names: ({ service }) => [serviceMember(service)],

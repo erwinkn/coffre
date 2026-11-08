@@ -7,14 +7,15 @@
 // nothing here runs for a request without a good one.
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import { isMcpScope, MCP_SCOPE_INFO, scopeString, type McpScope } from '@coffre/core/mcp';
+import { isStackOverflow } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { allowed, audited, denied, type McpVia } from '../api/context.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import type { AuthenticatedIdentity } from '../auth.ts';
-import { ApiError } from '../api/errors.ts';
+import { ApiError, NESTED_TOO_DEEPLY } from '../api/errors.ts';
 import { fetchApi } from '../fetch-api.ts';
-import { readLimitedJson } from '../http.ts';
+import { API_BODY_BYTES, check, readLimitedJson } from '../http.ts';
 import { logged } from '../logged.ts';
 import type { CoffreRuntime } from '../runtime.ts';
 import { COFFRE_VERSION } from '../version.ts';
@@ -30,7 +31,6 @@ import { INSTRUCTIONS, listed, TOOL_BY_NAME, TOOLS, type Tool, usable } from './
 export const PROTOCOL_VERSION = '2026-07-28';
 /** The 2025 era's, answered through `initialize`, without a session. */
 export const LEGACY_VERSIONS = ['2025-11-25', '2025-06-18'] as const;
-const BODY_BYTES = 256 * 1024;
 /** How long a client may keep the server's description, which every token sees the same. */
 const TTL_MS = 3_600_000;
 /** How long a client may keep its person's tool list, theirs alone: a role granted or taken shows within it. */
@@ -100,12 +100,13 @@ export async function mcpEndpoint(request: Request, runtime: CoffreRuntime, sour
   if (caller instanceof Response) return caller;
   let body: unknown;
   try {
-    body = await readLimitedJson(request, BODY_BYTES);
+    // Its caller checked first, so read to the API's bound (`API_BODY_BYTES`), as every body a credential sends.
+    body = await readLimitedJson(request, API_BODY_BYTES);
   } catch (error) {
     // A malformed body is a parse error; a well-formed one the guard refuses (too large, or a `__proto__` key) is an
     // invalid request, told as such rather than as broken JSON.
     return error instanceof ApiError && error.message !== 'the body is not JSON'
-      ? failure(null, 400, { code: CODE.invalidRequest, message: `Invalid Request: ${error.message}` })
+      ? failure(null, error.status, { code: CODE.invalidRequest, message: `Invalid Request: ${error.message}` })
       : failure(null, 400, { code: CODE.parse, message: 'Parse error: the body is not JSON' });
   }
   const message = parseMessage(body);
@@ -122,6 +123,7 @@ export async function mcpEndpoint(request: Request, runtime: CoffreRuntime, sour
     return await legacy(request, runtime, sourceIp, caller, message, id, header);
   } catch (error) {
     console.error('mcp request failed', logged(error));
+    if (isStackOverflow(error)) return failure(id, 400, { code: CODE.invalidParams, message: `Invalid params: ${NESTED_TOO_DEEPLY}` });
     return failure(id, 500, { code: CODE.internal, message: 'Internal error: see the server log' });
   }
 }
@@ -237,7 +239,7 @@ function toolsFor(connection: McpConnection): Record<string, unknown>[] {
 // --- tools/call ---------------------------------------------------------------
 
 const CallParams = z
-  .object({ name: z.string().max(64), arguments: z.record(z.string(), z.unknown()).optional(), requestState: z.string().max(512).optional(), inputResponses: z.record(z.string(), z.unknown()).optional() })
+  .object({ name: z.string(), arguments: z.record(z.string(), z.unknown()).optional(), requestState: z.string().optional(), inputResponses: z.record(z.string(), z.unknown()).optional() })
   .passthrough();
 
 /** What coffre knows of a client from its request: its era, and whether it can open a URL for its person. */
@@ -275,11 +277,11 @@ async function call(
   if (!(await mcp.admitCall(connection.id, requestId))) {
     return failure(id, 429, { code: CODE.internal, message: 'Too many calls: try again in a minute' }, { 'retry-after': '60' });
   }
-  const params = CallParams.safeParse(message.params ?? {});
+  const params = check(CallParams, message.params ?? {});
   if (!params.success) return rpc(id, { error: { code: CODE.invalidParams, message: 'Invalid params: tools/call takes a name and its arguments' } });
   const tool = TOOL_BY_NAME.get(params.data.name);
   if (tool === undefined) return rpc(id, { error: { code: CODE.invalidParams, message: `Unknown tool: ${params.data.name}` } });
-  const args = tool.input.safeParse(params.data.arguments ?? {});
+  const args = check(tool.input, params.data.arguments ?? {});
   if (!args.success) {
     return answer(toolError(`The arguments do not fit ${tool.name}: ${args.error.issues.map((issue) => `${issue.path.join('.') || 'arguments'}: ${issue.message}`).join('; ')}`));
   }

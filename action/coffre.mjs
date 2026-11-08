@@ -1841,7 +1841,7 @@ async function planImport(coffre, path, entries) {
 	};
 }
 //#endregion
-//#region ../core/dist/access-DWe2MVhp.js
+//#region ../core/dist/access-Dlz5TFkW.js
 /**
 * Who may do what: nine permissions, the seven project roles a grant names,
 * and the five instance roles a person holds across every project.
@@ -5769,7 +5769,7 @@ function personalOf(environment) {
 }
 string().refine((value) => slug.safeParse(personalOf(value) ?? value).success, "not a valid environment");
 slug.refine((value) => !PROJECT_PAGES.includes(value), { error: (issue) => `"${String(issue.input)}" is taken by a project's page, /projects/<project>/${String(issue.input)}: an environment cannot have it` });
-string().trim().min(1).max(120);
+string().trim().min(1);
 string().min(1).max(64).refine((name) => name === name.trim(), "a folder name cannot start or end with a space").refine((name) => !/[/\p{Cc}]/u.test(name), "a folder name cannot hold \"/\" or a control character");
 string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
 /**
@@ -5787,8 +5787,8 @@ string().regex(ROLE_ID, ROLE_ID_RULE);
 /** Which projects or environments a scope takes in, by slug: `all`, `{ only: [...] }` or `{ except: [...] }`. */
 const scopeFilter = union([
 	literal("all"),
-	object({ only: array(slug).max(200) }).strict(),
-	object({ except: array(slug).min(1).max(200) }).strict()
+	object({ only: array(slug) }).strict(),
+	object({ except: array(slug).min(1) }).strict()
 ]);
 object({
 	projects: scopeFilter.optional(),
@@ -5796,6 +5796,7 @@ object({
 }).strict();
 string().uuid();
 string().email().max(320);
+1024 * 2 ** Math.floor(Math.log2(Math.min(135e3, 2e5) / 1024));
 const WORKLOAD_PROFILES = [
 	"github",
 	"github-reusable",
@@ -6036,14 +6037,13 @@ function integer(value, name, min, max) {
 function sortedUnique(values) {
 	return [...new Set(values)].sort();
 }
-function uuidList(value, what, max) {
-	if (!Array.isArray(value) || value.length > max || value.some((id) => typeof id !== "string" || !UUID$1.test(id.toLowerCase()))) throw new BindingInvalid(`${what} lists at most ${max} IDs`);
+function uuidList(value, what) {
+	if (!Array.isArray(value) || value.some((id) => typeof id !== "string" || !UUID$1.test(id.toLowerCase()))) throw new BindingInvalid(`${what} lists IDs`);
 	return sortedUnique(value.map((id) => id.toLowerCase()));
 }
 function checkReads(value) {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BindingInvalid("reads maps environment IDs to { keys, mints }");
 	const entries = Object.entries(value);
-	if (entries.length > 64) throw new BindingInvalid(`reads names at most 64 environments`);
 	const reads = {};
 	const seen = /* @__PURE__ */ new Set();
 	for (const [environment, entry] of entries) {
@@ -6056,11 +6056,11 @@ function checkReads(value) {
 		if (Object.keys(rest).length > 0) throw new BindingInvalid(`each environment of reads holds keys and mints, not ${Object.keys(rest).join(", ")}`);
 		const read = {};
 		if (keys !== void 0) {
-			const listed = keys === "*" ? "*" : uuidList(keys, "reads.keys", 256);
+			const listed = keys === "*" ? "*" : uuidList(keys, "reads.keys");
 			if (listed === "*" || listed.length > 0) read.keys = listed;
 		}
 		if (mints !== void 0) {
-			if (!Array.isArray(mints) || mints.length > 256 || mints.some((name) => typeof name !== "string" || !CREDENTIAL_NAME.test(name))) throw new BindingInvalid("reads.mints lists minters by name");
+			if (!Array.isArray(mints) || mints.some((name) => typeof name !== "string" || !CREDENTIAL_NAME.test(name))) throw new BindingInvalid("reads.mints lists minters by name");
 			if (mints.length > 0) read.mints = sortedUnique(mints);
 		}
 		if (read.keys !== void 0 || read.mints !== void 0) reads[id] = read;
@@ -6097,7 +6097,7 @@ function checkPolicy(profile, input, options) {
 		if (reads !== void 0) policy.reads = reads;
 	}
 	if (given.sources !== void 0) {
-		if (!Array.isArray(given.sources) || given.sources.length > 16) throw new BindingInvalid(`sources lists at most 16 CIDRs`);
+		if (!Array.isArray(given.sources)) throw new BindingInvalid("sources lists CIDRs");
 		const sources = sortedUnique(given.sources.map((source) => {
 			const block = typeof source === "string" ? parseCidr(source) : null;
 			if (block === null) throw new BindingInvalid(`sources lists CIDRs, such as 162.220.232.0/24 or 2001:db8::/32: ${String(source)} is none`);
@@ -16834,6 +16834,11 @@ async function pickCheck() {
 */
 const CREDENTIALS_PATH = join(homedir(), ".coffre", "credentials.json");
 const PINS_PATH = join(homedir(), ".coffre", "directories.json");
+/**
+* The longest label the CLI gives a credential it asks for: instances up to 0.15 refuse one past 120 characters,
+* and a newer instance takes any, so the CLI's own (a host name, a run's paths) is cut to what both take.
+*/
+const OLD_LABEL_MAX = 120;
 process.stdout.on("error", (error) => {
 	if (error.code === "EPIPE") process.exit(0);
 	throw error;
@@ -17477,7 +17482,7 @@ async function approvedInBrowser(origin, label, intro, noBrowser) {
 			method: "POST",
 			redirect: "manual",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ client_label: label.slice(0, 120) })
+			body: JSON.stringify({ client_label: label.slice(0, OLD_LABEL_MAX) })
 		});
 	} catch (error) {
 		fail(unreachable(origin, error));
@@ -18082,7 +18087,7 @@ async function placeholders(paths, to = target()) {
 	const at = (path, headers) => retryingPolicyChange(new Request(`${to.origin}/use${path}`, { headers })).catch((error) => fail(unreachable(to.origin, error)));
 	const label = `coffre run on ${hostname()}: ${paths.join(" ")}`;
 	const handle = await client(to, void 0, [], retryingPolicyChange).handles.create({
-		label: label.length <= 120 ? label : `${label.slice(0, 119)}…`,
+		label: label.length <= OLD_LABEL_MAX ? label : `${label.slice(0, 119)}…`,
 		paths: [...paths]
 	});
 	const planOf = async (path) => {

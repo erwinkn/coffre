@@ -217,6 +217,10 @@ const bindingCalls = prepared((db) => {
  * More than `max` is a database changed around the app, and matches nothing.
  * With them, the account's and each binding's newest change, which the
  * vault checks and pins in its one statement (T192, `NewestChanges`).
+ * Each is read whole, its label included, and its MAC checked over its
+ * claims and issuer, whatever their size: an Owner's, and accepted
+ * (docs/design/workload-access.md, section 3, "What an Owner's bindings
+ * cost").
  */
 export async function workloadCandidates(
   db: Queryable,

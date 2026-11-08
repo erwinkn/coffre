@@ -143,7 +143,11 @@ export async function serveVault(config: NodeVaultConfig & { socket: string }, o
         return reply(400, { error: 'a call is { release, method, args }, its arguments a JSON array' });
       }
       name = envelope.method;
-      reply(200, await vault.call(String(envelope.release), envelope.method as VaultMethod, envelope.args));
+      // Copied as a Workers vault's RPC copies a call, by V8's serializer (structured clone), so that a call nested
+      // deeper than it carries is refused here as there, before any method runs, whatever the method checks first:
+      // `JSON.parse` reads any depth, and Node 26's `JSON.stringify` writes 100,000 levels where 24's overflowed. For
+      // JSON values the copy is the same value; it overflows (`RangeError`), answered 400 by `failureOf`.
+      reply(200, await vault.call(String(envelope.release), envelope.method as VaultMethod, structuredClone(envelope.args)));
     } catch (error) {
       console.error(`vault ${name} failed`, error);
       const { status, body } = failureOf(error);

@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 
 import { deriveKey } from '@coffre/core/identity';
 import { MCP_SCOPES, type McpScope } from '@coffre/core/mcp';
+import { splitAtMost } from '@coffre/core/schemas';
 
 /**
  * What an MCP client holds (docs/design/mcp.md, section 4):
@@ -136,8 +137,10 @@ export function sealState(chainKey: Buffer, state: ApprovalState): string {
 
 /** A state whose MAC holds, expired or not; null for anything else. */
 export function openState(chainKey: Buffer, sealed: string): ApprovalState | null {
-  const [body, tag, ...rest] = sealed.split('.');
-  if (body === undefined || tag === undefined || rest.length > 0 || sealed.length > 512) return null;
+  // Its own format's length, and its two parts, checked before anything is split.
+  if (sealed.length > 512) return null;
+  const [body, tag, ...rest] = splitAtMost(sealed, '.', 2) ?? [];
+  if (body === undefined || tag === undefined || rest.length > 0) return null;
   const given = Buffer.from(tag, 'base64url');
   const expected = stateMac(chainKey, body);
   if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;

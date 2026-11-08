@@ -1,7 +1,7 @@
-import { CREDENTIAL_LABEL_MAX, MAX_PERSONAL_TOKEN_MINUTES, MAX_SCOPE_PLACES, MAX_SERVICE_TOKEN_DAYS, PERMISSIONS, protects, ROLE_DESCRIPTION_MAX, ROLE_NAME_MAX, type Permission } from '@coffre/core/access';
-import { MAX_BINDINGS, MAX_CLAIMS, MAX_KEYS, WORKLOAD_PROFILES, type JSONWebKeySet, type WorkloadProfile } from '@coffre/core/identity';
+import { MAX_PERSONAL_TOKEN_MINUTES, MAX_SERVICE_TOKEN_DAYS, PERMISSIONS, protects, type Permission } from '@coffre/core/access';
+import { MAX_BINDINGS, MAX_KEYS, WORKLOAD_PROFILES, type JSONWebKeySet, type WorkloadProfile } from '@coffre/core/identity';
 import { MAX_RECIPE_LENGTH, recipeProblem } from '@coffre/core/recipe';
-import { displayName, environmentSlug, folderName, instanceRole, roleId, scopeInput, secretKey, slug } from '@coffre/core/schemas';
+import { displayName, environmentSlug, folderName, instanceRole, MAX_VALUE_BYTES, roleId, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { POLICY_REVISION, type ProxyDefinition } from '@coffre/core/vault';
 import { z } from 'zod';
 
@@ -41,7 +41,8 @@ import {
 import { proxyPage, releaseReserved, saveProxy } from './proxy.ts';
 
 /** A reveal's body, which `fetchApi` reads first for one key's (`namedReveal`). */
-export const revealInput = z.object({ path: z.string().max(400), keys: z.array(secretKey).min(1).max(2000).optional() });
+// `keys` as many as the body holds: how many a reader may read at once is the vault's bulk limit (`bulkLimit`), not this.
+export const revealInput = z.object({ path: z.string(), keys: z.array(secretKey).min(1).optional() });
 
 /** A permission at the route's place, or at its project for project-wide ones. */
 export type Check = Permission | { permission: Permission; on: 'project' } | { anyOf: readonly Permission[] };
@@ -125,7 +126,7 @@ function roleChange(query: z.infer<typeof roleChangeQuery>): { dryRun: boolean; 
 
 const secretValue = z
   .string()
-  .max(64 * 1024)
+  .refine((value) => value.length <= MAX_VALUE_BYTES && Buffer.byteLength(value, 'utf8') <= MAX_VALUE_BYTES, `a value is at most ${MAX_VALUE_BYTES / 1024} KiB, as UTF-8`)
   .refine((value) => !value.includes('\0'), 'a value cannot contain NUL bytes')
   // A lone UTF-16 surrogate has no UTF-8: stored, it would come back as U+FFFD, a value other than the one written.
   .refine((value) => !/[\uD800-\uDFFF]/u.test(value), 'a value must be well-formed Unicode: it holds a lone surrogate');
@@ -144,7 +145,7 @@ const generatedValue = z.object({
     pair: z.object({ private: secretKey, public: secretKey }).strict().optional(),
   }).strict(),
   // A regenerate's: the id of the version it replaces, as listed, or the write is refused (409).
-  replaces: z.string().max(64).optional(),
+  replaces: z.string().optional(),
   // Who sees it: a secret, or sensitive where the key is, unless it says.
   sensitivity: z.enum(['secret', 'sensitive']).optional(),
 }).strict();
@@ -157,7 +158,7 @@ const generatedValue = z.object({
 const plainValue = z.object({
   value: secretValue,
   plain: z.literal(true),
-  replaces: z.string().max(64).optional(),
+  replaces: z.string().optional(),
 }).strict();
 
 /** Who sees a key's value (`Sensitivity`): plain, secret or sensitive. */
@@ -170,7 +171,7 @@ const sensitivity = z.enum(SENSITIVITIES);
 const sensitiveValue = z.object({
   value: secretValue,
   sensitivity,
-  replaces: z.string().max(64).optional(),
+  replaces: z.string().optional(),
 }).strict();
 
 /**
@@ -178,10 +179,10 @@ const sensitiveValue = z.object({
  * change, and looser is refused (409). With `replaces`, the version it
  * marks, as listed, or the mark is refused (409 `stale`).
  */
-const marked = z.object({ sensitivity, replaces: z.string().max(64).optional() }).strict();
+const marked = z.object({ sensitivity, replaces: z.string().optional() }).strict();
 
 /** A patch of an environment's keys (`PATCH /secrets/:project/:environment`): what its route parses, and the key write's front door before it (write-ahead.ts). */
-export const secretPatch = z.record(secretKey, z.union([secretValue, generatedValue, plainValue, sensitiveValue, marked, z.object({ ref: z.string().max(400) }).strict()]).nullable())
+export const secretPatch = z.record(secretKey, z.union([secretValue, generatedValue, plainValue, sensitiveValue, marked, z.object({ ref: z.string() }).strict()]).nullable())
   .superRefine((patch, issues) => {
     const problem = generationProblem(patch);
     if (problem !== null) issues.addIssue({ code: 'custom', message: problem });
@@ -191,15 +192,15 @@ export const secretPatch = z.record(secretKey, z.union([secretValue, generatedVa
 const role = roleId;
 /** A role's definition, both columns (docs/design/roles.md): the vault checks it whole (`definitionProblem`). */
 const roleDefinition = z.object({
-  name: z.string().max(ROLE_NAME_MAX),
-  description: z.string().max(ROLE_DESCRIPTION_MAX),
+  name: z.string(),
+  description: z.string(),
   permissions: z.array(z.enum(PERMISSIONS)).max(PERMISSIONS.length),
   protected: z.array(z.enum(PERMISSIONS)).max(PERMISSIONS.length),
 }).strict();
 /** What one member should hold, each place by path: a role, a role until a date, or null for none. */
 const accessPatch = z.record(
-  z.string().max(200),
-  z.union([role, z.object({ role, until: z.string().max(40).nullable() }).strict(), z.null()]),
+  z.string(),
+  z.union([role, z.object({ role, until: z.string().nullable() }).strict(), z.null()]),
 );
 /** `PUT /members/:member`'s body: a person's instance role and its scope, or a service account's first grants (`putMember`). */
 export const memberBody = z
@@ -211,10 +212,7 @@ export const memberBody = z
   .strict();
 
 /** A token's or a binding's scope, each place by path and its role: `{ "market/dev": "developer" }`. All its account holds when left out. */
-const credentialScope = z
-  .record(z.string().max(200), role)
-  .refine((scope) => Object.keys(scope).length <= MAX_SCOPE_PLACES, `a scope names at most ${MAX_SCOPE_PLACES} places`)
-  .optional();
+const credentialScope = z.record(z.string(), role).optional();
 
 /** Sessions and service tokens are coffre's own sign-in; behind Cloudflare Access there are none. */
 function signin(ctx: ApiContext) {
@@ -239,19 +237,30 @@ const touchAnswer = z.object({ state: z.string().min(1), response: z.record(z.st
 /** A passkey's name, as its person gives it (section 3.6): shown in lists and the log, so no control character. */
 const passkeyLabel = z.string().trim().min(1).max(64).refine((name) => !/\p{Cc}/u.test(name), 'a name cannot hold a control character');
 
+/**
+ * What an authorization request's parameters may be, together, in bytes: they come to the consent page in its URL,
+ * and Workers takes a URL of 16 KB at most (https://developers.cloudflare.com/workers/platform/limits/, "URL size",
+ * read as decimal, the smaller reading), so no request a person consented to on Workers is longer. Its refusal or its
+ * code goes back in a redirect's `Location`, as long. Node holds to the same number, so a deployment answers alike.
+ */
+const AUTHORIZATION_URL_BYTES = 16_000;
+
 const authorizationRequest = z.object({
-  client_id: z.string().max(2048).optional(),
-  redirect_uri: z.string().max(2048).optional(),
-  response_type: z.string().max(64).optional(),
-  code_challenge: z.string().max(256).optional(),
-  code_challenge_method: z.string().max(16).optional(),
-  state: z.string().max(2048).optional(),
-  scope: z.string().max(512).optional(),
-  resource: z.string().max(2048).optional(),
-});
+  client_id: z.string().optional(),
+  redirect_uri: z.string().optional(),
+  response_type: z.string().optional(),
+  code_challenge: z.string().optional(),
+  code_challenge_method: z.string().optional(),
+  state: z.string().optional(),
+  scope: z.string().optional(),
+  resource: z.string().optional(),
+}).refine(
+  (request) => Object.values(request).reduce((sum, value) => sum + (value === undefined ? 0 : Buffer.byteLength(value)), 0) <= AUTHORIZATION_URL_BYTES,
+  `an authorization request's parameters are at most ${AUTHORIZATION_URL_BYTES} bytes together: the URL that brings them is no longer`,
+);
 
 /** An issuer's public keys, uploaded with a binding: a JWKS, whose keys `uploadedKeys` checks one by one. */
-const keySet = z.object({ keys: z.array(z.record(z.string().max(64), z.unknown())).min(1).max(MAX_KEYS) });
+const keySet = z.object({ keys: z.array(z.record(z.string(), z.unknown())).min(1).max(MAX_KEYS) });
 
 /** Trust bindings for CI runs: on when the deployment's sign-in says so. */
 function workloads(ctx: ApiContext) {
@@ -268,7 +277,7 @@ function serviceId(member: string): string {
 /** What a token is made with, as `POST /members/:member/tokens` takes it: a service's or a person's. */
 const tokenInput = z.object({
   // Printed in lists, the log and terminals: no control character, which could rewrite what is shown around it.
-  label: z.string().trim().min(1).max(CREDENTIAL_LABEL_MAX).refine((label) => !/\p{Cc}/u.test(label), 'a label cannot hold a control character').nullable().default(null),
+  label: z.string().trim().min(1).refine((label) => !/\p{Cc}/u.test(label), 'a label cannot hold a control character').nullable().default(null),
   // A service token's lifetime, in days.
   expiresInDays: z.number().int().min(1).max(MAX_SERVICE_TOKEN_DAYS).optional(),
   // A personal token's, in minutes: an afternoon's script or agent, a week at most.
@@ -501,7 +510,7 @@ export const routes = {
   }),
 
   ...route('GET /references', {
-    input: z.object({ path: z.string().max(400) }),
+    input: z.object({ path: z.string() }),
     run: (ctx, { input }) => listReferences(ctx, parsePath(input.path, [1, 2, 3]), () => readersAt(ctx)),
   }),
   ...route('POST /reveals', {
@@ -518,7 +527,7 @@ export const routes = {
 
   // Who
   ...route('GET /members', {
-    input: z.object({ path: z.string().max(200).optional() }),
+    input: z.object({ path: z.string().optional() }),
     run: (ctx, { input }) =>
       listMembers(ctx, { path: input.path === undefined ? undefined : parsePath(input.path, [1, 2]) }),
   }),
@@ -564,7 +573,7 @@ export const routes = {
       label: tokenInput.shape.label.unwrap().unwrap(),
       // Twelve hours unless told: a working day's dev loop, a week at most, as a personal token.
       expiresInMinutes: z.number().int().min(1).max(MAX_PERSONAL_TOKEN_MINUTES).default(12 * 60),
-      paths: z.array(z.string().max(200)).min(1).max(MAX_SCOPE_PLACES),
+      paths: z.array(z.string()).min(1),
     }),
     run: (ctx, { input }) => signin(ctx).issueHandle(ctx, input),
   }),
@@ -609,18 +618,16 @@ export const routes = {
     input: z.object({
       profile: z.enum(WORKLOAD_PROFILES as [WorkloadProfile, ...WorkloadProfile[]]),
       // github.com's or gitlab.com's when left out; a custom binding names its own.
-      issuer: z.string().max(400).nullable().default(null),
+      issuer: z.string().nullable().default(null),
       // A value, or for what started the run (event_name, pipeline_source), a list of them.
-      claims: z
-        .record(z.string().max(64), z.union([z.string().max(1024), z.array(z.string().max(64)).min(1).max(16)]))
-        .refine((claims) => Object.keys(claims).length <= MAX_CLAIMS, `a binding names at most ${MAX_CLAIMS} claims`),
+      claims: z.record(z.string(), z.union([z.string(), z.array(z.string()).min(1)])),
       scope: credentialScope,
-      label: z.string().trim().min(1).max(CREDENTIAL_LABEL_MAX).nullable().default(null),
+      label: z.string().trim().min(1).nullable().default(null),
       replaces: z.array(z.string().uuid()).max(MAX_BINDINGS).default([]),
       // The issuer's keys, for one coffre asks nothing: then the issuer is any string its tokens name.
       jwks: keySet.optional(),
       // A workload's binding's policy (docs/design/workload-access.md, section 11), checked by its profile (`checkPolicy`).
-      policy: z.record(z.string().max(32), z.unknown()).optional(),
+      policy: z.record(z.string(), z.unknown()).optional(),
     }).strict(),
     // `?dryRun=1` checks the binding and asks its issuer where its keys are, and writes nothing.
     query: dryRunFlag,
@@ -629,7 +636,7 @@ export const routes = {
   }),
   // New keys, uploaded, for every binding of the service on the issuer: each replaced by one the same but for them.
   ...route('POST /members/:member/bindings/keys', {
-    input: z.object({ issuer: z.string().min(1).max(400), jwks: keySet }).strict(),
+    input: z.object({ issuer: z.string().min(1), jwks: keySet }).strict(),
     // `?dryRun=1` checks the keys and says which bindings would be replaced, and writes nothing.
     query: dryRunFlag,
     run: (ctx, { params, input, query }) =>
@@ -637,9 +644,9 @@ export const routes = {
   }),
   ...route('GET /workloads/lookup', {
     input: z.object({
-      github: z.string().max(200).optional(),
-      gitlab: z.string().max(400).optional(),
-      gitlabUrl: z.string().max(400).optional(),
+      github: z.string().optional(),
+      gitlab: z.string().optional(),
+      gitlabUrl: z.string().optional(),
     }).strict(),
     run: (ctx, { input }) => workloads(ctx).lookup(ctx, input),
   }),
@@ -756,7 +763,7 @@ export const routes = {
     input: z.object({
       request: authorizationRequest,
       approve: z.boolean(),
-      scopes: z.array(z.string().max(32)).max(16).default([]),
+      scopes: z.array(z.string()).default([]),
       // A touch for this connection, with these scopes (passkeys.md, section 4.4), as for a device approval.
       touch: touchAnswer.optional(),
     }).strict(),
@@ -794,8 +801,8 @@ export const routes = {
   ...route('GET /audit', {
     input: z.object({
       // A project, an environment, or a secret: `market/prod/DATABASE_URL` for who read or changed it.
-      path: z.string().max(400).optional(),
-      actor: z.string().max(330).optional(),
+      path: z.string().optional(),
+      actor: z.string().optional(),
       decision: z.enum(['allow', 'deny']).optional(),
       // `?detail=1` includes sign-ins and technical steps, `DETAIL_ACTIONS`.
       detail: z.enum(['1', 'true']).optional(),

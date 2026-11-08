@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { decodeWorkloadToken, keySummaries, KeysInvalid, uploadedKeys, verifyWorkloadToken, WorkloadTokenRefused } from '@coffre/core/identity';
+import { MAX_BODY_NODES } from '@coffre/core/schemas';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
 
 const ISSUER = 'https://token.actions.githubusercontent.com';
@@ -96,7 +97,14 @@ test('the shape is checked before anything is trusted', () => {
     assert.throws(() => decodeWorkloadToken(token(claims)), why);
   }
   assert.throws(() => decodeWorkloadToken('a.b'), /not a compact JWS/);
-  assert.throws(() => decodeWorkloadToken(`${'a'.repeat(9000)}.b.c`), /longer than 8192 bytes/);
+  assert.throws(() => decodeWorkloadToken('a.b.c.d'), /not a compact JWS/);
+  // No length of its own: the body that brings it holds a token (`SIGN_IN_BODY_BYTES`), and a long one is read as any other.
+  assert.throws(() => decodeWorkloadToken(`${'a'.repeat(9000)}.b.c`), /not JSON/);
+  // But its parts are counted before they are parsed, as a body's values are: a short string may hide a large tree.
+  const encoded = (text: string) => Buffer.from(text).toString('base64url');
+  const tree = `{"iss":"x","sub":"y","exp":1,"iat":1,"pad":[${'[],'.repeat(MAX_BODY_NODES)}[]]}`;
+  assert.throws(() => decodeWorkloadToken(`${encoded('{"alg":"RS256"}')}.${encoded(tree)}.c`), new RegExp(`more than ${MAX_BODY_NODES} values`));
+  assert.throws(() => decodeWorkloadToken(`${encoded(`{"alg":"RS256","x":${'['.repeat(MAX_BODY_NODES)}${']'.repeat(MAX_BODY_NODES)}}`)}.${encoded('{}')}.c`), /more than/);
 });
 
 test('with a lifetime given, a token that lives longer, iat to exp, is refused, however recently issued', async () => {
@@ -165,4 +173,67 @@ test('a token that names no key verifies under whichever key of the set signed i
   await refused(verify(await (await signer('RS256', 'other')).sign({}, { kid: undefined }), keys), 'signature');
   // Its claims are still checked, under the key that signed it.
   await refused(verify(await next.sign({ aud: 'https://elsewhere.example' }, { kid: undefined }), keys), 'audience');
+});
+
+test("a token naming no key is tried against each key by its signature alone: its header parsed once, however wide, not once a key (review r8)", async () => {
+  const unnamed = (jwk: JWK) => Object.fromEntries(Object.entries(jwk).filter(([name]) => name !== 'kid')) as JWK;
+  const signers = await Promise.all(Array.from({ length: 32 }, (_, i) => signer('ES256', `k${i}`)));
+  const keys = signers.map(({ jwk }) => unnamed(jwk));
+  // A header of 1,300 members, as a stranger's may be: within the values a part may hold, and no key named.
+  const wide = Object.fromEntries(Array.from({ length: 1300 }, (_, i) => [`m${i}`, 0]));
+  const headerParses = async (token: string) => {
+    const text = Buffer.from(token.split('.')[0]!, 'base64url').toString('utf8');
+    const parse = JSON.parse;
+    let parses = 0;
+    JSON.parse = ((input: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
+      if (input === text) parses += 1;
+      return parse(input, reviver);
+    }) as typeof JSON.parse;
+    try {
+      return { result: await verify(token, keys).then((claims) => claims.sub, (error: unknown) => error), parses };
+    } finally {
+      JSON.parse = parse;
+    }
+  };
+  // A stranger's: refused for its signature, its header read once, by jose's first look, before it found 32 keys.
+  const stranger = await headerParses(await (await signer('ES256', 'stranger')).sign({}, { kid: undefined, ...wide }));
+  assert.ok(stranger.result instanceof WorkloadTokenRefused && stranger.result.reason === 'signature', String(stranger.result));
+  assert.equal(stranger.parses, 1);
+  // Signed by the 20th key: verified, and its header read once more, by the whole verification of that key alone.
+  const signed = await headerParses(await signers[19]!.sign({}, { kid: undefined, ...wide }));
+  assert.equal(signed.result, 'repo:acme/api:ref:refs/heads/main');
+  assert.equal(signed.parses, 2);
+});
+
+test("the signature check alone only picks the key: a token whose signature it passes is still refused by jose's whole verification", async () => {
+  const unnamed = (jwk: JWK) => Object.fromEntries(Object.entries(jwk).filter(([name]) => name !== 'kid')) as JWK;
+  const [one, two] = [await signer('ES256', 'one'), await signer('ES256', 'two')];
+  const keys = [unnamed(one.jwk), unnamed(two.jwk)];
+  // What each WebCrypto check answered: the pre-check's, key by key, then jose's own, if it gets that far.
+  const subtle = crypto.subtle;
+  const verifySignature = subtle.verify.bind(subtle);
+  const checks: boolean[] = [];
+  subtle.verify = (async (...args: Parameters<SubtleCrypto['verify']>) => {
+    const verified = await verifySignature(...args);
+    checks.push(verified);
+    return verified;
+  }) as SubtleCrypto['verify'];
+  const passedThenRefused = async (token: string, reason: string) => {
+    checks.length = 0;
+    await refused(verify(token, keys), reason);
+    assert.ok(checks.includes(true), `the pre-check passed ${reason}'s token: ${checks}`);
+  };
+  try {
+    // A signature in base64url with a character outside its alphabet: Buffer skips it, so the pre-check
+    // verifies the bytes it reads; jose refuses to decode it.
+    const token = await two.sign({}, { kid: undefined });
+    const dot = token.lastIndexOf('.');
+    await passedThenRefused(`${token.slice(0, dot + 5)}!${token.slice(dot + 5)}`, 'signature');
+    // Signed by a key of the set, but expired, or from another issuer: the claims are jose's to check.
+    await passedThenRefused(await two.sign({ iat: at(-600), exp: at(-300) }, { kid: undefined }), 'expired');
+    await passedThenRefused(await two.sign({ iss: 'https://elsewhere.example' }, { kid: undefined }), 'signature');
+  } finally {
+    subtle.verify = verifySignature;
+    delete (subtle as { verify?: unknown }).verify;
+  }
 });

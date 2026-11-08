@@ -2764,21 +2764,30 @@ export async function unansweredApprovals(db: Queryable, connectionId: string, d
 export async function findDeviceAuthorizations(
   db: Queryable,
   chainKey: Buffer,
-  by: { userCode: string } | { deviceCodeHash: Buffer } | { openAt: Date },
+  by: { userCode: string } | { deviceCodeHash: Buffer },
 ) {
   const { deviceLogins } = tablesOf(db);
   const rows = await db
     .select()
     .from(deviceLogins)
-    .where(
-      'userCode' in by
-        ? eq(deviceLogins.userCode, by.userCode)
-        : 'deviceCodeHash' in by
-          ? eq(deviceLogins.deviceCodeHash, by.deviceCodeHash)
-          : and(isNull(deviceLogins.decidedAt), gt(deviceLogins.expiresAt, by.openAt)),
-    );
+    .where('userCode' in by ? eq(deviceLogins.userCode, by.userCode) : eq(deviceLogins.deviceCodeHash, by.deviceCodeHash));
   for (const row of rows) verifyAuthRow(chainKey, 'device_authorizations', row);
   return rows;
+}
+
+/**
+ * The address each open device login came from, for the next one's
+ * admission: the rows' every column but the label, which the MAC does not
+ * cover and anyone may make as long as a body is, so that the hundreds of
+ * open logins admission reads hold a few hundred bytes each, never a body's
+ * size each. Each row's MAC is checked all the same.
+ */
+export async function openDeviceSources(db: Queryable, chainKey: Buffer, at: Date): Promise<(string | null)[]> {
+  const { deviceLogins } = tablesOf(db);
+  const { clientLabel: _label, ...columns } = getTableColumns(deviceLogins);
+  const rows = await db.select(columns).from(deviceLogins).where(and(isNull(deviceLogins.decidedAt), gt(deviceLogins.expiresAt, at)));
+  for (const row of rows) verifyAuthRow(chainKey, 'device_authorizations', row);
+  return rows.map((row) => row.clientIp);
 }
 
 // --- secrets ------------------------------------------------------------------

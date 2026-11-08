@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import { EVERYWHERE, isInstanceRole, isScope, normalScope, ownsInstance, runsInstance, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
 import { PRINCIPAL } from '@coffre/core/vault';
+import { splitAtMost } from '@coffre/core/schemas';
 import type { Access, AdmitReadInput, CredentialAcceptance } from '@coffre/core/vault';
 
 import { credentialEnded, readerOf, type Reader } from './decide.ts';
@@ -246,7 +247,7 @@ export function sealUnder(domain: string, key: LogMacKey, value: unknown): strin
 /** What `sealUnder` sealed under `domain` and one of these keys; null for anything else. */
 export function openUnder<T>(domain: string, keys: readonly LogMacKey[], sealed: unknown): T | null {
   if (typeof sealed !== 'string') return null;
-  const [body, tag, ...rest] = sealed.split('.');
+  const [body, tag, ...rest] = splitAtMost(sealed, '.', 2) ?? [];
   if (body === undefined || tag === undefined || rest.length > 0) return null;
   const text = Buffer.from(body, 'base64url').toString('utf8');
   const given = Buffer.from(tag, 'base64url');

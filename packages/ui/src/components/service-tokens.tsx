@@ -1,5 +1,5 @@
 import type { TokenRow } from '@coffre/client';
-import { CREDENTIAL_LABEL_MAX, credentialScopeInWords } from '@coffre/core/access';
+import { credentialScopeInWords } from '@coffre/core/access';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment, useState } from 'react';
 import { revokeCredential } from '../lib/changes';
@@ -196,7 +196,6 @@ function IssueToken({ serviceId, grants, maxDays }: { serviceId: string; grants:
                 <input
                   className="input"
                   value={label}
-                  maxLength={CREDENTIAL_LABEL_MAX}
                   placeholder="GitHub Actions deploy"
                   onChange={(event) => setLabel(event.target.value)}
                 />

@@ -627,6 +627,37 @@ export function isUnsealed(error: unknown): boolean {
   return false;
 }
 
+/**
+ * What V8 throws, as a `RangeError`, when a call nests deeper than its stack:
+ * on Node and on Workers alike. `JSON.parse` reads any depth, but much of
+ * what reads a value after it walks it by recursion (`JSON.stringify`,
+ * `structuredClone`, an RPC's copy, a canonical form), and runs out at a
+ * few thousand levels: about 3,300 for `structuredClone`, 4,400 for
+ * `JSON.stringify` (Node 24), where a body of `MAX_BODY_NODES` values may
+ * nest as deep as it has values.
+ */
+export const STACK_OVERFLOW = 'Maximum call stack size exceeded';
+
+/** The code a stack that ran out crosses the vault's Node socket with (`failureOf`), as a database error's crosses with its own. */
+export const STACK_OVERFLOW_CODE = 'stack_overflow';
+
+/**
+ * Whether `error`, or one of its causes, is a stack that ran out: a value
+ * nested deeper than what walks it holds. V8's own `RangeError`, its message
+ * exactly `STACK_OVERFLOW`, as thrown or as a Workers RPC hands it back (its
+ * type and message kept; the vault's entry throws a plain one for a wrapped
+ * one, whose causes RPC drops); or one the vault's Node socket answered,
+ * by its code. Never by words inside a message, which a caller's input can
+ * hold (a key named so, in a validation's error).
+ */
+export function isStackOverflow(error: unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    const { name, message, code } = cause as { name?: unknown; message?: unknown; code?: unknown };
+    if (code === STACK_OVERFLOW_CODE || (name === 'RangeError' && message === STACK_OVERFLOW)) return true;
+  }
+  return false;
+}
+
 /** The most entries one `vouch` call checks: a page of the audit log lists a few hundred at most. */
 export const VOUCHED_AT_ONCE = 2000;
 
