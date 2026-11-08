@@ -531,7 +531,7 @@ another request settled.
 
 | Protection, in the code | Turned off, TLC finds |
 |---|---|
-| Each operation's requests take turns among themselves alone (`#slots`, by operation) | a request waiting for a slot another call's request holds (`WaitsOnlyBehindItsOwn`), and a use waiting at all (`UsesNeverWait`) |
+| Each operation's requests take turns among themselves alone, whichever KEK each goes to (`slotsOf`, by operation) | a request waiting for a slot another call's request holds (`WaitsOnlyBehindItsOwn`), and a use waiting at all (`UsesNeverWait`) |
 
 How long an attempt waits (706 ms, `KMS_ATTEMPT_MS`) and that none starts
 past its operation's deadline are timing, which the model leaves to the tests

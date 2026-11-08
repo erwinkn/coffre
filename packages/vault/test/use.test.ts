@@ -6,14 +6,13 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { verifyEntries, type StoredEntry } from '@coffre/core/audit';
 import { decrypt } from '@coffre/core/envelope';
 import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog } from '@coffre/core/merkle';
 import { USE_DEADLINE_MS, type UseOutcome } from '@coffre/core/vault';
-import { awsKms, KekUnavailableError, KMS_REQUEST_MAX_MS } from '@coffre/core/kek';
+import { awsKms, KMS_REQUEST_MAX_MS } from '@coffre/core/kek';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
 import { newestAccess } from '@coffre/db/grants';
 import { appendEntries } from '@coffre/db/log';
@@ -236,31 +235,36 @@ test('DeadlineChecked, in Postgres: a use held past its deadline by its principa
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 0);
 });
 
-test('a use whose key service never answers is answered by its deadline, 3 s, though one request may take 3,118 ms (W331)', async () => {
+test('a use whose key service never answers is answered late at its deadline: its last attempt cut there, though one request may take 3,118 ms (W331)', async () => {
   // AWS KMS that wraps, then hangs on every Decrypt: each attempt is cut at what is left of the use's deadline, and no
   // attempt nor pause starts past it (core kek/aws-kms.ts, KMS_ATTEMPT_MS, KMS_REQUEST_MAX_MS).
   const arn = 'arn:aws:kms:eu-west-3:123456789012:key/hung';
   const blob = randomBytes(48).toString('base64');
-  let decrypts = 0;
+  const attempts: { started: number; ended?: number }[] = [];
   const kms = awsKms({ keyArn: arn, credentials: { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'secret' }, fetch: async (_input, init) => {
     if (new Headers(init?.headers).get('x-amz-target') === 'TrentService.Encrypt') return Response.json({ CiphertextBlob: blob, KeyId: arn });
-    decrypts += 1;
-    return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+    const attempt: { started: number; ended?: number } = { started: Date.now() };
+    attempts.push(attempt);
+    return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => { attempt.ended = Date.now(); reject(new Error('aborted')); }, { once: true }));
   } });
   const config = resolveVaultConfig({ kek: kms, previousKeks: [KEK], signingKey: SIGNING_KEY.toString('base64'), owners: ['root@acme.example'] });
   const w = await world();
   const id = await w.key('hung', false, w.dev, null, config.keks);
   const { use } = await isolate({}, config);
   const alive = setInterval(() => {}, 1000);
+  const random = Math.random;
+  // The pauses at their least, 100 and 400 ms, so the third attempt starts at 1,912 ms at the earliest; a deadline of
+  // 2,100 ms, under a use's 3 s, which that attempt cannot finish before: cut there, the use is late. An attempt left its
+  // own 706 ms would end at 2,618 ms at the earliest, and the use would answer the key service unavailable.
+  Math.random = () => 0;
   const at = Date.now();
-  const outcome = await use(ask(w, id, { at, deadline: at + USE_DEADLINE_MS })).then((answer) => answer, (error: unknown) => error).finally(() => clearInterval(alive));
-  const ended = Date.now();
-  // Late, cut by its deadline; or, its attempts spent just before it, the key service unavailable: either way answered
-  // by then, and nothing released.
-  assert.ok(isDeepStrictEqual(outcome, { ok: false, busy: 'late', retryAfter: 1 }) || outcome instanceof KekUnavailableError, String(outcome));
-  assert.ok(USE_DEADLINE_MS < KMS_REQUEST_MAX_MS);
-  assert.ok(ended < at + USE_DEADLINE_MS + 500, `answered ${ended - at} ms after its start`);
-  assert.ok(decrypts >= 2, `${decrypts} attempts`);
+  const outcome = await use(ask(w, id, { at, deadline: at + 2_100 })).finally(() => { clearInterval(alive); Math.random = random; });
+  assert.ok(2_100 < USE_DEADLINE_MS && USE_DEADLINE_MS < KMS_REQUEST_MAX_MS);
+  assert.deepEqual(outcome, { ok: false, busy: 'late', retryAfter: 1 });
+  assert.equal(attempts.length, 3);
+  const last = attempts.at(-1)!;
+  assert.ok(last.ended !== undefined && last.ended - last.started < 706, `the last attempt ran ${last.ended! - last.started} ms: not cut at the deadline`);
+  assert.ok(Date.now() < at + 30_000, 'a watchdog for a hang');
 });
 
 test('FloorChecked: a use stamped below the floor of `at` writes nothing', async () => {

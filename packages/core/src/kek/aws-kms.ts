@@ -73,6 +73,20 @@ const CONCURRENCY = 6;
 /** What KMS says when the ciphertext does not open under this key and context: a bad claim, not an outage. */
 const NOT_THIS_KEY = new Set(['InvalidCiphertextException', 'IncorrectKeyException']);
 
+/**
+ * Each operation's slots (`CONCURRENCY`), kept while it lives, whichever provider its requests go to: a call's keys
+ * under its `kek` and its `previousKeks` (a rotation's batch) take turns in the same six, as Workers counts them for
+ * the invocation (review r2 of #549). Keyed by the operation, which is one call's alone: no call waits on another's.
+ */
+const operationSlots = new WeakMap<KeyOperation, Slots>();
+function slotsOf(operation: KeyOperation | undefined): Slots {
+  // A request with no operation is a call of its own: one request, nothing to take turns with.
+  if (operation === undefined) return new Slots(CONCURRENCY);
+  let slots = operationSlots.get(operation);
+  if (slots === undefined) operationSlots.set(operation, (slots = new Slots(CONCURRENCY)));
+  return slots;
+}
+
 /** A KEK held in AWS KMS: it never leaves, and coffre asks KMS to wrap and unwrap each data key. */
 export function awsKms(options: AwsKmsOptions): KekProvider {
   return new AwsKmsKekProvider(options);
@@ -95,8 +109,6 @@ export class AwsKmsKekProvider implements KekProvider {
   readonly #url: URL;
   readonly #credentials: () => Promise<AwsCredentials>;
   readonly #fetch: typeof fetch;
-  /** Each operation's own slots (`CONCURRENCY`), kept while it lives: one call's requests take turns among themselves. */
-  readonly #slots = new WeakMap<KeyOperation, Slots>();
 
   constructor(options: AwsKmsOptions) {
     const match = KEY_ARN.exec(options.keyArn);
@@ -158,9 +170,7 @@ export class AwsKmsKekProvider implements KekProvider {
   async #call(action: 'Encrypt' | 'Decrypt', request: object, operation?: KeyOperation): Promise<Record<string, string>> {
     const body = JSON.stringify(request);
     const signal = operationSignal(operation);
-    // A request with no operation is a call of its own: one request, nothing to take turns with.
-    const slots = operation === undefined ? new Slots(CONCURRENCY) : this.#slots.get(operation) ?? new Slots(CONCURRENCY);
-    if (operation !== undefined) this.#slots.set(operation, slots);
+    const slots = slotsOf(operation);
     return slots.run(async () => {
       checkOperation(operation);
       let credentials: AwsCredentials;

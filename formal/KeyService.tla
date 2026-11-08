@@ -28,8 +28,10 @@ CONSTANTS
 
 CONSTANTS
     \* Each call's own requests take turns among themselves, and no other's
-    \* (aws-kms.ts: the bound kept per operation, `CONCURRENCY` per call).
-    \* Off, one pool for every call of the isolate, as `Slots(8)` was.
+    \* (aws-kms.ts: the bound kept per operation, `CONCURRENCY` per call,
+    \* whichever KEK each request goes to: a rotation's batch, under its kek
+    \* and its previousKeks, takes turns in the same six). Off, one pool for
+    \* every call of the isolate, as `Slots(8)` was.
     SlotsPerCall
 
 VARIABLES

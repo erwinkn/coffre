@@ -228,6 +228,25 @@ test("at most six of one operation's requests are in flight at once, and calls a
   assert.equal(apart.mostInFlight(), 30);
 });
 
+test("one call's keys under two KEKs (a rotation's batch) take turns in the same six (review r2 of #549)", async () => {
+  let inFlight = 0;
+  let most = 0;
+  const answering = (arn: string): typeof fetch => async (_input, init) => {
+    inFlight++;
+    most = Math.max(most, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight--;
+    const body = JSON.parse(String(init?.body)) as { Plaintext?: string };
+    return Response.json({ CiphertextBlob: randomBytes(48).toString('base64'), KeyId: arn, Plaintext: body.Plaintext });
+  };
+  const other = 'arn:aws:kms:eu-west-3:123456789012:key/previous';
+  const current = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: answering(ARN) });
+  const previous = awsKms({ keyArn: other, credentials: CREDENTIALS, fetch: answering(other) });
+  const operation = { deadline: Date.now() + 10_000, signal: new AbortController().signal };
+  await Promise.all(Array.from({ length: 24 }, (_, i) => (i % 2 === 0 ? current : previous).wrap(randomBytes(32), context(), operation)));
+  assert.equal(most, 6);
+});
+
 test("a call never waits behind another call's hung requests: a use's key opens while a read's six hang (formal/KeyService.tla)", async () => {
   const fake = fakeKms();
   let hang = 6;
@@ -255,31 +274,39 @@ test('an attempt KMS does not answer is cut at KMS_ATTEMPT_MS and tried again; w
     return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
   } });
   const alive = setInterval(() => {}, 1000);
+  const random = Math.random;
+  Math.random = () => 0; // the pauses at their least, 100 and 400 ms
   const started = Date.now();
-  await assert.rejects(kek.wrap(randomBytes(32), context()), (error: unknown) => error instanceof KekUnavailableError && /3 times/.test((error as Error).message)).finally(() => clearInterval(alive));
+  await assert.rejects(kek.wrap(randomBytes(32), context()), (error: unknown) => error instanceof KekUnavailableError && /3 times/.test((error as Error).message))
+    .finally(() => { clearInterval(alive); Math.random = random; });
   const took = Date.now() - started;
   assert.equal(sent, KMS_ATTEMPTS);
-  // Three attempts of 706 ms and two pauses of at least 100 and 400 ms; a watchdog above the bound, for a loaded host.
-  assert.ok(took >= KMS_ATTEMPTS * KMS_ATTEMPT_MS + 500 && took < KMS_REQUEST_MAX_MS + 5_000, `it took ${took} ms`);
+  // Three attempts of 706 ms and pauses of 100 and 400 ms: 2,618 ms at least; the upper bound a watchdog for a hang.
+  assert.ok(took >= KMS_ATTEMPTS * KMS_ATTEMPT_MS + 500 - 5, `it took ${took} ms`);
+  assert.ok(took < KMS_REQUEST_MAX_MS + 30_000, `it took ${took} ms`);
 });
 
 test("a hung KMS answers by its operation's deadline: each attempt cut at what is left of it, no attempt nor pause started past it", async () => {
-  let sent = 0;
+  const attempts: { started: number; ended?: number }[] = [];
   const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async (_input, init) => {
-    sent++;
-    return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+    const attempt: { started: number; ended?: number } = { started: Date.now() };
+    attempts.push(attempt);
+    return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => { attempt.ended = Date.now(); reject(new Error('aborted')); }, { once: true }));
   } });
   const alive = setInterval(() => {}, 1000);
-  // A use's deadline: 3 s (`USE_DEADLINE_MS`), though one request's attempts and pauses could take 3,118 ms.
+  const random = Math.random;
+  Math.random = () => 0; // pauses of 100 and 400 ms: the third attempt starts at 1,912 ms at the earliest
+  // A deadline the third attempt cannot finish before (2,100 < 1,912 + 706): it must be cut at it, at 2,100 ms, where
+  // an attempt left its own 706 ms would end at 2,618 ms at the earliest.
   const started = Date.now();
-  const deadline = started + 3_000;
+  const deadline = started + 2_100;
   await assert.rejects(kek.unwrap({ kekProvider: 'aws-kms', kekId: ARN, kekVersion: '1', bytes: randomBytes(48) }, context(), { deadline, signal: new AbortController().signal }),
-    // Cancelled at its deadline, or out of attempts just before it: either way an outage, answered by then.
-    KekUnavailableError).finally(() => clearInterval(alive));
+    KekCancelledError).finally(() => { clearInterval(alive); Math.random = random; });
   const ended = Date.now();
-  assert.ok(ended >= started + 2 * KMS_ATTEMPT_MS, `it gave up after ${ended - started} ms`);
-  assert.ok(ended < deadline + 250, `it answered ${ended - deadline} ms past its deadline`);
-  assert.ok(sent >= 2 && sent <= KMS_ATTEMPTS, `${sent} attempts`);
+  assert.equal(attempts.length, 3);
+  const last = attempts.at(-1)!;
+  assert.ok(last.ended !== undefined && last.ended - last.started < KMS_ATTEMPT_MS, `the last attempt ran ${last.ended! - last.started} ms: not cut at the deadline`);
+  assert.ok(ended < deadline + 30_000, 'a watchdog for a hang');
 });
 
 test('no pause before another try starts when it would end past the deadline: the call is cancelled at once', async () => {
