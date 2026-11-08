@@ -90,7 +90,7 @@ export async function conform(
   await report.check('bulk limit', { people }, ({ people }) => bulkLimit(people, options.bulkLimit));
   await report.check('stale session', { people, alone, canaries }, ({ people, alone, canaries }) => staleSession(deployment, people, alone, canaries));
   // Under `required` from here to `back to optional`: the workload checks too, which no passkey touches.
-  await report.check('passkeys required', { people, live, canaries }, ({ people, live, canaries }) => passkeysRequired(deployment, people, live, canaries));
+  const signedOut = await report.check('passkeys required', { people, live, canaries }, ({ people, live, canaries }) => passkeysRequired(deployment, people, live, canaries));
   // A CI run signing in with its ID token, through a binding. The limit
   // comes last of these: it spends this address's exchanges for the minute.
   const binding = await report.check('trust a run', { admin }, ({ admin }) => trustRun(deployment, admin));
@@ -102,7 +102,7 @@ export async function conform(
   await report.check('run unbound', { admin, binding, credential }, ({ admin, binding, credential }) => runUnbound(deployment, admin, binding, credential));
   await report.check('exchanges limited', { binding }, () => exchangesLimited(deployment));
   await report.check('tokens unlogged', { binding }, () => tokensUnlogged(deployment));
-  await report.check('back to optional', { people }, ({ people }) => backToOptional(deployment, people));
+  await report.check('back to optional', { people }, ({ people }) => backToOptional(deployment, people, signedOut));
   await report.check('issuer replaced', { people }, ({ people }) => issuerReplaced(deployment, people));
   await report.check('IP public URL', {}, () => ipPublicUrl(deployment));
 

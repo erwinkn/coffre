@@ -657,7 +657,7 @@ export async function readsStayReads(deployment: Deployment, { admin }: People, 
  * The way out is shown from a second session of the bulk reader's, so that `bulk.browser` stays signed in for the
  * canary scan's signed-in viewer once `backToOptional` lets it read again.
  */
-export async function passkeysRequired(deployment: Deployment, { admin, bulk }: People, live: { token: string; canary: { project: string; environment: string; key: string; value: string } }, canaries: Canaries): Promise<string> {
+export async function passkeysRequired(deployment: Deployment, { admin, bulk }: People, live: { token: string; canary: { project: string; environment: string; key: string; value: string } }, canaries: Canaries): Promise<{ detail: string; value: Browser }> {
   const sensitive = canaries[`${BULK}/REQUIRED_SENSITIVE`] = canary();
   const write = canaries[`${BULK}/REQUIRED_WRITE`] = canary();
   await admin.api.secrets.set(BULK, { REQUIRED_SENSITIVE: { value: sensitive, sensitivity: 'sensitive' } });
@@ -697,23 +697,35 @@ export async function passkeysRequired(deployment: Deployment, { admin, bulk }: 
   const uses = entries.filter((entry) => entry.occurredAt >= since && entry.action.startsWith('secret.') && entry.decision === 'allow');
   expect(uses.length === 0, 'a refused credential has a use of a key in the log', uses);
 
+  // Under required this session reads nothing either way: what proves the sign-out ended it is a copy of its cookie,
+  // kept, refused once the deployment is back to optional (`backToOptional`).
+  const signedOut = leaving.copy();
   const out = await leaving.send('POST', '/auth/signout');
   expect(out.status === 303 || out.status === 302, `signing out a session no passkey stands behind answered ${out.status}`);
-  expect(!(await signedIn(leaving)), 'a session no passkey stands behind, signed out, still read', await said(await leaving.fetch('/api/projects')));
 
   // 16: a service, with no passkey anywhere, reads as it did; the handle reaches /use as it did.
   const read = await bearer(deployment.origin, live.token).secrets.reveal(`${live.canary.project}/${live.canary.environment}`);
   expect(read.values[live.canary.key] === live.canary.value, "under required, a service's token did not read its value");
   const usedThen = await used(deployment, handle.token);
   expect(usedThen === 200, `under required, a handle made under optional answered ${usedThen} at /use, not 200 as before`);
-  return 'under required, a session no passkey stands behind answered 401 passkey_required to every call, /api/me too, but signing out; a one-key reveal refused alike for a key that exists, a sensitive one and one never made, no use logged; a service read as before, and a handle reached /use as before';
+  return {
+    detail: 'under required, a session no passkey stands behind answered 401 passkey_required to every call, /api/me too, but signing out; a one-key reveal refused alike for a key that exists, a sensitive one and one never made, no use logged; a service read as before, and a handle reached /use as before',
+    value: signedOut,
+  };
 }
 
-/** The deployment back to `optional`, after the workload checks ran under `required` (16): the session `required` refused reads again. */
-export async function backToOptional(deployment: Deployment, { bulk }: People): Promise<string> {
+/**
+ * The deployment back to `optional`, after the workload checks ran under `required` (16): the session `required` refused
+ * reads again, and the one signed out under `required` (`signedOut`, its cookie as it was) stays ended. With no
+ * `signedOut` (`passkeys required` failed first), it still restarts, so that later checks run under `optional`.
+ */
+export async function backToOptional(deployment: Deployment, { bulk }: People, signedOut: Browser | undefined): Promise<string> {
   await deployment.restart({ PASSKEYS: 'optional' });
   expect(await signedIn(bulk.browser), "back under optional, the bulk reader's session, refused under required, did not read", await said(await bulk.browser.fetch('/api/projects')));
-  return "restarted under optional; the bulk reader's session, refused under required, reads again";
+  if (signedOut === undefined) return "restarted under optional; the bulk reader's session, refused under required, reads again";
+  const ended = await signedOut.fetch('/api/projects');
+  expect(ended.status === 401, 'a session signed out under required read again under optional, its cookie kept', await said(ended));
+  return "restarted under optional; the bulk reader's session, refused under required, reads again, and the one signed out under required, its cookie kept, answers 401";
 }
 
 /**
