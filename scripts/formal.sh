@@ -246,6 +246,15 @@ REMOVALS=(
   "RoutingKeys KeyByItem EverySendAllowed"
   "RoutingKeys StandingFirst NoRouteBeforeStanding"
   "RoutingKeys FencedRead EverySendAllowed"
+  # The roles split out of `log_config` (Roles.tla, T178 PR 2): 0.15.0's changes write the role's row unsealed, 0.16's both
+  # objects after resealing every row that differs from the whole object, as the vault's start does; 0.17 reads sealed rows only.
+  "Roles NullOnOld SealedRowsTrue"
+  "Roles DualWrite NoStaleDecision"
+  "Roles EditSyncs RowsFaithful"
+  "Roles SyncFromConfig RowsFaithful"
+  "Roles SyncEveryRole RowsFaithful"
+  "Roles NeverSkip NoStaleDecision"
+  "Roles ReadChecksSeal NoStaleDecision"
   # 0.15's hot path (HotPathOne.tla; W208, W211; the plan's PRs 3 to 5): one call per use, every input sealed.
   "HotPathOne UseLocks TotalOrder"
   "HotPathOne UseLocks NothingAllowedAfterAnswer"

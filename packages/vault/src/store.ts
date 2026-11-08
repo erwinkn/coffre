@@ -8,9 +8,10 @@ import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/g
 import { entryColumns, newestVaultEntries, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
-import { indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref } from './inputs.ts';
+import { canonical, indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref, type RoleInput } from './inputs.ts';
 import { changeHolds, CUTOVER_OBJECT, type ChangeRow, type LogMacKey } from './log-entry.ts';
-import { configObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
+import type { StoredRole } from './role-rows.ts';
+import { configObject, environmentObject, memberStanding, policyObject, principalObject, secretObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
@@ -1242,11 +1243,22 @@ export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, {
         seal: row.seal === null ? null : Buffer.from(row.seal),
       };
     }
-    case 'roles': case 'policy': {
+    case 'roles': {
       const [row] = await db.select({ value: logConfig.value, seal: logConfig.seal }).from(logConfig).where(eq(logConfig.name, ref.kind));
       if (row === undefined) return { row: null, seal: null };
       // Whatever it holds: a value that is not the object fails its seal.
       return { row: configObject(row.value), seal: row.seal ?? null };
+    }
+    case 'policy': {
+      const { policy } = tablesOf(db);
+      const [row] = await db.select().from(policy).where(eq(policy.name, ref.id));
+      return row === undefined ? { row: null, seal: null } : { row: policyObject(row), seal: row.seal };
+    }
+    case 'role': {
+      const { roles } = tablesOf(db);
+      const { scope, name } = roleName(ref.id);
+      const [row] = await db.select({ definition: roles.definition, seal: roles.seal }).from(roles).where(and(eq(roles.scope, scope), eq(roles.name, name)));
+      return row === undefined ? { row: null, seal: null } : { row: roleRow(ref.id, row.definition), seal: row.seal ?? null };
     }
     case 'proxy': {
       const { proxyDefinitions } = tablesOf(db);
@@ -1542,6 +1554,7 @@ const KNOWN_OPS: Record<Kind, readonly string[]> = {
   principal: ['member.add', 'member.role', 'member.remove', 'member.restore', 'access.grant', 'access.revoke'],
   environment: ['environment.protect', 'environment.rename', 'environment.archive'],
   roles: ['role.define'],
+  role: ['role.define'],
   policy: ['bulk.limit'],
   proxy: ['proxy.save', 'proxy.code'],
   'proxy-reserved': ['proxy.code', 'proxy.release'],
@@ -1568,7 +1581,8 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
   const op = (JSON.parse(call.payload) as { op?: unknown }).op;
   if (ref.kind === 'binding') throw new Error('a binding changes by the vault\'s own statements alone (`change_bindings`)');
   if (typeof op !== 'string' || (op !== 'genesis' && !KNOWN_OPS[ref.kind].includes(op))) throw new Error(`this schema knows no change ${String(op)} to a ${ref.kind}`);
-  const proxied = ref.kind === 'proxy' || ref.kind === 'proxy-reserved';
+  // Written whole from the newest change's seal: the proxy's, and a role's row (0.16).
+  const proxied = ref.kind === 'proxy' || ref.kind === 'proxy-reserved' || ref.kind === 'role';
   if (op === 'genesis' && proxied) throw new Error(`a ${ref.kind} object has no genesis`);
   const named = (JSON.parse(call.payload) as { ref?: { kind?: unknown; id?: unknown } }).ref;
   if ((op !== 'genesis' || named !== undefined) && (named?.kind !== ref.kind || named.id !== ref.id)) throw new Error(`a change names the object it is to: ${ref.kind}, ${ref.id}`);
@@ -1576,6 +1590,7 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
   const valued = ref.kind === 'environment' ? op !== 'genesis' && value === null
     : ref.kind === 'secret' ? (op === 'secret.write') === (value === null)
     : ref.kind === 'roles' || ref.kind === 'policy' ? (op === 'genesis') === (value !== null)
+    : ref.kind === 'role' ? false
     : proxied ? value === null : value !== null;
   if (valued) throw new Error(`a ${ref.kind} change ${op} carries the object it leaves exactly when change_input writes it`);
   // ChangeChecksSeal; the proxy's rows are written whole, from the newest change's seal (0056).
@@ -1656,9 +1671,23 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
       if (ref.id !== 'instance' || config === null || typeof config !== 'object' || Array.isArray(config) || (op === 'genesis' && call.sealFrom !== null)) {
         throw new Error(`the ${ref.kind} object is one, made once from its value and changed from its seal`);
       }
+      const [prior] = await tx.select({ value: logConfig.value }).from(logConfig).where(eq(logConfig.name, ref.kind));
       done = call.sealFrom === null
         ? changedRows(await tx.insert(logConfig).values({ name: ref.kind, value: JSON.stringify(config), seal: call.seal }).onConflictDoNothing())
         : changedRows(await tx.update(logConfig).set({ value: JSON.stringify(config), seal: call.seal }).where(and(eq(logConfig.name, ref.kind), eq(logConfig.seal, call.sealFrom))));
+      if (ref.kind === 'roles' && done > 0) await unsealChanged(tx, prior === undefined ? {} : JSON.parse(prior.value) as unknown, config as Record<string, unknown>);
+      // The policy's typed row too (0040; 0081 on Postgres), from the same value, sealed the same; both move, or the change is refused.
+      if (ref.kind === 'policy' && done > 0) {
+        const { policy } = tablesOf(tx);
+        const bulk = (config as { bulk?: { count?: unknown; windowMs?: unknown } }).bulk;
+        if (typeof bulk?.count !== 'number' || typeof bulk.windowMs !== 'number') throw new Error('a policy object is its bulk cap\'s count and window');
+        if (call.seal === null) throw new Error('a policy change leaves its object');
+        const columns = { bulkCount: bulk.count, bulkWindowMs: bulk.windowMs, seal: call.seal };
+        const moved = call.sealFrom === null
+          ? changedRows(await tx.insert(policy).values({ name: 'instance', ...columns }).onConflictDoNothing())
+          : changedRows(await tx.update(policy).set(columns).where(and(eq(policy.name, 'instance'), eq(policy.seal, call.sealFrom))));
+        if (moved === 0) throw new StaleRow('the policy object\'s rows are not one another\'s: stale');
+      }
       break;
     }
     case 'proxy': case 'proxy-reserved': {
@@ -1675,6 +1704,26 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
         const row = { names: value!.names, seal: call.seal };
         done = changedRows(await tx.insert(proxyReserved).values({ id: 1, ...row }).onConflictDoUpdate({ target: proxyReserved.id, set: row }));
       }
+      break;
+    }
+    case 'role': {
+      // A role's row (0.16), written whole from its value, from the newest change's seal: a row unsealed or moved is replaced.
+      if (!sameBytes(call.sealFrom, newest?.seal ?? null)) return null;
+      const { scope, name } = roleName(ref.id);
+      if ((scope !== 'project' && scope !== 'instance') || name === ''
+        || (value !== null && (value.kind !== 'role' || value.id !== ref.id || !(value.definition === null || isRecord(value.definition))))
+        || (value === null) !== (call.seal === null)) {
+        throw new Error('a role object is its scope and name, and its definition or none');
+      }
+      const { roles } = tablesOf(tx);
+      if (value === null) {
+        await tx.delete(roles).where(and(eq(roles.scope, scope), eq(roles.name, name)));
+      } else {
+        const row = { definition: value.definition as Record<string, unknown> | null, seal: call.seal };
+        await tx.insert(roles).values({ scope, name, ...row }).onConflictDoUpdate({ target: [roles.scope, roles.name], set: row });
+      }
+      // From the newest seal, whatever the row held: a deletion of a row already gone is a change all the same.
+      done = 1;
       break;
     }
   }
@@ -1710,6 +1759,71 @@ async function heldSeal(db: Queryable, ref: Ref): Promise<Buffer | null> {
     }
     default:
       return (await readObject(db, ref as Ref & { kind: ReadKind })).seal;
+  }
+}
+
+/**
+ * Every row of `roles` (T178, 0.16), each with the seal its object's newest change left (`StoredRole`): what the
+ * vault's start, and a change of a role, sync the rows from (`roleChanges`). One statement on Postgres, one probe of
+ * each role's changes; a handful of rows, however long the log.
+ */
+export async function roleRows(db: Queryable): Promise<StoredRole[]> {
+  if (engineOf(db) === 'postgres') {
+    const rows = await rowsOf<{ scope: string; name: string; definition: unknown; seal: Buffer | Uint8Array | null; found: boolean; newest: Buffer | Uint8Array | null }>(db, sql`
+      SELECT r.scope, r.name, r.definition, r.seal, l.number IS NOT NULL AS found, l.seal AS newest FROM roles r
+        LEFT JOIN LATERAL (SELECT c.number, c.seal FROM log_changes c WHERE c.object = log_object('role', r.scope || '/' || r.name) ORDER BY c.number DESC LIMIT 1) l ON true`);
+    return rows.map((row) => ({
+      scope: row.scope, name: row.name, definition: roleRow('', row.definition).definition, seal: bytes(row.seal), newest: row.found ? bytes(row.newest) : undefined,
+    }));
+  }
+  const { roles } = tablesOf(db);
+  const rows = await db.select().from(roles);
+  const refs = rows.map((row) => ({ kind: 'role' as const, id: `${row.scope}/${row.name}` }));
+  const newest = await newestSeals(db, refs);
+  return rows.map((row, i) => ({
+    scope: row.scope, name: row.name, definition: roleRow('', row.definition).definition, seal: row.seal ?? null,
+    newest: newest.has(objectKey(refs[i]!)) ? newest.get(objectKey(refs[i]!)) ?? null : undefined,
+  }));
+}
+
+/** A role's object id, `<scope>/<name>`, split. */
+function roleName(id: string): { scope: string; name: string } {
+  const slash = id.indexOf('/');
+  return slash < 0 ? { scope: '', name: '' } : { scope: id.slice(0, slash), name: id.slice(slash + 1) };
+}
+
+/** A row of `roles` as its object: the definition JSON (jsonb on Postgres, text on SQLite), null as the role ships. */
+function roleRow(id: string, definition: unknown): RoleInput {
+  return { kind: 'role', id, definition: (typeof definition === 'string' ? JSON.parse(definition) : definition ?? null) as RoleInput['definition'] };
+}
+
+/**
+ * NullOnOld, as `change_input` does it (0081; formal/Roles.tla): after a change of the whole roles object, the row of
+ * each role it moved, unsealed, as it leaves it, unless the row says that already (0.16's own change of the role, just
+ * before). A role whose edit it takes away keeps its row, its definition none, unsealed: nobody's, until the vault's
+ * start rewrites it.
+ */
+async function unsealChanged(tx: Transaction, prior: unknown, config: Record<string, unknown>): Promise<void> {
+  const { roles } = tablesOf(tx);
+  const tableOf = (object: unknown, table: string): Record<string, unknown> => {
+    const value = isRecord(object) ? object[table] : undefined;
+    return isRecord(value) ? value : {};
+  };
+  for (const [scope, table] of [['project', 'roles'], ['instance', 'instanceRoles']] as const) {
+    const was = tableOf(prior, table);
+    const now = tableOf(config, table);
+    for (const [name, definition] of Object.entries(now)) {
+      if (Object.hasOwn(was, name) && canonical(was[name]) === canonical(definition)) continue;
+      const [row] = await tx.select({ definition: roles.definition }).from(roles).where(and(eq(roles.scope, scope), eq(roles.name, name)));
+      if (row === undefined) await tx.insert(roles).values({ scope, name, definition: definition as Record<string, unknown>, seal: null });
+      else if (canonical(roleRow('', row.definition).definition) !== canonical(definition)) {
+        await tx.update(roles).set({ definition: definition as Record<string, unknown>, seal: null }).where(and(eq(roles.scope, scope), eq(roles.name, name)));
+      }
+    }
+    for (const name of Object.keys(was)) {
+      if (Object.hasOwn(now, name)) continue;
+      await tx.update(roles).set({ definition: null, seal: null }).where(and(eq(roles.scope, scope), eq(roles.name, name), isNotNull(roles.definition)));
+    }
   }
 }
 
@@ -1772,9 +1886,9 @@ export async function loggedObjects(db: Queryable): Promise<Set<string>> {
   return new Set(rows.map((row) => row.object));
 }
 
-/** The rows `log_config` holds, by name: only `change_input` writes one, sealed (the roles', the policy's). */
+/** The configuration objects' rows there are, by kind: only `change_input` writes one, sealed (the roles' in `log_config`, the policy's in `policy`). */
 export async function configRows(db: Queryable): Promise<Set<string>> {
-  const rows = await rowsOf<{ name: string }>(db, sql`SELECT name FROM log_config`);
+  const rows = await rowsOf<{ name: string }>(db, sql`SELECT name FROM log_config WHERE name = 'roles' UNION ALL SELECT 'policy' FROM policy`);
   return new Set(rows.map((row) => row.name));
 }
 

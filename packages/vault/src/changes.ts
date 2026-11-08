@@ -193,7 +193,9 @@ export class Changes {
   async prepare(db: Queryable): Promise<void> {
     const unread = [...this.#staged.values()].filter((staged) => staged.read === undefined);
     // Each object's reads asked together: one round trip for them all.
-    const reads = await Promise.all(unread.map((staged) => this.#read(db, staged.ref, staged.steps[0]?.op.op === 'proxy.save' && staged.steps[0].op.replace)));
+    // A role's row is written whole too (0.16): from its newest change's seal, whatever the row holds, which 0.15.0's
+    // changes leave unsealed and the vault's start rewrites (formal/Roles.tla).
+    const reads = await Promise.all(unread.map((staged) => this.#read(db, staged.ref, staged.ref.kind === 'role' || (staged.steps[0]?.op.op === 'proxy.save' && staged.steps[0].op.replace))));
     for (const [i, staged] of unread.entries()) {
       const read = reads[i]!;
       if (read.logged) {
@@ -504,7 +506,7 @@ function opsBetween(before: Input | null, after: Input | null): Op[] {
  * one: its reference's end (`ended_at`, 0029).
  */
 function writes(ref: Ref): boolean {
-  return ref.kind === 'environment' || ref.kind === 'secret' || ref.kind === 'roles' || ref.kind === 'policy' || ref.kind === 'proxy' || ref.kind === 'proxy-reserved';
+  return ref.kind === 'environment' || ref.kind === 'secret' || ref.kind === 'roles' || ref.kind === 'role' || ref.kind === 'policy' || ref.kind === 'proxy' || ref.kind === 'proxy-reserved';
 }
 
 /**

@@ -67,6 +67,9 @@ async function seed(): Promise<void> {
       JSON.stringify({ kind: 'policy', bulk: { count: 1000, windowMs: 900_000 } }), sealOf(SEAL, { kind: 'policy', id: 'instance' }, { kind: 'policy', bulk: { count: 1000, windowMs: 900_000 } }),
       JSON.stringify({ kind: 'roles', roles: {}, instanceRoles: {} }), sealOf(SEAL, { kind: 'roles', id: 'instance' }, { kind: 'roles', roles: {}, instanceRoles: {} }),
     ]);
+    await client.unsafe(`INSERT INTO policy (name, bulk_count, bulk_window_ms, seal) VALUES ('instance', 1000, 900000, $1)`, [
+      sealOf(SEAL, { kind: 'policy', id: 'instance' }, { kind: 'policy', bulk: { count: 1000, windowMs: 900_000 } }),
+    ]);
     await change({ kind: 'policy', id: 'instance' }, { kind: 'policy', bulk: { count: 1000, windowMs: 900_000 } }, client);
     await change({ kind: 'roles', id: 'instance' }, { kind: 'roles', roles: {}, instanceRoles: {} }, client);
     const projects: { id: string; dev: string; prod: string; mine: string; owner: string }[] = [];

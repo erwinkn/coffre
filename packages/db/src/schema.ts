@@ -1118,6 +1118,65 @@ export const logConfig = pgTable(
 );
 
 /**
+ * The instance's policy (T178, 0.16): the bulk cap's count and window, R52's,
+ * each a column of the one row. Sealed as every input is, its object the
+ * `policy` one `log_config` held, `{ kind: 'policy', bulk: { count,
+ * windowMs } }`, which every change of it carries whole: a use reads the cap
+ * from that change (CapSealed), and this row only to check its seal.
+ * Written only through `change_input`, which writes `log_config`'s too while
+ * 0.15.0's code may read it. The window's bound is the vault's
+ * `MAX_BULK_WINDOW_MINUTES` (a day), as `checkBulkLimit` holds it.
+ */
+export const policy = pgTable(
+  'policy',
+  {
+    name: text().primaryKey(),
+    bulkCount: bigint('bulk_count', { mode: 'number' }).notNull(),
+    bulkWindowMs: bigint('bulk_window_ms', { mode: 'number' }).notNull(),
+    seal: bytea().notNull(),
+  },
+  (table) => [
+    check('policy_name_check', sql`${table.name} = 'instance'`),
+    check('policy_bulk_count_check', sql`${table.bulkCount} >= 1`),
+    check('policy_bulk_window_ms_check', sql`${table.bulkWindowMs} > 0 AND ${table.bulkWindowMs} <= 86400000`),
+    check('policy_seal_check', sql`octet_length(${table.seal}) = 16`),
+  ],
+);
+
+/**
+ * The roles, one row each (T178, 0.16): an Owner's edit of a role that
+ * ships, or a role an Owner made, `scope` saying which table it is of
+ * (`project`, granted on places, or `instance`, a member's own). Its
+ * definition as JSON, null for one as the release ships it; no row for a
+ * role an Owner made and deleted. Each is an object of 0.15's log,
+ * `role`/`<scope>/<name>`, sealed by its own newest change. 0.16 decides on
+ * `log_config`'s whole `roles` object still, and writes each role's row
+ * beside it; its vault seals every row from that object at its start. A row
+ * with no seal is 0.15.0's (its `change_input` unseals the row of each role
+ * it changes) or a writer's: never what a release reads. 0.17 reads the
+ * rows, refusing one that is not sealed and its object's newest, and adds
+ * `grants`' foreign key onto them; 0.18 drops `log_config`
+ * (formal/Roles.tla). Written only through `change_input`.
+ */
+export const roles = pgTable(
+  'roles',
+  {
+    scope: text().notNull(),
+    name: text().notNull(),
+    definition: jsonb(),
+    seal: bytea(),
+  },
+  (table) => [
+    primaryKey({ name: 'roles_pkey', columns: [table.scope, table.name] }),
+    check('roles_scope_check', sql`${table.scope} IN ('project', 'instance')`),
+    // `ROLE_ID`, as `grants_role_check` holds a grant's role to it.
+    check('roles_name_check', sql`${table.name} ~ ${sql.raw(`'${ROLE_ID.source}'`)}`),
+    check('roles_definition_check', sql`${table.definition} IS NULL OR jsonb_typeof(${table.definition}) = 'object'`),
+    check('roles_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+  ],
+);
+
+/**
  * Proxy definitions written in the UI (0.16, T186; docs/design/proxy-ui.md,
  * section 2): each environment's, one sealed object of 0.15's log, kind
  * `proxy`. Its items by name, each with what its save froze; the index of

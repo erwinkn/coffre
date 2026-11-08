@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
+import { INSTANCE_ROLES, ROLES } from '@coffre/core/access';
 import { encrypt, freshDek, ownerKey } from '@coffre/core/envelope';
 import type { UseInput, UseOutcome } from '@coffre/core/vault';
 import { tablesOf, type Database, type Queryable } from '@coffre/db';
@@ -13,7 +14,7 @@ import { sql } from 'drizzle-orm';
 import type { Sealed } from '../src/checkpointer.ts';
 import { resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
 import { CUTOVER_OBJECT } from '../src/cutover.ts';
-import { objectKey, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
+import { objectKey, roleObject, roleRef, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
 import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
@@ -49,7 +50,7 @@ export async function useDatabases(opened: TestDatabase): Promise<Database> {
 
 /** The log as a new instance's: no change, no use, the floor a minute back, days of uses made around today. */
 export async function emptyLog(): Promise<void> {
-  for (const table of ['log_uses', 'bulk_cap', 'log_changes', 'log_config']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  for (const table of ['log_uses', 'bulk_cap', 'log_changes', 'log_config', 'policy', 'roles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
   await emptyReads(db.owner);
   await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
   if (ENGINE === 'postgres') {
@@ -159,6 +160,16 @@ export async function world(options: {
   if ((await rows(db.owner, sql`SELECT 1 FROM log_config`)).length === 0) {
     await genesis({ kind: 'policy', id: 'instance' }, { kind: 'policy', bulk: { count: options.count ?? 1000, windowMs: options.windowMs ?? 15 * 60_000 } });
     await genesis({ kind: 'roles', id: 'instance' }, { kind: 'roles', roles: {}, instanceRoles: {} });
+    // Each role's row, as the vault's start makes it (T178): every role that ships, as it ships, so that a vault's first
+    // call finds them in step and changes nothing.
+    for (const [table, shipped] of [['roles', ROLES], ['instanceRoles', INSTANCE_ROLES]] as const) {
+      for (const role of Object.keys(shipped)) {
+        const ref = roleRef(table, role);
+        // Its payload names it, as the vault's do: a role's object has no genesis to name it.
+        await change(ref, { op: 'role.define', table, role, definition: null, ref } as Op, roleObject(table, role, null), (tx, value) =>
+          run(tx, sql`INSERT INTO roles (scope, name, definition, seal) VALUES (${table === 'roles' ? 'project' : 'instance'}, ${role}, ${null}, ${value})`));
+      }
+    }
     await cutOverStandIn();
   }
   await genesis({ kind: 'principal', id: principal }, objects.principal);
@@ -219,7 +230,9 @@ export async function genesis(ref: Ref, object: Input): Promise<void> {
   };
   await change(ref, op, object, async (tx, value) => {
     if (ref.kind === 'roles' || ref.kind === 'policy') {
+      // As `change_input` makes them: the policy's typed row beside its `log_config` one (0081).
       await run(tx, sql`INSERT INTO log_config (name, value, seal) VALUES (${ref.kind}, ${JSON.stringify(object)}, ${value})`);
+      if (object.kind === 'policy') await run(tx, sql`INSERT INTO policy (name, bulk_count, bulk_window_ms, seal) VALUES ('instance', ${object.bulk.count}, ${object.bulk.windowMs}, ${value})`);
       return;
     }
     const [table, key] = where[ref.kind]!;
@@ -275,14 +288,18 @@ export async function replayed(answered: ReadonlyMap<string, UseOutcome>): Promi
   return checked;
 }
 
-function stripped(op: Op & { old?: string }): Op {
-  const { old: _, ...rest } = op;
+/** A change's op as replay takes it: without what its payload carries beside it (`old`, a role's `ref`). */
+export function stripped(op: Op & { old?: string; ref?: Ref }): Op {
+  const { old: _, ref: _ref, ...rest } = op;
   return rest as Op;
 }
 
 /** The object a change is about: the kind and id its key is of, from a genesis's value or a ref seen before. */
-function refOf(op: Op, key: string, seen: Map<string, Ref>): Ref {
-  if (op.op === 'genesis') {
+export function refOf(op: Op & { ref?: Ref }, key: string, seen: Map<string, Ref>): Ref {
+  if (op.ref !== undefined) {
+    assert.equal(objectKey(op.ref), key);
+    seen.set(key, op.ref);
+  } else if (op.op === 'genesis') {
     const value = op.value;
     const ref: Ref = value.kind === 'principal' ? { kind: 'principal', id: value.principal } : value.kind === 'roles' || value.kind === 'policy' || value.kind === 'proxy-reserved' ? { kind: value.kind, id: 'instance' } : { kind: value.kind, id: value.id };
     assert.equal(objectKey(ref), key);

@@ -112,14 +112,17 @@ test("the hot login's timeouts are HOT_LOCK_TIMEOUT_MS and HOT_STATEMENT_TIMEOUT
   assert.equal(HELD_PAST_DEADLINE_MS, HOT_STATEMENT_TIMEOUT_MS);
 });
 
-test("a grant's role check takes a role id as ROLE_ID does: 2 to ROLE_ID_MAX characters", async () => {
-  if (ENGINE === 'postgres') {
-    const [row] = await rows<{ definition: string }>(db.owner, sql`
-      SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conname = 'grants_role_check'`);
-    assert.ok(row!.definition.includes(`'${ROLE_ID.source}'`), row!.definition);
-  } else {
-    const [row] = await rows<{ sql: string }>(db.owner, sql`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'grants'`);
-    assert.ok(row!.sql.includes(`BETWEEN 2 AND ${ROLE_ID_MAX} AND`), row!.sql);
+test("a grant's role check and a role row's name check take a role id as ROLE_ID does: 2 to ROLE_ID_MAX characters", async () => {
+  // A role row's name too (T178): a longer ROLE_ID with no migration would fail the vault's start sync on its CHECK.
+  for (const [table, check] of [['grants', 'grants_role_check'], ['roles', 'roles_name_check']] as const) {
+    if (ENGINE === 'postgres') {
+      const [row] = await rows<{ definition: string }>(db.owner, sql`
+        SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conname = ${check}`);
+      assert.ok(row!.definition.includes(`'${ROLE_ID.source}'`), row!.definition);
+    } else {
+      const [row] = await rows<{ sql: string }>(db.owner, sql`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ${table}`);
+      assert.ok(row!.sql.includes(`BETWEEN 2 AND ${ROLE_ID_MAX} AND`), row!.sql);
+    }
   }
   assert.equal(ROLE_ID.source, `^[a-z][a-z0-9-]{1,${ROLE_ID_MAX - 1}}$`);
 });

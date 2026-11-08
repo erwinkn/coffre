@@ -310,7 +310,7 @@ test('the roles and the policy: a row put back is stale; the cap is the policy\'
   const { use } = await isolate();
   // Its row says 99, its newest change 1: the use is refused before anything (StaleFirst), on the rows of its first
   // call, its key not in the set, and nothing is written (review r2 of D153).
-  await run(db.owner, sql`UPDATE log_config SET value = ${JSON.stringify({ kind: 'policy', bulk: { count: 99, windowMs: DAY } })} WHERE name = 'policy'`);
+  await run(db.owner, sql`UPDATE policy SET bulk_count = 99, bulk_window_ms = ${DAY}`);
   assert.equal(code(heard(await use(ask(w, first)))), 'tampered', 'its seal is not over the row any more');
   assert.equal((await rows(db.owner, sql`SELECT last FROM bulk_cap`)).length, 0);
   // A call made as decided, a row put back between its two calls: the cap is still the newest change's, one key in.
@@ -531,7 +531,7 @@ test('a session\'s first call does its planning\'s cold work before it takes the
     const fresh = postgresSession(OWNER_URL);
     try {
       await fresh.unsafe(`SET lock_timeout = '200ms'`);
-      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0076', false)`);
+      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0081', false)`);
       const at = Date.now();
       await assert.rejects(
         fresh.unsafe(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6)`, [w.credentialId, id, newRequestId(), String(at), randomBytes(16), String(at + 3000)]),
@@ -562,7 +562,7 @@ test('a session\'s first call does its planning\'s cold work before it takes the
         [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
       assert.equal(answer!.use.state, null);
       const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-      assert.equal(setting!.planned, '0076');
+      assert.equal(setting!.planned, '0081');
     } finally {
       await fresh.end();
     }

@@ -765,7 +765,10 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows, routed?: { read
   const grants = m === undefined ? [] : await rows.read(`grants\n${c!.principal}`, () => rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx,
     sql`SELECT coalesce(g.project_id, ge.project_id) AS project_id, g.environment_id, g.environment_slug, g.role, g.expires_at
           FROM grants g LEFT JOIN environments ge ON ge.id = g.environment_id WHERE g.principal = ${c!.principal}`));
-  const config = await rows.read('config', () => rowsOf<{ name: string; value: string; seal: Buffer | null }>(tx, sql`SELECT name, value, seal FROM log_config`));
+  // The roles' row and the policy's (0040: typed, its object's JSON rebuilt from its columns), in one read.
+  const config = await rows.read('config', () => rowsOf<{ name: string; value: string; seal: Buffer | null }>(tx, sql`
+    SELECT name, value, seal FROM log_config WHERE name = 'roles'
+    UNION ALL SELECT 'policy', json_object('kind', 'policy', 'bulk', json_object('count', bulk_count, 'windowMs', bulk_window_ms)), seal FROM policy`));
   const roles = config.find((row) => row.name === 'roles');
   const policyRow = config.find((row) => row.name === 'policy');
   const secretOf = (id: string | null) => id === null

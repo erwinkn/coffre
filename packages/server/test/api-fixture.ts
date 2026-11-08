@@ -598,6 +598,8 @@ export async function resetDatabase(owner: Database): Promise<void> {
     principals,
     logChanges,
     logConfig,
+    policy,
+    roles,
     proxyDefinitions,
     proxyReserved,
     passkeys,
@@ -625,6 +627,8 @@ export async function resetDatabase(owner: Database): Promise<void> {
   // 0.15's log, which the change path writes (unless COFFRE_TEST_LOG=0.14), gone with the rows it is of.
   await owner.delete(logChanges);
   await owner.delete(logConfig);
+  await owner.delete(policy);
+  await owner.delete(roles);
   // 0.16's proxy definitions, the vault's objects too.
   await owner.delete(proxyDefinitions);
   await owner.delete(proxyReserved);

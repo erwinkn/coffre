@@ -63,6 +63,9 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
   their passkeys take, the log's head, which orders the app's own issues
   against a change, the check of every request, and the sign-in's decision
   whether a person adds a passkey first ([below](#factortla)).
+- One holds 0.16's roles split out of `log_config`, while 0.15.0's code still
+  runs on the new schema, through 0.17's read of the rows: [`formal/Roles.tla`](../formal/Roles.tla)
+  ([below](#rolestla)).
 - [`scripts/formal.sh`](../scripts/formal.sh) downloads TLC, checks its
   checksum and runs everything.
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
@@ -3000,6 +3003,90 @@ name, a key write, an add), which run the check in that call (T216;
 passkeys.md, section 6.2): `req` is one statement either way. SQLite,
 whose one writer serializes the change and every issue whole, so the
 interleavings cannot happen.
+
+## 0.16: the roles split
+
+### Roles.tla
+
+The roles split out of `log_config` (T178 PR 2), written before the code
+(R45). Until 0.16 the roles are one sealed object, `roles`/`instance`: the
+Owner's edits of every role in one row of `log_config`, its seal the one its
+newest change left. 0.16 adds an object per role, `role`/`<scope>/<name>`, a
+row of the `roles` table, sealed by its own newest change. It takes three
+releases:
+
+- **0.16** decides on the whole object, as 0.15.0 does: a use reads it in
+  its one statement, unchanged, and a change of a role checks it current.
+  Each change of a role writes the role's row too, and the vault's start
+  rewrites, sealed, every row that is not what the whole object says.
+- **0.17** reads the rows, and refuses one that is unsealed, or not sealed
+  by its object's newest change. It adds `grants`' foreign key onto them.
+- **0.18** drops `log_config`.
+
+Between `coffre migrate` and the deploy, and again after a rollback, 0.15.0's
+vault serves on 0.16's schema: its TypeScript knows only the whole object,
+while its SQL, `change_input` included, is the migration's. So does 0.14.5's,
+on a one-step upgrade to 0.16 ([deploy.md](deploy.md#from-0145-to-016)),
+which knows neither and grants roles it writes no row of: the foreign key
+waits for 0.17, which only a 0.16 precedes.
+
+**The model.** Two roles, one shipped (`dev`, which 0.15.0 left edited) and
+one an Owner makes (`c`); no row of either at first, as the migration makes
+none. Every change and every use is one step, as each holds the head and
+the fence:
+
+- `OldEdit`, 0.15.0's change of one role: a change of the whole object, and
+  `change_input`, which writes `log_config`, and the role's own row, as the
+  edit leaves it, unsealed, unless the row says that already;
+- `NewEdit`, 0.16's change of one role, in one transaction: the sync below,
+  a change of the role's object and one of the whole object;
+- `Sync`, the vault's start: a change of each role whose row is not sealed
+  and current, or not what the whole object says, to what the whole object
+  says;
+- `Use`, a use of 0.15.0 or 0.16, on the whole object;
+- `Upgrade`, 0.17's deploy, after which no 0.15.0 code runs, and `Read`, a
+  use of 0.17, on a role's row (no row: no role, a grant of it reaches
+  nothing);
+- `Tamper`, someone who writes the database (R64): a row with any
+  definition and no seal, an earlier sealed one put back, or none.
+
+What must hold: every use decides on what the newest change of the role
+says, or refuses (`NoStaleDecision`); after any step of 0.16's every row is
+sealed, current, and what the whole object says (`RowsFaithful`), which is
+what 0.17 reads; and, but for the database's writer, a row sealed and
+current says what the newest change says, whichever release wrote last
+(`SealedRowsTrue`): a 0.17 deployed too soon refuses what 0.15.0 changed,
+never serves it stale.
+
+| Protection | Without it |
+|---|---|
+| `NullOnOld`: `change_input` writes the role's row, unsealed, on 0.15.0's change | the row 0.16 sealed still says what 0.15.0 changed since (`SealedRowsTrue`) |
+| `DualWrite`: 0.16's change writes the whole object too | a use decides on an edit 0.16 replaced |
+| `EditSyncs`: 0.16's change first reseals every row that differs | the rows 0.15.0 left unsealed stay so after 0.16's change |
+| `SyncFromConfig`: the sync seals the whole object's definition, not the row's | it seals a definition the writer wrote |
+| `SyncEveryRole`: it rewrites each row that differs, sealed and current or not | a row put back, sealed and current on its own object, stays |
+| `NeverSkip`: 0.17 deploys only after 0.16's vault has synced since 0.15.0's last change | 0.17 serves a row the writer put back over one 0.15.0 unsealed |
+| `ReadChecksSeal`: 0.17 serves a row only on its newest change's seal | 0.17 serves a row the writer wrote |
+
+`NeverSkip` is the upgrade rule: 0.14.5 or 0.15.0 to 0.16.x, then to 0.17,
+never straight to 0.17. A 0.16 vault that started has synced; a 0.15.0
+change after it, through a rollback, is synced again by the next start of
+0.16's vault, or by 0.16's next change of a role.
+
+| Scenario | What | Distinct states |
+|---|---|---|
+| `Roles` | both releases change and use two roles while the vault syncs, someone writes the rows and 0.17 reads them | 41,686 |
+
+Once, by hand, at larger bounds: three roles (one shipped, two an Owner
+makes), nine changes, two of the writer's: 10,407,558 distinct states, no
+error, in 12 minutes on four workers. CI runs the bounds above.
+
+**What it does not cover.** The policy, whose object stays one and whose
+typed row is its newest change's value, which every change carries whole:
+HotPathOne.tla's `CapFromPolicy` and `CapSealed` hold unchanged. What a
+role grants, which `@coffre/core/access` decides and the Lean proofs hold.
+0.17's foreign key, which adds no step: a grant names a row 0.16 made.
+0.18, which drops `log_config` and the whole object.
 
 ## TLC
 

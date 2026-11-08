@@ -13,7 +13,7 @@ import { sql } from 'drizzle-orm';
 import { objectKey, type Input, type Op, type Ref } from '../src/inputs.ts';
 import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { openTestDatabase, rows, run, type TestDatabase } from './database.ts';
-import { ask, change, DAY, emptyLog, genesis, isolate, ROOT, SEAL, seal, useDatabases, world } from './use-world.ts';
+import { ask, change, DAY, emptyLog, genesis, isolate, refOf, ROOT, SEAL, seal, stripped, useDatabases, world } from './use-world.ts';
 import { newRequestId } from '../src/use.ts';
 
 let db: TestDatabase;
@@ -41,9 +41,8 @@ async function replayAgrees(): Promise<number> {
   const refs = new Map<string, Ref>();
   const entries: Logged[] = [
     ...changes.map((row) => {
-      const op = JSON.parse(row.payload) as Op & { old?: string };
-      const { old: _, ...rest } = op;
-      return { kind: 'change' as const, number: BigInt(row.number), at: Number(row.at), ref: refOf(op, row.object, refs), op: rest as Op, seal: row.seal === null ? null : Buffer.from(row.seal) };
+      const op = JSON.parse(row.payload) as Op & { old?: string; ref?: Ref };
+      return { kind: 'change' as const, number: BigInt(row.number), at: Number(row.at), ref: refOf(op, row.object, refs), op: stripped(op), seal: row.seal === null ? null : Buffer.from(row.seal) };
     }),
     ...uses.map((row) => ({ kind: 'use' as const, number: BigInt(row.number), request: { credential: row.credential, secretId: row.secret, place: row.place, at: Number(row.at), ...purposeOf(Number(row.purpose))! }, phased: phasedOf(row.phased) })),
   ].sort((a, b) => (a.number < b.number ? -1 : 1));
@@ -57,15 +56,6 @@ async function replayAgrees(): Promise<number> {
   });
   assert.deepEqual(result.faults, []);
   return checked;
-}
-
-function refOf(op: Op, key: string, seen: Map<string, Ref>): Ref {
-  if (op.op === 'genesis') {
-    const value = op.value;
-    const ref: Ref = value.kind === 'principal' ? { kind: 'principal', id: value.principal } : value.kind === 'roles' || value.kind === 'policy' || value.kind === 'proxy-reserved' ? { kind: value.kind, id: 'instance' } : { kind: value.kind, id: value.id };
-    seen.set(key, ref);
-  }
-  return seen.get(key)!;
 }
 
 const code = (outcome: UseOutcome) => (outcome.ok ? null : 'busy' in outcome ? outcome.busy : outcome.code);

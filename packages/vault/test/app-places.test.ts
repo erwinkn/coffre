@@ -464,7 +464,13 @@ test("what an unarchive restores is read with two probes of each key's changes, 
     const [row] = await rows<Record<string, unknown>>(db.owner, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${loggedChangesQuery(refs, refs)}`);
     const json = Object.values(row!)[0];
     const plan = (typeof json === 'string' ? JSON.parse(json) : json) as { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[];
-    return plan[0]!.Plan['Shared Hit Blocks'] + plan[0]!.Plan['Shared Read Blocks'];
+    // Less the heap pages the four rows lie on: two or three, as where a key's two rows fall by a page's end has it, which
+    // the rows before them decide (the vault's start's own changes among them), never how long the history is.
+    const [pages] = await rows<{ n: number }>(db.owner, sql`
+      SELECT count(DISTINCT (ctid::text::point)[0])::int AS n FROM log_changes
+       WHERE number IN (SELECT l.number FROM (VALUES (${objectKey(refs[0]!)}::uuid), (${objectKey(refs[1]!)}::uuid)) AS o(id),
+                        LATERAL (SELECT number FROM log_changes WHERE object = o.id ORDER BY number DESC LIMIT 2) AS l)`);
+    return plan[0]!.Plan['Shared Hit Blocks'] + plan[0]!.Plan['Shared Read Blocks'] - pages!.n;
   };
   const grown = async (count: number) => {
     for (const ref of refs) await history(objectKey(ref), count);
@@ -481,8 +487,9 @@ test("what an unarchive restores is read with two probes of each key's changes, 
     assert.ok(!/\bSCAN\b/.test(String(large)) && /log_changes_object_idx/.test(String(large)) && /SEARCH c USING INTEGER PRIMARY KEY/.test(String(large)), String(large));
     return;
   }
-  // Four probes (each key's newest change and the one before it, T190), each and its row a B-tree level deeper at most.
-  assert.ok(Number(large) - Number(small) <= 8, `${small} buffers at 1k changes a key, ${large} at 100k`);
+  // Four probes (each key's newest change and the one before it, T190), each and its row's index entry a B-tree level
+  // deeper at most.
+  assert.ok(Number(large) - Number(small) <= 8, `${small} index buffers at 1k changes a key, ${large} at 100k`);
 });
 
 test("a key the log never held, archived (0.14's alone, before the cutover): its unarchive logs nothing, as any of 0.14's rows (T134)", async () => {

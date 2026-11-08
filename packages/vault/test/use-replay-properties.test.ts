@@ -318,6 +318,7 @@ function edited(row: Input): Input {
     case 'secret': return { ...row, nature: row.nature === 'sensitive' ? 'secret' : 'sensitive' };
     case 'environment': return { ...row, deleted: !row.deleted };
     case 'roles': return { ...row, roles: { ...row.roles, viewer: { name: 'Viewer', description: '', permissions: ['secret.read', 'secret.use', 'secret.write'], protected: [] } } };
+    case 'role': return { ...row, definition: row.definition === null ? { name: 'Edited', description: '', permissions: [], protected: [] } : null };
     case 'policy': return { ...row, bulk: { ...row.bulk, count: row.bulk.count + 1 } };
     case 'proxy': return { ...row, items: {} };
     case 'proxy-reserved': return { ...row, names: [...row.names, 'edited'] };

@@ -991,6 +991,41 @@ export const logConfig = sqliteTable(
   ],
 );
 
+/** The instance's policy, its bulk cap typed (schema.ts). */
+export const policy = sqliteTable(
+  'policy',
+  {
+    name: text().primaryKey(),
+    bulkCount: integer('bulk_count').notNull(),
+    bulkWindowMs: integer('bulk_window_ms', { mode: 'number' }).notNull(),
+    seal: bytes('seal').notNull(),
+  },
+  (table) => [
+    check('policy_name_check', sql`${table.name} = 'instance'`),
+    check('policy_bulk_count_check', sql`${table.bulkCount} >= 1`),
+    check('policy_bulk_window_ms_check', sql`${table.bulkWindowMs} > 0 AND ${table.bulkWindowMs} <= 86400000`),
+    check('policy_seal_check', sql`octet_length(${table.seal}) = 16`),
+  ],
+);
+
+/** The roles, one row each, sealed as `role` (schema.ts). The definition as JSON text, null as the release ships it. */
+export const roles = sqliteTable(
+  'roles',
+  {
+    scope: text().notNull(),
+    name: text().notNull(),
+    definition: text({ mode: 'json' }),
+    seal: bytes('seal'),
+  },
+  (table) => [
+    primaryKey({ name: 'roles_pkey', columns: [table.scope, table.name] }),
+    check('roles_scope_check', sql`${table.scope} IN ('project', 'instance')`),
+    check('roles_name_check', sql`length(${table.name}) BETWEEN 2 AND ${sql.raw(String(ROLE_ID_MAX))} AND ${table.name} GLOB '[a-z]*' AND ${table.name} NOT GLOB '*[^a-z0-9-]*'`),
+    check('roles_definition_check', sql`${table.definition} IS NULL OR json_type(${table.definition}) = 'object'`),
+    check('roles_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+  ],
+);
+
 /** An environment's proxy definitions, sealed as `proxy` (schema.ts). Its items as JSON text. */
 export const proxyDefinitions = sqliteTable(
   'proxy_definitions',
