@@ -535,7 +535,7 @@ another request settled.
 | Each operation's requests take turns among themselves alone (`slotsOf`, by operation) | a request waiting for a slot another call's request holds (`WaitsOnlyBehindItsOwn`), and a use waiting at all (`UsesNeverWait`) |
 | One operation's slots span every KEK it asks, whichever provider object (`slotsOf` is the module's, not a provider's) | a read across a rotation, its keys under the kek and a previous one, with more requests in flight than its slots (`InFlightBounded`), which Workers would queue with their attempts' clocks running |
 
-How long an attempt waits (830 ms, `KMS_ATTEMPT_MS`) and that none starts
+How long an attempt waits (878 ms, `KMS_ATTEMPT_MS`) and that none starts
 past its operation's deadline are timing, which the model leaves to the tests
 (`kek-aws-kms.test.ts`; `use.test.ts`, a hung KMS under a use answered by its
 3 s).
