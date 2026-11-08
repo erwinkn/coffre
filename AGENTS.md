@@ -352,11 +352,13 @@ anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
   `formal/lean` in the same pull request, or the cases disagree.
 - `pnpm test:terraform` (after `pnpm build`) checks the Terraform provider,
   a Go module in `terraform-provider/` that no `@coffre/*` package imports:
-  gofmt, `go vet`, its unit tests, then its acceptance tests on Terraform
+  gofmt, `go vet`, its unit tests, then its release (GoReleaser's unsigned
+  snapshot, `terraform-provider/.goreleaser.yml`), which Terraform and OpenTofu
+  install from a filesystem mirror and run, then its acceptance tests on Terraform
   and OpenTofu 1.11 against a coffre that
   `packages/conformance/scripts/terraform-fixture.ts` boots, the Node example
   on SQLite on ports 3482 and 3483 (`scripts/terraform-provider.sh`; `--unit`
-  for the first three alone). Go and both CLIs are pinned by version and
+  for the first three alone). Go, GoReleaser and both CLIs are pinned by version and
   SHA-256 and downloaded once. A change to a route the provider calls (the
   secrets list and write, `POST /api/auth/oidc`) runs it in the same pull
   request.

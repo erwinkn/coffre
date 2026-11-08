@@ -632,19 +632,53 @@ OpenTofu's) publishes from a public GitHub repository named
 `terraform-provider-coffre`, from its tags' GitHub releases: zips for each
 OS and architecture, a `SHA256SUMS` file, its detached GPG signature, and
 a manifest, which GoReleaser builds. The registry checks the signature
-against a GPG public key added to the namespace. The release workflow here
-pushes `terraform-provider/` to that repository as its own history (`git
-subtree split`) and tags it. GoReleaser runs there, signing with a key kept
-in that repository's Actions secrets. The provider takes its own versions (`0.1.0` first),
-apart from coffre's: `pnpm bump` leaves it alone, and its notes say which
-coffre release it needs.
+against a GPG public key added to the namespace. The provider takes its own
+versions (`0.1.0` first), apart from coffre's: `pnpm bump` leaves it alone,
+and its notes (`terraform-provider/CHANGELOG.md`) say which coffre release
+it needs.
 
-Publishing waits for Erwin's go, at publishing time, not before building:
-creating the repository (and in which account, `erwinkn` or `equisafe`, which is
-also the registry namespace: `erwinkn/coffre` in `required_providers`),
-making the GPG key, and the first registry release. Until then, Infra can
-use a local build through Terraform's `dev_overrides`, or a filesystem
-mirror.
+The mirror is `erwinkn/terraform-provider-coffre`, so the provider is
+`erwinkn/coffre` in `required_providers`. It holds `terraform-provider/`
+alone, as its own history, and only coffre writes to it:
+
+- coffre's `Terraform provider` workflow
+  (`.github/workflows/terraform-provider.yml`), dispatched from main with a
+  version, checks that the notes have its section and that the release
+  builds, then pushes `git subtree split --prefix=terraform-provider` (the
+  same commits every time) to the mirror's `main`, and the tag `v<version>`
+  on it, in one atomic push. Its deploy key, the mirror's only write
+  credential, lives in coffre's `terraform-mirror` environment, which only
+  main may use.
+- The tag starts the mirror's `Release` workflow
+  (`terraform-provider/.github/workflows/release.yml`), HashiCorp's
+  standard provider release: one job, in the mirror's `release`
+  environment, which only `v*` tags may use and which alone holds the
+  signing key. It installs Go and GoReleaser pinned by version and SHA-256
+  (`terraform-provider/scripts/tools.sh`), imports the key into a GnuPG home
+  of its own, and runs `goreleaser release`
+  (`terraform-provider/.goreleaser.yml`) with the job's token, which may
+  write the mirror's releases: GoReleaser builds the zips, signs their sums
+  and publishes the release, with the notes
+  `terraform-provider/scripts/notes.sh` reads from
+  the changelog. The key and the token share the job: code that runs there
+  could take the key, which is worth more than a token that writes one
+  repository's releases for one job, so a second job would protect little.
+- The mirror's rulesets keep `main` moving forward only and `v*` tags from
+  moving or going: a version is released once.
+- `pnpm test:terraform` builds the release unsigned (GoReleaser's
+  snapshot), and Terraform and OpenTofu each install this platform's zip
+  from a filesystem mirror and run it: the registries' own reading of the
+  zip, not a checker of ours. The build is reproducible: the same commit
+  gives the same zips.
+
+The signing key is RSA 4096 (the Registry takes no ECC key), signing only,
+its private half and passphrase in the `release` environment and in
+Erwin's 1Password, its public half on the `erwinkn` namespace. The first
+release waits for Erwin: he adds the public key to the namespace and
+connects the mirror on registry.terraform.io, then dispatches `0.1.0`.
+Until a release, Infra uses a local build through Terraform's
+`dev_overrides`, or a filesystem mirror. `terraform-provider/README.md`,
+"Releasing", has the steps.
 
 **Tests, never against a live instance.**
 
@@ -764,6 +798,7 @@ mirror.
 6. Destroy keeps the key (`on_destroy = "keep"`). Archiving takes
    `on_destroy = "archive"` in a reviewed apply, and a credential made for
    a custom role holding `secret.archive`, which `contributor` lacks.
-7. Code in `terraform-provider/`, its own versions, published from a
-   mirror repository once Erwin says go. Acceptance tests boot a local
+7. Code in `terraform-provider/`, its own versions, published from the
+   mirror `erwinkn/terraform-provider-coffre`, the first release once Erwin
+   says go. Acceptance tests boot a local
    coffre, on Terraform and OpenTofu.

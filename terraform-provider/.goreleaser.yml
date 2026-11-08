@@ -1,0 +1,80 @@
+# The provider's release as the Terraform Registry and OpenTofu's take it
+# (developer.hashicorp.com/terraform/registry/providers/publishing): a zip per
+# OS and architecture, holding the binary terraform-provider-coffre_v<version>;
+# terraform-provider-coffre_<version>_SHA256SUMS, over the zips and the
+# manifest; its detached GPG signature, .sig; and the manifest,
+# terraform-registry-manifest.json (protocol 6.0, terraform-plugin-framework's).
+# HashiCorp's scaffolding provider's, with the build made reproducible. The
+# mirror's Release workflow runs it; coffre's `pnpm test:terraform` builds a
+# snapshot and installs it with Terraform and OpenTofu.
+version: 2
+
+project_name: terraform-provider-coffre
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    # No VCS stamp: Go would embed the commit's highest tag as the module's
+    # version, so v0.2.0-rc.1 rebuilt after v0.2.0 tags the same commit would
+    # change bytes. main.version names the release instead.
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    # The same bytes from the same commit.
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    # Terraform's own platforms; Go has no windows/arm or darwin/386 or darwin/arm.
+    goos: [darwin, freebsd, linux, windows]
+    goarch: ['386', amd64, arm, arm64]
+    ignore:
+      - goos: darwin
+        goarch: '386'
+      - goos: darwin
+        goarch: arm
+      - goos: windows
+        goarch: arm
+    binary: '{{ .ProjectName }}_v{{ .Version }}'
+
+archives:
+  - formats: [zip]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    builds_info:
+      mtime: '{{ .CommitDate }}'
+    # The license travels with the binary, nothing else.
+    files:
+      - src: LICENSE
+        info:
+          mtime: '{{ .CommitDate }}'
+
+checksum:
+  name_template: '{{ .ProjectName }}_{{ .Version }}_SHA256SUMS'
+  algorithm: sha256
+  extra_files:
+    - glob: terraform-registry-manifest.json
+      name_template: '{{ .ProjectName }}_{{ .Version }}_manifest.json'
+
+# The sums alone, with the key the Release workflow imported; the passphrase
+# goes to gpg on stdin. A snapshot skips it.
+signs:
+  - artifacts: checksum
+    args: [--batch, --pinentry-mode, loopback, --passphrase-fd, '0', --local-user, '{{ .Env.GPG_FINGERPRINT }}', --output, '${signature}', --detach-sign, '${artifact}']
+    stdin: '{{ .Env.PASSPHRASE }}'
+
+# The zips, the sums, their signature and the manifest, which the sums cover
+# but GoReleaser uploads only when named here too. A version such as
+# 0.2.0-rc.1 is a prerelease, not the latest.
+release:
+  github:
+    owner: erwinkn
+    name: terraform-provider-coffre
+  extra_files:
+    - glob: terraform-registry-manifest.json
+      name_template: '{{ .ProjectName }}_{{ .Version }}_manifest.json'
+  prerelease: auto
+
+# What a snapshot build is called: never a version the registry could take.
+# The g keeps a commit of digits alone, such as 0123456, valid SemVer.
+snapshot:
+  version_template: '0.0.0-snapshot.g{{ .ShortCommit }}'
+

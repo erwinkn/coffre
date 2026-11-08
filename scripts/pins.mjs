@@ -11,6 +11,8 @@
 //   4. Only scripts/fetch.sh downloads, checking the SHA-256 it is given:
 //      `curl` and `wget` are banned everywhere else, except on a line marked
 //      `# pins: local` whose every URL is 127.0.0.1, localhost or [::1].
+//      terraform-provider/scripts/fetch.sh, its copy for the provider's
+//      mirror repository, which check-pins.mjs holds to the same bytes, too.
 //   5. Nothing fetches a package outside the lockfile: the commands in
 //      PACKAGE_FETCHES below are banned.
 //   6. A pnpm install (`pnpm … install`, or `pnpm i`) carries
@@ -32,7 +34,7 @@
 // file's data, as js-yaml reads it (and GitHub, Compose and pnpm). A list of
 // words (`command: [pnpm, install]`, `RUN ["npm", "install"]`) is the line
 // they make. Comment lines are skipped, and end at their line, a trailing
-// backslash's too. scripts/fetch.sh is held to rules 5 to 7. Rules 5 and 6 read each command of a
+// backslash's too. The fetchers are held to rules 5 to 7. Rules 5 and 6 read each command of a
 // line apart, its part between `;`, `&` and `|`: the program's name, then a
 // subcommand's anywhere after it, or a one- or two-letter alias (`npm i`)
 // right after it. A line no rule can hold carries `# unpinned: <reason>` (in
@@ -49,7 +51,9 @@ import { loadAll } from 'js-yaml';
 const DIGEST = /@sha256:[0-9a-f]{64}$/;
 const COMMIT = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+@[0-9a-f]{40}$/;
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/;
-const FETCHER = 'scripts/fetch.sh';
+// The one fetcher, and the copy the Terraform provider's mirror carries (it
+// holds terraform-provider/ alone), which check-pins.mjs holds to its bytes.
+export const FETCHERS = ['scripts/fetch.sh', 'terraform-provider/scripts/fetch.sh'];
 
 // A word: a program's name, or a path's last part (`/usr/bin/curl`), not
 // `libcurl` or `curl-config`.
@@ -140,7 +144,7 @@ function lines(text, kind, report, { path }) {
             // An argument list is the command its words make.
             line = line.replace(/"\s*,\s*"/g, ' ');
         }
-        if (!skip) commands(line, (message) => report(index, message), { downloads: path === FETCHER });
+        if (!skip) commands(line, (message) => report(index, message), { downloads: FETCHERS.includes(path) });
     }
 }
 

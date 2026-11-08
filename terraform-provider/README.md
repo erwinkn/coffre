@@ -3,7 +3,12 @@
 A Terraform and OpenTofu provider that writes secrets into coffre and never
 reads one back: one resource, `coffre_secret`, whose value is a write-only
 argument, absent from state and plans. The design, its rules and why:
-[docs/design/terraform-provider.md](../docs/design/terraform-provider.md).
+[docs/design/terraform-provider.md](https://github.com/erwinkn/coffre/blob/main/docs/design/terraform-provider.md).
+
+It lives in [erwinkn/coffre](https://github.com/erwinkn/coffre)'s
+`terraform-provider/`, beside the server it calls, and is mirrored to
+[erwinkn/terraform-provider-coffre](https://github.com/erwinkn/terraform-provider-coffre)
+for the registries: send changes to coffre.
 
 ```hcl
 terraform {
@@ -69,7 +74,7 @@ plan, since the key exists: a new value is a new `value_wo_version`.
 
 ## Using a local build
 
-Until the provider is published, point Terraform at a build:
+To try a change, or before a release, point Terraform at a build:
 
 ```sh
 cd terraform-provider && go build -o "$HOME/.terraform.d/coffre-dev/terraform-provider-coffre" .
@@ -86,15 +91,57 @@ provider_installation {
 ## Tests
 
 `pnpm test:terraform` from the repository's root, after `pnpm build`
-(`scripts/terraform-provider.sh`): gofmt, `go vet`, the unit tests, then the
-acceptance tests, on Terraform 1.11 and OpenTofu 1.11, against a local
-coffre that `packages/conformance/scripts/terraform-fixture.ts` boots (the
-Node example on SQLite, ports 3482 and 3483) and seeds. Go and both CLIs are
+(`scripts/terraform-provider.sh`): gofmt, `go vet` and the unit tests; then
+the release, built as GoReleaser's unsigned snapshot, which Terraform and
+OpenTofu each install from a filesystem mirror holding this platform's zip
+(`init`) and run (a plan and the provider's schema); then the acceptance
+tests, on Terraform 1.11 and OpenTofu 1.11, against a local coffre that
+`packages/conformance/scripts/terraform-fixture.ts` boots (the Node example
+on SQLite, ports 3482 and 3483) and seeds. Go, GoReleaser and both CLIs are
 pinned by version and SHA-256 and downloaded once. `--unit` runs the first
-three alone, with no coffre and no Terraform.
+three alone, with no release, no coffre and no Terraform.
 
 The acceptance tests also check, for every write, that the value is in
 neither the state nor any record of a saved plan (`tfplan`, `tfstate`,
 `tfstate-prev`), with private data decoded layer by layer, and first that
 this check catches `internal/acceptance/leaky`, a test provider that hides a
 value in its private data.
+
+## Releasing
+
+The provider takes its own versions (`0.1.0` first), apart from coffre's:
+`pnpm bump` leaves it alone. A release:
+
+1. A PR in coffre heads `CHANGELOG.md`'s `## Unreleased` here as
+   `## 0.1.0 (<date>)`, under a new, empty `## Unreleased`; its notes say
+   which coffre release the provider needs. Merged, it is main.
+2. `gh workflow run terraform-provider.yml --repo erwinkn/coffre --ref main -f version=0.1.0`.
+   Coffre's `Terraform provider` workflow checks the version and its notes
+   (`scripts/notes.sh 0.1.0`) and builds the release unsigned, then pushes
+   this directory's own history (`git subtree split`, the same commits every
+   time) to the mirror's `main`, with the tag `v0.1.0` on it, through a
+   deploy key that only that workflow's `terraform-mirror` environment holds.
+3. The tag starts the mirror's `Release` workflow
+   (`.github/workflows/release.yml`), the one every Registry provider runs:
+   one job, in the `release` environment, which only `v*` tags may use. It
+   installs the pinned Go and GoReleaser (`scripts/tools.sh`), imports the
+   signing key into a GnuPG home of its own, and runs `goreleaser release`
+   (`.goreleaser.yml`), which builds the zips, signs their sums and publishes
+   the GitHub release with those notes, a prerelease for a version such as
+   `0.2.0-rc.1`. The Terraform Registry takes it from there; OpenTofu's too,
+   once the provider and its key are submitted to it
+   (github.com/opentofu/registry), a step not yet taken.
+
+The build is reproducible: the same commit gives the same zips, byte for
+byte. Rulesets on the mirror keep its `main` moving forward only and its
+`v*` tags fixed, so a version is released once.
+
+The signing key and the job's token, which may write the mirror's releases,
+share that one job. Code that runs in it could take the key, which is worth
+more than the token, so splitting them into two jobs would protect little.
+
+The signing key is RSA 4096, signing only (the Registry takes no ECC key),
+its private half and passphrase in the mirror's `release` environment
+(`GPG_PRIVATE_KEY`, `PASSPHRASE`) and in Erwin's 1Password, its public half
+on registry.terraform.io under the `erwinkn` namespace's signing keys. It
+does not exist yet: the first release waits for it.

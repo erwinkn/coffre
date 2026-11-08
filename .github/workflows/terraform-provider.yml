@@ -1,0 +1,101 @@
+name: Terraform provider
+
+# Releases the Terraform provider (terraform-provider/, its own versions,
+# apart from coffre's) from main:
+#
+#   gh workflow run terraform-provider.yml --ref main -f version=0.1.0
+#
+# terraform-provider/CHANGELOG.md must hold a `## 0.1.0` section, merged
+# first: it is the release's notes. This checks the release builds, then
+# pushes terraform-provider/'s own history (`git subtree split`, the same
+# commits every time) to erwinkn/terraform-provider-coffre's main, with the
+# tag v0.1.0 on it. The tag starts the mirror's own release workflow
+# (terraform-provider/.github/workflows/release.yml), which builds, signs and
+# publishes the GitHub release the Terraform Registry takes.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The provider's version, as 0.1.0
+        required: true
+
+permissions:
+  contents: read
+
+# One release at a time; the others wait, every one of them.
+concurrency:
+  group: terraform-provider-release
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  check:
+    name: Check the release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # The mirror's release reads the same notes from the tag, which cannot
+      # move: what it would refuse there is refused here, before the push.
+      - name: Check the version and its notes
+        env:
+          VERSION: ${{ inputs.version }}
+        run: terraform-provider/scripts/notes.sh "$VERSION"
+
+      # What the mirror will build, unsigned.
+      - name: Build the release unsigned
+        working-directory: terraform-provider
+        run: |
+          source scripts/tools.sh
+          use_go
+          use_goreleaser
+          goreleaser release --snapshot --clean --skip=sign
+
+  push:
+    name: Push to the mirror
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The mirror's deploy key lives in this environment alone, which only main may use.
+    environment: terraform-mirror
+    steps:
+      - name: Check out main, whole
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Split terraform-provider/
+        id: split
+        run: |
+          split="$(git subtree split --prefix=terraform-provider HEAD)"
+          echo "terraform-provider/ at $(git rev-parse HEAD) is $split"
+          echo "commit=$split" >> "$GITHUB_OUTPUT"
+
+      # The key goes to an agent of this step's own, from stdin, never to a
+      # file or another process's environment; the agent goes with the step.
+      # github.com's host key is its published one (GitHub's /meta), not
+      # whatever the network answers.
+      - name: Push main and the tag
+        env:
+          VERSION: ${{ inputs.version }}
+          SPLIT: ${{ steps.split.outputs.commit }}
+          DEPLOY_KEY: ${{ secrets.TERRAFORM_MIRROR_DEPLOY_KEY }}
+        run: |
+          key="$DEPLOY_KEY"
+          unset DEPLOY_KEY
+          eval "$(ssh-agent -s)" > /dev/null
+          trap 'ssh-agent -k > /dev/null' EXIT
+          ssh-add -q - <<< "$key"
+          unset key
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519"
+          mirror=git@github.com:erwinkn/terraform-provider-coffre.git
+          # The mirror's main only moves forward, and a tag never moves: a
+          # version already released, or a main that is not this one's
+          # ancestor, refuses the push whole.
+          git push --atomic "$mirror" "$SPLIT:refs/heads/main" "$SPLIT:refs/tags/v$VERSION"

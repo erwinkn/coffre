@@ -84,6 +84,21 @@ test("check:pins holds the workspace's Node to one exact release, and each examp
     }
 });
 
+test("check:pins holds the Terraform provider's fetcher to a byte-for-byte copy of scripts/fetch.sh", (t) => {
+    const dir = checkout(t);
+    const copy = 'terraform-provider/scripts/fetch.sh';
+    for (const file of ['scripts/fetch.sh', copy]) {
+        mkdirSync(dirname(join(dir, file)), { recursive: true });
+        cpSync(join(root, file), join(dir, file));
+    }
+    execFileSync('git', ['add', '--all'], { cwd: dir });
+    assert.equal(run(dir, 'check-pins.mjs').status, 0);
+    writeFileSync(join(dir, copy), `${readFileSync(join(dir, copy), 'utf8')}# drift\n`);
+    const checked = run(dir, 'check-pins.mjs');
+    assert.equal(checked.status, 1);
+    assert.match(checked.stderr, /terraform-provider\/scripts\/fetch\.sh: not a copy of scripts\/fetch\.sh/);
+});
+
 test('a release is bump and a commit: pnpm takes its lockfile as it is', (t) => {
     const dir = checkout(t);
     const git = (...args) => execFileSync('git', ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Bump test', '-c', 'user.email=bump@example.test', ...args], { cwd: dir, encoding: 'utf8' }).trim();

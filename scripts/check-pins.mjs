@@ -14,7 +14,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { kindOf, problemsIn } from './pins.mjs';
+import { FETCHERS, kindOf, problemsIn } from './pins.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
 const EXACT = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -128,6 +128,13 @@ for (const path of tracked) {
     if (kindOf(path) === null || !existsSync(join(root, path))) continue;
     files++;
     problems.push(...problemsIn(path, readFileSync(join(root, path), 'utf8'), { root: path === 'pnpm-workspace.yaml' }));
+}
+
+// Each tracked copy of the fetcher is the fetcher, byte for byte.
+const [original, ...copies] = FETCHERS;
+for (const copy of copies.filter((path) => tracked.includes(path))) {
+    const same = tracked.includes(original) && readFileSync(join(root, copy), 'utf8') === readFileSync(join(root, original), 'utf8');
+    if (!same) problems.push(`${copy}: not a copy of ${original} (cp ${original} ${copy})`);
 }
 
 if (problems.length > 0) {

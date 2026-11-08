@@ -1,0 +1,55 @@
+name: Release
+
+# HashiCorp's standard provider release (.goreleaser.yml): coffre's
+# `Terraform provider` workflow pushes a v<version> tag here with the deploy
+# key, and GoReleaser builds, signs and publishes the GitHub release the
+# Terraform Registry takes. The key and the token share this job: code that
+# runs here could take the key, which is worth more than the token.
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+# A cancelled run would leave its tag, which never moves, without a release.
+concurrency:
+  group: release
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release # the signing key; only v* tags, which never move
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Import the signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          install -d -m 700 "$GNUPGHOME"
+          gpg --batch --import <<< "$GPG_PRIVATE_KEY"
+          fingerprint="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }')"
+          [ -n "$fingerprint" ]
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          echo "GPG_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
+
+      # One command a line: errexit stops at the first that fails.
+      - name: Build, sign and publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PASSPHRASE: ${{ secrets.PASSPHRASE }}
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }} # even beside another tag on the commit
+        run: |
+          source scripts/tools.sh
+          use_go
+          use_goreleaser
+          scripts/notes.sh "${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/notes.md"
+          goreleaser release --clean --release-notes "$RUNNER_TEMP/notes.md"

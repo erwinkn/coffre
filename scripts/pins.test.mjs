@@ -62,6 +62,9 @@ test('3. a Dockerfile’s ADD of a URL carries its SHA-256', () => {
 test('4. only scripts/fetch.sh downloads; a health check of this machine is marked', () => {
     passes('scripts/a.sh', '"$root/scripts/fetch.sh" "https://go.dev/dl/go$V.tar.gz" "$digest" "$file"\n');
     passes('scripts/fetch.sh', 'curl -fsSL --proto =https -o "$tmp" "$url"\n');
+    // The copy the Terraform provider's mirror carries, and no other.
+    passes('terraform-provider/scripts/fetch.sh', 'curl -fsSL --proto =https -o "$tmp" "$url"\n');
+    fails('terraform-provider/scripts/tools.sh', 'curl -fsSL --proto =https -o "$tmp" "$url"\n', /curl downloads/);
     // The helper may download; nothing else in it is exempt.
     fails('scripts/fetch.sh', 'npm install some-tool\n', /fetches a package outside the lockfile/);
     fails('scripts/fetch.sh', 'pnpm install\n', /without --frozen-lockfile/);
