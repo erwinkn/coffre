@@ -950,7 +950,7 @@ test('admission comes first: both limits, a limiter that fails, and the body\'s 
   limits = { perSource: { limit: async () => { throw new Error('binding gone'); } }, total: processLimits().total };
   const failing = await trade(token(rsa));
   // A limiter that could not count is coffre not answering for a moment: back in 5 s, not a minute.
-  assert.deepEqual([failing.status, failing.body.reason, failing.retryAfter], [503, 'busy', '5']);
+  assert.deepEqual([failing.status, failing.body.reason, failing.retryAfter], [503, 'busy', '1']);
   limits = processLimits();
   // Past the bound of every body before sign-in (`SIGN_IN_BODY_BYTES`), which bounds the token too: 413.
   const over = await exchange(JSON.stringify({ service: MEMBER, token: 'x'.repeat(SIGN_IN_BODY_BYTES) }));

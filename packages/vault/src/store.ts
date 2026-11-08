@@ -5,7 +5,7 @@ import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type Crede
 import { later, laterRows, prepared, tablesOf, type Database, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
-import { entryColumns, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
+import { entryColumns, newestVaultEntries, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref } from './inputs.ts';
@@ -58,23 +58,26 @@ export { accessEntriesAbout, insertGrant, liveProjects } from '@coffre/db/grants
 export { newestVaultEntries } from '@coffre/db/log';
 
 /**
- * On Postgres, fail a lock wait in this transaction after `ms`, rather than
- * wait for ever behind a transaction that never ends; with `statements`,
- * any statement that takes longer, too. A queue for a row each holder
- * updates, as the log's head, is no one wait: a waiter follows each update
- * to the row's new version and waits again, its lock's clock started over,
- * so only the statement's own bound ends it.
+ * On Postgres, fail each lock wait in this transaction after `lockMs`,
+ * rather than wait for ever behind a transaction that never ends; with
+ * `statementMs`, any statement that takes longer, too. A queue for a row each
+ * holder updates, as the log's head, is no one wait: a waiter follows each
+ * update to the row's new version and waits again, its lock's clock started
+ * over, so only the statement's own bound ends it.
  */
-export async function boundLockWaits(tx: Transaction, ms: number, statements = false, { final = false }: { final?: boolean } = {}): Promise<void> {
+export async function boundLockWaits(tx: Transaction, lockMs: number, statementMs?: number, { final = false }: { final?: boolean } = {}): Promise<void> {
   if (engineOf(tx) !== 'postgres') return;
-  const bound = String(Math.trunc(ms));
-  const statement = statements
-    ? sql`SELECT set_config('lock_timeout', ${bound}, true), set_config('statement_timeout', ${bound}, true)`
-    : sql.raw(`SET LOCAL lock_timeout = ${bound}`);
+  const lock = String(Math.trunc(lockMs));
+  const statement = statementMs === undefined
+    ? sql`SELECT set_config('lock_timeout', ${lock}, true)`
+    : sql`SELECT set_config('lock_timeout', ${lock}, true), set_config('statement_timeout', ${String(Math.trunc(Math.min(statementMs, MAX_STATEMENT_MS)))}, true)`;
   // `final`: nothing awaits it, it goes first in what the transaction asks next (`later`).
   if (final) later(tx, statement);
   else await tx.execute(statement);
 }
+
+/** Postgres's `statement_timeout` takes an int of milliseconds: a bound past it is none. */
+const MAX_STATEMENT_MS = 2_147_483_647;
 
 /**
  * How long a release is kept: the longest bulk limit window
@@ -988,6 +991,41 @@ export async function vaultEntriesOf(
     .limit(limit);
   return stored(rows);
 }
+
+/**
+ * The key services' intents logged at or after `since` (the database's clock), and every outcome naming one of them,
+ * oldest first: what a rotation reads to close those still open (`#rotate`). The intents newest first, a page at a
+ * time by `audit_log_action_idx`, until one is older; their outcomes by the same index, above the oldest of them.
+ */
+export async function recentIntents(db: Queryable, since: number): Promise<StoredEntry[]> {
+  const intents: StoredEntry[] = [];
+  for (let before: bigint | undefined; ;) {
+    const page = await newestVaultEntries(db, 'key.intent', INTENT_PAGE, before);
+    const recent = page.filter((entry) => entry.occurredAt >= since);
+    intents.push(...recent);
+    if (page.length < INTENT_PAGE || recent.length < page.length) break;
+    before = page.at(-1)!.seq;
+  }
+  if (intents.length === 0) return [];
+  const { auditLog } = tablesOf(db);
+  const oldest = intents.reduce((min, entry) => (entry.seq < min ? entry.seq : min), intents[0]!.seq);
+  const outcomes = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(and(
+      eq(auditLog.author, 'vault'), inArray(auditLog.action, ['secret.read', 'key.wrap', 'key.rewrap']), gt(auditLog.seq, oldest),
+      inArray(auditLog.relatedSeq, intents.map((entry) => entry.seq)),
+    ))
+    .orderBy(asc(auditLog.seq));
+  return [...intents, ...stored(outcomes)].sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0));
+}
+
+/**
+ * How many intents `recentIntents` reads a statement: a bound on one answer's size, an intent's metadata naming each of
+ * its keys, up to the bulk limit's (1,000 by default), about 120 bytes each: 100 intents, at most about 12 MB, under a
+ * tenth of a Worker's 128 MB. Fewer pages hold no lock longer; the rotation that reads them holds the head throughout.
+ */
+const INTENT_PAGE = 100;
 
 /** Which of these secrets' newest versions are sensitive, by the versions' own order. */
 export async function newestSensitive(db: Queryable, secretIds: readonly string[]): Promise<Set<string>> {

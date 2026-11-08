@@ -1871,6 +1871,17 @@ export const USE_DEADLINE_MS = 3000;
 export const HOT_LOCK_TIMEOUT_MS = 1000;
 export const HOT_STATEMENT_TIMEOUT_MS = 2000;
 
+/**
+ * How long anything but a use waits for each lock it takes: half a use's own wait (`HOT_LOCK_TIMEOUT_MS`), R75.
+ * Postgres grants a lock in the order it was asked, so a writer waiting for the fence exclusive, or a DDL statement for a
+ * table, holds back every use that asks after it; leaving the queue within half a use's wait lets such a use take its
+ * lock with half its own wait to spare, rather than be refused busy behind a write. A wait cut short rolls its
+ * transaction back, and its caller tries again (the vault's decisions, `#decideNow`; the migrator, `migrate.ts`) or
+ * answers unavailable (the app's write transactions, `createDatabase`'s `lockWaitMs`). Nothing that holds a lock any of
+ * them takes waits on anything slow meanwhile: no key service, no network, a few round trips at most (W331).
+ */
+export const LOCK_WAIT_MS = HOT_LOCK_TIMEOUT_MS / 2;
+
 /** A use's request id: 63 random bits, as text, unique within its millisecond (hot-path-one.md, "Row size"). */
 export function newUseRequestId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(8));

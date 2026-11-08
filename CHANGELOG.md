@@ -92,6 +92,34 @@
   a body holds values, and a narrowed session's path constraints are
   reduced by a sort rather than by comparing every pair.
 
+- **No lock is held while a key service answers, and no write waits long for
+  one (W331, R75).** With AWS KMS, a read, a wrap or a rewrap held its
+  reader's member row, a transaction and a database connection across every
+  KMS call, up to its 5 s budget: a removal of that member waited for it,
+  their later reads queued behind the removal, and in a KMS brownout twenty
+  reveals held the vault's whole Hyperdrive pool. Now the vault checks and
+  logs the intent, calls KMS holding nothing, then decides it all again
+  under the reader's row and the log's head: a removal, revocation or
+  deletion meanwhile commits at once, and the read is refused, its keys
+  wiped, never released (CloudTrail shows the Decrypts, the log the
+  refusal). And every wait for a lock but a use's is now `LOCK_WAIT_MS`
+  (`@coffre/core/vault`), 500 ms, half a use's own, where the vault's
+  changes waited 15 s and the app's write transactions as long as it took:
+  a write waiting for the fence held back every use behind it in Postgres's
+  queue. A vault change whose wait gave up is decided again, after a pause
+  of 25 ms doubled up to 400 ms, for 5 s (`CALL_DEADLINE_MS`, formerly
+  `READ_DEADLINE_MS`); an app write answers 503 at once. The two credential
+  writes that take the fence in SQL, `revoke_credential` and
+  `change_bindings`, wait 500 ms too (migration 0078, from 1 s); `sign_in`
+  and `issue_token`, which take only the issue lock no use asks for, keep
+  their 1 s. Such a 503 says
+  `Retry-After: 1`, not 5: one lock wait, in whole seconds, rounded up.
+  A rotation to a new vault key no longer waits for reads at KMS, so it logs
+  an outcome, refused, for each key service's intent still open, which the
+  vault on the retired key can no longer log itself. `formal/Coffre.tla`
+  holds the new order (`StandingRecheckUnderHead`, `RotationClosesIntents`,
+  and any wait may give up, `GivesUp`).
+
 - **A token's end may run at most a minute past its longest by the app's
   clock, not five (W331, limits D3).** The vault held a service or
   personal token's end to its longest plus 5 minutes, the room for an app
