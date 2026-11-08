@@ -235,7 +235,7 @@ test('DeadlineChecked, in Postgres: a use held past its deadline by its principa
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 0);
 });
 
-test('a use whose key service never answers is answered late at its deadline: its last attempt cut there, though one request may take 3,118 ms (W331)', async () => {
+test('a use whose key service never answers is answered late at its deadline: its last attempt cut there, though one request may take 3,490 ms (W331)', async () => {
   // AWS KMS that wraps, then hangs on every Decrypt: each attempt is cut at what is left of the use's deadline, and no
   // attempt nor pause starts past it (core kek/aws-kms.ts, KMS_ATTEMPT_MS, KMS_REQUEST_MAX_MS).
   const arn = 'arn:aws:kms:eu-west-3:123456789012:key/hung';
@@ -253,18 +253,18 @@ test('a use whose key service never answers is answered late at its deadline: it
   const { use } = await isolate({}, config);
   const alive = setInterval(() => {}, 1000);
   const random = Math.random;
-  // The pauses at their least, 100 and 400 ms, so the third attempt starts at 1,912 ms at the earliest; a deadline of
-  // 2,100 ms, under a use's 3 s, which that attempt cannot finish before: cut there, the use is late. An attempt left its
-  // own 706 ms would end at 2,618 ms at the earliest, and the use would answer the key service unavailable.
+  // The pauses at their least, 100 and 400 ms, so the third attempt starts at 2,160 ms at the earliest; a deadline of
+  // 2,300 ms, under a use's 3 s, which that attempt cannot finish before: cut there, the use is late. An attempt left its
+  // own 830 ms would end at 2,990 ms at the earliest.
   Math.random = () => 0;
   const at = Date.now();
-  const outcome = await use(ask(w, id, { at, deadline: at + 2_100 })).finally(() => { clearInterval(alive); Math.random = random; });
-  assert.ok(2_100 < USE_DEADLINE_MS && USE_DEADLINE_MS < KMS_REQUEST_MAX_MS);
+  const outcome = await use(ask(w, id, { at, deadline: at + 2_300 })).finally(() => { clearInterval(alive); Math.random = random; });
+  assert.ok(2_300 < USE_DEADLINE_MS && USE_DEADLINE_MS < KMS_REQUEST_MAX_MS);
   assert.deepEqual(outcome, { ok: false, busy: 'late', retryAfter: 1 });
   // However the host schedules it (a stall in a pause leaves no time for the third attempt, which then never starts):
-  // every attempt that could not finish before the deadline was cut at it, never let run its own 706 ms past it.
+  // every attempt that could not finish before the deadline was cut at it, never let run its own 830 ms past it.
   assert.ok(attempts.length >= 2 && attempts.length <= 3, `${attempts.length} attempts`);
-  const late = attempts.filter((attempt) => attempt.started + KMS_ATTEMPT_MS > at + 2_100);
+  const late = attempts.filter((attempt) => attempt.started + KMS_ATTEMPT_MS > at + 2_300);
   for (const attempt of late) {
     assert.ok(attempt.ended !== undefined && attempt.ended - attempt.started < KMS_ATTEMPT_MS, `an attempt ran ${attempt.ended! - attempt.started} ms past the deadline: not cut at it`);
   }

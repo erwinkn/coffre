@@ -266,8 +266,8 @@ test("a call never waits behind another call's hung requests: a use's key opens 
 });
 
 test('an attempt KMS does not answer is cut at KMS_ATTEMPT_MS and tried again; with no deadline, the request ends within KMS_REQUEST_MAX_MS', async () => {
-  assert.equal(KMS_ATTEMPT_MS, 706);
-  assert.equal(KMS_REQUEST_MAX_MS, 3_118);
+  assert.equal(KMS_ATTEMPT_MS, 830);
+  assert.equal(KMS_REQUEST_MAX_MS, 3_490);
   let sent = 0;
   const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async (_input, init) => {
     sent++;
@@ -281,7 +281,7 @@ test('an attempt KMS does not answer is cut at KMS_ATTEMPT_MS and tried again; w
     .finally(() => { clearInterval(alive); Math.random = random; });
   const took = Date.now() - started;
   assert.equal(sent, KMS_ATTEMPTS);
-  // Three attempts of 706 ms and pauses of 100 and 400 ms: 2,618 ms at least; the upper bound a watchdog for a hang.
+  // Three attempts of 830 ms and pauses of 100 and 400 ms: 2,990 ms at least; the upper bound a watchdog for a hang.
   assert.ok(took >= KMS_ATTEMPTS * KMS_ATTEMPT_MS + 500 - 5, `it took ${took} ms`);
   assert.ok(took < KMS_REQUEST_MAX_MS + 30_000, `it took ${took} ms`);
 });
@@ -295,16 +295,16 @@ test("a hung KMS answers by its operation's deadline: each attempt cut at what i
   } });
   const alive = setInterval(() => {}, 1000);
   const random = Math.random;
-  Math.random = () => 0; // pauses of 100 and 400 ms: the third attempt starts at 1,912 ms at the earliest
-  // A deadline the third attempt cannot finish before (2,100 < 1,912 + 706): it must be cut at it, at 2,100 ms, where
-  // an attempt left its own 706 ms would end at 2,618 ms at the earliest.
+  Math.random = () => 0; // pauses of 100 and 400 ms: the third attempt starts at 2,160 ms at the earliest
+  // A deadline the third attempt cannot finish before (2,300 < 2,160 + 830): it must be cut at it, at 2,300 ms, where
+  // an attempt left its own 830 ms would end at 2,990 ms at the earliest.
   const started = Date.now();
-  const deadline = started + 2_100;
+  const deadline = started + 2_300;
   await assert.rejects(kek.unwrap({ kekProvider: 'aws-kms', kekId: ARN, kekVersion: '1', bytes: randomBytes(48) }, context(), { deadline, signal: new AbortController().signal }),
     KekCancelledError).finally(() => { clearInterval(alive); Math.random = random; });
   const ended = Date.now();
   // However the host schedules it (a stall in a pause leaves no time for the third attempt, which then never starts):
-  // every attempt that could not finish before the deadline was cut at it, never let run its own 706 ms past it.
+  // every attempt that could not finish before the deadline was cut at it, never let run its own 830 ms past it.
   assert.ok(attempts.length >= 2 && attempts.length <= 3, `${attempts.length} attempts`);
   const late = attempts.filter((attempt) => attempt.started + KMS_ATTEMPT_MS > deadline);
   for (const attempt of late) {

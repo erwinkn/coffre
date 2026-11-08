@@ -218,9 +218,10 @@ larger than that cannot be read in one call there. The Paid plan allows
 **When KMS fails.** Before it asks KMS anything, the vault commits a
 `key.intent` entry naming every key of the call; afterwards, it logs each
 key's outcome against it. A throttled or failed request is retried twice;
-an attempt KMS does not answer within 706 ms is taken for lost and tried
+an attempt KMS does not answer within 830 ms is taken for lost and tried
 again (the slowest p99 measured, 506 ms across an ocean on a new
-connection, and one TCP retransmission, 200 ms); and the whole call has 5
+connection, and one TCP retransmission on that path, its 124 ms round trip
+and Linux's 200 ms floor); and the whole call has 5
 seconds, a use 3, each attempt cut at what is left of them. If KMS still has not answered, refuses
 coffre's credentials, or the key is disabled, the call fails (the API answers
 500, and the server log names the KMS error) and each key is logged with what

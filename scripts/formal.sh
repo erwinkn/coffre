@@ -168,6 +168,8 @@ REMOVALS=(
   # R75: each call's KMS requests take turns among themselves alone; one pool for the isolate lets a use wait behind a read's hung requests.
   "KeyService SlotsPerCall WaitsOnlyBehindItsOwn"
   "KeyService SlotsPerCall UsesNeverWait"
+  # One call's six span every KEK it asks (review r2 of #549): slots of each provider's own let a rotation's batch past them.
+  "KeyService SlotsAcrossKeks InFlightBounded"
   "WorkloadReplay KeyCheckedAgainstRow CopyIsUseless"
   "WorkloadReplay RequestDigestChecked ForwardedIsSigned"
   "WorkloadReplay OnlySignedHeadersForwarded ForwardedIsSigned"

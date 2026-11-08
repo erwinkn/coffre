@@ -521,7 +521,8 @@ window of fifteen minutes. #292's review.
 ### KeyService.tla
 
 One isolate's calls at AWS KMS (W331, R75): two uses of one key each, a read
-of three and a rewrap of two, with two slots, while KMS answers in any
+of three and a rewrap of two, their keys under the vault's kek or a previous
+one, with two slots, while KMS answers in any
 order, late or never, which nothing makes it do (no fairness): a brownout.
 Each call's requests take turns among themselves alone (`aws-kms.ts`, six
 per operation). Before W331 one pool served every call of a provider object,
@@ -531,9 +532,10 @@ another request settled.
 
 | Protection, in the code | Turned off, TLC finds |
 |---|---|
-| Each operation's requests take turns among themselves alone, whichever KEK each goes to (`slotsOf`, by operation) | a request waiting for a slot another call's request holds (`WaitsOnlyBehindItsOwn`), and a use waiting at all (`UsesNeverWait`) |
+| Each operation's requests take turns among themselves alone (`slotsOf`, by operation) | a request waiting for a slot another call's request holds (`WaitsOnlyBehindItsOwn`), and a use waiting at all (`UsesNeverWait`) |
+| One operation's slots span every KEK it asks, whichever provider object (`slotsOf` is the module's, not a provider's) | a read across a rotation, its keys under the kek and a previous one, with more requests in flight than its slots (`InFlightBounded`), which Workers would queue with their attempts' clocks running |
 
-How long an attempt waits (706 ms, `KMS_ATTEMPT_MS`) and that none starts
+How long an attempt waits (830 ms, `KMS_ATTEMPT_MS`) and that none starts
 past its operation's deadline are timing, which the model leaves to the tests
 (`kek-aws-kms.test.ts`; `use.test.ts`, a hung KMS under a use answered by its
 3 s).

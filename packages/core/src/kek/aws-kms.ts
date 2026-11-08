@@ -43,20 +43,25 @@ export const KMS_ATTEMPTS = 3;
  *   a host in Helsinki, a new connection each 362-365 / 388-406 / 410-413 / 412-415
  *
  * A request on a connection kept is one round trip and a few ms of KMS's; on a new one about four (TCP, TLS, the
- * request). So: the slowest p99 measured, 506 ms (a far Worker's Encrypt on a new connection), and one lost segment's
- * retransmission at Linux's least retransmission timeout, 200 ms (`TCP_RTO_MIN`, include/net/tcp.h; Cloudflare's and
- * Node's hosts taken to use Linux's, not checked): 706 ms. Past it the request is taken for lost, and tried again.
+ * request). So: the slowest p99 measured, 506 ms (a far Worker's Encrypt on a new connection), and one lost segment
+ * retransmitted on that path: Linux retransmits after its RTO, the smoothed round trip and a variance term floored at
+ * 200 ms (`TCP_RTO_MIN`, include/net/tcp.h; `tcp_rtt_estimator`, `__tcp_set_rto`), so 124 ms, that path's measured
+ * round trip, and 200 ms (Cloudflare's and Node's hosts taken to use Linux's, not checked): 506 + 324 = 830 ms. Past
+ * it the request is taken for lost, and tried again. What it does not cover: a lost SYN, which Linux retries after 1 s
+ * (`TCP_TIMEOUT_INIT`), and a path whose round trip is much longer than 124 ms, which the next attempt retries (Fable's
+ * review of #549).
  */
-export const KMS_ATTEMPT_MS = 506 + 200;
+export const KMS_ATTEMPT_MS = 506 + (124 + 200);
 
 /** The pause before the `attempt`th try after a failure, at most: 100 ms × 4^(attempt-1), jittered up to twice. */
 const backoffMs = (attempt: number) => 100 * 4 ** (attempt - 1) * (1 + Math.random());
 
 /**
- * The longest one KMS request may take, all its attempts and pauses, on a path with no deadline of its own: 3 × 706 ms
- * and pauses of at most 200 and 800 ms, 3,118 ms. Every path the vault takes has a deadline (its operation's), which cuts
- * each attempt and starts no attempt nor pause past it: a use's, 3 s (`USE_DEADLINE_MS`), answers by it. Not a bound
- * of a use's, nor one anyone waits on: what a key read or write without a deadline would take at worst.
+ * The longest one KMS request may take, all its attempts and pauses, on a path with no deadline of its own: 3 × 830 ms
+ * and pauses of at most 200 and 800 ms, 3,490 ms, once its credentials are had (a credentials function that never
+ * answers is bounded by a deadline alone). Every path the vault takes has a deadline (its operation's), which cuts each
+ * attempt and starts no attempt nor pause past it: a use's, 3 s (`USE_DEADLINE_MS`), answers by it. Not a bound of a
+ * use's, nor one anyone waits on: what a key read or write without a deadline would take at worst.
  */
 export const KMS_REQUEST_MAX_MS = KMS_ATTEMPTS * KMS_ATTEMPT_MS + Array.from({ length: KMS_ATTEMPTS - 1 }, (_, i) => 200 * 4 ** i).reduce((a, b) => a + b, 0);
 
