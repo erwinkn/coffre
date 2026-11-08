@@ -5,10 +5,11 @@
 // Every run's live answers are held to the replay of the log (R53).
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { decrypt } from '@coffre/core/envelope';
+import { awsKms } from '@coffre/core/kek';
 import type { UseManyInput, UseManyOutcome, UseOutcome } from '@coffre/core/vault';
 import { createDatabase, tablesOf, type Database } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
@@ -20,7 +21,8 @@ import { vaultLogKey } from '../src/log.ts';
 import { newRequestId, UseCache, useLimits, useMany, type UsePath } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { HOT_URL, openTestDatabase, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
-import { ask, change, CONFIG, emptyLog, isolate, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { ask, change, CONFIG, emptyLog, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { resolveVaultConfig } from '../src/config.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -435,3 +437,33 @@ async function environmentOf(w: { project: string }, slug: string): Promise<Retu
   await change({ kind: 'environment', id }, { op: 'genesis', value: object }, object, seal('environments', 'id', id));
   return id;
 }
+
+test("a batch's keys at a key service take turns as one call's, six at once, whatever the batch's size (review r1 of #549)", async () => {
+  // AWS KMS that keeps what it wrapped, and answers each Decrypt after a moment, counting those in flight at once.
+  const arn = 'arn:aws:kms:eu-west-3:123456789012:key/batch';
+  const wrapped = new Map<string, string>();
+  let inFlight = 0;
+  let most = 0;
+  const kms = awsKms({ keyArn: arn, credentials: { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'secret' }, fetch: async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { Plaintext?: string; CiphertextBlob?: string };
+    if (new Headers(init?.headers).get('x-amz-target') === 'TrentService.Encrypt') {
+      const blob = randomBytes(48).toString('base64');
+      wrapped.set(blob, body.Plaintext!);
+      return Response.json({ CiphertextBlob: blob, KeyId: arn });
+    }
+    inFlight += 1;
+    most = Math.max(most, inFlight);
+    await sleep(30);
+    inFlight -= 1;
+    return Response.json({ Plaintext: wrapped.get(body.CiphertextBlob!), KeyId: arn });
+  } });
+  const config = resolveVaultConfig({ kek: kms, previousKeks: [KEK], signingKey: SIGNING_KEY.toString('base64'), owners: ['root@acme.example'] });
+  const w = await world();
+  const ids: string[] = [];
+  for (let i = 0; i < 12; i += 1) ids.push(await w.key(`v${i}`, false, w.dev, null, config.keks));
+  const { vault } = await isolate({}, config);
+  const answered = await vault.useMany!(many(w, ids));
+  assert.ok(answered.ok && answered.values.length === 12, JSON.stringify(answered).slice(0, 300));
+  assert.equal(most, 6, "one call's Decrypts, six at a time: Workers' simultaneous open connections of an invocation");
+});
+

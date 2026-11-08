@@ -3878,15 +3878,15 @@ test('a deadline aborts KMS requests and drops queued keys before a removal can 
   try {
     await assert.rejects(w.vault.unwrap({ principal: ADA, purpose: 'run', items: await versionItems(items) }), KekUnavailableError);
     assert.equal(active, 0, 'all in-flight requests settled before the decision ended');
-    assert.equal(started, 8, 'the queued key never reached KMS');
+    assert.equal(started, 6, "the keys queued behind one call's six never reached KMS");
     assert.ok((await (await w.twin()).remove({ actor: ROOT, principal: ADA })).ok);
-    // One entry per outcome at the place, listing the keys it was: eight uncertain, one never sent.
+    // One entry per outcome at the place, listing the keys it was: six uncertain, three never sent.
     const outcomes = (await vaultLog(w)).filter((entry) => entry.action === 'secret.read');
-    assert.deepEqual(outcomes.map((entry) => [entry.code, (entry.detail.secrets as unknown[] | undefined)?.length ?? 1]), [['kms_uncertain', 8], ['cancelled', 1]]);
+    assert.deepEqual(outcomes.map((entry) => [entry.code, (entry.detail.secrets as unknown[] | undefined)?.length ?? 1]), [['kms_uncertain', 6], ['cancelled', 3]]);
   } finally {
     await sleep(650);
   }
-  assert.equal(started, 8, 'no queued request started after removal');
+  assert.equal(started, 6, 'no queued request started after removal');
 });
 
 for (const action of ['unwrap', 'rewrap'] as const) {

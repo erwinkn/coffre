@@ -226,11 +226,11 @@ export class AwsKmsKekProvider implements KekProvider {
       sent = true;
       response = await this.#fetch(this.#url, {
         method: 'POST', headers, body,
-        // An attempt waits `KMS_ATTEMPT_MS` at most, and no longer than what is left of its operation's deadline.
-        signal: AbortSignal.any([
-          AbortSignal.timeout(operation === undefined ? KMS_ATTEMPT_MS : Math.max(0, Math.min(KMS_ATTEMPT_MS, operation.deadline - Date.now()))),
-          ...(signal === undefined ? [] : [signal]),
-        ]),
+        // An attempt waits `KMS_ATTEMPT_MS` at most, and no longer than what is left of its operation's deadline: then the
+        // operation's own signal ends it, the one timer of the deadline, so no slot frees a moment before it (review r1).
+        signal: operation !== undefined && operation.deadline - Date.now() <= KMS_ATTEMPT_MS && signal !== undefined
+          ? signal
+          : AbortSignal.any([AbortSignal.timeout(KMS_ATTEMPT_MS), ...(signal === undefined ? [] : [signal])]),
       });
       text = await response.text();
     } catch (error) {

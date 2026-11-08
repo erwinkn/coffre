@@ -285,11 +285,18 @@ test("a hung KMS answers by its operation's deadline: each attempt cut at what i
 test('no pause before another try starts when it would end past the deadline: the call is cancelled at once', async () => {
   let sent = 0;
   const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: async () => (sent++, kmsError('ThrottlingException')) });
-  const started = Date.now();
-  // The first pause is at least 100 ms; 90 ms are left.
-  await assert.rejects(kek.wrap(randomBytes(32), context(), { deadline: started + 90, signal: new AbortController().signal }), KekCancelledError);
-  assert.equal(sent, 1);
-  assert.ok(Date.now() - started < 90, 'cancelled before its deadline, not at it');
+  // Every timer started meanwhile: a pause is one of at least 100 ms (`backoffMs`). The deadline is under it from the
+  // start, so none may start, however the host schedules this (a stall before the first try cancels it unsent).
+  const started: number[] = [];
+  const real = globalThis.setTimeout;
+  globalThis.setTimeout = ((handler: () => void, ms?: number, ...rest: unknown[]) => (started.push(ms ?? 0), real(handler, ms, ...rest))) as typeof setTimeout;
+  try {
+    await assert.rejects(kek.wrap(randomBytes(32), context(), { deadline: Date.now() + 99, signal: new AbortController().signal }), KekCancelledError);
+  } finally {
+    globalThis.setTimeout = real;
+  }
+  assert.ok(sent <= 1, `${sent} requests`);
+  assert.deepEqual(started.filter((ms) => ms >= 100), [], 'no pause started');
 });
 
 test('every call of one operation shares its deadline, so the deadline cancels them all at once', async () => {
