@@ -81,7 +81,7 @@ test('a request leaves through the binding with the real key, and its redirect s
   assert.equal(moved.headers.get('location'), 'https://secrets.acme.example/use/market/dev/schumann/companies?page=2');
 });
 
-test('an AWS-signed upload past the 16 MiB a body is held to streams through the binding, signed again with the real key', { timeout: 60_000 }, async () => {
+test('an AWS-signed upload past the 1 MiB a body is read whole to streams through the binding, signed again with the real key', { timeout: 60_000 }, async () => {
   const size = 24 * 1024 * 1024;
   const put = await worker.fetch('/use/s3/bucket/object', {
     method: 'PUT',
