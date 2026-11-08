@@ -317,24 +317,30 @@ test("a large result goes no faster than the app counts it: uncounted, the objec
   ws.close();
 });
 
-/** The JavaScript heap workerd's isolate holds once garbage is collected, in bytes, through its inspector. */
-async function heapUsed(): Promise<number> {
+/**
+ * What workerd's isolate holds once garbage is collected, in bytes, through its inspector: its objects and the buffers
+ * behind them, outside its heap, which hold a chunk's bytes.
+ */
+async function heapHeld(): Promise<number> {
   const [target] = (await (await fetch(`http://127.0.0.1:${inspector}/json`)).json()) as { webSocketDebuggerUrl: string }[];
   const cdp = new WebSocket(target!.webSocketDebuggerUrl);
   await once(cdp, 'open');
   let id = 0;
+  type Usage = { usedSize: number; backingStorageSize: number };
   const call = (method: string) =>
-    new Promise<{ result?: { usedSize: number } }>((resolve) => {
+    new Promise<{ result?: Usage }>((resolve) => {
       const mine = ++id;
       cdp.on('message', (data: Buffer) => {
-        const answer = JSON.parse(data.toString()) as { id?: number; result?: { usedSize: number } };
+        const answer = JSON.parse(data.toString()) as { id?: number; result?: Usage };
         if (answer.id === mine) resolve(answer);
       });
       cdp.send(JSON.stringify({ id: mine, method }));
     });
   try {
     await call('HeapProfiler.collectGarbage');
-    return (await call('Runtime.getHeapUsage')).result!.usedSize;
+    const { usedSize, backingStorageSize } = (await call('Runtime.getHeapUsage')).result!;
+    assert.equal(typeof backingStorageSize, 'number', "the inspector says what the isolate's buffers hold");
+    return usedSize + backingStorageSize;
   } finally {
     cdp.close();
   }
@@ -344,18 +350,35 @@ test("a long result streamed through the object leaves its heap as it was: each 
   const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}`, 'coffre-tunnel-flow': 'credit' } });
   await once(ws, 'message');
   let received = 0;
+  // While the heap is read, what the app took and has not counted.
+  let owed: number | null = null;
   let tail = Buffer.alloc(0);
   let reached: { at: number; then: () => void } | null = null;
   let readied: () => void = () => {};
+  let stilled: () => void = () => {};
   ws.on('message', (data: Buffer, binary: boolean) => {
     if (!binary) return;
     received += data.length;
-    ws.send(String(data.length));
+    if (owed === null) ws.send(String(data.length));
+    else if ((owed += data.length) >= WINDOW) stilled();
     tail = Buffer.concat([tail, data]).subarray(-6);
     if (tail.length === 6 && tail.equals(Buffer.from([0x5a, 0, 0, 0, 5, 0x49]))) readied();
     if (reached !== null && received >= reached.at) reached.then();
   });
   const idle = () => new Promise<void>((resolve) => (readied = resolve));
+  // The heap, read while the object sends nothing: the app stops counting, and once it holds a window uncounted the
+  // object sends no more until it counts. Read while the result flows, it also holds what the object made between the
+  // collection and the read: over 800 MB it grew from -9 to +7 MiB beside the Postgres suite, 9.7 MiB once in CI. Read
+  // still, it moves by a few KiB.
+  const stillHeap = async () => {
+    const still = new Promise<void>((resolve) => (stilled = resolve));
+    owed = 0;
+    await still;
+    const held = await heapHeld();
+    ws.send(String(owed));
+    owed = null;
+    return held;
+  };
   const params = Buffer.from('user\0app\0database\0app\0\0');
   const startup = Buffer.alloc(8);
   startup.writeInt32BE(8 + params.length, 0);
@@ -372,18 +395,19 @@ test("a long result streamed through the object leaves its heap as it was: each 
   ws.send(message('p', Buffer.from(`${HANDLE}\0`)));
   await login;
   // 1.2 GB of rows, counted as they come; the heap read at 200 MB and again at 1 GB, the session still open, so that what
-  // the other objects of this isolate did before is in both.
+  // the other objects of this isolate did before is in both. An object that kept a small record of each chunk it sent
+  // held 4 MiB more at 1 GB; one that kept the chunks, 750 MiB.
   const done = idle();
   const at200 = new Promise<void>((resolve) => (reached = { at: 200e6, then: resolve }));
   ws.send(message('Q', Buffer.from(`SELECT repeat('x', 1000) FROM generate_series(1, 1200000)\0`)));
   await at200;
   reached = null;
-  const before = await heapUsed();
+  const before = await stillHeap();
   const at1000 = new Promise<void>((resolve) => (reached = { at: 1000e6, then: resolve }));
   await at1000;
   reached = null;
-  const during = await heapUsed();
+  const during = await stillHeap();
   await done;
   ws.close();
-  assert.ok(during - before < 8 * 1024 * 1024, `the object's heap grew ${Math.round((during - before) / 1024)} KiB over 800 MB`);
+  assert.ok(during - before < 1024 * 1024, `the object held ${Math.round((during - before) / 1024)} KiB more after 800 MB`);
 });
