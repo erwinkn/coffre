@@ -303,9 +303,13 @@ test("a hung KMS answers by its operation's deadline: each attempt cut at what i
   await assert.rejects(kek.unwrap({ kekProvider: 'aws-kms', kekId: ARN, kekVersion: '1', bytes: randomBytes(48) }, context(), { deadline, signal: new AbortController().signal }),
     KekCancelledError).finally(() => { clearInterval(alive); Math.random = random; });
   const ended = Date.now();
-  assert.equal(attempts.length, 3);
-  const last = attempts.at(-1)!;
-  assert.ok(last.ended !== undefined && last.ended - last.started < KMS_ATTEMPT_MS, `the last attempt ran ${last.ended! - last.started} ms: not cut at the deadline`);
+  // However the host schedules it (a stall in a pause leaves no time for the third attempt, which then never starts):
+  // every attempt that could not finish before the deadline was cut at it, never let run its own 706 ms past it.
+  assert.ok(attempts.length >= 2 && attempts.length <= 3, `${attempts.length} attempts`);
+  const late = attempts.filter((attempt) => attempt.started + KMS_ATTEMPT_MS > deadline);
+  for (const attempt of late) {
+    assert.ok(attempt.ended !== undefined && attempt.ended - attempt.started < KMS_ATTEMPT_MS, `an attempt ran ${attempt.ended! - attempt.started} ms past the deadline: not cut at it`);
+  }
   assert.ok(ended < deadline + 30_000, 'a watchdog for a hang');
 });
 

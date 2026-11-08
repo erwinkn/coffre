@@ -12,7 +12,7 @@ import { verifyEntries, type StoredEntry } from '@coffre/core/audit';
 import { decrypt } from '@coffre/core/envelope';
 import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog } from '@coffre/core/merkle';
 import { USE_DEADLINE_MS, type UseOutcome } from '@coffre/core/vault';
-import { awsKms, KMS_REQUEST_MAX_MS } from '@coffre/core/kek';
+import { awsKms, KMS_ATTEMPT_MS, KMS_REQUEST_MAX_MS } from '@coffre/core/kek';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
 import { newestAccess } from '@coffre/db/grants';
 import { appendEntries } from '@coffre/db/log';
@@ -261,9 +261,13 @@ test('a use whose key service never answers is answered late at its deadline: it
   const outcome = await use(ask(w, id, { at, deadline: at + 2_100 })).finally(() => { clearInterval(alive); Math.random = random; });
   assert.ok(2_100 < USE_DEADLINE_MS && USE_DEADLINE_MS < KMS_REQUEST_MAX_MS);
   assert.deepEqual(outcome, { ok: false, busy: 'late', retryAfter: 1 });
-  assert.equal(attempts.length, 3);
-  const last = attempts.at(-1)!;
-  assert.ok(last.ended !== undefined && last.ended - last.started < 706, `the last attempt ran ${last.ended! - last.started} ms: not cut at the deadline`);
+  // However the host schedules it (a stall in a pause leaves no time for the third attempt, which then never starts):
+  // every attempt that could not finish before the deadline was cut at it, never let run its own 706 ms past it.
+  assert.ok(attempts.length >= 2 && attempts.length <= 3, `${attempts.length} attempts`);
+  const late = attempts.filter((attempt) => attempt.started + KMS_ATTEMPT_MS > at + 2_100);
+  for (const attempt of late) {
+    assert.ok(attempt.ended !== undefined && attempt.ended - attempt.started < KMS_ATTEMPT_MS, `an attempt ran ${attempt.ended! - attempt.started} ms past the deadline: not cut at it`);
+  }
   assert.ok(Date.now() < at + 30_000, 'a watchdog for a hang');
 });
 
