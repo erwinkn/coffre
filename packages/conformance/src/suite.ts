@@ -10,12 +10,13 @@ import { deletion } from './checks/deletion.ts';
 import { folders, forks, inheritance, loosening, missingKeys, personalConfigs, references } from './checks/environments.ts';
 import { appLogin, hotLogin, vaultLogin } from './checks/logins.ts';
 import { mcpRead, mcpChanges, mcpConnect, mcpValues } from './checks/mcp.ts';
+import { backToOptional, ceremonies, ipPublicUrl, issuerReplaced, leaveAlone, passkeyChanges, passkeysRequired, readsStayReads, requiredFromCold, staleSession } from './checks/passkeys.ts';
 import { accessAuthorship, memberTampering, noAuditNoAccess, sealingRace } from './checks/members.ts';
 import { refusedCheckpoint, missingCheckpoint, middleCut } from './checks/readiness.ts';
 import { editedGeneration, forgedCredential, forgedIdentity, forgedApproval } from './checks/signin.ts';
 import { canaryScan } from './checks/canaries.ts';
 import { Cli, cliLogin, manageByCli, verifyAsOwner, verifyAsUser, verifyInterrupted, verifyKeys, verifyLeftovers, verifyWithToken } from './checks/cli.ts';
-import { pageLoad, personas, setUp, setUpLive, signInAdmin } from './checks/people.ts';
+import { pageLoad, personas, setUp, setUpLive } from './checks/people.ts';
 import { pagesInBrowser, pastedValues, signinErrorOnce } from './checks/pages.ts';
 import { bodies, browserBundle, headers, health } from './checks/surface.ts';
 import { cliSignsIn, exchangesLimited, keysUploaded, runSignsIn, runsRefused, runUnbound, spentOnce, tokensUnlogged, trustRun } from './checks/workloads.ts';
@@ -28,7 +29,8 @@ export async function conform(
   const report = new Report({ mark: deployment.mark });
   await report.check('health', {}, () => health(deployment));
   await report.check('browser bundle', {}, () => browserBundle(deployment));
-  const admin = await report.check('sign-in', {}, () => signInAdmin(deployment));
+  // The first sign-in, under `required` from cold (docs/design/passkeys.md, section 13): the rest runs as booted.
+  const admin = await report.check('sign-in', {}, () => requiredFromCold(deployment));
   await report.check('page load', { admin }, ({ admin }) => pageLoad(admin));
   await report.check('security headers', { admin }, ({ admin }) => headers(deployment, admin));
   const canaries = await report.check('setup', { admin }, ({ admin }) => setUp(admin));
@@ -38,6 +40,8 @@ export async function conform(
   await report.check('sign-in error, once', { admin }, ({ admin }) => signinErrorOnce(deployment, admin, options.browser));
   const people = await report.check('personas', { admin, canaries }, ({ admin }) => personas(deployment, admin));
   const all = { people, canaries };
+  // Touched now and left alone: stale by `stale session`, five minutes on at least.
+  const alone = await report.check('a session left alone', { admin }, ({ admin }) => leaveAlone(deployment, admin));
 
   await report.check('members only', { people }, ({ people }) => membersOnly(deployment, people));
   await report.check('grant scoping', all, ({ people, canaries }) => grantScoping(people, canaries));
@@ -56,6 +60,9 @@ export async function conform(
   await report.check('reveals audited', all, ({ people, canaries }) => revealAudited(deployment, people, canaries, 'reveal'));
   await report.check('runs audited', all, ({ people, canaries }) => revealAudited(deployment, people, canaries, 'run'));
   await report.check('cross-site', all, ({ people, canaries }) => crossSite(people, canaries));
+  await report.check('passkey ceremonies', { people }, ({ people }) => ceremonies(deployment, people));
+  await report.check('passkey changes', { people }, ({ people }) => passkeyChanges(deployment, people));
+  await report.check('reads stay reads', all, ({ people, canaries }) => readsStayReads(deployment, people, canaries));
   const live = await report.check('live setup', { admin, canaries }, ({ admin, canaries }) => setUpLive(admin, canaries));
   // `coffre verify`, as an operator runs it against an instance: with a
   // token from CI; then signed in with `coffre login`, a user turned away,
@@ -81,6 +88,9 @@ export async function conform(
   await report.check('offboarding', all, ({ people, canaries }) => offboarding(deployment, people, canaries));
   await report.check('instance roles', all, ({ people, canaries }) => instanceRoles(deployment, people, canaries));
   await report.check('bulk limit', { people }, ({ people }) => bulkLimit(people, options.bulkLimit));
+  await report.check('stale session', { people, alone, canaries }, ({ people, alone, canaries }) => staleSession(deployment, people, alone, canaries));
+  // Under `required` from here to `back to optional`: the workload checks too, which no passkey touches.
+  const signedOut = await report.check('passkeys required', { people, live, canaries }, ({ people, live, canaries }) => passkeysRequired(deployment, people, live, canaries));
   // A CI run signing in with its ID token, through a binding. The limit
   // comes last of these: it spends this address's exchanges for the minute.
   const binding = await report.check('trust a run', { admin }, ({ admin }) => trustRun(deployment, admin));
@@ -92,6 +102,9 @@ export async function conform(
   await report.check('run unbound', { admin, binding, credential }, ({ admin, binding, credential }) => runUnbound(deployment, admin, binding, credential));
   await report.check('exchanges limited', { binding }, () => exchangesLimited(deployment));
   await report.check('tokens unlogged', { binding }, () => tokensUnlogged(deployment));
+  await report.check('back to optional', { people }, ({ people }) => backToOptional(deployment, people, signedOut));
+  await report.check('issuer replaced', { people }, ({ people }) => issuerReplaced(deployment, people));
+  await report.check('IP public URL', {}, () => ipPublicUrl(deployment));
 
   await report.check('checkpoints', { people }, ({ people }) => checkpoints(deployment, people));
   await report.check('keys behind writes', { people }, ({ people }) => writesAgree(deployment));

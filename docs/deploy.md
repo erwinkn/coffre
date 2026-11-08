@@ -815,6 +815,9 @@ with that callback works too. Set
 `OWNERS` in `vault/wrangler.jsonc`: the instance's Owners, made ones at
 every deploy, and the way back in if every Owner is locked out
 ([deployment-auth.md](deployment-auth.md#the-owners-the-deployment-names)). `VAULT_KEY_ID` comes with the keys, in step 3.
+`PASSKEYS`, `optional` as written, says who signs in with a passkey after
+GitHub: whoever holds one and every Owner, or with `required` everyone
+([deployment-auth.md](deployment-auth.md#passkeys)).
 
 For Cloudflare Access instead, replace `signin(…)` with `cloudflareAccess(…)`
 ([deployment-auth.md](deployment-auth.md)).
@@ -956,7 +959,8 @@ cp vault.env.example vault.env
 chmod 600 .env vault.env
 ```
 
-Fill in `PUBLIC_URL`, the GitHub OAuth settings and `OWNERS`, then
+Fill in `PUBLIC_URL`, the GitHub OAuth settings, `PASSKEYS` if not
+`optional` ([deployment-auth.md](deployment-auth.md#passkeys)) and `OWNERS`, then
 the values from `coffre setup`'s screen ([step 3 above](#3-keys-and-secrets)
 says what each key is for). `.env` takes the app key, `APP_KEY`, and
 the app's database URL, as `DATABASE_URL`. `vault.env` takes the vault ID,

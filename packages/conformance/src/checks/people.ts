@@ -52,6 +52,14 @@ export async function signIn(
   email: string,
   start = '/auth/signin/github',
 ): Promise<{ ok: true } | { ok: false; error: string; location: string }> {
+  const location = await provider(deployment, browser, email, start);
+  if (location.pathname === '/auth/passkey') return passkeyStep(deployment, browser, email);
+  const error = location.searchParams.get('error');
+  return error === null ? { ok: true } : { ok: false, error, location: `${location.pathname}${location.search}` };
+}
+
+/** The provider's half of a sign-in, `signIn`'s first: to the stand-in GitHub and back, and where coffre sent the browser then. */
+export async function provider(deployment: Deployment, browser: Browser, email: string, start = '/auth/signin/github'): Promise<URL> {
   const leave = await browser.fetch(start);
   const authorize = new URL(leave.headers.get('location') ?? '', deployment.origin);
   expect(
@@ -70,10 +78,22 @@ export async function signIn(
   );
   const back = await browser.fetch(callback);
   expect(back.status === 302 || back.status === 303, `the callback answered ${back.status}`, await back.text());
-  const location = new URL(back.headers.get('location') ?? '/', deployment.origin);
-  if (location.pathname === '/auth/passkey') return passkeyStep(deployment, browser, email);
-  const error = location.searchParams.get('error');
-  return error === null ? { ok: true } : { ok: false, error, location: `${location.pathname}${location.search}` };
+  return new URL(back.headers.get('location') ?? '/', deployment.origin);
+}
+
+/** What a browser's `navigator.credentials` call is asked against coffre: its RP ID, its origin and the challenge. */
+export function ceremonyOf(deployment: Deployment, challenge: string): { rpId: string; origin: string; challenge: Uint8Array } {
+  return { rpId: new URL(deployment.origin).hostname, origin: deployment.origin, challenge: new Uint8Array(Buffer.from(challenge, 'base64url')) };
+}
+
+/** The passkey conformance added for `email` and kept, if it did: every check signs as that person with it. */
+export function passkeyOf(email: string): SoftAuthenticator | undefined {
+  return passkeys.get(email);
+}
+
+/** Keep `key` as `email`'s passkey from now on: one a check added beside the first, the one the person signs in with. */
+export function keepPasskey(email: string, key: SoftAuthenticator): void {
+  passkeys.set(email, key);
 }
 
 /** Each person's passkey, once coffre had them add one: the same browser's authenticator, whichever browser signs in. */
@@ -149,7 +169,7 @@ export async function withPasskey(deployment: Deployment, person: Person): Promi
  * A fresh check, as coffre's dialog asks it (docs/design/passkeys.md, section 3.4): a touch of `email`'s passkey at the
  * step-up's door, whose answer replaces the browser's session with one confirmed now.
  */
-async function stepUp(deployment: Deployment, browser: Browser, email: string): Promise<void> {
+export async function stepUp(deployment: Deployment, browser: Browser, email: string): Promise<void> {
   const asked = await browser.fetch('/api/auth/passkey?step-up=1&next=/projects');
   expect(asked.ok, 'the step-up had nothing to ask', await asked.clone().text());
   const { options, state } = (await asked.json()) as { options: { challenge: string }; state: string };

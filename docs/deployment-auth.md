@@ -244,6 +244,139 @@ everything and were in no member row; during 0.6's development it was
 makes the root admins they name Owners ("Upgrading from 0.5" in the
 [release notes](../CHANGELOG.md)).
 
+## Passkeys
+
+With `signin`, a passkey can follow the provider: GitHub says who someone
+is, and a touch of a passkey on their laptop or phone says it is them at
+this browser, now. A stolen GitHub session then gets an attacker as far as
+"Confirm it's you", with nothing written, and a phishing site relaying the
+sign-in gets no answer: a passkey made for `secrets.acme.example` answers
+that origin alone. Passkeys are the second factor coffre supports, the only
+one: no TOTP, no SMS. Cloudflare Access runs its own sign-in, so behind it
+there are none.
+
+```ts
+auth: signin({
+  providers: [github({ app })],
+  passkeys: 'required', // 'off' | 'optional' (the default) | 'required'
+}),
+```
+
+`coffre init` reads it from the app's `PASSKEYS` var, `optional` as
+written (`app/wrangler.jsonc` on Workers, `.env` on Node), so that turning
+it off to recover (below) is a var and a deploy.
+
+| | `off` | `optional` (default) | `required` |
+|---|---|---|---|
+| Signing in, no passkey yet | the provider | the provider; an Owner adds one first | the provider, then adding one, before any session exists |
+| Signing in, with a passkey | the provider | the provider, then a touch | the provider, then a touch |
+| Changing access, issuing a service's credentials, the other acts below | as is | a touch in the last 5 minutes; no passkey yet: add one first | a touch in the last 5 minutes |
+| Approving a terminal, connecting an MCP client, approving its change | as is | a touch for that act, if you hold a passkey | a touch for that act |
+| Reading values | as is | as is | as is |
+| `/use`, CI and workload sign-in, services | untouched | untouched | untouched |
+
+Under `optional`, everyone with a passkey signs in with it, and so does
+every Owner of the whole instance and every Owner the deployment names:
+they add one at their next sign-in. A Developer who never adds one signs
+in with GitHub alone, as before, and is asked for one the first time they
+do something that needs a fresh check. People add more (ten at most) and
+rename or remove theirs in **Account → Passkeys**.
+
+**What needs a fresh check.** A touch at sign-in, or in the step-up dialog
+an act opens when the session is not fresh, keeps that browser's session
+fresh for five minutes. The acts that
+need one widen someone's reach, mint a credential or cannot be undone:
+adding, changing or removing a member, their grants or instance role, a
+role, issuing a service's token, a trust binding or an enrollment code,
+approving a workload's waiting session, the instance's settings,
+unprotecting an environment, lifting a freeze, making a sensitive value a
+secret, erasing a project or an environment, accepting lost audit entries,
+linking another sign-in account, adding a passkey, resetting someone's.
+Revoking sessions, tokens, bindings and connected apps, freezing and
+protecting never need one: in an incident they must be quick.
+The table is `FRESH_ROUTES` (`packages/server/src/api/fresh-routes.ts`); a
+refused request answers `403 fresh_check_required`, and the pages ask for
+the touch and send it again. The CLI asks the same of its terminal, through
+a browser that approves it. Those two touches, at sign-in and the step-up,
+also end the session they came in on and issue a new one, so a copy of the
+old cookie stops working. Approving a terminal, an MCP client's change or
+its connection takes a touch of its own, for that act alone: it approves
+that act and nothing else, and neither refreshes the session nor replaces
+it. A copy of that browser's cookie keeps working until it expires or is
+revoked, and needs a fresh touch of its own for anything above.
+
+**What a change to someone's passkeys ends.** Adding a first passkey ends
+every session, terminal, personal token, handle and MCP client of theirs
+that none confirmed. Removing one, or an Owner's reset, ends every one of
+theirs but the browser that removed it. Services, their tokens and CI runs
+never hold a passkey and are untouched.
+
+**The relying party.** A passkey belongs to a host name. coffre makes them
+for `publicUrl`'s host unless `passkeys: { policy, rpId }` names a parent
+of it (`rpId: 'acme.example'` for `secrets.acme.example`): the origin must
+still be `publicUrl`'s, so `evil.acme.example` gets no answer either way.
+A `publicUrl` that is an IP address does not start with passkeys on:
+browsers make none there, so use `http://localhost:<port>` locally. A passkey
+is made for the `rpId` in force then and answers only for it, so changing
+`rpId` is itself a move: from `secrets.acme.example` to `acme.example`,
+every passkey made before is refused at once, on the same host. Moving
+coffre to another host keeps the passkeys only if `rpId` was a parent of
+both before the first one was made. So choose the parent before anyone
+enrolls. Otherwise nobody is signed out by the change itself: sessions,
+terminals and tokens already issued stand on their passkey's row, which
+names no RP ID, and keep working. What fails is every touch of an old
+passkey after it: a sign-in's, a step-up's, a terminal's or an MCP client's,
+and a removal's. A session touched in the last five minutes still stands
+on that touch, so for those minutes its person can add a passkey, made for
+the new `rpId`, and an Owner can reset someone's. Once no session is that
+fresh, the way back is the last Owner's, below, for everyone: `off` for
+minutes, each person removes their old passkeys, then the policy back, and
+each adds a new one at their next sign-in.
+
+### Lost passkeys
+
+- **One of several lost.** Sign in with another and remove the lost one in
+  **Account → Passkeys**. Everything else you were signed in with ends.
+- **All of them lost.** An Owner of the whole instance opens **Users →
+  the person → ⋯ → Reset passkeys…**, touches their own passkey, and every
+  passkey of that person's goes, with everything they were signed in with.
+  Their next sign-in asks for a new passkey under `required`, takes GitHub
+  alone under `optional` (an Owner's adds one again), and says who reset
+  them, and when. Only an Owner of the whole instance resets anyone, and
+  never their own: keep two.
+- **The last Owner lost theirs.** Nobody can reset them. Set `PASSKEYS` to
+  `off` (or `passkeys: 'off'`), deploy, sign in with GitHub alone, remove
+  the lost passkeys, set the policy back and deploy again; the next
+  sign-in adds a new one. There is no reset command and no exemption for
+  one person: this is the way back, and while it is `off` a GitHub account
+  is enough for everyone, so keep the window to minutes. `off` deletes no
+  passkey, and turning it back restores everyone's. Sessions, terminals,
+  personal tokens and MCP clients made meanwhile name no passkey, and are
+  refused at their next request once it is back, for everyone who holds
+  one. Handles are the exception: `/use` does not hold a handle to the
+  policy at each request, so one made meanwhile keeps working once it is
+  back, until it expires (twelve hours unless asked, a week at most). A
+  reset of its person's passkeys, or their removal, ends it. What they
+  did meanwhile stays done: read the log for the window (**Audit**, or
+  `coffre audit`), and look for `member.*`, `access.*`, `role.*`, service
+  tokens and trust bindings, handles (`token.create` of kind `handle`),
+  and `passkey.*`.
+
+### When someone else added their passkey
+
+The one gap `optional` leaves is a person who has no passkey yet: until
+they add one, they are as strong as their GitHub account. Someone holding
+Bob's GitHub account can sign in and add a passkey of their own, which
+ends Bob's sessions, terminals and tokens, and Bob's next sign-in asks for
+a passkey Bob does not have. It is loud: Bob is locked out, and the log has
+a `passkey.add` in Bob's name. When it happens, confirm with Bob some other
+way than this account, have an Owner reset Bob's passkeys, read the log
+from that `passkey.add` on for what was done in Bob's name, and rotate
+what Bob's access could reach that was read meanwhile (the person's page
+lists what was read, as for offboarding: [offboarding.md](offboarding.md)).
+`required` closes the gap for everyone signed in since, Owners are closed
+already, and the provider's own two-factor closes it the most.
+
 ## Local development
 
 `pnpm dev` signs in as a deployment does, with `signin(…)`

@@ -2,7 +2,7 @@
 // `pnpm start` reads): read by src/server.ts, and so only on the
 // server. It holds no vault key: it asks the vault, a process of its own
 // (src/vault.ts), over a Unix socket.
-import { createCoffre, fileAnchor, github, githubApp, processLimits, signin, type CoffreContext } from '@coffre/server/node';
+import { createCoffre, fileAnchor, github, githubApp, processLimits, signin, type CoffreContext, type PasskeyPolicy } from '@coffre/server/node';
 import { auditWatch } from '@coffre/server/plugins/audit-watch';
 import { credentialProxy } from '@coffre/server/plugins/credential-proxy';
 import { connectVault } from '@coffre/vault/node';
@@ -35,6 +35,11 @@ export const coffre = createCoffre({
   // vault: await localVault({ database: env('DATABASE_URL'), hotDatabase: …, checkpointer: { memory: … }, kek: …, owners: […] }),
   auth: signin({
     providers: [app ? github({ app }) : github(client)],
+    // A passkey after GitHub: `optional`, unless PASSKEYS says otherwise,
+    // asks it of whoever holds one, and of every Owner; `required`, of
+    // everyone; `off`, of no one, the recovery when the last Owner lost
+    // theirs (docs/deployment-auth.md).
+    passkeys: (process.env.PASSKEYS || undefined) as PasskeyPolicy | undefined,
     // CI runs and apps may sign in as services with their platform's proof,
     // through the trust bindings owners make (docs/design/oidc.md), into
     // key-bound sessions or, for now, bearer credentials; `useOnly: true`

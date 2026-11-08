@@ -61,6 +61,14 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
     'the leaver, removed': people.leaver.browser,
     'the stranger': people.stranger.browser,
   };
+  // A caller listed as signed in that an earlier check signed out would read as no one, and the scan would pass
+  // with one viewer fewer. Each must read before the scan trusts its answers.
+  const out: string[] = [];
+  for (const name of ['the Owner', 'the reader', 'the bulk reader'] as const) {
+    const status = (await browsers[name].fetch('/api/projects')).status;
+    if (status !== 200) out.push(`${name}: ${status}`);
+  }
+  expect(out.length === 0, 'a caller the scan reads as, signed in, was not', out);
   const callers: [string, (url: string) => Promise<Response>][] = [
     ['no one', (url) => fetch(url, { redirect: 'manual' })],
     ...Object.entries(browsers).map(([name, browser]): [string, (url: string) => Promise<Response>] => [name, (url) => browser.fetch(url)]),

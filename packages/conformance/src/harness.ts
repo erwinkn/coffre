@@ -26,6 +26,9 @@ import { Failure, until } from './report.ts';
 
 export type Kind = 'workers' | 'node';
 
+/** The app's settings a check may change over a restart: the environment its config reads (examples/*\/app/src/coffre.ts). */
+export type Settings = { PASSKEYS?: 'off' | 'optional' | 'required'; PUBLIC_URL?: string; GITHUB_API_URL?: string };
+
 export type HarnessOptions = {
   port: number;
   /** Postgres as a login that may create databases; workers only. */
@@ -48,8 +51,16 @@ export type Deployment = {
   beforeFirstBeat: boolean;
   /** What the Cron trigger does every five minutes. */
   scheduled(options?: { allowFailure?: boolean }): Promise<void>;
-  /** Stop what serves the deployment and start it again on the same data: new isolates on Workers, new processes on Node. */
-  restart(): Promise<void>;
+  /**
+   * Stop what serves the deployment and start it again on the same data: new isolates on Workers, new processes on Node.
+   * `settings` are the app's own (`PASSKEYS`, `PUBLIC_URL`), over what it was booted with, until the next restart.
+   */
+  restart(settings?: Settings): Promise<void>;
+  /**
+   * Stop what serves the deployment and start it with `settings` that it must refuse to start with: what it answered,
+   * then the deployment as booted again. Started anyway (`/api/me` answered), it fails.
+   */
+  refusesToStart(settings: Settings): Promise<string>;
   /** The process group of each process serving it, by name, for whoever measures them: `wrangler` on Workers; `vault` and `server` on Node. */
   serving(): Record<string, number>;
   /** The app's database, as its owner. */
@@ -191,6 +202,27 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     return path;
   }
 
+  /** The settings a restart gave, over the deployment's own (`Settings`). */
+  let settings: Settings = {};
+
+  /**
+   * Started with settings it must refuse (`refusesToStart`): what it said, from its exit or its first answer, and its
+   * output meanwhile. Answering `/api/me` with anything but a 5xx is starting.
+   */
+  async function refusal(entry: Child, since: () => string): Promise<string> {
+    let answered: Response | null = null;
+    await until('the refused start to end', async () => {
+      if (entry.exited) return true;
+      const me = await fetch(`${origin}/api/me`).catch(() => null);
+      if (me === null || me.status === 503) return false;
+      answered = me;
+      return true;
+    }, 60);
+    const me = answered as Response | null;
+    if (me !== null && me.status < 500) throw new Failure(`it started anyway: /api/me answered ${me.status}`, since());
+    return `${me === null ? 'exited' : `${me.status} ${await me.text()}`}\n${since()}`.trim();
+  }
+
   const idp = new DevIdp();
   idp.listenPort = port + 1;
   await idp.start();
@@ -257,19 +289,21 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     // The app as it deploys: its Start app, built by its own Vite, which wrangler runs unbundled.
     await run(bin('vite'), ['build', 'app']);
     const state = join(scratch, 'state');
-    const startWrangler = () => start('wrangler', bin('wrangler'), [
+    const startWrangler = (asked: Settings = settings) => start('wrangler', bin('wrangler'), [
       'dev',
       ...['-c', drainingConfig(join(dir, 'app/dist/server')), '-c', 'vault/wrangler.jsonc'],
       ...['--ip', '127.0.0.1', '--port', String(port), '--inspector-port', String(port + 2)],
       ...['--persist-to', state, '--show-interactive-dev-session=false'],
       // Not in wrangler.jsonc's vars, so not taken from the environment.
-      ...['--var', `GITHUB_URL:${github.GITHUB_URL}`, '--var', `GITHUB_API_URL:${github.GITHUB_API_URL}`],
+      ...['--var', `GITHUB_URL:${github.GITHUB_URL}`, '--var', `GITHUB_API_URL:${asked.GITHUB_API_URL ?? github.GITHUB_API_URL}`],
       // The dev IdP's workload issuer is plain HTTP on loopback, which only a check may trust.
       ...['--var', 'ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT:true'],
     ], {
       // Wrangler hands each Worker the vars and secrets its own
       // wrangler.jsonc declares, from here: the app never sees the vault key.
       PUBLIC_URL: origin,
+      ...(asked.PASSKEYS === undefined ? {} : { PASSKEYS: asked.PASSKEYS }),
+      ...(asked.PUBLIC_URL === undefined ? {} : { PUBLIC_URL: asked.PUBLIC_URL }),
       GITHUB_CLIENT_ID: github.GITHUB_CLIENT_ID,
       GITHUB_CLIENT_SECRET: github.GITHUB_CLIENT_SECRET,
       APP_KEY: KEYS.APP_KEY,
@@ -292,11 +326,28 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         const response = await fetch(`${origin}/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*`);
         if (!response.ok && !options.allowFailure) throw new Failure(`the scheduled handler answered ${response.status}`, `${await response.text()}\n${logs()}`);
       },
-      async restart() {
+      async restart(asked = {}) {
         await halt(wrangler);
+        settings = asked;
         wrangler = startWrangler();
         await until(`${origin}/livez`, async () => (await fetch(`${origin}/livez`)).ok, 120, alive);
         await doorOpen();
+      },
+      async refusesToStart(asked) {
+        await halt(wrangler);
+        const since = mark();
+        const refused = startWrangler({ ...settings, ...asked });
+        try {
+          // Wrangler serves whatever the Worker does: the Worker's config is read at its first request, and refused there.
+          // Waited for inside the `finally`: a Wrangler that never serves is stopped, and the deployment put back, too.
+          await until(`${origin}/livez`, async () => (await fetch(`${origin}/livez`).catch(() => null)) !== null || refused.exited, 120);
+          return await refusal(refused, since);
+        } finally {
+          await halt(refused);
+          wrangler = startWrangler();
+          await until(`${origin}/livez`, async () => (await fetch(`${origin}/livez`)).ok, 120, alive);
+          await doorOpen();
+        }
       },
       serving: () => ({ wrangler: wrangler.child.pid! }),
       database: () => postgres(owner),
@@ -335,7 +386,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     // The pages as they run: the deployment's Start app, built by its own Vite.
     await run(bin('vite'), ['build', 'app']);
     // As `pnpm start` runs it: the app's build, under srvx.
-    const startServer = () =>
+    const startServer = (asked: Settings = settings) =>
       start('server', bin('srvx'), ['--prod', '--host=127.0.0.1', 'app/dist/server/server.js'], {
         PORT: String(port),
         PUBLIC_URL: origin,
@@ -345,6 +396,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         APP_KEY: KEYS.APP_KEY,
         ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT: 'true',
         ...github,
+        ...asked,
       });
     let server = startServer();
     return {
@@ -361,13 +413,29 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
         await doorOpen();
       },
-      async restart() {
+      async restart(asked = {}) {
         await halt(server);
         await halt(vault);
+        settings = asked;
         vault = await startVault();
         server = startServer();
         await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
         await doorOpen();
+      },
+      async refusesToStart(asked) {
+        await halt(server);
+        const since = mark();
+        const refused = startServer({ ...settings, ...asked });
+        // Its own daemon flag off: its exit is what is asked of it.
+        refused.daemon = false;
+        try {
+          return await refusal(refused, since);
+        } finally {
+          await halt(refused);
+          server = startServer();
+          await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
+          await doorOpen();
+        }
       },
       serving: () => ({ vault: vault.child.pid!, server: server.child.pid! }),
       database: async () => sqlite(database),
