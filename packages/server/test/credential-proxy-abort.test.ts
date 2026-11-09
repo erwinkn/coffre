@@ -57,6 +57,8 @@ let upstream: Server;
 let proxy: Srvx;
 /** While set, the proxy's answer waits for it before it goes to srvx: middleware that holds the answer back. */
 let holdAnswer: Promise<void> | undefined;
+/** Called with the proxy's answer once its route has returned it: the upstream's headers are in. */
+let answered: (() => void) | undefined;
 let proxyAt: URL;
 
 before(async () => {
@@ -83,6 +85,7 @@ before(async () => {
   proxy = serve({ port: 0, hostname: '127.0.0.1', silent: true,
     fetch: async (request) => {
       const answer = await routes.fetch(request, coffre);
+      answered?.();
       await holdAnswer;
       return answer;
     },
@@ -169,6 +172,7 @@ test("an app that hangs up after the upstream's headers came, before the answer 
   const late = watch('/late');
   let release!: () => void;
   holdAnswer = new Promise<void>((resolve) => (release = resolve));
+  const routed = new Promise<void>((resolve) => (answered = resolve));
   const unhandled: unknown[] = [];
   const note = (reason: unknown) => unhandled.push(reason);
   process.on('unhandledRejection', note);
@@ -177,7 +181,8 @@ test("an app that hangs up after the upstream's headers came, before the answer 
     answer.catch(() => {});
     request.end();
     await within(late.arrived, 'the upstream got the request');
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // The route has returned its answer, so the hang-up meets a body the proxy wrapped, not a fetch still waiting for headers.
+    await within(routed, 'the proxy had its answer');
     hangUp();
     assert.equal((await within(late.ended, 'the upstream request ended')).answered, false);
     release();
@@ -186,6 +191,7 @@ test("an app that hangs up after the upstream's headers came, before the answer 
   } finally {
     release();
     holdAnswer = undefined;
+    answered = undefined;
     process.off('unhandledRejection', note);
   }
   assert.deepEqual(unhandled, []);
