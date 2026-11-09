@@ -33,6 +33,9 @@ import { createDatabase } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
+// Its connections hold no more as its rows grow, a cell asked at a time; it says when it ends, as every matrix does, so
+// that the others' shares of Postgres grow then.
+import '../../../scripts/matrix-connections.ts';
 import { shardOf } from '../../../scripts/matrix-shard.ts';
 import { blocksApart, twinOf, weigh, weighingSession, WORLD_TABLES, type Weighed } from '../../../scripts/matrix-weigh.ts';
 import { resolveConfig } from '../src/config.ts';

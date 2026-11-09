@@ -32,16 +32,19 @@ import type { NamedUseInput, NamedUseOutcome } from '@coffre/core/vault';
 import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
+import { BESIDE_CELLS, connectionShare, FREE_CONNECTIONS, POOL } from '../../../scripts/matrix-connections.ts';
 import { shardOf } from '../../../scripts/matrix-shard.ts';
 import { deletesSettled, horizonHeld, removeDeleted, WORLD_TABLES } from '../../../scripts/matrix-weigh.ts';
 import type { Input } from '../src/inputs.ts';
 import { ENGINE, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
-import { holding, keyBlocksOf, namedWorld, principalLocks, slowed, turnsApart, weighed, weighedInTurn, weighingSession, type HotCall, type Weighed } from './named-world.ts';
+import { each, endSlowed, holding, keyBlocksOf, namedWorld, principalLocks, slowed, turnsApart, weighed, weighedInTurn, weighingSession, type HotCall, type Weighed } from './named-world.ts';
 import { change, emptyLog, seal, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
+/** The connections Postgres lets open (`FREE_CONNECTIONS`), which this file shares with the matrices beside it. */
+let free = 0;
 before(async () => {
-  db = await openTestDatabase();
+  db = await openTestDatabase({ connections: POOL });
   await useDatabases(db);
   await emptyLog();
   // No autovacuum on this database's tables: the cells' buffers are weighed on statistics only `weigh` refreshes, between
@@ -51,6 +54,7 @@ before(async () => {
       FOR t IN SELECT c.oid::regclass AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' LOOP
         EXECUTE format('ALTER TABLE %s SET (autovacuum_enabled = off)', t.name);
       END LOOP; END $$`));
+    [{ free }] = (await rows<{ free: number }>(db.owner, sql.raw(FREE_CONNECTIONS))) as [{ free: number }];
   }
 });
 after(() => db.close());
@@ -164,14 +168,18 @@ async function cell(row: Row, key: Key) {
   // A source archived since lives in an environment of its own, which the archive leaves `dev` beside.
   const sourceAt = key === 'a reference, its source archived since' ? await w.environment('src') : undefined;
   const reference = key.startsWith('a reference') ? await w.reference(name, sourceAt) : null;
-  const measured = await slowed(db, { connections: 1 });
   const ask = (purpose: NamedUseInput['purpose'], extra: Partial<NamedUseInput> = {}) => w.ask(name, { purpose, ...extra });
-  // Used before: by another isolate of the principal's, while it stood: its row of the cap's fresh.
+  // Used before: by another isolate of the principal's, while it stood: its row of the cap's fresh. Ended before the
+  // measured isolate opens its own: a cell holds one connection at a time (`rowsAtOnce`).
   if (USED.has(key)) {
     const other = await slowed(db, { connections: 1 });
-    await other.vault.useNamed!(ask('use'));
-    await other.end();
+    try {
+      await other.vault.useNamed!(ask('use'));
+    } finally {
+      await other.end();
+    }
   }
+  const measured = await slowed(db, { connections: 1 });
   if (row.map === 'while standing' || row.map === 'renamed, its slug reused') await measured.vault.useNamed!(ask('use'));
   // Their standing goes.
   if (row.lost === 'revoked') await w.revoke();
@@ -210,39 +218,42 @@ async function cell(row: Row, key: Key) {
     principal: w.principal,
     /** The request, its principal's lock held and every statement slow: its answer, its calls, what it wrote. */
     measure: async () => {
-      setMap(row, { w, cache: measured.cache, name, elsewhere, elsewhereKey, gone, otherCredential });
-      const entries = () => count(sql`SELECT count(*) AS n FROM log_uses WHERE credential = ${w.credentialId}`);
-      const capRows = () => count(sql`SELECT count(*) AS n FROM bulk_cap WHERE principal = ${w.principal}`);
-      if (row.window === 'passed') await run(db.owner, sql`DELETE FROM bulk_cap WHERE principal = ${w.principal}`);
-      const [beforeEntries, beforeCap] = [await entries(), await capRows()];
-      await measured.connect();
-      measured.slow(delayOf());
-      const before = measured.statements();
-      const at = Date.now();
-      const request = ask(purpose, row.admission === 'past its deadline' ? { at: at - 4000, deadline: at - 1000 } : { at, deadline: at + 3000 });
-      const work = () => measured.vault.useNamed!(request);
-      // Its principal's lock is held by another connection meanwhile, the batch's every one on one (`principalLocks`).
-      const answer = await work();
-      measured.slow(0);
-      // Its own last call, if it made one: one answered before any (busy at its deadline) weighs nothing.
-      const last = measured.statements() > before ? measured.last() : null;
-      const result = {
-        code: codeOf(answer), route: routeOf(answer), calls: measured.statements() - before,
-        entries: (await entries()) - beforeEntries, capRows: (await capRows()) - beforeCap,
-        // Its last statement's form (`p_known`, the 12th argument, set is the cached form, which an isolate's history
-        // would choose: Fable's review and review r12 of D153), and, weighed once the row's cells have all answered
-        // (`weigh`), the buffers it reads inside (Postgres).
-        cached: last !== null && last.args[11] != null, sent: last, buffers: null as number | null, keyBlocks: null as number | null, blocks: null as Weighed['blocks'] | null,
-        // Standing, a refused key's request again from an isolate with no history (no map, seals or covers), on the same
-        // world: what its call reads must not hang on what the measured isolate's history held.
-        cold: null as HotCall | null, coldBuffers: null as number | null, coldKeyBlocks: null as number | null, coldBlocks: null as Weighed['blocks'] | null,
-        coldAnswer: null as { code: string; route: string } | null,
-        // Standing nowhere, what it reads at each of a new session's first calls, at the server's planner settings
-        // (`weighedInTurn`): weighed with the rest.
-        early: row.lost !== 'they stand', turns: null as { asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null,
-      };
-      await measured.end();
-      return result;
+      try {
+        setMap(row, { w, cache: measured.cache, name, elsewhere, elsewhereKey, gone, otherCredential });
+        const entries = () => count(sql`SELECT count(*) AS n FROM log_uses WHERE credential = ${w.credentialId}`);
+        const capRows = () => count(sql`SELECT count(*) AS n FROM bulk_cap WHERE principal = ${w.principal}`);
+        if (row.window === 'passed') await run(db.owner, sql`DELETE FROM bulk_cap WHERE principal = ${w.principal}`);
+        const [beforeEntries, beforeCap] = [await entries(), await capRows()];
+        await measured.connect();
+        measured.slow(delayOf());
+        const before = measured.statements();
+        const at = Date.now();
+        const request = ask(purpose, row.admission === 'past its deadline' ? { at: at - 4000, deadline: at - 1000 } : { at, deadline: at + 3000 });
+        const work = () => measured.vault.useNamed!(request);
+        // Its principal's lock is held by another connection meanwhile, the batch's every one on one (`principalLocks`).
+        const answer = await work();
+        measured.slow(0);
+        // Its own last call, if it made one: one answered before any (busy at its deadline) weighs nothing.
+        const last = measured.statements() > before ? measured.last() : null;
+        const result = {
+          code: codeOf(answer), route: routeOf(answer), calls: measured.statements() - before,
+          entries: (await entries()) - beforeEntries, capRows: (await capRows()) - beforeCap,
+          // Its last statement's form (`p_known`, the 12th argument, set is the cached form, which an isolate's history
+          // would choose: Fable's review and review r12 of D153), and, weighed once the row's cells have all answered
+          // (`weigh`), the buffers it reads inside (Postgres).
+          cached: last !== null && last.args[11] != null, sent: last, buffers: null as number | null, keyBlocks: null as number | null, blocks: null as Weighed['blocks'] | null,
+          // Standing, a refused key's request again from an isolate with no history (no map, seals or covers), on the same
+          // world: what its call reads must not hang on what the measured isolate's history held.
+          cold: null as HotCall | null, coldBuffers: null as number | null, coldKeyBlocks: null as number | null, coldBlocks: null as Weighed['blocks'] | null,
+          coldAnswer: null as { code: string; route: string } | null,
+          // Standing nowhere, what it reads at each of a new session's first calls, at the server's planner settings
+          // (`weighedInTurn`): weighed with the rest.
+          early: row.lost !== 'they stand', turns: null as { asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null,
+        };
+        return result;
+      } finally {
+        await measured.end();
+      }
     },
     /**
      * Its twin, on the same world, from an isolate with no history (no map, seals or covers): standing, the same
@@ -255,12 +266,15 @@ async function cell(row: Row, key: Key) {
     twin: async (result: { coldAnswer: { code: string; route: string } | null; cold: HotCall | null }): Promise<void> => {
       if (!usable(row, key)) {
         const fresh = await slowed(db, { connections: 1 });
-        const now = Date.now();
-        const times = row.admission === 'past its deadline' ? { at: now - 4000, deadline: now - 1000 } : { at: now, deadline: now + 3000 };
-        const twin = await fresh.vault.useNamed!(row.lost === 'they stand' ? ask(purpose, times) : w.ask(`${name}_NEVER`, { purpose, ...times }));
-        result.coldAnswer = { code: codeOf(twin), route: routeOf(twin) };
-        result.cold = fresh.statements() > 0 ? fresh.last() : null;
-        await fresh.end();
+        try {
+          const now = Date.now();
+          const times = row.admission === 'past its deadline' ? { at: now - 4000, deadline: now - 1000 } : { at: now, deadline: now + 3000 };
+          const twin = await fresh.vault.useNamed!(row.lost === 'they stand' ? ask(purpose, times) : w.ask(`${name}_NEVER`, { purpose, ...times }));
+          result.coldAnswer = { code: codeOf(twin), route: routeOf(twin) };
+          result.cold = fresh.statements() > 0 ? fresh.last() : null;
+        } finally {
+          await fresh.end();
+        }
       }
     },
   };
@@ -295,14 +309,6 @@ function setMap(row: Row, at: {
   }
 }
 
-/** `work` over `items`, side by side on Postgres; on SQLite, which writes one at a time, in turn. */
-async function each<T, R>(items: readonly T[], work: (item: T) => Promise<R>): Promise<R[]> {
-  if (ENGINE === 'postgres') return Promise.all(items.map(work));
-  const done: R[] = [];
-  for (const item of items) done.push(await work(item));
-  return done;
-}
-
 /**
  * How many more shared buffers one refusal may read than another it is held alike to: a run's noise (a page split, a
  * heap page a world's rows spilled to). A key's own rows read before the standing was decided cost 30 to 90 more (W259:
@@ -332,6 +338,27 @@ const ROWS: Row[] = shardOf(import.meta.url, [
   ...SET.flatMap((map) => LOST.flatMap((lost) => PLACES.filter((place) => place !== 'its seal replaced').flatMap((place) => (['as asked', 'past the floor'] as const).map((admission) =>
     ({ map, lost, place, admission, window: 'passed' as const }))))),
 ], labelOf);
+
+/**
+ * The most rows a batch makes and asks side by side: the width the matrix's timings were taken at, on CI's runners beside
+ * the other matrices (T198: a cell's first statement, its call's 3 s deadline), and that its cells are made within their
+ * keys' minute at (T204). A wider batch makes more worlds before any is asked.
+ */
+const WIDEST = 3;
+
+/**
+ * How many rows the next batch takes on Postgres: up to `WIDEST`, as many as this file's share of the connections holds
+ * (`connectionShare`), a row's cells a connection each at a time (their hot path's) beside what the file holds whatever
+ * its cells (`BESIDE_CELLS`). Asked for each batch, as the share grows once the files beside this one end. SQLite asks
+ * its cells in turn.
+ */
+function rowsAtOnce(): number {
+  if (ENGINE !== 'postgres') return 1;
+  const share = connectionShare(free);
+  const fit = Math.floor((share - BESIDE_CELLS) / KEYS.length);
+  if (fit < 1) throw new Error(`a row's ${KEYS.length} cells, beside ${BESIDE_CELLS}, are past this file's share of Postgres's ${free} connections, ${share}`);
+  return Math.min(WIDEST, fit);
+}
 
 test(`a caller learns nothing of a key they may not have, whatever the isolate's map holds, in any of ${ROWS.length} rows of ${KEYS.length} key states (T158, D150, D153)`, { timeout: 7_200_000 }, async (t) => {
   const differing: string[] = [];
@@ -461,57 +488,61 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
   // floor raised only while they are measured.
   const floor = (row: Row) => row.admission === 'past the floor';
   const phases = [ROWS.filter((row) => !floor(row)), ROWS.filter(floor)];
-  for (const phase of phases) {
-    const inTurn = ENGINE !== 'postgres';
-    // Three rows at a time: each cell holds a connection of its own (its hot path's), and the batch one more, its
-    // principals' locks, within Postgres's 100 beside the other matrices' processes.
-    for (let i = 0; i < phase.length; i += 3) {
-      const batch = phase.slice(i, i + 3);
-      /** The floor of `at` past the requests `row` makes from now, while `work` runs: a batch's rows share their admission but in turn. */
-      const past = async <T>(row: Row, work: () => Promise<T>): Promise<T> => {
-        if (!floor(row)) return work();
-        await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() + 60_000}`);
-        try {
-          return await work();
-        } finally {
-          await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
-        }
-      };
-      if (inTurn) {
-        // Each cell made and asked before the next is made: no other cell's change between.
-        for (const row of batch) {
-          const results = [];
-          for (const key of KEYS) {
-            // The cap's period (a minute, at the 15-minute window): a key fresh in the set stays so within it, and one
-            // passed moves it on, which decides first and writes no entry. Each cell's keys are made as their periods
-            // start (T204, `freshKeyId`), so a cell is made and asked within one.
-            const made = await cell(row, key);
-            results.push({ key, ...(await past(row, async () => {
-              const result = await made.measure();
-              await made.twin(result);
-              await weigh([result]);
-              return result;
-            })) });
+  // A cell made and never asked, a row failed beside it, holds its pool until the file ends them all: its process would
+  // not exit with any left open.
+  try {
+    for (const phase of phases) {
+      const inTurn = ENGINE !== 'postgres';
+      for (let i = 0; i < phase.length;) {
+        const batch = phase.slice(i, i += rowsAtOnce());
+        /** The floor of `at` past the requests `row` makes from now, while `work` runs: a batch's rows share their admission but in turn. */
+        const past = async <T>(row: Row, work: () => Promise<T>): Promise<T> => {
+          if (!floor(row)) return work();
+          await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() + 60_000}`);
+          try {
+            return await work();
+          } finally {
+            await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
           }
-          judge(row, results);
+        };
+        if (inTurn) {
+          // Each cell made and asked before the next is made: no other cell's change between.
+          for (const row of batch) {
+            const results = [];
+            for (const key of KEYS) {
+              // The cap's period (a minute, at the 15-minute window): a key fresh in the set stays so within it, and one
+              // passed moves it on, which decides first and writes no entry. Each cell's keys are made as their periods
+              // start (T204, `freshKeyId`), so a cell is made and asked within one.
+              const made = await cell(row, key);
+              results.push({ key, ...(await past(row, async () => {
+                const result = await made.measure();
+                await made.twin(result);
+                await weigh([result]);
+                return result;
+              })) });
+            }
+            judge(row, results);
+          }
+          continue;
         }
-        continue;
+        // Rows a few at a time, each with its own world per cell, made side by side, then asked side by side.
+        // Made and asked within a minute of their keys' making: within each key's period (above).
+        const cells = await each(batch, async (row) => ({ row, cells: await each(KEYS, (key) => cell(row, key)) }));
+        const measured = await past(batch[0]!, async () => {
+          // Every cell's principal's lock held by another connection while the cells are asked: all of the batch's on one, a
+          // connection a cell being 30 of Postgres's 100, beside the other matrices' processes (#453, 53300 in CI).
+          // Their twins after, the locks let go.
+          const askAll = () => each(cells, async ({ row, cells: keys }) => ({ row, results: await each(keys, async (c) => ({ key: c.key, twin: c.twin, ...(await c.measure()) })) }));
+          const answered = ENGINE === 'postgres' ? await holding(db, principalLocks(cells.flatMap(({ cells: keys }) => keys.map((c) => c.principal))), askAll) : await askAll();
+          await each(answered.flatMap(({ results }) => results), (r) => r.twin(r));
+          await weigh(answered.flatMap(({ results }) => results));
+          return answered;
+        });
+        for (const { row, results } of measured) judge(row, results);
       }
-      // Rows a few at a time, each with its own world per cell, made side by side, then asked side by side.
-      // Made and asked within a minute of their keys' making: within each key's period (above).
-      const cells = await each(batch, async (row) => ({ row, cells: await each(KEYS, (key) => cell(row, key)) }));
-      const measured = await past(batch[0]!, async () => {
-        // Every cell's principal's lock held by another connection while the cells are asked: all of the batch's on one, a
-        // connection a cell being 30 of Postgres's 100, beside the other matrices' processes (#453, 53300 in CI).
-        // Their twins after, the locks let go.
-        const askAll = () => each(cells, async ({ row, cells: keys }) => ({ row, results: await each(keys, async (c) => ({ key: c.key, twin: c.twin, ...(await c.measure()) })) }));
-        const answered = ENGINE === 'postgres' ? await holding(db, principalLocks(cells.flatMap(({ cells: keys }) => keys.map((c) => c.principal))), askAll) : await askAll();
-        await each(answered.flatMap(({ results }) => results), (r) => r.twin(r));
-        await weigh(answered.flatMap(({ results }) => results));
-        return answered;
-      });
-      for (const { row, results } of measured) judge(row, results);
     }
+  } finally {
+    await endSlowed();
   }
   console.log(`the widest spread of buffers within a row's refusals, beyond their world's key never made, no standing: ${widest}; standing, a refusal's beside an isolate with no history: ${widestHistory}, of the key's blocks ${widestKeyBlocks}`);
   assert.deepEqual(differing, []);

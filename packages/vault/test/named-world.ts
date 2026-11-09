@@ -222,6 +222,31 @@ export async function holding<T>(db: TestDatabase, lock: ReturnType<typeof sql>,
 }
 
 /**
+ * `work` over `items`, side by side on Postgres; on SQLite, which writes one at a time, in turn. One failing fails them
+ * all, but once every other has settled: one still running past it would open a pool after its file's last `endSlowed`,
+ * and the file would never exit (T246: a cell refused a connection, 53300, left 18 of its row's open for four hours).
+ */
+export async function each<T, R>(items: readonly T[], work: (item: T) => Promise<R>): Promise<R[]> {
+  if (ENGINE !== 'postgres') {
+    const done: R[] = [];
+    for (const item of items) done.push(await work(item));
+    return done;
+  }
+  const settled = await Promise.allSettled(items.map(work));
+  const failed = settled.find((result) => result.status === 'rejected');
+  if (failed !== undefined) throw failed.reason;
+  return settled.map((result) => (result as PromiseFulfilledResult<R>).value);
+}
+
+/** The pools `slowed` opened, not yet ended: a cell made and never asked holds its own until `endSlowed`. */
+const slowedPools = new Set<() => Promise<void>>();
+
+/** Ends every pool `slowed` opened and nothing ended yet: a matrix's `finally`, so that a failure ends its file. */
+export async function endSlowed(): Promise<void> {
+  await Promise.all([...slowedPools].map((end) => end()));
+}
+
+/**
  * A vault over a hot path of its own, each of its calls counted as it is sent, and, on Postgres, sent `delay` ms late
  * when set: a database slow alike for every statement, as review r4 of #412 ran its probes on. On Postgres, a call is
  * a statement; on SQLite, which runs a use as a transaction of its own and the read of names as statements outside
@@ -284,7 +309,17 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
       accepts: { signin: true, issuers: [], passkeys: 'off' as const }, purpose: 'use', at, deadline: at + 3000,
     });
   };
-  return { vault, cache: prepared.uses, statements: () => statements, last: () => last, slow: (ms: number) => { delay = ms; }, connect, end: () => pool.end() };
+  // Ended once, whoever ends it first: the cell, or its file's `endSlowed`.
+  let ending: Promise<void> | null = null;
+  const end = () => {
+    ending ??= (async () => {
+      slowedPools.delete(end);
+      await client.end();
+    })();
+    return ending;
+  };
+  slowedPools.add(end);
+  return { vault, cache: prepared.uses, statements: () => statements, last: () => last, slow: (ms: number) => { delay = ms; }, connect, end };
 }
 
 export { absentOf, keyBlocksOf, turnsApart, twinOf, type HotCall, type Weighed } from '../../../scripts/matrix-weigh.ts';

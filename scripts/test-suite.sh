@@ -35,10 +35,22 @@ case "$COFFRE_TEST_ENGINE" in
 esac
 
 files=("scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts")
+concurrency=4
 if [ "${1:-}" = --files ]; then
     shift
-    node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=4 "$@"
-    exit
+    # The files side by side share Postgres's connections, each a share of them while it runs
+    # (scripts/matrix-connections.ts): how many there are, how many run at once, and where each says it ended.
+    shopt -s nullglob globstar
+    # shellcheck disable=SC2206 # the patterns expand here as node's --test expands them
+    matched=($@)
+    shopt -u nullglob globstar
+    export COFFRE_TEST_FILES="${#matched[@]}" COFFRE_TEST_CONCURRENCY="$concurrency"
+    COFFRE_TEST_FILES_ENDED="$(mktemp -d "${TMPDIR:-/tmp}/coffre-ended.XXXXXX")"
+    export COFFRE_TEST_FILES_ENDED
+    status=0
+    node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency="$concurrency" "$@" || status=$?
+    rm -rf "$COFFRE_TEST_FILES_ENDED"
+    exit "$status"
 fi
 # Then the files that run alone (`*.alone.ts`), one at a time, once the others are done: those that hold a
 # statement's work to a budget or to the same call by call, and so its backend's caches. A commit of thousands of
@@ -47,6 +59,6 @@ fi
 # in plans everything again, as a connection's first does (use-days.alone.ts, request-cost.alone.ts). Both runs run;
 # either failing fails the suite.
 status=0
-node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=4 "$@" "${files[@]}" || status=$?
+node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency="$concurrency" "$@" "${files[@]}" || status=$?
 node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=1 "$@" "packages/*/test/*.alone.ts" || status=$?
 exit "$status"
