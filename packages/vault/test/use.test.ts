@@ -950,6 +950,21 @@ test('an isolate that answered its uses late refuses part of the next at once, h
   assert.equal(fresh.cache.throttle!.rate(Date.now()), 0);
 });
 
+test("a use Postgres gave up on before its deadline, its lock or its statement timed out, counts as late to the throttle (config.md, Q1, step 2; Sol's review r1 of #554)", async () => {
+  const w = await world();
+  const id = await w.key();
+  for (const code of ['55P03', '57014']) {
+    const path: UsePath = {
+      db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits()),
+      ready: () => Promise.reject(Object.assign(new Error('canceling statement'), { code })),
+    };
+    const at = Date.now();
+    assert.deepEqual(await use(path, ask(w, id, { at, deadline: at + 3_000 })), { ok: false, busy: 'late', retryAfter: 1 }, code);
+    assert.ok(Date.now() < at + 3_000, 'answered well before its deadline');
+    assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 2, `${code}: one answered, none in time`);
+  }
+});
+
 test('before the policy is logged, a use does nothing', async () => {
   const w = await world();
   const id = await w.key();

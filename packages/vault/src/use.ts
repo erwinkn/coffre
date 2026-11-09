@@ -549,15 +549,25 @@ async function seated<I extends { at: number; deadline: number }, T>(
     throttle?.answered(Date.now(), false);
     return busyAs(busy('overloaded'));
   }
+  let answered: T | undefined;
   try {
-    return await answer({ ...path, seat }, input);
+    answered = await answer({ ...path, seat }, input);
+    return answered;
   } finally {
-    // In time: settled before its deadline, whatever it answered or threw. `late` is answered at the deadline or past
-    // it, as is an outage that waited it out; one that failed at once cost nothing to throttle, nor did bad input.
+    // In time: settled before its deadline, whatever it answered or threw, but `late`. That is answered at the deadline,
+    // or before it when Postgres gave up for it (its lock_timeout, 1 s, or statement_timeout, 2 s: `raced`), as is an
+    // outage that waited it out; one that failed at once cost nothing to throttle, nor did bad input.
     const now = Date.now();
-    throttle?.answered(now, now < input.deadline);
+    throttle?.answered(now, now < input.deadline && !isLate(answered));
     seat.release();
   }
+}
+
+/** Whether a use path answered `late`: `{ busy: 'late' }`, or a named answer's `outcome` so (`busyNamed`). */
+function isLate(answer: unknown): boolean {
+  if (typeof answer !== 'object' || answer === null) return false;
+  const { busy, route, outcome } = answer as { busy?: unknown; route?: unknown; outcome?: { busy?: unknown } };
+  return busy === 'late' || (route === 'busy' && outcome?.busy === 'late');
 }
 
 /** One use, end to end (the module's comment says how): one place in admission. */

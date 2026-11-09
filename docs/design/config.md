@@ -644,8 +644,9 @@ by every use entry before its place is taken), with two departures from
 the book, both about when and how it refuses, not how much:
 
 - **A use counts once its outcome is known**, refused, or settled in time
-  (before its deadline, whatever it answered or threw) or not (`late`, an
-  outage that waited it out), never on arrival. The book's client counts a request when it sends it,
+  (before its deadline, whatever it answered or threw, but `late`) or not
+  (`late`, even one Postgres gave up on early, its lock or statement timed
+  out; an outage that waited it out), never on arrival. The book's client counts a request when it sends it,
   which a cold isolate cannot afford: 200 uses in its first second at
   80 ms each are 16 in flight, and the 17th would see 16 requests and no
   accept, p = 16 ÷ 17. Counted on its outcome, an in-flight use is
