@@ -72,7 +72,7 @@ async function grow(total: number): Promise<void> {
            'token:other-' || (g % 1000), '{}', ${Buffer.alloc(32)}, ${Buffer.alloc(32)}, ${Buffer.alloc(32)}, true
       FROM generate_series(1, ${others}) g`);
   // As autovacuum leaves a table that stopped growing: index-only probes read no heap.
-  await run(db.owner, sql`VACUUM ANALYZE`);
+  await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0)`);
 }
 
 test('R48: a use is one statement, its buffers the same at 10k and at 1M entries, probing and from the cache', { ...postgresOnly('the hot path'), timeout: 600_000 }, async () => {
@@ -160,7 +160,7 @@ test("D153: a named use reads what it names by index, its buffers the same at 1k
       SELECT gen_random_uuid(), e.project_id, e.id, ${names!.key} FROM environments e JOIN projects p ON p.id = e.project_id
        WHERE p.slug LIKE 'grown-%' AND NOT EXISTS (SELECT 1 FROM secrets s WHERE s.environment_id = e.id)`);
     made += count;
-    await run(db.owner, sql`VACUUM ANALYZE`);
+    await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0)`);
   };
   // As the hot login runs it, on the plans its cache settles on after its first five (T207): the least of several runs, as above.
   const client = postgresClient(HOT_URL, { max: 1 });
@@ -236,7 +236,7 @@ test("T165: a named use at a fork, and at `dev@me`, walks the place's chain and 
       SELECT e.id, 'REMOVED', 'grown' FROM environments e JOIN projects p ON p.id = e.project_id
        WHERE p.slug LIKE 'forked-%' AND e.parent_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dismissed_keys d WHERE d.environment_id = e.id)`);
     made += count;
-    await run(db.owner, sql`VACUUM ANALYZE`);
+    await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0)`);
   };
   const client = postgresClient(HOT_URL, { max: 1 });
   /** The least of several runs' buffers, a named call by no ids (a cold isolate's), of `key` at `environment`. */
@@ -301,7 +301,7 @@ test("T165 (PR 2): a named batch's first statement reads no key without standing
       SELECT e.id, 'REMOVED', 'grown' FROM environments e JOIN projects p ON p.id = e.project_id
        WHERE p.slug LIKE 'batched-%' AND e.parent_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dismissed_keys d WHERE d.environment_id = e.id)`);
     made += count;
-    await run(db.owner, sql`VACUUM ANALYZE`);
+    await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0)`);
   };
   const client = postgresClient(HOT_URL, { max: 1 });
   // Ended however the test ends: a client left open keeps the file running to its timeout.
@@ -381,7 +381,7 @@ test("T165 (PR 2): a named batch's first statement reads no key without standing
   };
   // Forty keys more at the fork: a refusal still reads none of them.
   await run(db.owner, sql`INSERT INTO secrets (id, project_id, environment_id, key) SELECT gen_random_uuid(), ${w.project}, ${fork}, 'MORE_' || g FROM generate_series(1, 40) g`);
-  await run(db.owner, sql`VACUUM ANALYZE`);
+  await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0)`);
   const grown = await buffers('feature', null, false);
   console.log(JSON.stringify({ few, small, large, refused, grown }));
   assert.ok(Math.max(refused.listed, refused.held, refused.never, grown) - Math.min(refused.listed, refused.held, refused.never, grown) <= 2,
@@ -452,7 +452,7 @@ test("T220: a reference's use reads its newest reference by its holder, its buff
     }
   };
   // As autovacuum leaves a table that stopped growing.
-  const settle = () => run(db.owner, sql`VACUUM ANALYZE secret_references, secrets, audit_log`);
+  const settle = () => run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) secret_references, secrets, audit_log`);
   await settle();
   // The reference's use, and the source's, a key with a value of its own. On 0068, the reference's read 254 buffers
   // alone, 105 here: its source holds no reference row, which its source's lookup (`xref`) found only once it had

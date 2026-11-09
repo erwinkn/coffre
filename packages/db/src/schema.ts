@@ -450,6 +450,22 @@ export const auditLog = pgTable(
     index('audit_log_releases_idx').on(table.author, table.actor, table.action, table.decision, table.occurredAt),
     // What the vault logged about one member, in order.
     index('audit_log_subject_idx').on(table.author, table.subjectPrincipal, table.seq),
+    // The first entry an author wrote under a key, or that it wrote none, in one step however long the log (T245, R48):
+    // the vault's start and the app's key rotation ask it of a key that may never have written. Built without blocking writes (`online-indexes.ts`).
+    index('audit_log_key_idx').on(table.author, table.keyId, table.seq).concurrently(),
+    // Each author's newest entries, in one step however many of the other's came after them (T245): the vault's
+    // (`vaultPage`) and the app's (`newestAppEntry`, at an app's cold start). Postgres walks the primary key back
+    // for either, which it expects to meet one soon, a long tail of the other's entries or not, unless an index
+    // holds that author's alone. Built without blocking writes (`online-indexes.ts`).
+    index('audit_log_vault_idx').on(table.seq).where(sql`${table.author} = 'vault'`).concurrently(),
+    index('audit_log_app_idx').on(table.seq).where(sql`${table.author} = 'app'`).concurrently(),
+    // The vault's newest allowed entry of an action (`latestVaultEntry`: the checkpoint signed last, the last rotation),
+    // and its newest refusal of an action for a reason since (`newestRefusal`: a broken log's), each in one step however
+    // many refusals came after the one or of other reasons beside the other: a vault refused its checkpoint for a wrong
+    // KEK every beat walked them all, at each checkpoint and verification (T245, R48). Keyed without `author` and
+    // `decision`, which their conditions fix (`audit_log_access_idx`). Built without blocking writes (`online-indexes.ts`).
+    index('audit_log_vault_allowed_idx').on(table.action, table.seq).where(sql`${table.author} = 'vault' AND ${table.decision} = 'allow'`).concurrently(),
+    index('audit_log_vault_refused_idx').on(table.action, table.code, table.seq).where(sql`${table.author} = 'vault' AND ${table.decision} = 'deny'`).concurrently(),
     // Of those, the allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
     // however many refusals the log holds about them (T239, R48). No `author` in its key, which the condition fixes:
     // Postgres takes a clause the condition implies for no bound, so a step past a principal would scan from the start.
@@ -1324,6 +1340,9 @@ export const logUses = pgTable(
   (table) => [
     check('log_uses_mac_check', sql`octet_length(${table.mac}) = 16`),
     uniqueIndex('log_uses_request_idx').on(table.at, table.requestId),
+    // The checkpointer's window by number (T245, R48): its first entries in one step, however far behind it is, where the
+    // index by `at` read every use from the floor and sorted them. Built without blocking writes (`online-indexes.ts`).
+    index('log_uses_by_number_idx').on(table.number).concurrently(),
   ],
 );
 
@@ -1357,6 +1376,9 @@ export const logReads = pgTable(
   (table) => [
     check('log_reads_mac_check', sql`octet_length(${table.mac}) = 16`),
     uniqueIndex('log_reads_number_idx').on(table.at, table.number),
+    // A pair's reads by number, which the reads check lists (T245, R48): the index by `at` read every read of the window's
+    // times, a stall's worth, for the few thousand a pair holds. Built without blocking writes (`online-indexes.ts`).
+    index('log_reads_by_number_idx').on(table.number).concurrently(),
     index('log_reads_principal_idx').on(table.principal, table.at, table.number),
     // A place's reads (T175): each column naming a place a read is at, newest first. Its key's, its environment's and its
     // project's; the fork it was read in; through a reference, the source's three. Those that only some reads name are

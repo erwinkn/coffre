@@ -3111,6 +3111,38 @@ test('a verification counts the prefix it resumes from: an entry cut before the 
   assert.deepEqual(!verdict.ok && [verdict.failedAtSeq, verdict.reason], [6, 'sequence gap: expected seq 5, found 6']);
 });
 
+test('on a log longer than one count holds, a cut is found by the counts round the log, a stretch a checkpoint, and stands for every verification (T245)', async () => {
+  // Four entries a count, and one entry of the past rehashed a checkpoint, which reaches no further than the counts.
+  const w = await world({}, { walks: { scrub: 1, count: 4n } });
+  await reads(20);
+  const signed = await w.vault.checkpoint();
+  assert.ok(signed.ok && signed.checkpoint.seq >= 12);
+  // Entry 5 cut: the counts go round from the first entry, four a checkpoint, so the second after counts it.
+  const { auditLog } = tablesOf(db.owner);
+  await withLogUnlocked(db.owner, (owned) => owned.delete(auditLog).where(eq(auditLog.seq, 5n)));
+  // A verification counts the newest four of the prefix, which hold no gap.
+  const early = await w.vault.verifyLog({});
+  assert.equal(early.ok, true, JSON.stringify(early));
+  // [0, 3] whole; [4, 7] is not.
+  // A count goes on with each checkpoint signed, as the rehash of the past does: one with nothing new to sign moves neither.
+  const verdicts: boolean[] = [];
+  for (let i = 0; i < 2; i += 1) {
+    await reads(1);
+    verdicts.push((await w.vault.checkpoint()).ok);
+  }
+  assert.deepEqual(verdicts, [true, false]);
+  assert.equal(String((await vaultLog(w)).at(-1)!.detail.reason), 'sequence gap: expected seq 5, found 6');
+  const verdict = await w.vault.verifyLog({});
+  assert.match(String(!verdict.ok && verdict.reason), /refused: sequence gap: expected seq 5, found 6$/, 'the refusal stands for a verification');
+  // A stretch between two checkpoints signed before it counts only the newest four of its prefix, past the cut:
+  // the refusal stands for it too, as for the app's walk stretch by stretch (`verifyAudit`).
+  const checkpoints = (await vaultLog(w)).filter(({ action, outcome }) => action === 'audit.checkpoint' && outcome === 'allow').map(({ seq }) => Number(seq));
+  const [from, to] = checkpoints.slice(-2);
+  assert.ok(from !== undefined && to !== undefined && from > 8);
+  const stretch = await w.vault.verifyLog({ from, to });
+  assert.match(String(!stretch.ok && stretch.reason), /refused: sequence gap: expected seq 5, found 6$/, JSON.stringify(stretch));
+});
+
 test("access changed after the app's head is read by the vault's own walk, not taken for tampering", async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);

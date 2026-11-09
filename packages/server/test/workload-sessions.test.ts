@@ -595,6 +595,12 @@ test("the per-request statement reads its rows through their indexes, however ma
     return `'${String(named).replaceAll("'", "''")}'`;
   };
   const inlined = text.replace(/\$(\d+)/g, (_, n: string) => literal(params[Number(n) - 1]));
+  // A log with history, the app's and the vault's, analyzed: on an empty one every index is one page, and the
+  // planner may as well walk the app's or the vault's newest entries back (`audit_log_app_idx`, T245) as look up a freeze.
+  await db.owner.execute(sql`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+    SELECT coalesce((SELECT max(seq) FROM audit_log), 0) + n, CASE WHEN n % 2 = 0 THEN 'app' ELSE 'vault' END, 'k', 0, 'system:coffre', 'audit.heartbeat', 'allow', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex')
+    FROM generate_series(1, 20000) n`);
+  await db.owner.execute(sql`ANALYZE audit_log`);
   // Sequential scans priced out, so the plan shows which lookups the statement can use at all.
   const plan = await db.owner.transaction(async (tx) => {
     await tx.execute(sql.raw('SET LOCAL enable_seqscan = off'));
@@ -607,6 +613,7 @@ test("the per-request statement reads its rows through their indexes, however ma
   assert.match(lines, /Bitmap Index Scan on credentials_pkey/, lines);
   // Nor of the log, which only grows: each freeze and the tombstone through an index.
   assert.doesNotMatch(lines, /Seq Scan on audit_log/, lines);
+  assert.doesNotMatch(lines, /Backward using audit_log_(app|vault)_idx/, lines);
   assert.match(lines, /audit_log_freeze_idx/, lines);
 });
 

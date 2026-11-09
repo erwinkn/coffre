@@ -719,15 +719,13 @@ export async function vaultPage(db: Queryable, before: bigint | undefined, limit
 }
 
 /**
- * The seq of the vault's first entry under `keyId`, or undefined. No index
- * serves it: it reads the log from its start up to that entry, which for
- * the key a log began under is among its first: the vault's entries alone,
- * by `audit_log_subject_idx`, its author first. With `unlessRotated`, none
- * read once a `key.rotate` of the vault's is under `keyId`, an index probe of
- * the few such entries decided before the walk: asked before the start knows
- * whether it needs it (`#start` in vault.ts, T206), it walks no entries of a
- * key the vault rotated from, as the start, finding the rotation, never did
- * (R48). Undefined then says nothing.
+ * The seq of the vault's first entry under `keyId`, or undefined: one step
+ * of `audit_log_key_idx` (T245, R48), whether or not the key ever wrote.
+ * Until 0.16 no index served it, and a key that never wrote, a new KEK's
+ * before its rotation lands, read the whole log. With `unlessRotated`, none
+ * once a `key.rotate` of the vault's is under `keyId`, an index probe of the
+ * few such entries: asked before the start knows whether it needs it
+ * (`#start` in vault.ts, T206). Undefined then says nothing.
  */
 export async function firstVaultEntryUnder(db: Queryable, keyId: string, { unlessRotated = false } = {}): Promise<bigint | undefined> {
   const { auditLog } = tablesOf(db);
@@ -867,7 +865,7 @@ export async function restoredNatures(
   return items.map(({ secretId, from }) => (currentOf.get(secretId) === from ? null : natureOf.get(from) ?? 'secret'));
 }
 
-/** The vault's newest entry of any of these actions, allowed, or undefined. */
+/** The vault's newest entry of any of these actions, allowed, or undefined: for one action, one step of `audit_log_vault_allowed_idx` (T245, R48), however many refusals came since. */
 export async function latestVaultEntry(db: Queryable, actions: readonly string[]): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
   const [row] = await db
@@ -925,7 +923,7 @@ export async function talliedWithin(db: Queryable, after: bigint, through: bigin
   return stored(rows);
 }
 
-/** The vault's newest refusal of `action` with `code` after entry `after`, or undefined: one range of the (author, action, seq) index. */
+/** The vault's newest refusal of `action` with `code` after entry `after`, or undefined: one step of `audit_log_vault_refused_idx` (T245, R48). */
 export async function newestRefusal(db: Queryable, action: string, code: string, after: bigint): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
   const [row] = await db

@@ -32,7 +32,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 
 import { openDatabase } from '@coffre/db/connect';
-import { migrateDatabase } from '@coffre/db/migrate';
+import { migrateDatabase, type UnbuiltIndex } from '@coffre/db/migrate';
 
 import { runScheduled, settleKey, walkAuditBacklog } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
@@ -52,7 +52,7 @@ export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './s
 export { processLimits } from './workloads/limits.ts';
 
 /** Bring the database up to date: what `coffre-server migrate` runs. */
-export function migrate(database: string): Promise<void> {
+export function migrate(database: string): Promise<{ unbuilt: UnbuiltIndex[] }> {
   return migrateDatabase(database);
 }
 

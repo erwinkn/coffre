@@ -12,6 +12,33 @@
   as it counts `late`. Credentials refused or missing, a disabled key and
   KMS's own 5xx still count in time: a misconfigured vault does not
   throttle itself. Callers see the same answer as before.
+- **No statement on the runtime logins costs more as history grows (T245,
+  R48), so that a statement timeout on them holds at any size.** Migration
+  0082 adds seven indexes, built after the migrations commit without
+  blocking writes: `audit_log (author, key_id, seq)` (the vault's start, the
+  app's key rotation, for a key that never wrote: 186 ms to 0.2 ms at 1.2
+  million entries), the vault's entries by `seq` and the app's (the app's
+  newest entry, at its cold start, past 100,000 of the vault's: 3,050
+  pages to 3), the vault's allowed entries by action and its refusals by
+  action and reason (the newest signed checkpoint, and a broken log's
+  refusal since, at each checkpoint and verification, past 100,000
+  checkpoints refused for a wrong KEK: 3,253 pages to 8), `log_uses (number)` (the
+  checkpointer's window after an hour's backlog of 3.5 million uses: 776 ms
+  to 3.8 ms; it was past 5 s from there) and `log_reads (number)` (the
+  reads check of a pair after a stall: 96,367 buffers to 60,219, flat in
+  the stall's length). A use, an audit entry and a projected read each
+  write one index entry more. The spent
+  tokens' prune reads a 128 MB stretch of its table a beat, round the
+  table, instead of all of it; a token's record is kept up to a round
+  (about 25 minutes at 1,000 sign-ins a second) past its two hours.
+  `newestMove` asks for each action's newest apart. A checkpoint counts at
+  most a million entries of the log's prefix: a longer log's are counted a
+  million a checkpoint, round the log, so a cut in its middle is found
+  within as many checkpoints as it has millions of entries, not at the
+  next; a verification counts the newest million, and the checkpoints'
+  refusal stands for it. The migrator builds a migration's `CREATE INDEX
+  CONCURRENTLY` after its transaction, on every run until it is built
+  (`docs/deploy.md`, "Upgrading").
 - **The credential proxy ends its upstream request when the app's request
   ends, and sets no time bound of its own (W365, config Q7).** It passes the
   incoming request's abort signal to the upstream `fetch`: an app that

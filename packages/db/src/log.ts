@@ -548,30 +548,68 @@ export async function withinBytes(
 }
 
 /**
- * The first entry missing from the log up to `seq`, and the one found in
- * its place, or null when every one is there. Seqs are the primary key, so
+ * How many entries one count of the log holds at most (T245, R48), so that
+ * no count costs more as the log grows: a count is one pass over the
+ * primary key's index, 1.2 million entries in 58 ms on the compose
+ * Postgres (measured), and one entry's heap page more for each the
+ * visibility map has not caught up with, which an append-only log's newest
+ * fifth may be (autovacuum's insert threshold). A million keeps the worst
+ * of that, a million heap fetches from a cold cache, within the runtime
+ * logins' 5 s `statement_timeout`. A log of that many or fewer is counted
+ * whole at each checkpoint; a longer one a million at a time, a stretch a
+ * checkpoint, round the log (`COUNT_LAP` in the vault).
+ */
+export const COUNTED_AT_ONCE = 1_000_000n;
+
+/**
+ * The first entry missing from the log in [`from`, `seq`], and the one found
+ * in its place, or null when every one is there. Seqs are the primary key, so
  * a stretch is whole exactly when its count is its length: one pass over
  * the key's index, never the entries. Only a log with a gap pays for more,
- * a count per halving to find where.
+ * a count per halving to find where. A stretch longer than `COUNTED_AT_ONCE`
+ * is refused: its caller counts a window of it (`countWindow`).
  *
  *   entries 0..9, 4 cut:  { expected: 4n, found: 5n }
  */
-export async function missingEntry(db: Queryable, seq: bigint): Promise<{ expected: bigint; found: bigint | null } | null> {
+export async function missingEntry(db: Queryable, seq: bigint, from = 0n): Promise<{ expected: bigint; found: bigint | null } | null> {
+  if (seq - from + 1n > COUNTED_AT_ONCE) throw new Error(`a count of entries ${from} to ${seq} is longer than ${COUNTED_AT_ONCE.toLocaleString('en')} entries`);
   const { auditLog } = tablesOf(db);
-  const whole = async (to: bigint) => {
-    const [{ n }] = await db.select({ n: count() }).from(auditLog).where(and(gte(auditLog.seq, 0n), lte(auditLog.seq, to)));
-    return BigInt(n) === to + 1n;
+  const whole = async (start: bigint, to: bigint) => {
+    const [{ n }] = await db.select({ n: count() }).from(auditLog).where(and(gte(auditLog.seq, start), lte(auditLog.seq, to)));
+    return BigInt(n) === to - start + 1n;
   };
-  if (seq < 0n || (await whole(seq))) return null;
-  // The first stretch from 0 that is not whole ends at the missing entry.
-  let [low, high] = [0n, seq];
+  if (seq < from || (await whole(from, seq))) return null;
+  // The first stretch from `from` that is not whole ends at the missing entry.
+  let [low, high] = [from, seq];
   while (low < high) {
     const middle = (low + high) / 2n;
-    if (await whole(middle)) low = middle + 1n;
+    if (await whole(from, middle)) low = middle + 1n;
     else high = middle;
   }
   const [next] = await db.select({ seq: auditLog.seq }).from(auditLog).where(gt(auditLog.seq, low)).orderBy(asc(auditLog.seq)).limit(1);
   return { expected: low, found: (next?.seq as bigint | undefined) ?? null };
+}
+
+/**
+ * The stretch of the prefix through `seq` a count holds, from `at`, where the
+ * last one stopped (null for the first entry): the whole prefix when it is
+ * `COUNTED_AT_ONCE` or fewer; else `COUNTED_AT_ONCE` from `at`, round to the
+ * first entry again past the end. `next`: where the following count goes on
+ * from, null when this one reached the end, which ends a lap.
+ *
+ *   seq 9, at null:            { from: 0n, to: 9n, next: null }
+ *   seq 2,500,000, at null:    { from: 0n, to: 999,999n, next: 1,000,000n }
+ *   seq 2,500,000, at 2,000,000n: { from: 2,000,000n, to: 2,500,000n, next: null }
+ */
+export function countWindow(seq: bigint, at: bigint | null, size = COUNTED_AT_ONCE): { from: bigint; to: bigint; next: bigint | null } {
+  const from = at === null || at > seq ? 0n : at;
+  const to = seq - from + 1n > size ? from + size - 1n : seq;
+  return { from, to, next: to >= seq ? null : to + 1n };
+}
+
+/** Where a verification's count of the prefix through `seq` starts: its newest `size` entries, all of a log no longer. */
+export function newestWindow(seq: bigint, size = COUNTED_AT_ONCE): bigint {
+  return seq + 1n > size ? seq + 1n - size : 0n;
 }
 
 /**

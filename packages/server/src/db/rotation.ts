@@ -8,16 +8,22 @@ import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 
 import type { AuthRow, AuthTable } from '../auth-rows.ts';
 
-/** The app's newest `key.reseal` or `key.rotate`, unchecked. */
+/**
+ * The app's newest `key.reseal` or `key.rotate`, unchecked: each action's
+ * newest, one step of the action index apiece, and the later of the two
+ * (T245, R48). Asked as one, `action IN (…)`, no index reads them in `seq`
+ * order, and Postgres may walk the whole log back by `seq` instead, from
+ * the newest entry to the newest move. Both start together, one round trip.
+ */
 export async function newestMove(db: Queryable): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
-  const [row] = await db
+  const newest = await Promise.all(MOVES_FROM.map((action) => db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), inArray(auditLog.action, [...MOVES_FROM])))
+    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, action)))
     .orderBy(desc(auditLog.seq))
-    .limit(1);
-  return row as StoredEntry | undefined;
+    .limit(1)));
+  return (newest.flat() as StoredEntry[]).reduce<StoredEntry | undefined>((later, row) => (later === undefined || row.seq > later.seq ? row : later), undefined);
 }
 
 /** Which of `keyIds` an app's `key.reseal` or `key.rotate` names as the key it moves from. */
@@ -37,7 +43,11 @@ export async function wroteUnder(db: Queryable, keyId: string): Promise<boolean>
   return row !== undefined;
 }
 
-/** The app's newest entry, unchecked. */
+/**
+ * The app's newest entry, unchecked: one step of `audit_log_app_idx` (T245,
+ * R48), where the walk back by `seq` read every vault entry since the app's
+ * last, at each cold start of an app idle while the vault's beats went on.
+ */
 export async function newestAppEntry(db: Queryable): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
   const [row] = await db.select(entryColumns(db)).from(auditLog).where(eq(auditLog.author, 'app')).orderBy(desc(auditLog.seq)).limit(1);

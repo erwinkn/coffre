@@ -310,6 +310,51 @@ test('PR 8 review r3 (W240): a bounded read stops at its limit in the database t
 });
 
 
+test('T245: the window by number reads its first entries in one step of the index, however long the backlog: 400,000 uses behind, a few pages', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its plan' }, async () => {
+  // A backlog as a stall leaves: uses numbered past the newest pair, stamped now, in today's day.
+  await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
+    SELECT nextval('log_number'), (extract(epoch FROM now()) * 1000)::bigint, g, gen_random_uuid(), gen_random_uuid(), 1, '\\x00000000000000000000000000000000'::bytea
+      FROM generate_series(1, 400000) g`);
+  // The rows earlier tests deleted gone from the indexes too, as a vacuum leaves a live log.
+  await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) log_changes, log_uses`);
+  const window = postgresWindow(-1n, 2n ** 62n, sql`0`, undefined, 10_001, true);
+  type Node = { 'Shared Hit Blocks': number; 'Shared Read Blocks': number; 'Index Name'?: string; Plans?: Node[] };
+  const indexesOf = (node: Node): string[] => [...(node['Index Name'] === undefined ? [] : [node['Index Name']]), ...(node.Plans ?? []).flatMap(indexesOf)];
+  const measured = async (unindexed: boolean) => {
+    let read = { buffers: 0, indexes: [] as string[] };
+    await db.owner.transaction(async (tx) => {
+      // 0.15's read, without the index: in a transaction that puts it back.
+      if (unindexed) await run(tx, sql`DROP INDEX log_uses_by_number_idx`);
+      const [plan] = await rows<{ 'QUERY PLAN': [{ Plan: Node }] }>(tx, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${window}`);
+      const top = plan!['QUERY PLAN'][0].Plan;
+      read = { buffers: top['Shared Hit Blocks'] + top['Shared Read Blocks'], indexes: indexesOf(top) };
+      if (unindexed) tx.rollback();
+    }).catch((error: unknown) => {
+      if (!unindexed || !(error instanceof Error && /rollback/i.test(error.message))) throw error;
+    });
+    return read;
+  };
+  const [indexed, sorted] = [await measured(false), await measured(true)];
+  // Measured: 182 buffers by the index after 3.5 million uses, where the sort read 50,003 (T245).
+  const said = `${indexed.buffers} buffers by [${indexed.indexes.join(', ')}], ${sorted.buffers} sorting the backlog`;
+  assert.ok(indexed.indexes.some((name) => name.endsWith('_by_number_idx')), said);
+  assert.ok(indexed.buffers < 400 && indexed.buffers * 5 < sorted.buffers, said);
+});
+
+test("T245: a pair's reads listed by number read the pair's, not every read in the window's times: 100,000 reads in them, a few pages", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its plan' }, async () => {
+  const now = Date.now();
+  await run(db.owner, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, mac)
+    SELECT g, ${now}::bigint - 100000 + g, gen_random_uuid(), 1, 'user:ada@acme.example', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), '\\x00000000000000000000000000000000'::bytea
+      FROM generate_series(1, 100000) g`);
+  await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) log_reads`);
+  // What `listing` asks of a pair of 1,000 after a stall: the window's times span every read.
+  const listed = sql`SELECT r.number FROM log_reads r WHERE r.at >= ${now - 200_000}::bigint AND r.at <= ${now}::bigint AND r.number > 50000 AND r.number <= 51000`;
+  const [plan] = await rows<{ 'QUERY PLAN': [{ Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number; 'Actual Rows': number } }] }>(db.vault, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${listed}`);
+  const top = plan!['QUERY PLAN'][0].Plan;
+  assert.equal(top['Actual Rows'], 1000);
+  assert.ok(top['Shared Hit Blocks'] + top['Shared Read Blocks'] < 100, `${top['Shared Hit Blocks'] + top['Shared Read Blocks']} buffers for a pair's 1,000`);
+});
+
 test('T169: a backlog far past the window drains a part a tick, each part a pair whose floor is the lowest `at` left above it, and the whole log verifies, every entry provable', async () => {
   const { cp, store, memory, alerts } = await open(variableMemory(), 200);
   await use();

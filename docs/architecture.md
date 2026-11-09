@@ -1347,7 +1347,13 @@ Each limit is stated here once; the other documents link to it.
   Ada's row from before. Her row and the entries that remain agree, so the
   vault lets her in. Within five minutes the next checkpoint counts one
   entry fewer than the prefix it starts from, finds where, refuses to sign
-  and turns `/readyz` red; every verification says the same. If the owner
+  and turns `/readyz` red; every verification says the same. A count holds
+  a million entries at most (T245): on a longer log, each checkpoint signed
+  counts the million after the last one's, round the log, so a cut is
+  found within as many checkpoints as the log has millions of entries,
+  50 minutes for 10 million; a verification counts the newest million, and
+  the checkpoints' refusal stands for it, one of a stretch between two older
+  checkpoints included. If the owner
   edits 812 in place instead, so that it is no longer about Ada, every
   entry is there and the hash the last checkpoint signed stays:
   checkpoints and verifications start from the newest tally and read

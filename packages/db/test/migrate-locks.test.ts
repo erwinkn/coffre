@@ -144,7 +144,7 @@ test(`a table held past every try fails the migration loudly within seconds, nam
   const holder = await holdTable();
   // A use's session: the hot login's lock_timeout, reading TABLE again and again while the migration waits.
   const reader = postgresSession(url, { application_name: 'coffre-locks-reader' });
-  let run: Promise<void> | undefined;
+  let run: Promise<unknown> | undefined;
   try {
     const before = await ledger(observer);
     await reader.unsafe(`SET lock_timeout = '${HOT_LOCK_TIMEOUT_MS}ms'`);
@@ -228,7 +228,7 @@ test("reasserting the privileges waits for another database's migrator changing 
   // The roles are the server's: another database's run granting coffre_backup holds the role's lock to its commit.
   const other = postgresSession(BASE, { application_name: 'coffre-locks-other-database' });
   const observer = postgresClient(url, { max: 1 });
-  let run: Promise<void> | undefined;
+  let run: Promise<unknown> | undefined;
   let rolledBack = false;
   try {
     await other.unsafe('BEGIN');

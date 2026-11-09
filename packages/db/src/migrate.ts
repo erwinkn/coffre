@@ -6,6 +6,8 @@ import { HOT_LOCK_TIMEOUT_MS, HOT_STATEMENT_TIMEOUT_MS, LOCK_WAIT_MS } from '@co
 
 import { engineOfUrl } from './connect.ts';
 import { lockNotAvailable, type Engine } from './dialect.ts';
+import { buildOnline, onlineIndex, onlineIndexes, unbuiltReason, type OnlineIndex, type UnbuiltIndex } from './online-indexes.ts';
+export { unbuiltNote, type UnbuiltIndex } from './online-indexes.ts';
 import { postgresSession, quoteIdentifier, type PostgresClient } from './postgres.ts';
 
 /**
@@ -34,6 +36,16 @@ import { postgresSession, quoteIdentifier, type PostgresClient } from './postgre
  */
 
 const MIGRATION_LOCK_KEY = '7165058122361679213';
+
+/**
+ * The online builds' own lock (`online`), taken without waiting once the
+ * migration lock is let go. A concurrent build waits for every transaction
+ * older than it, a statement waiting for a lock included: built under the
+ * migration lock, it would wait for another run's wait for that lock, which
+ * waits for it, a deadlock (as two builds deploying at once, each Worker's,
+ * would make). A run that finds another building leaves the builds to it.
+ */
+const ONLINE_LOCK_KEY = '7165058122361679214';
 
 /**
  * How long each of a migration's statements waits for a lock, once the
@@ -304,12 +316,13 @@ export function backupLoginProblem(login: string): string | null {
 
 /**
  * The migrations are applied, by this run or an earlier one, and their
- * ledger checked, but reasserting the privileges after them failed: unlike
- * a migration's failure, this one may have changed the database.
+ * ledger checked, but what follows them failed: reasserting the privileges,
+ * or building an index online (`online-indexes.ts`). Unlike a migration's
+ * failure, this one may have changed the database.
  */
 export class AfterMigrations extends Error {
-  constructor(error: unknown) {
-    super(`the database is at the migrated schema, but reasserting its privileges failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  constructor(error: unknown, what = 'reasserting its privileges') {
+    super(`the database is at the migrated schema, but ${what} failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     this.name = 'AfterMigrations';
   }
 }
@@ -357,6 +370,8 @@ interface Migrator {
   migrate(pending: ExpectedMigration[], managed: Managed): Promise<void>;
   /** Reassert privileges a one-database backup does not carry, and grant `backupLogin` the backup group (0019_backup_role.sql). */
   restrict(backupLogin: string | undefined): Promise<void>;
+  /** Build each of `indexes` not built yet, without blocking writes (`online-indexes.ts`): those it left, and why. */
+  online(indexes: readonly OnlineIndex[]): Promise<UnbuiltIndex[]>;
   /** Why this login cannot change the objects migrations change, `managed` among them, or hand them to their owner, or null when it can. */
   notOwner(managed: Managed): Promise<NotOwner | null>;
   close(): Promise<void>;
@@ -673,6 +688,27 @@ function verifyHistory(
 async function postgresMigrator(url: string): Promise<Migrator> {
   // One session: the advisory lock and lock_timeout are the session's, and a statement after it is lost fails.
   const client = postgresSession(url, { application_name: 'coffre-migrations' });
+  const buildAll = async (indexes: readonly OnlineIndex[]): Promise<UnbuiltIndex[]> => {
+    const unbuilt: UnbuiltIndex[] = [];
+    const session = {
+      client,
+      briefly: <T>(run: () => Promise<T>) => waitingBriefly(client, run),
+      waitShort: async () => void (await client.unsafe(`SET lock_timeout = '${MIGRATION_LOCK_WAIT_MS}ms'`)),
+      // A concurrent build waits for every transaction older than it, an open backup's included, and queues no
+      // write behind it meanwhile: it waits as long as for another run.
+      waitLong: async () => void (await client.unsafe(`SET lock_timeout = '${OTHER_RUN_LOCK_TIMEOUT}'`)),
+    };
+    for (const index of indexes) {
+      try {
+        await buildOnline(session, index);
+      } catch (error) {
+        const reason = unbuiltReason(error);
+        if (reason === null) throw error;
+        unbuilt.push({ name: index.name, table: index.table, reason });
+      }
+    }
+    return unbuilt;
+  };
   return {
     async applied() {
       const [found] = await client.unsafe<{ relation: string | null }[]>(
@@ -702,7 +738,8 @@ async function postgresMigrator(url: string): Promise<Migrator> {
           await tx.unsafe('CREATE SCHEMA IF NOT EXISTS drizzle');
           await tx.unsafe('CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at bigint)');
           for (const migration of pending) {
-            for (const statement of migration.sql.split('--> statement-breakpoint')) await tx.unsafe(statement);
+            // A CONCURRENTLY build runs after the transaction commits (`online`).
+            for (const statement of migration.sql.split('--> statement-breakpoint')) if (onlineIndex(statement) === null) await tx.unsafe(statement);
             await tx.unsafe('INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ($1, $2::bigint)', [migration.hash, migration.createdAt]);
           }
           for (const { statement } of await tx.unsafe<{ statement: string }[]>(HANDED_OVER, [relations, functions, types])) {
@@ -723,6 +760,15 @@ async function postgresMigrator(url: string): Promise<Migrator> {
         const found = await client.unsafe('SELECT 1 FROM pg_roles WHERE rolname::text = $1', [backupLogin]);
         if (found.length === 0) throw new Error(`role ${quoteIdentifier(backupLogin)} does not exist: make it, coffre never does`);
         await client.unsafe(`GRANT coffre_backup TO ${quoteIdentifier(backupLogin)} WITH ADMIN FALSE, INHERIT TRUE, SET FALSE`);
+      }
+    },
+    async online(indexes) {
+      const [{ got }] = await client.unsafe<[{ got: boolean }]>('SELECT pg_try_advisory_lock($1::bigint) AS got', [ONLINE_LOCK_KEY]);
+      if (!got) return [];
+      try {
+        return await buildAll(indexes);
+      } finally {
+        await client.unsafe('SELECT pg_advisory_unlock($1::bigint)', [ONLINE_LOCK_KEY]);
       }
     },
     async notOwner({ relations, functions, types }) {
@@ -789,6 +835,8 @@ async function sqliteMigrator(url: string): Promise<Migrator> {
     // drizzle-orm's own, which applies the tree in one transaction. One file, which whoever opens it may change: no owner.
     migrate: () => migrate(sqlite, { migrationsFolder: migrationsFolder('sqlite') }),
     async restrict() {},
+    // SQLite's migrations build their indexes as any other statement.
+    online: async () => [],
     notOwner: async () => null,
     close,
   };
@@ -844,7 +892,7 @@ export async function migrationStatus(url: string): Promise<{ applied: string[];
 export async function migrateDatabase(
   url: string,
   { onPlan, backupLogin }: { onPlan?: (plan: MigrationPlan) => void | Promise<void>; backupLogin?: string } = {},
-): Promise<void> {
+): Promise<{ unbuilt: UnbuiltIndex[] }> {
   const engine = engineOfUrl(url);
   const problem = backupLogin === undefined ? null : backupLoginProblem(backupLogin);
   if (problem !== null) throw new Error(problem);
@@ -870,6 +918,16 @@ export async function migrateDatabase(
       await migrator.restrict(backupLogin);
     } catch (error) {
       throw new AfterMigrations(error);
+    }
+    // Last, for they may take minutes on a large log, holding up no write: the indexes built without blocking
+    // writes, every run until each is built, once the migration lock is let go (`ONLINE_LOCK_KEY`). One that
+    // waited too long is said, and left to the next run.
+    await migrator.unlock();
+    locked = false;
+    try {
+      return { unbuilt: await migrator.online(onlineIndexes(expected.map((entry) => entry.sql))) };
+    } catch (error) {
+      throw new AfterMigrations(error, 'building its indexes online');
     }
   } finally {
     try {

@@ -39,7 +39,8 @@ async function grow(total: number, tag = ''): Promise<void> {
     SELECT (SELECT coalesce(max(seq), 0) FROM audit_log) + g, 'vault', 'vault:x', ${now}, 'system:x', CASE WHEN g % 10 = 0 THEN 'access.grant' ELSE 'secret.read' END, 'allow',
            'token:other-' || (g % 1000), '{}', ${Buffer.alloc(32)}, ${Buffer.alloc(32)}, ${Buffer.alloc(32)}, true
       FROM generate_series(1, ${others}) g`);
-  await run(db.owner, sql`VACUUM ANALYZE`);
+  // No parallel workers: their shared memory for a million entries' indexes outgrows the container's /dev/shm.
+  await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0)`);
 }
 
 test("R48: a key write's vault statement and its app's hold read as many buffers at 10k entries as at 1M", { ...postgresOnly("a key write's statements are Postgres's"), timeout: 600_000 }, async () => {

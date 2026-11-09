@@ -7,10 +7,10 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { generateToken, github, hashToken, signin, tokenHint } from '@coffre/core/identity';
-import type { Database } from '@coffre/db';
+import { createDatabase, type Database } from '@coffre/db';
 import { appendEntries, KeyRetired, lockLogHead } from '@coffre/db/log';
 import { SNAPSHOT } from '@coffre/db/dialect';
-import { asc, desc, eq } from 'drizzle-orm';
+import { asc, desc, eq, sql } from 'drizzle-orm';
 
 import { coffreRoute, keyReady, respond, runScheduled, settleKey } from '../src/app.ts';
 import { authMac, signedBy, type AuthTable } from '../src/auth-rows.ts';
@@ -21,7 +21,9 @@ import { insertSession } from '../src/db/workloads.ts';
 import { sealAnchor } from '../src/anchor.ts';
 import { toErrorBody } from '../src/api/errors.ts';
 import { finishRotation, keyState, keyStateNow, rotateStep, SIGNED_TABLES } from '../src/key-rotation.ts';
-import { newestMove } from '../src/db/rotation.ts';
+import { newestAppEntry, newestMove } from '../src/db/rotation.ts';
+import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
+import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { postgresOnly } from './db/engine.ts';
 import { auditWatch, walkOn } from '../src/plugins/audit-watch.ts';
 import { watchContext } from '../src/watch.ts';
@@ -566,4 +568,35 @@ test('an instance the log moved on from leaves the anchor as it is, whatever its
   assert.equal(await context.log.movedOn(), true);
   assert.equal(await walkOn(context, anchor), false);
   assert.deepEqual(await anchor.read(), backlog);
+});
+
+test("the app's newest entry is one step of the log however many of the vault's came after it (T245, R48)", postgresOnly('it reads Postgres query plans'), async () => {
+  // The app's entries, then the vault's, as an app idle while the vault's beats go on: heartbeats, which no fence follows.
+  // Enough of the app's that an index keyed by author alone, then by action, key or subject, would sort them all.
+  const append = (author: 'app' | 'vault', count: number) => db.owner.execute(sql`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
+    SELECT coalesce((SELECT max(seq) FROM audit_log), 0) + n, ${author}, 'k', 0, 'system:coffre', 'audit.heartbeat', 'allow', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex')
+    FROM generate_series(1, ${count}) n`);
+  await append('app', 20_000);
+  const [newest] = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.author, 'app')).orderBy(desc(auditLog.seq)).limit(1);
+  const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
+  /** The pages the app's start reads for its newest entry, as its own login, after `count` more of the vault's. */
+  const read = async (count: number) => {
+    await append('vault', count);
+    await db.owner.execute(sql`ANALYZE audit_log`);
+    const seen: { text: string; values: unknown[] }[] = [];
+    const found = await newestAppEntry(createDatabase(watched(pool, ({ text, values }) => void seen.push({ text, values }))));
+    assert.equal(found?.seq, newest!.seq);
+    const [explained] = await pool.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${seen[0]!.text}`, seen[0]!.values as never[]);
+    const plan = (explained as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
+    return plan['Shared Hit Blocks'] + plan['Shared Read Blocks'];
+  };
+  try {
+    // Walked back by `seq`, 307 pages past 10,000 and 3,050 past 100,000: now the app's partial index, a few pages.
+    for (const count of [10_000, 90_000]) {
+      const pages = await read(count);
+      assert.ok(pages <= 8, `${pages} pages for the app's newest entry`);
+    }
+  } finally {
+    await pool.end();
+  }
 });
