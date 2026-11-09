@@ -427,8 +427,10 @@ test('a token no binding can take costs its admission and one indexed read: no o
   const seen: Statement[] = [];
   try {
     const stranger = createRuntime(config, createDatabase(counted(pool, seen)), deps.vault, transport);
-    // The door's reads of the migrations and of the app key's standing are the isolate's, once, not an exchange's (app.ts).
+    // The door's reads of the migrations, of the login's statement timeout and of the app key's standing are the
+    // isolate's, once, not an exchange's (app.ts).
     stranger.schema.migrated = true;
+    stranger.schema.factsRead = true;
     stranger.appKey.settled = true;
     /** What one exchange cost: the statements it sent, its vault calls and its fetches. */
     const ask = async (service: string, jwt: string) => {

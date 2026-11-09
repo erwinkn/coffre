@@ -646,6 +646,17 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
  * cursor on after them, never past the newest pair; SQLite, one writer and
  * no partitions, writes them in a transaction, and drops a day's by `at`.
  */
+/**
+ * How long `drop_reads_day` may run: its DELETEs take a whole day's rows of
+ * `log_read_days` and `log_read_place_days` at once, which on a large
+ * instance can take longer than the vault login's 5 s ceiling
+ * (`RUNTIME_STATEMENT_TIMEOUT_MS`), which would roll the day back every
+ * run, never done. It runs in the upkeep, behind no caller, one at a time:
+ * 60 s, Hyperdrive's own bound on a query, what it ran under before the
+ * ceiling.
+ */
+const DROP_READS_DAY_MS = 60_000;
+
 /** How many objects one statement of `objects` asks for. */
 const OBJECTS_AT_ONCE = 200;
 
@@ -762,7 +773,12 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
     },
     async dropDay(day) {
       if (postgres) {
-        const [row] = await rowsOf<{ state: string }>(db, sql`SELECT drop_reads_day(${day}::date) AS state`);
+        // Its own ceiling, not the login's (`RUNTIME_STATEMENT_TIMEOUT_MS`): a function's SET cannot lengthen the
+        // statement that calls it, so the transaction sets it first.
+        const [row] = await db.transaction(async (tx) => {
+          await tx.execute(sql`SELECT set_config('statement_timeout', ${String(DROP_READS_DAY_MS)}, true)`);
+          return rowsOf<{ state: string }>(tx, sql`SELECT drop_reads_day(${day}::date) AS state`);
+        });
         if (row?.state !== 'kept') made.delete(day);
         return;
       }

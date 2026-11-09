@@ -511,8 +511,11 @@ for (const as of ['superuser', 'owner'] as const) {
     for (const verifier of stored.verifiers) assert.match(verifier, /^SCRAM-SHA-256\$4096:/);
     assert.ok(stored.migrations! > 0);
 
-    // Again, piped in, without --reset-passwords: nothing changes, and nothing is shown.
+    // Again, piped in, without --reset-passwords: nothing changes, and nothing is shown. An administrator's own
+    // statement timeout for the app's login meanwhile is kept, and said as it is (W364, review r1).
+    await asSuperuser(`setup_${as}`, (client) => client.unsafe("ALTER ROLE coffre_runtime SET statement_timeout = '30s'"));
     const again = setup(['--json'], { stdin: `${url}\n` });
+    assert.match(again.stderr, /\n\s+coffre_vault_runtime ends a statement after 5s \(statement_timeout\)\n\s+coffre_runtime keeps its own statement_timeout, 30s, where coffre gives 5s\n/);
     assert.deepEqual(json(again), {
       app: {},
       vault: {},

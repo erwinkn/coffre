@@ -6,7 +6,7 @@ import type { Sealing } from '@coffre/core/vault';
 import { isUnreachable, migrationLedger } from '@coffre/db/dialect';
 import { asc, sql, type SQL } from 'drizzle-orm';
 
-import { coffreRoute, respond, runScheduled } from '../src/app.ts';
+import { coffreRoute, respond, runScheduled, schemaReady } from '../src/app.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { admitSocket } from '../src/socket-admission.ts';
 import { TEST_ENGINE } from './db/engine.ts';
@@ -251,4 +251,57 @@ test('without an audit watch, the scheduled run asks the vault to checkpoint and
   assert.deepEqual([actions.includes('audit.heartbeat'), actions.at(-1)], [false, 'audit.checkpoint']);
   const ready = await ask(runtime, '/readyz');
   assert.deepEqual([ready.status, JSON.parse(ready.body)], [200, { ok: true, watched: false }]);
+});
+
+test("the app's login's statement timeout, read beside the schema's first question: asked again after the database could not be reached, though the schema was known, and said once (W364, review r1)", { skip: TEST_ENGINE === 'postgres' ? false : 'Postgres only: SQLite has no statement timeout' }, async () => {
+  // The database's facts (`databaseFacts`): unreachable the first time, then a login with no statement timeout.
+  const asked: string[] = [];
+  const facts = (answers: (() => unknown)[]) =>
+    new Proxy(deps.db, {
+      get(target, key) {
+        if (key === 'execute') {
+          return async (query: SQL) => {
+            const text = (target as unknown as { dialect: { sqlToQuery(q: SQL): { sql: string } } }).dialect.sqlToQuery(query).sql;
+            if (!text.includes('max_connections')) return target.execute(query);
+            asked.push('facts');
+            return answers.shift()!();
+          };
+        }
+        const value = Reflect.get(target, key, target) as unknown;
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+  const unbounded = [{ max: 100, reserved: 3, statement_ms: 0, login: 'coffre_runtime' }];
+  const warned = mock.method(console, 'warn', () => {});
+  const failed = mock.method(console, 'error', () => {});
+  try {
+    const runtime: CoffreRuntime = {
+      ...freshRuntime(),
+      db: facts([() => { throw Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), { code: 'ECONNREFUSED' }); }, () => unbounded]),
+      schema: { migrated: false, factsRead: false },
+    };
+    assert.equal(await schemaReady(runtime), true);
+    assert.deepEqual([asked.length, runtime.schema.factsRead, warned.mock.callCount()], [1, false, 0]);
+    // The schema known, the facts are asked on their own, and the login's lack said.
+    assert.equal(await schemaReady(runtime), true);
+    assert.deepEqual([asked.length, runtime.schema.factsRead], [2, true]);
+    assert.deepEqual(warned.mock.calls.map((call) => String(call.arguments[0]).slice(0, 48)), ['the app: coffre_runtime runs with no statement_t']);
+    assert.equal(await schemaReady(runtime), true);
+    assert.equal(asked.length, 2, 'read once it answered');
+
+    // Any other failure is logged, and not asked again.
+    asked.length = 0;
+    const refused: CoffreRuntime = {
+      ...freshRuntime(),
+      db: facts([() => { throw Object.assign(new Error('permission denied'), { code: '42501' }); }]),
+      schema: { migrated: false, factsRead: false },
+    };
+    assert.equal(await schemaReady(refused), true);
+    assert.equal(await schemaReady(refused), true);
+    assert.deepEqual([asked.length, refused.schema.factsRead], [1, true]);
+    assert.deepEqual(failed.mock.calls.map((call) => call.arguments[0]), ["the app could not read its login's statement timeout"]);
+  } finally {
+    warned.mock.restore();
+    failed.mock.restore();
+  }
 });

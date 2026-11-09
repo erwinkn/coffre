@@ -35,14 +35,16 @@ import { openDatabase, poolsAt } from '@coffre/db/connect';
 import { TooFewConnections } from '@coffre/db/connections';
 import { migrateDatabase } from '@coffre/db/migrate';
 
+import { ApiError } from './api/errors.ts';
 import { runScheduled, settleKey, walkAuditBacklog } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
 import { processGates } from './gate.ts';
+import { errorResponse, jsonResponse } from './http.ts';
 import { logged } from './logged.ts';
 import { publicConnect, upgrade } from './node-sockets.ts';
 import { createRuntime, type CoffreRuntime } from './runtime.ts';
 import { SCHEDULE_MINUTES } from './schedule.ts';
-import { requestScope, type CoffreContext } from './scope.ts';
+import { requestScope, type CoffreContext, type CoffreRequest } from './scope.ts';
 import { nodeTransport } from './workloads/node-transport.ts';
 
 export * from './index.ts';
@@ -83,11 +85,15 @@ const BACKLOG_MARGIN_MS = 30_000;
  * and serves the process's every request from then on. A database too small
  * for coffre's pools stops the process, naming the `max_connections` it
  * needs, as the vault's process stops; one that cannot be reached yet is
- * tried again by the next request.
+ * tried again by the next request, which answers 503 meanwhile. Until it
+ * opens, health answers without it: `/livez` that the process is up,
+ * `/readyz` 503, so that an orchestrator restarts nothing for an outage
+ * of the database's.
  */
 export function createCoffre(config: NodeConfig): CoffreNode {
   const resolved = checkNodeConfig(config);
   let runtime: Promise<CoffreRuntime> | undefined;
+  let opened = false;
   // A rotation to a new app key goes on to its end as the process starts, beside the requests, which answer 503
   // `rotating` meanwhile, `/livez` and `/readyz` aside: a Worker's CPU limit is not Node's.
   const open = async () => {
@@ -95,6 +101,7 @@ export function createCoffre(config: NodeConfig): CoffreNode {
     const database = await openDatabase(config.database, { max: pools?.app, lockWaitMs: LOCK_WAIT_MS });
     const rt = createRuntime(resolved, database.db, versioned(config.vault), { ...nodeTransport(), connect: publicConnect() }, undefined, processGates());
     void settleKey(rt);
+    opened = true;
     return rt;
   };
   const ready = () =>
@@ -112,11 +119,13 @@ export function createCoffre(config: NodeConfig): CoffreNode {
     request(request) {
       // The caller's address, as srvx gives it on Node; behind a proxy, the proxy's.
       const sourceIp = (request as { ip?: string }).ip ?? null;
-      const scope = ready().then((rt) => requestScope(rt, () => sourceIp));
+      // Asked when the request is, not before: a health answer below asks nothing of the database.
+      let scope: Promise<CoffreRequest> | undefined;
+      const scoped = () => (scope ??= ready().then((rt) => requestScope(rt, () => sourceIp)));
       return {
         coffre: {
-          route: async (req) => (await scope).route(req),
-          respond: async (req, render) => (await scope).respond(req, render),
+          route: async (req) => (opened ? null : unopened(req)) ?? scoped().then((s) => s.route(req), errorResponse),
+          respond: async (req, render) => (opened ? null : unopened(req)) ?? scoped().then((s) => s.respond(req, render), errorResponse),
         },
       };
     },
@@ -151,6 +160,20 @@ export function createCoffre(config: NodeConfig): CoffreNode {
     },
   };
 }
+
+/**
+ * Health before the database has opened (`createCoffre`): the process is
+ * live, and not ready. Null for any other request, which waits for it.
+ */
+function unopened(request: Request): Response | null {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return null;
+  const { pathname } = new URL(request.url);
+  if (pathname === '/livez') return jsonResponse({ ok: true });
+  if (pathname === '/readyz') return errorResponse(new ApiError('unavailable', UNOPENED));
+  return null;
+}
+
+const UNOPENED = "coffre's database has not opened yet: the process tries again with each request";
 
 /** coffre's configuration on Node. */
 export type NodeConfig = CoffreConfig & {

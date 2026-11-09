@@ -410,6 +410,7 @@ async function run(
         },
       });
       const pending = plan.total - plan.applied;
+      const timeouts = await statementTimeouts(client, [ROLES.app, ROLES.vault]);
       return {
         text:
           pending === 0
@@ -417,7 +418,8 @@ async function run(
             : `Migrated the database to coffre ${version}'s schema: ${count(pending, 'migration')} applied`,
         details: [
           `${ROLES.backup} is a member of coffre_backup, which reads every row and writes none`,
-          ...(unbounded.length === 0 ? [`${ROLES.app} and ${ROLES.vault} end a statement after ${RUNTIME_SETTINGS.statement_timeout} (statement_timeout)`] : unboundedNote(unbounded)),
+          ...timedOut(timeouts),
+          ...unboundedNote(unbounded),
         ],
       };
     });
@@ -718,6 +720,35 @@ async function probed(url: string): Promise<boolean[]> {
 }
 
 /** The same, from the catalog, for a login whose password this run did not set: the administrator asks for it. */
+/** Each of `logins`' statement_timeout as its role holds it, server-wide (`holdRuntimeTimeouts`), or null for none. */
+async function statementTimeouts(client: PostgresClient, logins: readonly string[]): Promise<Map<string, string | null>> {
+  const rows = await client.unsafe<{ login: string; value: string | null }[]>(
+    `SELECT r.rolname AS login,
+            (SELECT substr(c, length('statement_timeout=') + 1) FROM pg_db_role_setting s, unnest(s.setconfig) AS c
+              WHERE s.setrole = r.oid AND s.setdatabase = 0 AND split_part(c, '=', 1) = 'statement_timeout') AS value
+       FROM pg_roles r WHERE r.rolname = ANY($1)`,
+    [[...logins]],
+  );
+  return new Map(logins.map((login) => [login, rows.find((row) => row.login === login)?.value ?? null]));
+}
+
+/**
+ * What the runtime logins' statement timeouts are, as set: coffre's, or an
+ * administrator's own, which `holdRuntimeTimeouts` keeps. Those with none are
+ * `unboundedNote`'s.
+ *
+ *   coffre_runtime and coffre_vault_runtime end a statement after 5s (statement_timeout)
+ *   coffre_runtime keeps its own statement_timeout, 30s, where coffre gives 5s
+ */
+function timedOut(timeouts: ReadonlyMap<string, string | null>): string[] {
+  const ours = [...timeouts].filter(([, value]) => value === RUNTIME_SETTINGS.statement_timeout).map(([login]) => login);
+  const own = [...timeouts].filter(([, value]) => value !== null && value !== RUNTIME_SETTINGS.statement_timeout);
+  return [
+    ...(ours.length === 0 ? [] : [`${listed(ours, 'and')} end${ours.length === 1 ? 's' : ''} a statement after ${RUNTIME_SETTINGS.statement_timeout} (statement_timeout)`]),
+    ...own.map(([login, value]) => `${login} keeps its own statement_timeout, ${value}, where coffre gives ${RUNTIME_SETTINGS.statement_timeout}`),
+  ];
+}
+
 async function granted(client: PostgresClient, role: string): Promise<boolean[]> {
   const allowed: boolean[] = [];
   for (const { privilege } of BOUNDARY) {

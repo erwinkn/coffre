@@ -1,12 +1,18 @@
 import type { Client } from '@coffre/db';
 import { postgresClient, type PostgresClient } from '@coffre/db/connect';
+import { RUNTIME_LOGINS } from '@coffre/db/migrate';
 
-/** Bound broken connections and blocked SQL in tests, including the vault's pool; `allowExitOnIdle` closes it once idle. */
+/**
+ * Bound broken connections and blocked SQL in tests, including the vault's pool; `allowExitOnIdle` closes it once idle.
+ * The runtime logins run under their role's statement timeout, as deployed (`RUNTIME_SETTINGS`, which the suite's
+ * migration gives them), so that a statement that needs longer fails here first; the owner's has none of its own.
+ */
 export function testPostgresPool(connectionString: string, allowExitOnIdle = false): PostgresClient {
+  const runtime = (RUNTIME_LOGINS as readonly string[]).includes(decodeURIComponent(new URL(connectionString).username));
   return postgresClient(connectionString, {
     connect_timeout: 5,
     idle_timeout: allowExitOnIdle ? 1 : 10,
-    connection: { statement_timeout: 10_000 },
+    ...(runtime ? {} : { connection: { statement_timeout: 10_000 } }),
   });
 }
 

@@ -165,6 +165,11 @@ pools reconnect with the new value. A query sent on such a session at that
 moment fails once, as it would during a restart. Until a login has the
 setting, the app and the vault log a warning when they start.
 
+One statement sets a longer ceiling for itself: retention's drop of a day
+of reads, which deletes that day's rows at once, runs under 60 seconds,
+Hyperdrive's own limit. It runs in the vault's upkeep, with no caller
+waiting on it.
+
 `coffre setup` makes `coffre_backup_login` and grants it the group.
 `coffre migrate --backup-login <role>` grants `coffre_backup` to that
 existing role, on every run that names it. Migrate never makes the role,
@@ -1045,7 +1050,10 @@ and the vault's share, which also holds the checkpointer's 2 connections.
 
 If the database is too small to give each login 5 connections, a process
 refuses to start and says what `max_connections` it needs: 22 with 3
-reserved. These shares assume one server process and one vault process,
+reserved. A server that cannot reach the database yet keeps trying with
+each request: meanwhile `/livez` answers 200, `/readyz` 503, and other
+requests 503 `unavailable`, so an orchestrator does not restart it for
+the database's outage. These shares assume one server process and one vault process,
 and a database that serves coffre alone. To run more processes, put a
 pooler such as PgBouncer in front of the database, which plays the part
 Hyperdrive plays on Workers.

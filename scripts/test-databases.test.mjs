@@ -3,6 +3,9 @@ import test from 'node:test';
 import { restrictDatabase } from '@coffre/db/migrate';
 import { cloneDatabase, owners, removeDatabases } from './test-databases.mjs';
 
+/** What `holdRuntimeTimeouts` reads of each runtime login: there, with its statement timeout already. */
+const HELD = [{ exists: true, held: true }];
+
 function owner(t, databases = []) {
     const queries = [];
     const connected = [];
@@ -12,7 +15,7 @@ function owner(t, databases = []) {
         return {
             unsafe: async (sql) => {
                 queries.push(sql);
-                return databases.map((datname) => ({ datname }));
+                return sql.includes('to_regrole') ? HELD : databases.map((datname) => ({ datname }));
             },
             end: async () => { closed.push(database); },
         };
@@ -23,8 +26,8 @@ function owner(t, databases = []) {
 test('a clone preserves schema grants and restricts its new database ACL', async (t) => {
     const { queries, connected, closed } = owner(t);
     const restriction = [];
-    await restrictDatabase({ unsafe: async (sql) => { restriction.push(sql); } });
-    assert.equal(restriction.length, 3);
+    await restrictDatabase({ unsafe: async (sql) => { restriction.push(sql); return sql.includes('to_regrole') ? HELD : undefined; } });
+    assert.equal(restriction.length, 5);
     await cloneDatabase('coffre_template', 'coffre_worker');
     assert.deepEqual(queries, [
         'CREATE DATABASE "coffre_worker" TEMPLATE "coffre_template"',

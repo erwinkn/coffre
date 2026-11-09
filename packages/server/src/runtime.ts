@@ -45,7 +45,8 @@ export type CoffreRuntime = {
   plugins: ResolvedConfig['plugins'];
   /**
    * What is known of the database's schema, for as long as the configuration lives: the isolate's, or the process's;
-   * and whether its login's statement timeout was read (`factsRead`, `schemaReady`).
+   * and whether its login's statement timeout was read (`factsRead`, `schemaReady`), absent from a runtime made by hand
+   * (the suites'): nothing to read.
    */
   schema: { migrated: boolean; factsRead?: boolean };
   /** Whether the log is under the app's key, for as long as the configuration lives (key-rotation.ts). */

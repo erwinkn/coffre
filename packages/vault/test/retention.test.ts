@@ -656,3 +656,18 @@ test('T169, review r5: a fence closed under retention\'s consistency proof goes 
   });
   await assert.rejects(retain(cp, fenced, { keepDays: 9, keys, now }), (error: Error) => error instanceof FenceClosed);
 });
+
+test("a day's reads too many to drop within the vault login's statement timeout drop under drop_reads_day's own ceiling, done in one run (W364, review r1)", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its statement timeout' }, async () => {
+  // A day long gone, whose uses' partition is no more: its places' days alone, many.
+  const day = '2001-01-01';
+  const n = Date.parse(`${day}T00:00:00Z`) / DAY_MS;
+  await run(db.owner, sql`INSERT INTO log_read_place_days (place, day) SELECT gen_random_uuid(), ${n} FROM generate_series(1, 300000)`);
+  // The vault's login with a ceiling far shorter than their DELETE, set on its one connection as the role's would be.
+  const vault = await db.connect(1);
+  await run(vault, sql`SET statement_timeout = '100ms'`);
+  const started = performance.now();
+  await logStore(vault).dropDay(day);
+  assert.ok(performance.now() - started > 100, 'the drop took longer than the login lets a statement run');
+  assert.equal((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_place_days WHERE day = ${n}`))[0]!.n, 0);
+  assert.equal((await rows<{ s: string }>(vault, sql`SELECT current_setting('statement_timeout') AS s`))[0]!.s, '100ms', "the drop's ceiling ended with its transaction");
+});

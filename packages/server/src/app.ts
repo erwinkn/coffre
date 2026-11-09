@@ -208,16 +208,14 @@ const UNCHECKED = "coffre could not check that its audit log is cut over to 0.15
  * other failure of the question fails the request.
  */
 export async function schemaReady(runtime: CoffreRuntime): Promise<boolean> {
-  if (!runtime.schema.migrated) {
-    const facts = runtime.schema.factsRead === true ? null : unboundedLogin(runtime);
-    try {
-      runtime.schema.migrated = await migrated(runtime.db);
-    } catch (error) {
-      if (isUnreachable(error)) return true;
-      throw error;
-    } finally {
-      await facts;
-    }
+  const facts = runtime.schema.factsRead === false ? unboundedLogin(runtime) : null;
+  try {
+    if (!runtime.schema.migrated) runtime.schema.migrated = await migrated(runtime.db);
+  } catch (error) {
+    if (isUnreachable(error)) return true;
+    throw error;
+  } finally {
+    await facts;
   }
   return runtime.schema.migrated;
 }
@@ -225,12 +223,20 @@ export async function schemaReady(runtime: CoffreRuntime): Promise<boolean> {
 /**
  * Asked beside the first question of the schema, so no round trip of its
  * own (T206): whether the app's login runs without the statement timeout
- * `coffre migrate` gives it (`unboundedStatements`), said once. A failure
- * is the schema's question's to meet, and is asked again with it.
+ * `coffre migrate` gives it (`unboundedStatements`), said once. Asked again
+ * by the next request while the database cannot be reached, on its own once
+ * the schema is known; any other failure is logged, and not asked again.
  */
 async function unboundedLogin(runtime: CoffreRuntime): Promise<void> {
-  const facts = await databaseFacts(runtime.db).catch(() => undefined);
-  if (facts === undefined) return;
+  let facts: Awaited<ReturnType<typeof databaseFacts>>;
+  try {
+    facts = await databaseFacts(runtime.db);
+  } catch (error) {
+    if (isUnreachable(error)) return;
+    runtime.schema.factsRead = true;
+    console.error("the app could not read its login's statement timeout", logged(error));
+    return;
+  }
   runtime.schema.factsRead = true;
   const unbounded = facts === null ? null : unboundedStatements(facts);
   if (unbounded !== null) console.warn(`the app: ${unbounded}`);
