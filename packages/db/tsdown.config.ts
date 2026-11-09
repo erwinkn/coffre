@@ -16,6 +16,7 @@ export default defineConfig({
     'schema-version': 'src/schema-version.ts',
     hyperdrive: 'src/hyperdrive.ts',
     connect: 'src/connect.ts',
+    connections: 'src/connections.ts',
     migrate: 'src/migrate.ts',
     log: 'src/log.ts',
     grants: 'src/grants.ts',

@@ -17,6 +17,7 @@ import {
 import { WORKLOAD_SIGN_IN_PATH } from '@coffre/core/identity';
 import { preferencesIn, type Preferences } from '@coffre/core/pages';
 import { isUnreachable } from '@coffre/db/dialect';
+import { databaseFacts, unboundedStatements } from '@coffre/db/connections';
 import { migrated } from '@coffre/db/schema-version';
 
 import { auditHead, pruneSpentTokens } from './db/queries.ts';
@@ -208,14 +209,31 @@ const UNCHECKED = "coffre could not check that its audit log is cut over to 0.15
  */
 export async function schemaReady(runtime: CoffreRuntime): Promise<boolean> {
   if (!runtime.schema.migrated) {
+    const facts = runtime.schema.factsRead === true ? null : unboundedLogin(runtime);
     try {
       runtime.schema.migrated = await migrated(runtime.db);
     } catch (error) {
       if (isUnreachable(error)) return true;
       throw error;
+    } finally {
+      await facts;
     }
   }
   return runtime.schema.migrated;
+}
+
+/**
+ * Asked beside the first question of the schema, so no round trip of its
+ * own (T206): whether the app's login runs without the statement timeout
+ * `coffre migrate` gives it (`unboundedStatements`), said once. A failure
+ * is the schema's question's to meet, and is asked again with it.
+ */
+async function unboundedLogin(runtime: CoffreRuntime): Promise<void> {
+  const facts = await databaseFacts(runtime.db).catch(() => undefined);
+  if (facts === undefined) return;
+  runtime.schema.factsRead = true;
+  const unbounded = facts === null ? null : unboundedStatements(facts);
+  if (unbounded !== null) console.warn(`the app: ${unbounded}`);
 }
 
 const MIGRATING = "coffre's database lacks this version's migrations: an owner runs `coffre migrate`, as every deploy does first";

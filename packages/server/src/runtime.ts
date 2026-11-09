@@ -43,8 +43,11 @@ export type CoffreRuntime = {
   rotateAfterDays: number | null;
   /** What the deployment added, in its configuration's order (`plugins.ts`). */
   plugins: ResolvedConfig['plugins'];
-  /** What is known of the database's schema, for as long as the configuration lives: the isolate's, or the process's. */
-  schema: { migrated: boolean };
+  /**
+   * What is known of the database's schema, for as long as the configuration lives: the isolate's, or the process's;
+   * and whether its login's statement timeout was read (`factsRead`, `schemaReady`).
+   */
+  schema: { migrated: boolean; factsRead?: boolean };
   /** Whether the log is under the app's key, for as long as the configuration lives (key-rotation.ts). */
   appKey: { settled: boolean };
   /**
@@ -72,7 +75,7 @@ export type CoffreRuntime = {
  * isolate's, or the process's. Settled values, never a pending read
  * (AGENTS.md, "What an isolate keeps").
  */
-type Known = { schema: { migrated: boolean }; scopes: { sealed: boolean }; appKey: CoffreRuntime['appKey']; cutover: CoffreRuntime['cutover']; accesses: Accesses };
+type Known = { schema: { migrated: boolean; factsRead?: boolean }; scopes: { sealed: boolean }; appKey: CoffreRuntime['appKey']; cutover: CoffreRuntime['cutover']; accesses: Accesses };
 const known = new WeakMap<ResolvedConfig, Known>();
 
 /**
@@ -147,7 +150,7 @@ export function createRuntime(
 function knownOf(config: ResolvedConfig): Known {
   let kept = known.get(config);
   if (kept === undefined) {
-    kept = { schema: { migrated: false }, scopes: { sealed: false }, appKey: { settled: false }, cutover: { done: false }, accesses: new Accesses() };
+    kept = { schema: { migrated: false, factsRead: false }, scopes: { sealed: false }, appKey: { settled: false }, cutover: { done: false }, accesses: new Accesses() };
     known.set(config, kept);
   }
   return kept;

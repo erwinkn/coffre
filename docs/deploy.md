@@ -141,6 +141,30 @@ ALTER ROLE coffre_vault_hot RESET jit;
 ALTER ROLE coffre_vault_hot RESET plan_cache_mode;
 ```
 
+### Statement timeouts
+
+`coffre_runtime` and `coffre_vault_runtime` end any statement after 5
+seconds (`statement_timeout`), the deadline a read call answers within.
+Without it, a statement that hangs keeps its connection until it ends, or
+until Hyperdrive gives up at 60 seconds. On a small database that can be
+one of only six connections. The hot path's login keeps its own, shorter
+timeouts. `coffre setup` and every `coffre migrate` set it server-wide on
+each of the two roles that has none of its own yet, and leave a value an
+administrator set. The same `CREATEROLE` and `ADMIN` rule as above
+applies: a login that only migrates leaves the setting unset and prints
+these statements. An administrator runs them once per server:
+
+```sql
+ALTER ROLE coffre_runtime SET statement_timeout = '5s';
+ALTER ROLE coffre_vault_runtime SET statement_timeout = '5s';
+```
+
+Postgres applies a role's setting when a session logs in. So the run that
+sets it also ends those logins' idle sessions on the database, and the
+pools reconnect with the new value. A query sent on such a session at that
+moment fails once, as it would during a restart. Until a login has the
+setting, the app and the vault log a warning when they start.
+
 `coffre setup` makes `coffre_backup_login` and grants it the group.
 `coffre migrate --backup-login <role>` grants `coffre_backup` to that
 existing role, on every run that names it. Migrate never makes the role,
@@ -864,10 +888,12 @@ before it makes a query wait (a soft limit, which a network failure can
 briefly exceed), and the database refuses any past its
 `max_connections`: a page's parallel reads then fail with "remaining
 connection slots are reserved" (53300). `coffre setup` reads the database's
-`max_connections`, less the slots it reserves for superusers, keeps 3 for
-the administrator and `coffre migrate`, and gives each config a third of
-the rest, at most 20; the commands it shows carry that number, here 20, for
-a `max_connections` of 100 (31 each, capped at 20), and 6 for one of 25. Fix
+`max_connections`, less the slots it reserves for superusers, keeps 4 for
+migrations and backups, and gives each config a third of the rest, at most
+20. Those 4 are two `coffre migrate` runs at once (with Workers Builds both
+builds migrate) and a `coffre backup`'s two sessions. The commands it shows
+carry that number: 20 for a `max_connections` of 100 (31 each, capped at
+20), and 6 for one of 25. Below 22 (with 3 reserved), setup refuses. Fix
 an existing config with
 `wrangler hyperdrive update <id> --origin-connection-limit=<n>`.
 
@@ -1003,6 +1029,26 @@ pnpm start    # in the server's process
 The server listens on `127.0.0.1:PORT`. Put a TLS-terminating proxy in front
 of it and forward requests to that address. Its scheduled job runs in the
 server process.
+
+Each process sizes its connection pools when it starts, by the rule `coffre
+setup` uses for Hyperdrive. It reads the database's `max_connections`,
+takes away the slots reserved for superusers and the 4 kept for migrations
+and backups, and splits the rest evenly between the three logins. The
+server's pool gets one share. The vault's process gets the hot path's share
+and the vault's share, which also holds the checkpointer's 2 connections.
+
+| `max_connections` (3 reserved) | Each share | Server | Hot path | Vault | Checkpointer |
+|---|---|---|---|---|---|
+| 25 | 6 | 6 | 6 | 4 | 2 |
+| 100 | 31 | 31 | 31 | 29 | 2 |
+| 500 | 164 | 164 | 164 | 162 | 2 |
+
+If the database is too small to give each login 5 connections, a process
+refuses to start and says what `max_connections` it needs: 22 with 3
+reserved. These shares assume one server process and one vault process,
+and a database that serves coffre alone. To run more processes, put a
+pooler such as PgBouncer in front of the database, which plays the part
+Hyperdrive plays on Workers.
 
 For tests and local development only, every URL can name the same absolute
 SQLite file (`file:/tmp/coffre-local.db`), migrated once with `pnpm exec

@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
-import { HOT_LOCK_TIMEOUT_MS, HOT_STATEMENT_TIMEOUT_MS, LOCK_WAIT_MS } from '@coffre/core/vault';
+import { HOT_LOCK_TIMEOUT_MS, HOT_STATEMENT_TIMEOUT_MS, LOCK_WAIT_MS, RUNTIME_STATEMENT_TIMEOUT_MS } from '@coffre/core/vault';
 
 import { engineOfUrl } from './connect.ts';
 import { lockNotAvailable, type Engine } from './dialect.ts';
-import { postgresSession, quoteIdentifier, type PostgresClient } from './postgres.ts';
+import { postgresSession, quoteIdentifier, quoteLiteral, type PostgresClient } from './postgres.ts';
 
 /**
  * Bring a database up to date with its engine's migration tree:
@@ -157,9 +157,10 @@ const LOCK_HOLDERS = `
 
 /**
  * Reassert database privileges that pg_dump and CREATE DATABASE TEMPLATE do not carry and the hot path's login's
- * group and timeouts, and clear the planner settings 0.15.0 gave the runtime logins.
+ * group and timeouts, clear the planner settings 0.15.0 gave the runtime logins, and give them their statement
+ * timeout where this login may: the logins it may not give it (`holdRuntimeTimeouts`).
  */
-export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): Promise<void> {
+export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): Promise<{ unbounded: string[] }> {
   await client.unsafe(`DO $$ BEGIN
     EXECUTE format(
       'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_vault_hot, coffre_backup',
@@ -168,6 +169,76 @@ export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): 
   END $$`);
   await holdHotLogin(client);
   await clearPlannerSettings(client);
+  return { unbounded: await holdRuntimeTimeouts(client) };
+}
+
+/** The app's and the vault's logins' statement timeout as Postgres stores it: whole seconds, from `RUNTIME_STATEMENT_TIMEOUT_MS`. */
+export const RUNTIME_SETTINGS = { statement_timeout: `${RUNTIME_STATEMENT_TIMEOUT_MS / 1000}s` } as const;
+
+/** The logins `holdRuntimeTimeouts` holds: the app's and the vault's. The hot path's has its own, shorter (`holdHotLogin`). */
+export const RUNTIME_LOGINS = ['coffre_runtime', 'coffre_vault_runtime'] as const;
+
+/**
+ * Give the app's and the vault's logins their statement timeout
+ * (`RUNTIME_STATEMENT_TIMEOUT_MS`), server-wide, as a role's setting
+ * (docs/design/config.md, Q5): to each that exists and has no
+ * `statement_timeout` of its own yet, an administrator's own kept, and only
+ * where this login may alter the role, CREATEROLE and ADMIN on it, as
+ * `coffre setup`'s administrator has. Postgres applies a role's setting at
+ * login, so a login given it now has its sessions on this database ended,
+ * those idle, and its pool reconnects with it: Hyperdrive's, or a Node
+ * process's, which open a connection again for the next query. A query
+ * sent on one just as Postgres ends it fails, once, as on a restart. One
+ * this login may not end, or busy, takes it once its pool replaces the
+ * connection. Returns the logins left without it, which the run says, and
+ * docs/deploy.md gives the administrator the SQL for; the app and the vault
+ * warn as they start until they have it. The rows are the server's, so a
+ * run on another database may be changing them too: Postgres fails the
+ * second change, and it looks again once the first has committed.
+ */
+export async function holdRuntimeTimeouts(client: Pick<PostgresClient, 'unsafe'>, logins: readonly string[] = RUNTIME_LOGINS): Promise<string[]> {
+  const unbounded: string[] = [];
+  const given: string[] = [];
+  for (const login of logins) {
+    for (let attempt = 1; ; attempt += 1) {
+      const [found] = await client.unsafe<{ exists: boolean; held: boolean }[]>(
+        `SELECT to_regrole($1) IS NOT NULL AS exists,
+                EXISTS (SELECT 1 FROM pg_db_role_setting s, unnest(s.setconfig) AS setting
+                         WHERE s.setrole = to_regrole($1) AND s.setdatabase = 0 AND split_part(setting, '=', 1) = 'statement_timeout') AS held`,
+        [login],
+      );
+      if (!found!.exists || found!.held) break;
+      try {
+        await client.unsafe(`ALTER ROLE ${quoteIdentifier(login)} SET statement_timeout = '${RUNTIME_SETTINGS.statement_timeout}'`);
+        given.push(login);
+        break;
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (code === '42501') {
+          unbounded.push(login);
+          break;
+        }
+        // Another database's run changing the same role: Postgres fails the second (XX000, or 23505 for a new row).
+        if ((code !== 'XX000' && code !== '23505') || attempt === 5) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+  }
+  if (given.length > 0) {
+    await client.unsafe(`DO $$ DECLARE
+      idle int;
+    BEGIN
+      FOR idle IN SELECT pid FROM pg_stat_activity
+                   WHERE usename = ANY(ARRAY[${given.map((login) => quoteLiteral(login)).join(', ')}]::text[])
+                     AND datname = current_database() AND state = 'idle' LOOP
+        BEGIN
+          PERFORM pg_terminate_backend(idle);
+        EXCEPTION WHEN insufficient_privilege THEN NULL;
+        END;
+      END LOOP;
+    END $$`);
+  }
+  return unbounded;
 }
 
 /**
@@ -355,8 +426,11 @@ interface Migrator {
   unlock(): Promise<void>;
   /** Apply `pending`, in one transaction, which on Postgres hands `managed` to the ledger's owner before it commits. */
   migrate(pending: ExpectedMigration[], managed: Managed): Promise<void>;
-  /** Reassert privileges a one-database backup does not carry, and grant `backupLogin` the backup group (0019_backup_role.sql). */
-  restrict(backupLogin: string | undefined): Promise<void>;
+  /**
+   * Reassert privileges a one-database backup does not carry, and grant `backupLogin` the backup group
+   * (0019_backup_role.sql): the runtime logins it may not give their statement timeout (`holdRuntimeTimeouts`).
+   */
+  restrict(backupLogin: string | undefined): Promise<{ unbounded: string[] }>;
   /** Why this login cannot change the objects migrations change, `managed` among them, or hand them to their owner, or null when it can. */
   notOwner(managed: Managed): Promise<NotOwner | null>;
   close(): Promise<void>;
@@ -717,13 +791,14 @@ async function postgresMigrator(url: string): Promise<Migrator> {
       // It changes no table, only rows of the roles and of the database, which no use locks: it may wait for another
       // database's migrator changing the same roles, as for the migration lock. The last of the run's statements.
       await client.unsafe(`SET lock_timeout = '${OTHER_RUN_LOCK_TIMEOUT}'`);
-      await restrictDatabase(client);
+      const restricted = await restrictDatabase(client);
       if (backupLogin !== undefined) {
         // Compared as text: as a name, Postgres would cut it to 63 bytes, and grant whichever role bears the cut.
         const found = await client.unsafe('SELECT 1 FROM pg_roles WHERE rolname::text = $1', [backupLogin]);
         if (found.length === 0) throw new Error(`role ${quoteIdentifier(backupLogin)} does not exist: make it, coffre never does`);
         await client.unsafe(`GRANT coffre_backup TO ${quoteIdentifier(backupLogin)} WITH ADMIN FALSE, INHERIT TRUE, SET FALSE`);
       }
+      return restricted;
     },
     async notOwner({ relations, functions, types }) {
       type Foreign = { owner: string; member: boolean; member_of_login: boolean; owns_ledger: boolean; login: string; grants_inherit: boolean; inherits: boolean };
@@ -788,7 +863,7 @@ async function sqliteMigrator(url: string): Promise<Migrator> {
     async unlock() {},
     // drizzle-orm's own, which applies the tree in one transaction. One file, which whoever opens it may change: no owner.
     migrate: () => migrate(sqlite, { migrationsFolder: migrationsFolder('sqlite') }),
-    async restrict() {},
+    restrict: async () => ({ unbounded: [] }),
     notOwner: async () => null,
     close,
   };
@@ -839,12 +914,14 @@ export async function migrationStatus(url: string): Promise<{ applied: string[];
  * and with it the hand-over, which a run with nothing to apply makes too.
  * `backupLogin` names an existing role to
  * grant the backup group, `coffre_backup`, on Postgres; it is never made, and
- * never revoked when a later run names none.
+ * never revoked when a later run names none. `unbounded`: the runtime logins
+ * this login may not give their statement timeout (`holdRuntimeTimeouts`),
+ * for the run to say.
  */
 export async function migrateDatabase(
   url: string,
   { onPlan, backupLogin }: { onPlan?: (plan: MigrationPlan) => void | Promise<void>; backupLogin?: string } = {},
-): Promise<void> {
+): Promise<{ unbounded: string[] }> {
   const engine = engineOfUrl(url);
   const problem = backupLogin === undefined ? null : backupLoginProblem(backupLogin);
   if (problem !== null) throw new Error(problem);
@@ -867,7 +944,7 @@ export async function migrateDatabase(
     await migrator.migrate(expected.slice(done), managed);
     verifyHistory(expected, await migrator.applied(), true);
     try {
-      await migrator.restrict(backupLogin);
+      return await migrator.restrict(backupLogin);
     } catch (error) {
       throw new AfterMigrations(error);
     }

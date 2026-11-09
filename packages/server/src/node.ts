@@ -31,7 +31,8 @@ import { LOCK_WAIT_MS, versioned } from '@coffre/core/vault';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 
-import { openDatabase } from '@coffre/db/connect';
+import { openDatabase, poolsAt } from '@coffre/db/connect';
+import { TooFewConnections } from '@coffre/db/connections';
 import { migrateDatabase } from '@coffre/db/migrate';
 
 import { runScheduled, settleKey, walkAuditBacklog } from './app.ts';
@@ -51,8 +52,8 @@ export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './s
 /** Limits for workload exchanges that count in this process: `signin({ workloads: { limits: processLimits() } })`. */
 export { processLimits } from './workloads/limits.ts';
 
-/** Bring the database up to date: what `coffre-server migrate` runs. */
-export function migrate(database: string): Promise<void> {
+/** Bring the database up to date: what `coffre-server migrate` runs. `unbounded`: the runtime logins left without their statement timeout (`holdRuntimeTimeouts`). */
+export function migrate(database: string): Promise<{ unbounded: string[] }> {
   return migrateDatabase(database);
 }
 
@@ -77,21 +78,35 @@ const BACKLOG_WALKS = 100;
 const BACKLOG_MARGIN_MS = 30_000;
 
 /**
- * coffre on Node, its configuration checked now. The database opens with
- * the first request or the first run of the scheduled job, and serves the
- * process's every request from then on.
+ * coffre on Node, its configuration checked now. The database opens now,
+ * its pool the app's login's share of what the database lets in (`poolsAt`),
+ * and serves the process's every request from then on. A database too small
+ * for coffre's pools stops the process, naming the `max_connections` it
+ * needs, as the vault's process stops; one that cannot be reached yet is
+ * tried again by the next request.
  */
 export function createCoffre(config: NodeConfig): CoffreNode {
   const resolved = checkNodeConfig(config);
   let runtime: Promise<CoffreRuntime> | undefined;
   // A rotation to a new app key goes on to its end as the process starts, beside the requests, which answer 503
   // `rotating` meanwhile, `/livez` and `/readyz` aside: a Worker's CPU limit is not Node's.
+  const open = async () => {
+    const pools = await poolsAt(config.database);
+    const database = await openDatabase(config.database, { max: pools?.app, lockWaitMs: LOCK_WAIT_MS });
+    const rt = createRuntime(resolved, database.db, versioned(config.vault), { ...nodeTransport(), connect: publicConnect() }, undefined, processGates());
+    void settleKey(rt);
+    return rt;
+  };
   const ready = () =>
-    (runtime ??= openDatabase(config.database, { lockWaitMs: LOCK_WAIT_MS }).then((database) => {
-      const rt = createRuntime(resolved, database.db, versioned(config.vault), { ...nodeTransport(), connect: publicConnect() }, undefined, processGates());
-      void settleKey(rt);
-      return rt;
+    (runtime ??= open().catch((error: unknown) => {
+      runtime = undefined;
+      throw error;
     }));
+  void ready().catch((error: unknown) => {
+    if (!(error instanceof TooFewConnections)) return;
+    console.error(error.message);
+    process.exit(1);
+  });
   let timer: NodeJS.Timeout | undefined;
   return {
     request(request) {

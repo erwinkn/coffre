@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **Connection pools, head waiters and a statement timeout come from the
+  database (W364, docs/design/config.md Q2, Q3, Q5).**
+  - On Node, the server and the vault read the database's
+    `max_connections` when they start. Each sizes its pools to its login's
+    share, by the rule `coffre setup` uses for Hyperdrive, instead of
+    postgres.js's 10. At 100 connections that is 31 for the server, 31
+    for the hot path, and 29 for the vault plus 2 for its checkpointer. A
+    database too small to give each login 5 refuses the process, which
+    names the `max_connections` it needs (docs/deploy.md, "On Node").
+  - Connections kept free for migrations and backups go from 3 to 4: two
+    `coffre migrate` runs at once and a backup's two sessions. The
+    smallest database setup accepts is now 22 connections with 3 reserved
+    (it was 21). Hyperdrive limits for 25 and 100 connections are
+    unchanged (6 and 20).
+  - The number of reads waiting for the log's head becomes min(16, the
+    vault's connections − 2). The vault learns its connections with its
+    first reads, so this adds no round trip. At 25 connections, 4 reads
+    wait on Workers and 2 on Node, instead of 16 taking every connection.
+  - `coffre setup` and `coffre migrate` give `coffre_runtime` and
+    `coffre_vault_runtime` a 5 s `statement_timeout` (a read call's
+    deadline) where their login may alter those roles, then end the
+    roles' idle sessions so pools reconnect with it. A login that may not
+    prints the two `ALTER ROLE` statements for an administrator to run,
+    and the app and the vault log a warning at start until the roles
+    have the setting (docs/deploy.md, "Statement timeouts").
+
 - **The credential proxy holds 1 MiB of a body at most, and an isolate's
   memory is split into named shares (W331, limits S11-S13, S26, S52).** A
   Worker's isolate has 128 MB; `@coffre/core/memory` now gives it shares:

@@ -369,7 +369,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | Its retry pauses | 25 ms doubling to 400 ms, ×0.5 to ×1.5 | a retry policy, written as one | #538 |
 | A read's lock wait (`READ_LOCK_TIMEOUT_MS`) | 3 s, or what is left of the call's deadline if less | a choice | #347 ⚠ |
 | The app's first ask of the vault's `about()` and the proxy's gate: a request that joins another's attempt takes it over after (`TAKE_OVER_MS`) and gives up with 503 after (`WAIT_MS`) | 3 s; 6 s, for joiners only: the isolate's first request awaits its own call as long as that call takes, with no bound from this helper (only the vault's own deadlines, above) | "longer than a deploy's write and its seal take"; 2 × `TAKE_OVER_MS` | T201 (`packages/server/src/asked-once.ts`) ⚠ the 3 s is not measured; the first request's wait has no bound of its own |
-| Waiters for the log's head (`READ_HEAD_WAITERS`) | 16 | 2.4 s ÷ 150 ms measured; should also be ≤ the vault's request connections − 2, a database-wide count that leaves no connection free on any one Hyperdrive shard | Q3 |
+| Waiters for the log's head (`headWaiters`) | min(16, request connections − 2), at least 1: 4 on Workers and 2 on Node at `max_connections` 25; 16 from a share of 18 | 16 (`READ_HEAD_WAITERS`) = 2.4 s ÷ 150 ms measured; the 2 left free (`LEFT_BESIDE_WAITERS`): one for the writer holding the head, one for a call that needs none. A database-wide count, which leaves no connection free on any one Hyperdrive shard | Q3, built (W364): the vault reads `max_connections` with its first reads |
 | A plain 503's `Retry-After` | 1 s (from 5) | `LOCK_WAIT_MS` rounded up to whole seconds | #538 |
 | An app write's lock wait | 500 ms (from unbounded) | `LOCK_WAIT_MS`; then 503 at once | #538 |
 | An AWS KMS attempt's timeout | 706 ms (from 5 s), or what is left of the caller's deadline if less | a measured p99 of a KMS call | #538's stacked KMS PR (its measurement table not yet in a PR) |
@@ -420,9 +420,10 @@ read call with a key service 11.2 s.
 
 | Name | 0.16 value | Formula | Source |
 |---|---|---|---|
-| A Hyperdrive config's connections, set by `coffre setup` | ⌊(max_connections − reserved − 3) ÷ 3⌋, at least 5, at most **20** ⚠ | an even third for each login (app, vault, uses), less 3 held back | the 20 is Free's maximum, applied on Paid too: [limits.md](limits.md) #12 proposes the plan's maximum. Example at 100: 31 each, cut to 20 |
-| Held back (`HELD_BACK`) | 3 | for the administrator, `coffre migrate`, the host's tools | a guess ⚠ (Q2) |
-| A Node pool | **10** ⚠ | `max ?? 10`, node-postgres's default; proposed: setup's share, at least 5, or the process refuses to start | Q2 |
+| A Hyperdrive config's connections, set by `coffre setup` | ⌊(max_connections − reserved − 4) ÷ 3⌋, at least 5, at most **20** ⚠ | an even third for each login (app, vault, uses), less 4 held back (`share`, `@coffre/db/connections`) | the 20 is Free's maximum, applied on Paid too: [limits.md](limits.md) #12 proposes the plan's maximum. Example at 100: 31 each, cut to 20 |
+| Held back (`HELD_BACK`) | 4 (from 3) | a deploy's migrations, 2 (with Workers Builds both builds run `coffre migrate`, the second waiting for the lock on its own session), and a backup, 2 (its snapshot's session and `pg_dump`); a superuser administrator takes a reserved slot | derived (W364). The minimum database is 22 with 3 reserved (from 21) |
+| The fewest per login (`FEWEST`) | 5 | Hyperdrive's minimum; on Node, the vault's checkpointer 2 + one waiter + the 2 it leaves free | derived (W364) |
+| A Node pool | the share: 31 at 100, 6 at 25, 164 at 500; the vault's less the checkpointer's 2 | read at each process's start (`poolsAt`); below `FEWEST` the process refuses, naming the `max_connections` it needs | Q2, built (W364) |
 | The Node checkpointer's pool | 2 | its own connection | ⚠ (limits.md V39) |
 | A Workers call's connections | 1 | several at once were cancelled as hung on Cloudflare | measured (#80) |
 
@@ -623,6 +624,8 @@ waits.
 
 ### Q2. Node pools, and processes beyond one
 
+*Built in 0.16 (W364): `poolsAt` and `nodePools` (`@coffre/db/connect`, `@coffre/db/connections`), with `HELD_BACK` derived as 4 (section 2.5).*
+
 **Facts.** A Node pool is 10 connections, node-postgres's default; the code
 meant to read its size reads a property that is never set (limits.md V2). A
 Node deployment already runs one app process and one vault process: the
@@ -654,6 +657,8 @@ Q3's waiters −2, so the process refuses, asking for 21 (3 + 3 + 3 × 5). At
 21, pools of 5, 5, 3 and 2, and 1 waiter.
 
 ### Q3. Where the vault learns its connection share (`READ_HEAD_WAITERS`)
+
+*Built in 0.16 (W364): `headWaiters` (`vault.ts`), from the vault's first reads; run at the minimum share in local workerd, not on Cloudflare (the PR says what it showed).*
 
 **Facts.** Up to 16 reads wait for the log's head, each holding a vault
 connection while it waits. On a small database the vault's config has fewer
@@ -691,6 +696,8 @@ gives its shard back between tries (one round trip per try; unmeasured).
 Node has no shards: there the count is exact.
 
 ### Q5. Statement timeouts for the app's and the vault's logins
+
+*Built in 0.16 (W364): `RUNTIME_STATEMENT_TIMEOUT_MS` (`@coffre/core/vault`), `holdRuntimeTimeouts` (`@coffre/db/migrate`), the warning in the app's and the vault's first reads; docs/deploy.md, "Statement timeouts".*
 
 **Facts.** Only the uses' login has a `statement_timeout` (2 s). #538 (R75)
 bounds a write's lock waits to 500 ms (section 2.4 lists the longer ones:
@@ -853,9 +860,9 @@ it ends at 30 s with the app's.
 | The vault's `uses` block on Workers (`inFlight`, `connections`, `coverMs`, `names`, `batch`) | five settings, none set by any deployment | gone: the in-flight count derived (Q1), `coverMs` the policy's `audit.repeatsWithinSeconds`, the rest internal constants at today's defaults (10,000, 100; section 2.3) |
 | `DEFAULT_CONNECTIONS` and Node's pool probe | 10 per isolate or process; the probe always reads nothing | gone, with Q1's step 1 |
 | `USES_AT_ONCE` (4 per request) | "leaves the isolate's admission room" | gone with the count it protects |
-| Node pool size (`max ?? 10`) | 10 per pool; a deployment passing a URL cannot change it | derived from the database at start (Q2) |
+| Node pool size (`max ?? 10`) | 10 per pool; a deployment passing a URL cannot change it | derived from the database at start (Q2, built) |
 | `coffre setup`'s Hyperdrive maximum | 20, Free's, on Paid too | the plan's maximum (limits.md #12) |
-| `READ_HEAD_WAITERS` | 16, whatever the database | min(16, request connections − 2), the share computed (Q3) |
+| `READ_HEAD_WAITERS` | 16, whatever the database | min(16, request connections − 2), the share computed (Q3, built) |
 | `signin({ workloads: { useOnly, noReads } })` | in `signin`'s `workloads`, both `false` | `policy.services.useOnly`, `policy.services.noReads`; `workloads` keeps its wiring (the limiters' bindings, `github`, `alert`) |
 | `vault({ bulkLimit })`, `serveVault({ bulkLimit })` | in the vault's config | `policy.reads.bulkLimit` |
 | `signin({ passkeys, browserSessionHours, cliSessionDays, serviceTokenMaxDays })` | in `signin` | `policy.people.*`, `policy.services.tokenMaxDays`; `passkeys.rpId` stays in `signin` |

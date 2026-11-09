@@ -33,7 +33,8 @@ import { memberMac, rowKey, sealed } from '../src/rows.ts';
 import { snapshot as readSnapshot } from '../src/snapshot.ts';
 import * as store from '../src/store.ts';
 import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
-import { openVault, prepareVault, CALL_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
+import { databaseFacts, hyperdriveConnections } from '@coffre/db/connections';
+import { headWaiters, openVault, prepareVault, CALL_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
 import { openLocalVault as openEntry, spoken } from '../src/local.ts';
 import {
   CONVERSION,
@@ -1401,51 +1402,63 @@ test('a read gives up a lock it waits seconds for, and fails as unavailable, its
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true, 'and the next one, the head free, reads');
 });
 
-test("a burst of reads at a held head: those past its places in line are refused at once, and none waits past its deadline", postgresOnly('SQLite runs one writer at a time'), async () => {
-  const w = await world();
-  await member(w, ADA, [[w.dev, 'viewer']]);
-  const secret = await w.secret(w.dev);
-  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
-  // Over enough connections for every place in line and one more, each read on its own, as isolates are; once first,
-  // so that what a process does once is done.
-  const vault = await w.twin(READ_HEAD_WAITERS + 4);
-  assert.equal((await vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
-  const release = await holdHead(await db.connect());
-  // As many reads as may wait for the head, each on a connection of its own, until they all do.
-  const started = Date.now();
-  // The first to answer, which none should before the read past the line.
-  let first: { ok: boolean; error: unknown } | undefined;
-  const timed = () => vault.unwrap({ principal: ADA, purpose: 'reveal', items }).then(
-    (outcome) => ({ ok: outcome.ok, error: null as unknown, ms: Date.now() - started }),
-    (error: unknown) => ({ ok: false, error, ms: Date.now() - started }),
-  ).then((outcome) => (first ??= outcome, outcome));
-  const waiting = Array.from({ length: READ_HEAD_WAITERS }, timed);
-  // Places in this database: another file's reads, in a clone of their own, take the same keys (T153).
-  const inLine = () => locksHere(db.owner, sql`locktype = 'advisory' AND classid::bigint = ${0x636f6668} AND granted`);
-  let outcomes: Awaited<ReturnType<typeof timed>>[];
-  try {
-    // Until they all are: one that answered first never will be, nor any past its deadline.
-    while ((await inLine()) < READ_HEAD_WAITERS) {
-      assert.equal(first, undefined, `a read answered before all were in line: ${first?.ok ? 'ok' : String(first?.error)}`);
-      assert.ok(Date.now() - started < CALL_DEADLINE_MS, `the reads were not all in line after ${Date.now() - started} ms`);
-      await sleep(20);
-    }
-    // The next waits for nothing: unavailable, at once, as a lock not available.
-    const refusedAt = Date.now();
-    await assert.rejects(vault.unwrap({ principal: ADA, purpose: 'reveal', items }), (error: Error & { code?: string }) => isUnavailable(error) && error.code === '55P03');
-    assert.ok(Date.now() - refusedAt < 1_000, `the read past the line was refused after ${Date.now() - refusedAt} ms`);
-    // Those in line give up at their bound, unavailable, within the call's deadline.
-    outcomes = await Promise.all(waiting);
-  } finally {
-    await release();
-  }
-  for (const { ok, error, ms } of outcomes) {
-    assert.ok(!ok && isUnavailable(error), `a read in line ended ${ok ? 'ok' : String(error)}`);
-    assert.ok(ms < CALL_DEADLINE_MS + 1_000, `a read in line answered after ${ms} ms`);
-  }
-  assert.equal(await inLine(), 0, 'and every place is free again');
-  assert.equal((await vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true, 'the head free, the next read reads');
+test('the reads waiting for the head leave two of the vault\'s connections free, at most READ_HEAD_WAITERS, at least one', () => {
+  assert.equal(READ_HEAD_WAITERS, 16);
+  // At max_connections 25, 3 reserved: a share of 6, Workers' 6 and Node's 4; at 100, Workers' 20 (Free's most) and Node's 29.
+  assert.deepEqual([3, 4, 6, 18, 20, 29, 162].map(headWaiters), [1, 2, 4, 16, 16, 16, 16]);
+  assert.equal(headWaiters(1), 1, "a Hyperdrive config set below setup's: one still waits");
 });
+
+// The vault's own connections: unsaid, its login's share as the database says (16 places at the suites' 100, 3 at the
+// smallest coffre runs on, 22); said, as on Node, where the checkpointer's 2 are apart, 6 leave 4.
+for (const requests of [undefined, 6] as const) {
+  test(`a burst of reads at a held head${requests === undefined ? '' : `, on ${requests} connections`}: those past its places in line are refused at once, and none waits past its deadline`, postgresOnly('SQLite runs one writer at a time'), async () => {
+    const waiters = headWaiters(requests ?? hyperdriveConnections((await databaseFacts(db.owner))!.connections));
+    const w = await world({}, requests === undefined ? {} : { requestConnections: requests });
+    await member(w, ADA, [[w.dev, 'viewer']]);
+    const secret = await w.secret(w.dev);
+    const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+    // Over enough connections for every place in line and one more, each read on its own, as isolates are; once first,
+    // so that what a process does once is done.
+    const vault = await w.twin(waiters + 4);
+    assert.equal((await vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true);
+    const release = await holdHead(await db.connect());
+    // As many reads as may wait for the head, each on a connection of its own, until they all do.
+    const started = Date.now();
+    // The first to answer, which none should before the read past the line.
+    let first: { ok: boolean; error: unknown } | undefined;
+    const timed = () => vault.unwrap({ principal: ADA, purpose: 'reveal', items }).then(
+      (outcome) => ({ ok: outcome.ok, error: null as unknown, ms: Date.now() - started }),
+      (error: unknown) => ({ ok: false, error, ms: Date.now() - started }),
+    ).then((outcome) => (first ??= outcome, outcome));
+    const waiting = Array.from({ length: waiters }, timed);
+    // Places in this database: another file's reads, in a clone of their own, take the same keys (T153).
+    const inLine = () => locksHere(db.owner, sql`locktype = 'advisory' AND classid::bigint = ${0x636f6668} AND granted`);
+    let outcomes: Awaited<ReturnType<typeof timed>>[];
+    try {
+      // Until they all are: one that answered first never will be, nor any past its deadline.
+      while ((await inLine()) < waiters) {
+        assert.equal(first, undefined, `a read answered before all were in line: ${first?.ok ? 'ok' : String(first?.error)}`);
+        assert.ok(Date.now() - started < CALL_DEADLINE_MS, `the reads were not all in line after ${Date.now() - started} ms`);
+        await sleep(20);
+      }
+      // The next waits for nothing: unavailable, at once, as a lock not available.
+      const refusedAt = Date.now();
+      await assert.rejects(vault.unwrap({ principal: ADA, purpose: 'reveal', items }), (error: Error & { code?: string }) => isUnavailable(error) && error.code === '55P03');
+      assert.ok(Date.now() - refusedAt < 1_000, `the read past the line was refused after ${Date.now() - refusedAt} ms`);
+      // Those in line give up at their bound, unavailable, within the call's deadline.
+      outcomes = await Promise.all(waiting);
+    } finally {
+      await release();
+    }
+    for (const { ok, error, ms } of outcomes) {
+      assert.ok(!ok && isUnavailable(error), `a read in line ended ${ok ? 'ok' : String(error)}`);
+      assert.ok(ms < CALL_DEADLINE_MS + 1_000, `a read in line answered after ${ms} ms`);
+    }
+    assert.equal(await inLine(), 0, 'and every place is free again');
+    assert.equal((await vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true, 'the head free, the next read reads');
+  });
+}
 
 test("a read given the app's record of a use appends it beside its read, names it back, and appends none when refused", async () => {
   const w = await world();

@@ -20,9 +20,10 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { postgresClient, postgresSession, quoteIdentifier, quoteLiteral, type PostgresClient } from '@coffre/db/connect';
-import { HOT_SETTINGS, migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
+import { HOT_SETTINGS, migrateDatabase, RUNTIME_SETTINGS, type MigrationPlan } from '@coffre/db/migrate';
 
 import { cappedLimit, type Connections, connectionsOf, hyperdriveLimit, limitReason, tooFewConnections } from './connections.ts';
+import { unboundedNote } from './migrate.ts';
 import { readDatabaseUrl } from './database-url.ts';
 import { deploymentKind, install, installAsLocked, installed, readWorker } from './deployment.ts';
 import { init, KINDS, type Kind } from './init.ts';
@@ -400,7 +401,7 @@ async function run(
     });
     await step(1, async (progress) => {
       let plan: MigrationPlan = { applied: 0, total: 0, pending: [] };
-      await migrateDatabase(administrator.href, {
+      const { unbounded } = await migrateDatabase(administrator.href, {
         backupLogin: ROLES.backup,
         onPlan(planned) {
           plan = planned;
@@ -414,7 +415,10 @@ async function run(
           pending === 0
             ? `The database is up to date, at coffre ${version}'s schema`
             : `Migrated the database to coffre ${version}'s schema: ${count(pending, 'migration')} applied`,
-        details: [`${ROLES.backup} is a member of coffre_backup, which reads every row and writes none`],
+        details: [
+          `${ROLES.backup} is a member of coffre_backup, which reads every row and writes none`,
+          ...(unbounded.length === 0 ? [`${ROLES.app} and ${ROLES.vault} end a statement after ${RUNTIME_SETTINGS.statement_timeout} (statement_timeout)`] : unboundedNote(unbounded)),
+        ],
       };
     });
     let used = false;
@@ -817,7 +821,7 @@ export function setupScreen(result: SetupResult, names: { app: string; vault: st
                   `Setup can't see the limit each config has now, and the update ${updated.length === 1 ? 'command sets' : 'commands set'} it to ${limit}. Below that, a call waiting on a lock stops the others on its Hyperdrive shard: leave --origin-connection-limit out only for a config you keep lower because its database serves more than coffre (pnpm exec wrangler hyperdrive get <id> shows its limit).`,
                 ]),
             ...hyperdrive.flatMap((command, i) => [`The ${lowered(RUNTIME_URLS[set[i]!].label)}:`, command]),
-            `Each command sets its config's connection limit to ${limit}, so that all three configs fit under the database's max_connections, with some left for migrations (${limitReason(result.connections, limit)}).`,
+            `Each command sets its config's connection limit to ${limit}, so that all three configs fit under the database's max_connections, with some left for migrations and backups (${limitReason(result.connections, limit)}).`,
             ...(kept.length === 0
               ? []
               : [

@@ -176,11 +176,13 @@ import {
   isConfirmation,
   type Confirmation,
   LOCK_WAIT_MS,
+  CALL_DEADLINE_MS,
   DEFAULT_CONNECTIONS,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { engineOf, isUnavailable, isUniqueViolation, lockNotAvailable, SNAPSHOT } from '@coffre/db/dialect';
 import { changeName, everyProjectConversion, findingMetadata, newestAccess, newestChangeNames, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
+import { databaseFacts, hyperdriveConnections, LEFT_BESIDE_WAITERS, unboundedStatements, type DatabaseFacts } from '@coffre/db/connections';
 import { appendEntries, HeadBusy, holdFence, holdIssues, isMovedChange, laterHead, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { KeyAccounting } from './accounting.ts';
@@ -271,6 +273,15 @@ export type VaultOptions = {
    * connection closed by then (cloudflare.ts). Not a deployment's to set.
    */
   callsEndWithRequest?: boolean;
+  /**
+   * The connections the vault's own pool answers calls on, which the reads
+   * waiting for the log's head leave `LEFT_BESIDE_WAITERS` of (`headWaiters`):
+   * on Node, its login's share less the checkpointer's pool (`nodePools`,
+   * `localVault`). Unset, its login's share as `coffre setup` sizes its
+   * Hyperdrive config (`hyperdriveConnections`), read from the database with
+   * the vault's first reads. Not a deployment's to set.
+   */
+  requestConnections?: number;
 };
 
 
@@ -292,7 +303,17 @@ export type PreparedVault = {
   logKey: LogKey;
   /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
-  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'sealing' | 'uses' | 'callsEndWithRequest'>> & { walks: Walks };
+  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'sealing' | 'uses' | 'callsEndWithRequest' | 'requestConnections'>> & { walks: Walks };
+  /** The connections the vault's own pool answers calls on, when its process said (`requestConnections`). */
+  requestConnections: number | null;
+  /**
+   * How many reads may wait for the log's head at once (`headWaiters`), once
+   * the vault's first reads have read the database's connections; null until
+   * then, and on SQLite, where `READ_HEAD_WAITERS` holds.
+   */
+  headWaiters: number | null;
+  /** Whether this process has read what the database lets in, and its login's statement timeout (`#facts`). */
+  factsRead: boolean;
   /**
    * 0.15's log, when it is on: the keys its changes are sealed and MACed
    * with, from the vault's signing keys, and what each waits on to answer.
@@ -348,6 +369,9 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     cutover: false,
     marked: false,
     verifier: null,
+    requestConnections: options.requestConnections ?? null,
+    headWaiters: null,
+    factsRead: false,
     uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses), { callsEndWithRequest: options.callsEndWithRequest === true }),
     verified: START,
     reported: new Set(),
@@ -402,18 +426,8 @@ const KEY_BUDGET_MS = 5_000;
  */
 const READ_LOCK_TIMEOUT_MS = 3_000;
 
-/**
- * How long a whole read call may take, from its start to its answer, its
- * refusal's entries, the record of a vault key's check and, with a key
- * service, its intent and its own budget (added) included: each transaction's waits are bounded by what is left of it, and
- * past it the call fails as unavailable (`Overdue`) rather than start
- * another. So a caller hears within it, ok or 503, never tens of seconds later.
- *
- * A write's work has no such bound (R75: writes may take longer), but its lock waits do: each is `LOCK_WAIT_MS`, and a
- * decision whose wait gave up is decided again, after a pause, for as long as this much time from its first attempt
- * allows (`#decideNow`, `retryingLocks`); past it, it fails as unavailable, its last 55P03 said.
- */
-export const CALL_DEADLINE_MS = 5_000;
+/** How long a whole read call may take: `CALL_DEADLINE_MS` (`@coffre/core/vault`), which the runtime logins' `statement_timeout` is too. */
+export { CALL_DEADLINE_MS };
 
 /**
  * How many reads may wait for the log's head at once, through all of the
@@ -426,8 +440,21 @@ export const CALL_DEADLINE_MS = 5_000;
  */
 export const READ_HEAD_WAITERS = 16;
 
-/** The reads' places in line for the head. */
-const READ_QUEUE: HeadQueue = { waiters: READ_HEAD_WAITERS, line: 'reads' };
+/**
+ * How many reads may wait for the log's head on `requests` connections:
+ * `READ_HEAD_WAITERS`, or fewer on a small database, leaving
+ * `LEFT_BESIDE_WAITERS` free, so that waiters never take every connection
+ * the vault has (docs/design/config.md, Q3). At `max_connections` 25 (3
+ * reserved), each login's share is 6: on Workers 6 connections and 4
+ * waiters; on Node 4 (the checkpointer's 2 apart) and 2. From a share of 18,
+ * `READ_HEAD_WAITERS`. On Workers, Hyperdrive splits a config's connections
+ * among its shards, so the two left free are a count across the database,
+ * not on each shard: it caps the damage, not guarantees it. At least 1:
+ * `FEWEST` leaves the vault room for one.
+ */
+export function headWaiters(requests: number): number {
+  return Math.max(1, Math.min(READ_HEAD_WAITERS, requests - LEFT_BESIDE_WAITERS));
+}
 
 /** The code's proxy names' one place in line for the head (`reserveProxy`): one call of a deploy's herd waits; the rest read again. */
 const CODE_QUEUE: HeadQueue = { waiters: 1, line: 'code' };
@@ -757,6 +784,8 @@ type Standing = {
  * otherwise; a step that finds none reads for itself).
  */
 type StartReads = {
+  /** `#facts`': what the database lets in, and the vault's login's statement timeout; null on SQLite. */
+  facts?: Promise<DatabaseFacts | null>;
   /** `#settle`'s: the vault's newest `key.rotate`, its newest entry, and its first under its current key. */
   rotation?: Promise<StoredEntry | undefined>;
   newest?: Promise<StoredEntry | undefined>;
@@ -961,7 +990,7 @@ class VaultService implements Vault {
             ? store.boundLockWaits(tx, within(deadline, READ_LOCK_TIMEOUT_MS), within(deadline, READ_LOCK_TIMEOUT_MS))
             : store.boundLockWaits(tx, within(deadline, LOCK_WAIT_MS), deadline === undefined ? undefined : within(deadline, Infinity)),
           principals.length === 0 ? new Map<string, Member>() : store.lockMembers(tx, principals, shared),
-          this.#snapshot(tx, principals, asked, true, shared ? READ_QUEUE : queue),
+          this.#snapshot(tx, principals, asked, true, shared ? this.#readQueue() : queue),
         ]);
         const log015 = this.#prepared.log015;
         const d: Decision = {
@@ -1026,7 +1055,7 @@ class VaultService implements Vault {
           if (shared) await store.boundLockWaits(tx, within(deadline, READ_LOCK_TIMEOUT_MS), within(deadline, READ_LOCK_TIMEOUT_MS));
           else await store.boundLockWaits(tx, LOCK_WAIT_MS);
           // In one of the head's places in line, as the read's decision waited, or refused at once.
-          if (shared) await lockLogHeadQueued(tx, READ_HEAD_WAITERS);
+          if (shared) await lockLogHeadQueued(tx, this.#readQueue().waiters);
           await this.#append(tx, entries);
         });
         // A change's, its lock waits retried as its decision's are, within the call's time.
@@ -1386,6 +1415,7 @@ class VaultService implements Vault {
     // to write goes in once (`#rotate`).
     const start = this.#start();
     if (start === null) return null;
+    if (start.facts !== undefined) this.#facts(await start.facts);
     if (prepared.since === null) await this.#settle(start);
     // Under 0.15's log, nothing of its own before the cutover (`cutover`): the conversion and the Owners it names, and
     // the bulk cap, after it, as decisions of 0.15's log.
@@ -1397,6 +1427,28 @@ class VaultService implements Vault {
     if (prepared.superseded === null && prepared.since !== null && !prepared.converted) await this.#convert(start);
     if (prepared.superseded === null && prepared.log015 !== null && !prepared.limited) await this.#limit(start);
     return prepared.superseded;
+  }
+
+  /**
+   * What the vault's first reads learned of the database, once per process
+   * (or isolate): how many reads may wait for the log's head on its
+   * connections (`headWaiters`), and, said once, whether its login runs
+   * without the statement timeout `coffre migrate` gives it
+   * (`unboundedStatements`).
+   */
+  #facts(facts: DatabaseFacts | null): void {
+    const prepared = this.#prepared;
+    if (facts !== null) {
+      prepared.headWaiters = headWaiters(prepared.requestConnections ?? hyperdriveConnections(facts.connections));
+      const unbounded = unboundedStatements(facts);
+      if (unbounded !== null) console.warn(`the vault: ${unbounded}`);
+    }
+    prepared.factsRead = true;
+  }
+
+  /** The reads' places in line for the head: `headWaiters` of the vault's connections, once its first reads said, `READ_HEAD_WAITERS` until then. */
+  #readQueue(): HeadQueue {
+    return { waiters: this.#prepared.headWaiters ?? READ_HEAD_WAITERS, line: 'reads' };
   }
 
   /**
@@ -1422,8 +1474,10 @@ class VaultService implements Vault {
     // The cutover mark's, until the cutover or the mark; the Owners' declaration's, until the conversion lands.
     const cutover = log015 && !prepared.cutover && (!prepared.marked || convert);
     const limit = log015 && !prepared.limited;
-    if (!settle && !convert && !cutover && !limit) return null;
+    const facts = !prepared.factsRead;
+    if (!settle && !convert && !cutover && !limit && !facts) return null;
     const asked: StartReads = {
+      facts: facts ? databaseFacts(db) : undefined,
       rotation: settle ? store.latestVaultEntry(db, [KEY_ROTATE]) : undefined,
       newest: settle ? store.vaultPage(db, undefined, 1).then(([entry]) => entry) : undefined,
       // None once a rotation to the key is logged (R48): `#settle` reads it again if it needs it after all.

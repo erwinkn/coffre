@@ -18,7 +18,7 @@ import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core
 import { shownMember } from '@coffre/core/schemas';
 import { openDatabase } from '@coffre/db/connect';
 import { everyProjectPreview, readGrants, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
-import { AfterMigrations, backupLoginProblem, DatabaseAhead, HandOverFailed, LockWaitsExhausted, migrateDatabase, migrationStatus, NotOwner } from '@coffre/db/migrate';
+import { AfterMigrations, backupLoginProblem, DatabaseAhead, HandOverFailed, LockWaitsExhausted, migrateDatabase, migrationStatus, NotOwner, RUNTIME_SETTINGS } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
 import { coffrePins, deploymentKind } from './deployment.ts';
@@ -153,12 +153,14 @@ async function migrateDeployment(
       return;
     }
     // What every run does with nothing to apply: the privileges a restore leaves out, and the backup login's group.
+    let unbounded: string[];
     try {
-      await migrateDatabase(url.href, { backupLogin: options.backupLogin });
+      ({ unbounded } = await migrateDatabase(url.href, { backupLogin: options.backupLogin }));
     } catch (error) {
       throw new MigrateError(migrationFailure(error));
     }
     out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}; ${reasserted(options)}\n`);
+    for (const line of unboundedNote(unbounded)) out.write(`  ${s.dim(line)}\n`);
     out.write(describeFirstRun(await previewFirstRun(url)));
     return;
   }
@@ -168,11 +170,18 @@ async function migrateDeployment(
   }
   out.write(`  ${count(pending.length, 'migration')} to apply to ${where}, for coffre ${deployment.version}: ${listed(pending, 'and')}\n\n`);
   const steps = new Steps(out, [`Apply ${listed(pending, 'and')}`], () => terminal?.keys ?? null, clean);
+  let unbounded: string[] = [];
   try {
-    await steps.run(0, (step) => apply(url, where, pending, step, options));
+    await steps.run(0, async (step) => {
+      const applied = await apply(url, where, pending, step, options);
+      unbounded = applied.unbounded;
+      return applied.text;
+    });
   } finally {
     steps.end();
   }
+  // Printed whole, to copy: a step's lines are cut to the terminal's width.
+  for (const line of unboundedNote(unbounded)) out.write(`  ${s.dim(line)}\n`);
   out.write(describeFirstRun(await previewFirstRun(url)));
 }
 
@@ -190,7 +199,8 @@ export type FirstRun = {
  * owner's login.
  */
 async function previewFirstRun(url: URL): Promise<FirstRun> {
-  const { db, close } = await openDatabase(url.href);
+  // One connection, its reads in turn: a run takes no more than the one `HELD_BACK` counts it for (`@coffre/db/connections`).
+  const { db, close } = await openDatabase(url.href, { max: 1 });
   try {
     const at = new Date();
     const [everyProject, unsealed, grants] = await Promise.all([
@@ -326,11 +336,12 @@ export function describeEveryProject(previews: readonly EveryProjectPreview[]): 
 }
 
 /** Apply `pending` to the database, asking first unless told yes. */
-async function apply(url: URL, where: string, pending: string[], step: Step, options: Options): Promise<string> {
+async function apply(url: URL, where: string, pending: string[], step: Step, options: Options): Promise<{ text: string; unbounded: string[] }> {
   if (!options.yes && !(await step.ask(`Apply ${count(pending.length, 'migration')} to ${where}?`))) throw new Cancelled();
   step.note(`Applying ${listed(pending, 'and')}`);
+  let unbounded: string[];
   try {
-    await migrateDatabase(url.href, {
+    ({ unbounded } = await migrateDatabase(url.href, {
       backupLogin: options.backupLogin,
       onPlan(plan) {
         // Under the lock now: what was read before, or another run got there first.
@@ -338,12 +349,32 @@ async function apply(url: URL, where: string, pending: string[], step: Step, opt
           throw new MigrateError(`another migration ran meanwhile: ${where} now lacks ${listed(plan.pending, 'and') || 'nothing'}`);
         }
       },
-    });
+    }));
   } catch (error) {
     if (error instanceof MigrateError) throw error;
     throw new MigrateError(migrationFailure(error));
   }
-  return `Applied ${listed(pending, 'and')}, and ${reasserted(options)}`;
+  return { text: `Applied ${listed(pending, 'and')}, and ${reasserted(options)}`, unbounded };
+}
+
+/**
+ * What a run says of the runtime logins it may not give their statement
+ * timeout (`holdRuntimeTimeouts`): nothing stops for it, as nothing breaks
+ * without it, and the app and the vault warn as they start until they have it.
+ *
+ *   coffre_runtime and coffre_vault_runtime have no statement timeout, which this login may not give them: have a login
+ *   with CREATEROLE and ADMIN on them run, once per server (docs/deploy.md, "Statement timeouts"):
+ *     ALTER ROLE coffre_runtime SET statement_timeout = '5s';
+ *     ALTER ROLE coffre_vault_runtime SET statement_timeout = '5s';
+ */
+export function unboundedNote(unbounded: readonly string[]): string[] {
+  if (unbounded.length === 0) return [];
+  const one = unbounded.length === 1;
+  return [
+    `${listed([...unbounded], 'and')} ${one ? 'has' : 'have'} no statement timeout, which this login may not give ${one ? 'it' : 'them'}: ` +
+      `have a login with CREATEROLE and ADMIN on ${one ? 'it' : 'them'} run, once per server (docs/deploy.md, "Statement timeouts"):`,
+    ...unbounded.map((login) => `  ALTER ROLE ${login} SET statement_timeout = '${RUNTIME_SETTINGS.statement_timeout}';`),
+  ];
 }
 
 function reasserted({ backupLogin }: Options): string {

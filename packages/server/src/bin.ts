@@ -19,6 +19,9 @@ if (command === '--help' || command === '-h') {
   console.error('coffre-server: no database URL: pass one, or set DATABASE_URL');
   process.exitCode = 2;
 } else {
-  await migrateDatabase(url);
+  const { unbounded } = await migrateDatabase(url);
   console.log('database schema is up to date');
+  if (unbounded.length > 0) {
+    console.warn(`${unbounded.join(' and ')}: no statement timeout, which this login may not give: see docs/deploy.md, "Statement timeouts"`);
+  }
 }

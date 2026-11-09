@@ -1,24 +1,11 @@
 // How many connections each Hyperdrive config may open to the database,
 // out of what the database lets coffre's logins open: what `coffre setup`
 // reads as it connects, before it changes anything, and gives each config.
+// The share is the one a Node process sizes its pools to (`@coffre/db/connections`).
+import { DATABASE_FACTS, FEWEST, HELD_BACK, HYPERDRIVE_CONNECTIONS, share, tooFewConnections as tooFew, type Connections } from '@coffre/db/connections';
 import type { PostgresClient } from '@coffre/db/connect';
 
-/** Connections the Hyperdrive configs leave free: for the administrator, `coffre migrate` and the host's own tools. */
-const HELD_BACK = 3;
-
-/** The fewest connections Hyperdrive takes per config, and the most Free allows, which is plenty for coffre. */
-const HYPERDRIVE_CONNECTIONS = { fewest: 5, most: 20 } as const;
-
-/** What the database lets in: `max_connections`, and the slots it reserves for superusers and `pg_use_reserved_connections`. */
-export type Connections = { max: number; reserved: number };
-
-/** coffre's Hyperdrive configs, one per runtime login: the app's, the vault's, and the vault's hot path's. */
-const CONFIGS = 3;
-
-/** Each config's even share of what the database lets coffre's logins open, less what is held back. */
-function share({ max, reserved }: Connections): number {
-  return Math.floor((max - reserved - HELD_BACK) / CONFIGS);
-}
+export type { Connections };
 
 /**
  * The most connections each of the three Hyperdrive configs may open: an
@@ -33,7 +20,7 @@ function share({ max, reserved }: Connections): number {
  */
 export function hyperdriveLimit(connections: Connections): number | null {
   const each = share(connections);
-  return each < HYPERDRIVE_CONNECTIONS.fewest ? null : Math.min(each, HYPERDRIVE_CONNECTIONS.most);
+  return each < FEWEST ? null : Math.min(each, HYPERDRIVE_CONNECTIONS.most);
 }
 
 /**
@@ -46,30 +33,22 @@ export function cappedLimit(current: number | null | undefined, limit: number): 
   return current === null || current === undefined || current > limit ? limit : null;
 }
 
-/** How the limit was chosen: `max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 9 each`. */
+/** How the limit was chosen: `max_connections 25, 3 reserved, 4 kept for migrations and backups: 6 each`. */
 export function limitReason(connections: Connections, limit: number): string {
   const each = share(connections);
   return (
-    `max_connections ${connections.max}, ${connections.reserved} reserved, ${HELD_BACK} kept for the administrator and migrations: ` +
+    `max_connections ${connections.max}, ${connections.reserved} reserved, ${HELD_BACK} kept for migrations and backups: ` +
     `${each} each${each > limit ? `, capped at ${limit}` : ''}`
   );
 }
 
 /** Why a database letting in `connections` can have no Hyperdrive config for each login. */
 export function tooFewConnections(connections: Connections): string {
-  const needed = CONFIGS * HYPERDRIVE_CONNECTIONS.fewest + HELD_BACK + connections.reserved;
-  return (
-    `the database's max_connections is ${connections.max}, ${connections.reserved} of them reserved; Hyperdrive takes at least ${HYPERDRIVE_CONNECTIONS.fewest} ` +
-    `for each of coffre's three configs, and setup keeps ${HELD_BACK} for the administrator and migrations: raise max_connections to ${needed} or more, or move to a larger plan`
-  );
+  return tooFew(connections, { workers: true });
 }
 
-/** What the database lets in, as the administrator reads it; `reserved_connections` is Postgres 16's, and none before. */
+/** What the database lets in, as the administrator reads it. */
 export async function connectionsOf(client: PostgresClient): Promise<Connections> {
-  const [row] = await client.unsafe<Connections[]>(
-    `SELECT current_setting('max_connections')::int AS max,
-            current_setting('superuser_reserved_connections')::int
-              + coalesce(current_setting('reserved_connections', true), '0')::int AS reserved`,
-  );
-  return row!;
+  const [row] = await client.unsafe<Connections[]>(DATABASE_FACTS);
+  return { max: row!.max, reserved: row!.reserved };
 }

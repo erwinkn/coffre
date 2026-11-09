@@ -20,7 +20,7 @@ import { Agent, createServer, request as httpRequest, type IncomingMessage } fro
 
 import type { Vault, VaultAnswer, VaultEntry, VaultMethod } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
-import { engineOfUrl, openDatabase } from '@coffre/db/connect';
+import { engineOfUrl, openDatabase, poolsAt } from '@coffre/db/connect';
 
 import { keepCheckpointer } from './checkpointer-node.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
@@ -79,10 +79,13 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
   if (own && config.checkpointer?.memory === undefined) {
     throw new Error("the vault answers a change once its checkpointer has sealed it: set checkpointer: { memory } in the vault's configuration, the file its signer remembers in (CHECKPOINTER_MEMORY)");
   }
+  // Its pools, the vault's login's share and the hot path's, read from the database before any opens (Q2): a database
+  // too small for them refuses the process here.
+  const pools = typeof config.database === 'string' ? await poolsAt(config.database) : null;
   const opened: (() => Promise<void>)[] = [];
-  const open = async (database: string | Database) => {
+  const open = async (database: string | Database, max: number | undefined) => {
     if (typeof database !== 'string') return database;
-    const { db, close } = await openDatabase(database);
+    const { db, close } = await openDatabase(database, { max });
     opened.push(close);
     return db;
   };
@@ -93,10 +96,10 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
     await Promise.all(opened.map((done) => done()));
   };
   try {
-    const db = await open(config.database);
+    const db = await open(config.database, pools?.vault);
     // The same URL is the same connection: on SQLite, where it is the same file, two would wait on each other's
     // writes, a use's and the checkpointer's, past the busy timeout.
-    const hot = config.hotDatabase === undefined ? undefined : config.hotDatabase === config.database ? db : await open(config.hotDatabase);
+    const hot = config.hotDatabase === undefined ? undefined : config.hotDatabase === config.database ? db : await open(config.hotDatabase, pools?.hot);
     // A use holds one of the hot pool's connections from its call to its answer: at most that many in flight.
     const connections = (hot as { $client?: { options?: { max?: number } } } | undefined)?.$client?.options?.max;
     const uses = { ...(connections === undefined ? {} : { connections }), ...options.uses };
@@ -104,11 +107,13 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
       // On Postgres, a connection of its own, which it cuts once it stalls (T169): what a stalled tick awaits holds none of
       // the vault's. On SQLite, the vault's one: two to one file wait on each other's writes.
       const url = typeof config.database === 'string' && engineOfUrl(config.database) === 'postgres' ? config.database : null;
-      const where = url === null ? { database: db } : { connect: () => openDatabase(url, { max: 2 }) };
+      const where = url === null ? { database: db } : { connect: () => openDatabase(url, { max: pools?.checkpointer }) };
       const kept = (checkpointer = await keepCheckpointer({ ...where, signingKeys: resolved.signingKeys, memory: config.checkpointer!.memory }));
       options = { ...options, sealThrough: kept.sealThrough, heldOutside: kept.heldOutside, sealing: kept.sealing };
     }
-    return await openLocalVault(db, resolved, { ...options, uses }, close, hot);
+    // The reads waiting for the log's head count the vault's own pool, the checkpointer's being apart.
+    const requests = pools === null ? {} : { requestConnections: pools.vault };
+    return await openLocalVault(db, resolved, { ...requests, ...options, uses }, close, hot);
   } catch (error) {
     await close();
     throw error;

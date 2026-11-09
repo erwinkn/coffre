@@ -57,6 +57,11 @@
       "types": "./dist/connect.d.ts",
       "default": "./dist/connect.js"
     },
+    "./connections": {
+      "coffre:source": "./src/connections.ts",
+      "types": "./dist/connections.d.ts",
+      "default": "./dist/connections.js"
+    },
     "./migrate": {
       "coffre:source": "./src/migrate.ts",
       "types": "./dist/migrate.d.ts",

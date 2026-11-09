@@ -1902,6 +1902,31 @@ export const HOT_STATEMENT_TIMEOUT_MS = 2000;
 export const LOCK_WAIT_MS = HOT_LOCK_TIMEOUT_MS / 2;
 
 /**
+ * How long a whole read call may take, from its start to its answer, its
+ * refusal's entries, the record of a vault key's check and, with a key
+ * service, its intent and its own budget (added) included: each transaction's waits are bounded by what is left of it, and
+ * past it the call fails as unavailable (`Overdue`) rather than start
+ * another. So a caller hears within it, ok or 503, never tens of seconds later. A choice, "a caller hears within it"
+ * (#356; docs/design/config.md, section 2.4).
+ *
+ * A write's work has no such bound (R75: writes may take longer), but its lock waits do: each is `LOCK_WAIT_MS`, and a
+ * decision whose wait gave up is decided again, after a pause, for as long as this much time from its first attempt
+ * allows (`#decideNow`, `retryingLocks`); past it, it fails as unavailable, its last 55P03 said.
+ */
+export const CALL_DEADLINE_MS = 5_000;
+
+/**
+ * The app's and the vault's logins' `statement_timeout` (`coffre_runtime`, `coffre_vault_runtime`): a ceiling on every
+ * statement either sends, whatever path sent it, so that a stuck one gives its connection back within a read call's
+ * deadline rather than hold it until Hyperdrive gives up, at 60 s (docs/design/config.md, Q5). A read's caller hears
+ * within `CALL_DEADLINE_MS`, so none of its statements needs longer; the vault's transactions with a deadline tighten it
+ * to what that deadline has left (`boundLockWaits`), and the hot login keeps its own, shorter
+ * (`HOT_STATEMENT_TIMEOUT_MS`). `coffre migrate` and `coffre setup` set it on the roles where their login may
+ * (`holdRuntimeTimeouts`, `@coffre/db/migrate`); the app and the vault warn when they run without it.
+ */
+export const RUNTIME_STATEMENT_TIMEOUT_MS = CALL_DEADLINE_MS;
+
+/**
  * A vault's pool's connections, unless its transport says (pg's default), and so the uses an isolate or process has in
  * flight at most unless set (`useLimits`): past it, a use is refused at once as `overloaded` (R44). A binding's removal
  * holds the fence each use shares for no longer than that many uses arriving at R44's rate take (W331; the server's

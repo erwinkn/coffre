@@ -23,7 +23,8 @@ import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
 import { emptyDatabase, ENGINE, HOT_URL, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, places, rows, run, sealed, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
 import { resolveVaultConfig } from '../src/config.ts';
-import { READ_HEAD_WAITERS } from '../src/vault.ts';
+import { headWaiters, READ_HEAD_WAITERS } from '../src/vault.ts';
+import { databaseFacts, hyperdriveConnections } from '@coffre/db/connections';
 
 const ROOT = 'user:root@acme.example';
 const skip = ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive';
@@ -405,6 +406,45 @@ test('through the entrypoint, the credential a CI run came in on is copied into 
     const refused = await vault.call('admit', { actor: ROOT, principal: 'token:other', credentialId: 'not-a-uuid' });
     assert.match(refused.error ?? '', /credentialId must be a lowercase UUID/);
   } finally {
+    await vault.stop();
+  }
+});
+
+test("in workerd, the reads that wait for a held head are as many as the vault's share leaves room for, and the next is refused at once", { skip, timeout: 120_000 }, async () => {
+  // The share as setup sizes the vault's Hyperdrive config, from what this database lets in: 16 places at the suites'
+  // 100 connections, 3 at the smallest coffre runs on, 22 (docs/design/config.md, Q3).
+  const facts = (await databaseFacts(db.owner))!;
+  const waiters = headWaiters(hyperdriveConnections(facts.connections));
+  const placed = await places(db.owner);
+  const secret = await placed.secret(placed.dev);
+  const vault = await freshVault(VAULT_URL);
+  const holder = postgresSession(OWNER_URL);
+  const inLine = async () => Number((await db.owner.execute(sql`SELECT count(*) AS n FROM pg_locks l JOIN pg_database d ON d.oid = l.database
+    WHERE d.datname = current_database() AND l.locktype = 'advisory' AND l.classid::bigint = ${0x636f6668} AND l.granted`) as unknown as [{ n: string }])[0].n);
+  try {
+    const wrapped = (await vault.call('wrap', { principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] })) as { ok: boolean; result: { wrapped: WrappedKey[] } };
+    assert.ok(wrapped.ok);
+    const items = await storedVersions(db.owner, [{ secret, wrapped: wrapped.result.wrapped[0]! }]);
+    const read = () => vault.call('unwrap', { principal: ROOT, caller: 'person', purpose: 'reveal', items });
+    assert.equal(((await read()).result as { ok: boolean }).ok, true);
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE');
+    const waiting = Array.from({ length: waiters }, read);
+    const started = Date.now();
+    while ((await inLine()) < waiters) {
+      assert.ok(Date.now() - started < 3_000, `${await inLine()} of ${waiters} reads in line after ${Date.now() - started} ms`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const refusedAt = Date.now();
+    const refused = await read();
+    assert.ok(Date.now() - refusedAt < 2_000, `refused after ${Date.now() - refusedAt} ms`);
+    assert.equal(refused.code, '55P03', JSON.stringify(refused));
+    await holder.unsafe('ROLLBACK');
+    // Let go, those in line read: none failed for want of a connection.
+    for (const outcome of await Promise.all(waiting)) assert.equal((outcome.result as { ok: boolean } | undefined)?.ok, true, JSON.stringify(outcome));
+  } finally {
+    await holder.unsafe('ROLLBACK').catch(() => undefined);
+    await holder.end();
     await vault.stop();
   }
 });

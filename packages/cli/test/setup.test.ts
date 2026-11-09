@@ -290,18 +290,18 @@ test("each Hyperdrive config's connection limit is an even share of the database
   // now, the app's, the vault's and the hot path's, share it.
   const small = { max: 25, reserved: 3 };
   assert.equal(hyperdriveLimit(small), 6);
-  assert.equal(limitReason(small, 6), 'max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 6 each');
+  assert.equal(limitReason(small, 6), 'max_connections 25, 3 reserved, 4 kept for migrations and backups: 6 each');
   // Postgres's default: no more than Free allows, which a query that holds a connection only while it runs never needs.
   const standard = { max: 100, reserved: 3 };
   assert.equal(hyperdriveLimit(standard), 20);
-  assert.equal(limitReason(standard, 20), 'max_connections 100, 3 reserved, 3 kept for the administrator and migrations: 31 each, capped at 20');
+  assert.equal(limitReason(standard, 20), 'max_connections 100, 3 reserved, 4 kept for migrations and backups: 31 each, capped at 20');
   // The fewest Hyperdrive takes is 5 per config: below it, setup refuses rather than write a smaller limit.
-  assert.equal(hyperdriveLimit({ max: 21, reserved: 3 }), 5);
-  assert.equal(hyperdriveLimit({ max: 20, reserved: 3 }), null);
-  assert.match(tooFewConnections({ max: 15, reserved: 3 }), /max_connections is 15, 3 of them reserved.*at least 5 for each of coffre's three configs.*raise max_connections to 21 or more/);
+  assert.equal(hyperdriveLimit({ max: 22, reserved: 3 }), 5);
+  assert.equal(hyperdriveLimit({ max: 21, reserved: 3 }), null);
+  assert.match(tooFewConnections({ max: 15, reserved: 3 }), /max_connections is 15, 3 of them reserved.*at least 5 for each of coffre's three configs.*raise max_connections to 22 or more/);
   // The guide on setup's screen says what the commands' limit is for, and how it came to it.
   assert.ok(setupScreen(made).guide[0]!.lines.includes(
-    "Each command sets its config's connection limit to 6, so that all three configs fit under the database's max_connections, with some left for migrations (max_connections 25, 3 reserved, 3 kept for the administrator and migrations: 6 each).",
+    "Each command sets its config's connection limit to 6, so that all three configs fit under the database's max_connections, with some left for migrations and backups (max_connections 25, 3 reserved, 4 kept for migrations and backups: 6 each).",
   ));
 });
 
@@ -468,6 +468,7 @@ for (const as of ['superuser', 'owner'] as const) {
     const count = KNOWN_MIGRATIONS.postgres.length;
     assert.match(first.stderr, new RegExp(`✓ Migrated the database to coffre \\S+'s schema: ${count} migration${count === 1 ? '' : 's'} applied\n`));
     assert.match(first.stderr, /\n\s+coffre_backup_login is a member of coffre_backup, which reads every row and writes none\n/);
+    assert.match(first.stderr, /\n\s+coffre_runtime and coffre_vault_runtime end a statement after 5s \(statement_timeout\)\n/);
     assert.match(
       first.stderr,
       /coffre_runtime\s+can read the log; cannot write members, delete log entries or create tables\n\s+coffre_vault_runtime\s+can read the log and write members; cannot delete log entries or create tables\n\s+coffre_vault_hot\s+can read the log and write members; cannot delete log entries or create tables\n\s+coffre_backup_login\s+can read the log; cannot write members, delete log entries or create tables\n/,
@@ -482,6 +483,15 @@ for (const as of ['superuser', 'owner'] as const) {
     assert.equal(new URL(shown.vault.HOT_DATABASE_URL!).username, 'coffre_vault_hot');
     assert.ok(await connects(shown.vault.HOT_DATABASE_URL!));
     assert.deepEqual(await hotRole(`setup_${as}`), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'statement_timeout=2s'] });
+    // The app's and the vault's, a ceiling of a read call's deadline, at their next login.
+    for (const login of ['app', 'vault'] as const) {
+      const client = postgresClient(shown[login].DATABASE_URL!, { max: 1 });
+      try {
+        assert.equal((await client.unsafe<{ t: string }[]>("SELECT current_setting('statement_timeout') AS t"))[0]!.t, '5s');
+      } finally {
+        await client.end();
+      }
+    }
     assert.equal(new URL(shown.backup.DATABASE_URL!).username, 'coffre_backup_login');
     assert.ok(await connects(shown.backup.DATABASE_URL!));
     assert.deepEqual(await membership(`setup_${as}`), [{ admin: false, inherit: true, set: false }], 'a member of coffre_backup, as --backup-login grants it');
@@ -560,7 +570,7 @@ test("a Workers deployment whose database can't hold the three Hyperdrive config
     // A fresh database: nothing made, nothing migrated, and the commands it would show never shown.
     const fresh = setup(['--json'], { stdin: `${url}\n`, workers: true });
     assert.equal(fresh.status, 1, fresh.stderr);
-    assert.match(fresh.stderr, /✗ Check 127\.0\.0\.1\/setup_small has room for Hyperdrive\n\s+the database's max_connections is 15, 3 of them reserved; Hyperdrive takes at least 5 for each of coffre's three configs, .*raise max_connections to 21 or more/s);
+    assert.match(fresh.stderr, /✗ Check 127\.0\.0\.1\/setup_small has room for Hyperdrive\n\s+the database's max_connections is 15, 3 of them reserved; Hyperdrive takes at least 5 for each of coffre's three configs, .*raise max_connections to 22 or more/s);
     assert.equal(fresh.stdout, '');
     assert.deepEqual(await verifiers(), []);
     assertNoAdministrator(fresh, url);
@@ -575,7 +585,7 @@ test("a Workers deployment whose database can't hold the three Hyperdrive config
     // keeps logging in with the ones it has.
     const reset = setup(['--reset-passwords', '--json'], { stdin: `${url}\n`, workers: true });
     assert.equal(reset.status, 1, reset.stderr);
-    assert.match(reset.stderr, /✗ Check .*raise max_connections to 21 or more/s);
+    assert.match(reset.stderr, /✗ Check .*raise max_connections to 22 or more/s);
     assert.doesNotMatch(reset.stderr, /✓ (Set new passwords|Created|Kept|Migrated|The database is up to date)/, 'no step after it ran');
     assert.deepEqual(await verifiers(), before);
     assert.ok(await connects(node.app.DATABASE_URL!));

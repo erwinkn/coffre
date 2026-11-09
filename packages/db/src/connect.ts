@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 
 import type { Client, InStatement, ResultSet, Transaction as LibsqlTransaction, TransactionMode } from '@libsql/client';
+import { DATABASE_FACTS, nodePools, TooFewConnections } from './connections.ts';
 import { createDatabase, type Database } from './database.ts';
 import type { Engine } from './dialect.ts';
 import { asPostgresDatabase } from './portable.ts';
@@ -11,19 +12,20 @@ export { postgresClient, postgresOptions, postgresSession, quoteIdentifier, quot
 /**
  * Open a database from its URL, on a Node server:
  *
- *   postgres://… or postgresql://…   postgres.js, a pool of up to 10 connections
+ *   postgres://… or postgresql://…   postgres.js, a pool of up to `max` connections
  *   file:… or libsql:…                @libsql/client (SQLite)
  *
  * The SQLite driver loads only when asked for. The Worker does not
  * come through here; it builds its Postgres database from the Hyperdrive
- * pool with createDatabase. `max`, for a pool of its own beside another,
- * as the vault's checkpointer has (T169). `lockWaitMs`, Postgres's: each
+ * pool with createDatabase. `max`: a deployment's processes size their
+ * pools to their logins' share (`poolsAt`); unset, postgres.js's own
+ * default, 10, for a tool or a test. `lockWaitMs`, Postgres's: each
  * transaction's lock waits (`createDatabase`).
  */
 export async function openDatabase(url: string, options: { max?: number; lockWaitMs?: number } = {}): Promise<OpenDatabase> {
   switch (engineOfUrl(url)) {
     case 'postgres': {
-      // As node-postgres's pool was: 10 connections, each closed after 10 s idle.
+      // Each connection closed after 10 s idle, as node-postgres's pool did.
       const client = postgresClient(url, { max: options.max ?? 10, idle_timeout: 10 });
       return { engine: 'postgres', db: createDatabase(client, { lockWaitMs: options.lockWaitMs }), close: () => client.end(), cut: () => client.end({ timeout: 0 }) };
     }
@@ -40,6 +42,29 @@ export async function openDatabase(url: string, options: { max?: number; lockWai
       return { engine: 'sqlite', db: asPostgresDatabase(db), close: async () => client.close(), cut: async () => client.close() };
     }
   }
+}
+
+/**
+ * The pools a Node deployment's processes open, each its login's share of
+ * what the database lets in (`nodePools`), read as the process starts, as
+ * `login`, on a connection of its own closed before the pools open: so a
+ * process that starts holds no more than its share. A database too small
+ * for them refuses the process (`TooFewConnections`), naming the
+ * `max_connections` it needs. Null on SQLite, which has no pools.
+ */
+export async function poolsAt(url: string): Promise<NonNullable<ReturnType<typeof nodePools>> | null> {
+  if (engineOfUrl(url) !== 'postgres') return null;
+  const client = postgresClient(url, { max: 1, application_name: 'coffre-start' });
+  let row: { max: number; reserved: number };
+  try {
+    [row] = (await client.unsafe<{ max: number; reserved: number }[]>(DATABASE_FACTS)) as unknown as [{ max: number; reserved: number }];
+  } finally {
+    await client.end();
+  }
+  const connections = { max: row.max, reserved: row.reserved };
+  const pools = nodePools(connections);
+  if (pools === null) throw new TooFewConnections(connections);
+  return pools;
 }
 
 /** `close` once what was asked has answered; `cut` at once, what is in flight failing (T169). */
