@@ -1,15 +1,16 @@
 import { createHash } from 'node:crypto';
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import type { PreparedChange } from '@coffre/core/vault';
-import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, lte, sql, type Placeholder, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, lte, sql, type SQL } from 'drizzle-orm';
 
+import { authoredBy, entriesOf, keyedBy, KINDS, type Kind } from './access-entries.ts';
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
 import { later, laterRows } from './later.ts';
 import { prepared } from './prepared.ts';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf } from './dialect.ts';
 
-export { accessAllowed, authoredBy, signedCheckpoints } from './access-entries.ts';
+export { accessAllowed, authoredBy, entriesOf, indexOf, keyedBy, KINDS, type Kind } from './access-entries.ts';
 export { recordField, recorded, RECORDS, type ChangeRecord } from './change-records.ts';
 
 /**
@@ -619,50 +620,67 @@ export function newestWindow(seq: bigint, size = COUNTED_AT_ONCE): bigint {
  */
 export type Authenticity = { authentic: (entry: StoredEntry) => boolean; forged: (entry: StoredEntry) => void };
 
-/** Up to `limit` of the entries in the vault's name, allowed, of one `action`, before `before` (the newest when undefined), newest first. */
-export async function newestVaultEntries(db: Queryable, action: string, limit: number, before?: bigint): Promise<StoredEntry[]> {
-  const rows = before === undefined ? await newestEntries(db, { action, limit }) : await entriesBefore(db, { action, limit, before });
+/** Up to `limit` of the entries of `kind` (`KINDS`), before `before` (the newest when undefined), newest first: one step of the kind's index, then a row a step. */
+export async function newestVaultEntries(db: Queryable, kind: Kind, limit: number, before?: bigint): Promise<StoredEntry[]> {
+  const rows = before === undefined ? await newestEntries[kind](db, { limit }) : await entriesBefore[kind](db, { limit, before });
   return rows as StoredEntry[];
 }
 
-function vaultEntries(db: Queryable, before?: SQL) {
+function vaultEntries(db: Queryable, kind: Kind, before?: SQL) {
   const { auditLog } = tablesOf(db);
   return db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, sql.placeholder('action')), eq(auditLog.decision, 'allow'), before))
+    .where(and(entriesOf(kind), before))
     .orderBy(desc(auditLog.seq))
     .limit(sql.placeholder('limit'));
 }
 
-const newestEntries = prepared((db) => vaultEntries(db));
-const entriesBefore = prepared((db) => vaultEntries(db, lt(tablesOf(db).auditLog.seq, sql.placeholder('before'))));
-
-/**
- * The number of the newest entry in the vault's name, allowed, of one
- * `action`, or null for none: whether one was appended since, and nothing
- * of what it says, so its MAC is not checked. One indexed read.
- */
-export function newestVaultSeq(db: Queryable, action: string): Promise<bigint | null> {
-  // Started now (`.then`): `policyNow` reads it ahead of what a transaction's work asks next.
-  return newestSeq(db, { action }).then(([row]) => (row?.seq as bigint | undefined) ?? null);
+/** One built statement for each kind, whose condition is constants (`entriesOf`). */
+function byKind<T>(build: (kind: Kind) => T): Record<Kind, T> {
+  return Object.fromEntries((Object.keys(KINDS) as Kind[]).map((kind) => [kind, build(kind)])) as Record<Kind, T>;
 }
 
-const newestSeq = prepared((db) => newestSeqQuery(db, sql.placeholder('action')));
+const newestEntries = byKind((kind) => prepared((db) => vaultEntries(db, kind)));
+const entriesBefore = byKind((kind) => prepared((db) => vaultEntries(db, kind, lt(tablesOf(db).auditLog.seq, sql.placeholder('before')))));
+
+/**
+ * The number of the newest entry of `kind`, or null for none: whether one
+ * was appended since, and nothing of what it says, so its MAC is not
+ * checked. One step of the kind's index (`KINDS`).
+ */
+export function newestVaultSeq(db: Queryable, kind: Kind): Promise<bigint | null> {
+  // Started now (`.then`): `policyNow` reads it ahead of what a transaction's work asks next.
+  return newestSeq[kind](db).then(([row]) => (row?.seq as bigint | undefined) ?? null);
+}
+
+const newestSeq = byKind((kind) => prepared((db) => newestSeqQuery(db, kind)));
 
 /**
  * `newestVaultSeq`'s query, to run or to read inside another, as a
- * credential's read takes the newest `policy.change` with it: one rule for
+ * credential's read takes the newest policy change with it: one rule for
  * what the newest is, wherever it is read.
  */
-export function newestSeqQuery(db: Queryable, action: string | Placeholder) {
+export function newestSeqQuery(db: Queryable, kind: Kind) {
   const { auditLog } = tablesOf(db);
   return db
     .select({ seq: auditLog.seq })
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
+    .where(entriesOf(kind))
     .orderBy(desc(auditLog.seq))
     .limit(1);
+}
+
+/**
+ * The seq of `author`'s first entry under `keyId` that `also` holds, or
+ * undefined: one step of its key index (`audit_log_vault_key_idx`, `audit_log_app_key_idx`; `keyedBy`; T245, R48),
+ * whether the key wrote nothing, a little, or most of the log.
+ */
+export async function firstEntryUnder(db: Queryable, author: 'app' | 'vault', keyId: string, also?: SQL): Promise<bigint | undefined> {
+  const { auditLog } = tablesOf(db);
+  const key = keyedBy(db, auditLog.keyId, auditLog.seq, 'asc', keyId, sql.param([keyId]));
+  const [row] = await db.select({ seq: auditLog.seq }).from(auditLog).where(and(authoredBy(author), key.where, also)).orderBy(...key.orderBy).limit(1);
+  return (row?.seq as bigint | undefined) ?? undefined;
 }
 
 /** How many entries in its name the vault reads back, a page at a time, for its own newest of a kind (`newestAuthentic`). */

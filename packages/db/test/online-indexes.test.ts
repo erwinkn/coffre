@@ -42,11 +42,21 @@ after(async () => {
 
 test('a migration CONCURRENTLY index is read whole, comments before it or not; any other statement is not one', () => {
   assert.deepEqual(ALL.map(({ name, table }) => `${table}.${name}`), [
-    'audit_log.audit_log_key_idx',
+    'audit_log.audit_log_vault_key_idx',
+    'audit_log.audit_log_app_key_idx',
     'audit_log.audit_log_vault_idx',
     'audit_log.audit_log_app_idx',
     'audit_log.audit_log_signed_idx',
-    'audit_log.audit_log_vault_refused_idx',
+    'audit_log.audit_log_checkpoint_idx',
+    'audit_log.audit_log_broken_log_idx',
+    'audit_log.audit_log_policy_idx',
+    'audit_log.audit_log_settings_idx',
+    'audit_log.audit_log_rotation_idx',
+    'audit_log.audit_log_intent_idx',
+    'audit_log.audit_log_key_check_idx',
+    'audit_log.audit_log_tamper_idx',
+    'audit_log.audit_log_moves_idx',
+    'audit_log.audit_log_frozen_idx',
     'log_reads.log_reads_by_number_idx',
     'log_uses.log_uses_by_number_idx',
   ]);
@@ -88,7 +98,7 @@ test('an online build waits for an older transaction without holding up writes, 
   const holder = postgresSession(url, { application_name: 'coffre-online-holder' });
   const writer = postgresSession(url);
   try {
-    await session.unsafe('DROP INDEX audit_log_key_idx');
+    await session.unsafe('DROP INDEX audit_log_vault_key_idx');
     await session.unsafe('DROP INDEX log_uses_by_number_idx');
     // An open snapshot, as a backup's: a concurrent build waits for it to end before it can finish.
     await holder.unsafe('BEGIN ISOLATION LEVEL REPEATABLE READ');
@@ -126,10 +136,10 @@ test('an index a cut-short build left invalid is dropped and built again; one bu
   try {
     // What a run killed during CREATE INDEX CONCURRENTLY leaves: the index there, invalid.
     await session.unsafe("UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'audit_log_vault_idx'::regclass");
-    const [before] = await session.unsafe<{ oid: number }[]>("SELECT 'audit_log_key_idx'::regclass::oid::int AS oid");
+    const [before] = await session.unsafe<{ oid: number }[]>("SELECT 'audit_log_vault_key_idx'::regclass::oid::int AS oid");
     assert.deepEqual(await migrateDatabase(url), { unbuilt: [] });
     assert.ok((await state(session)).every(({ valid }) => valid));
-    const [kept] = await session.unsafe<{ oid: number }[]>("SELECT 'audit_log_key_idx'::regclass::oid::int AS oid");
+    const [kept] = await session.unsafe<{ oid: number }[]>("SELECT 'audit_log_vault_key_idx'::regclass::oid::int AS oid");
     assert.equal(kept!.oid, before!.oid, 'a valid index is not built again');
   } finally {
     await session.end();
@@ -158,9 +168,9 @@ test('a run that finds another building its indexes says which are not built yet
   const session = postgresSession(url);
   const other = postgresSession(url);
   try {
-    await session.unsafe('DROP INDEX audit_log_key_idx');
+    await session.unsafe('DROP INDEX audit_log_vault_key_idx');
     await other.unsafe('SELECT pg_advisory_lock($1::bigint)', [ONLINE_LOCK_KEY]);
-    assert.deepEqual(await migrateDatabase(url), { unbuilt: [{ name: 'audit_log_key_idx', table: 'audit_log', reason: 'another migration run is building it' }] });
+    assert.deepEqual(await migrateDatabase(url), { unbuilt: [{ name: 'audit_log_vault_key_idx', table: 'audit_log', reason: 'another migration run is building it' }] });
     await other.unsafe('SELECT pg_advisory_unlock($1::bigint)', [ONLINE_LOCK_KEY]);
     assert.deepEqual(await migrateDatabase(url), { unbuilt: [] });
     assert.ok((await state(session)).every(({ valid }) => valid));

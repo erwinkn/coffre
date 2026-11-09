@@ -15,7 +15,7 @@ import {
   type AnySQLiteColumn,
 } from 'drizzle-orm/sqlite-core';
 
-import { accessAllowed, signedCheckpoints } from './access-entries.ts';
+import { accessAllowed, authoredBy, entriesOf, indexOf } from './access-entries.ts';
 import { ACTIVE_SUBJECT } from './active-subject.ts';
 import { recordField, recorded } from './change-records.ts';
 
@@ -428,19 +428,29 @@ export const auditLog = sqliteTable(
     index('audit_log_releases_idx').on(table.author, table.actor, table.action, table.decision, table.occurredAt),
     index('audit_log_subject_idx').on(table.author, table.subjectPrincipal, table.seq),
     // The first entry an author wrote under a key, or that it wrote none, in one step however long the log (T245, R48):
-    // the vault's start and the app's key rotation ask it of a key that may never have written.
-    index('audit_log_key_idx').on(table.author, table.keyId, table.seq),
+    // the vault's start and the app's key rotation ask it of a key that may never have written. `author` first, as the
+    // author indexes below.
+    index('audit_log_vault_key_idx').on(table.author, table.keyId, table.seq).where(authoredBy('vault')),
+    index('audit_log_app_key_idx').on(table.author, table.keyId, table.seq).where(authoredBy('app')),
     // Each author's newest entries, in one step however many of the other's came after them (T245): the vault's
     // (`vaultPage`) and the app's (`newestAppEntry`). Keyed `author` first, unlike Postgres's: SQLite otherwise takes
     // the key index, its `author` matched, and sorts every entry of that author's.
     index('audit_log_vault_idx').on(table.author, table.seq).where(sql`${table.author} = 'vault'`),
     index('audit_log_app_idx').on(table.author, table.seq).where(sql`${table.author} = 'app'`),
-    // The vault's newest signed checkpoint (`latestSigned`), and its newest refusal of an action for a reason
-    // (`newestRefusal`), each in one step however many refusals came after or beside them (T245, R48). Keyed with every
-    // equality the lookup names, unlike Postgres's: SQLite otherwise takes `audit_log_action_idx`, which matches two.
-    index('audit_log_signed_idx').on(table.author, table.action, table.decision, table.seq).where(signedCheckpoints()),
-    index('audit_log_vault_refused_idx').on(table.author, table.action, table.decision, table.code, table.seq).where(sql`${table.author} = 'vault' AND ${table.decision} = 'deny'`),
-    // Of those, the allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
+    // Each kind of entry a runtime read asks the newest of, an index of its own with the kind's condition (`KINDS`;
+    // T245, R48). Keyed with every column the condition names, unlike Postgres's: SQLite weighs an index by the
+    // equalities it matches, and otherwise takes `audit_log_action_idx`, which matches two.
+    index(indexOf('checkpoint')).on(table.author, table.action, table.seq).where(entriesOf('checkpoint')),
+    index(indexOf('signed')).on(table.author, table.action, table.decision, table.seq).where(entriesOf('signed')),
+    index(indexOf('brokenLog')).on(table.author, table.action, table.decision, table.code, table.seq).where(entriesOf('brokenLog')),
+    index(indexOf('policy')).on(table.author, table.action, table.decision, table.seq).where(entriesOf('policy')),
+    index(indexOf('settings')).on(table.author, table.action, table.decision, table.seq).where(entriesOf('settings')),
+    index(indexOf('rotation')).on(table.author, table.action, table.decision, table.seq).where(entriesOf('rotation')),
+    index(indexOf('intent')).on(table.author, table.action, table.decision, table.seq).where(entriesOf('intent')),
+    index(indexOf('keyCheck')).on(table.author, table.action, table.decision, table.seq).where(entriesOf('keyCheck')),
+    index(indexOf('tamper')).on(table.author, table.subjectPrincipal, table.action, table.seq).where(entriesOf('tamper')),
+    index(indexOf('moves')).on(table.author, table.seq).where(entriesOf('moves')),
+    // The allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
     // however many refusals the log holds about them (T239, R48). Keyed as the subject index, `author` first, unlike
     // Postgres's: SQLite weighs an index by the equalities it matches, and picks the subject index over one that matches
     // fewer.
@@ -451,6 +461,10 @@ export const auditLog = sqliteTable(
       .where(sql`${table.author} = 'app' AND ${table.action} = 'token.unbind' AND ${table.decision} = 'allow'`),
     // Whether a target is frozen: its newest allowed freeze or lift (docs/design/workload-access.md, section 8.2).
     index('audit_log_freeze_idx')
+      .on(sql`json_extract(${table.metadata}, '$.target')`, table.seq)
+      .where(sql`${table.author} = 'app' AND ${table.action} IN ('workload.freeze', 'workload.unfreeze') AND ${table.decision} = 'allow'`),
+    // Postgres's, by the same key as this one (T245); this one goes with Postgres's old one, in 0.17.
+    index('audit_log_frozen_idx')
       .on(sql`json_extract(${table.metadata}, '$.target')`, table.seq)
       .where(sql`${table.author} = 'app' AND ${table.action} IN ('workload.freeze', 'workload.unfreeze') AND ${table.decision} = 'allow'`),
     // An enrollment code's tombstone: the app's successful `enrollment.supersede` naming it.

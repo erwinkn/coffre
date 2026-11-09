@@ -5,7 +5,7 @@ import { ACCESS_ACTIONS, MAX_PARENTS, settingsFrom, type Checkpoint, type Enviro
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { accessAllowed, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
+import { accessAllowed, entriesOf, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -341,13 +341,13 @@ export function policyNow(db: Queryable, ids: readonly string[]): Promise<{ seq:
   // Started now (`.then`), not once awaited: under `audited`, ahead of what the work asks next, a first `later` write
   // included, which could otherwise rename a protected environment before this reads it (postgres-js's `flush`).
   // Nothing protected, the newest change alone: a join on nothing still scans every environment on SQLite.
-  if (ids.length === 0) return newestVaultSeq(db, 'policy.change').then((seq) => ({ seq, slugs: new Map<string, string>() }));
+  if (ids.length === 0) return newestVaultSeq(db, 'policy').then((seq) => ({ seq, slugs: new Map<string, string>() }));
   const { projects, environments } = tablesOf(db);
   const live = sql`${and(inArray(environments.id, [...ids]), standing(environments.slug))}
     AND EXISTS (SELECT 1 FROM ${projects} WHERE ${projects.id} = ${environments.projectId} AND ${standing(projects.slug)})`;
   // One row for the newest change, whatever the environments: one more per live environment, each beside it.
   return dialect.rowsNow<{ seq: string | number | null; id: string | null; slug: string | null }>(db, sql`
-    SELECT (${newestSeqQuery(db, 'policy.change')}) AS seq, ${environments.id} AS id, ${environments.slug} AS slug
+    SELECT (${newestSeqQuery(db, 'policy')}) AS seq, ${environments.id} AS id, ${environments.slug} AS slug
     FROM (SELECT 1 AS one) AS here LEFT JOIN ${environments} ON ${live}`).then((rows) => {
     const seq = rows[0]?.seq ?? null;
     return {
@@ -1489,7 +1489,7 @@ export async function findCredential(
 function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) => SQL, shown: 'answer' | 'settings' | null = null) {
   const { credentials, identities, passkeys } = tablesOf(db);
   // The newest policy change, as `newestPolicySeq` reads it on its own.
-  const newestPolicy = sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`;
+  const newestPolicy = sql<string | number | null>`(${newestSeqQuery(db, 'policy')})`;
   return db
     .select({
       credential: credentials, identity: identities, now: clock(db), policySeq: newestPolicy,
@@ -2005,7 +2005,7 @@ export async function exchangeCandidates(
     .select({
       binding: serviceBindings,
       spent: truth(exists(spent)),
-      policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`,
+      policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy')})`,
       ...newestChangeColumns(db, principal, serviceBindings.id),
       now: clock(db),
     })
@@ -3594,13 +3594,13 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
   return { rows: rows.map(shown), more: page.cut || page.count === filter.limit };
 }
 
-/** The newest of one author's allowed entries of `action`, with the database's clock beside it. */
-function newestEntry(db: Queryable, author: 'app' | 'vault', action: string) {
+/** The vault's newest signed checkpoint, with the database's clock beside it: one step of `audit_log_signed_idx` (`KINDS`; T245, R48). */
+function newestSigned(db: Queryable) {
   const { auditLog } = tablesOf(db);
   return db
     .select({ seq: auditLog.seq, occurredAt: auditLog.occurredAt, metadata: auditLog.metadata, now: clockMillis(db) })
     .from(auditLog)
-    .where(and(eq(auditLog.author, author), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
+    .where(entriesOf('signed'))
     .orderBy(desc(auditLog.seq))
     .limit(1);
 }
@@ -3610,7 +3610,7 @@ function newestEntry(db: Queryable, author: 'app' | 'vault', action: string) {
  * whose signature whoever shows it checks with the vault's public key.
  */
 export async function latestCheckpoint(db: Queryable): Promise<Checkpoint | null> {
-  const [row] = await newestEntry(db, 'vault', 'audit.checkpoint');
+  const [row] = await newestSigned(db);
   return row === undefined ? null : (JSON.parse(row.metadata) as Checkpoint);
 }
 
@@ -3670,7 +3670,7 @@ export async function talliedAfter(db: Queryable, after: bigint, limit: number):
 
 function talliedWhere(db: Queryable) {
   const { auditLog } = tablesOf(db);
-  return [eq(auditLog.author, 'vault'), eq(auditLog.action, 'audit.checkpoint'), eq(auditLog.decision, 'allow'), isNotNull(auditLog.relatedSeq)];
+  return [entriesOf('signed'), isNotNull(auditLog.relatedSeq)];
 }
 
 function talliedCheckpoints(db: Queryable, where?: SQL) {

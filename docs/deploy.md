@@ -420,8 +420,9 @@ second on an audit log of 440,000 entries, 1.3 to 1.9 s on 1.2 million
 (measured), and minutes on a day of uses. A concurrent build holds up no
 write, but waits for every transaction older than it to end, a backup's
 `pg_dump` included, up to 5 minutes, and takes as long as the table is big:
-about 4.6 s for 0.16's seven on a log of 1.2 million entries, and 1.6 s for
-a day of 3.5 million uses (measured). One that gave up, or that another run
+0.3 to 0.9 s for each of 0.16's fifteen on a log of 1.2 million entries,
+about 6 s in all, and 1.6 s for a day of 3.5 million uses (measured; an
+entry written meanwhile commits in 4 ms). One that gave up, or that another run
 is building, is said, and the next run builds it; coffre works without it
 meanwhile, only slower on a large log. An instance whose days of uses hold
 tens of millions each spends minutes building their indexes on its first

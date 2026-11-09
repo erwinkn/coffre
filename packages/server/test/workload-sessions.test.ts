@@ -611,10 +611,10 @@ test("the per-request statement reads its rows through their indexes, however ma
   assert.doesNotMatch(lines, /Seq Scan on credentials/, lines);
   assert.match(lines, /Bitmap Index Scan on credentials_token_hash_key/, lines);
   assert.match(lines, /Bitmap Index Scan on credentials_pkey/, lines);
-  // Nor of the log, which only grows: each freeze and the tombstone through an index.
+  // Nor of the log, which only grows: each freeze and the tombstone through an index, the freeze by `(target, seq)` (T245).
   assert.doesNotMatch(lines, /Seq Scan on audit_log/, lines);
   assert.doesNotMatch(lines, /Backward using audit_log_(app|vault)_idx/, lines);
-  assert.match(lines, /audit_log_freeze_idx/, lines);
+  assert.match(lines, /audit_log_frozen_idx/, lines);
 });
 
 test('a session whose binding is removed, or whose row is changed around the app, is no session', async () => {

@@ -1439,7 +1439,7 @@ class VaultService implements Vault {
     const sync = log015 && !prepared.rolesSynced;
     if (!settle && !convert && !cutover && !limit && !sync) return null;
     const asked: StartReads = {
-      rotation: settle ? store.latestVaultEntry(db, KEY_ROTATE) : undefined,
+      rotation: settle ? store.latestRotation(db) : undefined,
       newest: settle ? store.vaultPage(db, undefined, 1).then(([entry]) => entry) : undefined,
       // None once a rotation to the key is logged (R48): `#settle` reads it again if it needs it after all.
       first: settle ? store.firstVaultEntryUnder(db, prepared.logKey.keyId, { unlessRotated: true }) : undefined,
@@ -1630,7 +1630,7 @@ class VaultService implements Vault {
     for (let attempt = 1; ; attempt += 1) {
       // The start's reads first; a retry, after a rotation that raced another, reads again.
       const asked = attempt === 1 ? start : undefined;
-      const rotation = await (asked?.rotation ?? store.latestVaultEntry(this.#db, KEY_ROTATE));
+      const rotation = await (asked?.rotation ?? store.latestRotation(this.#db));
       if (rotation?.keyId === current && this.#authentic(rotation)) {
         prepared.since = rotation.seq;
         return;
@@ -1776,7 +1776,7 @@ class VaultService implements Vault {
     const head = held?.head ?? undefined;
     await this.#weigh(tx, entries);
     const appended = await appendEntries(tx, prepared.logKey, entries, async (locked) => {
-      const rotation = head === undefined ? await store.latestVaultEntry(locked, KEY_ROTATE) : head.rotation ?? undefined;
+      const rotation = head === undefined ? await store.latestRotation(locked) : head.rotation ?? undefined;
       if (rotation !== undefined && !prepared.logKeys.some((key) => key.keyId === rotation.keyId)) {
         prepared.superseded = `the log moved on to ${rotation.keyId}, a key this vault does not hold: a vault given a newer vault key replaced it, and a replaced key writes nothing more`;
         throw new Error(prepared.superseded);
@@ -3201,7 +3201,7 @@ class VaultService implements Vault {
     const entry = await newestAuthentic(
       (limit, before) => (reads?.newestSettings !== undefined && before === undefined
         ? Promise.resolve(reads.newestSettings === null ? [] : [reads.newestSettings])
-        : store.newestVaultEntries(db, SETTINGS, limit, before)),
+        : store.newestVaultEntries(db, 'settings', limit, before)),
       this.#check(reports, null),
     );
     if (entry === 'none') return settingsFrom(null);
@@ -3231,7 +3231,7 @@ class VaultService implements Vault {
     const entry = await newestAuthentic(
       (limit, before) => (reads !== undefined && before === undefined
         ? Promise.resolve(reads.newestPolicy === null ? [] : [reads.newestPolicy])
-        : store.newestVaultEntries(db, POLICY, limit, before)),
+        : store.newestVaultEntries(db, 'policy', limit, before)),
       this.#check(reports, null),
     );
     if (entry === 'none') return { policy: DEFAULT_POLICY, edits: NO_EDITS, readable: true, seq: null };
@@ -3562,7 +3562,7 @@ class VaultService implements Vault {
   /** Each KEK's recorded check value, by `provider:keyId`, and the entry that holds it. */
   async #checkValues(db: Queryable): Promise<Map<string, { seq: bigint; wrapped: WrappedKey }>> {
     const checks = new Map<string, { seq: bigint; wrapped: WrappedKey }>();
-    for (const entry of await store.vaultEntriesOf(db, [KEY_CHECK], -1n, VERIFY_BATCH)) {
+    for (const entry of await store.keyChecks(db, VERIFY_BATCH)) {
       // A check in the vault's name that the vault did not write proves nothing either way.
       if (!this.#authentic(entry)) continue;
       const { kekProvider, kekId, kekVersion, bytes } = JSON.parse(entry.metadata) as WrappedKey;
@@ -3859,7 +3859,7 @@ class VaultService implements Vault {
    */
   async #standingRefusal(db: Queryable): Promise<{ failedAtSeq?: number | null; reason?: string } | null> {
     const signed = await store.latestSigned(db);
-    const refused = await store.newestRefusal(db, CHECKPOINT, 'log_broken', signed?.seq ?? -1n);
+    const refused = await store.newestBrokenLog(db, signed?.seq ?? -1n);
     if (refused === undefined || !this.#authentic(refused)) return null;
     return JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };
   }

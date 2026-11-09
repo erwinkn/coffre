@@ -112,7 +112,7 @@ export async function loadCaller(db: Queryable, vault: Vault, principal: Princip
  * vault is asked, whose answer's policy is then that one or newer, never older.
  */
 export function newestPolicySeq(db: Queryable): Promise<bigint | null> {
-  return newestVaultSeq(db, 'policy.change');
+  return newestVaultSeq(db, 'policy');
 }
 
 /**

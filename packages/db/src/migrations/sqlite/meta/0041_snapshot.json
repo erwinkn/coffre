@@ -279,14 +279,25 @@
           ],
           "isUnique": false
         },
-        "audit_log_key_idx": {
-          "name": "audit_log_key_idx",
+        "audit_log_vault_key_idx": {
+          "name": "audit_log_vault_key_idx",
           "columns": [
             "author",
             "key_id",
             "seq"
           ],
-          "isUnique": false
+          "isUnique": false,
+          "where": "author = 'vault'"
+        },
+        "audit_log_app_key_idx": {
+          "name": "audit_log_app_key_idx",
+          "columns": [
+            "author",
+            "key_id",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "author = 'app'"
         },
         "audit_log_vault_idx": {
           "name": "audit_log_vault_idx",
@@ -306,6 +317,16 @@
           "isUnique": false,
           "where": "\"audit_log\".\"author\" = 'app'"
         },
+        "audit_log_checkpoint_idx": {
+          "name": "audit_log_checkpoint_idx",
+          "columns": [
+            "author",
+            "action",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'audit.checkpoint'"
+        },
         "audit_log_signed_idx": {
           "name": "audit_log_signed_idx",
           "columns": [
@@ -317,8 +338,8 @@
           "isUnique": false,
           "where": "author = 'vault' AND action = 'audit.checkpoint' AND decision = 'allow'"
         },
-        "audit_log_vault_refused_idx": {
-          "name": "audit_log_vault_refused_idx",
+        "audit_log_broken_log_idx": {
+          "name": "audit_log_broken_log_idx",
           "columns": [
             "author",
             "action",
@@ -327,7 +348,82 @@
             "seq"
           ],
           "isUnique": false,
-          "where": "\"audit_log\".\"author\" = 'vault' AND \"audit_log\".\"decision\" = 'deny'"
+          "where": "author = 'vault' AND action = 'audit.checkpoint' AND decision = 'deny' AND code = 'log_broken'"
+        },
+        "audit_log_policy_idx": {
+          "name": "audit_log_policy_idx",
+          "columns": [
+            "author",
+            "action",
+            "decision",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'policy.change' AND decision = 'allow'"
+        },
+        "audit_log_settings_idx": {
+          "name": "audit_log_settings_idx",
+          "columns": [
+            "author",
+            "action",
+            "decision",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'settings.change' AND decision = 'allow'"
+        },
+        "audit_log_rotation_idx": {
+          "name": "audit_log_rotation_idx",
+          "columns": [
+            "author",
+            "action",
+            "decision",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'key.rotate' AND decision = 'allow'"
+        },
+        "audit_log_intent_idx": {
+          "name": "audit_log_intent_idx",
+          "columns": [
+            "author",
+            "action",
+            "decision",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'key.intent' AND decision = 'allow'"
+        },
+        "audit_log_key_check_idx": {
+          "name": "audit_log_key_check_idx",
+          "columns": [
+            "author",
+            "action",
+            "decision",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'key.check' AND decision = 'allow'"
+        },
+        "audit_log_tamper_idx": {
+          "name": "audit_log_tamper_idx",
+          "columns": [
+            "author",
+            "subject_principal",
+            "action",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'vault.tampered' AND code IN ('mac', 'stale')"
+        },
+        "audit_log_moves_idx": {
+          "name": "audit_log_moves_idx",
+          "columns": [
+            "author",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "author = 'app' AND action IN ('key.reseal', 'key.rotate')"
         },
         "audit_log_access_idx": {
           "name": "audit_log_access_idx",
@@ -349,6 +445,15 @@
         },
         "audit_log_freeze_idx": {
           "name": "audit_log_freeze_idx",
+          "columns": [
+            "json_extract(\"metadata\", '$.target')",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" IN ('workload.freeze', 'workload.unfreeze') AND \"audit_log\".\"decision\" = 'allow'"
+        },
+        "audit_log_frozen_idx": {
+          "name": "audit_log_frozen_idx",
           "columns": [
             "json_extract(\"metadata\", '$.target')",
             "seq"
@@ -4660,6 +4765,13 @@
         }
       },
       "audit_log_freeze_idx": {
+        "columns": {
+          "json_extract(\"metadata\", '$.target')": {
+            "isExpression": true
+          }
+        }
+      },
+      "audit_log_frozen_idx": {
         "columns": {
           "json_extract(\"metadata\", '$.target')": {
             "isExpression": true

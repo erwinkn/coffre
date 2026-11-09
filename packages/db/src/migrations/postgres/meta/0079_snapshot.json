@@ -387,15 +387,9 @@
           "method": "btree",
           "with": {}
         },
-        "audit_log_key_idx": {
-          "name": "audit_log_key_idx",
+        "audit_log_vault_key_idx": {
+          "name": "audit_log_vault_key_idx",
           "columns": [
-            {
-              "expression": "author",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
             {
               "expression": "key_id",
               "isExpression": false,
@@ -410,6 +404,29 @@
             }
           ],
           "isUnique": false,
+          "where": "author = 'vault'",
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_app_key_idx": {
+          "name": "audit_log_app_key_idx",
+          "columns": [
+            {
+              "expression": "key_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "author = 'app'",
           "concurrently": true,
           "method": "btree",
           "with": {}
@@ -446,6 +463,22 @@
           "method": "btree",
           "with": {}
         },
+        "audit_log_checkpoint_idx": {
+          "name": "audit_log_checkpoint_idx",
+          "columns": [
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'audit.checkpoint'",
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
         "audit_log_signed_idx": {
           "name": "audit_log_signed_idx",
           "columns": [
@@ -462,17 +495,107 @@
           "method": "btree",
           "with": {}
         },
-        "audit_log_vault_refused_idx": {
-          "name": "audit_log_vault_refused_idx",
+        "audit_log_broken_log_idx": {
+          "name": "audit_log_broken_log_idx",
           "columns": [
             {
-              "expression": "action",
+              "expression": "seq",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
-            },
+            }
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'audit.checkpoint' AND decision = 'deny' AND code = 'log_broken'",
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_policy_idx": {
+          "name": "audit_log_policy_idx",
+          "columns": [
             {
-              "expression": "code",
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'policy.change' AND decision = 'allow'",
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_settings_idx": {
+          "name": "audit_log_settings_idx",
+          "columns": [
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'settings.change' AND decision = 'allow'",
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_rotation_idx": {
+          "name": "audit_log_rotation_idx",
+          "columns": [
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'key.rotate' AND decision = 'allow'",
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_intent_idx": {
+          "name": "audit_log_intent_idx",
+          "columns": [
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'key.intent' AND decision = 'allow'",
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_key_check_idx": {
+          "name": "audit_log_key_check_idx",
+          "columns": [
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "author = 'vault' AND action = 'key.check' AND decision = 'allow'",
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_tamper_idx": {
+          "name": "audit_log_tamper_idx",
+          "columns": [
+            {
+              "expression": "subject_principal",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -485,7 +608,23 @@
             }
           ],
           "isUnique": false,
-          "where": "\"audit_log\".\"author\" = 'vault' AND \"audit_log\".\"decision\" = 'deny'",
+          "where": "author = 'vault' AND action = 'vault.tampered' AND code IN ('mac', 'stale')",
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_moves_idx": {
+          "name": "audit_log_moves_idx",
+          "columns": [
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "author = 'app' AND action IN ('key.reseal', 'key.rotate')",
           "concurrently": true,
           "method": "btree",
           "with": {}
@@ -547,6 +686,28 @@
           "isUnique": false,
           "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" IN ('workload.freeze', 'workload.unfreeze') AND \"audit_log\".\"decision\" = 'allow'",
           "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_frozen_idx": {
+          "name": "audit_log_frozen_idx",
+          "columns": [
+            {
+              "expression": "((\"metadata\")::jsonb ->> 'target')",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" IN ('workload.freeze', 'workload.unfreeze') AND \"audit_log\".\"decision\" = 'allow'",
+          "concurrently": true,
           "method": "btree",
           "with": {}
         },

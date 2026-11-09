@@ -1,5 +1,5 @@
 import { TOMBSTONE } from '@coffre/core/schemas';
-import { ACCESS_ACTIONS } from '@coffre/core/vault';
+import { accessAllowed } from '@coffre/db/log';
 import { sql, type SQL } from 'drizzle-orm';
 
 import type { Asked } from './snapshot.ts';
@@ -20,7 +20,6 @@ export function snapshotQuery(asked: Asked): SQL {
   const principals = sql`${sql.param([...asked.principals])}::text[]`;
   const environments = sql`${sql.param([...(asked.environments ?? [])])}::uuid[]`;
   const references = sql`${sql.param((asked.references ?? []).map(String))}::bigint[]`;
-  const actions = sql`${sql.param([...ACCESS_ACTIONS])}::text[]`;
   const tomb = `%${TOMBSTONE}%`;
   const released = asked.released;
   const seals = asked.seals === true;
@@ -68,9 +67,11 @@ export function snapshotQuery(asked: Asked): SQL {
         SELECT coalesce(json_agg(${ENTRY}), '[]')
         FROM unnest(${principals}) AS asked (principal)
         CROSS JOIN LATERAL (
+          -- One step of audit_log_access_idx, its condition as constants (\`accessAllowed\`), the principal \`= ANY\` and
+          -- first in the order so that only that index yields it (\`keyedBy\`; T245, R48).
           SELECT * FROM audit_log
-          WHERE author = 'vault' AND subject_principal = asked.principal AND action = ANY(${actions}) AND decision = 'allow'
-          ORDER BY seq DESC LIMIT 1
+          WHERE ${accessAllowed()} AND subject_principal = ANY(ARRAY[asked.principal])
+          ORDER BY subject_principal DESC, seq DESC LIMIT 1
         ) e
       ),
       'policy', (SELECT ${ENTRY} FROM policy e),${seals

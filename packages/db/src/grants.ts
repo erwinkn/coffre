@@ -14,13 +14,12 @@ import {
   type Scope,
 } from '@coffre/core/access';
 import type { StoredEntry } from '@coffre/core/audit';
-import { ACCESS_ACTIONS } from '@coffre/core/vault';
 import { and, asc, desc, eq, gt, inArray, isNull, like, lt, or, sql, type SQL } from 'drizzle-orm';
 
 import { tablesOf, type Queryable } from './database.ts';
 import { prepared } from './prepared.ts';
 import { engineOf, rowsOf, tombstone, truth } from './dialect.ts';
-import { entryColumns, logObject, newestAuthentic, newestVaultEntries, type Authenticity, type Newest } from './log.ts';
+import { accessAllowed, entriesOf, entryColumns, keyedBy, logObject, newestAuthentic, type Authenticity, type Newest } from './log.ts';
 
 /**
  * One grant, as `grants` holds it: on a project (`environmentId`
@@ -269,12 +268,7 @@ export async function tamperedMembers(db: Queryable, principal?: string): Promis
   const found = await db
     .select({ principal: auditLog.subjectPrincipal, weighed: sql<string | null>`${weighed}`, seq: sql<string>`CAST(max(${auditLog.seq}) AS text)` })
     .from(auditLog)
-    .where(and(
-      eq(auditLog.author, 'vault'),
-      eq(auditLog.action, 'vault.tampered'),
-      inArray(auditLog.code, [...TAMPER_CODES]),
-      principal === undefined ? undefined : eq(auditLog.subjectPrincipal, principal),
-    ))
+    .where(and(entriesOf('tamper'), principal === undefined ? undefined : eq(auditLog.subjectPrincipal, principal)))
     .groupBy(auditLog.subjectPrincipal, weighed);
   if (found.length === 0) return new Set();
   const legacy = new Map(found.flatMap((row) => (row.weighed === null ? [[row.principal!, BigInt(row.seq)] as const] : [])));
@@ -285,7 +279,7 @@ export async function tamperedMembers(db: Queryable, principal?: string): Promis
       : db
           .select({ principal: auditLog.subjectPrincipal, seq: sql<string>`CAST(max(${auditLog.seq}) AS text)` })
           .from(auditLog)
-          .where(and(eq(auditLog.author, 'vault'), inArray(auditLog.action, [...ACCESS_ACTIONS]), eq(auditLog.decision, 'allow'), inArray(auditLog.subjectPrincipal, [...legacy.keys()])))
+          .where(and(accessAllowed(), inArray(auditLog.subjectPrincipal, [...legacy.keys()])))
           .groupBy(auditLog.subjectPrincipal),
     newestChangeNames(db, named),
   ]);
@@ -300,9 +294,6 @@ export async function tamperedMembers(db: Queryable, principal?: string): Promis
     named: naming.has(principal),
   })));
 }
-
-/** The codes of the vault's reports that a member's row was changed around it: their row's MAC fails (`mac`), or an older one was put back (`stale`). */
-const TAMPER_CODES = ['mac', 'stale'] as const;
 
 /** What a finding names for a member 0.15's log holds no change of (`changeName`). */
 const NO_CHANGE = 'none';
@@ -439,25 +430,20 @@ export function newestAccess(db: Queryable, principal: string, check: Authentici
 
 /** Up to `limit` of the vault's allowed access entries about `principal` before `before` (the newest when undefined), newest first. */
 export async function accessEntriesAbout(db: Queryable, principal: string, limit: number, before?: bigint): Promise<StoredEntry[]> {
-  const rows = before === undefined ? await newestAccessEntries(db, { principal, limit }) : await accessEntriesBefore(db, { principal, limit, before });
+  const principals = [principal];
+  const rows = before === undefined ? await newestAccessEntries(db, { principal, principals, limit }) : await accessEntriesBefore(db, { principal, principals, limit, before });
   return rows as StoredEntry[];
 }
 
+/** A principal's allowed access entries, newest first: steps of `audit_log_access_idx` (`keyedBy`; T239, T245, R48). */
 function accessEntries(db: Queryable, before?: SQL) {
   const { auditLog } = tablesOf(db);
+  const about = keyedBy(db, auditLog.subjectPrincipal, auditLog.seq, 'desc', sql.placeholder('principal'), sql.placeholder('principals'));
   return db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(
-      and(
-        eq(auditLog.author, 'vault'),
-        eq(auditLog.subjectPrincipal, sql.placeholder('principal')),
-        inArray(auditLog.action, [...ACCESS_ACTIONS]),
-        eq(auditLog.decision, 'allow'),
-        before,
-      ),
-    )
-    .orderBy(desc(auditLog.seq))
+    .where(and(accessAllowed(), about.where, before))
+    .orderBy(...about.orderBy)
     .limit(sql.placeholder('limit'));
 }
 
@@ -467,7 +453,7 @@ const accessEntriesBefore = prepared((db) => accessEntries(db, lt(tablesOf(db).a
 
 /**
  * Up to `limit` of the vault's reports that `principal`'s row was changed
- * around it (`TAMPER_CODES`), before `before` (the newest when undefined),
+ * around it (`KINDS.tamper`: their row's MAC fails, `mac`, or an older one was put back, `stale`), before `before` (the newest when undefined),
  * newest first: of 0.15's log, those that name the change `names`; of
  * 0.14's, those after seq `after`.
  */
@@ -481,10 +467,8 @@ async function tamperReportsAbout(
     .from(auditLog)
     .where(
       and(
-        eq(auditLog.author, 'vault'),
+        entriesOf('tamper'),
         eq(auditLog.subjectPrincipal, principal),
-        eq(auditLog.action, 'vault.tampered'),
-        inArray(auditLog.code, [...TAMPER_CODES]),
         'names' in which ? sql`${weighed} = ${which.names}` : and(sql`${weighed} IS NULL`, gt(auditLog.seq, which.after)),
         before === undefined ? undefined : lt(auditLog.seq, before),
       ),

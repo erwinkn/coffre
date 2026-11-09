@@ -1,11 +1,11 @@
 import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre/core/access';
-import type { Author, StoredEntry } from '@coffre/core/audit';
+import type { StoredEntry } from '@coffre/core/audit';
 import { deletedWithProject, isTombstone, TOMBSTONE } from '@coffre/core/schemas';
 import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type CredentialColumns, type EnvironmentColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { later, laterRows, prepared, tablesOf, type Database, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
-import { authoredBy, entryColumns, newestVaultEntries, signedCheckpoints, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
+import { accessAllowed, authoredBy, entriesOf, entryColumns, firstEntryUnder, newestVaultEntries, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { canonical, indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref, type RoleInput } from './inputs.ts';
@@ -553,15 +553,14 @@ export async function fastAdded(db: Queryable): Promise<Set<string>> {
 }
 
 /** The vault's newest allowed access entry about principal `p`, unchecked: one probe, as a use's (`m_access`, 0053). */
-function newestAccessSeq(p: SQL, actions: SQL): SQL {
-  return sql`(SELECT a.seq FROM audit_log a WHERE a.author = 'vault' AND a.subject_principal = ${p} AND a.decision = 'allow' AND a.action IN ${actions} ORDER BY a.seq DESC LIMIT 1)`;
+function newestAccessSeq(p: SQL): SQL {
+  return sql`(SELECT a.seq FROM audit_log a WHERE ${accessAllowed('a')} AND a.subject_principal = ${p} ORDER BY a.seq DESC LIMIT 1)`;
 }
 
 function memberLogsPostgres(principals: readonly string[]): SQL {
   const asked = sql`unnest(${sql.param([...principals])}::text[])`;
-  const actions = sql`(SELECT unnest(${sql.param([...ACCESS_ACTIONS])}::text[]))`;
   return sql`SELECT p.principal, m.seal, l.number, l.at, l.request_id::text AS request_id, l.object::text AS object, l.actor, l.payload, l.seal AS newest, l.mac,
-      ${newestAccessSeq(sql`p.principal`, actions)} AS access
+      ${newestAccessSeq(sql`p.principal`)} AS access
     FROM ${asked} AS p (principal)
     LEFT JOIN principals m ON m.principal = p.principal
     LEFT JOIN LATERAL (
@@ -572,8 +571,7 @@ function memberLogsPostgres(principals: readonly string[]): SQL {
 /** SQLite has no `log_object`: each member's object key, as the vault computes it (`objectKey`), beside its principal. */
 function memberLogsSqlite(principals: readonly string[]): SQL {
   const pairs = JSON.stringify(principals.map((principal) => ({ p: principal, k: objectKey({ kind: 'principal', id: principal }) })));
-  const actions = sql`(SELECT value FROM json_each(${JSON.stringify(ACCESS_ACTIONS)}))`;
-  return sql`SELECT a.p AS principal, m.seal, c.number, c.at, c.request_id, c.object, c.actor, c.payload, c.seal AS newest, c.mac, ${newestAccessSeq(sql`a.p`, actions)} AS access
+  return sql`SELECT a.p AS principal, m.seal, c.number, c.at, c.request_id, c.object, c.actor, c.payload, c.seal AS newest, c.mac, ${newestAccessSeq(sql`a.p`)} AS access
     FROM (SELECT json_extract(value, '$.p') AS p, json_extract(value, '$.k') AS k FROM json_each(${pairs})) a
     LEFT JOIN principals m ON m.principal = a.p
     LEFT JOIN log_changes c ON c.object = a.k AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = a.k)`;
@@ -720,7 +718,7 @@ export async function vaultPage(db: Queryable, before: bigint | undefined, limit
 
 /**
  * The seq of the vault's first entry under `keyId`, or undefined: one step
- * of `audit_log_key_idx` (T245, R48), whether or not the key ever wrote.
+ * of `audit_log_vault_key_idx` (`firstEntryUnder`; T245, R48), whether or not the key ever wrote.
  * Until 0.16 no index served it, and a key that never wrote, a new KEK's
  * before its rotation lands, read the whole log. With `unlessRotated`, none
  * once a `key.rotate` of the vault's is under `keyId`, an index probe of the
@@ -728,15 +726,8 @@ export async function vaultPage(db: Queryable, before: bigint | undefined, limit
  * (`#start` in vault.ts, T206). Undefined then says nothing.
  */
 export async function firstVaultEntryUnder(db: Queryable, keyId: string, { unlessRotated = false } = {}): Promise<bigint | undefined> {
-  const { auditLog } = tablesOf(db);
   const due = sql`NOT EXISTS (SELECT 1 FROM audit_log r WHERE r.author = 'vault' AND r.action = 'key.rotate' AND r.decision = 'allow' AND r.key_id = ${keyId})`;
-  const [row] = await db
-    .select({ seq: auditLog.seq })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault' satisfies Author), eq(auditLog.keyId, keyId), unlessRotated ? due : undefined))
-    .orderBy(asc(auditLog.seq))
-    .limit(1);
-  return row?.seq;
+  return firstEntryUnder(db, 'vault', keyId, unlessRotated ? due : undefined);
 }
 
 /** The entries at these seqs, any author, by seq: what a reference names as its seal. */
@@ -865,28 +856,21 @@ export async function restoredNatures(
   return items.map(({ secretId, from }) => (currentOf.get(secretId) === from ? null : natureOf.get(from) ?? 'secret'));
 }
 
-/** The vault's newest allowed entry of `action`, or undefined: a step of `audit_log_action_idx` and a walk back through that action's refusals, which only checkpoints come in runs of (`latestSigned` for those). */
-export async function latestVaultEntry(db: Queryable, action: string): Promise<StoredEntry | undefined> {
+/** The vault's newest rotation of the KEK, or undefined: one step of `audit_log_rotation_idx` (`KINDS`; T245, R48). */
+export async function latestRotation(db: Queryable): Promise<StoredEntry | undefined> {
+  return newestOf(db, entriesOf('rotation'));
+}
+
+/** The newest entry `where` holds, or undefined. */
+async function newestOf(db: Queryable, where: SQL): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
-  const [row] = await db
-    .select(entryColumns(db))
-    .from(auditLog)
-    .where(and(authoredBy('vault', 'allow'), eq(auditLog.action, action)))
-    .orderBy(desc(auditLog.seq))
-    .limit(1);
+  const [row] = await db.select(entryColumns(db)).from(auditLog).where(where).orderBy(desc(auditLog.seq)).limit(1);
   return row === undefined ? undefined : stored([row])[0];
 }
 
-/** The vault's newest signed checkpoint that `also` holds, or undefined: one step of `audit_log_signed_idx` (`signedCheckpoints`; T245, R48), however many refusals came since. */
-async function newestSigned(db: Queryable, also?: SQL): Promise<StoredEntry | undefined> {
-  const { auditLog } = tablesOf(db);
-  const [row] = await db.select(entryColumns(db)).from(auditLog).where(and(signedCheckpoints(), also)).orderBy(desc(auditLog.seq)).limit(1);
-  return row === undefined ? undefined : stored([row])[0];
-}
-
-/** The vault's newest signed checkpoint, or undefined (`newestSigned`). */
+/** The vault's newest signed checkpoint, or undefined: one step of `audit_log_signed_idx` (`KINDS`; T245, R48), however many refusals came since. */
 export async function latestSigned(db: Queryable): Promise<StoredEntry | undefined> {
-  return newestSigned(db);
+  return newestOf(db, entriesOf('signed'));
 }
 
 /**
@@ -896,19 +880,12 @@ export async function latestSigned(db: Queryable): Promise<StoredEntry | undefin
  */
 export async function latestTallied(db: Queryable): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
-  return newestSigned(db, isNotNull(auditLog.relatedSeq));
+  return newestOf(db, and(entriesOf('signed'), isNotNull(auditLog.relatedSeq))!);
 }
 
-/** The vault's newest `audit.checkpoint` entry, signed or refused, or undefined. */
+/** The vault's newest `audit.checkpoint` entry, signed or refused, or undefined: one step of `audit_log_checkpoint_idx` (`KINDS`). */
 export async function newestCheckpointEntry(db: Queryable): Promise<StoredEntry | undefined> {
-  const { auditLog } = tablesOf(db);
-  const [row] = await db
-    .select(entryColumns(db))
-    .from(auditLog)
-    .where(and(authoredBy('vault'), eq(auditLog.action, 'audit.checkpoint')))
-    .orderBy(desc(auditLog.seq))
-    .limit(1);
-  return row === undefined ? undefined : stored([row])[0];
+  return newestOf(db, entriesOf('checkpoint'));
 }
 
 /**
@@ -919,7 +896,7 @@ export async function newestCheckpointEntry(db: Queryable): Promise<StoredEntry 
 export async function talliedWithin(db: Queryable, after: bigint, through: bigint, limit: number): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
   const tallied = and(
-    authoredBy('vault', 'allow'), eq(auditLog.action, 'audit.checkpoint'), isNotNull(auditLog.relatedSeq),
+    entriesOf('signed'), isNotNull(auditLog.relatedSeq),
     gt(auditLog.seq, after), lte(auditLog.seq, through),
   );
   const batch = await withinBytes(db, tallied, limit);
@@ -929,16 +906,9 @@ export async function talliedWithin(db: Queryable, after: bigint, through: bigin
   return stored(rows);
 }
 
-/** The vault's newest refusal of `action` with `code` after entry `after`, or undefined: one step of `audit_log_vault_refused_idx` (T245, R48). */
-export async function newestRefusal(db: Queryable, action: string, code: string, after: bigint): Promise<StoredEntry | undefined> {
-  const { auditLog } = tablesOf(db);
-  const [row] = await db
-    .select(entryColumns(db))
-    .from(auditLog)
-    .where(and(authoredBy('vault', 'deny'), eq(auditLog.action, action), gt(auditLog.seq, after), eq(auditLog.code, code)))
-    .orderBy(desc(auditLog.seq))
-    .limit(1);
-  return row === undefined ? undefined : stored([row])[0];
+/** The vault's newest refusal of a checkpoint for a broken log after entry `after`, or undefined: one step of `audit_log_broken_log_idx` (`KINDS`; T245, R48). */
+export async function newestBrokenLog(db: Queryable, after: bigint): Promise<StoredEntry | undefined> {
+  return newestOf(db, and(entriesOf('brokenLog'), gt(tablesOf(db).auditLog.seq, after))!);
 }
 
 /** Up to `limit` of the vault's checkpoints that keep a tally after entry `after`, oldest first: each one's entry, and the last entry it signs. */
@@ -947,12 +917,7 @@ export async function talliedAfter(db: Queryable, after: bigint, limit: number):
   const rows = await db
     .select({ seq: auditLog.seq, signs: auditLog.relatedSeq })
     .from(auditLog)
-    .where(and(
-      authoredBy('vault', 'allow'),
-      eq(auditLog.action, 'audit.checkpoint'),
-      isNotNull(auditLog.relatedSeq),
-      gt(auditLog.seq, after),
-    ))
+    .where(and(entriesOf('signed'), isNotNull(auditLog.relatedSeq), gt(auditLog.seq, after)))
     .orderBy(asc(auditLog.seq))
     .limit(limit);
   return rows.map(({ seq, signs }) => ({ seq, signs: signs! }));
@@ -964,36 +929,16 @@ export async function newestAccessEntries(db: Queryable): Promise<Map<string, St
   const newest = db
     .select({ seq: sql`max(${auditLog.seq})` })
     .from(auditLog)
-    .where(
-      and(eq(auditLog.author, 'vault'), inArray(auditLog.action, [...ACCESS_ACTIONS]), eq(auditLog.decision, 'allow')),
-    )
+    .where(accessAllowed())
     .groupBy(auditLog.subjectPrincipal);
   const rows = stored(await db.select(entryColumns(db)).from(auditLog).where(inArray(auditLog.seq, newest)));
   return new Map(rows.flatMap((row) => (row.subjectPrincipal === null ? [] : [[row.subjectPrincipal, row]])));
 }
 
-/** Up to `limit` of the vault's allowed entries of these actions after `afterSeq`, oldest first. */
-export async function vaultEntriesOf(
-  db: Queryable,
-  actions: readonly string[],
-  afterSeq: bigint,
-  limit: number,
-): Promise<StoredEntry[]> {
+/** Up to `limit` of the vault's checks of a KEK, oldest first: steps of `audit_log_key_check_idx` (`KINDS`; T245, R48). */
+export async function keyChecks(db: Queryable, limit: number): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
-  const rows = await db
-    .select(entryColumns(db))
-    .from(auditLog)
-    .where(
-      and(
-        eq(auditLog.author, 'vault'),
-        inArray(auditLog.action, [...actions]),
-        eq(auditLog.decision, 'allow'),
-        gt(auditLog.seq, afterSeq),
-      ),
-    )
-    .orderBy(asc(auditLog.seq))
-    .limit(limit);
-  return stored(rows);
+  return stored(await db.select(entryColumns(db)).from(auditLog).where(entriesOf('keyCheck')).orderBy(asc(auditLog.seq)).limit(limit));
 }
 
 /**
@@ -1004,7 +949,7 @@ export async function vaultEntriesOf(
 export async function recentIntents(db: Queryable, since: number): Promise<StoredEntry[]> {
   const intents: StoredEntry[] = [];
   for (let before: bigint | undefined; ;) {
-    const page = await newestVaultEntries(db, 'key.intent', INTENT_PAGE, before);
+    const page = await newestVaultEntries(db, 'intent', INTENT_PAGE, before);
     const recent = page.filter((entry) => entry.occurredAt >= since);
     intents.push(...recent);
     if (page.length < INTENT_PAGE || recent.length < page.length) break;
