@@ -2095,11 +2095,13 @@ wait for its statement would number its use after the revoke (below,
 without CloseFenced or BatchFenced). A vault whose every use statement
 also read the binding's `closed_at` would let them go unfenced
 (VaultChecksClosed holds the model without them), at a join on the hot
-path; it does not. So the batch bounds the fence each revoke holds: for
-no longer than the uses a process takes in flight (10, the vault pool's,
-`DEFAULT_CONNECTIONS`) take to arrive at R44's 1,000 a second, 10 ms, as
-each use past them is refused `overloaded` while it waits; at about 0.08
-ms a credential, 125 a batch on Node. D178 (Erwin, 2026-11-06) had chosen
+path; it does not. So the batch bounds the fence each revoke holds, to
+10 ms, Erwin's rule that revoking never pauses `/use` beyond a few ms; at
+about 0.08 ms a credential, 125 a batch on Node. The uses that arrive
+meanwhile wait, none refused: 10 at R44's 1,000 a second, against the
+1,250 keys an isolate has in flight (`USES_IN_FLIGHT`). The 10 ms was
+first derived from that count while it was 10, node-postgres's pool
+size, every use past it refused `overloaded` while it waited (D181). D178 (Erwin, 2026-11-06) had chosen
 50 ms (625); measured through the whole app, one Node process beside a
 removal of 5,000 (reveals by the same service), it refused none of 100
 uses a second, 10% of 200, 43% of 400 and 68% of 800; at 125 a batch,

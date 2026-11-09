@@ -15,7 +15,7 @@ import { sql } from 'drizzle-orm';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { ENGINE, HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
 import { namedWorld } from './named-world.ts';
-import { CONFIG, emptyLog, isolate, LOG_015, onePeriod, useDatabases, world } from './use-world.ts';
+import { CONFIG, emptyLog, heldKeks, isolate, LOG_015, onePeriod, until, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -152,6 +152,21 @@ test("a live reference in a batch: its source's value, decided by its name on th
   const name = await w.nameOf(own);
   assert.deepEqual(values(await vault.useNamedMany!(many(w, [name, 'LIVE_REF']))), { [name]: 'own', LIVE_REF: 'source of LIVE_REF' });
   assert.deepEqual(values(await vault.useNamedMany!(many(w, null))), { [name]: 'own', LIVE_REF: 'source of LIVE_REF', [await w.nameOf(ref.source)]: 'source of LIVE_REF' });
+});
+
+test('every key the place holds takes a place in admission while its key opens, once the vault has listed them (config.md, Q1)', async () => {
+  const w = await named();
+  const made = [await w.key('x'), await w.key('y'), await w.key('z')];
+  const held = heldKeks();
+  const { vault, cache } = await isolate({ uses: { inFlight: 3 } }, { ...CONFIG, keks: held.keks });
+  const all = vault.useNamedMany!(many(w, null));
+  await until(() => held.waiting() === 3);
+  assert.equal(cache.inFlight, 3, 'admitted as one, grown to the three keys it listed');
+  const overloaded = await vault.useNamedMany!(many(w, [await w.nameOf(made[0]!)]));
+  assert.deepEqual(overloaded, { served: true, route: 'busy', outcome: { ok: false, busy: 'overloaded', retryAfter: 1 } });
+  held.free();
+  assert.deepEqual(Object.values(values(await all)).sort(), ['x', 'y', 'z']);
+  assert.equal(cache.inFlight, 0);
 });
 
 test('every key the place holds, listed by the vault, sorted by name', async () => {

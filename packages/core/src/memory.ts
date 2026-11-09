@@ -6,14 +6,17 @@
 // bounded by shares of that number, each with its source:
 //
 //   share            bytes        holds                                               source
-//   uses in flight   64,000,000   the `/use` calls an isolate holds open              half, limits.md's proposal (Q1)
+//   uses in flight   64,000,000   the `/use` calls an isolate holds open              half (D1, Q1)
 //   proxy bodies     16 MiB       request bodies the credential proxy reads whole     the 16 MiB one body took before
 //   caches           16 MiB       answers kept between requests                       as much as the bodies
 //   runtime          the rest     code, the runtime's own, a request's objects        measured: 8.6 MB of it idle
 //
 // The vault's Worker is an isolate of its own, split the same way: it reads no proxy body, and its caches
-// (`UseCache`, `@coffre/vault`) are still counted by `useLimits`. On Node, nothing ends a process at 128 MB: each
-// process holds to the same numbers, as defensive bounds, so a deployment behaves alike on either runtime.
+// (`UseCache`, `@coffre/vault`) are still counted by `useLimits`, its keys in flight by `USES_IN_FLIGHT`. On Node,
+// nothing ends a process at 128 MB: each process holds to the same numbers, as defensive bounds, so a deployment
+// behaves alike on either runtime.
+
+import { USE_DEADLINE_MS } from './vault.ts';
 
 const MiB = 1024 * 1024;
 
@@ -23,16 +26,41 @@ const MiB = 1024 * 1024;
  */
 export const ISOLATE_BYTES = 128_000_000;
 
-/**
- * The `/use` calls an isolate holds open at once: half the isolate, as `docs/design/limits.md` (section 2) proposes,
- * Erwin's to set (its question Q1, open). One in flight holds about 30 KiB on the vault's isolate and 28 KiB on the
- * app's (`USE_IN_FLIGHT_BYTES`), so about 2,000 fit. Stated, not used yet: how uses are refused under overload is
- * Q1's, and `useLimits` (`@coffre/vault`) still counts them as before.
- */
+/** The `/use` calls an isolate holds open at once: half the isolate (D1; docs/design/config.md, section 2.2). */
 export const USES_BYTES = 64_000_000;
 
-/** What one `/use` in flight holds, the larger of the two isolates': local workerd, W331 phase 2a, flat from 100 to 500 at once. */
+/**
+ * What one key in flight holds in the vault's isolate, from its admission to its answer, its wait on the key service
+ * included: 30 KiB, the largest of the measurements, so that `USES_IN_FLIGHT` holds whichever is nearest workerd's.
+ *
+ *   a use held in its statement, local workerd, its RPC from the app included     30 KiB (36 by heap snapshot), flat
+ *                                                                                  from 100 to 500 (W331, phase 2a)
+ *   a lone use held at its key service, Node, in process                          13 to 15 KiB, 250 to 1,000 held
+ *   a batch's key held there, batches of 100, Node, in process                    6 to 9 KiB, 500 and 1,000 held
+ *
+ * Node's V8 does not compress pointers, as workerd's does, so its figures bound workerd's for the same objects from
+ * above; they leave out the transport, which the workerd figure has. A key service's requests take turns, eight at
+ * once (`@coffre/core/kek`'s aws-kms.ts), so the keys waiting there hold their place in its queue, not a request each.
+ * `USES_IN_FLIGHT` is 1,250 while this is at most 51,200 bytes (64,000,000 ÷ 1,250): past it, memory binds.
+ */
 export const USE_IN_FLIGHT_BYTES = 30 * 1024;
+
+/** The CPU one use takes in the vault's isolate, warm: 2.4 ms, local workerd (W331, `pnpm bench:workers`'s use). */
+export const USE_CPU_MS = 2.4;
+
+/**
+ * How many keys an isolate or process has in flight at once, each a place in the vault's admission (`UseCache`,
+ * `@coffre/vault`): past it, a use is refused at once, `overloaded` (R44). The smaller of what its memory holds and
+ * what its CPU can serve within one use's deadline, since a use admitted past that could only be answered `late`:
+ *
+ *   min(USES_BYTES ÷ USE_IN_FLIGHT_BYTES, USE_DEADLINE_MS ÷ USE_CPU_MS)
+ *     = min(64,000,000 ÷ 30,720, 3,000 ms ÷ 2.4 ms) = min(2,083, 1,250) = 1,250
+ *
+ * Derived, never set (R70; docs/design/config.md, Q1). On Node, the same two bounds for the process, as for the other
+ * shares. To re-measure the bytes: `packages/vault/test/bench/held.ts` (its header says how to run it), and a heap
+ * snapshot of the vault's Worker under `pnpm bench:workers`; the CPU: `pnpm bench:workers`, its use's warm CPU.
+ */
+export const USES_IN_FLIGHT = Math.min(Math.floor(USES_BYTES / USE_IN_FLIGHT_BYTES), Math.floor(USE_DEADLINE_MS / USE_CPU_MS));
 
 /**
  * Request bodies the credential proxy reads whole, all of an isolate's at once: the 16 MiB one body could take before,

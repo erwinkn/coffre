@@ -23,7 +23,7 @@ import { openVault, prepareVault } from '../src/vault.ts';
 import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
 import { deletesSettled, horizonHeld, weigh, weighingSession, WORLD_TABLES, type HotCall } from '../../../scripts/matrix-weigh.ts';
-import { change, CONFIG, emptyLog, isolate, LOG_015, seal, SIGNING_KEY, useDatabases } from './use-world.ts';
+import { change, CONFIG, emptyLog, heldKeks, isolate, LOG_015, seal, SIGNING_KEY, until, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
 let hot: Database;
@@ -128,6 +128,24 @@ test('a route of two keys, and of plain keys only: every key decided on one vers
   const before = await count('log_uses');
   assert.deepEqual(values(await vault.useRoute(w.askRoute('flags'))), { [plainName]: 'plain-text' });
   assert.equal(await count('log_uses'), before, 'a plain value: no entry');
+});
+
+test('a route use takes a place in admission for each of its keys while they open, once it has read them (config.md, Q1)', async () => {
+  const w = await routeWorld(db);
+  const a = await w.key('access-key');
+  const b = await w.key('secret-key');
+  const [nameA, nameB] = [await w.nameOf(a), await w.nameOf(b)];
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ s3: { definition: route('s3', [nameA, nameB]), editor: ada } });
+  const held = heldKeks();
+  const { vault, cache } = await isolate({ uses: { inFlight: 2 } }, { ...CONFIG, keks: held.keks });
+  const first = vault.useRoute(w.askRoute('s3'));
+  await until(() => held.waiting() === 2);
+  assert.equal(cache.inFlight, 2, 'admitted as one, grown to its two keys');
+  assert.deepEqual(await vault.useRoute(w.askRoute('s3')), { served: true, route: 'busy', outcome: { ok: false, busy: 'overloaded', retryAfter: 1 } });
+  held.free();
+  assert.deepEqual(values(await first), { [nameA]: 'access-key', [nameB]: 'secret-key' });
+  assert.equal(cache.inFlight, 0);
 });
 
 test("T216: a person's credential no passkey stands behind, presented as a handle's, is refused at its gate as the policy says, cold and warm, a route of one key and of two: nothing used, nothing logged (review r4 of #528; docs/design/passkeys.md, section 6.2)", async () => {

@@ -669,17 +669,17 @@ test("a use by ids logs its request whatever it finds, as before names, its key 
 
 test("an isolate's map of names keeps the most recently used, up to its cap, and none at a cap of 0", () => {
   const ids = (credential: string): Resolved => ({ credential, environment: 'e', slugs: { project: 'p', environment: 'e' } });
-  const cache = new UseCache(useLimits(1, { names: 2 }));
+  const cache = new UseCache(useLimits({ names: 2 }));
   cache.name('a', ids('a'));
   cache.name('b', ids('b'));
   assert.equal(cache.named('a')?.credential, 'a', 'a, used: the most recent now');
   cache.name('c', ids('c'));
   assert.deepEqual([...cache.names.keys()], ['a', 'c'], 'b, the least recently used, gone');
-  const none = new UseCache(useLimits(1, { names: 0 }));
+  const none = new UseCache(useLimits({ names: 0 }));
   none.name('a', ids('a'));
   assert.equal(none.named('a'), undefined);
   // Key ids apart, by environment and name, bounded alike: names asked and dropped leave none behind (review r3 of #412).
-  const keys = new UseCache(useLimits(1, { names: 2 }));
+  const keys = new UseCache(useLimits({ names: 2 }));
   for (const name of ['A', 'B', 'C', 'D']) keys.key('e', name, { id: `id-${name}`, through: false });
   assert.deepEqual([...keys.keyIds.keys()], ['e\nC', 'e\nD']);
   assert.equal(keys.keyed('e', 'A'), undefined);

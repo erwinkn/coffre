@@ -2,6 +2,7 @@ import { NOTHING } from '@coffre/core/access';
 import { ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { KekBadClaimError, KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
 import { CREDENTIAL_NAME } from '@coffre/core/identity';
+import { USES_IN_FLIGHT } from '@coffre/core/memory';
 import { HOT_STATEMENT_TIMEOUT_MS, MAX_PARENTS } from '@coffre/core/vault';
 import {
   type Access, type CredentialAcceptance, type DecidedItem, type NamedKey, type NamedManyInput, type NamedManyOutcome, type NamedUseInput, type NamedUseOutcome, type NamedValue, newUseRequestId,
@@ -31,10 +32,13 @@ import { callBatch as batchSqlite, callNamedBatch as namedSqlite, callRoute as r
  *
  * Around the call, what is per isolate (each a settled value, never work in
  * flight: vault.ts, `PreparedVault`):
- * - **admission:** at most `limit` calls in flight; the next is refused at
- *   once, `overloaded`, holding no connection (R44). A call's place is
- *   given back when it settles; on Workers, where a call may never settle,
- *   at the latest `HELD_PAST_DEADLINE_MS` past its deadline (`UseCache`);
+ * - **admission:** at most `USES_IN_FLIGHT` keys in flight, a call holding
+ *   a place for each key it uses from its admission to its answer, its wait
+ *   on the key service included; the next is refused at once, `overloaded`,
+ *   holding no connection (R44). A call's places are given back when it has
+ *   answered and what it started has settled; on Workers, where a call may
+ *   never settle, at the latest `HELD_PAST_DEADLINE_MS` past its deadline
+ *   (`UseCache`, `seated`);
  * - **the deadline:** at most 3 s from the request's time (R53, R54). The
  *   call is raced against it and answered `late` when it loses; Postgres
  *   holds it too (DeadlineChecked), and a value whose call returns after
@@ -82,10 +86,11 @@ type Lasts = {
 export type Cover = { number: string; at: number; requestId: string; until: number };
 
 /**
- * The settings of an isolate's uses: how many calls in flight at once, how long a cover holds, and how many requests'
+ * The settings of an isolate's uses: how many keys in flight at once, how long a cover holds, and how many requests'
  * names it maps to ids (`UseCache.names`; 0 maps none, each request then reads its ids: the bench's worst case).
  */
 export type UseLimits = {
+  /** Places in admission, one a key a call makes a use of, from its admission to its answer (`UseCache.admit`): `USES_IN_FLIGHT`. */
   inFlight: number; coverMs: number; names: number;
   /**
    * The most keys a statement of a batch makes uses of (`useMany`): each statement holds the fence for its keys' uses,
@@ -96,13 +101,11 @@ export type UseLimits = {
 };
 
 /**
- * How many uses an isolate has in flight at most, unless set: a pool of
- * `connections` serves that many at once, and a call past it would only
- * queue for a connection, holding its deadline. T112 measures the number
- * for Workers; here it is the pool's.
+ * An isolate's uses' settings: the derived count of places (`USES_IN_FLIGHT`, `@coffre/core/memory`), unless a test
+ * sets its own; no deployment sets it (R70).
  */
-export function useLimits(connections: number, set: Partial<UseLimits> = {}): UseLimits {
-  return { inFlight: set.inFlight ?? Math.max(1, connections), coverMs: set.coverMs ?? 60_000, names: set.names ?? 10_000, batch: Math.max(1, set.batch ?? 100) };
+export function useLimits(set: Partial<UseLimits> = {}): UseLimits {
+  return { inFlight: set.inFlight ?? USES_IN_FLIGHT, coverMs: set.coverMs ?? 60_000, names: set.names ?? 10_000, batch: Math.max(1, set.batch ?? 100) };
 }
 
 /**
@@ -110,23 +113,46 @@ export function useLimits(connections: number, set: Partial<UseLimits> = {}): Us
  * `statement_timeout`, `HOT_STATEMENT_TIMEOUT_MS` (`@coffre/core/vault`). On Workers a call's connection is its own, closed
  * at its deadline at the latest (cloudflare.ts, `HyperdrivePool.end`), or with its request if that ends first: what
  * the call asked and Hyperdrive had not sent goes with it, and what reached Postgres by then Postgres ends within its
- * `statement_timeout`. So by this long past the deadline nothing of the call's holds a connection, whether its
- * promise ever settles or not, which on Workers it may never do: its I/O is gone with its request (AGENTS.md, "What
- * an isolate keeps"). Counted until it settled, each such call kept its place until the isolate was recycled (T170).
+ * `statement_timeout`. Its key service's requests are cut at the deadline too (`open`). So by this long past the
+ * deadline nothing of the call's holds a connection, whether its promise ever settles or not, which on Workers it may
+ * never do: its I/O is gone with its request (AGENTS.md, "What an isolate keeps"). Counted until it settled, each such
+ * call kept its place until the isolate was recycled (T170).
  */
 export const HELD_PAST_DEADLINE_MS = HOT_STATEMENT_TIMEOUT_MS;
 
 /**
+ * A call's places in admission (`UseCache.admit`), from its admission until it has answered and nothing it started is
+ * still running, or, where places lapse, `HELD_PAST_DEADLINE_MS` past its deadline at the latest.
+ */
+export type Seat = {
+  /**
+   * Holds `places` from now on, never fewer than it holds: a call that learns how many keys it uses once its first
+   * statement has listed them (a whole environment's read, a route's item). Admitted already, it is never refused here:
+   * the isolate holds one call's keys past its count at most for each call so admitted.
+   */
+  hold(places: number): void;
+  /** Keeps the places until `work` has settled too: a statement the call no longer waits for (answered `late`) still holds its connection. */
+  during(work: Promise<unknown>): void;
+  /** The call has answered: its places go back once all its work has settled. */
+  release(): void;
+};
+
+/** A call's places, by when they lapse: a count and a time, never work in flight. */
+type Admitted = { places: number; until: number; running: number; answered: boolean };
+
+/**
  * An isolate's admission, seal cache and covers. Bounded: past `max` entries, a map starts over.
  *
- * A call holds its place in admission until it settles. With `callsEndWithRequest` (Workers), at most until `HELD_PAST_DEADLINE_MS`
- * past its deadline, settled or not; without (Node), until it settles, as it always does there, its I/O never torn
- * down under it: a call stuck queued for the hot pool or reading past its deadline (`oldWrite`) holds the pool too,
- * and counts until it lets go, so that no call abandoned piles more on the pool (review r1 of #438).
+ * Admission counts keys, not calls: a call holds one place for each key it makes a use of, from its admission until
+ * its last key is opened, refused or `late`, its wait on the key service included (docs/design/config.md, Q1). With
+ * `callsEndWithRequest` (Workers), at most until `HELD_PAST_DEADLINE_MS` past its deadline, settled or not; without
+ * (Node), until it settles, as it always does there, its I/O never torn down under it: a call stuck queued for the hot
+ * pool or reading past its deadline (`oldWrite`) holds the pool too, and counts until it lets go, so that no call
+ * abandoned piles more on the pool (review r1 of #438).
  */
 export class UseCache {
-  /** Each call admitted and not settled, by when its place lapses (`admit`): a time, never work in flight. */
-  readonly #admitted = new Set<{ until: number }>();
+  /** Each call admitted and not settled (`admit`). */
+  readonly #admitted = new Set<Admitted>();
   readonly #lapses: boolean;
   readonly seals = new Map<string, CachedSeals>();
   readonly covers = new Map<string, Cover>();
@@ -157,23 +183,50 @@ export class UseCache {
     this.#lapses = callsEndWithRequest;
   }
 
-  /** How many calls hold a place now: admitted, not settled, and not lapsed. */
+  /** How many places are held now: of calls admitted, not settled, and not lapsed. */
   get inFlight(): number {
     const now = Date.now();
-    for (const slot of this.#admitted) if (slot.until <= now) this.#admitted.delete(slot);
-    return this.#admitted.size;
+    let held = 0;
+    for (const slot of this.#admitted) {
+      if (slot.until <= now) this.#admitted.delete(slot);
+      else held += slot.places;
+    }
+    return held;
   }
 
-  /** Whether the next call is refused, `overloaded`. */
-  full(): boolean {
-    return this.inFlight >= this.limits.inFlight;
-  }
-
-  /** A place for a call due by `deadline`, given back once it settles (what this answers), unless it lapsed first. */
-  admit(deadline: number): () => void {
-    const slot = { until: this.#lapses ? deadline + HELD_PAST_DEADLINE_MS : Infinity };
+  /**
+   * `places` for a call due by `deadline` (its keys, as far as it knows them), or null: refused, `overloaded`, when the
+   * isolate's places are taken, or would be past its count with this call's while other calls hold some. A call of more
+   * keys than the whole count is admitted alone: refused, it could never be served. A batch by ids asks for all its
+   * places at once, so one too large for the places left is refused while other calls keep them taken; a named read of
+   * every key at a place asks for one and grows to its keys once listed (`Seat.hold`), past the count if need be. Under
+   * steady load near the count, the first can be refused retry after retry where the second is served (review r2 of #551).
+   */
+  admit(deadline: number, places = 1): Seat | null {
+    const held = this.inFlight;
+    const { inFlight: count } = this.limits;
+    if (held >= count || (held > 0 && held + places > count)) return null;
+    const slot: Admitted = { places, until: this.#lapses ? deadline + HELD_PAST_DEADLINE_MS : Infinity, running: 0, answered: false };
     this.#admitted.add(slot);
-    return () => this.#admitted.delete(slot);
+    const settled = () => {
+      if (slot.answered && slot.running === 0) this.#admitted.delete(slot);
+    };
+    return {
+      hold: (more) => {
+        slot.places = Math.max(slot.places, more);
+      },
+      during: (work) => {
+        slot.running += 1;
+        void work.then(() => {}, () => {}).finally(() => {
+          slot.running -= 1;
+          settled();
+        });
+      },
+      release: () => {
+        slot.answered = true;
+        settled();
+      },
+    };
   }
 
   keep<T>(map: Map<string, T>, key: string, value: T): void {
@@ -412,6 +465,8 @@ export type UsePath = {
   macKeys: readonly LogMacKey[];
   keks: KekRegistry;
   cache: UseCache;
+  /** The call's places in admission, which its entry (`seated`) takes and every statement it starts holds (`raced`). */
+  seat?: Seat;
   /**
    * What a call waits for first, within its admission: an isolate's first, the log's cutover (vault.ts, `#cutOverYet`).
    * Within it, as on Workers it reads on the call's one connection; however long it waits, its place lapses as any does.
@@ -466,8 +521,33 @@ function wayOf(input: Pick<UseInput, 'credential' | 'way'>): { credential: strin
 /** Busy answers: nothing was decided, ask again shortly. */
 const busy = (why: UseBusy, retryAfter = 1): Extract<UseOutcome, { busy: UseBusy }> => ({ ok: false, busy: why, retryAfter });
 
-/** One use, end to end (the module's comment says how). */
+/** A busy answer as a named use, a named batch or a route use gives it. */
+const busyNamed = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served: true as const, route: 'busy' as const, outcome });
+
+/**
+ * `answer`, within the call's places in admission (`UseCache.admit`): `places`, one for each key it knows it uses, from
+ * here until it has answered and nothing it started still runs (`Seat`). Refused at once, holding nothing, `late` past
+ * its deadline, as the database would (deadline_max), or `overloaded` with the isolate's places taken (R44).
+ */
+async function seated<I extends { at: number; deadline: number }, T>(
+  path: UsePath, input: I, places: number, busyAs: (outcome: Extract<UseOutcome, { busy: UseBusy }>) => T, answer: (path: UsePath, input: I) => Promise<T>,
+): Promise<T> {
+  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busyAs(busy('late'));
+  const seat = path.cache.admit(input.deadline, places);
+  if (seat === null) return busyAs(busy('overloaded'));
+  try {
+    return await answer({ ...path, seat }, input);
+  } finally {
+    seat.release();
+  }
+}
+
+/** One use, end to end (the module's comment says how): one place in admission. */
 export async function use(path: UsePath, input: UseInput): Promise<UseOutcome> {
+  return seated(path, input, 1, (outcome) => outcome, useSeated);
+}
+
+async function useSeated(path: UsePath, input: UseInput): Promise<UseOutcome> {
   checkInput(input);
   checkIds(input);
   const asked = { ...input, ...wayOf(input) };
@@ -498,6 +578,11 @@ export async function use(path: UsePath, input: UseInput): Promise<UseOutcome> {
  * null, the app logs it): the batch is refused, and makes no other call.
  */
 export async function useMany(path: UsePath, input: UseManyInput): Promise<UseManyOutcome> {
+  // A place for each key.
+  return seated(path, input, Array.isArray(input.items) ? input.items.length : 1, (outcome) => outcome, manySeated);
+}
+
+async function manySeated(path: UsePath, input: UseManyInput): Promise<UseManyOutcome> {
   const { items, ...asked } = input;
   if (!Array.isArray(items) || items.length === 0) throw new Error('a batch of uses names a key at least');
   for (const item of items) {
@@ -511,7 +596,7 @@ export async function useMany(path: UsePath, input: UseManyInput): Promise<UseMa
   if ('busy' in made) return made;
   if ('index' in made) return refusedAt(made.index, made.used);
   // Every key allowed: each opened, within the deadline.
-  const opened = await Promise.all(made.allowed.map((one) => opening(path, one, input.deadline)));
+  const opened = await openingAll(path, made.allowed, input.deadline);
   const values: Extract<UseManyOutcome, { ok: true }>['values'] = [];
   for (const [index, one] of opened.entries()) {
     const outcome = 'outcome' in one ? one.outcome : null;
@@ -544,7 +629,6 @@ async function byIds(
     const decided = round > 1;
     if (round > 2) throw new Error('use_batch answered `decide` to a call of keys it was decided for');
     if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busy('late');
-    if (path.cache.full()) return busy('overloaded');
     const made = pending.map((index) => ready(path, each[index]!, requestOf(each[index]!, undefined), undefined, decided, seals));
     // Round 2's keys, each decided on round 1's rows, take their principal's lock: exclusive, first. Rows that name two
     // principals for one credential were written around the log: no lock first, and Postgres ends a wait cycle (40P01).
@@ -644,7 +728,6 @@ async function useOnce(path: UsePath, input: Asked, names?: Names, decided = fal
   const request = requestOf(input, names);
   // A deadline the database would refuse (deadline_max) is refused here at no cost; one already past, too.
   if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return { outcome: busy('late'), row: null, checked: null, request };
-  if (path.cache.full()) return { outcome: busy('overloaded'), row: null, checked: null, request };
   const made = ready(path, input, request, names, decided);
   // The statement, then, within the same admission and deadline, the MAC check of an access entry its probe found that
   // the new log does not account for (`oldWrite`), never past that entry: one forged in the vault's name is passed over.
@@ -803,6 +886,16 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
 /** A use allowed, its key yet to open: what `settle` answers of a sealed value, which its caller opens (`opening`). */
 type Allowed = { allowed: { view: UseView; number: string; covered: boolean }; row: UseRow; checked: CheckedView; request: UseRequest };
 
+/**
+ * Each allowed key opened (`opening`), in order. The call answers on its first failure, as soon as it is known, but
+ * keeps its places (`Seat.during`) while any of its keys is still with the key service.
+ */
+function openingAll(path: UsePath, allowed: readonly Allowed[], deadline: number): Promise<Used[]> {
+  const openings = allowed.map((one) => opening(path, one, deadline));
+  for (const one of openings) path.seat?.during(one);
+  return Promise.all(openings);
+}
+
 /** A use's answer once its key is opened: the value, or `late` past its deadline, or `bad_claim` for a key not this value's. */
 async function opening(path: UsePath, { allowed: { view, number, covered }, row, checked, request }: Allowed, deadline: number): Promise<Used> {
   const opened = await open(path, view, row, deadline);
@@ -852,14 +945,16 @@ function mapped(row: UseRow): Resolved | null {
  * account's alone (`routeOf`, Probing.tla, OneRoute): the key and the map decide the use, never how the app answers it.
  */
 export async function useNamed(path: UsePath, input: NamedUseInput): Promise<NamedUseOutcome> {
+  return seated(path, input, 1, busyNamed, namedSeated);
+}
+
+async function namedSeated(path: UsePath, input: NamedUseInput): Promise<NamedUseOutcome> {
   checkInput(input);
   if ((input.key !== null && (typeof input.key !== 'string' || input.key === '')) || typeof input.tokenHash !== 'string') throw new Error('a named use names its token, by hash, and its key, if any');
   const accepts = acceptsOf(input);
   const { cache } = path;
   const tokenHash = Buffer.from(input.tokenHash, 'base64');
-  const busyFor = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served: true as const, route: 'busy' as const, outcome });
-  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busyFor(busy('late'));
-  if (cache.full()) return busyFor(busy('overloaded'));
+  const busyFor = busyNamed;
   const at = `${input.tokenHash}\n${input.place?.project ?? ''}\n${input.place?.environment ?? ''}`;
   const found = cache.named(at);
   const keyed = found === undefined || input.key === null ? undefined : cache.keyed(found.environment, input.key);
@@ -933,6 +1028,11 @@ export async function useNamed(path: UsePath, input: NamedUseInput): Promise<Nam
  *   the proxy's two keys of a credential, mapped        1 call, 1 statement, both values
  */
 export async function useNamedMany(path: UsePath, input: NamedManyInput): Promise<NamedManyOutcome> {
+  // A place for each key it names; a read of every key the place holds, one until its first statement lists them.
+  return seated(path, input, Array.isArray(input.keys) ? input.keys.length : 1, busyNamed, namedManySeated);
+}
+
+async function namedManySeated(path: UsePath, input: NamedManyInput): Promise<NamedManyOutcome> {
   checkInput({ ...input, requestId: '0' });
   const keys = input.keys === null ? null : [...input.keys];
   if (keys !== null && (keys.length === 0 || keys.some((key) => typeof key !== 'string' || key === '') || new Set(keys).size !== keys.length)) {
@@ -941,9 +1041,7 @@ export async function useNamedMany(path: UsePath, input: NamedManyInput): Promis
   if (typeof input.tokenHash !== 'string') throw new Error('a named batch names its token, by hash');
   const accepts = acceptsOf(input);
   const { cache } = path;
-  const busyFor = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served: true as const, route: 'busy' as const, outcome });
-  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busyFor(busy('late'));
-  if (cache.full()) return busyFor(busy('overloaded'));
+  const busyFor = busyNamed;
   const tokenHash = Buffer.from(input.tokenHash, 'base64');
   const at = `${input.tokenHash}\n${input.place?.project ?? ''}\n${input.place?.environment ?? ''}`;
   const found = cache.named(at);
@@ -984,6 +1082,7 @@ export async function useNamedMany(path: UsePath, input: NamedManyInput): Promis
     const read = await namedBatchOf(path.db)(path.db, gate.call, first, limit);
     // None listed (a refused gate, or a chain cut since it read it) is never a place that holds no key.
     const listed = keys ?? read.keys;
+    if (listed !== null) path.seat?.hold(listed.length);
     const rows = [...read.rows];
     const byIds = [...read.byIds];
     const aheads = [...read.aheads];
@@ -1136,7 +1235,7 @@ export async function useNamedMany(path: UsePath, input: NamedManyInput): Promis
     for (const [i, one] of made.allowed.entries()) allowed.set(again[i]!.index, one);
   }
   const indices = [...allowed.keys()].sort((a, b) => a - b);
-  const opened2 = await Promise.all(indices.map((index) => opening(path, allowed.get(index)!, input.deadline)));
+  const opened2 = await openingAll(path, indices.map((index) => allowed.get(index)!), input.deadline);
   for (const [i, one] of opened2.entries()) {
     const outcome = 'outcome' in one ? one.outcome : null;
     if (outcome === null || !outcome.ok || !('value' in outcome)) return { ...named, stands: true, keys: out, outcome: refusal(indices[i]!, one) };
@@ -1280,9 +1379,10 @@ function standingOf(checked: CheckedView, request: UseRequest): Access {
 /**
  * The call, then `then` on its row (or a batch's rows), raced against the
  * deadline (WorkerHonoursDeadline): lost, the use is answered `late`, and
- * the call's row, if it ever comes, is dropped. Both hold one place in
- * admission, as they hold the call's connection: what the vault reads
- * after the statement (`oldWrite`) is within the same place and deadline.
+ * the call's row, if it ever comes, is dropped. Both hold the call's places
+ * in admission (`Seat.during`), as they hold its connection, even once the
+ * call has answered `late`: what the vault reads after the statement
+ * (`oldWrite`) is within the same places and deadline.
  * Past the deadline, or the race lost, the call starts nothing more, neither the statement
  * after `ready` (nor a batch's next, `sends`) nor, the race lost, the reads after it: its
  * answer has gone. `then` is handed `starts` for those, which it calls before each (a batch's
@@ -1291,7 +1391,6 @@ function standingOf(checked: CheckedView, request: UseRequest): Access {
  * and its row is dropped. A round of a batch is one call, its statements made in turn within it.
  */
 async function raced<R, T>(path: UsePath, deadline: number, call: (sends: () => void) => Promise<R>, then: (row: R, starts: () => void) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
-  const release = path.cache.admit(deadline);
   // Whether the race is lost: once it is, `then` starts nothing. The timer alone says so, never the clock, so that a
   // statement that answered first is decided on, its entry written (Fable's review of #438).
   let lost = false;
@@ -1312,7 +1411,8 @@ async function raced<R, T>(path: UsePath, deadline: number, call: (sends: () => 
     const row = await call(sends);
     starts();
     return then(row, starts);
-  })().finally(release);
+  })();
+  path.seat?.during(running);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<'late'>((resolve) => {
     timer = setTimeout(() => {
@@ -1963,6 +2063,11 @@ function chainFault(path: UsePath, rows: RouteRows): 'tampered' | 'stale' | null
  *   the same, an Owner pointed `openai` elsewhere since              1 call: the new item, the use decided on it
  */
 export async function useRoute(path: UsePath, input: RouteUseInput): Promise<RouteUseOutcome> {
+  // A place for each of its route's keys, once its first statement has read them.
+  return seated(path, input, 1, busyNamed, routeSeated);
+}
+
+async function routeSeated(path: UsePath, input: RouteUseInput): Promise<RouteUseOutcome> {
   checkInput({ ...input, requestId: '0' });
   if (input.purpose !== 'use') throw new Error('a route use uses its keys');
   if (input.named !== null && (typeof input.named?.place?.project !== 'string' || typeof input.named.place.environment !== 'string')) throw new Error("a route use's place reading names its place by slugs");
@@ -1971,9 +2076,7 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
   if (workload !== null && input.named !== null) throw new Error("a workload's route use names its route at its place");
   if (!Array.isArray(input.digests) || input.digests.some((digest) => typeof digest !== 'string')) throw new Error("a route use names its copies' digests");
   const { cache } = path;
-  const busyFor = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served: true as const, route: 'busy' as const, outcome });
-  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busyFor(busy('late'));
-  if (cache.full()) return busyFor(busy('overloaded'));
+  const busyFor = busyNamed;
   const handle = input.caller.kind === 'handle' ? { tokenHash: Buffer.from(input.caller.tokenHash, 'base64'), token: input.caller.tokenHash, accepts: acceptsOf(input.caller) } : null;
   const ask: RouteAsk = {
     handle, workload, project: input.named?.place.project ?? null, environment: input.named?.place.environment ?? null, named: input.named?.route ?? null, stable: input.stable,
@@ -2009,6 +2112,7 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
     if ('busy' in gate) return busyFor(gate);
     if ('credential' in gate) return { served: true, route: 'credential', outcome: gate.credential };
     const { rows } = first;
+    path.seat?.hold(rows.keys.length);
     const placed = handle === null ? null : mapped(rows.gate);
     const at = handle !== null ? placeOf(gate.checked, rows.gate) : workloadPlace(gate.checked, workload!.place);
     const answer = {
@@ -2116,7 +2220,7 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
     // Every key allowed: each opened, within the deadline.
     const values: (NamedValue | null)[] = rows.keys.map((_, i) => decided.plain.get(i) ?? null);
     const indices = [...decided.allowed.keys()].sort((a, b) => a - b);
-    const opened = await Promise.all(indices.map((i) => opening(path, decided.allowed.get(i)!, ask.deadline)));
+    const opened = await openingAll(path, indices.map((i) => decided.allowed.get(i)!), ask.deadline);
     for (const [n, one] of opened.entries()) {
       const outcome = 'outcome' in one ? one.outcome : null;
       if (outcome === null || !outcome.ok || !('value' in outcome)) return { ...named, outcome: routeRefusal(indices[n]!, one) };
@@ -2200,12 +2304,14 @@ function routeAskOf(ask: RouteAsk, made: Ready): Asked {
  * serves. It decides no use, opens no value and writes no entry.
  */
 export async function proxyItem(path: UsePath, input: ProxyItemInput): Promise<ProxyItemOutcome> {
+  return seated(path, input, 1, (outcome) => outcome, proxyItemSeated);
+}
+
+async function proxyItemSeated(path: UsePath, input: ProxyItemInput): Promise<ProxyItemOutcome> {
   checkInput({ ...input, requestId: '0', purpose: 'use' });
   const workload = checkRoute(input, [input.name]);
   if (input.place !== null && (workload !== null || typeof input.place?.project !== 'string' || typeof input.place.environment !== 'string')) throw new Error("proxyItem's place is a handle's, by slugs");
   const { cache } = path;
-  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busy('late');
-  if (cache.full()) return busy('overloaded');
   const handle = input.caller.kind === 'handle' ? { tokenHash: Buffer.from(input.caller.tokenHash, 'base64'), token: input.caller.tokenHash, accepts: acceptsOf(input.caller) } : null;
   const ask: RouteAsk = {
     handle, workload, project: input.place?.project ?? null, environment: input.place?.environment ?? null,
