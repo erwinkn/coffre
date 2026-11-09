@@ -781,7 +781,14 @@ request sent on:
    request (a header, inside another header's Basic base64, the URL, the
    body), it is refused rather than leaked to a third party. The request
    goes out with `redirect: 'manual'`, through the global `fetch` or the
-   credential's `egress` (section 5).
+   credential's `egress` (section 5). It has no time bound of coffre's
+   own: the upstream request ends when the app's does (its hang-up, or its
+   own timeout), through the incoming request's abort signal, so a hung
+   upstream costs coffre no more than it costs the app. On Workers that
+   signal fires for a hang-up only with the `enable_request_signal`
+   compatibility flag, which the app's `wrangler.jsonc` in the examples and
+   in what `coffre init` writes carries; a deployment that has not added
+   it keeps waiting as before.
 5. **Back.** The upstream's answer, without `set-cookie` (it would land on
    coffre's origin), and always `cache-control: no-store`, its own cache
    headers dropped: a cache on the way would serve the next caller, with

@@ -3083,6 +3083,10 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
       headers,
       body: upload?.body ?? body,
       redirect: 'manual',
+      // coffre sets no time bound of its own: the app's is the bound. The upstream request ends, its response body too, when the
+      // app's does (it hangs up, or its own timeout aborts), as it would without coffre in the path. On Workers the signal fires
+      // for a disconnect with `enable_request_signal` (wrangler.jsonc), and on Node under srvx.
+      signal: request.signal,
       ...(streamed ? { duplex: 'half' } : {}),
     } as RequestInit);
   } catch (error) {
