@@ -47,7 +47,7 @@ const KEY_INDEXES = ['log_changes_object_idx'];
  * key's work reads of these (a reference's source's environment, a personal config's parent) takes columns no index
  * holds, a heap fetch that no all-visible page spares (review r6 of W268).
  */
-export const WORLD_TABLES = ['environments', 'projects', 'credentials', 'identities', 'principals', 'grants', 'log_config', 'checkpoint_fence'];
+export const WORLD_TABLES = ['environments', 'projects', 'credentials', 'identities', 'principals', 'grants', 'log_config', 'policy', 'roles', 'checkpoint_fence'];
 
 /** What a weighed call read: its shared buffers, of them the blocks `KEY_TABLES` and `KEY_INDEXES` gave, and every relation's blocks. */
 export type Weighed = { buffers: number; keyBlocks: number; blocks: Record<string, number> };

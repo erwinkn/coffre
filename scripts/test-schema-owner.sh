@@ -221,12 +221,30 @@ DO $$
 DECLARE
     v_missing text;
 BEGIN
-    -- Every function that runs as its owner and reads `passkeys`, read from their bodies.
-    SELECT string_agg(format('%s, running as %s', oid::regprocedure, pg_get_userbyid(proowner)), E';\n') INTO v_missing
-      FROM pg_proc
-     WHERE pronamespace = 'public'::regnamespace AND prosecdef AND prosrc ~ 'public\.passkeys[^a-z_]'
-       AND NOT has_table_privilege(proowner, 'public.passkeys', 'SELECT');
-    IF v_missing IS NOT NULL THEN RAISE EXCEPTION 'cannot read passkeys: %', v_missing; END IF;
+    -- Every function that runs as its owner and reads a table the member made after 0062, `passkeys` (0063) and T178's
+    -- `policy` and `roles` (0081), itself or through a helper that runs as its caller, read from their bodies.
+    WITH made(tbl) AS (VALUES ('passkeys'), ('policy'), ('roles')),
+    helpers AS (
+        SELECT proname, prosrc FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND NOT prosecdef
+    )
+    SELECT string_agg(format('%s, running as %s, cannot read %s', p.oid::regprocedure, pg_get_userbyid(p.proowner), m.tbl), E';\n')
+      INTO v_missing
+      FROM pg_proc p CROSS JOIN made m
+     WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef
+       AND (p.prosrc ~ ('public\.' || m.tbl || '([^a-z_]|$)')
+            OR EXISTS (SELECT 1 FROM helpers h WHERE p.prosrc ~ ('public\.' || h.proname || '\s*\(')
+                                                 AND h.prosrc ~ ('public\.' || m.tbl || '([^a-z_]|$)')))
+       AND NOT has_table_privilege(p.proowner, 'public.' || m.tbl, 'SELECT');
+    IF v_missing IS NOT NULL THEN RAISE EXCEPTION '%', v_missing; END IF;
+    -- And each one that writes them (`change_input`), what it writes.
+    WITH made(tbl) AS (VALUES ('policy'), ('roles')),
+    writes(privilege, pattern) AS (VALUES ('INSERT', 'INSERT INTO public\.'), ('UPDATE', 'UPDATE public\.'), ('DELETE', 'DELETE FROM public\.'))
+    SELECT string_agg(format('%s, running as %s, cannot %s %s', p.oid::regprocedure, pg_get_userbyid(p.proowner), w.privilege, m.tbl), E';\n')
+      INTO v_missing
+      FROM pg_proc p CROSS JOIN made m CROSS JOIN writes w
+     WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND p.prosrc ~ (w.pattern || m.tbl || '([^a-z_]|$)')
+       AND NOT has_table_privilege(p.proowner, 'public.' || m.tbl, w.privilege);
+    IF v_missing IS NOT NULL THEN RAISE EXCEPTION '%', v_missing; END IF;
     IF pg_get_userbyid((SELECT proowner FROM pg_proc WHERE oid = 'public.write_request(bigint, bytea, text, text, text[])'::regprocedure))
        <> 'migration_owner' THEN
         RAISE EXCEPTION 'write_request is no longer the owner''s: the split tests nothing';

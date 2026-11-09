@@ -187,6 +187,42 @@ export type RolesInput = {
   instanceRoles: Readonly<Partial<Record<InstanceRole, RoleDefinition>>>;
 };
 
+/**
+ * One role (T178, 0.16; formal/Roles.tla): its row of `roles`, an object of
+ * its own beside the whole `roles` one, `role`/`<scope>/<name>` (`roleRef`),
+ * its definition as the whole object says: an Owner's edit, or null for a
+ * role as it ships. A role an Owner made, deleted, is no object. 0.16
+ * decides on the whole object, writes this one with each change of the
+ * role (DualWrite), and seals it from the whole object at its start
+ * (`roleChanges`); 0.17 reads it.
+ *
+ *   developer, as it ships      { kind: 'role', id: 'project/developer', definition: null }
+ *   router, an Owner's          { kind: 'role', id: 'project/router', definition: { permissions: […], … } }
+ */
+export type RoleInput = { kind: 'role'; id: string; definition: RoleDefinition | null };
+
+/** Which of the roles' two tables a role is of: a project's, granted on places, or the instance's, a member's own. */
+export type RoleTable = 'roles' | 'instanceRoles';
+
+/** A role's object: `project/<name>` or `instance/<name>`. */
+export function roleRef(table: RoleTable, role: string): Ref & { kind: 'role' } {
+  return { kind: 'role', id: `${table === 'roles' ? 'project' : 'instance'}/${role}` };
+}
+
+/**
+ * What a role's object is, its table's edits being `edits` (the whole
+ * object's, `RolesInput`): the edit, null for one that ships with none, and
+ * no object for one an Owner made that the edits do not hold. The same
+ * rule `role.define` applies to the whole object, so that the two agree.
+ */
+export function roleObject(table: RoleTable, role: string, definition: RoleDefinition | null): RoleInput | null {
+  const shipped: Readonly<Record<string, RoleDefinition>> = table === 'roles' ? ROLES : INSTANCE_ROLES;
+  const ships = Object.hasOwn(shipped, role);
+  const same = definition !== null && ships && canonical(normalDefinition(shipped[role]!)) === canonical(normalDefinition(definition));
+  if (definition === null || same) return ships ? { kind: 'role', id: roleRef(table, role).id, definition: null } : null;
+  return { kind: 'role', id: roleRef(table, role).id, definition };
+}
+
 export type PolicyInput = { kind: 'policy'; bulk: BulkLimit };
 
 /**
@@ -225,7 +261,7 @@ export type ProxyInput = { kind: 'proxy'; id: string; items: Readonly<Record<str
 /** Every name the deployment's code ever reserved and no instance Owner released, sorted. */
 export type ReservedInput = { kind: 'proxy-reserved'; names: readonly string[] };
 
-export type Input = PrincipalInput | CredentialInput | ConnectionInput | BindingInput | SecretInput | EnvironmentInput | RolesInput | PolicyInput | ProxyInput | ReservedInput;
+export type Input = PrincipalInput | CredentialInput | ConnectionInput | BindingInput | SecretInput | EnvironmentInput | RolesInput | RoleInput | PolicyInput | ProxyInput | ReservedInput;
 export type Kind = Input['kind'];
 
 /** An object of the log: its kind and its id (the instance's own for the roles and the policy, of which there is one each). */
@@ -561,6 +597,8 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
       return op.op === 'environment.archive' ? { ...environment, archived: op.archived } : { ...environment, deleted: true, projectArchived: false };
     }
     case 'role.define': {
+      // One role's object, written whole (`roles`' row, 0.16): whatever it was, what the definition makes it.
+      if (ref.kind === 'role') return roleRef(op.table, op.role).id === ref.id ? roleObject(op.table, op.role, op.definition) : undefined;
       const edits = of('roles') ?? (created('roles') ? noEdits() : null);
       if (edits === null) return undefined;
       // A table with no prototype: a role named `__proto__` is a role like another, never the object's prototype.

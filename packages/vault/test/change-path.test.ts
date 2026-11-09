@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
-import { EVERYWHERE, ROLES, type Permission } from '@coffre/core/access';
+import { EVERYWHERE, INSTANCE_ROLES, ROLES, type Permission, type RoleDefinition } from '@coffre/core/access';
 import { later, tablesOf } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { postgresSession } from '@coffre/db/connect';
@@ -20,7 +20,8 @@ import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import type { Sealed } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { decideUse, type UseRequest } from '../src/decide.ts';
-import { noEdits, objectKey, sealKey, sealOf, type CredentialInput, type EnvironmentInput, type Input, type Op, type Ref, type SecretInput } from '../src/inputs.ts';
+import { noEdits, objectKey, roleRef, ROLES_REF, sealKey, sealOf, type CredentialInput, type EnvironmentInput, type Input, type Op, type Ref, type RoleTable, type RolesInput, type SecretInput } from '../src/inputs.ts';
+import { roleChanges } from '../src/role-rows.ts';
 import { authentic, changeEntry, entryMac, logMacKey } from '../src/log-entry.ts';
 import { readUse, replay, type LoggedChange, type Replayed } from '../src/log-replay.ts';
 import * as store from '../src/store.ts';
@@ -108,7 +109,7 @@ async function holdsReplay(keys: ChangeKeys, refs: readonly (Ref & { kind: store
 function made(keys: ChangeKeys, ref: Ref, op: Op, after: Input, sealFrom: Buffer | null, requestId: string = randomUUID()): store.ChangeCall {
   const seal = sealOf(keys.seals[0]!, ref, after);
   const row = { at: Date.now(), requestId, object: objectKey(ref), actor: ROOT, payload: payloadOf(ref, op), seal };
-  const writes = ref.kind === 'environment' || ref.kind === 'roles' || ref.kind === 'policy';
+  const writes = ref.kind === 'environment' || ref.kind === 'roles' || ref.kind === 'role' || ref.kind === 'policy';
   return { ref, ...row, value: writes ? JSON.stringify(after) : null, sealFrom, mac: entryMac(keys.mac, { tree: 'changes', row }) };
 }
 
@@ -437,10 +438,11 @@ test('protecting two sealed environments in one call is two changes, each from i
   await holdsReplay(w.keys, [w.dev, w.prod, gone].map((id) => ({ kind: 'environment' as const, id })));
 });
 
-test('a policy row planted with no seal is refused, not taken for one from before the cutover', async () => {
+test('a policy row planted under no seal of the vault\'s is refused, not taken for one from before the cutover', async () => {
   const config = configure();
-  const { logConfig } = tablesOf(db.owner);
-  await db.owner.insert(logConfig).values({ name: 'policy', value: JSON.stringify({ kind: 'policy', bulk: { count: 1_000_000, windowMs: 60_000 } }) });
+  // Its seal is a column it must have (0081), so the writer makes one up.
+  const { policy } = tablesOf(db.owner);
+  await db.owner.insert(policy).values({ name: 'instance', bulkCount: 1_000_000, bulkWindowMs: 60_000, seal: randomBytes(16) });
   const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   assert.deepEqual(await opsOf(keysOf(config), { kind: 'policy', id: 'instance' }), []);
@@ -481,6 +483,128 @@ test('an Owner\'s role edit is a change of the roles object, which the cutover m
   assert.deepEqual(roles.kind === 'roles' && Object.keys(roles.roles), ['user']);
 });
 
+/** The roles object as `log_config` holds it now, and what the rows lack of it (`roleChanges`): none when every row is in step. */
+async function rolesNow(keys: ChangeKeys): Promise<{ whole: RolesInput; behind: string[]; rows: Awaited<ReturnType<typeof store.roleRows>> }> {
+  const { row } = await store.readObject(db.owner, ROLES_REF as Ref & { kind: 'roles' });
+  const whole = row?.kind === 'roles' ? row : noEdits();
+  const rows = await store.roleRows(db.owner);
+  return { whole, rows, behind: roleChanges(keys.seals, whole, rows).map(({ ref }) => ref.id) };
+}
+
+/** `world()`, then one call: the vault's start steps run at the first call after the cutover, which `world` makes after its own. */
+async function rolesWorld(): Promise<Awaited<ReturnType<typeof world>>> {
+  const w = await world();
+  assert.equal((await w.vault.access(ROOT)).role, 'owner');
+  return w;
+}
+
+/** Every role that ships, by its object's id. */
+const SHIPPED = [...Object.keys(ROLES).map((role) => `project/${role}`), ...Object.keys(INSTANCE_ROLES).map((role) => `instance/${role}`)].sort();
+
+test("the vault's start makes each role's row what the roles object says, sealed, one change each, and the next start changes nothing (T178, Roles.tla's sync)", async () => {
+  const w = await rolesWorld();
+  const { rows, behind } = await rolesNow(w.keys);
+  assert.deepEqual(behind, []);
+  assert.deepEqual(rows.map((row) => `${row.scope}/${row.name}`).sort(), SHIPPED);
+  assert.ok(rows.every((row) => row.definition === null), 'each as it ships');
+  for (const id of SHIPPED) assert.deepEqual(await opsOf(w.keys, { kind: 'role', id }), ['role.define'], id);
+  const before = (await changeRows()).length;
+  const again = await openLocalVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  assert.equal((await again.access(ROOT)).role, 'owner');
+  assert.equal((await changeRows()).length, before, 'in step: no change');
+  await holdsReplay(w.keys, SHIPPED.map((id) => ({ kind: 'role' as const, id })));
+});
+
+test("an Owner's role edit writes the role's row and the whole object together, sealed alike, and a deletion takes the row (T178, DualWrite)", async () => {
+  const w = await rolesWorld();
+  const reader = { ...ROLES.viewer, name: 'reader', permissions: ['secret.read', 'secret.use'] as Permission[], protected: ['secret.read', 'secret.use'] as Permission[] };
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'reader', definition: reader } })).ok);
+  const developer = { ...ROLES.developer, permissions: ['secret.read', 'secret.use'] as Permission[], protected: [] as Permission[] };
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'developer', definition: developer } })).ok);
+  let now = await rolesNow(w.keys);
+  assert.deepEqual(now.behind, []);
+  assert.deepEqual(now.rows.find((row) => row.name === 'reader')?.definition, now.whole.roles.reader);
+  assert.deepEqual(now.rows.find((row) => row.scope === 'project' && row.name === 'developer')?.definition, now.whole.roles.developer);
+  assert.deepEqual(await opsOf(w.keys, { kind: 'role', id: 'project/reader' }), ['role.define']);
+  await holdsReplay(w.keys, [ROLES_REF as Ref & { kind: 'roles' }, { kind: 'role', id: 'project/reader' }, { kind: 'role', id: 'project/developer' }]);
+  // Deleted, and developer put back as it ships: no row of reader, developer's as it ships.
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'reader', definition: null } })).ok);
+  assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'developer', definition: null } })).ok);
+  now = await rolesNow(w.keys);
+  assert.deepEqual(now.behind, []);
+  assert.equal(now.rows.find((row) => row.name === 'reader'), undefined);
+  assert.equal(now.rows.find((row) => row.scope === 'project' && row.name === 'developer')?.definition, null);
+  assert.deepEqual(await opsOf(w.keys, { kind: 'role', id: 'project/reader' }), ['role.define', 'role.define']);
+  const replayed = await holdsReplay(w.keys, [{ kind: 'role', id: 'project/developer' }]);
+  assert.equal(replayed.rows.get(objectKey({ kind: 'role', id: 'project/reader' })), undefined, 'gone in the replay too');
+});
+
+test("0.15.0's change of the roles object leaves each role it moves unsealed (NullOnOld), and the vault's next start, or 0.16's next edit, seals it again", async () => {
+  const w = await rolesWorld();
+  const keys = w.keys;
+  // As 0.15.0's vault changes a role: the whole object, through `change_input`, which knows no role's row.
+  const edit = async (role: string, definition: RolesInput['roles'][string] | null, table: RoleTable = 'roles') => {
+    const { row, seal } = await store.readObject(db.owner, ROLES_REF as Ref & { kind: 'roles' });
+    const before = row?.kind === 'roles' ? row : noEdits();
+    const roles: Record<string, RoleDefinition> = { ...before[table] };
+    if (definition === null) delete roles[role];
+    else roles[role] = definition;
+    const op: Op = { op: 'role.define', table, role, definition };
+    assert.ok((await change([made(keys, ROLES_REF, op, { ...before, [table]: roles }, seal)]))[0] !== null, `0.15.0 changes ${role}`);
+  };
+  const tight = { ...ROLES.developer, permissions: ['secret.use'] as Permission[], protected: [] as Permission[] };
+  const ops = { ...ROLES.viewer, name: 'ops', permissions: ['secret.use'] as Permission[], protected: [] as Permission[] };
+  // An instance role too: the other table, and the other scope's rows.
+  const quiet = { ...INSTANCE_ROLES.auditor, permissions: [] as Permission[], protected: [] as Permission[] };
+  await edit('developer', tight);
+  await edit('ops', ops);
+  await edit('auditor', quiet, 'instanceRoles');
+  let now = await rolesNow(keys);
+  const row = (name: string, scope = 'project') => now.rows.find((stored) => stored.scope === scope && stored.name === name);
+  assert.deepEqual(now.behind, ['project/developer', 'project/ops', 'instance/auditor']);
+  assert.deepEqual([row('developer')?.definition, row('developer')?.seal], [tight, null], "developer's row as 0.15.0 left it, unsealed: never the vault's");
+  assert.deepEqual([row('ops')?.definition, row('ops')?.seal], [ops, null]);
+  assert.deepEqual([row('auditor', 'instance')?.definition, row('auditor', 'instance')?.seal], [quiet, null]);
+  assert.ok(row('viewer')?.seal !== null, 'a role it did not move keeps its seal');
+  assert.ok(row('auditor')?.seal !== null, "the project's auditor is another role, and keeps its seal");
+  const again = await openLocalVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  assert.equal((await again.access(ROOT)).role, 'owner');
+  now = await rolesNow(keys);
+  assert.deepEqual(now.behind, []);
+  // 0.15.0 deletes ops: its row stays, unsealed, its definition none; 0.16's next edit, of another role, deletes it first
+  // (EditSyncs).
+  await edit('ops', null);
+  now = await rolesNow(keys);
+  assert.deepEqual([row('ops')?.definition, row('ops')?.seal], [null, null]);
+  assert.deepEqual(now.behind, ['project/ops']);
+  const deployer = { ...ROLES.viewer, name: 'deployer', permissions: ['secret.use'] as Permission[], protected: [] as Permission[] };
+  assert.ok((await again.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'deployer', definition: deployer } })).ok);
+  now = await rolesNow(keys);
+  assert.deepEqual(now.behind, []);
+  assert.equal(row('ops'), undefined);
+  await holdsReplay(keys, [ROLES_REF as Ref & { kind: 'roles' }, { kind: 'role', id: 'project/developer' }, { kind: 'role', id: 'project/deployer' }]);
+});
+
+test("change_input writes a role's row only from its object's newest change's seal, whatever the row holds, and makes none by a genesis", async () => {
+  const w = await rolesWorld();
+  const ref = roleRef('roles', 'viewer');
+  const [stored] = (await store.roleRows(db.owner)).filter((row) => row.scope === 'project' && row.name === 'viewer');
+  const edited = { kind: 'role' as const, id: ref.id, definition: { ...ROLES.viewer, permissions: ['secret.use'] as Permission[] } };
+  const op: Op = { op: 'role.define', table: 'roles', role: 'viewer', definition: edited.definition };
+  // From a seal that is not the newest: nothing done.
+  assert.deepEqual(await change([made(w.keys, ref, op, edited, randomBytes(16))]), [null]);
+  // A writer moved the row: the change goes on from the newest seal all the same, and replaces it.
+  const { roles } = tablesOf(db.owner);
+  await db.owner.update(roles).set({ seal: null }).where(eq(roles.name, 'viewer'));
+  assert.notDeepEqual(await change([made(w.keys, ref, op, edited, stored!.newest!)]), [null]);
+  const [now] = (await store.roleRows(db.owner)).filter((row) => row.scope === 'project' && row.name === 'viewer');
+  assert.deepEqual(now!.definition, edited.definition);
+  assert.ok(now!.seal !== null && now!.newest?.equals(now!.seal), "sealed by its object's newest change");
+  // Not what the whole object says, which this change left as it was: the next start puts it back.
+  assert.deepEqual((await rolesNow(w.keys)).behind, ['project/viewer']);
+  await assert.rejects(change([genesisCall(w.keys, roleRef('roles', 'auditor'), { kind: 'role', id: 'project/auditor', definition: null }, Date.now(), 'system:cutover')]), (error: Error & { cause?: Error }) => /no genesis/.test(`${error.message} ${error.cause?.message ?? ''}`));
+});
+
 test('the vault writes its bulk cap into the log at its start, once, and again when the deployment changes it', async () => {
   const config = configure();
   const policy = { kind: 'policy' as const, id: 'instance' };
@@ -500,9 +624,10 @@ test('the vault writes its bulk cap into the log at its start, once, and again w
 test('a change answers only once its entry is sealed (R51, CommitBeforeAnswer)', async () => {
   let release!: () => void;
   const held = new Promise<void>((resolve) => (release = resolve));
-  // The start's own changes are sealed at once; the one this case watches waits until released.
+  // The start's own changes are sealed at once (the cutover, the bulk cap, the roles' rows); the one this case watches
+  // waits until released.
   const seal = sealThroughDouble(async () => {
-    if (seal.asked.length > 2) await held;
+    if (seal.asked.length > 3) await held;
     return {} as Sealed;
   });
   const w = await world({ sealThrough: seal });

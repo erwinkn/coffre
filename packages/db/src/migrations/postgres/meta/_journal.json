@@ -547,6 +547,13 @@
       "when": 1794134952480,
       "tag": "0080_spent_tokens_pruned",
       "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1794165126714,
+      "tag": "0081_roles_policy",
+      "breakpoints": true
     }
   ]
 }

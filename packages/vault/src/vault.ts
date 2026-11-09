@@ -195,9 +195,11 @@ import { proveIn, type SealThrough } from './checkpointer.ts';
 import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import {
-  applyOp, canonical, limitChange, noEdits, objectKey, POLICY_REF, RESERVED_REF, ROLES_REF, sealed as sealedObject, sealKey, sealOf,
-  type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type ProxyInput as ProxyObject, type ProxyItem, type Ref, type SecretInput,
+  applyOp, canonical, limitChange, noEdits, objectKey, POLICY_REF, RESERVED_REF, roleRef, ROLES_REF, sealed as sealedObject, sealKey, sealOf,
+  type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type ProxyInput as ProxyObject, type ProxyItem, type Ref, type RolesInput,
+  type RoleTable, type SecretInput,
 } from './inputs.ts';
+import { roleChanges, type StoredRole } from './role-rows.ts';
 import { frozenHoldings, notCleared, proxyView, reservedProblem, routeRefusal, type ResolvedKey } from './proxy.ts';
 import { TICK_MS } from './log-checkpointer.ts';
 import { authentic, changeEntry, changeHolds, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
@@ -301,6 +303,8 @@ export type PreparedVault = {
   log015: (ChangeKeys & { macs: readonly LogMacKey[]; sealThrough: SealThrough; heldOutside: () => Promise<readonly PairNotes[]>; sealing: () => Promise<Sealing> | Sealing }) | null;
   /** Whether this process wrote its bulk cap into 0.15's log, or found it there (`#limit`). */
   limited: boolean;
+  /** Whether this process made every role's row what the log's roles object says, sealed, or found it so (`#syncRoles`). */
+  rolesSynced: boolean;
   /** Whether 0.15's log is cut over from 0.14, as this process found it (`cutover`): until then, nothing of 0.15's runs. */
   cutover: boolean;
   /**
@@ -345,6 +349,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, codeWaitMs: options.codeWaitMs ?? CALL_DEADLINE_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
     log015: (options.log ?? '0.15') === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside, options.sealing) : null,
     limited: false,
+    rolesSynced: false,
     cutover: false,
     marked: false,
     verifier: null,
@@ -768,6 +773,9 @@ type StartReads = {
   holders?: Promise<string[]>;
   /** `#limit`'s: the policy as 0.15's log holds it. */
   policy?: Promise<HeldObject>;
+  /** `#syncRoles`': the roles' rows, and their whole object as the log holds it. */
+  roles?: Promise<StoredRole[]>;
+  whole?: Promise<Held>;
 };
 
 /**
@@ -1396,6 +1404,7 @@ class VaultService implements Vault {
     // A log with no entry of the vault's holds nothing to convert, and stays empty until someone acts.
     if (prepared.superseded === null && prepared.since !== null && !prepared.converted) await this.#convert(start);
     if (prepared.superseded === null && prepared.log015 !== null && !prepared.limited) await this.#limit(start);
+    if (prepared.superseded === null && prepared.log015 !== null && !prepared.rolesSynced) await this.#syncRoles(start);
     return prepared.superseded;
   }
 
@@ -1422,7 +1431,8 @@ class VaultService implements Vault {
     // The cutover mark's, until the cutover or the mark; the Owners' declaration's, until the conversion lands.
     const cutover = log015 && !prepared.cutover && (!prepared.marked || convert);
     const limit = log015 && !prepared.limited;
-    if (!settle && !convert && !cutover && !limit) return null;
+    const sync = log015 && !prepared.rolesSynced;
+    if (!settle && !convert && !cutover && !limit && !sync) return null;
     const asked: StartReads = {
       rotation: settle ? store.latestVaultEntry(db, [KEY_ROTATE]) : undefined,
       newest: settle ? store.vaultPage(db, undefined, 1).then(([entry]) => entry) : undefined,
@@ -1432,6 +1442,8 @@ class VaultService implements Vault {
       checkpoint: cutover && convert ? logStore(db).newest() : undefined,
       holders: convert ? store.everyProjectHolders(db) : undefined,
       policy: limit ? store.readObject(db, POLICY_REF as Ref & { kind: 'policy' }) : undefined,
+      roles: sync ? store.roleRows(db) : undefined,
+      whole: sync ? heldByLog(prepared.log015!, db, ROLES_REF as Ref & { kind: 'roles' }) : undefined,
     };
     // A step that returns first leaves the reads after it unawaited: their failures are the call's own, not unhandled.
     for (const read of Object.values(asked)) (read as Promise<unknown> | undefined)?.catch(() => {});
@@ -1490,6 +1502,37 @@ class VaultService implements Vault {
       if (op !== null) d.changes!.stage(POLICY_REF as Ref & { kind: 'policy' }, op, VAULT_ACTOR);
     });
     if (outcome.ok) this.#prepared.limited = true;
+  }
+
+  /**
+   * Under 0.15's log, every role's row made what the log's roles object
+   * says, sealed (T178, 0.16; formal/Roles.tla's sync): a change of each
+   * that is not, as any change, under the head and the fence, once per
+   * process, before the vault serves anything, after the bulk cap. 0.15.0's
+   * changes of the roles object leave the rows of the roles they change
+   * unsealed, and a writer may move any: each start puts them right, so
+   * that 0.17, which reads them, finds every one sealed (0.17 follows a
+   * 0.16 that started, NeverSkip). The rows are read first with no lock:
+   * an isolate that finds them in step takes none. A roles object the log
+   * does not bear out is refused wherever it is read: its rows wait for a
+   * start after an Owner writes it again.
+   */
+  async #syncRoles(start: StartReads): Promise<void> {
+    const log015 = this.#prepared.log015!;
+    const wholeOf = (held: Held): RolesInput => (held.log === 'live' && held.object.kind === 'roles' ? held.object : noEdits());
+    try {
+      const [rows, whole] = await Promise.all([start.roles ?? store.roleRows(this.#db), start.whole ?? heldByLog(log015, this.#db, ROLES_REF as Ref & { kind: 'roles' })]);
+      if (roleChanges(log015.seals, wholeOf(whole), rows).length > 0) {
+        const outcome = await this.#decideNow([], async (d) => {
+          const [held, under] = await Promise.all([d.changes!.held(d.tx, ROLES_REF as Ref & { kind: 'roles' }), store.roleRows(d.tx)]);
+          for (const { ref, op } of roleChanges(log015.seals, wholeOf(held), under)) d.changes!.stage(ref, op, VAULT_ACTOR);
+        });
+        if (!outcome.ok) return;
+      }
+    } catch (error) {
+      if (!(error instanceof NotLogged)) throw error;
+    }
+    this.#prepared.rolesSynced = true;
   }
 
   async #replaceEveryProject(d: Decision, principal: string): Promise<void> {
@@ -3232,7 +3275,7 @@ class VaultService implements Vault {
       // Those the policy no longer holds stay out: a deleted environment's id, and an unwritten fork's past its window,
       // neither of which comes back, the window being one a fork writes its row well within.
       // What 0.15's log changes with it: the roles object, or each environment whose protection moves.
-      const changes: { ref: Ref & { kind: 'roles' | 'environment' }; op: Op }[] = [];
+      const changes: { ref: Ref & { kind: 'roles' | 'role' | 'environment' }; op: Op }[] = [];
       const next: PolicyEdits = {
         roles: { ...edits.roles },
         instanceRoles: { ...edits.instanceRoles },
@@ -3260,7 +3303,7 @@ class VaultService implements Vault {
             throw refused('invalid', `${change.role} is granted on environments: as it ships, it holds a project-wide permission, which would make those grants incoherent`);
           }
           delete table[change.role];
-          changes.push({ ref: ROLES_REF as Ref & { kind: 'roles' }, op: { op: 'role.define', table: instance ? 'instanceRoles' : 'roles', role: change.role, definition: null } });
+          changes.push(...await this.#roleWrites(d, instance ? 'instanceRoles' : 'roles', change.role, null));
         } else {
           const problem = definitionProblem(change.definition);
           if (problem !== null) throw refused('invalid', problem);
@@ -3272,7 +3315,7 @@ class VaultService implements Vault {
           const shipped = instance ? INSTANCE_ROLES[change.role as InstanceRole] : isBuiltinRole(change.role) ? ROLES[change.role] : undefined;
           if (shipped !== undefined && JSON.stringify(normalDefinition(shipped)) === JSON.stringify(definition)) delete table[change.role];
           else table[change.role] = definition;
-          changes.push({ ref: ROLES_REF as Ref & { kind: 'roles' }, op: { op: 'role.define', table: instance ? 'instanceRoles' : 'roles', role: change.role, definition } });
+          changes.push(...await this.#roleWrites(d, instance ? 'instanceRoles' : 'roles', change.role, definition));
         }
       } else if (change?.kind === 'protect') {
         if (typeof change.projectId !== 'string' || !UUID.test(change.projectId) || !Array.isArray(change.environmentIds) || change.environmentIds.length === 0
@@ -3332,6 +3375,22 @@ class VaultService implements Vault {
       }
       return answer;
     });
+  }
+
+  /**
+   * What a change of one role writes to 0.15's log, in this order (T178, 0.16; formal/Roles.tla's 0.16 change): the
+   * row of each other role brought to what the log's roles object says, sealed, as the vault's start does (EditSyncs:
+   * one 0.15.0 changed since is not left behind this one); the role's own row, its object; and the whole object
+   * (DualWrite), which 0.16's uses still decide on. Under 0.14's log alone, the whole object's change, which nothing
+   * stages. Each staged under the change's actor.
+   */
+  async #roleWrites(d: Decision, table: RoleTable, role: string, definition: RoleDefinition | null): Promise<{ ref: Ref & { kind: 'roles' | 'role' }; op: Op }[]> {
+    const op: Op = { op: 'role.define', table, role, definition };
+    const whole = { ref: ROLES_REF as Ref & { kind: 'roles' }, op };
+    if (d.changes == null) return [whole];
+    const [held, rows] = await Promise.all([d.changes.held(d.tx, ROLES_REF as Ref & { kind: 'roles' }), store.roleRows(d.tx)]);
+    const object: RolesInput = held.log === 'live' && held.object.kind === 'roles' ? held.object : noEdits();
+    return [...roleChanges(this.#prepared.log015!.seals, object, rows, { table, role }), { ref: roleRef(table, role), op }, whole];
   }
 
   setSettings(input: SetSettingsInput): Promise<Outcome<{ settings: Settings }>> {

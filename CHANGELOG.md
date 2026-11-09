@@ -406,6 +406,45 @@
   key, and the tab words each: "pat@acme.example, who saved it as an Owner
   of market, no longer is one. An Owner of market saves it again."
 
+- **The policy and the roles out of `log_config` (T178).** `policy` holds
+  the bulk cap as columns, `bulk_count` and `bulk_window_ms`, each held by a
+  check to what a deployment's `bulkLimit` may be (a count of at least one,
+  a window above nothing and at most a day), where `log_config` held it as
+  JSON. It is the same sealed object: every change of it still carries the
+  whole policy, and a use still reads its cap from the newest one. The
+  migration copies the row over. `roles` holds one row per role, each its
+  own sealed object of the log: an Owner's edit of a role that ships (null
+  for one as it ships), or a role an Owner made, under `project` or
+  `instance`. This release still decides on `log_config`'s whole roles
+  object, as 0.15.0 does, so a use costs what it did. It writes each role's
+  row beside it: a change of a role writes the role's row and the whole
+  object in one transaction, and the vault, at each start, rewrites, sealed,
+  every row that is not what the whole object says. The migration makes no
+  row: the first start makes them all, one change per role. While 0.15.0's
+  code runs on this schema (between `coffre migrate` and the deploy, or after
+  a rollback), its changes of a role write `log_config` and leave that
+  role's row unsealed, which the next start of this release seals again
+  ([formal/Roles.tla](formal/Roles.tla)). That is on Postgres, where the
+  writes are the migration's SQL whichever release calls it. On SQLite (dev
+  and tests only) they are the release's own TypeScript, so a 0.15.0 rolled
+  back to writes `log_config` alone and leaves the policy's row behind,
+  after which uses are refused: don't roll a SQLite database back across
+  this release.
+
+  Three releases, in order, none skipped:
+  1. **0.16** (this one) writes both and reads `log_config`.
+  2. **0.17** reads the rows, refusing one that is unsealed or not its
+     object's newest change's, and adds `grants`' foreign key onto them. It
+     must follow a 0.16 whose vault has started since 0.15.0 last served: a
+     deployment goes 0.14.5 or 0.15.0 to 0.16, then to 0.17, never straight
+     to 0.17. One that skips is refused where its rows are unsealed, never
+     served stale.
+  3. **0.18** drops `log_config`.
+
+  The foreign key waits for 0.17 because 0.14.5, which serves on this
+  release's schema on a one-step upgrade ([deploy.md](docs/deploy.md#from-0145-to-016)),
+  grants roles it writes no row of.
+
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
   366. `signin({ serviceTokenMaxDays })` holds this deployment's tokens to a
