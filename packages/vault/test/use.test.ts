@@ -942,7 +942,7 @@ test('an isolate that answered its uses late refuses part of the next at once, h
   const [first, second] = await Promise.all([use(path, ask(w, id)), use(path, ask(w, id))]);
   assert.ok(heard(first).ok);
   assert.deepEqual(second, { ok: false, busy: 'overloaded', retryAfter: 1 });
-  assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 4, 'three answered, one in time: (3 - 2) / 4');
+  assert.equal(path.cache.throttle!.rate(Date.now()), 3 / 8, 'three answered, one in time: (3 - 1.5) / 4');
   assert.equal(path.cache.inFlight, 0);
   // Another isolate, its uses answered in time: nothing refused.
   const fresh: UsePath = { ...path, cache: new UseCache(useLimits()) };

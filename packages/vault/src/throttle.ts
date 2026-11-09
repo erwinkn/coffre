@@ -1,29 +1,46 @@
+import { USE_DEADLINE_MS } from '@coffre/core/vault';
+
 /**
  * Adaptive throttling (Google's SRE book, "Handling Overload"; docs/design/config.md, Q1, step 2). An isolate counts,
- * over the last two minutes, the uses it has answered or refused (`requests`) and those that settled before their
+ * over the last two use deadlines, the uses it has answered or refused (`requests`) and those that settled before their
  * deadline (`accepts`: answered, refused by policy or failed at once, but not `late`), and refuses a new use at once, `overloaded`, at the rate
  *
- *   p = max(0, (requests − K × accepts) ÷ (requests + 1)),   K = 2
+ *   p = max(0, (requests − K × accepts) ÷ (requests + 1)),   K = 1.5,   window = 2 × 3 s
  *
- * Both numbers are the book's. Nothing is refused while the vault answers at least half of its uses in time; past
- * that, part of the excess is refused before it costs a statement or a place. p stays below 1, so an isolate never
- * shuts and needs no rule to open again: as uses are answered in time, accepts catch up and refusals stop, with the
- * failures still in the window. A use refused counts as a request, not an accept, as the book counts it.
+ * So it lets through about K times what it answered in time, and refuses the rest before it costs a statement or a
+ * place. The book's numbers, K = 2 and two minutes, failed on Cloudflare (W363's first run, config.md): the excess
+ * this vault lets through is not refused cheaply downstream but goes `late`, holding its place and a hot connection
+ * for the whole 3 s, so K = 2 let half the burst go late; and a two-minute window kept refusing a light load three
+ * minutes after the burst. Each number here comes from that, as config.md derives:
+ *
+ * - The window is two deadlines: a use's outcome is known at most one deadline after it is asked, so two always hold
+ *   a deadline's worth of asks with every outcome in, and the burst's last late uses leave it one window after they
+ *   settle.
+ * - K is bounded on both sides and set between. Below, recovery: refused uses count as requests, so after an overload
+ *   the share let through can grow by at most K a window; at K = 1 it would never grow, and the refusals would outlive
+ *   the overload for good. Above, the late: past K × the vault's capacity everything is refused, and the K − 1 between
+ *   goes late; at 2,500 uses a second against about 1,000 answered, the late outnumber the refused from K = 1.75 up.
+ *   K = 1.5 sits inside both (config.md, Q1, step 2): about 10 s back to full service after such a burst, and a third
+ *   of its excess late.
+ *
+ * p stays below 1, so an isolate never shuts and needs no rule to open again. A use refused counts as a request, not
+ * an accept, as the book counts it: that keeps what an isolate lets through at K times its accepts however much is
+ * offered.
  *
  * Two departures from the book, both about when and how, not how much:
  * - A use counts once its outcome is known, not when it is asked: one still in flight is neither a success nor a
  *   failure yet. Counted on arrival, a cold isolate's burst would refuse itself: its 17th use of 16 in flight, none
  *   answered yet, would see p = 16 ÷ 17.
  * - The refusals are spread, not drawn: each use adds p to a credit, and is refused when the credit reaches 1, which
- *   takes 1 back. At p = 0.17, one use in six is refused, in a fixed pattern rather than at random; the same rate,
+ *   takes 1 back. At p = 0.2, one use in five is refused, in a fixed pattern rather than at random; the same rate,
  *   reproducible (`refuses`).
  *
- *   2,500 uses a second offered, 1,040 answered in time, for two minutes: 300,000 requests, 124,800 accepts
- *     → p = (300,000 − 249,600) ÷ 300,001 ≈ 17% refused at once; the rest of the excess is still answered `late`
+ *   2,500 uses a second offered, 1,040 answered in time, for a window: 15,000 requests, 6,240 accepts
+ *     → p = (15,000 − 9,360) ÷ 15,001 ≈ 38% refused at once; about 1,560 a second let through, 520 of them late
  *   a cold isolate whose first use was late: 1 request, 0 accepts → p = 1 ÷ 2: of the next two uses, one refused
  */
-export const THROTTLE_K = 2;
-export const THROTTLE_WINDOW_MS = 120_000;
+export const THROTTLE_K = 1.5;
+export const THROTTLE_WINDOW_MS = 2 * USE_DEADLINE_MS;
 /** The window in buckets of a second: the oldest second leaves as a new one starts. */
 const BUCKET_MS = 1_000;
 const BUCKETS = THROTTLE_WINDOW_MS / BUCKET_MS;

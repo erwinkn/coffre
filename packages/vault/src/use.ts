@@ -178,7 +178,7 @@ export class UseCache {
   readonly limits: UseLimits;
   readonly max: number;
   /**
-   * Refuses part of the uses asked while fewer than half are answered in time (`Throttle`; config.md, Q1, step 2), or
+   * Refuses part of the uses asked while fewer than two in three are answered in time (`Throttle`; config.md, Q1, step 2), or
    * null, off, in a test about something else (`VaultOptions.throttled`).
    */
   readonly throttle: Throttle | null;
@@ -535,7 +535,7 @@ const busyNamed = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served
  * `answer`, within the call's places in admission (`UseCache.admit`): `places`, one for each key it knows it uses, from
  * here until it has answered and nothing it started still runs (`Seat`). Refused at once, holding nothing, `late` past
  * its deadline, as the database would (deadline_max), or `overloaded`: by the isolate's throttle, while it answers
- * fewer than half its uses in time (`Throttle`), or with its places taken (R44). Each call counts toward the
+ * fewer than two in three of its uses in time (`Throttle`), or with its places taken (R44). Each call counts toward the
  * throttle once, whatever its keys.
  */
 async function seated<I extends { at: number; deadline: number }, T>(

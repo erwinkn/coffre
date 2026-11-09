@@ -1,9 +1,11 @@
 // Adaptive throttling (docs/design/config.md, Q1, step 2): the share of uses an isolate refuses at once, from what it
-// answered, in time or not, over the last two minutes. No database.
+// answered, in time or not, over the last two use deadlines. No database.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { Throttle, THROTTLE_WINDOW_MS } from '../src/throttle.ts';
+import { USE_DEADLINE_MS } from '@coffre/core/vault';
+
+import { Throttle, THROTTLE_K, THROTTLE_WINDOW_MS } from '../src/throttle.ts';
 
 const T0 = 1_800_000_000_000;
 
@@ -22,23 +24,25 @@ function asked(throttle: Throttle, at: number, uses: number, inTime: boolean): n
   return refused;
 }
 
-test('nothing is refused while at least half the uses are answered in time', () => {
+test('nothing is refused while at least two in three uses are answered in time', () => {
   const throttle = new Throttle();
-  answered(throttle, T0, 1_000, 500);
+  answered(throttle, T0, 1_500, 1_000);
   assert.equal(throttle.rate(T0), 0);
   assert.equal(asked(throttle, T0, 1_000, true), 0);
 });
 
-test("the book's example: 2,500 a second offered, 1,040 answered in time, for two minutes: p about 17%", () => {
+test('2,500 a second offered, 1,040 answered in time, for a window: p about 38%, K times the accepts let through', () => {
   const throttle = new Throttle();
-  for (let s = 0; s < 120; s += 1) answered(throttle, T0 + s * 1_000, 2_500, 1_040);
-  assert.ok(Math.abs(throttle.rate(T0 + 119_000) - (300_000 - 2 * 124_800) / 300_001) < 1e-12);
+  for (let s = 0; s < THROTTLE_WINDOW_MS / 1_000; s += 1) answered(throttle, T0 + s * 1_000, 2_500, 1_040);
+  const p = throttle.rate(T0 + THROTTLE_WINDOW_MS - 1);
+  assert.ok(Math.abs(p - (15_000 - THROTTLE_K * 6_240) / 15_001) < 1e-12);
+  assert.ok(Math.abs(2_500 * (1 - p) - THROTTLE_K * 1_040) < 1, 'about 1,560 a second let through');
 });
 
 test('refusals are spread at the rate, not drawn: at p = 1/5, one use in five', () => {
   const throttle = new Throttle();
-  // 60,000 answered, 23,990 in time: p = 12,020 ÷ 60,001, just over 1/5, which ten more uses barely move.
-  answered(throttle, T0, 60_000, 23_990);
+  // 60,000 answered, 31,990 in time: p = 12,015 ÷ 60,001, just over 1/5, which ten more uses barely move.
+  answered(throttle, T0, 60_000, 31_990);
   assert.ok(Math.abs(throttle.rate(T0) - 0.2) < 1e-3);
   const pattern = Array.from({ length: 10 }, () => throttle.refuses(T0));
   assert.deepEqual(pattern, [false, false, false, false, true, false, false, false, false, true]);
@@ -63,21 +67,61 @@ test('uses answered in time bring refusals back to 0 while the failures are stil
   const throttle = new Throttle();
   answered(throttle, T0, 1_000, 0);
   assert.ok(throttle.rate(T0) > 0.99);
-  // 1,000 more, all in time: 2,000 answered, 1,000 in time, exactly half.
-  answered(throttle, T0 + 30_000, 1_000, 1_000);
-  assert.equal(throttle.rate(T0 + 30_000), 0);
-  assert.equal(throttle.refuses(T0 + 30_000), false);
+  // 2,000 more, all in time: 3,000 answered, 2,000 in time, exactly two in three.
+  answered(throttle, T0 + 3_000, 2_000, 2_000);
+  assert.equal(throttle.rate(T0 + 3_000), 0);
+  assert.equal(throttle.refuses(T0 + 3_000), false);
 });
 
 test('what the window has left counts for nothing: second by second, and after a gap of more than the window', () => {
   const throttle = new Throttle();
   answered(throttle, T0, 100, 0);
-  answered(throttle, T0 + 60_000, 10, 10);
-  assert.equal(throttle.rate(T0 + THROTTLE_WINDOW_MS - 1), (110 - 20) / 111, 'the first second still in the window');
+  answered(throttle, T0 + 3_000, 10, 10);
+  assert.equal(throttle.rate(T0 + THROTTLE_WINDOW_MS - 1), (110 - 15) / 111, 'the first second still in the window');
   // The first second leaves it: 10 answered, 10 in time.
   assert.equal(throttle.rate(T0 + THROTTLE_WINDOW_MS), 0);
   // Every bucket after a long gap is empty, the failures with it.
   answered(throttle, T0 + 10 * THROTTLE_WINDOW_MS, 10, 0);
   assert.equal(throttle.rate(T0 + 10 * THROTTLE_WINDOW_MS), 10 / 11);
   assert.equal(throttle.rate(T0 + 11 * THROTTLE_WINDOW_MS), 0);
+});
+
+/**
+ * One isolate against a vault that answers `capacity` uses a second in time; any more it lets through wait their whole
+ * deadline and answer `late`. `offered` uses a second, for each second, oldest first; returns what each second did.
+ */
+function overload(offered: readonly number[], capacity: number) {
+  const throttle = new Throttle();
+  const lates = new Map<number, number>();
+  return offered.map((uses, s) => {
+    const now = T0 + s * 1_000;
+    for (let i = 0; i < (lates.get(s) ?? 0); i += 1) throttle.answered(now, false);
+    let inTime = 0;
+    let late = 0;
+    let refused = 0;
+    for (let i = 0; i < uses; i += 1) {
+      if (throttle.refuses(now)) refused += 1;
+      else if (inTime < capacity) {
+        inTime += 1;
+        throttle.answered(now, true);
+      } else late += 1;
+    }
+    lates.set(s + USE_DEADLINE_MS / 1_000, late);
+    return { inTime, late, refused };
+  });
+}
+
+test('after an overload, a load under capacity is let through in full within two windows; during it, most of the excess is refused, not late', () => {
+  // W363's Cloudflare run, scaled to one isolate: 2.5 times what it answers, for two minutes, then half of it.
+  const burst = 120;
+  const seconds = overload([...Array(burst).fill(250), ...Array(60).fill(50)], 100);
+  const during = seconds.slice(10, burst);
+  const sum = (key: 'inTime' | 'late' | 'refused') => during.reduce((n, second) => n + second[key], 0);
+  assert.ok(sum('inTime') >= 0.95 * 100 * during.length, `answered in time ${sum('inTime')}, about all it can`);
+  assert.ok(sum('refused') > 2 * sum('late'), `refused ${sum('refused')}, late ${sum('late')}`);
+  // The last second anything is refused, or late, after the burst.
+  const after = seconds.slice(burst);
+  const last = after.findLastIndex((second) => second.refused > 0 || second.late > 0);
+  assert.ok(last + 1 <= (2 * THROTTLE_WINDOW_MS) / 1_000, `all let through ${last + 1} s after the burst`);
+  assert.ok(after.slice(last + 1).every((second) => second.inTime === 50));
 });

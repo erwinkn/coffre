@@ -274,7 +274,7 @@ export type VaultOptions = {
    */
   callsEndWithRequest?: boolean;
   /**
-   * Whether the isolate's throttle refuses uses while fewer than half are answered in time (use.ts, `Throttle`). Always
+   * Whether the isolate's throttle refuses uses while fewer than two in three are answered in time (use.ts, `Throttle`). Always
    * on but in a test about something else whose isolate answers uses `late` on purpose. Not a deployment's to set.
    */
   throttled?: boolean;
