@@ -188,7 +188,11 @@ limit's number from `app/wrangler.jsonc` and nowhere else, so the number
 is written twice: in `deployment.ts` and in the `SIGN_IN_PER_SOURCE`
 binding's `simple: { limit, period }`, `period` 10. The app's build
 (`coffre()` in `app/vite.config.ts`, given the deployment) fails when the
-two differ. On Node, `processLimits({ perSource:
+two differ. It reads the Worker config the Cloudflare plugin writes beside
+the build, so with an environment (`CLOUDFLARE_ENV=production`) it holds
+that environment's binding, the one wrangler deploys: an `env.production`
+of your own repeats the binding (wrangler does not inherit bindings) at
+the same number. On Node, `processLimits({ perSource:
 deployment.services.signInsPerAddress })` counts to the field, as the
 Node example's `app/src/coffre.ts` passes it.
 
@@ -233,7 +237,7 @@ since one of the two would be ignored:
 | `createCoffre({ rotateAfterDays })` | `values.rotateAfterDays` |
 | `vault({ bulkLimit })`, `serveVault({ bulkLimit })` | `reads.bulkLimit` |
 | `vault({ uses: { coverMs } })`, `serveVault(…, { uses: { coverMs } })` | `audit.repeatsWithinSeconds`, in seconds |
-| `credentialProxy({ cacheSeconds, recheckSeconds })` | `proxy.revokedWithinSeconds`, the smaller of the two (each 60 unless set), at least 3; `cacheSeconds: 0` is `proxy.cacheValues: false` |
+| `credentialProxy({ cacheSeconds, recheckSeconds })` | `proxy.revokedWithinSeconds`, the smaller of the two (each 60 unless set); `cacheSeconds: 0` is `proxy.cacheValues: false`. Either under 3 s fails at start: R cannot be shorter, so write `proxy: { revokedWithinSeconds: 3 }` (with `cacheValues: false` for no cache) |
 | `credentialProxy({ editable })` | `proxy.editable` |
 | `SIGN_IN_PER_SOURCE`'s number | `services.signInsPerAddress`, which the build holds the binding to |
 

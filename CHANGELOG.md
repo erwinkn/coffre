@@ -44,22 +44,25 @@
     costs, about 800 bytes a use.
   - On Workers, `services.signInsPerAddress` must match `app/wrangler.jsonc`'s
     `SIGN_IN_PER_SOURCE` binding, which Cloudflare reads: the app's build
-    (`coffre({ deployment })`) fails when they differ.
+    (`coffre({ deployment })`) fails when they differ, in the Worker config
+    the Cloudflare plugin emits, so the environment it builds for
+    (`CLOUDFLARE_ENV`) is the one held.
   - `coffre setup`, as it makes the GitHub App on Workers, asks for the
     organization whose members may sign in (Enter for none): the app is
     then the organization's, asks to read its members, and the deployment
     gets `GITHUB_ORGANIZATION`, which the examples pass to
     `github({ organization })`.
   - The deployments `init` writes depend on `@coffre/core`, for
-    `defineDeployment`, and `@coffre/ui` on `jsonc-parser`, for the build's
-    check. `coffre update` adds no `deployment.ts`: a deployment that has
+    `defineDeployment`. `coffre update` adds no `deployment.ts`: a deployment that has
     none runs on the defaults and its old places, warned of.
   - The old places (`signin`'s lifetimes, `serviceTokenMaxDays` and
     `workloads.useOnly`/`noReads`, `createCoffre`'s `rotateAfterDays`,
     `credentialProxy`'s `cacheSeconds`, `recheckSeconds` and `editable`,
     the vault's `bulkLimit` and `uses.coverMs`) are read until 0.17, with a
     warning at start; a deployment that passes `deployment` and an old
-    place both fails to start. 0.17 refuses them.
+    place both fails to start, as does a `cacheSeconds` (above 0) or
+    `recheckSeconds` under 3 s, which no R can keep: it names the
+    `proxy.revokedWithinSeconds: 3` to write instead. 0.17 refuses them.
   - Workers Free is best effort: its 10 ms of CPU is below the 20 ms
     coffre's bounds are sized for, so a request at a bound may be ended by
     Cloudflare; `deploy.md` says which.

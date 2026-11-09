@@ -518,11 +518,13 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
 /**
  * The options 0.16 moved to `deployment.ts`, checked as before, as the object's fields (`movedSettings`): `editable`
  * as `proxy.editable`; `cacheSeconds: 0` as `proxy.cacheValues: false`; and one bound R for the rest, the smaller of
- * `cacheSeconds` (above 0) and `recheckSeconds`, each 60 unless given, as 0.15 ran them, and 3 at least, R's floor.
+ * `cacheSeconds` (above 0) and `recheckSeconds`, each 60 unless given, as 0.15 ran them. Either below 3 s, R's floor,
+ * is refused: read as 3 it would let a revoked credential work longer than the deployment said, so it names what to
+ * write instead.
  *
  *   { cacheSeconds: 30, recheckSeconds: 120 }    proxy: { revokedWithinSeconds: 30 }
  *   { cacheSeconds: 0 }                          proxy: { cacheValues: false }, R its default, 60
- *   { recheckSeconds: 1, editable: true }        proxy: { revokedWithinSeconds: 3, editable: true }
+ *   { cacheSeconds: 1 }                          refused: write proxy: { revokedWithinSeconds: 3 }, cacheValues: false for no cache
  */
 function movedOptions(options: CredentialProxyOptions): MovedSetting[] {
   const { cacheSeconds, recheckSeconds, editable } = options;
@@ -530,8 +532,21 @@ function movedOptions(options: CredentialProxyOptions): MovedSetting[] {
   if (cacheSeconds !== undefined && !(Number.isFinite(cacheSeconds) && cacheSeconds >= 0 && cacheSeconds <= 3_600)) throw new Error('credentialProxy: cacheSeconds is between 0 and 3600');
   // R: the smaller of the two as 0.15 ran them (60 each unless set; a cache of 0 bounds nothing), so that no deployment's
   // revocation bound grows on the way: `recheckSeconds: 600` alone keeps values 60 s, as before, and checks every 50.
+  // One below R's floor has no R that keeps it, and raising it would loosen it: refused, with what to write.
+  const short = [
+    ...(cacheSeconds !== undefined && cacheSeconds > 0 && cacheSeconds < LEAST_REVOKED_WITHIN_SECONDS ? [`cacheSeconds: ${cacheSeconds}`] : []),
+    ...(recheckSeconds !== undefined && recheckSeconds < LEAST_REVOKED_WITHIN_SECONDS ? [`recheckSeconds: ${recheckSeconds}`] : []),
+  ];
+  if (short.length > 0) {
+    throw new Error(
+      `credentialProxy({ ${short.join(', ')} }) is shorter than the ${LEAST_REVOKED_WITHIN_SECONDS} s that 0.16's one revocation bound, ` +
+        `deployment.ts's proxy.revokedWithinSeconds, can hold, and read as ${LEAST_REVOKED_WITHIN_SECONDS} s it would let a revoked credential work longer. ` +
+        `Write proxy: { revokedWithinSeconds: ${LEAST_REVOKED_WITHIN_SECONDS} } in deployment.ts (and cacheValues: false to keep no values at all) ` +
+        'and drop the option (docs/deploy.md, "deployment.ts")',
+    );
+  }
   const bounds = [...(cacheSeconds === 0 ? [] : [cacheSeconds ?? 60]), recheckSeconds ?? 60];
-  const revokedWithinSeconds = cacheSeconds === undefined && recheckSeconds === undefined ? undefined : Math.max(Math.min(...bounds), LEAST_REVOKED_WITHIN_SECONDS);
+  const revokedWithinSeconds = cacheSeconds === undefined && recheckSeconds === undefined ? undefined : Math.min(...bounds);
   const bound = revokedWithinSeconds === undefined ? {} : { revokedWithinSeconds };
   return [
     ...(cacheSeconds === undefined ? [] : [{ old: 'credentialProxy({ cacheSeconds })', options: { proxy: cacheSeconds === 0 ? { cacheValues: false } : bound } }]),

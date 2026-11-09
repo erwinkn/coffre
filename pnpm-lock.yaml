@@ -599,9 +599,6 @@ importers:
       '@tanstack/router-core':
         specifier: 1.171.15
         version: 1.171.15
-      jsonc-parser:
-        specifier: 3.3.1
-        version: 3.3.1
       lucide:
         specifier: 1.47.0
         version: 1.47.0
@@ -630,6 +627,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: 6.0.3
         version: 6.0.3(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))
+      jsonc-parser:
+        specifier: 3.3.1
+        version: 3.3.1
       react:
         specifier: 19.2.7
         version: 19.2.7

@@ -33,7 +33,7 @@ test('every window is R: values kept R (none without cacheValues), a request sen
   assert.deepEqual(times({ cacheValues: false }), { cacheMs: 0, sendMs: 60_000, check: { every: 50_000, deadline: 10_000 }, bound: 60_000 });
 });
 
-test("0.15's options are the object's fields: editable as is, cacheSeconds 0 as cacheValues false, and one R, the smaller of the two as 0.15 ran them, 3 at least", () => {
+test("0.15's options are the object's fields: editable as is, cacheSeconds 0 as cacheValues false, and one R, the smaller of the two as 0.15 ran them; one below R's 3 s floor refused", () => {
   const moved = (options: Omit<CredentialProxyOptions, 'credentials'>) => {
     const settings = movedByPlugin(credentialProxy({ credentials: {}, ...options }));
     return { old: settings.map((setting) => setting.old), deployment: resolveDeployment(undefined, settings, () => {}).proxy };
@@ -47,11 +47,16 @@ test("0.15's options are the object's fields: editable as is, cacheSeconds 0 as 
   // No cache says nothing of R: the tunnels keep the 60 s both settings had.
   assert.deepEqual(moved({ cacheSeconds: 0 }).deployment, { revokedWithinSeconds: 60, cacheValues: false, editable: false });
   assert.deepEqual(moved({ cacheSeconds: 0, recheckSeconds: 20 }).deployment, { revokedWithinSeconds: 20, cacheValues: false, editable: false });
-  // Below the floor: raised to it.
-  assert.deepEqual(moved({ recheckSeconds: 0.2, cacheSeconds: 1 }), {
-    old: ['credentialProxy({ cacheSeconds })', 'credentialProxy({ recheckSeconds })'],
-    deployment: { revokedWithinSeconds: 3, cacheValues: true, editable: false },
-  });
+  // Below the floor: no R keeps it, and 3 s would let a revoked credential serve longer than it said (0.15's
+  // `cacheSeconds: 1` asked the vault again 1.5 s on; R = 3 would not). Refused, naming what to write, alone or not.
+  const refused = /credentialProxy\(\{ cacheSeconds: 1 \}\) is shorter than the 3 s .* Write proxy: \{ revokedWithinSeconds: 3 \} in deployment\.ts \(and cacheValues: false/;
+  assert.throws(() => credentialProxy({ credentials: {}, cacheSeconds: 1 }), refused);
+  assert.throws(() => credentialProxy({ credentials: {}, cacheSeconds: 1, recheckSeconds: 60 }), refused);
+  assert.throws(() => credentialProxy({ credentials: {}, recheckSeconds: 0.2, cacheSeconds: 2.9 }), /credentialProxy\(\{ cacheSeconds: 2\.9, recheckSeconds: 0\.2 \}\) is shorter/);
+  assert.throws(() => credentialProxy({ credentials: {}, recheckSeconds: 2 }), /credentialProxy\(\{ recheckSeconds: 2 \}\) is shorter/);
+  // At the floor, and a cache of 0 beside a short recheck is still refused for the recheck.
+  assert.deepEqual(moved({ cacheSeconds: 3 }).deployment, { revokedWithinSeconds: 3, cacheValues: true, editable: false });
+  assert.throws(() => credentialProxy({ credentials: {}, cacheSeconds: 0, recheckSeconds: 1 }), /recheckSeconds: 1 \}\) is shorter/);
   // Checked as before.
   assert.throws(() => credentialProxy({ credentials: {}, recheckSeconds: 0 }), /recheckSeconds is above 0, an hour at most/);
   assert.throws(() => credentialProxy({ credentials: {}, cacheSeconds: 3_601 }), /cacheSeconds is between 0 and 3600/);
