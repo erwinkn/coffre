@@ -19,6 +19,7 @@ import { changeHolds, entryMac, MAC_BYTES, TAG_BYTES, type LogMacKey } from './l
 import { bindingObject, configObject, connectionObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { PURPOSES, purposeCode, WAYS } from './log-replay.ts';
 import { proxyServing, routeEditorRefusal, routeLookup, type RouteLevel } from './proxy.ts';
+import { Throttle } from './throttle.ts';
 import { callBatch as batchPostgres, callNamedBatch as namedPostgres, callRoute as routePostgres, callRouteNamed as routeNamedPostgres, callUse as callPostgres } from './use.postgres.ts';
 import { callBatch as batchSqlite, callNamedBatch as namedSqlite, callRoute as routeSqlite, callRouteNamed as routeNamedSqlite, callUse as callSqlite } from './use.sqlite.ts';
 
@@ -176,10 +177,16 @@ export class UseCache {
   readonly routeKeys = new Map<string, RouteKeys>();
   readonly limits: UseLimits;
   readonly max: number;
+  /**
+   * Refuses part of the uses asked while fewer than half are answered in time (`Throttle`; config.md, Q1, step 2), or
+   * null, off, in a test about something else (`VaultOptions.throttled`).
+   */
+  readonly throttle: Throttle | null;
 
-  constructor(limits: UseLimits, { max = 10_000, callsEndWithRequest = false }: { max?: number; callsEndWithRequest?: boolean } = {}) {
+  constructor(limits: UseLimits, { max = 10_000, callsEndWithRequest = false, throttled = true }: { max?: number; callsEndWithRequest?: boolean; throttled?: boolean } = {}) {
     this.limits = limits;
     this.max = max;
+    this.throttle = throttled ? new Throttle() : null;
     this.#lapses = callsEndWithRequest;
   }
 
@@ -527,17 +534,28 @@ const busyNamed = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served
 /**
  * `answer`, within the call's places in admission (`UseCache.admit`): `places`, one for each key it knows it uses, from
  * here until it has answered and nothing it started still runs (`Seat`). Refused at once, holding nothing, `late` past
- * its deadline, as the database would (deadline_max), or `overloaded` with the isolate's places taken (R44).
+ * its deadline, as the database would (deadline_max), or `overloaded`: by the isolate's throttle, while it answers
+ * fewer than half its uses in time (`Throttle`), or with its places taken (R44). Each call counts toward the
+ * throttle once, whatever its keys.
  */
 async function seated<I extends { at: number; deadline: number }, T>(
   path: UsePath, input: I, places: number, busyAs: (outcome: Extract<UseOutcome, { busy: UseBusy }>) => T, answer: (path: UsePath, input: I) => Promise<T>,
 ): Promise<T> {
   if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busyAs(busy('late'));
+  const { throttle } = path.cache;
+  if (throttle?.refuses(Date.now())) return busyAs(busy('overloaded'));
   const seat = path.cache.admit(input.deadline, places);
-  if (seat === null) return busyAs(busy('overloaded'));
+  if (seat === null) {
+    throttle?.answered(Date.now(), false);
+    return busyAs(busy('overloaded'));
+  }
   try {
     return await answer({ ...path, seat }, input);
   } finally {
+    // In time: settled before its deadline, whatever it answered or threw. `late` is answered at the deadline or past
+    // it, as is an outage that waited it out; one that failed at once cost nothing to throttle, nor did bad input.
+    const now = Date.now();
+    throttle?.answered(now, now < input.deadline);
     seat.release();
   }
 }

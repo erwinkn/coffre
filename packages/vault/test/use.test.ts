@@ -761,6 +761,10 @@ test("a call that never settles, as a Workers call whose request ended, gives it
   assert.equal(workers.readies(), 1, 'the call refused asked nothing');
   await sleep(at + 3_000 + HELD_PAST_DEADLINE_MS + 50 - Date.now());
   assert.equal(workers.path.cache.inFlight, 0, 'the place lapsed');
+  // Its two uses answered late or refused, its throttle refuses the next (p = 2/3, with the 1/2 the second owed); the
+  // one after, its place free, is served (config.md, Q1, step 2).
+  assert.deepEqual(await use(workers.path, ask(w, id)), { ok: false, busy: 'overloaded', retryAfter: 1 });
+  assert.equal(workers.readies(), 1, 'the throttle refused before anything was asked');
   assert.ok(heard(await use(workers.path, ask(w, id))).ok, 'the isolate serves again');
   // On Node a call's I/O is never torn down under it: it holds its place, as its pool's connection, until it settles.
   assert.equal(node.path.cache.inFlight, 1);
@@ -921,6 +925,29 @@ test('a key that fails to open answers the call at once, and its other keys keep
   assert.deepEqual(await use(held.path, ask(w, ids[0]!)), { ok: false, busy: 'overloaded', retryAfter: 1 });
   held.free();
   await until(() => held.path.cache.inFlight === 0);
+});
+
+test('an isolate that answered its uses late refuses part of the next at once, holding no place; one answering in time refuses none (config.md, Q1, step 2)', async () => {
+  const w = await world();
+  const id = await w.key('opened');
+  const { keks, free } = heldKeks();
+  const path: UsePath = { db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks, cache: new UseCache(useLimits()) };
+  const at = Date.now();
+  const late = use(path, ask(w, id, { at, deadline: at + 100 }));
+  await sleep(at + 150 - Date.now());
+  free();
+  assert.deepEqual(await late, { ok: false, busy: 'late', retryAfter: 1 });
+  assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 2, 'one answered, none in time');
+  // At p = 1/2, of the next two asked together one goes and one is refused; the one that went was in time.
+  const [first, second] = await Promise.all([use(path, ask(w, id)), use(path, ask(w, id))]);
+  assert.ok(heard(first).ok);
+  assert.deepEqual(second, { ok: false, busy: 'overloaded', retryAfter: 1 });
+  assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 4, 'three answered, one in time: (3 - 2) / 4');
+  assert.equal(path.cache.inFlight, 0);
+  // Another isolate, its uses answered in time: nothing refused.
+  const fresh: UsePath = { ...path, cache: new UseCache(useLimits()) };
+  for (let i = 0; i < 3; i += 1) assert.ok(heard(await use(fresh, ask(w, id))).ok);
+  assert.equal(fresh.cache.throttle!.rate(Date.now()), 0);
 });
 
 test('before the policy is logged, a use does nothing', async () => {

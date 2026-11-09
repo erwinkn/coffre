@@ -266,7 +266,8 @@ test("a cutover committed and not yet sealed serves no use: a use by ids and one
   const cutting = cutOver(first, { ...NONE, credentials: [vouched] as CutoverInput['credentials'] });
   await waitFor(async () => (await marker()).length === 1);
   // Another vault, as a deploy starts one, on the hot path's login: it finds the marker, and its seal not yet written.
-  const second = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough, heldOutside: nothingHeld }, async () => {}, ENGINE === 'postgres' ? await db.hot() : db.vault);
+  // Its throttle off: its first uses are `late` on purpose, which would have it refuse the next (config.md, Q1, step 2).
+  const second = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough, heldOutside: nothingHeld, throttled: false }, async () => {}, ENGINE === 'postgres' ? await db.hot() : db.vault);
   const [named] = await rows<{ project: string; environment: string; key: string }>(db.owner, sql`SELECT p.slug AS project, e.slug AS environment, s.key
     FROM secrets s JOIN environments e ON e.id = s.environment_id JOIN projects p ON p.id = e.project_id WHERE s.id = ${secret.secretId}`);
   const ask = async (deadlineMs: number) => {

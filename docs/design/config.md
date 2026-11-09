@@ -639,6 +639,26 @@ an hour) before it ships. Without that run, there is no step 2: the excess
 is answered `late` within 3 s, as W208 measured, and R44's "refused fast"
 waits.
 
+Built (W363, B: `Throttle`, `packages/vault/src/throttle.ts`, consulted
+by every use entry before its place is taken), with two departures from
+the book, both about when and how it refuses, not how much:
+
+- **A use counts once its outcome is known**, refused, or settled in time
+  (before its deadline, whatever it answered or threw) or not (`late`, an
+  outage that waited it out), never on arrival. The book's client counts a request when it sends it,
+  which a cold isolate cannot afford: 200 uses in its first second at
+  80 ms each are 16 in flight, and the 17th would see 16 requests and no
+  accept, p = 16 ÷ 17. Counted on its outcome, an in-flight use is
+  neither, and a cold burst refuses nothing until a use has failed.
+- **Refusals are spread, not drawn.** Each use adds p to a credit and is
+  refused when the credit reaches 1. *Example:* at p = 1/5, the 5th, 10th,
+  15th… are refused. The same rate as a random draw, but a test or a
+  bench sees the same sequence each run.
+
+A use refused by admission (`overloaded`, its places taken) counts as a
+request, not an accept, as the throttle's own refusals do. A call counts
+once, whatever its keys. The run on Cloudflare is still to come.
+
 ### Q2. Node pools, and processes beyond one
 
 **Facts.** A Node pool is 10 connections, node-postgres's default; the code
