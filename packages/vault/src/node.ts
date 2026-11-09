@@ -127,7 +127,8 @@ export type VaultServer = { socket: string; close(): Promise<void> };
  * whose body is `{ release, method, args }`, the version gate's envelope,
  * answered whole: the entry it forwards to gates (`openLocalVault`), and
  * nothing here gates again. `options` are `localVault`'s, such as `uses`
- * (how many calls in flight at once, by default the hot pool's size).
+ * (its cover window, name and batch sizes; how many keys it holds in flight is
+ * derived, `USES_IN_FLIGHT` in `@coffre/core/memory`, not set here).
  */
 export async function serveVault(config: NodeVaultConfig & { socket: string }, options: VaultOptions = {}): Promise<VaultServer> {
   const vault = await localVault(config, options);
