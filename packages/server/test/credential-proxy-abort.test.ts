@@ -11,6 +11,8 @@ import type { AddressInfo } from 'node:net';
 
 import { serve, type Server as Srvx } from 'srvx';
 
+import { defineDeployment } from '@coffre/core/deployment';
+
 import type { PluginContext } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 
@@ -23,6 +25,7 @@ let gate: Promise<void> | undefined;
 /** coffre as the proxy calls it: every handle stands, for market/dev, and opens this value. */
 const coffre = {
   publicUrl: 'https://secrets.acme.example',
+  deployment: defineDeployment(),
   workload: async () => null,
   handle: async () => ({ expiresAt: new Date(Date.now() + 3_600_000).toISOString(), paths: ['market/dev'] }),
   use: async () => {
