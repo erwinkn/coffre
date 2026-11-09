@@ -785,10 +785,11 @@ test("a vault whose throttle refuses answers a key held, one never made and one 
     // seven answered in time, 400 make its rate p about 0.97 (throttle.ts): its refusals spread by a credit that adds p a
     // use, the first in time is let through (its input refused at once), the next refused, and then about (2p − 1) ÷
     // (1 − p), 30, in a row: the six below, whatever they name.
-    const ask = (at: number, deadline: number) => vault.use!({ credential: 'none', secretId: 'none', place: null, purpose: 'reveal', requestId: '1', at, deadline } as UseInput);
-    for (let i = 0; i < 400; i += 1) assert.deepEqual(await ask(Date.now() - 2_000, Date.now() - 1), { ok: false, busy: 'late', retryAfter: 1 });
-    await assert.rejects(ask(Date.now(), Date.now() + 3_000), 'let through, refused as input');
-    assert.deepEqual(await ask(Date.now(), Date.now() + 3_000), { ok: false, busy: 'overloaded', retryAfter: 1 });
+    // One clock reading a use: two could be a millisecond apart, a 3,001 ms deadline, late at the door before the throttle.
+    const ask = (at: number, span: number) => vault.use!({ credential: 'none', secretId: 'none', place: null, purpose: 'reveal', requestId: '1', at, deadline: at + span } as UseInput);
+    for (let i = 0; i < 400; i += 1) assert.deepEqual(await ask(Date.now() - 2_000, 1_999), { ok: false, busy: 'late', retryAfter: 1 });
+    await assert.rejects(ask(Date.now(), 3_000), 'let through, refused as input');
+    assert.deepEqual(await ask(Date.now(), 3_000), { ok: false, busy: 'overloaded', retryAfter: 1 });
     const before = databases.statements().length;
     calls.length = 0;
     const byApi = [];
