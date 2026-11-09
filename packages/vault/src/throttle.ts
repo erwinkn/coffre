@@ -13,15 +13,18 @@ import { USE_DEADLINE_MS } from '@coffre/core/vault';
  * for the whole 3 s, so K = 2 let half the burst go late; and a two-minute window kept refusing a light load three
  * minutes after the burst. Each number here comes from that, as config.md derives:
  *
- * - The window is two deadlines: a use's outcome is known at most one deadline after it is asked, so two always hold
- *   a deadline's worth of asks with every outcome in, and the burst's last late uses leave it one window after they
- *   settle.
+ * - The window is two deadlines, nominally 6 s (a count leaves it 5 to 6 s after it lands, by where in its second it
+ *   fell): a use's outcome is known at most one deadline after it is asked, so the window weighs the asks whose
+ *   outcomes are in, not only the newest seconds' in-time answers, and the burst's last late uses leave it about one
+ *   window after they settle.
  * - K is bounded on both sides and set between. Below, recovery: refused uses count as requests, so after an overload
- *   the share let through can grow by at most K a window; at K = 1 it would never grow, and the refusals would outlive
- *   the overload for good. Above, the late: past K × the vault's capacity everything is refused, and the K − 1 between
- *   goes late; at 2,500 uses a second against about 1,000 answered, the late outnumber the refused from K = 1.75 up.
- *   K = 1.5 sits inside both (config.md, Q1, step 2): about 10 s back to full service after such a burst, and a third
- *   of its excess late.
+ *   what an isolate lets through grows each window by roughly K. That is a large-count approximation, not a bound
+ *   (overlapping windows let it grow faster, and the + 1 lets even K = 1 recover at a trickle), but it is why K must
+ *   sit well above 1: near 1 the refusals long outlive the overload. Above, the late: past K × the vault's capacity
+ *   everything is refused, and the K − 1 between goes late; at 2,500 uses a second against about 1,000 answered, the
+ *   late outnumber the refused from K = 1.75 up. K = 1.5 sits inside both (config.md, Q1, step 2): in its model, a
+ *   third of such a burst's excess late, and full service again 9 to 12 s after it at 500 a second (about 17 s if the
+ *   load drops to 50); the second Cloudflare run is to confirm it.
  *
  * p stays below 1, so an isolate never shuts and needs no rule to open again. A use refused counts as a request, not
  * an accept, as the book counts it: that keeps what an isolate lets through at K times its accepts however much is

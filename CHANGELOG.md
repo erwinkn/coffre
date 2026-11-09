@@ -75,8 +75,10 @@
   and refuses a new use with 503 `overloaded`, before any statement or
   place, at the rate max(0, (requests − 1.5 × accepts) ÷ (requests + 1)).
   At 2,500 uses a second against a database that answers 1,040, about 38%
-  are refused at once and a third of the excess still answers `late`; once
-  the load drops, it is served in full again within about 10 s. The book's
+  are refused at once and a third of the excess still answers `late`; a
+  model of that burst predicts full service again about 10 s after the load
+  drops to 500 a second (about 17 s at 50), which a second Cloudflare run
+  is to confirm. The book's
   K = 2 and two minutes let half such a burst go `late` and kept refusing
   a light load for minutes after, on Cloudflare. A use counts once
   answered, so a cold isolate's burst never refuses itself, and the

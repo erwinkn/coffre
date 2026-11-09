@@ -680,23 +680,30 @@ hot connection for 3 s. So the numbers are this vault's, derived from that:
 - **The window is two deadlines, 6 s** (`2 × USE_DEADLINE_MS`). A use's
   outcome is known at most one deadline after it is asked, a `late` one
   exactly then. A window of one deadline would weigh each second's `late`
-  uses against the in-time answers of later asks; two always hold a
-  deadline's worth of asks with every outcome in. And it forgets: the
+  uses against the in-time answers of later asks; two weigh the asks whose
+  outcomes are in. The 6 s is nominal: the window is six buckets of a
+  second, so a count leaves it 5 to 6 s after it lands, by where in its
+  second it fell, and just after a bucket empties the asks with every
+  outcome in span about two seconds, not three. And it forgets: the
   burst's last `late` uses settle one deadline after it ends, and leave the
-  window one window later. Two minutes kept a two-minute burst's refusals
-  for two more.
+  window about one window later. Two minutes kept a two-minute burst's
+  refusals for two more.
 - **K is bounded on both sides, and nothing derives a point between.**
   Under an overload an isolate lets through K times what it answers in time,
   refuses the rest, and the K − 1 between goes `late`. *Above:* at the run's
   2,500 a second against about 1,000 answered, the `late` ((K − 1) × 1,000)
   outnumber the refused (2,500 − K × 1,000) from K = 1.75 up; K = 2 let
   half the burst go late. *Below:* a refused use counts as a request, so
-  once the load drops the share let through grows by at most K a window
-  (each lets through K times what the last answered). At K = 1 it would
-  never grow: the refusals would outlive the overload for good. At K = 1.25
-  the model below takes 15 to 20 s to recover from the run's burst; at 1.5,
-  9 to 12 s, step 1's ~15 s with room. K = 1.5 is that pick: it lets through
-  half again what was answered in time.
+  once the load drops what an isolate lets through grows each window by
+  roughly K (each lets through about K times what the last answered). That
+  is a large-count approximation, not a bound: windows overlap, so it can
+  grow faster (in the model below, at K = 1.5, from 52% let through to
+  100% within one window, 1.92 times), and the `+ 1` lets even K = 1
+  recover, at a trickle. It says why K must sit well above 1: near 1 the
+  refusals long outlive the overload. The model's recovery times are the
+  numbers: at K = 1.25 it takes 15 to 20 s after the run's burst, at 1.5,
+  9 to 12 s, step 1's ~15 s with room. K = 1.5 is that pick: it lets
+  through half again what was answered in time.
 
 The model: one isolate, the vault answering a fixed number in time each
 second and the rest it lets through `late` after 3 s; with, or without, the
@@ -711,12 +718,22 @@ At 2,500 a second against 1,000:
 | 1.25, 6 s | 860 to 1,000 | 270 to 300 | 1,200 to 1,380 | 15 to 16 s |
 
 Recovery grows with the overload, by the log of its ratio: at K = 1.5, about
-15 s after 5 times the capacity and 20 s after 10 times. And between 1 and
-1.5 times the capacity nothing is refused: that excess goes `late`, as
-without step 2, until the isolate answers fewer than two in three in time.
-`packages/vault/test/throttle.test.ts` holds one isolate to the run's shape:
-during 2.5 times its capacity, more than twice as many refused as `late`;
-after it, half its capacity let through in full within two windows (9 s).
+15 s after 5 times the capacity and 20 s after 10 times. It also grows as
+the load after it shrinks, since fewer asks a second bring fewer in-time
+answers into the window: about 17 s when the run's burst drops to 50 a
+second, not 500. And between 1 and 1.5 times the capacity nothing is
+refused: that excess goes `late`, as without step 2, until the isolate
+answers fewer than two in three in time. In the steady state of an
+overload, K = 1.5 at 2.5 times the capacity refuses exactly two for each
+`late`; asks spread through each second, and outcomes settling as they
+come, land under that.
+
+`packages/vault/test/throttle.test.ts` holds one isolate to the run's
+shape, asks spread through each second, in-time answers settling 100 ms
+later and `late` ones 3 s later: during 2.5 times its capacity, most of the
+excess refused (about 10,700 refused to 5,800 `late`; K = 2 and two minutes
+give 4,700 to 11,800, and fail it); after it, half its capacity let through
+in full within two windows, 12 s (the model takes 9).
 
 The second run, with these numbers, is to pass three checks, written before
 it: at 500 a second, nothing refused or `late`; in the burst, clearly more
