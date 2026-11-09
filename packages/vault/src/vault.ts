@@ -176,7 +176,6 @@ import {
   isConfirmation,
   type Confirmation,
   LOCK_WAIT_MS,
-  DEFAULT_CONNECTIONS,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { engineOf, isUnavailable, isUniqueViolation, lockNotAvailable, SNAPSHOT } from '@coffre/db/dialect';
@@ -263,10 +262,11 @@ export type VaultOptions = {
    */
   sealing?: () => Promise<Sealing> | Sealing;
   /**
-   * 0.15's uses, per isolate (use.ts): how many calls in flight at once, by
-   * default the hot path's pool, `connections`, and how long a cover holds.
+   * 0.15's uses, per isolate (use.ts, `useLimits`): how long a cover holds, how many names it maps, how many keys a
+   * statement makes uses of. `inFlight`, the keys in flight at once, is derived (`USES_IN_FLIGHT`, `@coffre/core/memory`):
+   * only a test sets it.
    */
-  uses?: Partial<UseLimits> & { connections?: number };
+  uses?: Partial<UseLimits>;
   /**
    * Whether a call's I/O ends with its request, as on Workers, where a call whose request has ended may never settle:
    * then a use's place in admission lapses past its deadline, settled or not (use.ts, `HELD_PAST_DEADLINE_MS`), its
@@ -353,7 +353,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     cutover: false,
     marked: false,
     verifier: null,
-    uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses), { callsEndWithRequest: options.callsEndWithRequest === true }),
+    uses: new UseCache(useLimits(options.uses), { callsEndWithRequest: options.callsEndWithRequest === true }),
     verified: START,
     reported: new Set(),
     since: null,

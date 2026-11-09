@@ -46,7 +46,7 @@ import {
   type WorkloadsConfig,
 } from '@coffre/core/identity';
 import { shownMember } from '@coffre/core/schemas';
-import { DEFAULT_CONNECTIONS, type Access, type ChangeBindingsInput, type EndedBinding, type SignInCredential, type SignInInput, type SignInOutcome, type SignInRefusal, type Vault } from '@coffre/core/vault';
+import { type Access, type ChangeBindingsInput, type EndedBinding, type SignInCredential, type SignInInput, type SignInOutcome, type SignInRefusal, type Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { KeyRetired } from '@coffre/db/log';
 import { serviceBindings, type credentials } from '@coffre/db/schema';
@@ -472,19 +472,20 @@ const open = (rows: readonly BindingRow[]): BindingRow[] => rows.filter((row) =>
  *   157 ms for 2,000, 400 ms for 5,000, 1,583 ms for 20,000). The batches after the close need it too: a request whose
  *   check of its binding passed before the close can reach the vault after it, and an unfenced revoke would number
  *   its use after the revoke (formal/Unbinding.tla, `RevokeOrdersUses` without BatchFenced). A batch holds it
- *   `FENCE_BUDGET_MS` at most: as long as the uses an isolate or process takes in flight (`DEFAULT_CONNECTIONS`, 10,
- *   the vault pool's) take to arrive at R44's rate (`USES_PER_SECOND`, 1,000), 10 ms, since every use arriving past
- *   them while one waits is refused as `overloaded`, until Q1 of docs/design/limits.md (#501) decides that rule.
- *   Measured, one Node process beside a removal of 5,000 (reveals by the same service): at 50 ms a batch (D178), none
- *   refused at 100 uses a second, 10% at 200, 43% at 400, 68% at 800, as rate × hold passed 10. Rejected too:
- *   `HOT_LOCK_TIMEOUT_MS / 2`, 500 ms, the migrator's, which adds up to half a second to each use, batch after batch.
+ *   `FENCE_BUDGET_MS` at most, 10 ms: the longest a use waits behind one, Erwin's rule that revoking never pauses
+ *   `/use`, a few ms at most. The uses that arrive meanwhile wait, none refused: at R44's rate, 1,000 a second,
+ *   10 of them, far below the keys an isolate or process has in flight (`USES_IN_FLIGHT`, 1,250, which bounds
+ *   the hold at 1.25 s). It was derived from that count while it was 10 (node-postgres's pool size), every use past it
+ *   refused `overloaded` (D181): at 50 ms a batch (D178), one Node process beside a removal of 5,000 refused none of 100
+ *   uses a second, 10% at 200, 43% at 400, 68% at 800, as rate × hold passed 10; with the count derived (Q1 of
+ *   docs/design/config.md), the hold bounds a use's latency, not its refusal. Rejected too: `HOT_LOCK_TIMEOUT_MS / 2`,
+ *   500 ms, the migrator's, which adds up to half a second to each use, batch after batch.
  * - The message: Node's vault transport takes 8 MiB at most (`MAX_BODY`, @coffre/vault's node.ts; Workers' RPC 32 MiB,
  *   Cloudflare's docs). A credential's part of it is its columns, its scope among them, so each is counted as it
  *   serializes (about 550 bytes for one place, 21 kB for a hundred, review r4), the batch's up to half of it: the rest
  *   for the binding made, the policy's places, and the transport's own encoding.
  */
-const USES_PER_SECOND = 1_000;
-const FENCE_BUDGET_MS = (DEFAULT_CONNECTIONS / USES_PER_SECOND) * 1000;
+const FENCE_BUDGET_MS = 10;
 const FENCE_MS_PER_CREDENTIAL = 0.08;
 export const UNBIND_BATCH = Math.floor(FENCE_BUDGET_MS / FENCE_MS_PER_CREDENTIAL);
 const VAULT_MESSAGE_BYTES = 8 * 1024 * 1024;

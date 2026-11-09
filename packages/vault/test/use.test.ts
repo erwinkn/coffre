@@ -26,7 +26,7 @@ import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { authentic, entryMac } from '../src/log-entry.ts';
 import { purposeCode } from '../src/log-replay.ts';
 import { logStore } from '../src/log-store.ts';
-import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, type UsePath } from '../src/use.ts';
+import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, useMany, type UsePath } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, postgresOnly, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
@@ -688,7 +688,7 @@ test("the probe's MAC check runs within the use's admission and deadline: held u
   let release = () => {};
   const held = new Promise<void>((resolve) => (release = resolve));
   const path: UsePath = {
-    db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 })),
+    db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits({ inFlight: 1 })),
     oldWrite: async () => {
       await held;
       return false;
@@ -709,7 +709,7 @@ test("a call that never settles, as a Workers call whose request ended, gives it
   const pathFor = (lapses: boolean) => {
     let readies = 0;
     const path: UsePath = {
-      db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), { callsEndWithRequest: lapses }),
+      db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits({ inFlight: 1 }), { callsEndWithRequest: lapses }),
       ready: () => (readies++ === 0 ? new Promise<void>(() => {}) : Promise.resolve()),
     };
     return { path, readies: () => readies };
@@ -747,7 +747,7 @@ function heldBack(callsEndWithRequest: boolean): { path: UsePath; asked: () => n
   let waits = () => {};
   const waiting = new Promise<void>((resolve) => (waits = resolve));
   const path: UsePath = {
-    db: counted, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), { callsEndWithRequest }),
+    db: counted, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits({ inFlight: 1 }), { callsEndWithRequest }),
     ready: () => new Promise<void>((resolve) => {
       lift = resolve;
       waits();
@@ -820,6 +820,74 @@ test('admission: past its calls in flight, an isolate refuses at once, holding n
   const refused = all.filter((outcome) => 'busy' in outcome && outcome.busy === 'overloaded');
   assert.ok(refused.length >= 1 && refused.length <= 4, `refused ${refused.length}`);
   for (const outcome of refused) assert.deepEqual(outcome, { ok: false, busy: 'overloaded', retryAfter: 1 });
+});
+
+/** A path whose key service holds every unwrap until `free`, counting those waiting there. */
+function heldAtKeys(inFlight: number): { path: UsePath; waiting: () => number; free: () => void } {
+  let waiting = 0;
+  let free = () => {};
+  const freed = new Promise<void>((resolve) => (free = resolve));
+  const keks = new Proxy(CONFIG.keks, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'unwrap' || typeof value !== 'function') return value;
+      return async (...args: unknown[]) => {
+        waiting += 1;
+        await freed;
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
+  const path: UsePath = { db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks, cache: new UseCache(useLimits({ inFlight })) };
+  return { path, waiting: () => waiting, free: () => free() };
+}
+
+async function until(done: () => boolean): Promise<void> {
+  for (const end = Date.now() + 2_000; !done() && Date.now() < end;) await sleep(5);
+  assert.ok(done(), 'waited 2 s');
+}
+
+test('a use keeps its place while its key service opens its key, not only for its statement (config.md, Q1)', async () => {
+  const w = await world();
+  const id = await w.key('opened');
+  const { path, waiting, free } = heldAtKeys(1);
+  const first = use(path, ask(w, id));
+  await until(() => waiting() === 1);
+  assert.equal(path.cache.inFlight, 1, 'its statement answered, its key at the key service');
+  assert.deepEqual(await use(path, ask(w, id)), { ok: false, busy: 'overloaded', retryAfter: 1 });
+  free();
+  assert.ok(heard(await first).ok);
+  assert.equal(path.cache.inFlight, 0, 'opened: its place given back');
+});
+
+test('a batch takes a place for each of its keys, and one of more keys than the isolate has places runs alone (config.md, Q1)', async () => {
+  const w = await world();
+  const ids = [await w.key('a'), await w.key('b'), await w.key('c')];
+  const batch = (keys: readonly string[]) => {
+    const at = Date.now();
+    return { credential: w.credentialId, purpose: 'run' as const, at, deadline: at + 3_000, items: keys.map((secretId) => ({ secretId, place: null, requestId: newRequestId() })) };
+  };
+  const three = heldAtKeys(3);
+  const two = useMany(three.path, batch(ids.slice(0, 2)));
+  await until(() => three.waiting() === 2);
+  assert.equal(three.path.cache.inFlight, 2);
+  assert.deepEqual(await useMany(three.path, batch(ids.slice(1))), { ok: false, busy: 'overloaded', retryAfter: 1 }, 'two keys more than the one place left');
+  const one = use(three.path, ask(w, ids[2]!));
+  await until(() => three.waiting() === 3);
+  assert.equal(three.path.cache.inFlight, 3);
+  assert.deepEqual(await use(three.path, ask(w, ids[0]!)), { ok: false, busy: 'overloaded', retryAfter: 1 });
+  three.free();
+  assert.ok((await two).ok && heard(await one).ok);
+  assert.equal(three.path.cache.inFlight, 0);
+  // Three keys, one place: alone, the batch is served; beside it, nothing else is.
+  const single = heldAtKeys(1);
+  const all = useMany(single.path, batch(ids));
+  await until(() => single.waiting() === 3);
+  assert.equal(single.path.cache.inFlight, 3);
+  assert.deepEqual(await use(single.path, ask(w, ids[0]!)), { ok: false, busy: 'overloaded', retryAfter: 1 });
+  single.free();
+  assert.ok((await all).ok);
+  assert.equal(single.path.cache.inFlight, 0);
 });
 
 test('before the policy is logged, a use does nothing', async () => {

@@ -351,7 +351,7 @@ test('a batch that loses its race while one key\'s old-write check reads starts 
   let go = () => {};
   const held = new Promise<void>((resolve) => (go = resolve));
   const path: UsePath = {
-    db: isolate.hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits(1, { batch: 1 })),
+    db: isolate.hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits({ batch: 1 })),
     oldWrite: async (_principal, _old, through) => {
       checks.push(through);
       checking();

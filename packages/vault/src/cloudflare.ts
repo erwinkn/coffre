@@ -37,11 +37,10 @@ export * from './index.ts';
  * What the vault Worker's `vault(env => …)` returns, for 0.15's log
  * (docs/design/0.15-plan.md):
  * - `hotDatabase`: the uses' own Hyperdrive config, whose login is
- *   `coffre_vault_hot`, and `uses`, how many uses an isolate has in flight
- *   at most (by default `connections`, the share of that config's pool an
- *   isolate may hold: T112 measures it), and `uses.batch`, the most keys
- *   a statement of a request's several makes uses of (100:
- *   `UseLimits.batch`);
+ *   `coffre_vault_hot`, and `uses.batch`, the most keys a statement of a
+ *   request's several makes uses of (100: `UseLimits.batch`). How many keys
+ *   an isolate has in flight is derived, not set (`USES_IN_FLIGHT`,
+ *   `@coffre/core/memory`);
  * - `checkpointer`: the namespace of the checkpointer's Durable Object,
  *   `CoffreCheckpointer` (`checkpointer()`, below), bound beside the vault.
  *   A change answers once that object has sealed it (R51), and the
@@ -55,7 +54,7 @@ export type WorkersVaultConfig = VaultConfig & {
   checkpointer: ObjectNamespace;
   witnesses?: readonly Witness[];
   /** `coverMs` is deprecated: in `deployment.ts` since 0.16, `audit.repeatsWithinSeconds`, read until 0.17, which refuses it here. */
-  uses?: { inFlight?: number; connections?: number; coverMs?: number; names?: number; batch?: number };
+  uses?: { coverMs?: number; names?: number; batch?: number };
 };
 
 /**

@@ -1901,14 +1901,6 @@ export const HOT_STATEMENT_TIMEOUT_MS = 2000;
  */
 export const LOCK_WAIT_MS = HOT_LOCK_TIMEOUT_MS / 2;
 
-/**
- * A vault's pool's connections, unless its transport says (pg's default), and so the uses an isolate or process has in
- * flight at most unless set (`useLimits`): past it, a use is refused at once as `overloaded` (R44). A binding's removal
- * holds the fence each use shares for no longer than that many uses arriving at R44's rate take (W331; the server's
- * api/workloads.ts, `FENCE_BUDGET_MS`), so that none of them is refused behind it.
- */
-export const DEFAULT_CONNECTIONS = 10;
-
 /** A use's request id: 63 random bits, as text, unique within its millisecond (hot-path-one.md, "Row size"). */
 export function newUseRequestId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(8));

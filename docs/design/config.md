@@ -348,7 +348,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | A sign or verify request | ⌈m ÷ 3⌉ × 4 + 4,096 bytes, m the longest message: 91,480 bytes at the 64 KiB default, 1,402,200 at 1 MiB (an `hmac()`'s `maxBytes`, or any editable proxy) | the message as base64url in JSON, and 4 KiB for the rest | #519 (`compute`) |
 | Bodies read whole at once, each counted twice (its bytes and a copy) out of the 16 MiB | 8 forwarded bodies of 1 MiB; 5 sign or verify requests at 1 MiB messages; 128 field bodies | 16 MiB ÷ (2 × the body's bound) | #519's code. (`memory.ts`'s comment says sixteen: a P3 for #519) |
 | One cache's slice | 2,396,745 bytes | 16 MiB ÷ 7 caches, least recently used out first | #519 |
-| Uses an isolate can hold | about 2,083 | 64,000,000 ÷ 30 KiB per held use | 30 KiB measured (W331, local workerd); stated in #519, not used until Q1, which first has it re-measured over a use's whole life, its key's opening included |
+| Uses an isolate can hold | about 2,083 | 64,000,000 ÷ 30 KiB per key in flight (`USE_IN_FLIGHT_BYTES`) | 30 KiB measured (W331, local workerd, a use held in its statement, its RPC included); re-measured over a use's whole life by Q1's step 1 (W363, `packages/vault/test/bench/held.ts`): a use held at its key service 13 to 15 KiB, a batch's key 6 to 9 KiB, Node in process, which bounds workerd's from above but leaves out the transport. 30 KiB, the largest, stands |
 | A plugin's WebSocket message on Node | 1 MiB | the body bound | #519 |
 | A streamed body | 5 GiB | S3's one request | platform |
 | A body whose digest is declared | 95 MiB | under Cloudflare's 100 MB | platform |
@@ -357,7 +357,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 
 | Name | 0.16 value | Formula | Source |
 |---|---|---|---|
-| Uses in flight per isolate or process | **10** ⚠ | node-postgres's default pool, where Workers has no pool | none: Q1. It counts a use's database phase only, and a batch as one: a use waiting on its key service holds no place (Q1) |
+| Keys in flight per isolate or process (`USES_IN_FLIGHT`) | 1,250 | min(`USES_BYTES` ÷ `USE_IN_FLIGHT_BYTES`, 3,000 ms ÷ 2.4 ms a use) = min(2,083, 1,250) | Q1's step 1 (W363). A place a key, from admission to the value opened or the use refused or `late`, its wait on the key service included; a batch of more keys than the count is served alone. Was 10, node-postgres's pool size, counting a call's database phase only |
 | How long a use's place outlives its deadline (`HELD_PAST_DEADLINE_MS`) | 2 s | the uses' login's `statement_timeout` | R53 |
 | A use's time tolerance (`AT_SLACK_MS`) | 63 s | deadline 3 s + a clock 60 s ahead | R53, D3 |
 | The bulk cap's refresh | 60 s at 15 min | in ms, max(1, min(60,000, ⌊window ÷ 10⌋)): a 1 ms window refreshes every 1 ms | decision 9 (`refreshMs`, `packages/vault/src/bulk.ts`) |
@@ -450,7 +450,7 @@ read call with a key service 11.2 s.
 | A sign-in the vault found busy | 503, `Retry-After: 1` | one lock wait | #520 |
 | Node's limiter keys | 10,000 | the addresses one window's target can come from; about 2 MB | #520 |
 | Exchanges in flight per isolate | **32** ⚠ | none written | stays until a sign-in has a deadline of its own (limits.md #35) |
-| A binding removal's batch, Node (`UNBIND_BATCH`) | 125 | 10 ms ÷ 0.08 ms a credential, measured | the 10 ms is `FENCE_BUDGET_MS` = 10 uses in flight ÷ 1,000 a second: **derived from Q1's 10**, see Q1 and its refusal table |
+| A binding removal's batch, Node (`UNBIND_BATCH`) | 125 | 10 ms ÷ 0.08 ms a credential, measured | the 10 ms is `FENCE_BUDGET_MS`, Erwin's rule that revoking pauses `/use` a few ms at most; the 10 uses arriving meanwhile at 1,000 a second wait within the 1,250 in flight, none refused. It was 10 uses in flight ÷ 1,000 a second while the count was 10 (Q1) |
 | The same, on Workers | 114 a call, 228 a request | (10 ms − 4.85 ms fixed) ÷ 0.045 ms; 2 calls in the request's CPU, within 32 invocations | **estimated, from mixed runtimes** (#520, `removal.ts`): the per-credential costs (0.045 ms, 0.0175 ms) and the calls' own fixed CPU (0.55, 0.75 ms) are Node's, in process; only the 4.3 ms connection and login is workerd's, measured on another operation (the verifier's three statements, `ABOVE_NEWEST`). Whether a removal fits Free's 10 ms is unmeasured: a removal call and request timed on workerd would settle it |
 | A batch's bytes | 4 MiB | half the Node vault socket's 8 MiB message | #520 |
 | Spent sign-in tokens forgotten a beat | 600,000 | 2 × 1,000 a second × 300 s | R44 (#520; was 5,000) |
@@ -557,7 +557,8 @@ there is no pool (limits.md §2). Measured since:
 
 **Recommendation: two steps.**
 
-**Step 1, now, with no Cloudflare run:** replace the 10 with what an
+**Step 1, now, with no Cloudflare run** (built: W363, `USES_IN_FLIGHT`,
+the counting fixes below, the bytes re-measured): replace the 10 with what an
 isolate can actually carry, the smaller of its memory and its CPU within one
 deadline:
 
@@ -609,7 +610,9 @@ vault's use statement refuses a credential whose binding is closed, and the
 batches stop needing that lock at all. TLC holds every scenario so
 (`VaultChecksClosed`), at the cost of a join on the hot path (limits.md
 §3.6). Recommendation: step 1 and 50 ms batches; the join only if a
-removal's latency shows up in a real p99.
+removal's latency shows up in a real p99. Built (W363): 10 ms batches,
+kept by Erwin's standing rule that revoking pauses `/use` a few ms at
+most, which 50 ms would break.
 
 **Step 2, fast refusal from recent outcomes, A or B:** B, adaptive
 throttling (Google SRE book, "Handling Overload"). Each isolate counts, over
@@ -866,7 +869,7 @@ it ends at 30 s with the app's.
 | Knob | Before | After |
 |---|---|---|
 | The vault's `uses` block on Workers (`inFlight`, `connections`, `coverMs`, `names`, `batch`) | five settings, none set by any deployment | gone: the in-flight count derived (Q1), `coverMs` the object's `audit.repeatsWithinSeconds`, the rest internal constants at today's defaults (10,000, 100; section 2.3) |
-| `DEFAULT_CONNECTIONS` and Node's pool probe | 10 per isolate or process; the probe always reads nothing | gone, with Q1's step 1 |
+| `DEFAULT_CONNECTIONS` and Node's pool probe | 10 per isolate or process; the probe always reads nothing | gone, with Q1's step 1 (W363) |
 | `USES_AT_ONCE` (4 per request) | "leaves the isolate's admission room" | gone with the count it protects |
 | Node pool size (`max ?? 10`) | 10 per pool; a deployment passing a URL cannot change it | derived from the database at start (Q2) |
 | `coffre setup`'s Hyperdrive maximum | 20, Free's, on Paid too | the plan's maximum (limits.md #12) |

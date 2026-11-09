@@ -99,9 +99,7 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
     // The same URL is the same connection: on SQLite, where it is the same file, two would wait on each other's
     // writes, a use's and the checkpointer's, past the busy timeout.
     const hot = config.hotDatabase === undefined ? undefined : config.hotDatabase === config.database ? db : await open(config.hotDatabase);
-    // A use holds one of the hot pool's connections from its call to its answer: at most that many in flight.
-    const connections = (hot as { $client?: { options?: { max?: number } } } | undefined)?.$client?.options?.max;
-    const uses = { ...(connections === undefined ? {} : { connections }), ...options.uses, coverMs: resolved.deployment.audit.repeatsWithinSeconds * 1000 };
+    const uses = { ...options.uses, coverMs: resolved.deployment.audit.repeatsWithinSeconds * 1000 };
     if (own) {
       // On Postgres, a connection of its own, which it cuts once it stalls (T169): what a stalled tick awaits holds none of
       // the vault's. On SQLite, the vault's one: two to one file wait on each other's writes.

@@ -66,6 +66,26 @@
   - Workers Free is best effort: its 10 ms of CPU is below the 20 ms
     coffre's bounds are sized for, so a request at a bound may be ended by
     Cloudflare; `deploy.md` says which.
+- **An isolate refuses `/use` only past the keys it can carry, 1,250, not
+  past 10 calls (W363; docs/design/config.md, Q1, step 1).** The vault
+  refused an isolate's or process's 11th use in flight with 503
+  `overloaded`: 10 was node-postgres's default pool size, applied on
+  Workers, where there is no pool. The count is now derived, the smaller
+  of what an isolate's memory holds and what its CPU serves within a
+  use's 3 s deadline: min(64,000,000 ÷ 30 KiB, 3,000 ms ÷ 2.4 ms) = 1,250
+  (`USES_IN_FLIGHT`, `@coffre/core/memory`). It counts what it bounds:
+  - a use holds its place until its value is opened or it fails, its wait
+    on the key service included; it gave its place back once its
+    statement had answered;
+  - a batch takes a place for each key (a read of a whole environment,
+    once its first statement lists them), not one for the call. A batch
+    of more keys than an isolate has places is served alone.
+  - `vault({ uses: { inFlight, connections } })` and `serveVault`'s
+    `uses.connections` are gone, with `DEFAULT_CONNECTIONS` and Node's
+    probe of the hot pool's size: no deployment set them.
+  - A binding's removal still revokes 125 credentials a batch (10 ms of
+    the fence), now from Erwin's rule that revoking pauses `/use` a few
+    ms at most: the uses that arrive meanwhile wait, none refused.
 
 - **The credential proxy holds 1 MiB of a body at most, and an isolate's
   memory is split into named shares (W331, limits S11-S13, S26, S52).** A
