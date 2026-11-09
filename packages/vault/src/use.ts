@@ -9,7 +9,7 @@ import {
   type ProxyItemInput, type ProxyItemOutcome, type RouteFound, type RouteUseInput, type RouteUseOutcome, type UseBusy, type UseInput, type UseManyInput, type UseManyOutcome, type UseOutcome, type UsedValue,
 } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
-import { engineOf } from '@coffre/db/dialect';
+import { engineOf, isUnreachable } from '@coffre/db/dialect';
 
 import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
@@ -541,8 +541,13 @@ const busyNamed = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served
 async function seated<I extends { at: number; deadline: number }, T>(
   path: UsePath, input: I, places: number, busyAs: (outcome: Extract<UseOutcome, { busy: UseBusy }>) => T, answer: (path: UsePath, input: I) => Promise<T>,
 ): Promise<T> {
-  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busyAs(busy('late'));
   const { throttle } = path.cache;
+  if (input.deadline > input.at + USE_DEADLINE_MS) return busyAs(busy('late'));
+  // Past its deadline before it is seated (on Node, a vault too busy to read its socket in time): asked, not in time.
+  if (Date.now() >= input.deadline) {
+    throttle?.answered(Date.now(), false);
+    return busyAs(busy('late'));
+  }
   if (throttle?.refuses(Date.now())) return busyAs(busy('overloaded'));
   const seat = path.cache.admit(input.deadline, places);
   if (seat === null) {
@@ -550,15 +555,22 @@ async function seated<I extends { at: number; deadline: number }, T>(
     return busyAs(busy('overloaded'));
   }
   let answered: T | undefined;
+  let refused = false;
   try {
     answered = await answer({ ...path, seat }, input);
     return answered;
+  } catch (error) {
+    refused = isUnreachable(error);
+    throw error;
   } finally {
-    // In time: settled before its deadline, whatever it answered or threw, but `late`. That is answered at the deadline,
-    // or before it when Postgres gave up for it (its lock_timeout, 1 s, or statement_timeout, 2 s: `raced`), as is an
-    // outage that waited it out; one that failed at once cost nothing to throttle, nor did bad input.
+    // In time: settled before its deadline, whatever it answered or threw, but `late` or a connection refused. `late`
+    // is answered at the deadline, or before it when Postgres gave up for it (its lock_timeout, 1 s, or
+    // statement_timeout, 2 s: `raced`), or when the names it read moved under it, statement after statement (rare, and
+    // counted as any `late` is), as is an outage that waited it out. A connection refused at once (Postgres's 53300,
+    // Hyperdrive's pool with no slot to give: `isUnreachable`) is the database turning work away, the one failure the
+    // throttle is for however fast it came; any other that failed at once cost nothing to throttle, nor did bad input.
     const now = Date.now();
-    throttle?.answered(now, now < input.deadline && !isLate(answered));
+    throttle?.answered(now, now < input.deadline && !refused && !isLate(answered));
     seat.release();
   }
 }

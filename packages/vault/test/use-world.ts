@@ -86,10 +86,15 @@ let cutoverNumber: bigint | null = null;
  * before the deadline. Its cache is its own, throttle on (config.md, Q1, step 2); `batch`, the keys a statement reads.
  */
 export function timingOut(code: string, after = 0, batch?: number): UsePath {
+  return failing(Object.assign(new Error('canceling statement'), { code }), after, batch);
+}
+
+/** A hot path whose statements fail with `error` once `after` of them are sent, `batch` keys to a statement. */
+export function failing(error: Error, after = 0, batch?: number): UsePath {
   let sent = 0;
   return {
     db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits(batch === undefined ? {} : { batch })),
-    ready: () => (sent++ < after ? Promise.resolve() : Promise.reject(Object.assign(new Error('canceling statement'), { code }))),
+    ready: () => (sent++ < after ? Promise.resolve() : Promise.reject(error)),
   };
 }
 

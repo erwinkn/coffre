@@ -646,7 +646,10 @@ the book, both about when and how it refuses, not how much:
 - **A use counts once its outcome is known**, refused, or settled in time
   (before its deadline, whatever it answered or threw, but `late`) or not
   (`late`, even one Postgres gave up on early, its lock or statement timed
-  out; an outage that waited it out), never on arrival. The book's client counts a request when it sends it,
+  out; an outage that waited it out; a connection the database refused, at
+  once or not: Postgres out of connections, Hyperdrive's pool with no slot
+  to give; a use already past its deadline when the vault reads it), never
+  on arrival. The book's client counts a request when it sends it,
   which a cold isolate cannot afford: 200 uses in its first second at
   80 ms each are 16 in flight, and the 17th would see 16 requests and no
   accept, p = 16 ÷ 17. Counted on its outcome, an in-flight use is

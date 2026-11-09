@@ -70,7 +70,8 @@
   fewer than half in time (W363; docs/design/config.md, Q1, step 2).**
   Adaptive throttling, from Google's SRE book: each isolate or process
   counts, over the last two minutes, the uses it answered or refused and
-  those it answered before their deadline, and refuses a new use with
+  those it answered before their deadline (a connection the database
+  refused counts as not in time, however fast), and refuses a new use with
   503 `overloaded`, before any statement or place, at the rate
   max(0, (requests − 2 × accepts) ÷ (requests + 1)). At 2,500 uses a
   second against a database that answers 1,040, about 17% are refused at

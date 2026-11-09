@@ -31,7 +31,7 @@ import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, useMany,
 import { openVault, prepareVault } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, postgresOnly, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
-import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, heldKeks, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, timingOut, until, useDatabases, world } from './use-world.ts';
+import { ask, change, CONFIG, DAY, emptyLog, failing, FENCE, genesis, heldKeks, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, timingOut, until, useDatabases, world } from './use-world.ts';
 import { resolveVaultConfig } from '../src/config.ts';
 
 let db: TestDatabase;
@@ -960,6 +960,40 @@ test("a use Postgres gave up on before its deadline, its lock or its statement t
     assert.ok(Date.now() < at + 3_000, 'answered well before its deadline');
     assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 2, `${code}: one answered, none in time`);
   }
+});
+
+test("a use whose connection the database refused at once counts as not in time to the throttle (config.md, Q1, step 2; Fable's review r4 of #554)", async () => {
+  const w = await world();
+  const id = await w.key();
+  const refusals = [
+    Object.assign(new Error('sorry, too many clients already'), { code: '53300' }),
+    new Error('Failed to acquire a connection from the pool'),
+  ];
+  for (const error of refusals) {
+    const path = failing(error);
+    const at = Date.now();
+    await assert.rejects(use(path, ask(w, id, { at, deadline: at + 3_000 })), (thrown) => thrown === error);
+    assert.ok(Date.now() < at + 3_000, 'failed well before its deadline');
+    assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 2, `${error.message}: one answered, none in time`);
+    assert.equal(path.cache.inFlight, 0);
+  }
+  // Any other failure at once is in time: it cost the database nothing.
+  const path = failing(new Error('a bug of the vault'));
+  await assert.rejects(use(path, ask(w, id)));
+  assert.equal(path.cache.throttle!.rate(Date.now()), 0);
+});
+
+test("a use already past its deadline when the vault reads it counts as not in time; one whose deadline is past the bound, bad input, counts as nothing (Fable's review r4 of #554)", async () => {
+  const w = await world();
+  const id = await w.key();
+  const path = timingOut('57014', 1_000);
+  const at = Date.now() - 3_000;
+  assert.deepEqual(await use(path, ask(w, id, { at, deadline: at + 2_000 })), { ok: false, busy: 'late', retryAfter: 1 });
+  assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 2);
+  const fresh = timingOut('57014', 1_000);
+  const now = Date.now();
+  assert.deepEqual(await use(fresh, ask(w, id, { at: now, deadline: now + 60_000 })), { ok: false, busy: 'late', retryAfter: 1 });
+  assert.equal(fresh.cache.throttle!.rate(Date.now()), 0);
 });
 
 test('before the policy is logged, a use does nothing', async () => {
