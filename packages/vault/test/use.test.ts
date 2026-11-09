@@ -30,7 +30,7 @@ import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, useMany,
 import { openVault, prepareVault } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, postgresOnly, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
-import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, isolate, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, heldKeks, isolate, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, until, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
 /** The hot path's login, as an isolate's uses run on it. */
@@ -822,29 +822,11 @@ test('admission: past its calls in flight, an isolate refuses at once, holding n
   for (const outcome of refused) assert.deepEqual(outcome, { ok: false, busy: 'overloaded', retryAfter: 1 });
 });
 
-/** A path whose key service holds every unwrap until `free`, counting those waiting there. */
-function heldAtKeys(inFlight: number): { path: UsePath; waiting: () => number; free: () => void } {
-  let waiting = 0;
-  let free = () => {};
-  const freed = new Promise<void>((resolve) => (free = resolve));
-  const keks = new Proxy(CONFIG.keks, {
-    get(target, key) {
-      const value: unknown = Reflect.get(target, key, target);
-      if (key !== 'unwrap' || typeof value !== 'function') return value;
-      return async (...args: unknown[]) => {
-        waiting += 1;
-        await freed;
-        return (value as (...a: unknown[]) => unknown).apply(target, args);
-      };
-    },
-  });
+/** A path whose key service holds every unwrap until `free`, counting those waiting there (`heldKeks`). */
+function heldAtKeys(inFlight: number, options: { failing?: boolean } = {}): { path: UsePath; waiting: () => number; free: () => void } {
+  const { keks, waiting, free } = heldKeks(options);
   const path: UsePath = { db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks, cache: new UseCache(useLimits({ inFlight })) };
-  return { path, waiting: () => waiting, free: () => free() };
-}
-
-async function until(done: () => boolean): Promise<void> {
-  for (const end = Date.now() + 2_000; !done() && Date.now() < end;) await sleep(5);
-  assert.ok(done(), 'waited 2 s');
+  return { path, waiting, free };
 }
 
 test('a use keeps its place while its key service opens its key, not only for its statement (config.md, Q1)', async () => {
@@ -888,6 +870,20 @@ test('a batch takes a place for each of its keys, and one of more keys than the 
   single.free();
   assert.ok((await all).ok);
   assert.equal(single.path.cache.inFlight, 0);
+});
+
+test('a key that fails to open answers the call at once, and its other keys keep their places until they settle (config.md, Q1)', async () => {
+  const w = await world();
+  const ids = [await w.key('a'), await w.key('b'), await w.key('c')];
+  const at = Date.now();
+  const held = heldAtKeys(3, { failing: true });
+  const items = ids.map((secretId) => ({ secretId, place: null, requestId: newRequestId() }));
+  await assert.rejects(useMany(held.path, { credential: w.credentialId, purpose: 'run', at, deadline: at + 3_000, items }), { name: 'KekUnavailableError' });
+  assert.equal(held.waiting(), 2, 'answered with two keys still at the key service');
+  assert.equal(held.path.cache.inFlight, 3);
+  assert.deepEqual(await use(held.path, ask(w, ids[0]!)), { ok: false, busy: 'overloaded', retryAfter: 1 });
+  held.free();
+  await until(() => held.path.cache.inFlight === 0);
 });
 
 test('before the policy is logged, a use does nothing', async () => {

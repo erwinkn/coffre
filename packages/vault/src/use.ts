@@ -197,7 +197,10 @@ export class UseCache {
   /**
    * `places` for a call due by `deadline` (its keys, as far as it knows them), or null: refused, `overloaded`, when the
    * isolate's places are taken, or would be past its count with this call's while other calls hold some. A call of more
-   * keys than the whole count is admitted alone: refused, it could never be served.
+   * keys than the whole count is admitted alone: refused, it could never be served. A batch by ids asks for all its
+   * places at once, so one too large for the places left is refused while other calls keep them taken; a named read of
+   * every key at a place asks for one and grows to its keys once listed (`Seat.hold`), past the count if need be. Under
+   * steady load near the count, the first can be refused retry after retry where the second is served (review r2 of #551).
    */
   admit(deadline: number, places = 1): Seat | null {
     const held = this.inFlight;
@@ -884,14 +887,13 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
 type Allowed = { allowed: { view: UseView; number: string; covered: boolean }; row: UseRow; checked: CheckedView; request: UseRequest };
 
 /**
- * Each allowed key opened (`opening`), in order. Every one is waited for, even once one has failed, so that the call
- * keeps its places while any of its keys is still with the key service.
+ * Each allowed key opened (`opening`), in order. The call answers on its first failure, as soon as it is known, but
+ * keeps its places (`Seat.during`) while any of its keys is still with the key service.
  */
-async function openingAll(path: UsePath, allowed: readonly Allowed[], deadline: number): Promise<Used[]> {
-  const opened = await Promise.allSettled(allowed.map((one) => opening(path, one, deadline)));
-  const failed = opened.find((one) => one.status === 'rejected');
-  if (failed !== undefined) throw failed.reason;
-  return opened.map((one) => (one as PromiseFulfilledResult<Used>).value);
+function openingAll(path: UsePath, allowed: readonly Allowed[], deadline: number): Promise<Used[]> {
+  const openings = allowed.map((one) => opening(path, one, deadline));
+  for (const one of openings) path.seat?.during(one);
+  return Promise.all(openings);
 }
 
 /** A use's answer once its key is opened: the value, or `late` past its deadline, or `bad_claim` for a key not this value's. */

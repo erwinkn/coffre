@@ -4,9 +4,11 @@
 // entry written together.
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { INSTANCE_ROLES, ROLES } from '@coffre/core/access';
 import { encrypt, freshDek, ownerKey } from '@coffre/core/envelope';
+import { KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
 import type { UseInput, UseOutcome } from '@coffre/core/vault';
 import { tablesOf, type Database, type Queryable } from '@coffre/db';
 import { sql } from 'drizzle-orm';
@@ -77,6 +79,36 @@ export const LOG_015: VaultOptions = {
 
 /** The cutover's change this fixture stands in for, by its number (`cutOverStandIn`). */
 let cutoverNumber: bigint | null = null;
+
+/**
+ * A key service that holds every unwrap until `free`, counting those waiting there; `failing`, the first one asked
+ * fails at once, unavailable, the others still held (config.md, Q1: a use keeps its places while any key opens).
+ */
+export function heldKeks({ failing = false } = {}): { keks: KekRegistry; waiting: () => number; free: () => void } {
+  let waiting = 0;
+  let asked = 0;
+  let free = () => {};
+  const freed = new Promise<void>((resolve) => (free = resolve));
+  const keks = new Proxy(CONFIG.keks, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'unwrap' || typeof value !== 'function') return value;
+      return async (...args: unknown[]) => {
+        if (failing && asked++ === 0) throw new KekUnavailableError('the key service is down');
+        waiting += 1;
+        await freed;
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
+  return { keks, waiting: () => waiting, free: () => free() };
+}
+
+/** Polls `done` for up to 2 s. */
+export async function until(done: () => boolean): Promise<void> {
+  for (const end = Date.now() + 2_000; !done() && Date.now() < end;) await sleep(5);
+  assert.ok(done(), 'waited 2 s');
+}
 
 /** A vault of its own, a fresh isolate: its own seal cache, covers and admission count; and the vault, for its decisions. */
 export async function isolate(options: VaultOptions = {}, config: ResolvedVaultConfig = CONFIG) {
