@@ -31,12 +31,12 @@ let upstream: Server;
 const whole: { headers: IncomingHttpHeaders; length: number; sha256: string }[] = [];
 const broken: number[] = [];
 /** `/v3/hang`: each request that never gets an answer, and when its connection ended (the proxy's fetch aborted). */
-let hung: { ended: Promise<void> } | undefined;
+let onHang: (upstream: { ended: Promise<void> }) => void = () => {};
 
 before(async () => {
   upstream = createServer((request, response) => {
     if (request.url!.startsWith('/v3/hang')) {
-      hung = { ended: new Promise<void>((resolve) => response.on('close', resolve)) };
+      onHang({ ended: new Promise<void>((resolve) => response.on('close', resolve)) });
       return;
     }
     const hash = createHash('sha256');
@@ -143,16 +143,16 @@ test("a workload's 55 MB document that declares its Content-Digest streams out o
 });
 
 test("an app's request that ends before the upstream answers ends the upstream request", { timeout: 60_000 }, async () => {
-  hung = undefined;
+  const arrived = new Promise<{ ended: Promise<void> }>((resolve) => (onHang = resolve));
   // The request's signal fires after 300 ms, as Cloudflare's does when the caller hangs up (the Worker's `?abort-after`).
   const ended = await fetch(`http://${worker.address}:${worker.port}/use/yousign/hang?abort-after=300`, {
     headers: { authorization: `DPoP coffre_wl_${'t'.repeat(43)}`, dpop: 'checked on Node' },
   });
   assert.equal(ended.status, 502);
   assert.match(((await ended.json()) as { message: string }).message, /did not answer/);
-  assert.ok(hung !== undefined, 'the upstream got the request');
+  const { ended: ending } = await arrived;
   const timeout = new Promise<string>((resolve) => setTimeout(() => resolve('still open'), 10_000).unref());
-  assert.equal(await Promise.race([hung.ended.then(() => 'ended'), timeout]), 'ended', 'the upstream connection ends with the request');
+  assert.equal(await Promise.race([ending.then(() => 'ended'), timeout]), 'ended', 'the upstream connection ends with the request');
 });
 
 test("every Workers deployment's app asks Cloudflare to fire a request's signal when its caller hangs up: coffre init's, and the dev stack's", () => {

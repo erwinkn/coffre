@@ -486,6 +486,8 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
     routes: {
       prefix: '/use',
       fetch: async (request, coffre) => {
+        // Under srvx the signal watches the caller's disconnect from its first read: now, before the vault's reads.
+        void request.signal;
         // The bodies it reads whole, counted against the isolate's share until it ends, however it ends (`take`).
         const holding: Holding = { bodies, taken: 0 };
         try {

@@ -17,18 +17,24 @@ import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 const HANDLE = `coffre_use_${'h'.repeat(43)}`;
 const KEY = 'sk_schumann_real_0123456789abcdef';
 
+/** While set, `use` waits for it: a request held up in the vault's reads. */
+let gate: Promise<void> | undefined;
+
 /** coffre as the proxy calls it: every handle stands, for market/dev, and opens this value. */
 const coffre = {
   publicUrl: 'https://secrets.acme.example',
   workload: async () => null,
   handle: async () => ({ expiresAt: new Date(Date.now() + 3_600_000).toISOString(), paths: ['market/dev'] }),
-  use: async () => ({
+  use: async () => {
+    await gate;
+    return {
     values: { SCHUMANN_API_KEY: KEY },
     plain: [],
     keys: ['SCHUMANN_API_KEY'],
     environment: { path: 'market/dev', personal: false },
     expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-  }),
+    };
+  },
 } as unknown as PluginContext;
 
 /** What the upstream saw of a request: that it arrived, and that its connection ended before its answer was whole. */
@@ -126,4 +132,24 @@ test("an app that hangs up while the upstream's answer is streaming back ends th
   await within(streaming.arrived, 'the upstream got the request');
   hangUp();
   assert.deepEqual((await within(streaming.ended, 'the upstream request ended')).answered, false);
+});
+
+test('an app that hangs up while the vault is still opening its values never has its request sent upstream', { timeout: 30_000 }, async () => {
+  // A handle of its own: the proxy keeps what the vault said of the others' for a while, and this one's `use` must be asked.
+  const never = watch('/gated');
+  let release!: () => void;
+  gate = new Promise<void>((resolve) => (release = resolve));
+  try {
+    const { request, answer, hangUp } = call('/gated', { 'content-length': '2', 'x-api-key': `coffre_use_${'g'.repeat(43)}` });
+    request.end('{}');
+    answer.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    hangUp();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  } finally {
+    release();
+    gate = undefined;
+  }
+  const outcome = await Promise.race([never.arrived.then(() => 'sent'), new Promise<string>((resolve) => setTimeout(() => resolve('not sent'), 1000).unref())]);
+  assert.equal(outcome, 'not sent', 'the upstream got a request from a caller that had left');
 });
