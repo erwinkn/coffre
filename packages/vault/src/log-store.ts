@@ -446,7 +446,7 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
       // a write's tiles being at the edge, at or above every cut.
       let deleted = 0;
       for (let step = 0; step < 10_000; step += 1) {
-        const [row] = await rowsOf<{ done: string }>(db, sql`SELECT drop_tiles(${below}::bigint) AS done`);
+        const [row] = await upkeepRows<{ done: string }>(db, sql`SELECT drop_tiles(${below}::bigint) AS done`);
         const [what, name] = row!.done.split(' ') as [string, string];
         if (what === 'done') return deleted + Number(name);
         // Forgotten whichever step this call took: a DETACH whose answer was lost shows next as the range dropped.
@@ -647,15 +647,29 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
  * no partitions, writes them in a transaction, and drops a day's by `at`.
  */
 /**
- * How long `drop_reads_day` may run: its DELETEs take a whole day's rows of
- * `log_read_days` and `log_read_place_days` at once, which on a large
- * instance can take longer than the vault login's 5 s ceiling
- * (`RUNTIME_STATEMENT_TIMEOUT_MS`), which would roll the day back every
- * run, never done. It runs in the upkeep, behind no caller, one at a time:
- * 60 s, Hyperdrive's own bound on a query, what it ran under before the
- * ceiling.
+ * How long one statement of the upkeep's own may run, where its work grows
+ * with the log rather than a batch: `drop_reads_day`, whose DELETEs take a
+ * whole day's rows of `log_read_days` and `log_read_place_days` at once, and
+ * `drop_tiles`, whose last step deletes every upper tile below the cut in
+ * one DELETE over `log_tiles_uses_upper`. On a large instance either can
+ * take longer than the vault login's 5 s ceiling (`RUNTIME_STATEMENT_TIMEOUT_MS`),
+ * which would roll it back every run, never done. They run in the upkeep,
+ * behind no caller, one at a time: 60 s, Hyperdrive's own bound on a query,
+ * what they ran under before the ceiling.
  */
-const DROP_READS_DAY_MS = 60_000;
+const UPKEEP_STATEMENT_MS = 60_000;
+
+/**
+ * `query` under the upkeep's ceiling (`UPKEEP_STATEMENT_MS`), not the
+ * login's: a function's own SET cannot lengthen the statement that calls
+ * it, so a transaction sets it first, for itself alone.
+ */
+async function upkeepRows<T>(db: Database, query: SQL): Promise<T[]> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT set_config('statement_timeout', ${String(UPKEEP_STATEMENT_MS)}, true)`);
+    return rowsOf<T>(tx, query);
+  });
+}
 
 /** How many objects one statement of `objects` asks for. */
 const OBJECTS_AT_ONCE = 200;
@@ -773,12 +787,7 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
     },
     async dropDay(day) {
       if (postgres) {
-        // Its own ceiling, not the login's (`RUNTIME_STATEMENT_TIMEOUT_MS`): a function's SET cannot lengthen the
-        // statement that calls it, so the transaction sets it first.
-        const [row] = await db.transaction(async (tx) => {
-          await tx.execute(sql`SELECT set_config('statement_timeout', ${String(DROP_READS_DAY_MS)}, true)`);
-          return rowsOf<{ state: string }>(tx, sql`SELECT drop_reads_day(${day}::date) AS state`);
-        });
+        const [row] = await upkeepRows<{ state: string }>(db, sql`SELECT drop_reads_day(${day}::date) AS state`);
         if (row?.state !== 'kept') made.delete(day);
         return;
       }

@@ -85,7 +85,8 @@ const BACKLOG_MARGIN_MS = 30_000;
  * and serves the process's every request from then on. A database too small
  * for coffre's pools stops the process, naming the `max_connections` it
  * needs, as the vault's process stops; one that cannot be reached yet is
- * tried again by the next request, which answers 503 meanwhile. Until it
+ * tried again by the next request or readiness probe, a request answering
+ * 503 meanwhile; one too small when it is first reached stops it then. Until it
  * opens, health answers without it: `/livez` that the process is up,
  * `/readyz` 503, so that an orchestrator restarts nothing for an outage
  * of the database's.
@@ -104,16 +105,19 @@ export function createCoffre(config: NodeConfig): CoffreNode {
     opened = true;
     return rt;
   };
+  // Every attempt, the first or one a later request or probe starts: a database too small stops the process
+  // whenever it is first reached, one that was down at start included.
   const ready = () =>
     (runtime ??= open().catch((error: unknown) => {
       runtime = undefined;
+      if (error instanceof TooFewConnections) {
+        console.error(error.message);
+        process.exit(1);
+      }
       throw error;
     }));
-  void ready().catch((error: unknown) => {
-    if (!(error instanceof TooFewConnections)) return;
-    console.error(error.message);
-    process.exit(1);
-  });
+  // Tried again by the next request, or the next `/readyz`.
+  void ready().catch(() => {});
   let timer: NodeJS.Timeout | undefined;
   return {
     request(request) {
@@ -124,8 +128,8 @@ export function createCoffre(config: NodeConfig): CoffreNode {
       const scoped = () => (scope ??= ready().then((rt) => requestScope(rt, () => sourceIp)));
       return {
         coffre: {
-          route: async (req) => (opened ? null : unopened(req)) ?? scoped().then((s) => s.route(req), errorResponse),
-          respond: async (req, render) => (opened ? null : unopened(req)) ?? scoped().then((s) => s.respond(req, render), errorResponse),
+          route: async (req) => (opened ? null : unopened(req, ready)) ?? scoped().then((s) => s.route(req), errorResponse),
+          respond: async (req, render) => (opened ? null : unopened(req, ready)) ?? scoped().then((s) => s.respond(req, render), errorResponse),
         },
       };
     },
@@ -163,17 +167,20 @@ export function createCoffre(config: NodeConfig): CoffreNode {
 
 /**
  * Health before the database has opened (`createCoffre`): the process is
- * live, and not ready. Null for any other request, which waits for it.
+ * live, and not ready. `/readyz` starts another attempt, unawaited, so
+ * that a process an orchestrator only probes opens once the database is
+ * back. Null for any other request, which waits for it.
  */
-function unopened(request: Request): Response | null {
+function unopened(request: Request, ready: () => Promise<unknown>): Response | null {
   if (request.method !== 'GET' && request.method !== 'HEAD') return null;
   const { pathname } = new URL(request.url);
   if (pathname === '/livez') return jsonResponse({ ok: true });
-  if (pathname === '/readyz') return errorResponse(new ApiError('unavailable', UNOPENED));
-  return null;
+  if (pathname !== '/readyz') return null;
+  void ready().catch(() => {});
+  return errorResponse(new ApiError('unavailable', UNOPENED));
 }
 
-const UNOPENED = "coffre's database has not opened yet: the process tries again with each request";
+const UNOPENED = "coffre's database has not opened yet: the process tries again with each request and readiness probe";
 
 /** coffre's configuration on Node. */
 export type NodeConfig = CoffreConfig & {

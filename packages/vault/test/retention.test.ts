@@ -671,3 +671,15 @@ test("a day's reads too many to drop within the vault login's statement timeout 
   assert.equal((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_place_days WHERE day = ${n}`))[0]!.n, 0);
   assert.equal((await rows<{ s: string }>(vault, sql`SELECT current_setting('statement_timeout') AS s`))[0]!.s, '100ms', "the drop's ceiling ended with its transaction");
 });
+
+test("upper tiles too many to scan within the vault login's statement timeout are scanned under the upkeep's own ceiling (W364, review r2)", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its statement timeout' }, async () => {
+  // drop_tiles's last step, one DELETE over every upper tile of the uses tree, which grows with the log: a million
+  // here, none below a cut of 0, the cut a log with no retention change has, so the scan is all its work.
+  await run(db.owner, sql`INSERT INTO log_tiles (tree, level, leaf, hashes) SELECT 'uses', 1, g::bigint * 65536, decode(repeat('00', 32), 'hex') FROM generate_series(0, 999999) g`);
+  const vault = await db.connect(1);
+  await run(vault, sql`SET statement_timeout = '20ms'`);
+  const started = performance.now();
+  assert.equal(await logStore(vault).dropTiles(0), 0);
+  assert.ok(performance.now() - started > 20, 'the scan took longer than the login lets a statement run');
+  assert.equal((await rows<{ s: string }>(vault, sql`SELECT current_setting('statement_timeout') AS s`))[0]!.s, '20ms', "the step's ceiling ended with its transaction");
+});

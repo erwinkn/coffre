@@ -29,4 +29,4 @@ for container in "${containers[@]}"; do
     urls+=("postgresql://postgres:local-setup-only@127.0.0.1:$(docker port "$container" 5432/tcp | cut -d: -f2)")
 done
 COFFRE_TEST_SETUP_CLUSTER="${urls[0]}" COFFRE_TEST_SETUP_OTHER_CLUSTER="${urls[1]}" COFFRE_TEST_SETUP_SMALL_CLUSTER="${urls[2]}" \
-    node --conditions=coffre:source --test --test-concurrency=1 packages/cli/test/setup.test.ts packages/cli/test/setup-workers.test.ts packages/cli/test/setup-domain.test.ts packages/cli/test/migrate.test.ts
+    node --conditions=coffre:source --test --test-concurrency=1 packages/cli/test/setup.test.ts packages/cli/test/setup-workers.test.ts packages/cli/test/setup-domain.test.ts packages/cli/test/migrate.test.ts packages/server/test/node-start-small.test.ts
