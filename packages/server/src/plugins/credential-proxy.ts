@@ -3850,7 +3850,8 @@ function redacted(upstream: Response, { scrub, whole, any }: Redactor, location:
   const init = { status: upstream.status, statusText: whole(upstream.statusText), headers };
   const type = upstream.headers.get('content-type') ?? '';
   const text = /^text\/|json|xml|javascript|x-www-form-urlencoded|event-stream/i.test(type);
-  if (upstream.body === null || !text || !any) return new Response(upstream.body, init);
+  if (upstream.body === null) return new Response(null, init);
+  if (!text || !any) return new Response(cancellable(upstream.body), init);
   let carry = '';
   const bytes = (part: string) => Uint8Array.from(part, (char) => char.charCodeAt(0));
   const body = upstream.body.pipeThrough(
@@ -3866,7 +3867,28 @@ function redacted(upstream: Response, { scrub, whole, any }: Redactor, location:
       },
     }),
   );
-  return new Response(body, init);
+  return new Response(cancellable(body), init);
+}
+
+/**
+ * A body whose cancel never fails. The upstream's body errors when the app's request ends (its signal aborts it), and a
+ * server that finds the app gone as it is handed the answer, srvx on Node, cancels the body it has not read: on a stream
+ * that has errored that rejects, which srvx does not catch, and Node exits on the unhandled rejection. Read on demand
+ * (no high-water mark), so the stream is still readable, never errored, until its reader has asked for a chunk.
+ */
+function cancellable(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        const { done, value } = await reader.read();
+        if (done) controller.close();
+        else controller.enqueue(value);
+      },
+      cancel: (reason) => reader.cancel(reason).catch(() => {}),
+    },
+    { highWaterMark: 0 },
+  );
 }
 
 function resolve(name: string, credential: Credential, insecure: boolean): Resolved {

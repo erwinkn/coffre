@@ -55,6 +55,8 @@ const watch = (path: string) => {
 
 let upstream: Server;
 let proxy: Srvx;
+/** While set, the proxy's answer waits for it before it goes to srvx: middleware that holds the answer back. */
+let holdAnswer: Promise<void> | undefined;
 let proxyAt: URL;
 
 before(async () => {
@@ -69,6 +71,8 @@ before(async () => {
     response.on('close', () => entry?.end(received, response.writableEnded));
     entry?.arrive(request);
     if (path === '/stream') response.writeHead(200, { 'content-type': 'text/plain' }).write('first chunk\n');
+    // A binary answer goes on as the upstream sent it; a text one passes through the redactor first.
+    if (path === '/late') response.writeHead(200, { 'content-type': 'application/octet-stream' }).write('first chunk\n');
   });
   upstream.listen(0, '127.0.0.1');
   await once(upstream, 'listening');
@@ -76,7 +80,13 @@ before(async () => {
     insecureUpstreams: true,
     credentials: { schumann: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/`, inject: header('x-api-key', '{SCHUMANN_API_KEY}') } },
   }).routes!;
-  proxy = serve({ port: 0, hostname: '127.0.0.1', silent: true, fetch: (request) => routes.fetch(request, coffre) });
+  proxy = serve({ port: 0, hostname: '127.0.0.1', silent: true,
+    fetch: async (request) => {
+      const answer = await routes.fetch(request, coffre);
+      await holdAnswer;
+      return answer;
+    },
+  });
   await proxy.ready();
   proxyAt = new URL(proxy.url!);
 });
@@ -152,4 +162,31 @@ test('an app that hangs up while the vault is still opening its values never has
   }
   const outcome = await Promise.race([never.arrived.then(() => 'sent'), new Promise<string>((resolve) => setTimeout(() => resolve('not sent'), 1000).unref())]);
   assert.equal(outcome, 'not sent', 'the upstream got a request from a caller that had left');
+});
+
+test("an app that hangs up after the upstream's headers came, before the answer goes out, does not take the process down", { timeout: 30_000 }, async () => {
+  // srvx cancels a body it finds nobody to read: on the upstream's, which the hang-up has errored, that must not reject unhandled.
+  const late = watch('/late');
+  let release!: () => void;
+  holdAnswer = new Promise<void>((resolve) => (release = resolve));
+  const unhandled: unknown[] = [];
+  const note = (reason: unknown) => unhandled.push(reason);
+  process.on('unhandledRejection', note);
+  try {
+    const { request, answer, hangUp } = call('/late', { 'content-length': '0' });
+    answer.catch(() => {});
+    request.end();
+    await within(late.arrived, 'the upstream got the request');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    hangUp();
+    assert.equal((await within(late.ended, 'the upstream request ended')).answered, false);
+    release();
+    holdAnswer = undefined;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  } finally {
+    release();
+    holdAnswer = undefined;
+    process.off('unhandledRejection', note);
+  }
+  assert.deepEqual(unhandled, []);
 });
