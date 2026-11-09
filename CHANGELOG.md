@@ -35,8 +35,10 @@
   the sources (`changesOf`) and in fourteen of the database's functions,
   which 0082 replaces with that alone changed (their signatures, settings
   and answers 0.15's; the use's and the route's warm-up marks move to
-  `0082`, so a session plans the new bodies before it takes the fence). So
-  do a sign-in's freeze check (701 pages to 4 under a plan for any target),
+  `0082`, so a session plans the new bodies before it takes the fence), and
+  an audit page's credential origins, a credential's first change (367
+  pages behind 20,000 of other objects' changes before it). So do a
+  sign-in's freeze check (701 pages to 4 under a plan for any target),
   a member's newest access entry on their page, and an audit page by
   member, which reads each of their names by `audit_log_actor_idx`, then
   its entries by seq (613 pages behind 20,000 of another member's, now a
@@ -48,8 +50,10 @@
   for its values and one for any, and fails on a new one in the sources or
   the database's functions that it does not list, or a read of an object's
   changes not through `changesOf` (`packages/db/test/newest-lookups.test.ts`).
-  Two reads still go over a whole kind's history, every member's findings
-  and an audit page's count of what it hides, which T248 bounds. Migration
+  Four reads still go over a whole history, which T248 bounds: every
+  member's findings, an audit page's count of what it hides, an
+  offboarding report's reads of its members, and the vault keyring's
+  rotations. Migration
   0082 adds the seventeen indexes, built after the migrations commit
   without blocking writes: fifteen on `audit_log`, `log_uses (number)` (the
   checkpointer's window after an hour's backlog of 3.5 million uses: 776 ms

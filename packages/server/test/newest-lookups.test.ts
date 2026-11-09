@@ -9,15 +9,15 @@ import assert from 'node:assert/strict';
 import { createDatabase, type Database } from '@coffre/db';
 import { openDatabase, postgresClient } from '@coffre/db/connect';
 import { rowsOf } from '@coffre/db/dialect';
-import { indexOf } from '@coffre/db/log';
+import { indexOf, logObject } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
 import { policySeqAndSettings } from '../src/db/answers.ts';
-import { auditPage, latestCheckpoint, latestTallied, memberAccess, talliedAfter } from '../src/db/queries.ts';
+import { auditPage, latestCheckpoint, latestTallied, memberAccess, originsOf, talliedAfter } from '../src/db/queries.ts';
 import { newestAppEntry, newestMove, wroteUnder } from '../src/db/rotation.ts';
 import { frozenTargets } from '../src/db/workloads.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
-import { emptyLog, openTestDatabase, TEST_ENGINE, withLogUnlocked } from './db/engine.ts';
+import { emptyLog, openTestDatabase, TEST_ENGINE, withLogUnlocked, withTriggersLifted } from './db/engine.ts';
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 before(async () => {
@@ -33,11 +33,16 @@ const TAIL = TEST_ENGINE === 'postgres' ? 20_000 : 2_000;
 
 type Rows = { author: 'app' | 'vault'; action: string; decision?: 'allow' | 'deny'; code?: string; key?: string; count?: number; signs?: boolean; actor?: string; subject?: string; metadata?: string };
 
+/** Changes of one object in 0.15's log, by its key (`logObject`), each with `payload`. */
+type Changes = { object: string; count?: number; payload?: string };
+
 type Lookup = {
   name: string;
   head?: Rows[];
-  run: Rows;
+  run?: Rows;
   tail: Rows[];
+  /** 0.15's log after the audit log's history, oldest first. */
+  changes?: Changes[];
   /** The indexes its statements on the audit log take: each takes one of them. */
   indexes: string[];
   /** The most pages each may read, if not `PAGES`. */
@@ -47,6 +52,9 @@ type Lookup = {
 
 const ZERO = Buffer.alloc(32);
 const FREEZE = JSON.stringify({ target: 'instance' });
+/** A change's seal and its MAC, both 16 bytes: no MAC of the vault's, which the reads here do not check. */
+const SEAL = Buffer.alloc(16);
+const CREDENTIAL = '00000000-0000-4000-8000-0000000000c1';
 
 const LOOKUPS: Lookup[] = [
   {
@@ -122,6 +130,21 @@ const LOOKUPS: Lookup[] = [
       assert.deepEqual(older.rows.map(({ seq }) => seq), Array.from({ length: 32 }, (_, i) => newest - 1n - BigInt(i)));
     },
   },
+  {
+    // A credential's first change, its sign-in, behind a long run of another object's changes before it (Sol r7 of
+    // #556): the oldest of the object's, not the oldest of all.
+    name: 'originsOf',
+    tail: [],
+    changes: [
+      { object: logObject('secret', '00000000-0000-4000-8000-0000000000b1'), count: TAIL },
+      { object: logObject('credential', CREDENTIAL), payload: JSON.stringify({ signIn: { run: { job: 'deploy' } } }) },
+    ],
+    indexes: ['log_changes_object_idx'],
+    ask: async (app) => {
+      const origin = (await originsOf(app, [CREDENTIAL])).get(CREDENTIAL);
+      assert.deepEqual(origin?.kind === 'signIn' && [origin.seq, origin.run], [BigInt(TAIL) + 1n, { job: 'deploy' }]);
+    },
+  },
   ...(['policy', 'settings'] as const).map((kind): Lookup => ({
     name: `policySeqAndSettings (${kind})`,
     run: { author: 'vault', action: `${kind}.change` },
@@ -144,6 +167,18 @@ async function append(entries: Rows): Promise<void> {
       SELECT head.newest + g.n, ${author}, ${key}, CAST(${Date.now()} AS BIGINT) + g.n, ${actor}, ${action}, ${decision}, ${code}, ${subject},
         CASE WHEN ${signs ? 1 : 0} = 1 AND head.newest + g.n > 1 THEN head.newest + g.n - 1 END, ${ZERO}, ${ZERO}, ${ZERO}, ${metadata}
       FROM (SELECT coalesce(max(seq), 0) AS newest FROM audit_log) head, g`));
+  }
+}
+
+/** Appends `count` changes of `object` to 0.15's log, after its newest, as the owner with its triggers lifted. */
+async function appendChanges({ object, count = RUN, payload = '{}' }: Changes): Promise<void> {
+  const uuid = TEST_ENGINE === 'postgres' ? sql`CAST(${object} AS uuid)` : sql`${object}`;
+  for (let left = count; left > 0; left -= 20_000) {
+    await withTriggersLifted(db.owner, 'log_changes', (tx) => rowsOf(tx, sql`
+      WITH RECURSIVE g (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM g WHERE n < ${Math.min(20_000, left)})
+      INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+      SELECT head.newest + g.n, CAST(${Date.now()} AS BIGINT) + g.n, 'request:' || CAST(head.newest + g.n AS TEXT), ${uuid}, 'service:ci', ${payload}, ${SEAL}, ${SEAL}
+      FROM (SELECT coalesce(max(number), 0) AS newest FROM log_changes) head, g`));
   }
 }
 
@@ -215,12 +250,15 @@ async function measure(statement: Statement): Promise<{ pages: number; indexes: 
 for (const lookup of LOOKUPS) {
   test(`${lookup.name}: one step of its index, however long the run of other entries since (T245, R48)`, { timeout: 300_000 }, async () => {
     await emptyLog(db.owner);
+    await withTriggersLifted(db.owner, 'log_changes', (tx) => rowsOf(tx, sql.raw(TEST_ENGINE === 'postgres' ? 'TRUNCATE log_changes CASCADE' : 'DELETE FROM log_changes')));
     for (const rows of lookup.head ?? []) await append(rows);
     const first = (await newestSeq()) + 1n;
-    await append(lookup.run);
+    if (lookup.run !== undefined) await append(lookup.run);
     const newest = await newestSeq();
     for (const rows of lookup.tail) await append(rows);
-    await rowsOf(db.owner, sql.raw(TEST_ENGINE === 'postgres' ? 'VACUUM (ANALYZE, PARALLEL 0) audit_log' : 'ANALYZE'));
+    for (const changes of lookup.changes ?? []) await appendChanges(changes);
+    if (TEST_ENGINE === 'postgres') for (const table of ['audit_log', 'log_changes']) await rowsOf(db.owner, sql.raw(`VACUUM (ANALYZE, PARALLEL 0) ${table}`));
+    else await rowsOf(db.owner, sql`ANALYZE`);
     const statements = await sent((app) => lookup.ask(app, { first, newest }));
     assert.ok(statements.length > 0, 'the read asked the audit log');
     for (const statement of statements) {

@@ -2167,8 +2167,9 @@ export type CredentialOrigin =
  * through `audit_log_exchange_idx` and `audit_log_token_create_idx`, whose
  * expressions this repeats; or, with 0.15's log, the credential's sign-in
  * or issue change (D147). Either makes its credential, so it is the
- * object's first change: one probe of `log_changes_object_idx` each,
- * however many renewals and revokes came after (R48). One statement.
+ * object's first change: one probe of `log_changes_object_idx` each
+ * (`changesOf`), however many renewals and revokes came after, and
+ * whatever other objects' changes came before (R48). One statement.
  */
 export async function originsOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, CredentialOrigin>> {
   if (credentialIds.length === 0) return new Map();
@@ -2188,7 +2189,12 @@ export async function originsOf(db: Queryable, credentialIds: readonly string[])
     ${entries('token.create', metadata('targetCredentialId'))}
     UNION ALL
     SELECT ${engine === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object}, ${logChanges.number}, ${logChanges.payload}, '0.15', NULL, ${logChanges.actor} FROM ${logChanges}
-     WHERE ${logChanges.number} IN (${sql.join([...objects.keys()].map((object) => sql`(SELECT min(${logChanges.number}) FROM ${logChanges} WHERE ${logChanges.object} = ${object})`), sql`, `)})
+     WHERE ${logChanges.number} IN (${sql.join([...objects.keys()].map((object) => {
+       // Its oldest change, by the object's index: `min(number)` by the object walks the primary key past every other
+       // object's changes before its first (381 pages behind 20,000 of them, Sol r7 of #556).
+       const first = changesOf(db, 'c', object, 'asc');
+       return sql`(SELECT c.number FROM log_changes c WHERE ${first.where} ORDER BY ${first.order} LIMIT 1)`;
+     }), sql`, `)})
        AND ${recorded(engine, logChanges.payload, 'signIn', 'issue')}`);
   return new Map(rows.flatMap((row): [string, CredentialOrigin][] => {
     const id = row.log === '0.14' ? row.credential : objects.get(row.credential);

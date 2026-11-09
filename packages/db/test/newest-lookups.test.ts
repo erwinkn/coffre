@@ -102,6 +102,8 @@ const CHANGES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> 
   'packages/vault/src/log-store.ts#postgresStore': { by: VAULT, as: 'changesOf' },
   'packages/vault/src/log-store.ts#readsStore': { by: VAULT, as: 'changesOf' },
   'packages/server/src/db/queries.ts#newestChangeColumns': { by: VAULT, as: 'changesOf' },
+  // A credential's first change, its sign-in or issue, behind other objects' changes before it.
+  'packages/server/src/db/queries.ts#originsOf': { by: SERVER, as: 'originsOf' },
 };
 
 /**
@@ -170,7 +172,8 @@ function sites(): string[] {
 /**
  * Each read of an object's newest (or oldest) changes in the sources, by the function it is in: through `changesOf`
  * (`keyed`), or asked plainly, `object = … ORDER BY number`, Drizzle's `eq(logChanges.object, …)` then
- * `desc(logChanges.number)`, or the greatest or least number of an object's (`plain`).
+ * `asc` or `desc(logChanges.number)`, or the greatest or least number of an object's (`plain`), in SQL's words or
+ * Drizzle's columns.
  */
 function changeSites(): { keyed: string[]; plain: string[] } {
   const keyed = new Set<string>();
@@ -178,7 +181,8 @@ function changeSites(): { keyed: string[]; plain: string[] } {
   for (const { file, text } of sources()) {
     if (file === 'packages/db/src/access-entries.ts') continue;
     for (const use of text.matchAll(/\bchangesOf\(/g)) keyed.add(`${file}#${within(text, use.index)}`);
-    const asked = /\.object\s*=\s*(?:(?!ORDER BY|`).)*?ORDER BY [\w.]*number|eq\(logChanges\.object,[^\n]*\n?[^\n]*orderBy\(desc\(logChanges\.number\)\)|\b(?:max|min)\(\w*\.?number\)\s+FROM log_changes \w*\s*WHERE \w*\.?object\s*=/g;
+    // Each spelling: SQL's words, or Drizzle's columns interpolated (`${logChanges.number}`, Sol r7 of #556).
+    const asked = /\.object\}?\s*=\s*(?:(?!ORDER BY|`).)*?ORDER BY (?:\$\{)?[\w.]*number|eq\(logChanges\.object,[^\n]*\n?[^\n]*orderBy\((?:asc|desc)\(logChanges\.number\)\)|\b(?:max|min)\((?:\$\{\w+\.number\}|\w*\.?number)\)\s+FROM (?:log_changes|\$\{logChanges\})\s*\w*\s*WHERE (?:\$\{\w+\.object\}|\w*\.?object)\s*=/g;
     for (const read of text.matchAll(asked)) plain.add(`${file}#${within(text, read.index)}`);
   }
   return { keyed: [...keyed], plain: [...plain] };
