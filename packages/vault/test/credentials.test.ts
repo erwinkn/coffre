@@ -1,6 +1,7 @@
 // The vault makes and ends credentials itself (T149; credentials.ts; migration 0034): a sign-in through a trust binding
 // (`sign_in`) and a revoke (`revoke_credential`), each one statement. Each case names the part of formal/Lifecycle.tla
 // it holds, and runs on both engines unless it says otherwise: SQLite runs each function's twin, under its one writer.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -43,6 +44,7 @@ function configure(): ResolvedVaultConfig {
     owners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+    deployment: defineDeployment(),
   };
 }
 

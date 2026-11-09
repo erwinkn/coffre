@@ -7,6 +7,7 @@
 // service account they give read (break-glass): retyping protects nothing
 // from them. Everyone else writes the value again, and leaves prod
 // protected.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -74,6 +75,7 @@ beforeEach(async () => {
     waitUntil,
     schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
+    deployment: defineDeployment(),
     plugins: [],
   } as CoffreRuntime;
   root = clientFor(deps, ROOT);

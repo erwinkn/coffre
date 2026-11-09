@@ -3,6 +3,7 @@
 // could hand it in place of the run's own proof buys nothing. Keys it forged, an audience it chose, a key it binds the
 // session to. The vault asks no issuer for keys (with a local KEK, it fetches nothing at all): a binding of keys its issuer publishes takes the app's word
 // for its token, and a token naming a key the uploaded set lacks is refused, never looked for. Both engines.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, afterEach, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
@@ -53,6 +54,7 @@ function configure(): ResolvedVaultConfig {
     owners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+    deployment: defineDeployment(),
   };
 }
 

@@ -5,6 +5,7 @@
 // edits or makes roles, each change weighed first. A credential keeps what
 // its roles held when it was issued: a role widened later widens none, and
 // one narrowed narrows each at once, through its holder.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -70,6 +71,7 @@ beforeEach(async () => {
     waitUntil,
     schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
+    deployment: defineDeployment(),
     plugins: [],
   } as CoffreRuntime;
   root = clientFor(deps, ROOT);

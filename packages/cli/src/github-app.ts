@@ -59,17 +59,31 @@ export function appName(address: string): string {
  * permission to read a person's email addresses, and no webhook. A
  * manifest names that permission `emails`, as GitHub's form does, not
  * `email_addresses`, as its API does: GitHub refuses the latter here.
+ * With an `organization` whose members alone may sign in, one more, to
+ * read who they are: `members`, which GitHub's membership check needs of
+ * an app.
  */
-export function appManifest(publicUrl: string, redirect: string) {
+export function appManifest(publicUrl: string, redirect: string, organization: string | null = null) {
   return {
     name: appName(new URL(publicUrl).host),
     url: publicUrl,
     redirect_url: redirect,
     callback_urls: [`${publicUrl}/auth/callback/github`],
     public: false,
-    default_permissions: { emails: 'read' },
+    default_permissions: organization === null ? { emails: 'read' } : { emails: 'read', members: 'read' },
     hook_attributes: { url: publicUrl, active: false },
   };
+}
+
+/** A GitHub organization's login, as GitHub allows one: letters, digits and single dashes, 39 at most. */
+export function organizationProblem(answer: string): string | null {
+  return /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/.test(answer) ? null : "that is not an organization's login: its name as in github.com/<organization>";
+}
+
+/** Where the manifest goes: GitHub's form for a new app, owned by the organization when there is one, else by whoever is signed in. */
+function newAppAction(github: GitHub, state: string, organization: string | null): string {
+  const under = organization === null ? '' : `organizations/${encodeURIComponent(organization)}/`;
+  return `${github.web}/${under}settings/apps/new?state=${encodeURIComponent(state)}`;
 }
 
 const escape = (text: string) => text.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
@@ -82,8 +96,8 @@ ${body}`;
 }
 
 /** The page that posts the manifest to GitHub, at once. */
-export function manifestPage(github: GitHub, manifest: object, state: string): string {
-  const action = `${github.web}/settings/apps/new?state=${encodeURIComponent(state)}`;
+export function manifestPage(github: GitHub, manifest: object, state: string, organization: string | null = null): string {
+  const action = newAppAction(github, state, organization);
   return page(
     'coffre: to GitHub',
     `<h1>Taking you to GitHub</h1><p>to create coffre's GitHub App.</p>
@@ -97,8 +111,8 @@ export function manifestPage(github: GitHub, manifest: object, state: string): s
  * as it can be, and readable, so that it plainly goes to GitHub and nowhere
  * else. A browser takes it typed or pasted, never from a link.
  */
-export function manifestAddress(github: GitHub, manifest: object, state: string): string {
-  const action = `${github.web}/settings/apps/new?state=${encodeURIComponent(state)}`;
+export function manifestAddress(github: GitHub, manifest: object, state: string, organization: string | null = null): string {
+  const action = newAppAction(github, state, organization);
   const value = JSON.stringify(manifest).replace(/&/g, '&amp;').replace(/'/g, '&#39;');
   const html = `<form method=post action="${escape(action)}"><input type=hidden name=manifest value='${value}'></form><script>document.forms[0].submit()</script>`;
   return `data:text/html,${html.replace(/[%#\s]/g, (c) => encodeURIComponent(c))}`;
@@ -135,9 +149,17 @@ function listen(server: Server): Promise<number> {
 /**
  * coffre's GitHub App, made in the browser: on this machine, through
  * setup's page and its callback; on another, through the data: address,
- * and the callback's address pasted back. Whichever comes first.
+ * and the callback's address pasted back. Whichever comes first. With an
+ * `organization`, the organization owns it, and it may see who its
+ * members are.
  */
-export async function createGitHubApp(step: Step, say: { aside: (text: string) => void; link: Link }, github: GitHub, publicUrl: string): Promise<GitHubApp> {
+export async function createGitHubApp(
+  step: Step,
+  say: { aside: (text: string) => void; link: Link },
+  github: GitHub,
+  publicUrl: string,
+  organization: string | null = null,
+): Promise<GitHubApp> {
   const state = randomBytes(16).toString('base64url');
   const done = new AbortController();
   let app: GitHubApp | null = null;
@@ -157,7 +179,7 @@ export async function createGitHubApp(step: Step, say: { aside: (text: string) =
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     const send = (status: number, html: string) => response.writeHead(status, { 'content-type': 'text/html; charset=utf-8' }).end(html);
-    if (url.pathname === '/') return send(200, manifestPage(github, manifest, state));
+    if (url.pathname === '/') return send(200, manifestPage(github, manifest, state, organization));
     if (url.pathname !== '/created') return send(404, page('coffre', '<h1>Not here</h1>'));
     void take(url).then((error) =>
       error === null
@@ -168,11 +190,15 @@ export async function createGitHubApp(step: Step, say: { aside: (text: string) =
   const port = await listen(server);
   try {
     const here = `http://127.0.0.1:${port}/`;
-    manifest = appManifest(publicUrl, `${here}created`);
+    manifest = appManifest(publicUrl, `${here}created`, organization);
     // GitHub's page shows the name alone: what the app may do is said here, first.
-    say.aside("coffre's GitHub App may read the email addresses of whoever signs in with it, and nothing else.");
+    say.aside(
+      organization === null
+        ? "coffre's GitHub App may read the email addresses of whoever signs in with it, and nothing else."
+        : `coffre's GitHub App, ${organization}'s, may read the email addresses of whoever signs in with it, and who ${organization}'s members are, and nothing else.`,
+    );
     say.link("If no browser opened, create it at", here);
-    say.link('From a browser on another machine, open this address instead:', manifestAddress(github, manifest, state));
+    say.link('From a browser on another machine, open this address instead:', manifestAddress(github, manifest, state, organization));
     openBrowser(here);
     step.note("GitHub: create coffre's app in your browser; its name is yours to change");
     await step.paste(

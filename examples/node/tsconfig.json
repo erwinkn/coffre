@@ -10,7 +10,8 @@
     "skipLibCheck": true,
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
     "jsx": "react-jsx"
   },
-  "include": ["src", "app/src"]
+  "include": ["deployment.ts", "src", "app/src"]
 }

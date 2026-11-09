@@ -9,6 +9,7 @@ import test from 'node:test';
 import * as hegel from '@hegeldev/hegel';
 import { CoffreError } from '@coffre/client';
 import * as gs from '@hegeldev/hegel/generators';
+import { defineDeployment } from '@coffre/core/deployment';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import type { PluginContext, UseAsked, WorkloadUse } from '../src/plugins.ts';
@@ -20,6 +21,9 @@ const HANDLE = `coffre_use_${'h'.repeat(43)}`;
 const LATER = new Date(Date.now() + 3_600_000).toISOString();
 const MIN_REDACTED = 8;
 
+/** The deployment: no values kept, so that each request opens its own (`proxy.cacheValues`). */
+const NO_CACHE = defineDeployment({ proxy: { cacheValues: false } });
+
 /** coffre, as a plugin sees it: the handle stands for `market/dev`, whose values are the drawn ones. */
 function coffre(values: Record<string, string>, plain: readonly string[] = []): PluginContext {
   const unused = () => {
@@ -27,6 +31,7 @@ function coffre(values: Record<string, string>, plain: readonly string[] = []): 
   };
   return {
     publicUrl: PUBLIC,
+    deployment: NO_CACHE,
     binding: false,
     api: unused,
     exchange: unused,
@@ -61,7 +66,7 @@ function upstream(answer: (url: URL) => Response = () => new Response('ok')) {
 async function ask(options: CredentialProxyOptions, values: Record<string, string>, path: string, init: RequestInit = {}, plain: readonly string[] = []): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set('x-coffre-handle', HANDLE);
-  return credentialProxy({ cacheSeconds: 0, ...options }).routes!.fetch(new Request(`${PUBLIC}/use${path}`, { ...init, headers }), coffre(values, plain));
+  return credentialProxy(options).routes!.fetch(new Request(`${PUBLIC}/use${path}`, { ...init, headers }), coffre(values, plain));
 }
 
 /** Bytes as a string of one character each, as an answer's bytes are scanned. */
@@ -386,7 +391,7 @@ test(`a tunnel reaches its hosts however they and the URL write them, and nothin
   const url = `postgres://app:pw@${bracketed(named, tc.draw(spell(named)))}:5432/app`;
   const insecure = tc.draw(gs.booleans());
   tc.note(`hosts [${configured}] url ${url} insecure ${insecure}`);
-  const open = async (options: CredentialProxyOptions) => credentialProxy({ cacheSeconds: 0, ...options }).routes!.socket!(
+  const open = async (options: CredentialProxyOptions) => credentialProxy(options).routes!.socket!(
     new Request(`${PUBLIC}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}` } }),
     coffre({ DATABASE_URL: url }),
   );
@@ -404,7 +409,7 @@ test(`a tunnel reaches its hosts however they and the URL write them, and nothin
 test(`a tunnel dials a URL's host by name only when its hosts list it, and never localhost, a trailing dot or not, without insecureUpstreams, seed ${settings.seed}`, () => hegel.testAsync(async (tc) => {
   const name = tc.draw(gs.sampledFrom([...LOOPBACK_NAMES, ...PUBLIC_NAMES]));
   const listed = tc.draw(gs.booleans());
-  const proxy = () => credentialProxy({ cacheSeconds: 0, credentials: {}, tunnels: { db: postgres('DATABASE_URL', listed ? { hosts: [name] } : {}) } });
+  const proxy = () => credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', listed ? { hosts: [name] } : {}) } });
   // Listed, localhost is refused with the configuration.
   if (listed && LOOPBACK_NAMES.includes(name)) return void assert.throws(proxy, /names a private host/, name);
   const opened = await proxy().routes!.socket!(
@@ -463,7 +468,7 @@ test(`SASLprep keeps RFC 3454's bidi rule on right-to-left letters, punctuation 
 
 test("the proxy's own 503 says when to ask again, and only when coffre could not answer for a moment", async () => {
   const failing = (error: CoffreError): PluginContext => ({ ...coffre({ API_KEY: 'k' }), use: async () => { throw error; } });
-  const answer = (context: PluginContext) => credentialProxy({ cacheSeconds: 0, credentials: { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}') } } })
+  const answer = (context: PluginContext) => credentialProxy({ credentials: { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}') } } })
     .routes!.fetch(new Request(`${PUBLIC}/use/stripe/v1/charges`, { headers: { 'x-coffre-handle': HANDLE } }), context);
   const moment = await answer(failing(new CoffreError(503, 'unavailable', 'coffre cannot check who you are right now')));
   assert.deepEqual([moment.status, moment.headers.get('retry-after')], [503, '1']);

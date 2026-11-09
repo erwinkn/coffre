@@ -82,14 +82,14 @@ after(async () => {
   if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
 });
 
-test("a run's session in coffre's object: admitted and logged as on Node, rechecked a second, and ended once its handle is revoked", { skip, timeout: 180_000 }, async () => {
+test("a run's session in coffre's object: admitted and logged as on Node, rechecked every 1.5 s, and ended once its handle is revoked", { skip, timeout: 180_000 }, async () => {
   await (booted ??= boot());
   const listener = await tunnelListener(`ws://${worker.address}:${worker.port}/use/market/dev/db`, handle);
   try {
     const client = appClient(listener.port, handle);
     assert.deepEqual([...await client.unsafe('SELECT current_user AS who')], [{ who: 'coffre_runtime' }]);
     // One use at admission, 0.15's, as on Node (the Worker's vault keeps 0.15's log, cut over by its app's door if
-    // the suite's instance was not); then the object's check each second, a use its isolate's cover may leave
+    // the suite's instance was not); then the object's check every 1.5 s, a use its isolate's cover may leave
     // unlogged: the revoke below, which a check finds, is what shows them.
     assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
     await new Promise((resolve) => setTimeout(resolve, 1500));

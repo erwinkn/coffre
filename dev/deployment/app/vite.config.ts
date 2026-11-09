@@ -6,6 +6,8 @@ import { tanstackStart } from '@tanstack/react-start/plugin/vite';
 import viteReact from '@vitejs/plugin-react';
 import { defaultClientConditions, defaultServerConditions, defineConfig, type Plugin } from 'vite';
 
+import { deployment } from '../deployment';
+
 const here = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 
 /**
@@ -59,7 +61,7 @@ export default defineConfig({
     }),
     tanstackStart(),
     viteReact(),
-    coffre(),
+    coffre({ deployment }),
     workspaceSources(),
   ],
 });

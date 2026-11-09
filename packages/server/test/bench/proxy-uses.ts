@@ -1,7 +1,7 @@
 // `/use` at a steady rate beside ci.ts's sign-ins (PR 5b, R44, R58): the credential proxy's inject on a person's handle,
 // through the whole app, as a Node deployment serves it: one runtime, the vault in process, each Postgres connection one
 // round trip away through a relay of its own (`farPostgres`), on a thread of its own so that the sign-ins' work never
-// delays a request's timer. The proxy keeps no value (`cacheSeconds: 0`): every request opens its key, 0.14's unwrap or
+// delays a request's timer. The proxy keeps no value (`proxy: { cacheValues: false }`): every request opens its key, 0.14's unwrap or
 // 0.15's use, the hot path at its worst. Each request is timed from when it was due to its answer, and counted refused
 // unless the upstream got the real key. The main thread names a phase (`phase`) and gets each phase's numbers back
 // (`report`), as uses.ts's. Not a test.
@@ -42,7 +42,7 @@ export type ProxyLoad = {
   owner: string;
   chainKey: string;
   origin: string;
-  /** The proxy's `cacheSeconds`: 0, every request opens its key; its default, 60, as a deployment runs it. */
+  /** How long the proxy keeps values, in seconds (`proxy.revokedWithinSeconds`): 0, none, every request opens its key; 60, as a deployment runs it. */
   cacheSeconds: number;
   /** The stable URL, `/use/<credential>/…`, as an app's own config names it (R14), which asks first which environment the handle was made for; else the environment's. */
   stable: boolean;
@@ -105,9 +105,9 @@ const config = resolveConfig({
   plugins: [credentialProxy({
     credentials: load.ui !== undefined ? {} : { api: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`, inject: load.inPath === true ? inPath('bot{API_KEY}') : header('x-api-key', load.secret === undefined ? '{API_KEY}' : '{API_KEY}:{API_SECRET}') } },
     insecureUpstreams: true,
-    cacheSeconds: load.cacheSeconds,
-    ...(load.ui === undefined ? {} : { editable: true }),
   })],
+  // No cache at 0 s, R its default; else values kept that long, R's floor of 3 s at least.
+  deployment: { proxy: { cacheValues: load.cacheSeconds > 0, ...(load.cacheSeconds > 0 ? { revokedWithinSeconds: Math.max(load.cacheSeconds, 3) } : {}), editable: load.ui !== undefined } },
 });
 const runtime = createRuntime(config, createDatabase(appPool), vault, { json: async (url) => { throw new Error(`no fetch of ${url.href} here`); } });
 runtime.plugins = checkPlugins(config.plugins);

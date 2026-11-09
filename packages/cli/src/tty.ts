@@ -195,8 +195,9 @@ export function edit(text: string, key: Key, sequence: string): string | 'submit
 /**
  * A question answered by typing, shown as typed, `initial` to start from;
  * `note`, dim under it while it is asked; `check` says why an answer will
- * not do, under it. Once given, the question becomes one line: what was
- * asked, and the answer. Ctrl-C cancels.
+ * not do, under it. `none`, for a question Enter alone answers: the empty
+ * answer, shown as these words. Once given, the question becomes one line:
+ * what was asked, and the answer. Ctrl-C cancels.
  */
 export async function textLine(
   keys: Keyboard,
@@ -204,7 +205,7 @@ export async function textLine(
   s: Style,
   question: string,
   hint: string,
-  options: { initial?: string; note?: string; check?: (answer: string) => string | null | Promise<string | null> } = {},
+  options: { initial?: string; note?: string; none?: string; check?: (answer: string) => string | null | Promise<string | null> } = {},
 ): Promise<string> {
   const columns = Math.max(20, (out.columns || 80) - 1);
   let typed = options.initial ?? '';
@@ -222,7 +223,7 @@ export async function textLine(
     const next = edit(typed, key, sequence);
     if (next === 'cancel') cancelled = true;
     else if (next === 'submit') {
-      if (typed.trim() === '') return false;
+      if (typed.trim() === '') return options.none !== undefined;
       error = (await options.check?.(typed.trim())) ?? null;
       if (error === null) return true;
     } else {
@@ -238,7 +239,7 @@ export async function textLine(
   await answered;
   out.write('\r\x1b[J\x1b[1A\x1b[2K');
   if (cancelled) throw new Cancelled();
-  out.write(`${truncate(`  ${s.green('✓')} ${s.dim(question)}  ${typed.trim()}`, columns)}\n`);
+  out.write(`${truncate(`  ${s.green('✓')} ${s.dim(question)}  ${typed.trim() || (options.none ?? '')}`, columns)}\n`);
   return typed.trim();
 }
 

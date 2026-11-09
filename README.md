@@ -554,7 +554,7 @@ both colour schemes, following the system's with a manual override.
   refuses them.
 - **A value's age is in plain sight.** Each key says how long ago its value
   was written, a reference's its source's, and the table sorts by it. Past
-  the deployment's `rotateAfterDays`, a year unless it says, a quiet tag
+  `deployment.ts`'s `values.rotateAfterDays`, a year unless it says, a quiet tag
   says to rotate it; `coffre list --stale` lists the same keys.
 - **The audit page reads as sentences**, one line per action ("ada ran
   market/prod: 9 secrets"), with technical steps and sign-ins hidden until

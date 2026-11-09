@@ -150,6 +150,91 @@ as it is. To take it away, revoke each grantor's membership
 per grantor, and a `REVOKE` naming no grantor removes only the caller's
 own: anyone else's, a superuser's included, only warns.
 
+## deployment.ts: what the instance allows
+
+Every choice a deployment makes about what its instance allows sits in one
+file at its root, beside `app/` and `vault/` (Workers) or `app/` and
+`src/` (Node), which `coffre init` writes. The app and the vault each
+import it as they build and each hold their part, so a compromised app
+cannot loosen what the vault holds. Every field has a default, and a
+deployment that sets none runs as one that writes `defineDeployment()`:
+
+```ts
+// deployment.ts
+import { defineDeployment } from '@coffre/core/deployment';
+
+export const deployment = defineDeployment({
+  people: { browserSessionHours: 12, cliSessionDays: 30 },
+  services: { tokenMaxDays: 365, signInsPerAddress: 10_000, useOnly: false, noReads: false },
+  reads: { bulkLimit: { count: 1_000, windowMinutes: 15 } },
+  values: { rotateAfterDays: 365 },
+  proxy: { revokedWithinSeconds: 60, cacheValues: true, editable: false },
+  audit: { keepUsesDays: null, repeatsWithinSeconds: 60 },
+});
+```
+
+The app's `createCoffre` and the vault's `vault(…)` or `serveVault(…)` each
+take it as `deployment`. What each field means, and why it is a choice and
+not a constant, is [design/config.md](design/config.md), section 1. A field
+it does not know fails the build, rather than being ignored.
+
+Wiring stays where it was: the URL, the databases, the keys, the
+providers, the plugins, `owners`, and `signin({ passkeys })`, which an
+Owner switches per environment, `off` included, from the platform's
+dashboard, without a rebuild ([deployment-auth.md](deployment-auth.md)).
+
+**`services.signInsPerAddress` on Workers.** Cloudflare reads a rate
+limit's number from `app/wrangler.jsonc` and nowhere else, so the number
+is written twice: in `deployment.ts` and in the `SIGN_IN_PER_SOURCE`
+binding's `simple: { limit, period }`, `period` 10. The app's build
+(`coffre()` in `app/vite.config.ts`, given the deployment) fails when the
+two differ. On Node, `processLimits` counts to the field.
+
+**`audit.keepUsesDays`: what keeping uses costs.** Every use of a key
+leaves about 800 bytes in the database: its row, its share of the audit
+tree, and its row in the reads' projection with that projection's indexes
+([design/config.md](design/config.md), Q6). Retention drops all of them
+together, a day at a time; changes are kept forever. At a steady rate:
+
+| uses a second | a day | 30 days | a year |
+|---|---|---|---|
+| 1,000 | 69 GB | 2.1 TB | 25 TB |
+| 10 | 691 MB | 20.7 GB | 252 GB |
+
+Repeats a cover leaves out (`audit.repeatsWithinSeconds`) cost nothing: a
+loop that uses the same key a hundred times a minute logs about one entry
+a minute. `null`, the default, keeps every day, the record of who used
+which secret, which an audit may ask for years later. A deployment that
+sets a number later sheds the older days slowly, one an hour, each at
+least 20 minutes past its cut: a year-old database set to 30 drops its
+extra 335 days over about two weeks.
+
+**Workers Free is best effort.** Free gives an invocation 10 ms of CPU;
+coffre's bounds are sized for 20 ms ([design/config.md](design/config.md),
+section 2.1): a 1 MiB body of 1,600 values costs about 20 ms to check, and
+a stranger's sign-in tried against 32 keys about 12 ms. On Free those
+requests may be cut off with Cloudflare's own error (1102, exceeded resource limits) instead of coffre's
+answer. Nothing else changes, and nothing is lost: the request fails
+whole. A deployment that serves people beyond its own team, or CI at any
+volume, runs on Paid.
+
+**Moving from 0.15's places.** 0.15 took these settings in six places.
+0.16 still reads each, warns once at start, and 0.17 refuses them; a
+deployment that passes `deployment` and an old place both fails to start,
+since one of the two would be ignored:
+
+| 0.15 | `deployment.ts` |
+|---|---|
+| `signin({ browserSessionHours, cliSessionDays })` | `people.browserSessionHours`, `people.cliSessionDays` |
+| `signin({ serviceTokenMaxDays })` | `services.tokenMaxDays`, now held by the vault too |
+| `signin({ workloads: { useOnly, noReads } })` | `services.useOnly`, `services.noReads` |
+| `createCoffre({ rotateAfterDays })` | `values.rotateAfterDays` |
+| `vault({ bulkLimit })`, `serveVault({ bulkLimit })` | `reads.bulkLimit` |
+| `vault({ uses: { coverMs } })`, `serveVault(…, { uses: { coverMs } })` | `audit.repeatsWithinSeconds`, in seconds |
+| `credentialProxy({ cacheSeconds, recheckSeconds })` | `proxy.revokedWithinSeconds`, the smaller of the two (each 60 unless set), at least 3; `cacheSeconds: 0` is `proxy.cacheValues: false` |
+| `credentialProxy({ editable })` | `proxy.editable` |
+| `SIGN_IN_PER_SOURCE`'s number | `services.signInsPerAddress`, which the build holds the binding to |
+
 ## Upgrading
 
 0.4.0 is a clean break: a deployment of 0.3 or earlier is not upgraded, but
@@ -1158,7 +1243,7 @@ binding's rate until it expires for Azure's repeating ones
 A workload's key-bound session sends a fresh proof with each request
 ([design](design/workload-access.md#52-the-gate-replay-nonces-live-counters)),
 and each workload's gate takes each proof once and counts its limits. A
-deployment `coffre init` writes has it. `workloads: { useOnly: true }`
+deployment `coffre init` writes has it. `deployment.ts`'s `services: { useOnly: true }`
 leaves services nothing but those sessions
 ([section 6.3](design/workload-access.md#63-the-strict-instance-and-the-path-from-today));
 `coffre init` writes it again once conformance and the Action sign

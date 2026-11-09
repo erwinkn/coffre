@@ -37,7 +37,7 @@ same SQLite file for its `HOT_DATABASE_URL`. All are local; nothing is
 deployed.
 
 coffre takes `--port` (3082), the stand-in IdP the next port, and wrangler's
-inspector the one after. `--bulk-limit <n>` names the vault's `bulkLimit`
+inspector the one after. `--bulk-limit <n>` names the count of `deployment.ts`'s `reads.bulkLimit`
 when the deployment changed it. `--browser <path>` names the Chrome or
 Chromium the pages are loaded in; without it, one found on the machine is,
 and without one, that check is skipped and says so. Each run starts from nothing and leaves

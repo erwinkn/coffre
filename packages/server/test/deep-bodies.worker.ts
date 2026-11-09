@@ -4,6 +4,7 @@
 // platform whose stack is smaller than Node's. What each answered goes back
 // to the test. The bodies are written as text: a `JSON.stringify` of them
 // would overflow this side first.
+import { defineDeployment } from '@coffre/core/deployment';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { parentPort } from 'node:worker_threads';
 
@@ -44,7 +45,7 @@ const service = new SigninService({ ...deps, signin: auth.signin });
 const mcp = new McpService({ ...deps, config: auth.signin.mcp!, signin: auth.signin, publicUrl: ORIGIN, transport });
 const runtime: CoffreRuntime = {
   db: deps.db, vault: deps.vault, chainKey: deps.chainKey, previousChainKeys: [], signin: service, workloads: null, mcp, auth,
-  publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, plugins: [],
+  publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, deployment: defineDeployment(), plugins: [],
 };
 const route = (path: string, init: RequestInit) => coffreRoute(new Request(`${ORIGIN}${path}`, init), runtime, '203.0.113.7').then((response) => response!);
 

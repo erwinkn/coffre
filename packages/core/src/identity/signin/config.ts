@@ -132,15 +132,9 @@ export type WorkloadsOptions = {
    * and only public ones' IDs are looked up.
    */
   github?: GitHubApp;
-  /**
-   * Leaves services nothing but key-bound sessions (docs/design/
-   * workload-access.md, section 6.3): no service token is issued or taken,
-   * and `/api/auth/oidc` answers 410. Its sessions still read their
-   * bindings' listed `reads`. Taken, and not yet enforced: that design's PR
-   * 1a does.
-   */
+  /** @deprecated In `deployment.ts` since 0.16, `services.useOnly`: read until 0.17, which refuses it here. */
   useOnly?: boolean;
-  /** Stricter still: no binding may list `reads`, so services read plain values only. Taken, and not yet enforced (PR 1a). */
+  /** @deprecated In `deployment.ts` since 0.16, `services.noReads`: read until 0.17, which refuses it here. */
   noReads?: boolean;
   /** The deployment's own delivery of a workload's alerts, called in the background after the response: a Slack webhook, a pager. */
   alert?: (alert: WorkloadAlert) => unknown;

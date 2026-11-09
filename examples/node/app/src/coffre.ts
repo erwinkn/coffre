@@ -7,6 +7,8 @@ import { auditWatch } from '@coffre/server/plugins/audit-watch';
 import { credentialProxy } from '@coffre/server/plugins/credential-proxy';
 import { connectVault } from '@coffre/vault/node';
 
+import { deployment } from '../../deployment';
+
 function env(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is not set; see .env.example`);
@@ -28,19 +30,21 @@ const app = process.env.GITHUB_APP_ID
   : undefined;
 // What a sign-in that takes anyone passes first, a CI run's or an MCP
 // client's OAuth request: the requests one address makes to each, counted
-// apart, in this process. SIGN_IN_PER_SOURCE a 10-second window, 10,000
-// (1,000 a second) unless it says otherwise; conformance sets it lower, to
-// fill a window it can.
-const limits = processLimits(process.env.SIGN_IN_PER_SOURCE ? { perSource: Number(process.env.SIGN_IN_PER_SOURCE) } : {});
+// apart, in this process, as many in 10 s as deployment.ts's
+// `services.signInsPerAddress` says.
+const limits = processLimits({ perSource: deployment.services.signInsPerAddress });
 
 export const coffre = createCoffre({
   publicUrl: env('PUBLIC_URL'),
   database: env('DATABASE_URL'),
   vault: connectVault(env('VAULT_SOCKET')),
+  // What this instance allows: ../../deployment.ts, which the vault reads too.
+  deployment,
   // For tests or local SQLite development only, the vault in this process:
   // vault: await localVault({ database: env('DATABASE_URL'), hotDatabase: …, checkpointer: { memory: … }, kek: …, owners: […] }),
   auth: signin({
-    providers: [app ? github({ app }) : github(client)],
+    // GITHUB_ORGANIZATION, when set, lets only its members sign in.
+    providers: [github(app ? { app, organization: process.env.GITHUB_ORGANIZATION } : { ...client, organization: process.env.GITHUB_ORGANIZATION })],
     // A passkey after GitHub: `optional`, unless PASSKEYS says otherwise,
     // asks it of whoever holds one, and of every Owner; `required`, of
     // everyone; `off`, of no one, the recovery when the last Owner lost
@@ -48,11 +52,11 @@ export const coffre = createCoffre({
     passkeys: (process.env.PASSKEYS || undefined) as PasskeyPolicy | undefined,
     // CI runs and apps may sign in as services with their platform's proof,
     // through the trust bindings owners make (docs/design/oidc.md), into
-    // key-bound sessions or, for now, bearer credentials; `useOnly: true`
-    // leaves them key-bound sessions only (docs/design/workload-access.md,
-    // section 6.3). Each sign-in passes its address's limit first, 10,000
-    // per 10 s (1,000 a second), and each session's requests its gate; both
-    // are this process's, so run one.
+    // key-bound sessions or, for now, bearer credentials; deployment.ts's
+    // `services.useOnly` leaves them key-bound sessions only
+    // (docs/design/workload-access.md, section 6.3). Each sign-in passes its
+    // address's limit first, and each session's requests its gate; both are
+    // this process's, so run one.
     workloads: {
       limits,
       // Set by conformance only: a binding's issuer may then be plain HTTP on
@@ -76,11 +80,12 @@ export const coffre = createCoffre({
   // is checked only when someone runs `coffre verify log`.
   // The credential proxy (docs/design/credential-proxy.md): apps run with
   // `coffre run` reach their APIs through <PUBLIC_URL>/use, with the keys
-  // filled in, which they never hold. `editable` lets Owners write routes,
-  // signers, verifiers and databases per environment in its Proxy tab; add
-  // your own to `credentials` (and `tunnels`, `signers`, `verifiers`) to
-  // keep them in code, where they win the name in every environment.
-  plugins: [auditWatch({ anchor: fileAnchor(env('AUDIT_ANCHOR')) }), credentialProxy({ credentials: {}, editable: true })],
+  // filled in, which they never hold. deployment.ts's `proxy.editable` lets
+  // Owners write routes, signers, verifiers and databases per environment in
+  // its Proxy tab; add your own to `credentials` (and `tunnels`, `signers`,
+  // `verifiers`) to keep them in code, where they win the name in every
+  // environment.
+  plugins: [auditWatch({ anchor: fileAnchor(env('AUDIT_ANCHOR')) }), credentialProxy({ credentials: {} })],
 });
 
 // What src/server.ts hands Start with each request, for Start's types.

@@ -4,8 +4,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { defineDeployment, type DeploymentOptions } from '@coffre/core/deployment';
+
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
-import { proxyCodeOf } from '../src/proxy-code.ts';
+import { proxyCodeOf, proxyCodeWith } from '../src/proxy-code.ts';
 
 const itemsOf = (credentials: Parameters<typeof credentialProxy>[0]['credentials']) => {
   const items = proxyCodeOf([credentialProxy({ credentials })])?.items ?? [];
@@ -30,4 +32,17 @@ test("a code route's allow list says how it matches: as code, as before 0.16, or
   // `paths: []` leaves no allow entry, so its methods, which still answer first (405), live in `allowAs` alone.
   assert.deepEqual(items.pathless?.definition.kind === 'route' && items.pathless.definition.allow, []);
   assert.deepEqual(items.pathless?.allowAs, { from: 'legacy', methods: ['POST', 'PROPFIND'] });
+});
+
+test("what the tab says of editing and of a save's window is the deployment's: proxy.editable, and R whether values are kept or not", () => {
+  const plugins = [credentialProxy({ credentials: {}, insecureUpstreams: true })];
+  const code = (proxy: DeploymentOptions['proxy']) => {
+    const { editable, windowSeconds, insecureUpstreams } = proxyCodeWith(plugins, defineDeployment({ proxy }))!;
+    return { editable, windowSeconds, insecureUpstreams };
+  };
+  assert.deepEqual(code({}), { editable: false, windowSeconds: 60, insecureUpstreams: true });
+  assert.deepEqual(code({ editable: true, revokedWithinSeconds: 4 }), { editable: true, windowSeconds: 4, insecureUpstreams: true });
+  // No values kept: a request still sends up to R after its use was decided, so a save's old upstream may still get it.
+  assert.deepEqual(code({ cacheValues: false }), { editable: false, windowSeconds: 60, insecureUpstreams: true });
+  assert.equal(proxyCodeWith([], defineDeployment()), null);
 });

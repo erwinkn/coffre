@@ -11,5 +11,5 @@
     "isolatedModules": true,
     "jsx": "react-jsx"
   },
-  "include": ["app/src", "vault/src"]
+  "include": ["deployment.ts", "app/src", "vault/src"]
 }

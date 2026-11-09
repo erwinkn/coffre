@@ -8,6 +8,7 @@
 //
 //   COFFRE_TEST_DATABASE=<name> ./scripts/setup-test-database.sh
 //   node --conditions=coffre:source packages/vault/scripts/cutover-bench.ts <owner url> <vault url> [keys] [grants] [members] [checkpointed]
+import { defineDeployment } from '@coffre/core/deployment';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
@@ -35,6 +36,7 @@ const config: ResolvedVaultConfig = {
   owners: ['root@acme.example'],
   signingKeys: [randomBytes(32)],
   bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+  deployment: defineDeployment(),
 };
 const owner = postgresClient(ownerUrl, { max: 4 });
 const database = createDatabase(postgresClient(vaultUrl, { max: 8 }));

@@ -4,6 +4,7 @@
 // only an Owner of the project, or of the whole instance, unprotects. The vault keeps it in its newest `policy.change`
 // entry, by its MAC, and decides every read with it: a person holds a role's
 // protected column in a protected environment, a service account never.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -36,6 +37,7 @@ function configure(): ResolvedVaultConfig {
     owners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+    deployment: defineDeployment(),
   };
 }
 

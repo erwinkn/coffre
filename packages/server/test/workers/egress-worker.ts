@@ -5,6 +5,8 @@
 // `yousign` leaves through the Worker's own fetch, for the suite's upstream
 // at `UPSTREAM`, and takes a workload's request too: any session token
 // stands, its proof signing `content-type` and `content-digest`.
+import { defineDeployment } from '@coffre/core/deployment';
+
 import type { PluginContext } from '../../src/plugins.ts';
 import { credentialProxy, header, sigv4, type Egress } from '../../src/plugins/credential-proxy.ts';
 
@@ -16,6 +18,7 @@ const AWS = { AWS_ACCESS_KEY_ID: 'AKIAREAL0123456789AB', AWS_SECRET_ACCESS_KEY: 
 /** coffre as the proxy calls it: every handle stands, for market/dev, and opens these values. */
 const coffre = {
   publicUrl: 'https://secrets.acme.example',
+  deployment: defineDeployment(),
   // A handle's request is no workload's; a session's stands, its proof checked on Node.
   workload: async (request: Request) =>
     /^DPoP coffre_wl_/.test(request.headers.get('authorization') ?? '')

@@ -194,6 +194,9 @@ importers:
       '@coffre/conformance':
         specifier: workspace:*
         version: link:../packages/conformance
+      '@coffre/core':
+        specifier: workspace:*
+        version: link:../packages/core
       '@coffre/server':
         specifier: workspace:*
         version: link:../packages/server
@@ -245,6 +248,9 @@ importers:
 
   examples/node:
     dependencies:
+      '@coffre/core':
+        specifier: 0.15.0
+        version: link:../../packages/core
       '@coffre/server':
         specifier: 0.15.0
         version: link:../../packages/server
@@ -303,6 +309,9 @@ importers:
 
   examples/workers:
     dependencies:
+      '@coffre/core':
+        specifier: 0.15.0
+        version: link:../../packages/core
       '@coffre/server':
         specifier: 0.15.0
         version: link:../../packages/server
@@ -590,6 +599,9 @@ importers:
       '@tanstack/router-core':
         specifier: 1.171.15
         version: 1.171.15
+      jsonc-parser:
+        specifier: 3.3.1
+        version: 3.3.1
       lucide:
         specifier: 1.47.0
         version: 1.47.0

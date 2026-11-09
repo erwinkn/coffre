@@ -167,6 +167,8 @@ test("DNS elsewhere, two domains on the account, wrangler's login refused: setup
     await start(terminal, ADDRESS);
     await terminal.waitFor('First Owner');
     terminal.send('\r');
+    await terminal.waitFor('GitHub organization');
+    terminal.send('\r');
     // Not a token, then one Cloudflare refuses, then the one made on the dashboard.
     await terminal.waitFor('Paste a Cloudflare API token, hidden as you paste it');
     terminal.send('short\r');
@@ -254,6 +256,7 @@ async function refused(where: string, databaseUrl: string, address: string, down
     "coffre's address": `\x15${address}\r`,
     "This deployment's name": '\r',
     'First Owner': '\r',
+    'GitHub organization': '\r',
     'Which of your domains serves': '\r',
     'How should coffre be reached?': '\r',
     'The domain to add': '\r',
@@ -458,6 +461,8 @@ test("no domain on the account: the Worker's workers.dev address, for now; deplo
       await choose(terminal);
       await terminal.waitFor('First Owner');
       terminal.send('\r');
+      await terminal.waitFor('GitHub organization');
+      terminal.send('\r');
       // The server's backup login is the first deployment's, kept: only the keys.
       await githubAndKeys(terminal, pages, 'all three values');
       await terminal.waitFor('coffre is at', 60_000);
@@ -502,6 +507,7 @@ test("DNS elsewhere, on a database too small for the three Hyperdrive configs: s
     "coffre's address": '\x15small.example.org\r',
     "This deployment's name": '\r',
     'First Owner': '\r',
+    'GitHub organization': '\r',
     'Which of your domains serves': '\r',
   });
   assert.deepEqual(requests.filter(({ method }) => method !== 'GET').map(({ method, path }) => `${method} ${path}`), [], 'nothing written to Cloudflare');

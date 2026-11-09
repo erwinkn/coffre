@@ -19,6 +19,7 @@ import { SignatureV4 } from '@smithy/signature-v4';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { bodyDigest, contentDigest } from '@coffre/client/dpop';
+import { defineDeployment, type DeploymentOptions } from '@coffre/core/deployment';
 import { Deploying, USE_DEADLINE_MS, type ProxyDefinition, type Vault } from '@coffre/core/vault';
 
 import { sql, type SQL } from 'drizzle-orm';
@@ -28,7 +29,7 @@ import { TEST_ENGINE } from './db/engine.ts';
 import { db, deps, DEV, entries, NO, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { bindingRoute, checkPlugins } from '../src/plugins.ts';
-import { proxyCodeOf } from '../src/proxy-code.ts';
+import { proxyCodeWith } from '../src/proxy-code.ts';
 import { forgetProxyGates } from '../src/proxy-gate.ts';
 import { credentialProxy, form, header, privateKey, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
 import { publicFetch } from '../src/workloads/node-transport.ts';
@@ -58,14 +59,17 @@ before(async () => {
 });
 after(() => new Promise<void>((resolve) => upstream.close(() => resolve())));
 
-/** The deployment's proxy: code's `maps` (or none), the tab writing, local fakes allowed. */
+/** The deployment's proxy: code's `maps` (or none), local fakes allowed. */
 function proxyOf(extra: Partial<CredentialProxyOptions> = {}, code = true) {
   return credentialProxy({
     credentials: code ? { maps: { upstream: `${upstreamUrl}/maps`, inject: header('x-api-key', '{MAPS_KEY}') } } : {},
     signers: { signing: privateKey('SIGNING_KEY') },
-    editable: true, insecureUpstreams: true, ...extra,
+    insecureUpstreams: true, ...extra,
   });
 }
+
+/** An isolate that keeps nothing: each request decided on the newest version. */
+const NO_CACHE = { cacheValues: false };
 
 /** A route saved in the UI: `name` to `path` under the fake upstream, its key in Authorization, GET and POST as given. */
 function uiRoute(name: string, path: string, key = 'OPENAI_API_KEY'): ProxyDefinition {
@@ -75,10 +79,11 @@ function uiRoute(name: string, path: string, key = 'OPENAI_API_KEY'): ProxyDefin
   };
 }
 
-/** The deployment in front: its plugins, and the API's view of its proxy code. */
-function deploy(plugin: ReturnType<typeof proxyOf>): void {
+/** The deployment in front: its plugins, its `deployment.ts`, the tab writing unless `proxy` says, and the API's view of its proxy code. */
+function deploy(plugin: ReturnType<typeof proxyOf>, proxy: DeploymentOptions['proxy'] = {}): void {
   runtime.plugins = checkPlugins([plugin]);
-  deps.proxy = proxyCodeOf(runtime.plugins);
+  runtime.deployment = defineDeployment({ proxy: { editable: true, ...proxy } });
+  deps.proxy = proxyCodeWith(runtime.plugins, runtime.deployment);
 }
 
 let root: CoffreClient;
@@ -135,7 +140,7 @@ test('a UI route by its stable URL and by its place: sent to the item the vault 
   assert.equal(reached.length, before);
 });
 
-test('an edit reaches the next use; values kept for `cacheSeconds` go only where the item they were decided on says (BoundToDefinition)', ON_015, async () => {
+test('an edit reaches the next use; values kept for R go only where the item they were decided on says (BoundToDefinition)', ON_015, async () => {
   await save({ openai: uiRoute('openai', '/old') });
   const token = await handle();
   assert.equal((await route('/use/openai/models', as(token))).status, 200);
@@ -148,13 +153,13 @@ test('an edit reaches the next use; values kept for `cacheSeconds` go only where
   assert.equal((await route('/use/openai/models', as(token))).status, 200);
   assert.equal(reached.at(-1)!.url, '/old/models');
   // An isolate that keeps nothing: each request decided on the newest version.
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  deploy(proxyOf(), NO_CACHE);
   assert.equal((await route('/use/openai/models', as(token))).status, 200);
   assert.equal(reached.at(-1)!.url, '/new/models');
 });
 
 test("EditorStillHolds: a route its editor saved stops once they no longer read its key, until someone who does saves it again", ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  deploy(proxyOf(), NO_CACHE);
   await root.roles.set('router', { name: 'Router', description: 'routes keys', permissions: ['secret.read', 'secret.use', 'proxy.edit'], protected: ['secret.use'] });
   await root.access.set(`user:${LIN}`, { market: 'router' });
   const lin = clientFor(deps, LIN);
@@ -172,20 +177,20 @@ test("EditorStillHolds: a route its editor saved stops once they no longer read 
 });
 
 test('code wins its names: reserved before an isolate first serves, the UI item of a name code adds deleted (CodeGate, ClearSuperseded)', ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }, false));
+  deploy(proxyOf({}, false), NO_CACHE);
   await save({ maps: uiRoute('maps', '/ui-maps', 'MAPS_KEY') });
   const token = await handle();
   assert.equal((await route('/use/maps/models', as(token))).status, 200);
   assert.equal(reached.at(-1)!.url, '/ui-maps/models');
   // A deploy adding code `maps`: its first request reserves the name, which deletes the UI item, before it serves.
-  deploy(proxyOf({ cacheSeconds: 0 }, true));
+  deploy(proxyOf({}, true), NO_CACHE);
   assert.equal((await route('/use/maps/geocode', { headers: { 'x-api-key': token } })).status, 200);
   assert.equal(reached.at(-1)!.url, '/maps/geocode');
   const page = await root.proxy.get('market/dev');
   assert.deepEqual(page.items.map((item) => item.definition.name), []);
   assert.ok(page.reserved.includes('maps'));
   // And when a later deployment drops `maps`, the UI item it hid does not come back (NoRevival).
-  deploy(proxyOf({ cacheSeconds: 0 }, false));
+  deploy(proxyOf({}, false), NO_CACHE);
   assert.equal((await route('/use/maps/models', as(token))).status, 404);
 });
 
@@ -224,7 +229,7 @@ test('a name no definition holds is 404; a signer saved in the UI reaches no ups
 });
 
 test("a UI signer whose inherited key its caller may not use answers that refusal, the one \"no\", never what kind the item is (review r10 of #467)", ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  deploy(proxyOf(), NO_CACHE);
   await save({ signer: { kind: 'signer', name: 'signer', signer: { kind: 'private-key', key: 'OPENAI_API_KEY' }, limit: { perMinute: null, perDay: null } } });
   await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
   // LIN stands at the fork alone: its signer and its key are dev's, which LIN holds nothing of.
@@ -248,7 +253,7 @@ test("the plan gives a UI route's key as the handle, never its value, and names 
   assert.equal(plan.credentials.openai, `${ORIGIN}/use/market/dev/openai`);
   assert.ok(!JSON.stringify(plan).includes(OPENAI));
   // Without the tab, no UI item serves: the key is the person's to read, as any uncovered key.
-  deploy(proxyOf({ editable: false }));
+  deploy(proxyOf(), { editable: false });
   const plain = await (await route('/use/market/dev', as(token))).json() as { env: Record<string, string>; credentials: Record<string, string> };
   assert.equal(plain.env.OPENAI_API_KEY, OPENAI);
   assert.equal(plain.credentials.openai, undefined);
@@ -303,7 +308,7 @@ test('a UI route of three keys, a header and SigV4: one use decides them all, th
 });
 
 test("a fork serves its parent's UI route, the item and its key found through the chain; the fork's own item overrides it", ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  deploy(proxyOf(), NO_CACHE);
   await save({ openai: uiRoute('openai', '/parent') });
   await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
   const token = await handle('market/dev-eu');
@@ -374,7 +379,8 @@ test("the gate: an isolate's concurrent first requests reserve code's names in o
 });
 
 test("values go out within their window: a body that comes after the use's deadline is sent with none (review r1 of #467)", ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  // R at its floor, the use's own deadline: a request may send, or answer, 3 s after its use was decided.
+  deploy(proxyOf(), { ...NO_CACHE, revokedWithinSeconds: USE_DEADLINE_MS / 1000 });
   await save({ openai: uiRoute('openai', '/openai') });
   const token = await handle();
   // The handle in a header, so the use is made at once; the body, read whole, comes 3.5 s later.
@@ -395,7 +401,8 @@ test("values go out within their window: a body that comes after the use's deadl
 });
 
 test("values go out within their window however long signing takes: a SigV4 request signed after the deadline is sent with none (review r3 of #467)", ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  // R at its floor, the use's own deadline: a request may send, or answer, 3 s after its use was decided.
+  deploy(proxyOf(), { ...NO_CACHE, revokedWithinSeconds: USE_DEADLINE_MS / 1000 });
   await root.secrets.set('market/dev', { AWS_ACCESS_KEY_ID: AWS_ID, AWS_SECRET_ACCESS_KEY: AWS_SECRET });
   await save({
     s3: {
@@ -440,7 +447,7 @@ test("a personal config's plan: its UI items none, the plan given (review r1 of 
 });
 
 test("the URL's reading decides before code's precedence: `/use/openai/models/maps` is route openai at /models/maps, code's `maps` at `openai/models` only for a handle made for it (review r1 of #467)", ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  deploy(proxyOf(), NO_CACHE);
   await save({ openai: uiRoute('openai', '/openai') });
   const token = await handle();
   const answer = await route('/use/openai/models/maps', as(token));
@@ -475,7 +482,7 @@ async function countingVault(work: (calls: () => Record<string, number>) => Prom
 }
 
 test("`/use/<a>/<b>` is one vault call that reads both ways: route `<a>` at `/<b>`, or the place itself, the plan, compute or code's credential, which then go on as they did (C2b4)", ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  deploy(proxyOf(), NO_CACHE);
   const HOOK = 'whsec-0123456789abcdef';
   await root.secrets.set('market/dev', { HOOK_SECRET: HOOK });
   await save({
@@ -519,7 +526,7 @@ test("`/use/<a>/<b>` is one vault call that reads both ways: route `<a>` at `/<b
   assert.equal((await route('/use/market/dev', as(both))).status, 200);
 });
 
-test("with cacheSeconds, a URL found the place's is kept as a made-for list is, by handle: the next asks nothing to tell it, and another handle's same URL is read for itself (C2b4)", ON_015, async () => {
+test("with values kept, a URL found the place's is kept as a made-for list is, by handle: the next asks nothing to tell it, and another handle's same URL is read for itself (C2b4)", ON_015, async () => {
   // Route `market`, any method and path, named as the handles' project is.
   const market = { ...uiRoute('market', '/market'), allow: null } as ProxyDefinition;
   await save({ openai: uiRoute('openai', '/openai'), market });
@@ -601,7 +608,7 @@ test("a URL found the place's is kept no longer than its handle stands: past the
 });
 
 test('a two-segment stable URL whose handle rides only in the body: the UI route, not compute (review r1 of #467)', ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  deploy(proxyOf(), NO_CACHE);
   await save({
     login: {
       kind: 'route', name: 'login', upstream: `${upstreamUrl}/login`, inject: [{ kind: 'form', name: 'client_secret', template: '{OPENAI_API_KEY}' }],
@@ -615,7 +622,7 @@ test('a two-segment stable URL whose handle rides only in the body: the UI route
 });
 
 test("a handle escaped as its slot's own encoding allows: a query's or a form's percent escapes, a JSON string's \\u escapes, found with no other sign of it (review r7 of #467)", ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  deploy(proxyOf(), NO_CACHE);
   const post = [{ methods: ['POST'], path: '/token' }];
   await save({
     search: { ...uiRoute('search', '/search'), inject: [{ kind: 'query', name: 'key', template: '{OPENAI_API_KEY}' }] } as ProxyDefinition,
@@ -639,7 +646,7 @@ test("a handle escaped as its slot's own encoding allows: a query's or a form's 
 });
 
 test("a body decoded only as its Content-Type reads it: a JSON note's percent escapes, a form value's backslashes, are text, no second handle (review r8 of #467)", ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  deploy(proxyOf(), NO_CACHE);
   const post = [{ methods: ['POST'], path: '/token' }];
   await save({
     login: { ...uiRoute('login', '/login'), inject: [{ kind: 'form', name: 'client_secret', template: '{OPENAI_API_KEY}' }], allow: post } as ProxyDefinition,
@@ -660,7 +667,7 @@ test("a body decoded only as its Content-Type reads it: a JSON note's percent es
 });
 
 test("64 KiB of escaped quotes that never close cost their length, not their square: found no handle in, read as no JSON (review r8 of #467)", ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  deploy(proxyOf(), NO_CACHE);
   await save({ hook: { ...uiRoute('hook', '/hook'), inject: [{ kind: 'json', name: 'secret', template: '{OPENAI_API_KEY}' }], allow: [{ methods: ['POST'], path: '/v1/token' }] } as ProxyDefinition });
   const body = `"${'\\"'.repeat(32_000)}`;
   const sent = { method: 'POST', headers: { 'content-type': 'application/json' }, body };
@@ -682,7 +689,7 @@ test("a service binding's call is never served a handle's kept values: its own b
   const token = await handle();
   assert.equal((await route('/use/market/dev/openai/models', as(token))).status, 200);
   const before = reached.length;
-  // The same URL and handle through a binding, on the same isolate, within cacheSeconds: the binding's own call (C2b1),
+  // The same URL and handle through a binding, on the same isolate, within R: the binding's own call (C2b1),
   // refused here, as `token:svc` holds no live binding; nothing sent.
   const bound = await bindingRoute(new Request(`${ORIGIN}/use/market/dev/openai/models`, as(token)), runtime, 'token:svc')!;
   assert.equal(bound.status, 401, await bound.clone().text());
@@ -703,9 +710,9 @@ test("a place copy's allow list refuses only a handle whose checked made-for lis
   assert.equal(stranger.status, 401, await stranger.clone().text());
 });
 
-for (const cacheSeconds of [60, 0]) {
-  test(`a project named as code's credential is: its environment's UI route at the place URL, cacheSeconds ${cacheSeconds} (review r2 of #467)`, ON_015, async () => {
-    deploy(proxyOf({ cacheSeconds }));
+for (const cacheValues of [true, false]) {
+  test(`a project named as code's credential is: its environment's UI route at the place URL, cacheValues ${cacheValues} (review r2 of #467)`, ON_015, async () => {
+    deploy(proxyOf(), { cacheValues });
     await root.projects.create('maps');
     await root.environments.create('maps/dev');
     await root.secrets.set('maps/dev', { OPENAI_API_KEY: OPENAI });
@@ -721,9 +728,9 @@ for (const cacheSeconds of [60, 0]) {
   });
 }
 
-for (const cacheSeconds of [60, 0]) {
-  test(`a project named as code's credential is: its UI route's handle wherever the item takes it, the body read once, cacheSeconds ${cacheSeconds} (review r3 of #467)`, ON_015, async () => {
-    deploy(proxyOf({ cacheSeconds }));
+for (const cacheValues of [true, false]) {
+  test(`a project named as code's credential is: its UI route's handle wherever the item takes it, the body read once, cacheValues ${cacheValues} (review r3 of #467)`, ON_015, async () => {
+    deploy(proxyOf(), { cacheValues });
     await root.projects.create('maps');
     await root.environments.create('maps/dev');
     await root.secrets.set('maps/dev', { OPENAI_API_KEY: OPENAI });
@@ -755,7 +762,7 @@ for (const cacheSeconds of [60, 0]) {
 
 test("a code credential's refusal of the body leaves it whole for the UI route the handle's place reading takes, with no cache (review r4 of #467)", ON_015, async () => {
   // Code's `maps` takes its key in a form's field: a JSON body is no form, and its refusal reads the body.
-  deploy(proxyOf({ cacheSeconds: 0, credentials: { maps: { upstream: `${upstreamUrl}/maps`, inject: form('key', '{MAPS_KEY}') } } }));
+  deploy(proxyOf({ credentials: { maps: { upstream: `${upstreamUrl}/maps`, inject: form('key', '{MAPS_KEY}') } } }), NO_CACHE);
   await root.projects.create('maps');
   await root.environments.create('maps/dev');
   await root.secrets.set('maps/dev', { OPENAI_API_KEY: OPENAI });
@@ -768,7 +775,7 @@ test("a code credential's refusal of the body leaves it whole for the UI route t
   assert.deepEqual([reached.at(-1)!.url, reached.at(-1)!.headers.authorization, reached.at(-1)!.body], ['/openai/chat/completions', `Bearer ${OPENAI}`, body]);
 });
 
-test("values kept for a stable route serve every path under it: one use within cacheSeconds, whatever the URL's third segment, never the place reading's URL (review r4 of #467)", ON_015, async () => {
+test("values kept for a stable route serve every path under it: one use within R, whatever the URL's third segment, never the place reading's URL (review r4 of #467)", ON_015, async () => {
   // `market` too, named as the handle's project is: its stable copy must not answer `/use/market/dev/…`.
   await save({ openai: uiRoute('openai', '/openai'), market: uiRoute('market', '/market') });
   const token = await handle();
@@ -833,7 +840,7 @@ test("a UI route shaping a code signer's key: the plan refuses (409), as startup
 });
 
 test("a UI route's upstream goes out through the runtime's public fetch, and a runtime without one sends nothing (review r2 of #467)", ON_015, async () => {
-  deploy(proxyOf({ insecureUpstreams: false, cacheSeconds: 0 }, false));
+  deploy(proxyOf({ insecureUpstreams: false }, false), NO_CACHE);
   await save({ openai: { ...uiRoute('openai', ''), upstream: 'https://api.openai.example/v1' } as ProxyDefinition });
   const token = await handle();
   const sent: { url: string; authorization: string | null }[] = [];
@@ -857,7 +864,7 @@ test("a UI route's upstream goes out through the runtime's public fetch, and a r
 });
 
 test("`/use/<a>/<b>` on a runtime without a public fetch asks the made-for list alone: the plan is given, and route `<a>` refuses before any use is made (C2b4; Fable's review of #486)", ON_015, async () => {
-  deploy(proxyOf({ insecureUpstreams: false, cacheSeconds: 0 }, false));
+  deploy(proxyOf({ insecureUpstreams: false }, false), NO_CACHE);
   await save({ openai: { ...uiRoute('openai', ''), upstream: 'https://api.openai.example/v1' } as ProxyDefinition });
   const token = await handle();
   const kept = runtime.publicFetch;
@@ -915,7 +922,7 @@ test("a UI route through undici's public fetch, as a Node deployment sends one: 
       else callback(null, '127.0.0.1', 4);
     };
     runtime.publicFetch = publicFetch(lookup, { ca: cert });
-    deploy(proxyOf({ insecureUpstreams: false, cacheSeconds: 0 }, false));
+    deploy(proxyOf({ insecureUpstreams: false }, false), NO_CACHE);
     await save({ openai: { ...uiRoute('openai', ''), upstream: `https://api.openai.example:${port}/v1` } as ProxyDefinition });
     const token = await handle();
 
@@ -1100,7 +1107,7 @@ test("a signer and a verifier saved in the UI: a private key's signature and an 
       assert.ok(verifyWith(null, message, publicKey, Buffer.from(signed.body.signature as string, 'base64url')));
     }
     assert.equal(uses(), 2);
-    // An HMAC's: its scheme's signature, its values kept for cacheSeconds (60 here), so the second asks nothing.
+    // An HMAC's: its scheme's signature, its values kept for R (60 here), so the second asks nothing.
     const expected = (prefix: string, encoding: 'hex' | 'base64') => `${prefix}${createHmac('sha256', HOOK).update(message).digest(encoding)}`;
     for (let round = 0; round < 2; round++) {
       const signed = await compute(token, { sign: { credential: 'hooks', message: message.toString('base64url') } });
@@ -1132,7 +1139,7 @@ test("a signer and a verifier saved in the UI: a private key's signature and an 
     assert.deepEqual([uses(), reached.length], [1, sent], 'the route kept: refused with no use, nothing sent');
   });
   // An isolate that keeps nothing: decided on the newest version.
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  deploy(proxyOf(), NO_CACHE);
   assert.equal((await compute(token, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `v2=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
   // Each item takes what its kind does: a verifier signs nothing, a private key checks nothing, a route signs nothing
   // and presigns only with sigv4 its one rule; a name nothing defines, 404.
@@ -1179,15 +1186,15 @@ test("a message longer than the decided item takes is refused before its values 
   });
 });
 
-test("a copy past cacheSeconds refuses nothing: the use decides, and a private key's sign logs its message's SHA-256, hashed once the vault decided (Fable's review of #480)", ON_015, async () => {
+test("a copy past the cache's window refuses nothing: the use decides, and a private key's sign logs its message's SHA-256, hashed once the vault decided (Fable's review of #480)", ON_015, async () => {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   // Plain keys, so that the app writes the credential.use entry this test reads (a secret's use is the vault's slim row, R53).
   await root.secrets.set('market/dev', {
     STAMP_PEM: { value: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), sensitivity: 'plain' },
     STAMP_SECRET: { value: 'whsec-0123456789abcdef', sensitivity: 'plain' },
   });
-  // An isolate that keeps nothing: every copy it holds is past cacheSeconds the moment it is made.
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  // An isolate that keeps nothing: every copy it holds is past the cache's window the moment it is made.
+  deploy(proxyOf(), NO_CACHE);
   await save({ stamp: { kind: 'verifier', name: 'stamp', hmac: { key: 'STAMP_SECRET', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT } });
   const token = await handle();
   const message = Buffer.from('transfer 10');
@@ -1251,7 +1258,7 @@ test("a presign of a route saved in the UI: built and checked again on the decid
     assert.deepEqual([narrowed.status, narrowed.body.reason, narrowed.retryAfter], [503, 'moved', '1'], JSON.stringify(narrowed.body));
     assert.equal((await presign('/bucket/report.csv')).status, 403);
     // An inject edit under a copy that admits the path (another route, as a fresh copy's refusal stands for
-    // cacheSeconds): the decided route no longer signs with sigv4 alone, refused before its values are read, 503 moved;
+    // R): the decided route no longer signs with sigv4 alone, refused before its values are read, 503 moved;
     // then 400 by the copy it brought.
     const other = (path: string) => compute(token, { presign: { credential: 'backup', path, expiresIn: 60 } });
     await save({ backup: { ...s3('https://backup.example.test/files', '/bucket/**'), name: 'backup' } as ProxyDefinition });
@@ -1264,7 +1271,8 @@ test("a presign of a route saved in the UI: built and checked again on the decid
 });
 
 test("what a UI item makes answers within its values' window: a signature, a check or a URL made after the use's deadline, or after kept values lapse, is 503 late (review r1 of #480)", ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  // R at its floor, the use's own deadline: a request may send, or answer, 3 s after its use was decided.
+  deploy(proxyOf(), { ...NO_CACHE, revokedWithinSeconds: USE_DEADLINE_MS / 1000 });
   const { privateKey } = generateKeyPairSync('ed25519');
   await root.secrets.set('market/dev', { DFNS_PEM: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), HOOK_SECRET: 'whsec-0123456789abcdef', AWS_ACCESS_KEY_ID: AWS_ID, AWS_SECRET_ACCESS_KEY: AWS_SECRET });
   await save({
@@ -1320,12 +1328,12 @@ test("what a UI item makes answers within its values' window: a signature, a che
     // In time, the same ask is made.
     assert.equal((await compute(token, ask)).status, 200, what);
   }
-  // Kept values answer by when they lapse: kept for a second, an HMAC made 1.5 s later is late, its values unused.
-  deploy(proxyOf({ cacheSeconds: 1 }));
+  // Kept values answer by when they lapse: kept 3 s, an HMAC made 3.5 s later is late, its values unused.
+  deploy(proxyOf(), { revokedWithinSeconds: USE_DEADLINE_MS / 1000 });
   const kept = { sign: { credential: 'hooks', message } };
   assert.equal((await compute(token, kept)).status, 200);
   await countingUses(async (uses) => {
-    const late = await slowly(named('HMAC'), 1_500, kept);
+    const late = await slowly(named('HMAC'), USE_DEADLINE_MS + 500, kept);
     assert.deepEqual([late.status, late.body.reason], [503, 'late'], JSON.stringify(late.body));
     assert.equal(uses(), 0, 'made with the kept values, no use');
   });
@@ -1442,7 +1450,7 @@ test('a UI route with a path rule: saved as code writes it, its token in the seg
 });
 
 test("a UI route's allow list holds a method override too (T189): refused on the item the one use decided, sent nothing; one it takes goes, in one vault call", ON_015, async () => {
-  deploy(proxyOf({ cacheSeconds: 0 }));
+  deploy(proxyOf(), NO_CACHE);
   await save({ openai: uiRoute('openai', '/openai/v1') });
   const token = await handle();
   await countingVault(async (calls) => {

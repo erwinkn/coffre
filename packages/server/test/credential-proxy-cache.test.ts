@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { CoffreError } from '@coffre/client';
+import { defineDeployment, type Deployment } from '@coffre/core/deployment';
 
 import type { PluginContext, UseAsked, WorkloadUse } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
@@ -15,13 +16,17 @@ const PUBLIC = 'https://coffre.example';
 const HANDLE = `coffre_use_${'h'.repeat(43)}`;
 const LATER = new Date(Date.now() + 86_400_000).toISOString();
 
-/** coffre, as the proxy sees it: each `use` counted, answered at once, or as `next` says; `held`, the values and end it answers with. */
-function coffre() {
+/**
+ * coffre, as the proxy sees it, the deployment's values kept a minute unless `deployment` says otherwise: each `use`
+ * counted, answered at once, or as `next` says; `held`, the values and end it answers with.
+ */
+function coffre(deployment: Deployment = defineDeployment()) {
   const uses: number[] = [];
   let next: (() => Promise<void>) | null = null;
   const held = { values: { API_KEY: '' } as Record<string, string>, expiresAt: LATER };
   const context: PluginContext = {
     publicUrl: PUBLIC,
+    deployment,
     binding: false,
     api: () => assert.fail('api'),
     exchange: () => assert.fail('exchange'),
@@ -42,11 +47,10 @@ function coffre() {
   return { context, uses, held, hold: (then: () => Promise<void>) => void (next = then) };
 }
 
-/** The proxy, its cache a minute long, and what its upstream saw of the key. */
+/** The proxy, and what its upstream saw of the key. */
 function proxy() {
   const sent: string[] = [];
   const plugin = credentialProxy({
-    cacheSeconds: 60,
     credentials: { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async (_url: URL, init: RequestInit) => {
       sent.push(new Headers(init.headers).get('authorization') ?? '');
       return new Response('ok');
@@ -174,8 +178,8 @@ test('an environment that no longer holds the key, found when asking again, ends
 });
 
 test('with no cache, each request asks the vault', async () => {
-  const { context, uses } = coffre();
-  const plugin = credentialProxy({ cacheSeconds: 0, credentials: { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response('ok') } } } });
+  const { context, uses } = coffre(defineDeployment({ proxy: { cacheValues: false } }));
+  const plugin = credentialProxy({ credentials: { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response('ok') } } } });
   for (let i = 0; i < 3; i++) assert.equal((await plugin.routes!.fetch(new Request(`${PUBLIC}/use/stripe/v1/charges`, { headers: { 'x-coffre-handle': HANDLE } }), context)).status, 200);
   assert.equal(uses.length, 3);
 });

@@ -5,6 +5,7 @@
 // deletes fails closed (R64); a forged object is replaced whole by an Owner, never carried on. The log replays to the
 // rows. And the version gate: a call on another release runs nothing, in this process as over the socket.
 // Both engines; the change path is 0.15's log's.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -41,7 +42,7 @@ after(() => db.close());
 beforeEach(() => emptyDatabase(db.owner));
 
 function configure(): ResolvedVaultConfig {
-  return { keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')), owners: ['root@acme.example'], signingKeys: [randomBytes(32)], bulkLimit: { count: 1000, windowMs: 15 * 60_000 } };
+  return { keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')), owners: ['root@acme.example'], signingKeys: [randomBytes(32)], bulkLimit: { count: 1000, windowMs: 15 * 60_000 }, deployment: defineDeployment() };
 }
 
 /** A route, `name`, sending `key` to `host`. */

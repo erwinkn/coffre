@@ -6,6 +6,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { defineDeployment } from '@coffre/core/deployment';
+
 import type { PluginContext, UseAsked, WorkloadUse } from '../src/plugins.ts';
 import { credentialProxy, header, type Credential } from '../src/plugins/credential-proxy.ts';
 import { allows, readPattern, requestSegments, type AllowEntry } from '@coffre/core/proxy-match';
@@ -17,6 +19,7 @@ const LATER = new Date(Date.now() + 3_600_000).toISOString();
 /** coffre, as a plugin sees it: the handle stands for `market/dev`, whose one key is KEY. */
 const coffre = {
   publicUrl: PUBLIC,
+  deployment: defineDeployment({ proxy: { cacheValues: false } }),
   workload: async () => null,
   handle: async () => ({ expiresAt: LATER, paths: ['market/dev'] }),
   use: async (_handle: string | WorkloadUse, asked: UseAsked) => ({
@@ -35,7 +38,7 @@ function proxy(credential: Partial<Credential>) {
     reached.push(url.pathname);
     return new Response('ok');
   } };
-  const plugin = credentialProxy({ cacheSeconds: 0, credentials: { api: { upstream: 'https://api.example/v1', inject: header('x-api-key', '{KEY}'), egress, ...credential } } });
+  const plugin = credentialProxy({ credentials: { api: { upstream: 'https://api.example/v1', inject: header('x-api-key', '{KEY}'), egress, ...credential } } });
   const ask = async (path: string, method = 'GET') => {
     const answer = await plugin.routes!.fetch(new Request(`${PUBLIC}/use/market/dev/api${path}`, { method, headers: { 'x-coffre-handle': HANDLE } }), coffre);
     return { status: answer.status, message: answer.status === 200 ? '' : ((await answer.json()) as { message: string }).message };

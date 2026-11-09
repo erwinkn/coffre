@@ -2,6 +2,7 @@
 // one call of `change_input` (migration 0023), in the decision's transaction, after 0.14's writes. Each case names the
 // part of formal/HotPathOne.tla or formal/Migration015.tla it holds, and runs on both engines unless it says otherwise:
 // SQLite runs `change_input`'s twin (store.ts), under its one writer.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -44,6 +45,7 @@ function configure(): ResolvedVaultConfig {
     owners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+    deployment: defineDeployment(),
   };
 }
 

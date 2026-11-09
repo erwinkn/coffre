@@ -36,7 +36,7 @@
  * in), its redirects never followed, and a value the upstream echoes is
  * redacted from its answer. A handle opens values for its person as a read
  * does, by their grants and its scope, logged once per credential about
- * every 45 seconds while used (`cacheSeconds`), never handed back. The app holds as they are the
+ * every 45 seconds while used (the deployment's `proxy.revokedWithinSeconds`), never handed back. The app holds as they are the
  * values its person may read, plain and secret ones, never a sensitive one
  * (docs/design/credential-proxy.md, section 2).
  */
@@ -47,14 +47,15 @@ import { CoffreError } from '@coffre/client';
 import { bodyDigest, bodyLine, contentDigest, declaredDigest, fetchMethod, MAX_DIGESTED_BODY, METHOD_TOKEN, UNSIGNED_BODY } from '@coffre/client/dpop';
 import { constraintsAllow, CREDENTIAL_NAME, type Constraints, type GateCount } from '@coffre/core/identity';
 import { BODIES_BYTES, BODY_READ_WHOLE_BYTES, CACHE_SLICE_BYTES, Lru, weight } from '@coffre/core/memory';
+import { LEAST_REVOKED_WITHIN_SECONDS, type Deployment, type MovedSetting } from '@coffre/core/deployment';
 import { recipeProblem } from '@coffre/core/recipe';
 import { isUnavailable } from '@coffre/db/dialect';
 
 import type { ProxyAllow, ProxyDefinition, ProxyHmac, ProxyInject, ProxyLimit, ProxyMethod, ProxyTunnel } from '@coffre/core/vault';
-import { DEFAULT_CACHE_SECONDS, withProxyCode, type ProxyCodeItem } from '../proxy-code.ts';
+import { withProxyCode, type ProxyCodeItem } from '../proxy-code.ts';
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
-import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type PluginCounts, type RouteAsked, type RouteUsed, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
-import { definitionKeys, TEMPLATE_KEY as SHARED_TEMPLATE_KEY, USE_DEADLINE_MS, type DecidedItem, type ProxyRoute } from '@coffre/core/vault';
+import { movedSettings, WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type PluginCounts, type RouteAsked, type RouteUsed, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
+import { definitionKeys, TEMPLATE_KEY as SHARED_TEMPLATE_KEY, type DecidedItem, type ProxyRoute } from '@coffre/core/vault';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
@@ -332,9 +333,10 @@ export type CredentialProxyOptions = {
   /** HMAC secrets, by name as credentials are, that coffre checks signatures with for the app, and never signs with: an inbound webhook's, `{ yousign: hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) }`. */
   verifiers?: Record<string, Hmac>;
   /**
-   * How often an open tunnel checks its handle still stands, ending when it
-   * does not: 60 seconds unless set. A workload's tunnel stops within 15
-   * seconds of a freeze or a revocation, or this if it is less.
+   * @deprecated In `deployment.ts` since 0.16, `proxy: { revokedWithinSeconds }`,
+   * which bounds the tunnels' checks and the values' cache as one: read until
+   * 0.17, which refuses it here. How often an open tunnel checks its handle
+   * still stands, above 0, an hour at most.
    */
   recheckSeconds?: number;
   /**
@@ -358,19 +360,15 @@ export type CredentialProxyOptions = {
   /** Upstreams over plain HTTP, and at private, loopback or link-local addresses: for local fakes in development, never in production. */
   insecureUpstreams?: boolean;
   /**
-   * Whether Owners, and whoever a role gives `proxy.edit`, may write this
-   * deployment's proxy definitions per environment in the UI (0.16,
-   * docs/design/proxy-ui.md): off unless set. Code's definitions win a name
-   * both use, in every environment.
+   * @deprecated In `deployment.ts` since 0.16, `proxy: { editable }`: read
+   * until 0.17, which refuses it here. Whether Owners may write the
+   * deployment's proxy definitions in the UI.
    */
   editable?: boolean;
   /**
-   * How long a credential's values, once opened for a handle, serve its
-   * next requests from this process's memory: 60 seconds unless set, 0 for
-   * a read per request. Each opening is one entry in the log; a revoked
-   * handle's values serve no longer than this. In its last quarter (15
-   * seconds at most), one request at a time opens them again while the
-   * others are served, so a lapse does not become a vault call per request.
+   * @deprecated In `deployment.ts` since 0.16: `proxy: { revokedWithinSeconds }`
+   * for how long opened values serve, `proxy: { cacheValues: false }` for 0.
+   * Read until 0.17, which refuses it here. 0 to 3,600.
    */
   cacheSeconds?: number;
 };
@@ -469,18 +467,17 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const signers = new Map(Object.entries(options.signers ?? {}).map(([name, signer]) => [name, checkSigner(name, signer, credentials, tunnels, new Map(), 'signer')]));
   const verifiers = new Map(Object.entries(options.verifiers ?? {}).map(([name, verifier]) => [name, checkSigner(name, verifier, credentials, tunnels, signers, 'verifier') as Hmac]));
   const messageBytes = Math.max(...[...signers.values(), ...verifiers.values()].map(longest), MESSAGE_BYTES);
-  const recheckMs = (options.recheckSeconds ?? 60) * 1000;
-  if (!(recheckMs > 0 && recheckMs <= 3_600_000)) throw new Error('credentialProxy: recheckSeconds is above 0, an hour at most');
-  const cacheMs = (options.cacheSeconds ?? DEFAULT_CACHE_SECONDS) * 1000;
-  if (!Number.isFinite(cacheMs) || cacheMs < 0 || cacheMs > 3_600_000) throw new Error('credentialProxy: cacheSeconds is between 0 and 3600');
+  const moved = movedOptions(options);
   // Values a handle opened, by handle, environment and credential: settled values only, never a pending read (AGENTS.md,
   // "What an isolate keeps"). Each cache the least recently used out first, past its slice of the isolate's (`@coffre/core/memory`).
   const cache = new Lru<string, Kept>(CACHE_SLICE_BYTES);
   const handles = new Lru<string, { paths: readonly (string | null)[] | null; until: number }>(CACHE_SLICE_BYTES);
   const groups = new Map<string, Group>();
   const bodies: Bodies = { held: 0 };
-  const editable = options.editable === true;
   const ui: UiState = { items: new Lru<string, UiItem>(CACHE_SLICE_BYTES, itemWeight), last: new Lru(CACHE_SLICE_BYTES), kept: new Lru(CACHE_SLICE_BYTES), places: new Lru(CACHE_SLICE_BYTES) };
+  const held: Held = { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, generate, cache, handles, ui };
+  // The deployment's choices, the same object for every request: its windows and `editable`, read as each request comes.
+  const proxyFor = (coffre: PluginContext): Proxy => ({ ...held, ...proxyTimes(coffre.deployment), editable: coffre.deployment.proxy.editable });
   const plugin = withProxyCode({
     name: 'credential-proxy',
     routes: {
@@ -491,7 +488,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
         // The bodies it reads whole, counted against the isolate's share until it ends, however it ends (`take`).
         const holding: Holding = { bodies, taken: 0 };
         try {
-          return await requests.run(holding, () => serve(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles, editable, ui }));
+          return await requests.run(holding, () => serve(request, coffre, proxyFor(coffre)));
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code, error.retryAfter);
           throw error;
@@ -501,7 +498,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       },
       socket: async (request, coffre) => {
         try {
-          return await open(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles, editable, ui });
+          return await open(request, coffre, proxyFor(coffre));
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code, error.retryAfter);
           throw error;
@@ -509,14 +506,62 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       },
     },
   }, {
-    editable: options.editable === true,
     insecureUpstreams: options.insecureUpstreams === true,
     names: [...new Set([...credentials.keys(), ...tunnels.keys(), ...signers.keys(), ...verifiers.keys()])].sort(),
     items: codeItems(options.credentials, tunnels, signers, verifiers),
-    cacheSeconds: cacheMs / 1000,
   });
+  movedSettings(plugin, moved);
   UI_STATES.set(plugin, ui);
   return plugin;
+}
+
+/**
+ * The options 0.16 moved to `deployment.ts`, checked as before, as the object's fields (`movedSettings`): `editable`
+ * as `proxy.editable`; `cacheSeconds: 0` as `proxy.cacheValues: false`; and one bound R for the rest, the smaller of
+ * `cacheSeconds` (above 0) and `recheckSeconds`, each 60 unless given, as 0.15 ran them, and 3 at least, R's floor.
+ *
+ *   { cacheSeconds: 30, recheckSeconds: 120 }    proxy: { revokedWithinSeconds: 30 }
+ *   { cacheSeconds: 0 }                          proxy: { cacheValues: false }, R its default, 60
+ *   { recheckSeconds: 1, editable: true }        proxy: { revokedWithinSeconds: 3, editable: true }
+ */
+function movedOptions(options: CredentialProxyOptions): MovedSetting[] {
+  const { cacheSeconds, recheckSeconds, editable } = options;
+  if (recheckSeconds !== undefined && !(recheckSeconds > 0 && recheckSeconds <= 3_600)) throw new Error('credentialProxy: recheckSeconds is above 0, an hour at most');
+  if (cacheSeconds !== undefined && !(Number.isFinite(cacheSeconds) && cacheSeconds >= 0 && cacheSeconds <= 3_600)) throw new Error('credentialProxy: cacheSeconds is between 0 and 3600');
+  // R: the smaller of the two as 0.15 ran them (60 each unless set; a cache of 0 bounds nothing), so that no deployment's
+  // revocation bound grows on the way: `recheckSeconds: 600` alone keeps values 60 s, as before, and checks every 50.
+  const bounds = [...(cacheSeconds === 0 ? [] : [cacheSeconds ?? 60]), recheckSeconds ?? 60];
+  const revokedWithinSeconds = cacheSeconds === undefined && recheckSeconds === undefined ? undefined : Math.max(Math.min(...bounds), LEAST_REVOKED_WITHIN_SECONDS);
+  const bound = revokedWithinSeconds === undefined ? {} : { revokedWithinSeconds };
+  return [
+    ...(cacheSeconds === undefined ? [] : [{ old: 'credentialProxy({ cacheSeconds })', options: { proxy: cacheSeconds === 0 ? { cacheValues: false } : bound } }]),
+    ...(recheckSeconds === undefined ? [] : [{ old: 'credentialProxy({ recheckSeconds })', options: { proxy: bound } }]),
+    ...(editable === undefined ? [] : [{ old: 'credentialProxy({ editable })', options: { proxy: { editable } } }]),
+  ];
+}
+
+/**
+ * The proxy's windows, each derived from R, the deployment's `proxy.revokedWithinSeconds`, so that a revoked credential
+ * works through the proxy for R at most, whichever way it goes (docs/design/config.md, section 1):
+ *
+ *   R = 60    values kept 60 s; a request sends by 60 s from its use; a tunnel checks every 50 s, each given 10 s
+ *   R = 4     values kept 4 s; a request sends by 4 s from its use; a tunnel checks every 2 s, each given 2 s
+ */
+export type ProxyTimes = {
+  /** How long values opened for a caller serve its next requests from memory: R, or 0 under `cacheValues: false`. */
+  cacheMs: number;
+  /** How long after its use was decided a request may still send, or answer with what it made: R, never past the credential's end. */
+  sendMs: number;
+  /** A tunnel's check of the vault: given d = min(R / 2, 10 s) to answer, every R − d, so that a check's interval and deadline add up to R. */
+  check: { every: number; deadline: number };
+  /** How long a handle's tunnel carries bytes after its last good check started: R. */
+  bound: number;
+};
+
+export function proxyTimes(deployment: Deployment): ProxyTimes {
+  const revoked = deployment.proxy.revokedWithinSeconds * 1000;
+  const deadline = Math.min(revoked / 2, RECHECK_DEADLINE_MS);
+  return { cacheMs: deployment.proxy.cacheValues ? revoked : 0, sendMs: revoked, check: { every: revoked - deadline, deadline }, bound: revoked };
 }
 
 /** Each proxy's copies of UI items, by its plugin (`forgetUiItems`). */
@@ -545,7 +590,8 @@ const RECHECK_DEADLINE_MS = 10_000;
 /** How long a workload's tunnel runs past a freeze or a revocation at most (section 8.2): its statement is asked again within it. */
 const WORKLOAD_RECHECK_MS = 15_000;
 
-type Proxy = {
+/** What the plugin holds across requests: its code's items, and this isolate's tunnel groups and caches. */
+type Held = {
   credentials: Map<string, Resolved>;
   /** The open tunnel sessions, by handle or session, environment and tunnel, each group checked as one (`watch`). */
   groups: Map<string, Group>;
@@ -556,16 +602,19 @@ type Proxy = {
   /** The longest message any signer or verifier takes. */
   messageBytes: number;
   insecure: boolean;
-  recheckMs: number;
   generate: Map<string, 'all' | readonly string[]>;
-  cacheMs: number;
   cache: Lru<string, Kept>;
-  /** The environments each handle was made for, by path, kept for `cacheSeconds` as its values are (`madeFor`). A workload's are its statement's to say. */
+  /** The environments each handle was made for, by path, kept for `cacheMs` as its values are (`madeFor`). A workload's are its statement's to say. */
   handles: Lru<string, { paths: readonly (string | null)[] | null; until: number }>;
-  /** Whether the environments' UI definitions serve the names code lacks (`editable`), and this isolate's copies of them. */
-  editable: boolean;
+  /** This isolate's copies of the environments' UI definitions. */
   ui: UiState;
 };
+
+/**
+ * The proxy as a request sees it: what the plugin holds, with the deployment's windows (`proxyTimes`) and whether the
+ * environments' UI definitions serve the names code lacks (`proxy.editable`).
+ */
+type Proxy = Held & ProxyTimes & { editable: boolean };
 
 /**
  * This isolate's UI definitions (0.16, T186 PR C; docs/design/proxy-ui.md, sections 3 and 4): each item a vault answer
@@ -610,7 +659,7 @@ type Kept = Opened & { until: number; refreshFrom: number; hold?: number };
 /**
  * How long before its values stop serving a cache entry is asked for
  * again, by one request at a time while the others are served it: a
- * quarter of `cacheSeconds`, 15 s at most.
+ * quarter of `cacheMs`, 15 s at most.
  */
 function refreshWindow(cacheMs: number): number {
   return Math.min(cacheMs / 4, 15_000);
@@ -642,7 +691,7 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     return failure(400, 'the path is not valid percent-encoding');
   }
   const stable = proxy.credentials.get(place[0]!);
-  // Whether a name may be a handle's UI route for this request: under `editable`, of a handle's request (no session, no
+  // Whether a name may be a handle's UI route for this request: under `proxy.editable`, of a handle's request (no session, no
   // service binding, whose calls `uiWorkloadForward` takes), and a name code lacks (R66).
   const uiServes = (name: string | undefined) => proxy.editable && coffre.useRoute !== undefined && !coffre.binding && sessionToken(request) === null
     && name !== undefined && CREDENTIAL_NAME.test(name) && !coded(proxy, name);
@@ -655,12 +704,12 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     if (used !== null) return used;
   }
   // A name code lacks, of a workload's request (a session's or a service binding's call): the environment's UI route,
-  // under `editable` (T186 PR C2b). `/use/<a>/<b>` stays the plan or compute for a workload, as before.
+  // under `proxy.editable` (T186 PR C2b). `/use/<a>/<b>` stays the plan or compute for a workload, as before.
   if (proxy.editable && coffre.useRoute !== undefined && stable === undefined && named === undefined && raw.length !== 2) {
     const used = await uiWorkloadForward(request, coffre, proxy, raw, place, url);
     if (used !== null) return used;
   }
-  // A name code lacks, of a handle's request: the environment's UI definitions, under `editable` (T186 PR C). Code wins
+  // A name code lacks, of a handle's request: the environment's UI definitions, under `proxy.editable` (T186 PR C). Code wins
   // a name it holds (R66): only a URL whose name code lacks gets here, its readings as section 6's table says. Never a
   // service binding's call, which carries no handle, before any copy kept for a handle is looked at (review r2 of #467).
   if (proxy.editable && coffre.useRoute !== undefined && stable === undefined && sessionToken(request) === null && !coffre.binding) {
@@ -856,7 +905,7 @@ function handlesInBody(bytes: Uint8Array, kind: BodyRule['kind'] | null): Set<st
  * null, nothing used, and the caller serves the URL as the place's.
  *
  *   Bo's handle, `GET /use/openai/models`, openai saved in market/dev's Proxy tab   the vault's call, then api.openai.com/v1/models
- *   the same within cacheSeconds, an Owner having pointed openai elsewhere since      no call: api.openai.com still, its values' item
+ *   the same within cacheMs, an Owner having pointed openai elsewhere since      no call: api.openai.com still, its values' item
  *   Bo's handle, `GET /use/market/dev`, made for market/dev                           the vault's call, the place's: null, the plan
  */
 async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, raw: readonly string[], place: readonly string[], url: URL, placeReading: 'route' | null, found?: string): Promise<Response>;
@@ -888,7 +937,7 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
   if (kept === undefined) {
     // The copies this isolate holds for either reading, by digest: the answer leaves out an item that is one of them.
     const readings = [...(named === null ? [] : [`n\n${named.path}\n${named.route}`]), ...(stable === null ? [] : [`s\n${handle}\n${stable}`])];
-    // What a copy confirmed within `cacheSeconds` refuses (its upstream, path and method) stands, no call made; an older
+    // What a copy confirmed within `cacheMs` refuses (its upstream, path and method) stands, no call made; an older
     // copy's refusal does not: the use's answer decides (docs/design/proxy-ui.md, section 3, "The app's checks"). Only the
     // copy of the reading the vault would take: the place reading where the handle's kept made-for list names `<a>/<b>`,
     // else the stable one (section 6); none when that list is not kept, as another handle's place copy says nothing of
@@ -922,7 +971,7 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
       ? await coffre.useRoute!(handle, { named, stable, digests, logged: { ui: true }, refuses })
       : await coffre.useRouteOrPlace!(handle, { place: itself, stable: stable!, digests, logged: { ui: true }, refuses });
     if (used.reading === 'place') {
-      // The place's, kept as a made-for list keeps it, for `cacheSeconds` and never past the handle's end: the next such
+      // The place's, kept as a made-for list keeps it, for `cacheMs` and never past the handle's end: the next such
       // URL serves the place's at once, and a copy's refusal there stands for this handle only while it stands (Sol r1).
       if (proxy.cacheMs > 0) proxy.ui.places.set(`${handle}\n${itself}`, Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)));
       return null;
@@ -932,7 +981,7 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
     proxy.ui.last.set(used.reading === 'named' ? readings[0]! : `s\n${handle}\n${stable!}`, { digest: used.item.digest, confirmed: now });
     kept = { values: used.values, plain: used.plain, digest: used.item.digest, definition, reading: used.reading, path: used.environment.path, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) };
     if (proxy.cacheMs > 0) proxy.ui.kept.set(keptAt(handle, used.reading === 'named' ? { named: named! } : { stable: stable! }), kept);
-    sendBy = Math.min(now + Math.max(proxy.cacheMs, USE_DEADLINE_MS), Date.parse(used.expiresAt));
+    sendBy = Math.min(now + proxy.sendMs, Date.parse(used.expiresAt));
   } else {
     sendBy = kept.until;
   }
@@ -985,7 +1034,7 @@ function keptFor(proxy: Proxy, handle: string, named: { path: string; route: str
 }
 
 /**
- * Whether this handle's route use found, within `cacheSeconds`, that `at` names the place itself (C2b4): the plan, compute
+ * Whether this handle's route use found, within `cacheMs`, that `at` names the place itself (C2b4): the plan, compute
  * or code's credential there, which then decide everything themselves. It only says which URL this is, as a kept
  * made-for list does: nothing is sent on it.
  */
@@ -1061,7 +1110,7 @@ const noCredential = (name: string) => failure(404, `this instance has no creden
 
 /**
  * The environments `handle` was made for, by path as they are named now,
- * null for one deleted: asked of coffre, and kept for `cacheSeconds`, as
+ * null for one deleted: asked of coffre, and kept for `cacheMs`, as
  * the values they open are, so a rename reaches the stable URL within the
  * minute. Null for a handle of 0.8.
  */
@@ -1419,11 +1468,10 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   const db = dialled(proxy, path, name, tunnel, values[tunnel.key]!);
   if (db instanceof Response) return db;
   const key = cacheKey(handle, path, name);
-  const deadline = Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS);
-  // Every `recheckSeconds`, the database's URL opened again for the handle's sessions, as the vault decides it (a revoked handle, a lost grant), logged as a use.
+  // Every R − d, the database's URL opened again for the handle's sessions, as the vault decides it (a revoked handle, a
+  // lost grant), logged as a use, each given d: its bytes stop within R of the decision that ends them (`proxyTimes`).
   const check: Check = {
-    every: proxy.recheckMs,
-    deadline,
+    ...proxy.check,
     arms: true,
     now: !fresh,
     run: () => coffre.use(handle, { path: readOf(proxy, path, handle), keys: [tunnel.key], purpose: 'use', only: true, logged: { credential: name, tunnel: true, recheck: true } }).then((used) => Object.hasOwn(used.values, tunnel.key)),
@@ -1434,7 +1482,7 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
     database: db,
     // Just before a login: the handle afresh, opening nothing, and the group's last word on its person's access.
     stands: async () => (await coffre.handle(handle).then(() => true, () => false)) && (proxy.groups.get(key)?.stands ?? true),
-    watch: (end) => watch(proxy, key, { checks: [check], bound: proxy.recheckMs + deadline, until: Date.parse(expiresAt) }, end),
+    watch: (end) => watch(proxy, key, { checks: [check], bound: proxy.bound, until: Date.parse(expiresAt) }, end),
   });
 }
 
@@ -1443,12 +1491,12 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
  * Durable Object named by its session (`forwardSocket`), the database's URL
  * opened for the session as a credential's values are, and the app's login
  * asked for no password: the signed upgrade authenticated it (section 9.3).
- * It carries bytes while its last good check is less than `recheckSeconds`
- * old, 15 at most (section 8.2): every two thirds of that, section 5.3's
- * statement again, revocation and every freeze included, with a third of it
- * to answer; so a freeze or a revocation ends it within one. Every
- * `recheckSeconds`, the vault's decision afresh too, which a lost grant
- * changes.
+ * It carries bytes while its last good check is less than R old (the
+ * deployment's `proxy.revokedWithinSeconds`), 15 s at most (section 8.2):
+ * every two thirds of that, section 5.3's statement again, revocation and
+ * every freeze included, with a third of it to answer; so a freeze or a
+ * revocation ends it within one. The vault's decision afresh too, which a
+ * lost grant changes, as a handle's tunnel asks it (`proxyTimes`): within R.
  */
 async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, name: string, tunnel: Tunnel): Promise<Response | SocketSession> {
   if (sessionToken(request) === null || caller.path === null) return nonced(failure(403, 'a tunnel is a session\'s, which names its environment'), caller);
@@ -1466,12 +1514,11 @@ async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Pr
   const db = dialled(proxy, path, name, tunnel, opened.values[tunnel.key]!);
   if (db instanceof Response) return nonced(db, caller);
   const key = cacheKey(caller, path, name);
-  const bound = Math.min(proxy.recheckMs, WORKLOAD_RECHECK_MS);
+  const bound = Math.min(proxy.bound, WORKLOAD_RECHECK_MS);
   const checks: Check[] = [
     { every: (bound * 2) / 3, deadline: bound / 3, arms: true, now: false, run: () => coffre.recheck(caller) },
     {
-      every: proxy.recheckMs,
-      deadline: Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS),
+      ...proxy.check,
       arms: false,
       now: !fresh,
       run: () => coffre.use(caller, { path, keys: [tunnel.key], purpose: 'use', only: true, logged: { credential: name, tunnel: true, recheck: true } }).then((used) => Object.hasOwn(used.values, tunnel.key)),
@@ -1494,7 +1541,7 @@ type Dialling = { who: User; at: string; reading: string; asked: Pick<RouteAsked
  * "Tunnels"; formal/Tunnel.tla). The open is a route use of the item by name (`useRoute`), decided for the caller and
  * for the item's editor, and dials the decided item's hosts, never a copy's; the session keeps that item's digest. Each
  * recheck is the same use, which passes only if the item the vault decides on is the one dialled (`DigestRecheck`):
- * an Owner who narrows `hosts` mid-session ends it within `recheckSeconds` plus the check's deadline, and the client's
+ * an Owner who narrows `hosts` mid-session ends it within R, the deployment's `proxy.revokedWithinSeconds`, and the client's
  * reconnect dials by the new item. The item's own digest, never the object seal, which another item's edit changes
  * (`ItemDigest`): that edit ends nothing. Every connection is a use of its own, its values never kept: a database's
  * URL is used once, at the login.
@@ -1512,14 +1559,14 @@ async function uiTunnel(request: Request, coffre: PluginContext, proxy: Proxy, p
     if (sessionToken(request) === null || caller.path === null || caller.place === null) return nonced(failure(403, 'a tunnel is a session\'s, which names its environment'), caller);
     if (!constraintsAllow(caller.constraints, { place: caller.path, credential: name })) return nonced(failure(403, `this narrowed session may not open ${name}`, 'narrowed'), caller);
     try {
-      // As code's workload tunnel: its statement every two thirds of the bound, which arms, and the item's use every
-      // `recheckSeconds`, whose no ends the group.
+      // As code's workload tunnel: its statement every two thirds of the bound, which arms, and the item's use as a
+      // handle's tunnel asks it (`proxyTimes`), whose no ends the group.
       const dialling = { who: caller, at: caller.path, reading: `w\n${caller.place}\n${name}`, asked: { named: null, stable: name } };
-      const bound = Math.min(proxy.recheckMs, WORKLOAD_RECHECK_MS);
+      const bound = Math.min(proxy.bound, WORKLOAD_RECHECK_MS);
       const opened = await uiDialled(coffre, proxy, dialling, name, {
         checks: (run) => [
           { every: (bound * 2) / 3, deadline: bound / 3, arms: true, now: false, run: () => coffre.recheck(caller) },
-          { every: proxy.recheckMs, deadline: Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS), arms: false, now: false, run },
+          { ...proxy.check, arms: false, now: false, run },
         ],
         bound,
         until: () => null,
@@ -1537,10 +1584,9 @@ async function uiTunnel(request: Request, coffre: PluginContext, proxy: Proxy, p
   const handle = bearer(request);
   if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
   const dialling = { who: handle, at: path, reading: `n\n${path}\n${name}`, asked: { named: { path, route: name }, stable: null } };
-  const deadline = Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS);
   return uiDialled(coffre, proxy, dialling, name, {
-    checks: (run) => [{ every: proxy.recheckMs, deadline, arms: true, now: false, run }],
-    bound: proxy.recheckMs + deadline,
+    checks: (run) => [{ ...proxy.check, arms: true, now: false, run }],
+    bound: proxy.bound,
     until: (expiresAt) => Date.parse(expiresAt),
     stands: () => coffre.handle(handle).then(() => true, () => false),
     handle,
@@ -1598,7 +1644,7 @@ async function uiDialled(coffre: PluginContext, proxy: Proxy, dialling: Dialling
   const digest = used.item.digest;
   // By the item dialled: a session dialled by a newer item never joins a group whose checks hold it to an older one.
   const key = `${cacheKey(who, at, name)}\u0000ui\u0000${digest}`;
-  // Every `recheckSeconds`, the same use: it passes only on the item dialled, by its own digest, its key still held.
+  // Every check, the same use: it passes only on the item dialled, by its own digest, its key still held.
   const run = () => coffre.useRoute!(who, { ...asked, digests: [digest], logged: { ui: true, tunnel: true, recheck: true }, refuses: (decided) => {
     if (decided.digest === digest) return null;
     const definition = itemOf(proxy, decided);
@@ -1744,7 +1790,7 @@ function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bo
  * naming the credential it uses, as these do.
  */
 async function compute(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null): Promise<Response> {
-  // Read up to what the longest message takes, as base64url in JSON beside the rest: under `editable`, what an HMAC saved
+  // Read up to what the longest message takes, as base64url in JSON beside the rest: under `proxy.editable`, what an HMAC saved
   // in the Proxy tab may take, 1 MiB.
   const ui = proxy.editable && coffre.useRoute !== undefined;
   const most = ui ? Math.max(proxy.messageBytes, MAX_MESSAGE_BYTES) : proxy.messageBytes;
@@ -1807,9 +1853,9 @@ type Computing = {
  * section 3, "Signers and verifiers" and "Presign"). One route use decides the item and its keys, for the caller and
  * for the item's editor, as a route's are; then everything the request asks is checked again on the decided item, and
  * the signature, the check or the URL is made by it alone, never by this isolate's copy (`SentAsDecided`). A copy's
- * refusal before the use stands only when the vault confirmed the copy within `cacheSeconds`, and for a handle only on
+ * refusal before the use stands only when the vault confirmed the copy within `cacheMs`, and for a handle only on
  * a place its checked made-for list names; a request such a copy admitted and the decided item refuses is 503 `moved`,
- * nothing made. An HMAC's values are kept for `cacheSeconds` with the item they were decided on, whose `encoding`,
+ * nothing made. An HMAC's values are kept for `cacheMs` with the item they were decided on, whose `encoding`,
  * `prefix` and `maxBytes` a kept sign or verify takes, never a newer copy's (`BoundToDefinition`). A private key's sign
  * and a presign are each a use of their own, never kept, as code's are.
  *
@@ -1954,7 +2000,7 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
   if (definition === null) return failure(503, `${used.item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
   // What is made with values decided now answers within the use's window, as a route's request is sent in it
   // (`WithinWindow`): a signature made later, a slow key's or a stalled isolate's, answers 503 `late` (review r1 of #480).
-  const answerBy = Math.min(now + Math.max(proxy.cacheMs, USE_DEADLINE_MS), Date.parse(used.expiresAt));
+  const answerBy = Math.min(now + proxy.sendMs, Date.parse(used.expiresAt));
   // Refused before its use opened anything (`refuses`): the item takes the request.
   if (definition.kind === 'route') {
     const resolved = uiCredential(proxy, used.item.digest, definition);
@@ -1990,7 +2036,7 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
   return hmacMade(used.environment.path, name, hmac, used.values, operation, message!, given.signature, answerBy);
 }
 
-/** 503 `late`: what a UI item made was ready after its values' window closed, and goes nowhere (`WithinWindow`). */
+/** 503 `late`: what a signer, verifier or presign made was ready after its values' window closed, and goes nowhere (`WithinWindow`). */
 const lateMade = (name: string) => failure(503, `${name}: what it made was ready after its values may be used; send it again`, 'late', '1');
 
 /** An HMAC's sign or check with its values, by `hmac`, the item they were decided on, answered by `answerBy` or 503 `late`. */
@@ -2021,15 +2067,18 @@ async function sign(coffre: PluginContext, proxy: Proxy, path: string, who: User
   // A narrowed session's signers are named, and one limited to methods or paths signs nothing: no request to check them on.
   if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: name })) return failure(403, `this narrowed session may not sign with ${name}`, 'narrowed');
   if (signer.kind === 'hmac') {
-    const secret = await hmacSecret(coffre, proxy, path, who, name, signer);
-    return answer({ signature: await hmacSign(secret, message, { encoding: signer.encoding, prefix: signer.prefix ?? '' }) });
+    const { secret, by } = await hmacSecret(coffre, proxy, path, who, name, signer);
+    const signature = await hmacSign(secret, message, { encoding: signer.encoding, prefix: signer.prefix ?? '' });
+    return Date.now() > by ? lateMade(name) : answer({ signature });
   }
   const sha256 = hex(await crypto.subtle.digest('SHA-256', message));
+  const now = Date.now();
   const used = await coffre.use(who, { path: readOf(proxy, path, who), keys: [signer.key], purpose: 'use', only: true, logged: { credential: name, sign: { sha256 } } });
   const pem = Object.hasOwn(used.values, signer.key) ? used.values[signer.key] : undefined;
   if (pem === undefined) return failure(409, `${used.environment.path} holds no ${signer.key}, which ${name} signs with`);
   try {
-    return answer({ signature: base64url(await signWith(pem, message)) });
+    const signature = base64url(await signWith(pem, message));
+    return Date.now() > Math.min(now + proxy.sendMs, Date.parse(used.expiresAt)) ? lateMade(name) : answer({ signature });
   } catch (error) {
     // What is wrong with the key is said, never the key: neither the platform's error nor its message goes anywhere.
     return failure(409, `${used.environment.path}'s ${signer.key} ${error instanceof SigningKeyError ? error.message : 'signs nothing'}`);
@@ -2051,8 +2100,9 @@ async function verify(coffre: PluginContext, proxy: Proxy, path: string, who: Us
   if (message.byteLength > longest(verifier)) return failure(413, `${name} checks a message of ${sized(longest(verifier))} at most: its hmac()'s maxBytes takes a longer one`);
   if (typeof asked.signature !== 'string') return failure(400, 'verify a signature given as a string, as its header carried it');
   if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: name })) return failure(403, `this narrowed session may not verify with ${name}`, 'narrowed');
-  const secret = await hmacSecret(coffre, proxy, path, who, name, verifier);
-  return answer({ valid: await hmacVerify(secret, message, asked.signature, { encoding: verifier.encoding, prefix: verifier.prefix ?? '' }) });
+  const { secret, by } = await hmacSecret(coffre, proxy, path, who, name, verifier);
+  const valid = await hmacVerify(secret, message, asked.signature, { encoding: verifier.encoding, prefix: verifier.prefix ?? '' });
+  return Date.now() > by ? lateMade(name) : answer({ valid });
 }
 
 /** The longest message a signer or verifier takes. */
@@ -2068,12 +2118,15 @@ function messageOf(given: unknown): Uint8Array<ArrayBuffer> | null {
   return Buffer.from(given, 'base64url');
 }
 
-/** An HMAC signer's or verifier's secret, opened for the caller as a credential's values are: remembered for `cacheSeconds`, logged as one use when opened. */
-async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, hmac: Hmac): Promise<string> {
-  const { values } = await valuesFor(coffre, proxy, who, path, { name, keys: [hmac.key] }, { hmac: true });
+/**
+ * An HMAC signer's or verifier's secret, opened for the caller as a credential's values are: remembered for `cacheMs`,
+ * logged as one use when opened; and `by`, when what is made with it must answer (`valuesFor`).
+ */
+async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, hmac: Hmac): Promise<{ secret: string; by: number }> {
+  const { values, by } = await valuesFor(coffre, proxy, who, path, { name, keys: [hmac.key] }, { hmac: true });
   // WebCrypto takes no empty HMAC key: said as what is wrong with the value, not the platform's error.
   if (values[hmac.key] === '') throw new CoffreError(409, 'conflict', `${path}'s ${hmac.key} is empty, and ${name} signs and checks nothing with an empty secret`);
-  return values[hmac.key]!;
+  return { secret: values[hmac.key]!, by };
 }
 
 /**
@@ -2105,9 +2158,10 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
     return failure(403, `this narrowed session may not presign ${method} ${relative} through ${credential.name}`, 'narrowed');
   }
   // Every URL is one use in the log, opened now: a URL outlives the request, and whoever holds it may use it.
+  const now = Date.now();
   const used = await coffre.use(who, { path: readOf(proxy, path, who), keys: credential.keys, purpose: 'use', only: true, logged: { credential: credential.name, host: target.host, presign: { method, path: relative, expiresIn: asked.expiresIn } } });
   if (credential.keys.some((key) => !Object.hasOwn(used.values, key))) return failure(409, `${used.environment.path} holds no key ${credential.name} signs with`);
-  return presigned(inject, asked, target, used.values, used.expiresAt, who, credential.name);
+  return presigned(inject, asked, target, used.values, used.expiresAt, who, credential.name, Math.min(now + proxy.sendMs, Date.parse(used.expiresAt)));
 }
 
 /** What a presign asks for, as its JSON gave it. */
@@ -2177,9 +2231,9 @@ function decodings(href: string): string[] | null {
 
 /**
  * The presigned URL, signed with `values` for at most what was asked, and never past the handle's or the session's own
- * end; a UI route's answered by `answerBy`, its values' window, or 503 `late`.
+ * end; answered by `answerBy`, its values' window, or 503 `late`.
  */
-async function presigned(inject: SigV4Rule, asked: PresignAsked, target: URL, values: Record<string, string>, expiresAt: string, who: User, name: string, answerBy?: number): Promise<Response> {
+async function presigned(inject: SigV4Rule, asked: PresignAsked, target: URL, values: Record<string, string>, expiresAt: string, who: User, name: string, answerBy: number): Promise<Response> {
   const lasts = Math.min(asked.expiresIn, Math.floor((Date.parse(expiresAt) - Date.now()) / 1000));
   if (lasts < 1) return failure(401, typeof who === 'string' ? 'the handle ends now: run the app with `coffre run` again' : 'the session ends now: renew it');
   let url: URL;
@@ -2192,7 +2246,7 @@ async function presigned(inject: SigV4Rule, asked: PresignAsked, target: URL, va
   } catch {
     return failure(409, `${name}'s values sign no URL`);
   }
-  if (answerBy !== undefined && Date.now() > answerBy) return lateMade(name);
+  if (Date.now() > answerBy) return lateMade(name);
   return answer({ url: url.href, expiresAt: new Date(Date.now() + lasts * 1000).toISOString() });
 }
 
@@ -2520,12 +2574,14 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (content instanceof Response) return refuse(content);
   const through = { host: target.host };
   let route: string;
-  let opened: Opened;
+  // The values, and when the request must be sent by: within their window, as a UI route's (`valuesFor`'s `by`).
+  let opened: Opened & { by: number };
   if (typeof path === 'string') {
     route = path;
     opened = await valuesFor(coffre, proxy, handle, route, credential, through);
   } else {
     const logged = { credential: credential.name, ...through, ...(credential.egress === undefined ? {} : { egress: true }) };
+    const now = Date.now();
     const made = await coffre.useMadeFor!(handle, { keys: [credential.keys[0]!], purpose: 'use', logged, unless: path.unless });
     if (made === null) {
       const found = await routed(path);
@@ -2539,7 +2595,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
       // The vault found the environment in the same call: one the credential does not serve gets nothing of it.
       if (!serves(credential, route)) return notServed(credential.name, route);
       if (!Object.hasOwn(made.values, credential.keys[0]!)) throw new CoffreError(409, 'conflict', `${route} holds no ${credential.keys[0]}, which ${credential.name} needs`);
-      opened = { values: made.values, plain: made.plain };
+      opened = { values: made.values, plain: made.plain, by: Math.min(now + proxy.sendMs, Date.parse(made.expiresAt)) };
     }
   }
   // Each field the handle rides in, as the plan gave it, holds the handle the request is let in on, x-coffre-handle's
@@ -2552,7 +2608,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (unheld !== null) return unheld;
   // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
   // with an environment of the handle's would name that environment, and another credential (`/use/schumann/dev/maps/…`).
-  return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${route}/${credential.name}`, back, fields, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' } });
+  return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${route}/${credential.name}`, back, fields, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' }, sendBy: opened.by });
 }
 
 /**
@@ -2652,7 +2708,7 @@ async function refused<T>(asking: Promise<T>): Promise<T | Response> {
  * nothing, and only a binding that says `unsignedUploads` takes it. Then a
  * `narrow` child's constraints, on the URL about to be sent; the
  * credential's `limit`, counted by the gate in the same call; and the
- * values, opened for the session, or remembered for `cacheSeconds`: the
+ * values, opened for the session, or remembered for `cacheMs`: the
  * session itself is checked on every request, so a
  * revocation or a freeze stops the next one, warm or not.
  */
@@ -2712,7 +2768,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     const opened = await valuesFor(coffre, proxy, workload, workload.path, credential, { host: aimed.target.host });
     const proxied = `${coffre.publicUrl}/use/${path === null ? '' : `${path}/`}${credential.name}`;
     const secret = token === null ? null : { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
-    return send(request, credential, { ...aimed, ...content, opened, headers, proxied, back: [], fields, secret, ...(payload === undefined ? {} : { payload }) });
+    return send(request, credential, { ...aimed, ...content, opened, headers, proxied, back: [], fields, secret, ...(payload === undefined ? {} : { payload }), sendBy: opened.by });
   });
 }
 
@@ -2811,7 +2867,7 @@ async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy:
       proxy.ui.last.set(`w\n${caller.place}\n${name}`, { digest: used.item.digest, confirmed: nowAt });
       kept = { values: used.values, plain: used.plain, digest: used.item.digest, definition, reading: 'stable', path: used.environment.path, until: Math.min(nowAt + proxy.cacheMs, Date.parse(used.expiresAt)) };
       if (proxy.cacheMs > 0) proxy.ui.kept.set(keptAt, kept);
-      sendBy = Math.min(nowAt + Math.max(proxy.cacheMs, USE_DEADLINE_MS), Date.parse(used.expiresAt));
+      sendBy = Math.min(nowAt + proxy.sendMs, Date.parse(used.expiresAt));
     } else {
       sendBy = kept.until;
     }
@@ -2875,7 +2931,7 @@ function limitCounts(name: string, given: ProxyLimit, service: string): readonly
   return made === undefined ? [] : typeof made === 'function' ? [] : made;
 }
 
-/** A copy of a UI item at a workload's place: this isolate's, `fresh` when the vault confirmed it within `cacheSeconds`. */
+/** A copy of a UI item at a workload's place: this isolate's, `fresh` when the vault confirmed it within `cacheMs`. */
 type ItemCopy = { digest: string; definition: ProxyDefinition; fresh: boolean };
 
 /** What `itemCounts` makes: the counts, the copy they were made from (or the vault's refusal of it), and how to ask again. */
@@ -2966,10 +3022,11 @@ type Sending = Aim & Carried & {
   /** How a credential with no egress of its own goes out, a UI route's (`PluginContext.publicFetch`): else the global fetch. */
   through?: Egress;
   /**
-   * When the values decided for a UI route's request may last go out (epoch ms): checked as the fetch starts, after the
-   * body came and every signature was made, so a request that took longer sends none (review r1 and r3 of #467).
+   * When the values decided for the request may last go out (epoch ms), a code credential's as a UI route's: checked as
+   * the fetch starts, after the body came and every signature was made, so a request that took longer sends none
+   * (review r1 and r3 of #467; docs/design/config.md, section 1, `proxy.revokedWithinSeconds`).
    */
-  sendBy?: number;
+  sendBy: number;
 };
 
 /**
@@ -3076,7 +3133,7 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
 
   // A streamed body's refusal, once `scanned` stops it: the answer, whatever the upstream made of the broken request.
   // Values decided for a request sent within their window: one whose body, digest or signature came after it goes with none.
-  if (out.sendBy !== undefined && Date.now() > out.sendBy) return failure(503, `${credential.name}: the request was ready after its values may be sent; send it again`, 'late', '1');
+  if (Date.now() > out.sendBy) return failure(503, `${credential.name}: the request was ready after its values may be sent; send it again`, 'late', '1');
   const upload = streamed ? scanned(request.body!, Number(declared), secret, digest) : null;
   let upstream: Response;
   try {
@@ -3317,13 +3374,16 @@ function cacheKey(user: User, path: string, name: string): string {
 
 /**
  * The credential's values for the handle or workload: remembered for
- * `cacheSeconds` from when the vault was asked, or opened now, logged as
+ * `cacheMs` from when the vault was asked, or opened now, logged as
  * one use. In the last `refreshWindow` of an entry, one request at a time
  * asks the vault again, for `REFRESH_ATTEMPT_MS` at most, and every other
  * is served the entry meanwhile, so a steady caller does not turn a lapse
  * into a call per request. The one asking is served the entry too should
  * the vault not answer, and a second later another asks; refused, the
- * entry goes. Nothing serves past `until`.
+ * entry goes. Nothing serves past `until`. With them, `by`: when what the
+ * request does with them must be done, sent or answered (`sendBy`,
+ * `answerBy`): a kept entry's `until`; values opened now, `sendMs` from
+ * when the vault was asked, never past the credential's end.
  */
 async function valuesFor(
   coffre: PluginContext,
@@ -3335,7 +3395,7 @@ async function valuesFor(
   through: { host: string } | { tunnel: true } | { hmac: true },
   /** Told when the vault decided now, not the cache. */
   decided?: () => void,
-): Promise<Opened> {
+): Promise<Opened & { by: number }> {
   const key = cacheKey(user, path, credential.name);
   const now = Date.now();
   const kept = proxy.cache.get(key);
@@ -3343,7 +3403,7 @@ async function valuesFor(
   // Until when this request holds the others off, should it ask.
   const hold = now + Math.min(REFRESH_ATTEMPT_MS, refreshWindow(proxy.cacheMs) / 2);
   if (live !== undefined) {
-    if (now < live.refreshFrom || (live.hold !== undefined && now < live.hold)) return live;
+    if (now < live.refreshFrom || (live.hold !== undefined && now < live.hold)) return { values: live.values, plain: live.plain, by: live.until };
     live.hold = hold;
   }
   let used: Used;
@@ -3362,7 +3422,7 @@ async function valuesFor(
     console.error("the proxy's cache asked the vault again, unanswered; serving what it holds", logged(error));
     // Another a second on, unless one already asks after it, whose hold stands.
     if (held === live && live.hold === hold) live.hold = Date.now() + REFRESH_RETRY_MS;
-    return held;
+    return { values: held.values, plain: held.plain, by: held.until };
   }
   const missing = credential.keys.filter((name) => !Object.hasOwn(used.values, name));
   if (missing.length > 0) {
@@ -3372,13 +3432,13 @@ async function valuesFor(
   decided?.();
   // Kept only over the entry it set out from: an older answer replaces no newer one, brings back none a refusal ended, and none a tunnel's end removed.
   if (proxy.cacheMs > 0 && (live === undefined || proxy.cache.get(key) === live)) {
-    // From when the vault was asked, not when it answered: a revoked handle serves no longer than `cacheSeconds`.
+    // From when the vault was asked, not when it answered: a revoked handle serves no longer than `cacheMs`.
     const until = Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt));
     // An answer that serves no longer than the last (the handle's or session's end) is not asked for again.
     const refreshFrom = live !== undefined && until <= live.until ? until : until - refreshWindow(proxy.cacheMs);
     proxy.cache.set(key, { values: used.values, plain: used.plain, until, refreshFrom });
   }
-  return { values: used.values, plain: used.plain };
+  return { values: used.values, plain: used.plain, by: Math.min(now + proxy.sendMs, Date.parse(used.expiresAt)) };
 }
 
 /** The templates of a rule's that the app's request carries the handle in, when a key in them is no plain one: SigV4's access key id alone, which the SDK sends. */

@@ -17,6 +17,7 @@ import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
 
 import { bodyDigest, contentDigest, createProof, generateProofKey, thumbprint, type ProofKey } from '@coffre/client/dpop';
+import { defineDeployment } from '@coffre/core/deployment';
 import { github, hashToken, signin } from '@coffre/core/identity';
 import { BODY_READ_WHOLE_BYTES } from '@coffre/core/memory';
 import type { ProxyDefinition, Vault } from '@coffre/core/vault';
@@ -28,7 +29,7 @@ import { resolveConfig } from '../src/config.ts';
 import type { Gates } from '../src/gate.ts';
 import { upgrade } from '../src/node-sockets.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
-import { proxyCodeOf } from '../src/proxy-code.ts';
+import { proxyCodeWith } from '../src/proxy-code.ts';
 import { forgetProxyGates } from '../src/proxy-gate.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
@@ -79,11 +80,15 @@ const transport: WorkloadTransport = {
   },
 };
 
-/** The deployment: code's `stripe`, the Proxy tab writing, local fakes allowed. */
-function makeRuntime(cacheSeconds = 0, recheckSeconds?: number): CoffreRuntime {
+/**
+ * The deployment: code's `stripe`, the Proxy tab writing, local fakes allowed, values kept a minute or none; its R
+ * `revokedWithinSeconds` where a case sets it, below its 3 s floor where a case needs a tunnel's checks in
+ * milliseconds: a test's own object, which `defineDeployment` refuses, given to the runtime once made.
+ */
+function makeRuntime(cacheValues = false, revokedWithinSeconds?: number): CoffreRuntime {
   const plugins = checkPlugins([credentialProxy({
     credentials: { stripe: { upstream: `${upstreamAt}/stripe`, inject: header('authorization', 'Bearer {OPENAI_API_KEY}') } },
-    editable: true, insecureUpstreams: true, cacheSeconds, ...(recheckSeconds === undefined ? {} : { recheckSeconds }),
+    insecureUpstreams: true,
   })]);
   const config = resolveConfig({
     publicUrl: ORIGIN,
@@ -91,9 +96,12 @@ function makeRuntime(cacheSeconds = 0, recheckSeconds?: number): CoffreRuntime {
     auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000 }), alert: () => {} } }),
     auditChainKey: deps.chainKey.toString('base64'),
     plugins,
+    deployment: { proxy: { editable: true, cacheValues } },
   });
-  deps.proxy = proxyCodeOf(plugins);
-  return createRuntime(config, deps.db, deps.vault, transport, () => {}, gates);
+  const made = createRuntime(config, deps.db, deps.vault, transport, () => {}, gates);
+  if (revokedWithinSeconds !== undefined) made.deployment = { ...defineDeployment(), proxy: { ...made.deployment.proxy, revokedWithinSeconds } };
+  deps.proxy = proxyCodeWith(plugins, made.deployment);
+  return made;
 }
 
 before(async () => {
@@ -306,7 +314,7 @@ test("a UI route's limit is counted on a cold isolate before the gate, from the 
 });
 
 test("BoundToDefinition: kept values go where the item they were decided on says, as another session's use brings a newer copy", ON_015, async () => {
-  runtime = makeRuntime(60);
+  runtime = makeRuntime(true);
   await save({ openai: uiRoute('openai', '/v7') });
   await bind();
   const a = await session();
@@ -325,7 +333,7 @@ test("BoundToDefinition: kept values go where the item they were decided on says
 test("kept values answer to their own item's allow list alone, not to a newer copy another session's use brought", ON_015, async () => {
   // Version 7 allows /v1/**, version 8 /v2/**, both /health/**. A keeps 7's values; B's use brings 8's copy. A's requests are
   // held to 7 alone: /v1 goes, /v2 is refused, never both refused nor both let through to the kept check (review r1 of #477).
-  runtime = makeRuntime(60);
+  runtime = makeRuntime(true);
   const allow = (path: string) => [{ methods: ['GET' as const], path: '/health/**' }, { methods: ['GET' as const], path }];
   await save({ openai: uiRoute('openai', '/openai', { allow: allow('/v1/**') }) });
   await bind();
@@ -345,7 +353,7 @@ test("kept values answer to their own item's allow list alone, not to a newer co
 });
 
 test("a freeze stops warm requests at the place's URL too, a session's and a binding's: the credential frozen is the route, not the project", ON_015, async () => {
-  runtime = makeRuntime(60);
+  runtime = makeRuntime(true);
   await save({ openai: uiRoute('openai', '/openai') });
   await bind();
   await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'cloudflare', issuer: null, claims: {} as never, label: 'edge', replaces: [], policy: {} }, { dryRun: false });
@@ -364,7 +372,7 @@ test("a freeze stops warm requests at the place's URL too, a session's and a bin
 });
 
 test('a freeze, or the session revoked, stops the next request whatever the value cache holds', ON_015, async () => {
-  runtime = makeRuntime(60);
+  runtime = makeRuntime(true);
   await save({ openai: uiRoute('openai', '/openai') });
   await bind();
   const held = await session();
@@ -539,9 +547,9 @@ test("a workload signs, verifies and presigns with items saved in the UI: the si
 
 test("an Owner saves another kind under a kept HMAC signer's name: the kept signs still count against the item's limit (review r2 of #480)", ON_015, async () => {
   // A keeps an HMAC signer's values, 3 a minute. The name becomes a verifier with the same limit, and B's verify brings
-  // its copy to this isolate. A's kept values still sign, for cacheSeconds, by the signer they were decided on: each
+  // its copy to this isolate. A's kept values still sign, for R, by the signer they were decided on: each
   // sign is counted against the limit the item at the name has now, never let through uncounted for the verifier's kind.
-  runtime = makeRuntime(60);
+  runtime = makeRuntime(true);
   await clientFor(deps, ROOT).secrets.set('market/prod', { HOOK_SECRET: HOOK });
   const limit = { perMinute: 3, perDay: null };
   await save({ hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'HOOK_SECRET', encoding: 'hex', prefix: '', maxBytes: null }, limit } });
@@ -592,7 +600,7 @@ test("a session's UI route with a path rule: the segment its SDK wrote, whatever
 });
 
 test("a session's tunnel to a database saved in the Proxy tab: dialled by the decided item, ended within a recheck of an edit to it, and not of another's (C2b3)", { ...ON_015, timeout: 30_000 }, async () => {
-  runtime = makeRuntime(0, 1);
+  runtime = makeRuntime(false, 2);
   await clientFor(deps, ROOT).secrets.set('market/prod', { DATABASE_URL: 'postgres://app:pw@127.0.0.1:5432/app?sslmode=disable' });
   const database = (hosts: string[]): ProxyDefinition => ({ kind: 'tunnel', name: 'db', key: 'DATABASE_URL', hosts, network: null });
   await save({ db: database(['127.0.0.1']) });
@@ -625,7 +633,7 @@ test("a session's tunnel to a database saved in the Proxy tab: dialled by the de
     await save({ openai: uiRoute('openai', '/openai') });
     await sleep(3000);
     assert.equal(first.ws.readyState, WebSocket.OPEN, 'still open: another item changed, not its own');
-    // Its own item saved anew: ended within a recheck and its deadline.
+    // Its own item saved anew: ended within R, a recheck and its deadline.
     await save({ db: database(['db.acme.example']) });
     const editedAt = Date.now();
     const at = await closed;

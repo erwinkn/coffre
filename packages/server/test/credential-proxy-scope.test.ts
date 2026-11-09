@@ -6,6 +6,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { defineDeployment } from '@coffre/core/deployment';
+
 import type { PluginContext, UseAsked, WorkloadUse } from '../src/plugins.ts';
 import { credentialProxy, form, header, hmac, postgres, privateKey, sigv4, type Credential } from '../src/plugins/credential-proxy.ts';
 
@@ -13,6 +15,9 @@ const PUBLIC = 'https://coffre.example';
 const HANDLE = `coffre_use_${'h'.repeat(43)}`;
 const LATER = new Date(Date.now() + 3_600_000).toISOString();
 const SECRET = 'sk_live_0123456789abcdef';
+
+/** The deployment: no values kept, so that each request opens its own (`proxy.cacheValues`). */
+const NO_CACHE = defineDeployment({ proxy: { cacheValues: false } });
 
 /** coffre, as a plugin sees it: the handle stands for `market/dev`, whose keys each hold SECRET. `madeFor` plays the vault's one call. */
 function fake(madeFor?: 'found' | 'none'): PluginContext {
@@ -25,6 +30,7 @@ function fake(madeFor?: 'found' | 'none'): PluginContext {
   });
   return {
     publicUrl: PUBLIC,
+    deployment: NO_CACHE,
     workload: async () => null,
     handle: async () => ({ expiresAt: LATER, paths: ['market/dev'] }),
     use: async (_handle: string | WorkloadUse, asked: UseAsked) => used(asked.keys as readonly string[]),
@@ -39,7 +45,7 @@ function proxy(credential: Partial<Credential>, coffre = fake()) {
     reached.push({ url, headers: new Headers(init.headers) });
     return new Response('ok');
   } };
-  const plugin = credentialProxy({ cacheSeconds: 0, credentials: { api: { upstream: 'https://api.example/v1', inject: header('x-api-key', '{KEY}'), egress, ...credential } } });
+  const plugin = credentialProxy({ credentials: { api: { upstream: 'https://api.example/v1', inject: header('x-api-key', '{KEY}'), egress, ...credential } } });
   const ask = async (path: string, init: RequestInit = {}) => {
     const answer = await plugin.routes!.fetch(new Request(`${PUBLIC}/use${path}`, { ...init, headers: { 'x-coffre-handle': HANDLE, ...init.headers } }), coffre);
     return { status: answer.status, body: answer.status === 200 ? '' : await answer.text() };

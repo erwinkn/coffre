@@ -25,6 +25,8 @@ import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
+import { defineDeployment } from '@coffre/core/deployment';
+
 import type { PluginContext, UseAsked, WorkloadUse } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { allows, readPattern, type AllowEntry, type PathPattern } from '@coffre/core/proxy-match';
@@ -38,6 +40,7 @@ const many = propertySettings(500);
 
 const coffre = {
   publicUrl: PUBLIC,
+  deployment: defineDeployment({ proxy: { cacheValues: false } }),
   workload: async () => null,
   handle: async () => ({ expiresAt: LATER, paths: ['market/dev'] }),
   use: async (_handle: string | WorkloadUse, asked: UseAsked) => ({
@@ -203,7 +206,7 @@ test(`no encoding of a path outside the allow list reaches the upstream, and a o
   const reached: string[] = [];
   const egress = { fetch: async (url: URL) => (reached.push(url.pathname), new Response('ok')) };
   const which = legacy ? { paths: allow.map((entry) => entry.path) } : { allow: allow.map((entry) => ({ path: entry.path })) };
-  const make = () => credentialProxy({ cacheSeconds: 0, credentials: { api: { upstream: 'https://api.example/v1', inject: header('x-api-key', '{KEY}'), ...which, egress } } });
+  const make = () => credentialProxy({ credentials: { api: { upstream: 'https://api.example/v1', inject: header('x-api-key', '{KEY}'), ...which, egress } } });
   if (!allow.every((entry) => entry.valid)) {
     assert.throws(make, /a server behind may read the path as another than the one matched/);
     return;

@@ -5,6 +5,7 @@
 // only shows its caller, asks none: the app reads the vault's rows itself. Every vault call
 // costs a round trip to the vault Worker, and on Cloudflare the page that
 // made seven of them was the slowest, and the likeliest to meet a hang.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -55,6 +56,7 @@ before(async () => {
     waitUntil,
     schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
+    deployment: defineDeployment(),
     plugins: [],
   };
 });

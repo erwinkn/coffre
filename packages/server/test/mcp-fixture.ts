@@ -1,6 +1,7 @@
 // What the MCP suites share: an instance with MCP on, in process, a person
 // connecting Claude Code to it as Claude Code does, the official client in
 // either era, raw 2026-07-28 requests, and the log's entries by action.
+import { defineDeployment } from '@coffre/core/deployment';
 import { after, before, beforeEach } from 'node:test';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
@@ -65,7 +66,7 @@ export function useMcp(seed: () => Promise<void>, options: { approvalWaitMs?: nu
     if (auth.mode !== 'signin') throw new Error('unreachable');
     const service = new SigninService({ ...deps, signin: auth.signin });
     const mcp = new McpService({ ...deps, config: auth.signin.mcp!, signin: auth.signin, publicUrl: ORIGIN, transport, approvalWaitMs: options.approvalWaitMs });
-    runtime = { db: deps.db, vault: deps.vault, chainKey: deps.chainKey, previousChainKeys: [], signin: service, workloads: null, mcp, auth, publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, plugins: [] };
+    runtime = { db: deps.db, vault: deps.vault, chainKey: deps.chainKey, previousChainKeys: [], signin: service, workloads: null, mcp, auth, publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, deployment: defineDeployment(), plugins: [] };
   });
   after(async () => {
     await resetDatabase(db.owner);

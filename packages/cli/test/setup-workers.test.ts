@@ -198,6 +198,11 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
     terminal.send(`\x15${ADDRESS}\r`);
     await terminal.waitFor('First Owner');
     terminal.send('\r');
+    // Its members alone sign in: the app is made the organization's.
+    await terminal.waitFor('GitHub organization');
+    terminal.send('acme/\r');
+    await terminal.waitFor("that is not an organization's login");
+    terminal.send('\x15acme\r');
     // A browser on this machine: setup's page, GitHub's, and back.
     await terminal.waitFor("GitHub: create coffre's app");
     const page = await opened('http://127.0.0.1:');
@@ -217,21 +222,24 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
   assert.match(text, /✓ Signed in to Cloudflare as ops@acme\.test, account Acme/);
   assert.match(text, /✓ coffre's address {2}secrets\.acme\.test/);
   assert.match(text, /✓ First Owner {2}ops@acme\.test/);
+  assert.match(text, /✓ GitHub organization {2}acme\n/);
   assert.match(text, /✓ Created coffre_runtime, coffre_vault_runtime and coffre_vault_hot\n\s+coffre_backup_login: made, unable to log in until you have saved the password the screen shows\n/);
   assert.match(text, /✓ coffre_backup_login logs in with the password shown, and reads the log\n[\s\S]*✓ Deployed the vault/);
   assert.match(
     text,
     /✓ Hyperdrive configs coffre, coffre-vault and coffre-vault-hot, caching off, a connection limit of 20 each\n\s+coffre\s+made, for coffre_runtime\n\s+coffre-vault\s+made, for coffre_vault_runtime\n\s+coffre-vault-hot\s+made, for coffre_vault_hot\n\s+max_connections 100, 3 reserved, 3 kept for the administrator and migrations: 31 each, capped at 20\n/,
   );
-  assert.match(text, /✓ Made coffre's GitHub App, coffre-secrets-acme-test/);
+  assert.match(text, /✓ Made coffre's GitHub App, coffre-secrets-acme-test, acme's/);
+  // GitHub shows acme's members only to an app installed on acme.
+  assert.match(text, /\n {2}Install it on acme, or nobody can sign in, at\shttps:\/\/github\.com\/apps\/coffre-secrets-acme-test\/installations\/new\n/);
   // Its logo, which only its page sets: the file from the deployment's own CLI, and where it goes.
   assert.match(
     text,
-    new RegExp(`\\n {2}For its logo, upload node_modules/@coffre/cli/assets/github-app-logo\\.png, under Display information, at\\s${github.github.web}/settings/apps/coffre-secrets-acme-test\\n[\\s\\S]*✓ Made coffre's GitHub App`),
+    new RegExp(`\\n {2}For its logo, upload node_modules/@coffre/cli/assets/github-app-logo\\.png, under Display information, at\\s${github.github.web}/organizations/acme/settings/apps/coffre-secrets-acme-test\\n[\\s\\S]*✓ Made coffre's GitHub App`),
   );
   assert.match(
     text,
-    /✓ Filled in app\/wrangler\.jsonc and vault\/wrangler\.jsonc\n\s+app\s+the account, Hyperdrive, GitHub's client ID, the address and its custom domain\n\s+vault\s+the account, Hyperdrive, the first Owner and the vault ID\n/,
+    /✓ Filled in app\/wrangler\.jsonc and vault\/wrangler\.jsonc\n\s+app\s+the account, Hyperdrive, GitHub's client ID, the GitHub organization, the address and its custom domain\n\s+vault\s+the account, Hyperdrive, the first Owner and the vault ID\n/,
   );
   assert.match(text, /✓ Deployed the vault, coffre-vault, with its key/);
   assert.match(text, /✗ Deploy the app\n\s+wrangler could not deploy app\/dist\/server\/wrangler\.json/);
@@ -283,6 +291,7 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
   const vault = readWorker(deployment(), 'vault/wrangler.jsonc');
   assert.deepEqual([app.accountId, app.hyperdrive, app.route, app.vars.PUBLIC_URL], ['acc-acme', { HYPERDRIVE: configs[0]!.id }, ADDRESS, `https://${ADDRESS}`]);
   assert.match(app.vars.GITHUB_CLIENT_ID!, /^Iv23li/);
+  assert.equal(app.vars.GITHUB_ORGANIZATION, 'acme');
   assert.deepEqual([vault.accountId, vault.hyperdrive, vault.vars.OWNERS, vault.vars.VAULT_KEY_ID], [
     'acc-acme',
     { VAULT_HYPERDRIVE: configs[1]!.id, HOT_HYPERDRIVE: configs[2]!.id },
@@ -290,6 +299,8 @@ test('a first run: signed in, Hyperdrive, the GitHub App and the files done; the
     vaultId,
   ]);
   assert.deepEqual(github.state.manifests.map((manifest) => manifest.callback_urls), [[`https://${ADDRESS}/auth/callback/github`]]);
+  assert.deepEqual(github.state.manifests.map((manifest) => manifest.default_permissions), [{ emails: 'read', members: 'read' }]);
+  assert.deepEqual([...github.state.owners], [['coffre-secrets-acme-test', 'acme']]);
 });
 
 test('the run after: the vault keeps its key; the app gets a new one, and a new client secret for the same GitHub App', { skip }, async () => {
@@ -690,6 +701,9 @@ test("a second deployment on the same account: it takes names of its own, and th
       terminal.send('\x15coffre-try\r');
       await terminal.waitFor('First Owner');
       terminal.send('\r');
+      // No organization: any GitHub account an Owner adds.
+      await terminal.waitFor('GitHub organization');
+      terminal.send('\r');
       await terminal.waitFor("GitHub: create coffre's app");
       await fetch(await submitManifest(await (await fetch(await opened('http://127.0.0.1:', pages))).text()));
       await terminal.waitFor('reveal all');
@@ -709,6 +723,7 @@ test("a second deployment on the same account: it takes names of its own, and th
     /On this account, the Worker coffre, the Hyperdrive config coffre, the Worker coffre-vault, the Hyperdrive config coffre-vault and the\s+Hyperdrive\s+config\s+coffre-vault-hot\s+are\s+another\s+deployment's\.\s+Setup leaves them as they are\./,
   );
   assert.match(text, /✓ This deployment's name {2}coffre-try/);
+  assert.match(text, /✓ GitHub organization {2}none: any GitHub account an Owner adds\n/);
   assert.match(text, /✓ Hyperdrive configs coffre-try, coffre-try-vault and coffre-try-vault-hot, caching off/);
   assert.match(text, /✓ Deployed the app, coffre-try, with its key and GitHub's secret/);
   assert.match(text, /✓ coffre answers at https:\/\/coffre-try\.acme\.test/);
@@ -723,6 +738,7 @@ test("a second deployment on the same account: it takes names of its own, and th
   ]);
   const app = readWorker(second, 'app/wrangler.jsonc');
   const vault = readWorker(second, 'vault/wrangler.jsonc');
+  assert.equal(app.vars.GITHUB_ORGANIZATION, undefined, 'none asked, none written');
   assert.deepEqual([app.name, app.hyperdrive, vault.name, vault.hyperdrive], [
     'coffre-try',
     { HYPERDRIVE: configs[0]!.id },

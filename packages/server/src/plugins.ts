@@ -3,6 +3,7 @@
 // authority of its own. It answers paths of its own, and reaches coffre only
 // as whoever a request's credential names, through the API: the same route
 // table, checks, vault and audit log as the CLI.
+import type { Deployment, MovedSetting } from '@coffre/core/deployment';
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import { USE_DEADLINE_MS, type Access, type DecidedItem, type RouteCaller, type RouteFound, type RouteUseOutcome, type Vault } from '@coffre/core/vault';
 import type { CredentialScope } from '@coffre/core/access';
@@ -76,6 +77,8 @@ export type SocketSession = (client: Pipe, connect: Connect) => Promise<void>;
 /** What a plugin's route answers with: where coffre is, and its API as a credential's holder. */
 export type PluginContext = {
   publicUrl: string;
+  /** What the deployment chose, its `deployment.ts`: the same object for every request. */
+  deployment: Deployment;
   /**
    * Whether the request came through a Cloudflare service binding
    * (`bindingRoute`): its service's call, carrying no handle, token or
@@ -371,6 +374,19 @@ const COFFRE_PATHS = ['/api', '/auth', '/mcp', '/.well-known', '/livez', '/ready
 const under = (pathname: string, prefix: string) => pathname === prefix || pathname.startsWith(`${prefix}/`);
 
 /** Check a deployment's plugins, failing on the first problem: a bad name, or paths two would answer. */
+/** What each plugin's options still say that 0.16 moved to `deployment.ts`, as its constructor registered it (`movedSettings`). */
+const MOVED = new WeakMap<CoffrePlugin, readonly MovedSetting[]>();
+
+/** A plugin constructor's note of the settings it took in 0.15 that `deployment.ts` now holds: read until 0.17. */
+export function movedSettings(plugin: CoffrePlugin, moved: readonly MovedSetting[]): void {
+  if (moved.length > 0) MOVED.set(plugin, moved);
+}
+
+/** The settings `plugin` was given that `deployment.ts` now holds. */
+export function movedByPlugin(plugin: CoffrePlugin): readonly MovedSetting[] {
+  return MOVED.get(plugin) ?? [];
+}
+
 export function checkPlugins(plugins: readonly CoffrePlugin[]): readonly CoffrePlugin[] {
   const names = new Set<string>();
   const prefixes: string[] = [...COFFRE_PATHS];
@@ -964,6 +980,7 @@ function pluginContext(
     // A vault that decides no UI item (`servesUi`): neither, and the proxy serves code's items alone.
     ...(ui ? { useRoute: routeUse, useRouteOrPlace: routeOrPlace, proxyItem } : {}),
     publicUrl: runtime.publicUrl,
+    deployment: runtime.deployment,
     binding: binding !== null,
     ...(runtime.publicFetch === undefined ? {} : { publicFetch: runtime.publicFetch }),
     ...(runtime.publicConnect === undefined ? {} : { publicConnect: runtime.publicConnect }),

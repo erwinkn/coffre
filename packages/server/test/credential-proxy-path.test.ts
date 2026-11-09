@@ -9,6 +9,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import { createClient } from '@coffre/client';
+import { defineDeployment } from '@coffre/core/deployment';
 
 import { clientFor, LOG, usesLogged } from './api-fixture.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
@@ -130,12 +131,12 @@ function options(): CredentialProxyOptions {
       dots: { upstream: `${upstreamUrl}/dots`, inject: path('..{BOT_VALUE}'), allow: [{ methods: ['GET'], path: '/*/getMe' }] },
     },
     insecureUpstreams: true,
-    cacheSeconds: 0,
   };
 }
 
 useMcp(async () => {
   runtime.plugins = checkPlugins([credentialProxy(options())]);
+  runtime.deployment = defineDeployment({ proxy: { cacheValues: false } });
   reached.length = 0;
   const root = clientFor(deps, ROOT);
   await root.members.add(`user:${DEV}`);

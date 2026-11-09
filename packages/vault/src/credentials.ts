@@ -406,7 +406,7 @@ function isTrace(trace: unknown): trace is RequestTrace | null | undefined {
  * - a service account's (R15, R32): its issuer, a person, manages it, and could give
  *   it each grant, which the account holds (`issuesCredential`); sensitive
  *   reads only where the issuer is an Owner of the project (`ownsProject`);
- *   each grant's columns within its role; at most `MAX_SERVICE_TOKEN_DAYS`;
+ *   each grant's columns within its role; at most the deployment's `services.tokenMaxDays`, `MAX_SERVICE_TOKEN_DAYS` at most;
  * - a personal token: its person's own, made on a session, each role one
  *   that manages no access (`delegable`), no column past what that role
  *   holds as the policy defines it nor what they hold there
@@ -426,6 +426,7 @@ export function weighIssue(
   via: CredentialColumns | null,
   at: number,
   service: { setting: ServiceSetting | null; account: ServiceAccount } | null,
+  tokenMaxDays: number = MAX_SERVICE_TOKEN_DAYS,
 ): string | null {
   const { actor, principal, credential } = input;
   if (credential.createdBy !== actor.slice(actor.indexOf(':') + 1)) return 'a token names who made it, its issuer';
@@ -443,7 +444,8 @@ export function weighIssue(
   const scoped = holder.credentialScope != null;
   switch (credential.kind) {
     case 'service':
-      if (credential.expiresAt > at + MAX_SERVICE_TOKEN_DAYS * 86_400_000 + CLOCK_SKEW_MS) return `a service token lasts at most ${MAX_SERVICE_TOKEN_DAYS} days`;
+      // The deployment's longest (`services.tokenMaxDays`), which the app holds an issue to as well: never past R76's year.
+      if (credential.expiresAt > at + Math.min(tokenMaxDays, MAX_SERVICE_TOKEN_DAYS) * 86_400_000 + CLOCK_SKEW_MS) return `a service token lasts at most ${Math.min(tokenMaxDays, MAX_SERVICE_TOKEN_DAYS)} days here`;
       return weighService(actor, principal, scope, holder, at_, service);
     case 'personal': {
       if (principal !== actor || !actor.startsWith('user:')) return 'a personal token is its person\'s own';

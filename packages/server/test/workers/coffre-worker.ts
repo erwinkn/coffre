@@ -48,8 +48,9 @@ const coffre = createCoffre((env: Env) => ({
   vault: env.VAULT,
   auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }),
   auditChainKey: env.APP_KEY,
-  // The suite's database is on loopback; a check a second, so the suite sees one.
-  plugins: [credentialProxy({ credentials: {}, tunnels: { db: tunnel('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 1 }), probe],
+  // The suite's database is on loopback; R at its floor, 3 s, a check every 1.5 s, so the suite sees one.
+  plugins: [credentialProxy({ credentials: {}, tunnels: { db: tunnel('DATABASE_URL') }, insecureUpstreams: true }), probe],
+  deployment: { proxy: { revokedWithinSeconds: 3 } },
   sockets: env.SOCKETS,
 }));
 

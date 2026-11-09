@@ -4,6 +4,7 @@
 // cuts it over, as the app asks for it, and holds what was sealed to what 0.14 accepted. What only the app's key
 // says (a credential's or a binding's MAC, a deletion's entry) the app vouches for: here, the case does
 // (packages/server/test/cutover.test.ts holds the app's half). Both engines, but what says otherwise.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -50,6 +51,7 @@ function configure(): ResolvedVaultConfig {
     owners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 500, windowMs: 10 * 60_000 },
+    deployment: defineDeployment({ reads: { bulkLimit: { count: 500, windowMinutes: 10 } } }),
   };
 }
 

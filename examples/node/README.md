@@ -16,6 +16,9 @@ Two processes, configured in code:
   keeps in the server's database through a login of its own. It answers
   only the server, on a Unix socket. It also runs the checkpointer, which
   signs the audit log every half second: run one vault per database.
+- `deployment.ts`, what the instance allows: session lengths, service
+  tokens, the bulk read limit, the credential proxy, the audit log. Both
+  processes read it, each holding its own part, and every field has a default.
 
 Run them as two users that share a group, and the process facing the network
 never holds the vault key. For local development, the server can run the vault

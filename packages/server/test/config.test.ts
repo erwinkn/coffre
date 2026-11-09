@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { defineDeployment } from '@coffre/core/deployment';
 import { cloudflareAccess, github, signin } from '@coffre/core/identity';
 
 import { resolveConfig, type CoffreConfig } from '../src/config.ts';
@@ -54,13 +55,26 @@ test('previous app keys are each 32 bytes, counted once, and the current key lis
   assert.throws(() => resolveConfig({ ...base, previousAuditChainKeys: old as never }), /a list of the app keys/);
 });
 
-test('a value is flagged for rotation after a year, unless the deployment says otherwise or turns it off', () => {
+test('a value is flagged for rotation after a year, unless deployment.ts says otherwise or turns it off', () => {
   assert.equal(resolveConfig(base).rotateAfterDays, 365);
-  assert.equal(resolveConfig({ ...base, rotateAfterDays: 90 }).rotateAfterDays, 90);
-  assert.equal(resolveConfig({ ...base, rotateAfterDays: null }).rotateAfterDays, null);
+  assert.equal(resolveConfig({ ...base, deployment: defineDeployment({ values: { rotateAfterDays: 90 } }) }).rotateAfterDays, 90);
+  assert.equal(resolveConfig({ ...base, deployment: { values: { rotateAfterDays: null } } }).rotateAfterDays, null);
   for (const days of [0, -1, 1.5, Number.NaN, '90' as never]) {
-    assert.throws(() => resolveConfig({ ...base, rotateAfterDays: days }), /rotateAfterDays must be a whole number of days/, String(days));
+    assert.throws(() => resolveConfig({ ...base, deployment: { values: { rotateAfterDays: days } } }), /deployment\.values\.rotateAfterDays is a whole number/, String(days));
   }
+});
+
+test("0.15's places are read until 0.17, and refused beside deployment.ts", () => {
+  // createCoffre's rotateAfterDays and signin's lifetimes, where 0.15 took them.
+  const old = { ...base, rotateAfterDays: 90, auth: signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })], cliSessionDays: 7 }) };
+  const resolved = resolveConfig(old);
+  assert.equal(resolved.rotateAfterDays, 90);
+  assert.equal(resolved.deployment.people.cliSessionDays, 7);
+  assert.equal(resolved.auth.mode === 'signin' && resolved.auth.signin.cliSessionDays, 7);
+  assert.throws(() => resolveConfig({ ...old, deployment: defineDeployment() }), /createCoffre\(\{ rotateAfterDays \}\), signin\(\{ cliSessionDays \}\): in deployment\.ts now/);
+  // deployment.ts's own sign-in fields reach sign-in.
+  const fresh = resolveConfig({ ...base, auth: signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })] }), deployment: { people: { browserSessionHours: 4 } } });
+  assert.equal(fresh.auth.mode === 'signin' && fresh.auth.signin.browserSessionHours, 4);
 });
 
 test('auth constructors refuse what cannot be right', () => {

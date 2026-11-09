@@ -5,6 +5,8 @@ export default defineConfig({
   entry: {
     access: 'src/access.ts',
     audit: 'src/audit/chain.ts',
+    // What a deployment chooses, in one object: its deployment.ts, read by the app, the vault and the build.
+    deployment: 'src/deployment.ts',
     dotenv: 'src/dotenv.ts',
     envelope: 'src/envelope.ts',
     identity: 'src/identity/index.ts',

@@ -2,6 +2,7 @@
 // its account holds and its issuer could give when it is made, and a request
 // made with it reaches what both its scope and the account hold then:
 // docs/design/instance-roles.md, "Credentials' scopes" (D105).
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -77,6 +78,7 @@ beforeEach(async () => {
     waitUntil,
     schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
+    deployment: defineDeployment(),
     plugins: [],
   } as CoffreRuntime;
   root = clientFor(deps, ROOT);

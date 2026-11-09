@@ -2,6 +2,7 @@
 // person makes is weighed as a service token's issue is and sealed, a change of the log; one ended takes every live
 // credential it issued with it, in one statement; and a sign-in takes only a binding the vault sealed (formal/Lifecycle.tla's
 // BindingSealed, its bind and unbind). Both engines unless a case says otherwise.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -43,6 +44,7 @@ function configure(): ResolvedVaultConfig {
     owners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+    deployment: defineDeployment(),
   };
 }
 

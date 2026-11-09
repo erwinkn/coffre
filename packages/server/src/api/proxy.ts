@@ -1,14 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
 import { ownsInstance, ownsProject } from '@coffre/core/access';
-import { USE_DEADLINE_MS, type ProxyDefinition, type ProxyView, type Refusal as VaultRefusal } from '@coffre/core/vault';
+import type { ProxyDefinition, ProxyView, Refusal as VaultRefusal } from '@coffre/core/vault';
 
 import type { ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
 import { denied, Refusal, through, correlated, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, conflict, forbidden, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
-import { DEFAULT_CACHE_SECONDS, type ProxyCodeItem } from '../proxy-code.ts';
+import type { ProxyCodeItem } from '../proxy-code.ts';
 import { gateProxy } from '../proxy-gate.ts';
 
 /**
@@ -49,8 +49,10 @@ export type ProxyPage = ProxyView & {
   useUrl: string;
   /**
    * How long after a save values decided before it may still reach the old
-   * upstream, in seconds: the proxy's `cacheSeconds`, or its 3 s deadline
-   * with no cache (docs/design/proxy-ui.md, decision 4). The save says so.
+   * upstream, in seconds: R, the deployment's `proxy.revokedWithinSeconds`,
+   * which every request sends within, cached values or not
+   * (docs/design/proxy-ui.md, decision 4). The save says so. 0 with no
+   * proxy, which sends nothing.
    */
   windowSeconds: number;
   /** Whether a definition may reach plain HTTP and private addresses: the proxy's `insecureUpstreams`, for local fakes. */
@@ -79,13 +81,10 @@ function pageOf(ctx: ApiContext, place: ResolvedPath, view: ProxyView): ProxyPag
     routesSensitive: ownsProject(ctx.caller, place.project.id),
     releases: mayRelease(ctx),
     useUrl: `${(ctx.publicUrl ?? '').replace(/\/+$/, '')}/use`,
-    windowSeconds: Math.max(ctx.proxy?.cacheSeconds ?? DEFAULT_CACHE_SECONDS, USE_DEADLINE_SECONDS),
+    windowSeconds: ctx.proxy?.windowSeconds ?? 0,
     insecureUpstreams: ctx.proxy?.insecureUpstreams === true,
   };
 }
-
-/** The deadline a use's values are sent by (R53), in seconds: the window with no cache. */
-const USE_DEADLINE_SECONDS = USE_DEADLINE_MS / 1000;
 
 /** Whether the caller releases a reserved name: an Owner of the whole instance, a person signed in as themselves. */
 function mayRelease(ctx: ApiContext): boolean {
@@ -99,7 +98,7 @@ function mayRelease(ctx: ApiContext): boolean {
  * config, holding `proxy.edit` there.
  */
 function mayEdit(ctx: ApiContext, place: ResolvedPath): { error: ApiError; reason: string } | null {
-  if (ctx.proxy?.editable !== true) return { error: conflict("this deployment's code keeps its proxy definitions: credentialProxy({ editable: true }) lets the UI write them"), reason: 'not_editable' };
+  if (ctx.proxy?.editable !== true) return { error: conflict("this deployment's code keeps its proxy definitions: proxy: { editable: true } in its deployment.ts lets the UI write them"), reason: 'not_editable' };
   if (ctx.caller.principal.type !== 'user' || ctx.caller.credentialScope !== null) return { error: forbidden('a person edits proxy definitions, signed in as themselves'), reason: 'not_a_person' };
   if (place.environment!.owner !== null) return { error: conflict("a personal config takes no proxy definitions of its own: they are its environment's"), reason: 'route_not_personal' };
   if (!can(ctx.caller, 'proxy.edit', placeOf(place.project, place.environment))) return { error: forbidden('editing proxy definitions takes proxy.edit here: Owners hold it'), reason: 'missing_proxy_edit' };

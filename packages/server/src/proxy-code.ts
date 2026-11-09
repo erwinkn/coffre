@@ -1,29 +1,32 @@
+import type { Deployment } from '@coffre/core/deployment';
 import type { ProxyDefinition } from '@coffre/core/vault';
 
 import type { CoffrePlugin } from './plugins.ts';
 
 /**
- * `credentialProxy`'s `cacheSeconds` unless set: a revocation bound, how long an isolate may serve values a use
- * decided before it asks again (#249, #252); the design's choice, kept as policy (the limits audit, #501, S22).
- */
-export const DEFAULT_CACHE_SECONDS = 60;
-
-/**
  * What the deployment's code says of its credential proxy that the Proxy
  * tab's API needs (docs/design/proxy-ui.md, sections 1 and 6): whether the
- * tab may write (`editable`, off unless set), whether definitions may reach
- * local fakes (`insecureUpstreams`), every name code defines, of any kind,
- * which no UI item takes and no release frees while this code runs, each
- * of those items as the tab shows it, locked, and how long a save's old
- * upstream may still be sent values decided before it (`cacheSeconds`).
+ * tab may write (`editable`, its `deployment.ts`'s `proxy.editable`),
+ * whether definitions may reach local fakes (`insecureUpstreams`), every
+ * name code defines, of any kind, which no UI item takes and no release
+ * frees while this code runs, each of those items as the tab shows it,
+ * locked, and how long a save's old upstream may still be sent values
+ * decided before it (`windowSeconds`).
  */
-export type ProxyCode = {
+export type ProxyCode = PluginCode & {
   editable: boolean;
+  /**
+   * How long a request may still send, or answer, after its values were decided, in seconds: how long after a save
+   * they may still reach the old upstream. R, the deployment's `proxy.revokedWithinSeconds`, cached values or not.
+   */
+  windowSeconds: number;
+};
+
+/** What the plugin itself carries, its code's part, which the gate reserves the names of: the rest is the deployment's (`proxyCodeWith`). */
+export type PluginCode = {
   insecureUpstreams: boolean;
   names: readonly string[];
   items: readonly ProxyCodeItem[];
-  /** How long values a use decided keep serving from an isolate's memory (`cacheSeconds`): how long after a save they may still reach the old upstream. */
-  cacheSeconds: number;
 };
 
 /**
@@ -57,16 +60,22 @@ export type ProxyCodeItem = {
 
 const CODE = Symbol('coffre.proxy-code');
 
-/** `plugin`, carrying its proxy's `code` for the API to find (`proxyCodeOf`). */
-export function withProxyCode<T extends CoffrePlugin>(plugin: T, code: ProxyCode): T {
+/** `plugin`, carrying its proxy's `code` for the gate and the API to find (`proxyCodeOf`). */
+export function withProxyCode<T extends CoffrePlugin>(plugin: T, code: PluginCode): T {
   return Object.assign(plugin, { [CODE]: code });
 }
 
 /** The credential proxy's code among the deployment's plugins; null when it adds none. */
-export function proxyCodeOf(plugins: readonly CoffrePlugin[]): ProxyCode | null {
+export function proxyCodeOf(plugins: readonly CoffrePlugin[]): PluginCode | null {
   for (const plugin of plugins) {
-    const code = (plugin as { [CODE]?: ProxyCode })[CODE];
+    const code = (plugin as { [CODE]?: PluginCode })[CODE];
     if (code !== undefined) return code;
   }
   return null;
+}
+
+/** The same, with what `deployment` chose for the proxy: what the Proxy tab's API reads. */
+export function proxyCodeWith(plugins: readonly CoffrePlugin[], deployment: Deployment): ProxyCode | null {
+  const code = proxyCodeOf(plugins);
+  return code === null ? null : { ...code, editable: deployment.proxy.editable, windowSeconds: deployment.proxy.revokedWithinSeconds };
 }

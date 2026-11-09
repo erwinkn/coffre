@@ -26,9 +26,9 @@ key by whoever controls the upstream.
 2. **Ordering.** An edit is a change under the fence, exclusive. A use reads
    the definition in its one statement, under the fence, shared. So every
    use is decided wholly before or wholly after an edit. Values already
-   decided keep going to the old upstream for at most `cacheSeconds` (60 s,
-   or the 3 s deadline with no cache): the same bound a revoked handle has
-   today. TLC checks this, and finds a run for each protection removed.
+   decided keep going to the old upstream for at most R, the deployment's
+   `proxy.revokedWithinSeconds` (60 s unless set, 3 s at least): the same
+   bound a revoked handle has (docs/design/config.md, section 1). TLC checks this, and finds a run for each protection removed.
 3. **Who may route what.** Saving a definition freezes what its editor
    could read, exactly as issuing a service token does. Each use decides the
    route's keys twice: for the caller, as today, and for that frozen
@@ -105,8 +105,9 @@ credentialProxy({
   credentials: { … },                                     // code's, as today
   egresses: { 'schuman-prod': { via: env.SCHUMAN_EGRESS, hosts: ['api.schuman.example'] } },
   networks: { replica: { via: env.REPLICA_NET, hosts: ['10.0.1.5'] } },
-  editable: true,                                         // the Proxy tab may write; off by default
 });
+// deployment.ts: the Proxy tab may write; off by default
+export const deployment = defineDeployment({ proxy: { editable: true } });
 ```
 
 An egress gains a `hosts` list in 0.16: today it is only `{ fetch }`, and
@@ -117,7 +118,7 @@ database through a network must name hosts among the network's, which
 keeps R31's rule: private addresses and `sslmode=disable` need an explicit
 binding.
 
-`editable: false`, the default, keeps a deployment's uses as today: no
+`proxy.editable: false`, the default, keeps a deployment's uses as today: no
 Proxy tab writes, and no use reads a `proxy` object. One thing still runs:
 the gate of section 6, which reserves the names code defines, once per
 isolate, whenever `credentialProxy` is configured. Without it, this run
@@ -291,8 +292,9 @@ the pending edits on top. Nobody overwrites a change they never saw.
 The brief's property: *an edit that redirects a key's upstream must never
 let an in-flight or later use send the key to a host no current definition
 allows.* Taken literally, no design meets it without an extra round trip
-on every use, because the app already caches opened values (`cacheSeconds`,
-60 s by default) and serves them with no vault call. What holds, and what
+on every use, because the app already caches opened values (for R, the
+deployment's `proxy.revokedWithinSeconds`, 60 s by default) and serves them
+with no vault call. What holds, and what
 TLC checks:
 
 - **`EverySendAllowed`.** Every request that carries a key goes to the
@@ -302,7 +304,9 @@ TLC checks:
   request that carries several keys (Basic's user and password, SigV4's
   two) carries them under one version.
 - **`WithinWindow`.** That request leaves within W of the decision: W is
-  `cacheSeconds` with the cache, or the use's 3 s deadline without it.
+  R, cached values or not, R being 3 s at least, the use's own deadline.
+  Every path that forwards, signs, verifies or presigns holds to it, a
+  code credential's as a UI item's (0.16, docs/design/config.md, section 1).
 - **`NoRevival`.** No use is decided on a UI definition once code has
   shadowed it, by any isolate, then or after code drops the name. Code
   shadows a UI item when an isolate running it reserves the name (its gate,
@@ -319,7 +323,7 @@ TLC checks:
   on. That is an `EXPECTED` gap in `scripts/formal.sh`, kept so the window
   stays documented: values decided before an edit serve out their W.
 
-The window, as a timeline. `cacheSeconds` is 60.
+The window, as a timeline. R is 60.
 
 | Time | Event |
 |---|---|
@@ -329,8 +333,8 @@ The window, as a timeline. `cacheSeconds` is 60.
 | 12:00:45 | In the entry's last quarter, one request asks the vault again. It decides on version 8, and from here the key goes to the EU host |
 | 12:01:00 | At the latest: version 7's values serve no more |
 
-A revocation already works this way: "a revoked handle's values serve no
-longer than this" (`cacheSeconds`'s doc). Its uses and an edit's are
+A revocation already works this way: "a revoked credential's values serve
+no longer than this" (`proxy.revokedWithinSeconds`'s doc). Its uses and an edit's are
 ordered the same way, by the fence and the log number. A revoke numbered
 before a use refuses it; one numbered after leaves it decided, and its
 values serve out the window. Decision 4 accepts that window; section 11
@@ -569,7 +573,7 @@ isolate). One rule covers every path:
   sent. The client's retry finds the new copy.
 - **What the copy refuses stands only while the copy is fresh.** The app
   isolate keeps, beside each copy, when an answer last confirmed it. A
-  refusal on a copy confirmed within `cacheSeconds` stands. On an older
+  refusal on a copy confirmed within R (none with `cacheValues: false`) stands. On an older
   copy the isolate makes one `coffre.proxyItem` call, replaces its copy
   and checks again; what the checks refuse then is refused. With no copy
   there is nothing to refuse yet: a handle's checks wait for its use's
@@ -600,7 +604,7 @@ isolate). One rule covers every path:
   6). It decides no use, opens no value and writes no entry. A caller the
   vault refuses gets that refusal and refreshes nothing, which costs what
   a bogus handle's use costs today. The app keeps the serving index, so a
-  name absent from one confirmed within `cacheSeconds` is 404 with no call.
+  name absent from one confirmed within R is 404 with no call.
   It cannot be `coffre.use`, whose caller is the session a workload is
   still standing up.
 - **When it is called, by whom.** Two sites, apart. *Counts:* a
@@ -634,13 +638,13 @@ isolate). One rule covers every path:
   stable URL's place is known only once its caller stands, which is why
   the caller comes first on every path.
 - **What that costs.** Refreshes go by place and name, not by request:
-  refused traffic costs at most one call per route per `cacheSeconds` per
+  refused traffic costs at most one call per route per R per
   isolate, and unknown names at most one per place. An app isolate with
   no copy of a route costs nothing more on a handle's path (its use,
   carrying no digest, gets the item in its answer) and one `proxyItem`
   call on a workload's, sign's or verify's (its counts), once per isolate
   per route; section 4 counts it. A widening edit (an Owner adds `POST /responses/**`
-  to `openai`) takes effect on every path within `cacheSeconds`, as a
+  to `openai`) takes effect on every path within R, as a
   limit edit does, and no warm isolate refuses it for good.
 
 ### Workloads, signers, verifiers, tunnels and presign
@@ -669,8 +673,8 @@ take the same use, with what changes for each:
     before the gate and one after. Sign, verify and presign take their
     counts the same way. After an edit
     to a limit, an isolate counts against the old one until its next use
-    answer brings the new item: at most `cacheSeconds` (60 s by default)
-    while its values are kept, one request when `cacheSeconds` is 0. A
+    answer brings the new item: at most R (60 s by default)
+    while its values are kept, one request under `cacheValues: false`. A
     limit is a throttle, not who may use what: the two decisions of the use
     still decide that, on the newest version.
   - *What is read before the answer.* `aim` (the path against the
@@ -731,7 +735,7 @@ take the same use, with what changes for each:
   for a route's send).
 - **Tunnels.** A named use of the database item; the tunnel dials the
   decided item's hosts, checked as section 5 says, and the session keeps
-  that item's digest. Today's recheck, every `recheckSeconds`, is a plain
+  that item's digest. A code tunnel's recheck, every R − d, is a plain
   use reduced to "the key is still there" (`run` in `credential-proxy.ts`),
   which an edit to the item leaves passing: an Owner who narrows `hosts`
   mid-session would see logins keep going to the host dialled before. For
@@ -740,8 +744,9 @@ take the same use, with what changes for each:
   the session ends, and the client's reconnect dials by the new item. An
   edit to another route of the environment changes the object seal, not
   this digest, and ends nothing. The bound is Tunnel.tla's: a session
-  outlives the edit by at most `recheckSeconds` plus the check's deadline
-  (70 s by default).
+  outlives the edit by at most the checks' interval plus a check's
+  deadline, R − d + d = R, with d = min(R ÷ 2, 10 s): 60 s by default
+  (0.15's two settings made it 70).
 - **Presign.** Today a presigned URL assumes one `sigv4` rule and checks the
   path with its own, weaker rules; it builds the target URL and checks
   `paths` and `narrow` before the use, then signs that target after it. A
@@ -833,7 +838,7 @@ keys in that call (section 3), whichever path makes it.
 
 | Case | Today (0.15) | With UI definitions |
 |---|---|---|
-| Map hit, uncached (`cacheSeconds: 0`, or an entry's refresh) | 1 call | **1 call.** Two more inputs of the statement, each one more row and one more probe of its newest change, inside the same call: the proxy object (the route's item and the index) and the editor's principal (decision 5); one more proxy row and probe per fork parent, up to four; at a fork, each key resolved through the chain reads one more key row and probe per level until it is found, as an inherited value's read does today, inside the same statement. The item is not sent back, because the isolate's copy has its digest |
+| Map hit, uncached (`cacheValues: false`, or an entry's refresh) | 1 call | **1 call.** Two more inputs of the statement, each one more row and one more probe of its newest change, inside the same call: the proxy object (the route's item and the index) and the editor's principal (decision 5); one more proxy row and probe per fork parent, up to four; at a fork, each key resolved through the chain reads one more key row and probe per level until it is found, as an inherited value's read does today, inside the same statement. The item is not sent back, because the isolate's copy has its digest |
 | Map miss: an isolate cold for that environment or URL, or a key it has not used | 2 calls | **2 calls.** The first reads both URL readings by name (section 6): up to two places' proxy rows and probes, eight through forks of three parents. It picks the reading, resolves the route's keys by name, and answers the vault with the reading, the ids, the item and its digest (a few hundred bytes to a few KB). The vault's map keeps the ids. The second makes the use, reading the chosen place only, and the app gets the definition and digest in the use's answer |
 | Right after an edit that keeps the route's keys (a new upstream, rules or allow list) | 1 call | **1 call.** The statement sees the route's item hash to another digest than the copy's and returns the new item in the same answer. Nothing is refused or retried |
 | Right after an edit that adds a key to the route | 1 call | **2 calls, once per isolate**: a map miss for the new key, as any key used for the first time is today |
@@ -1047,12 +1052,12 @@ environment when `<a>/<b>` is one the handle was made for, and is otherwise
 the stable URL of credential `<a>` ([credential-proxy.md](credential-proxy.md),
 section 4, "Which route"). Where `<a>` names a code credential, the app asks
 the handle's environments first (`madeFor`, a vault call of its own, kept for
-`cacheSeconds`); with no cache, a named use already folds that question into
+R); with no cache, a named use already folds that question into
 its one call (`unless` in `NamedUseInput`: "served not by name when the
 handle's is one"). A UI name depends on the environment, so the app can no
 longer tell from its config that `<a>` names nothing, and taking `madeFor`
 for every such URL would be a second call on every request with
-`cacheSeconds: 0`. So a route use carries **both readings** of the URL, and
+`cacheValues: false`. So a route use carries **both readings** of the URL, and
 the statement picks one in its snapshot:
 
 | Reading | Place | Route | Taken when |
@@ -1078,7 +1083,7 @@ Concretely, for `/use/market/dev/openai/chat`:
   list, by the table, whatever its path, and finds the ids by the chosen
   place and route. So `/use/openai/companies/42/documents/x.pdf` and
   `/use/openai/models` from one `market/dev` handle are both map hits
-  after the first, one call each under `cacheSeconds: 0`, as today's
+  after the first, one call each under `cacheValues: false`, as today's
   stable URL is (Fable 5.1's review, `aee4142c`: keying by the URL's
   first three segments would have made each new path a miss). The app
   isolate keeps the definition and its digest, from the use's answer, as
@@ -1101,7 +1106,7 @@ reading of route `<a>` at path `/<b>`. So `GET /use/openai/models` from a
 `market/dev` handle is a GET of route `openai` at `/models`, and `GET
 /use/market/dev` from it is the plan. The plan and `compute` answer 404
 only after the call has decided the reading, never from code's maps
-alone. With no made-for list kept (`cacheSeconds: 0`, or a cold isolate),
+alone. With no made-for list kept (`cacheValues: false`, or a cold isolate),
 the route use decides: the app sends both readings, the statement picks
 one from the caller's rows, and an answer for the place reading carries
 no values, after which the plan or `compute` goes on as section 4 counts
@@ -1665,7 +1670,8 @@ reads it otherwise:
   `FIELD_NAME`, `alike`: query `secret` and `SECRET` are one). No allow list
   is kept as `null`, every request, and an empty one as `[]`, none: the
   sealed definition says which.
-- **The app's checks**: `credentialProxy({ editable })`, off by default; a
+- **The app's checks**: `credentialProxy({ editable })` (since 0.16,
+  `deployment.ts`'s `proxy.editable`), off by default; a
   name code defines (409); an egress or a network, none of which code can
   declare before PR C (400).
 
@@ -2356,8 +2362,8 @@ is fixed in this document, within PR C.
   (`ProxyCodeItem`: the definition in the tab's shape, `environments`, a
   limit per service, and whether a binding carries it), `routesSensitive`
   (the reader owns the project), `releases` (an instance Owner),
-  `useUrl` and `windowSeconds` (decision 4's window: `cacheSeconds`, or the
-  3 s deadline), and `insecureUpstreams`, so the page checks a definition
+  `useUrl` and `windowSeconds` (decision 4's window: R, the deployment's
+  `proxy.revokedWithinSeconds`), and `insecureUpstreams`, so the page checks a definition
   with the vault's own rules (`proxyDefinitionProblem`, now
   `@coffre/core/proxy`, which a browser loads) before it asks.
 - **The `route_not_cleared` mark** is the vault's: `Vault.proxy()` decides
@@ -2434,7 +2440,7 @@ uses.
    every code name; code keeps its per-kind rule, warning at startup on a
    cross-kind clash.
 4. **The window after an edit: (a)**, accepted as for revocation: old values
-   may reach the old upstream for up to `cacheSeconds`, and the save's
+   may reach the old upstream for up to R, and the save's
    confirmation says so.
 5. **An editor who leaves or is demoted: (b)**, holdings frozen at save and
    intersected with the editor's current ones, as R15 does for tokens; uses
