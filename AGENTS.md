@@ -279,7 +279,14 @@ anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
   writes which cases each matrix ran, which `Use matrices` holds to every case
   run exactly once (`scripts/matrix-coverage.mjs`); `pnpm validate` runs the same
   eight shards one at a time, then that check. A new matrix passes its
-  generated cases through `shardOf`, or that check fails.
+  generated cases through `shardOf`, or that check fails. The four files run side
+  by side on one Postgres, each within a share of the connections it lets open
+  (`max_connections` less its reserved slots), split among the files still
+  running (`scripts/matrix-connections.ts`): a file whose row is past its share
+  fails before its first cell, and `use.matrix.ts` takes as many rows at once as
+  its share holds. A cell that fails fails its file once the others have settled,
+  and every pool its cells opened is ended, so the file exits rather than wait
+  out its timeout (`packages/vault/test/matrix-cells.test.ts`).
 - `pnpm test:schema` verifies both runtime logins' privileges. It also runs the
   full migration as a non-superuser owner in a disposable Postgres cluster,
   checks TLS trust and hostname verification, and runs `coffre setup` against
@@ -312,10 +319,11 @@ anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
   requires a synthetic destructive migration to fail it. `--schema` applies a
   published version's migrations instead, to check past releases. It needs
   network and Postgres. CI runs it for both kinds.
-- `pnpm test:consumer [<dir>]` packs the eight packages, runs the packed CLI's
+- `pnpm test:consumer [--port <n>] [<dir>]` packs the eight packages, runs the packed CLI's
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,
-  builds and runs conformance on each. It also loads and calls the packed
+  builds and runs conformance on each, on conformance's ports (3082 to +2, or
+  `--port`'s). It also loads and calls the packed
   client, which declares Node >= 20, with each Node `COFFRE_CLIENT_NODES`
   lists (`scripts/client-smoke.cjs`; the current one when unset; CI names 20,
   22 and 24). It needs network for third-party packages.

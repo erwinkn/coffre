@@ -25,17 +25,18 @@ import type { NamedUseInput, NamedUseOutcome } from '@coffre/core/vault';
 import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
+import { BESIDE_CELLS, FREE_CONNECTIONS, POOL, withinShare } from '../../../scripts/matrix-connections.ts';
 import { shardOf } from '../../../scripts/matrix-shard.ts';
 import { deletesSettled, removeDeleted } from '../../../scripts/matrix-weigh.ts';
 import { ENGINE, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
-import { holding, namedWorld, principalLocks, slowed, turnsApart, weighed, weighedInTurn, weighingSession, type HotCall } from './named-world.ts';
+import { each, endSlowed, holding, namedWorld, principalLocks, slowed, turnsApart, weighed, weighedInTurn, weighingSession, type HotCall } from './named-world.ts';
 import { emptyLog, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
 before(async () => {
-  // Pools of 4: this file runs beside use.matrix.ts and named.matrix.ts, a process each, on a Postgres of 100
-  // connections, and its row's 8 cells need no more (CI, #453: 10 each, and a holder a cell, took use.matrix.ts's).
-  db = await openTestDatabase({ connections: 4 });
+  // Pools of `POOL`: this file runs beside the other matrices, a process each, on one Postgres, and its row's 8 cells
+  // need no more (CI, #453: 10 each, and a holder a cell, took use.matrix.ts's).
+  db = await openTestDatabase({ connections: POOL });
   await useDatabases(db);
   await emptyLog();
   if (ENGINE === 'postgres') {
@@ -43,6 +44,9 @@ before(async () => {
       FOR t IN SELECT c.oid::regclass AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' LOOP
         EXECUTE format('ALTER TABLE %s SET (autovacuum_enabled = off)', t.name);
       END LOOP; END $$`));
+    // A row's cells at once, a connection each, beside what the file holds whatever its cells: within its share.
+    const [{ free }] = (await rows<{ free: number }>(db.owner, sql.raw(FREE_CONNECTIONS))) as [{ free: number }];
+    withinShare(import.meta.url, BESIDE_CELLS + KEYS.length, free);
   }
 });
 after(() => db.close());
@@ -143,39 +147,35 @@ async function cell(row: Row, key: Key) {
     principal: w.principal,
     /** Its request, measured; the row holds every cell's principal's lock meanwhile, on one connection (`principalLocks`). */
     measure: async () => {
-      // The map set as it should never be: the place named, with dev's key as its own, or an id no key has.
-      if (row.map === "dev's key, mapped as the place's own" || row.map === 'a key never made') {
-        measured.cache.name(`${w.tokenHash.toString('base64')}\n${w.slug}\n${slug}`, { credential: w.credentialId, environment: place, slugs: { project: w.slug, environment: slug } });
-        measured.cache.key(place, name, { id: row.map === 'a key never made' ? randomUUID() : devKey!, through: false });
+      try {
+        // The map set as it should never be: the place named, with dev's key as its own, or an id no key has.
+        if (row.map === "dev's key, mapped as the place's own" || row.map === 'a key never made') {
+          measured.cache.name(`${w.tokenHash.toString('base64')}\n${w.slug}\n${slug}`, { credential: w.credentialId, environment: place, slugs: { project: w.slug, environment: slug } });
+          measured.cache.key(place, name, { id: row.map === 'a key never made' ? randomUUID() : devKey!, through: false });
+        }
+        const entries = () => count(sql`SELECT count(*) AS n FROM log_uses WHERE credential = ${w.credentialId}`);
+        const capRows = () => count(sql`SELECT count(*) AS n FROM bulk_cap WHERE principal = ${w.principal}`);
+        if (row.window === 'passed') await run(db.owner, sql`DELETE FROM bulk_cap WHERE principal = ${w.principal}`);
+        const [beforeEntries, beforeCap] = [await entries(), await capRows()];
+        await measured.connect();
+        measured.slow(delayOf());
+        const before = measured.statements();
+        const now = Date.now();
+        const work = () => measured.vault.useNamed!(ask(purpose, { at: now, deadline: now + 3000 }));
+        const answer = await work();
+        measured.slow(0);
+        const last = measured.statements() > before ? measured.last() : null;
+        const result = {
+          code: codeOf(answer), route: routeOf(answer), calls: measured.statements() - before,
+          entries: (await entries()) - beforeEntries, capRows: (await capRows()) - beforeCap,
+          cached: last !== null && last.args[11] != null, sent: last as HotCall | null, keyBlocks: null as number | null,
+        };
+        return result;
+      } finally {
+        await measured.end();
       }
-      const entries = () => count(sql`SELECT count(*) AS n FROM log_uses WHERE credential = ${w.credentialId}`);
-      const capRows = () => count(sql`SELECT count(*) AS n FROM bulk_cap WHERE principal = ${w.principal}`);
-      if (row.window === 'passed') await run(db.owner, sql`DELETE FROM bulk_cap WHERE principal = ${w.principal}`);
-      const [beforeEntries, beforeCap] = [await entries(), await capRows()];
-      await measured.connect();
-      measured.slow(delayOf());
-      const before = measured.statements();
-      const now = Date.now();
-      const work = () => measured.vault.useNamed!(ask(purpose, { at: now, deadline: now + 3000 }));
-      const answer = await work();
-      measured.slow(0);
-      const last = measured.statements() > before ? measured.last() : null;
-      const result = {
-        code: codeOf(answer), route: routeOf(answer), calls: measured.statements() - before,
-        entries: (await entries()) - beforeEntries, capRows: (await capRows()) - beforeCap,
-        cached: last !== null && last.args[11] != null, sent: last as HotCall | null, keyBlocks: null as number | null,
-      };
-      await measured.end();
-      return result;
     },
   };
-}
-
-async function each<T, R>(items: readonly T[], work: (item: T) => Promise<R>): Promise<R[]> {
-  if (ENGINE === 'postgres') return Promise.all(items.map(work));
-  const done: R[] = [];
-  for (const item of items) done.push(await work(item));
-  return done;
 }
 
 /**
@@ -189,56 +189,61 @@ const ROWS: Row[] = shardOf(import.meta.url, WHERE.flatMap((where) => LOST
 test(`at a fork and at \`dev@me\`, a caller learns nothing of a key they may not have, in any of ${ROWS.length} rows of ${KEYS.length} key states (T165, D153)`, { timeout: 7_200_000 }, async (t) => {
   const differing: string[] = [];
   await namedWorld(db);
-  for (const row of ROWS) {
-    // Each cell's keys are made as their periods start (T204, `freshKeyId`): made and asked within a minute, each within one.
-    const made = await each(KEYS, (key) => cell(row, key));
-    // Each cell's principal's lock held by another connection, all of the row's on one (a connection each would take as
-    // many of Postgres's as the row has cells), while its cells are asked.
-    const measureAll = () => each(made, async (c) => ({ key: c.key, ...(await c.measure()) }));
-    const results = ENGINE === 'postgres' ? await holding(db, principalLocks(made.map((c) => c.principal)), measureAll) : await measureAll();
-    const label = labelOf(row);
-    // The keys they may not have: each answered alike (D153).
-    const refused = results.filter((r) => !usable(row, r.key));
-    const [first] = refused;
-    for (const r of refused) {
-      if (r.capRows !== 0) differing.push(`${label}: ${r.key} wrote a row of the cap's`);
-      if (!stands(row) && r.entries !== 0) differing.push(`${label}: ${r.key} wrote ${r.entries} entries, standing nowhere`);
-    }
-    if (refused.some((r) => told(r.code) !== told(first!.code) || r.route !== first!.route || r.calls !== first!.calls)) {
-      differing.push(`${label}: ${refused.map((r) => `${r.key} ${r.code} by ${r.route} in ${r.calls}`).join(', ')}`);
-    }
-    if (refused.some((r) => r.code.startsWith('busy'))) differing.push(`${label}: busy, ${refused.filter((r) => r.code.startsWith('busy')).map((r) => r.key).join(', ')}`);
-    if (refused.some((r) => r.cached)) differing.push(`${label}: the cached form for ${refused.filter((r) => r.cached).map((r) => r.key).join(', ')}`);
-    // A key they may have is theirs to know of: with their principal's lock held and every statement slow, its use, a
-    // second call, may run past its deadline, as use.matrix.ts leaves it (use-named-forks.test.ts holds its yes).
-    // Without standing at the place, no call reads anything of its key: as many blocks of the key's relations for each.
-    if (ENGINE === 'postgres' && !stands(row)) {
-      // The rows of the cap's the window passed deleted, taken out first: left in, a new session read them, a block or
-      // three of `bulk_cap`, whenever a transaction ended before it, in another database too (T240, `removeDeleted`).
-      const watcher = postgresClient(OWNER_URL, { max: 1 });
-      try {
-        await deletesSettled(watcher, t.signal);
-        await removeDeleted(watcher, 'bulk_cap', t.signal);
-      } finally {
-        await watcher.end();
-      }
-      await run(db.owner, sql`ANALYZE`);
-      const session = weighingSession();
-      try {
-        for (const r of refused) r.keyBlocks = (await weighed(r.sent, session))?.keyBlocks ?? null;
-      } finally {
-        await session.end();
-      }
-      const blocks = new Set(refused.flatMap((r) => (r.keyBlocks === null ? [] : [r.keyBlocks])));
-      if (blocks.size > 1) differing.push(`${label}: blocks of the key's tables ${refused.map((r) => `${r.key} ${r.keyBlocks}`).join(', ')}`);
-      // And at each of a new session's first calls, at the server's planner settings, before its plan cache settles:
-      // as many as its world's twin, of a key never made, and as that twin asked with no id, cover or seal the isolate
-      // kept, at the same call (T207, Sol's reviews r2 and r4; `turnsApart`).
+  // A cell made and never asked, a row failed beside it, holds its pool until the file ends them all.
+  try {
+    for (const row of ROWS) {
+      // Each cell's keys are made as their periods start (T204, `freshKeyId`): made and asked within a minute, each within one.
+      const made = await each(KEYS, (key) => cell(row, key));
+      // Each cell's principal's lock held by another connection, all of the row's on one (a connection each would take as
+      // many of Postgres's as the row has cells), while its cells are asked.
+      const measureAll = () => each(made, async (c) => ({ key: c.key, ...(await c.measure()) }));
+      const results = ENGINE === 'postgres' ? await holding(db, principalLocks(made.map((c) => c.principal)), measureAll) : await measureAll();
+      const label = labelOf(row);
+      // The keys they may not have: each answered alike (D153).
+      const refused = results.filter((r) => !usable(row, r.key));
+      const [first] = refused;
       for (const r of refused) {
-        const read = await weighedInTurn(r.sent);
-        if (read !== null) for (const line of turnsApart(r.key, read.asked, read)) differing.push(`${label}: ${line}`);
+        if (r.capRows !== 0) differing.push(`${label}: ${r.key} wrote a row of the cap's`);
+        if (!stands(row) && r.entries !== 0) differing.push(`${label}: ${r.key} wrote ${r.entries} entries, standing nowhere`);
+      }
+      if (refused.some((r) => told(r.code) !== told(first!.code) || r.route !== first!.route || r.calls !== first!.calls)) {
+        differing.push(`${label}: ${refused.map((r) => `${r.key} ${r.code} by ${r.route} in ${r.calls}`).join(', ')}`);
+      }
+      if (refused.some((r) => r.code.startsWith('busy'))) differing.push(`${label}: busy, ${refused.filter((r) => r.code.startsWith('busy')).map((r) => r.key).join(', ')}`);
+      if (refused.some((r) => r.cached)) differing.push(`${label}: the cached form for ${refused.filter((r) => r.cached).map((r) => r.key).join(', ')}`);
+      // A key they may have is theirs to know of: with their principal's lock held and every statement slow, its use, a
+      // second call, may run past its deadline, as use.matrix.ts leaves it (use-named-forks.test.ts holds its yes).
+      // Without standing at the place, no call reads anything of its key: as many blocks of the key's relations for each.
+      if (ENGINE === 'postgres' && !stands(row)) {
+        // The rows of the cap's the window passed deleted, taken out first: left in, a new session read them, a block or
+        // three of `bulk_cap`, whenever a transaction ended before it, in another database too (T240, `removeDeleted`).
+        const watcher = postgresClient(OWNER_URL, { max: 1 });
+        try {
+          await deletesSettled(watcher, t.signal);
+          await removeDeleted(watcher, 'bulk_cap', t.signal);
+        } finally {
+          await watcher.end();
+        }
+        await run(db.owner, sql`ANALYZE`);
+        const session = weighingSession();
+        try {
+          for (const r of refused) r.keyBlocks = (await weighed(r.sent, session))?.keyBlocks ?? null;
+        } finally {
+          await session.end();
+        }
+        const blocks = new Set(refused.flatMap((r) => (r.keyBlocks === null ? [] : [r.keyBlocks])));
+        if (blocks.size > 1) differing.push(`${label}: blocks of the key's tables ${refused.map((r) => `${r.key} ${r.keyBlocks}`).join(', ')}`);
+        // And at each of a new session's first calls, at the server's planner settings, before its plan cache settles:
+        // as many as its world's twin, of a key never made, and as that twin asked with no id, cover or seal the isolate
+        // kept, at the same call (T207, Sol's reviews r2 and r4; `turnsApart`).
+        for (const r of refused) {
+          const read = await weighedInTurn(r.sent);
+          if (read !== null) for (const line of turnsApart(r.key, read.asked, read)) differing.push(`${label}: ${line}`);
+        }
       }
     }
+  } finally {
+    await endSlowed();
   }
   assert.deepEqual(differing, []);
 });

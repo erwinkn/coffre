@@ -5,8 +5,10 @@
 # workspace in sight, then typecheck and build each one, and hold it to
 # `coffre-conformance`, as its own `pnpm conformance`.
 #
-#   pnpm test:consumer [--kind workers|node] [<dir>]
+#   pnpm test:consumer [--kind workers|node] [--port <n>] [<dir>]
 # <dir> defaults to a new temporary one. Without --kind, exercise both kinds.
+# --port is conformance's: coffre's port, the IdP the next, wrangler's
+# inspector the one after (3082 unless given), for a run beside another.
 #
 # The packed client also loads and calls on every Node it declares, 20 and up,
 # as COFFRE_CLIENT_NODES lists them (Node binaries, space-separated; the
@@ -22,12 +24,16 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 kinds=(workers node)
-if [[ "${1:-}" == --kind ]]; then
-    case "${2:-}" in
-        workers | node) kinds=("$2"); shift 2 ;;
-        *) echo 'consumer-test: --kind must be workers or node' >&2; exit 2 ;;
+port=3082
+while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+        --kind)
+            case "${2:-}" in workers | node) kinds=("$2") ;; *) echo 'consumer-test: --kind must be workers or node' >&2; exit 2 ;; esac
+            shift 2 ;;
+        --port) port="${2:?--port needs a number}"; shift 2 ;;
+        *) echo "consumer-test: unknown option $1" >&2; exit 2 ;;
     esac
-fi
+done
 temporary=false
 if [[ -n "${1:-}" ]]; then
     work="$1"
@@ -164,8 +170,8 @@ for kind in "${kinds[@]}"; do
 
     echo "==> conformance of coffre-$kind"
     if [[ "$kind" == workers ]]; then
-        pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime" --hot-runtime "$hot_runtime"
+        pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime" --hot-runtime "$hot_runtime" --port "$port"
     else
-        pnpm --dir "$project" conformance
+        pnpm --dir "$project" conformance --port "$port"
     fi
 done
