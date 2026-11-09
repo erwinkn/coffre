@@ -8,7 +8,9 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
 import { cloudflareAccess, github, google, hashToken, signin } from '@coffre/core/identity';
-import type { Vault } from '@coffre/core/vault';
+import type { UseInput, Vault } from '@coffre/core/vault';
+import { createDatabase, type Database } from '@coffre/db';
+import { openDatabase } from '@coffre/db/connect';
 import { and, eq, gt, sql } from 'drizzle-orm';
 
 import { resolveConfig } from '../src/config.ts';
@@ -17,7 +19,9 @@ import { checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
-import { clientFor, entryOf, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, entryOf, contextFor, hotDatabaseUrl, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
+import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { auditLog, credentials as credentialRows, environments, bulkCap, checkpointFence, logUses, grants } from './db/tables.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 
@@ -91,7 +95,8 @@ before(async () => {
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
+  // Its throttle off: one vault answers the whole file, a held key `late` under its principal's lock on purpose (D154); the throttle's own answer is the last test's.
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, throttled: false }) });
   runtime = runtimeOver(counted(deps.vault, true));
   unnamed = runtimeOver(counted(deps.vault, false));
   deps.signin = runtime.signin!;
@@ -728,5 +733,78 @@ test("the proxy's use of a key a fork inherits, on the fork's URL and at a handl
     assert.equal(used.status, 204, `${url}: ${used.body}`);
     assert.deepEqual(sent, [DEV_KEY], `${url}: dev's key, inherited`);
     assert.deepEqual(calls, ['useNamed'], `${url}: one call`);
+  }
+});
+
+/**
+ * Databases opened for one test, each statement sent on them counted: on Postgres the app's, the vault's and the hot
+ * path's logins, as the suite's own (`watched`); on SQLite the one file, which all three share, as drizzle prepares them.
+ */
+async function countedDatabases(): Promise<{ app: Database; vault: Database; hot: Database; statements(): readonly string[]; close(): Promise<void> }> {
+  const statements: string[] = [];
+  if (TEST_ENGINE === 'postgres') {
+    const pools = ([['app', TEST_RUNTIME_DATABASE_URL], ['vault', TEST_VAULT_DATABASE_URL], ['hot', hotDatabaseUrl()]] as const)
+      .map(([name, url]) => watched(testPostgresPool(url), ({ text }) => statements.push(`${name}: ${text}`)));
+    const [app, vault, hot] = pools.map((pool) => createDatabase(pool));
+    return { app: app!, vault: vault!, hot: hot!, statements: () => statements, close: async () => { await Promise.all(pools.map((pool) => pool.end())); } };
+  }
+  const opened = await openDatabase(hotDatabaseUrl());
+  const session = (opened.db as unknown as { session: { logger: unknown; options: { logger?: unknown } } }).session;
+  session.logger = session.options.logger = { logQuery: (text: string) => statements.push(text) };
+  return { app: opened.db, vault: opened.db, hot: opened.db, statements: () => statements, close: opened.close };
+}
+
+test("a vault whose throttle refuses answers a key held, one never made and one its caller may not use alike, byte for byte, by the API and the proxy, before any statement (config.md, Q1, step 2)", async () => {
+  const root = clientFor(deps, ROOT);
+  const PROBE = 'throttled@acme.example';
+  // The proxy's credential injects `API_KEY`: market/dev holds it, market/thr-none does not, market/thr-gone does, its grant revoked.
+  for (const path of ['market/thr-none', 'market/thr-gone']) await root.environments.create(path);
+  await root.secrets.set('market/thr-gone', { API_KEY: 'sk_thr_gone' });
+  const paths = ['market/dev', 'market/thr-none', 'market/thr-gone'];
+  await root.members.add(`user:${PROBE}`);
+  await root.access.set(`user:${PROBE}`, Object.fromEntries(paths.map((path) => [path, 'developer' as const])));
+  const token = await personalToken(PROBE, { 'market/dev': 'developer' });
+  const handle = (await runtime.signin!.issueHandle({ ...(await contextFor(deps, PROBE)), personalToken: null }, { label: 'run', expiresInMinutes: 60, paths })).token;
+  await root.access.set(`user:${PROBE}`, { 'market/thr-gone': null });
+  // A vault of its own, its throttle on as a deployment's is, every statement on its databases and the app's counted.
+  const databases = await countedDatabases();
+  const vault = testVault([ROOT], { database: databases.vault, hotDatabase: databases.hot }, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
+  const at = runtimeOver(counted(vault, true), 'github', databases.app);
+  /** The whole response: its status, every header, its body's bytes. */
+  const whole = async (response: Response) => ({ status: response.status, headers: [...response.headers].sort(), body: await response.text() });
+  const api = (key: string) => fetchApi(new Request(`${ORIGIN}/api/reveals`, {
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path: key }),
+  }), at, { sourceIp: null }).then(whole);
+  const proxy = (path: string) => pluginRoute(new Request(`${ORIGIN}/use/${path}/api/v1/thing`, { headers: { 'x-api-key': handle } }), at, '203.0.113.7')!.then(whole);
+  const keys = ['market/dev/API_KEY', 'market/dev/NEVER_MADE', 'market/prod/API_KEY'];
+  try {
+    // Each asked once in time first, so that the isolate's map holds each as its answer left it: an id, or none.
+    assert.deepEqual(await Promise.all(keys.map(async (key) => (await api(key)).status)), [200, 404, 404]);
+    assert.deepEqual(await Promise.all(paths.map(async (path) => (await proxy(path)).status)), [204, 404, 404]);
+    // Tripped: uses late at its door, each counted not in time, none of them a statement (use.ts, `seated`). Against the
+    // seven answered in time, 400 make its rate p about 0.97 (throttle.ts): its refusals spread by a credit that adds p a
+    // use, the first in time is let through (its input refused at once), the next refused, and then about (2p − 1) ÷
+    // (1 − p), 30, in a row: the six below, whatever they name.
+    const ask = (at: number, deadline: number) => vault.use!({ credential: 'none', secretId: 'none', place: null, purpose: 'reveal', requestId: '1', at, deadline } as UseInput);
+    for (let i = 0; i < 400; i += 1) assert.deepEqual(await ask(Date.now() - 2_000, Date.now() - 1), { ok: false, busy: 'late', retryAfter: 1 });
+    await assert.rejects(ask(Date.now(), Date.now() + 3_000), 'let through, refused as input');
+    assert.deepEqual(await ask(Date.now(), Date.now() + 3_000), { ok: false, busy: 'overloaded', retryAfter: 1 });
+    const before = databases.statements().length;
+    calls.length = 0;
+    const byApi = [];
+    for (const key of keys) byApi.push(await api(key));
+    const byProxy = [];
+    for (const path of paths) byProxy.push(await proxy(path));
+    assert.deepEqual(databases.statements().slice(before), [], 'no statement, the app\'s or the vault\'s');
+    assert.deepEqual(calls, [...keys, ...paths].map(() => 'useNamed'), 'one call by name each');
+    assert.equal(byApi[0]!.status, 503, JSON.stringify(byApi[0]));
+    assert.ok(byApi[0]!.headers.some(([name]) => name === 'retry-after'), JSON.stringify(byApi[0]));
+    assert.match(byApi[0]!.body, /as many uses under way/);
+    assert.equal(byProxy[0]!.status, 503, JSON.stringify(byProxy[0]));
+    assert.ok(byProxy[0]!.headers.some(([name]) => name === 'retry-after'), JSON.stringify(byProxy[0]));
+    for (const [i, answer] of byApi.entries()) assert.deepEqual(answer, byApi[0], keys[i]);
+    for (const [i, answer] of byProxy.entries()) assert.deepEqual(answer, byProxy[0], paths[i]);
+  } finally {
+    await databases.close();
   }
 });

@@ -270,13 +270,15 @@ before(async () => {
     // The app's own database through a relay too, at no delay: its statements counted as the hot path's are.
     app = await relay(TEST_RUNTIME_DATABASE_URL);
     appPool = postgresClient(app.url, { max: 10 });
-    deps = testDeps(createDatabase(appPool), [ROOT], { vault: testVault([ROOT], { hotDatabase: hot.url }, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
+    // Its throttle off: one vault answers every cell, its locks held and statements slowed `late` on purpose, which would have it refuse a later cell's setup (config.md, Q1, step 2).
+    deps = testDeps(createDatabase(appPool), [ROOT], { vault: testVault([ROOT], { hotDatabase: hot.url }, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, throttled: false }) });
   } else {
     const session = (db.runtime as unknown as { session: { logger: unknown; options: { logger?: unknown } } }).session;
     const counting = { logQuery: () => { sqliteStatements += 1; } };
     session.logger = counting;
     session.options.logger = counting;
-    deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
+    // Its throttle off, as on Postgres: one vault answers every cell, `late` past the floor on purpose.
+    deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, throttled: false }) });
   }
   // Each call the app makes of the vault, by name: its sequence says the route a request took (`routeOf`).
   for (const method of ['useNamed', 'useNamedMany', 'use', 'useMany', 'access', 'unwrap'] as const) {

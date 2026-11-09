@@ -331,19 +331,25 @@ export function entryOf(vault: Vault): VaultEntry {
 
 export function testVault(
   owners: readonly string[],
-  /** `owners`: the emails the configuration names, the first of `owners` unless given; one named here alone is never admitted until it signs in. */
-  config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey' | 'owners'>> & { hotDatabase?: string } = {},
+  /**
+   * `owners`: the emails the configuration names, the first of `owners` unless given; one named here alone is never admitted until it signs in.
+   * `database`, `hotDatabase`: ones a test opened, to watch what the vault sends them; the suite's own otherwise.
+   */
+  config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey' | 'owners'>> & { database?: Database; hotDatabase?: string | Database } = {},
   keys: { kek: Buffer } = { kek: randomBytes(32) },
   walks: VaultOptions['walks'] = {},
-  /** `cutover: 'app'`: a 0.15 vault left for the app's door to cut over (cutover.test.ts), not cut over as it opens. */
-  { cutover, ...log }: Pick<VaultOptions, 'log' | 'sealThrough' | 'heldOutside' | 'uses'> & { cutover?: 'app' } = LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld } : { log: '0.14' },
+  /**
+   * `cutover: 'app'`: a 0.15 vault left for the app's door to cut over (cutover.test.ts), not cut over as it opens.
+   * `throttled: false`: its throttle off, for a suite whose answers are `late` on purpose (`VaultOptions.throttled`).
+   */
+  { cutover, ...log }: Pick<VaultOptions, 'log' | 'sealThrough' | 'heldOutside' | 'uses' | 'throttled'> & { cutover?: 'app' } = LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld } : { log: '0.14' },
 ): TestVault {
   const { kek } = keys;
   const signingKey = derivedSigningKey(kek);
   let offset = 0;
   let current: Promise<SpokenVault> | null = null;
   const open = async () => {
-    const database = await openVaultDatabase();
+    const database = config.database ?? await openVaultDatabase();
     const opened = spoken(await localVault(
       {
         database,
