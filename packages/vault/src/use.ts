@@ -563,11 +563,15 @@ async function seated<I extends { at: number; deadline: number }, T>(
   }
 }
 
-/** Whether a use path answered `late`: `{ busy: 'late' }`, or a named answer's `outcome` so (`busyNamed`). */
+/**
+ * Whether a use path answered `late`: `{ busy: 'late' }`, or a named answer whose `outcome` is, whatever its route: the
+ * vault's own (`busyNamed`, `route: 'busy'`), or a named batch's or a route's past its gate (`route: 'name'`), a later
+ * statement timed out.
+ */
 function isLate(answer: unknown): boolean {
   if (typeof answer !== 'object' || answer === null) return false;
-  const { busy, route, outcome } = answer as { busy?: unknown; route?: unknown; outcome?: { busy?: unknown } };
-  return busy === 'late' || (route === 'busy' && outcome?.busy === 'late');
+  const { busy, outcome } = answer as { busy?: unknown; outcome?: { busy?: unknown } };
+  return busy === 'late' || outcome?.busy === 'late';
 }
 
 /** One use, end to end (the module's comment says how): one place in admission. */

@@ -31,7 +31,7 @@ import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, useMany,
 import { openVault, prepareVault } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, postgresOnly, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
-import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, heldKeks, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, until, useDatabases, world } from './use-world.ts';
+import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, heldKeks, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, timingOut, until, useDatabases, world } from './use-world.ts';
 import { resolveVaultConfig } from '../src/config.ts';
 
 let db: TestDatabase;
@@ -954,10 +954,7 @@ test("a use Postgres gave up on before its deadline, its lock or its statement t
   const w = await world();
   const id = await w.key();
   for (const code of ['55P03', '57014']) {
-    const path: UsePath = {
-      db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits()),
-      ready: () => Promise.reject(Object.assign(new Error('canceling statement'), { code })),
-    };
+    const path = timingOut(code);
     const at = Date.now();
     assert.deepEqual(await use(path, ask(w, id, { at, deadline: at + 3_000 })), { ok: false, busy: 'late', retryAfter: 1 }, code);
     assert.ok(Date.now() < at + 3_000, 'answered well before its deadline');
