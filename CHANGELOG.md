@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **The credential proxy ends its upstream request when the app's request
+  ends, and sets no time bound of its own (W365, config Q7).** It passes the
+  incoming request's abort signal to the upstream `fetch`: an app that
+  hangs up, or times out, no longer leaves coffre waiting on a hung
+  upstream, which on Node was up to 300 s for the headers. Workers fire
+  that signal for a hang-up only with the `enable_request_signal`
+  compatibility flag: the examples' `app/wrangler.jsonc`, and so what
+  `coffre init` writes, now carry it. A deployment that does not add it to
+  its own `wrangler.jsonc` keeps the old behavior; `coffre update` does not
+  edit that file.
 - **The credential proxy holds 1 MiB of a body at most, and an isolate's
   memory is split into named shares (W331, limits S11-S13, S26, S52).** A
   Worker's isolate has 128 MB; `@coffre/core/memory` now gives it shares:

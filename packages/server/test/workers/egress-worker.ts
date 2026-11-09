@@ -62,6 +62,14 @@ export default {
     if (!url.pathname.startsWith('/use')) return upstream(request);
     try {
       const routes = proxy(url.searchParams.has('missing') ? env.MISSING : env.EGRESS, env.UPSTREAM).routes!;
+      // `?abort-after=<ms>`: the app's request ends then, as a hang-up ends it on Cloudflare, whose request signal fires
+      // for it (`enable_request_signal`); local workerd tells a Worker of one only once it writes to the caller.
+      const after = url.searchParams.get('abort-after');
+      if (after !== null) {
+        const hangUp = new AbortController();
+        setTimeout(() => hangUp.abort(), Number(after));
+        return await routes.fetch(new Request(request, { signal: hangUp.signal }), coffre);
+      }
       return await routes.fetch(request, coffre);
     } catch (error) {
       return new Response(error instanceof Error ? error.message : String(error), { status: 500 });

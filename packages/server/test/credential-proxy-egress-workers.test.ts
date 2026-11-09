@@ -12,7 +12,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,9 +30,15 @@ let worker: Unstable_DevWorker;
 let upstream: Server;
 const whole: { headers: IncomingHttpHeaders; length: number; sha256: string }[] = [];
 const broken: number[] = [];
+/** `/v3/hang`: each request that never gets an answer, and when its connection ended (the proxy's fetch aborted). */
+let onHang: (upstream: { ended: Promise<void> }) => void = () => {};
 
 before(async () => {
   upstream = createServer((request, response) => {
+    if (request.url!.startsWith('/v3/hang')) {
+      onHang({ ended: new Promise<void>((resolve) => response.on('close', resolve)) });
+      return;
+    }
     const hash = createHash('sha256');
     let length = 0;
     request.on('data', (chunk: Buffer) => (hash.update(chunk), (length += chunk.length)));
@@ -50,7 +56,7 @@ before(async () => {
     JSON.stringify({
       name: NAME,
       compatibility_date: '2026-08-06',
-      compatibility_flags: ['nodejs_compat'],
+      compatibility_flags: ['nodejs_compat', 'enable_request_signal'],
       services: [{ binding: 'EGRESS', service: NAME }],
       vars: { UPSTREAM: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v3` },
     }),
@@ -134,4 +140,24 @@ test("a workload's 55 MB document that declares its Content-Digest streams out o
   assert.deepEqual([empty.status, ((await empty.json()) as { message: string }).message], [400, 'the body is not what its Content-Digest says']);
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.deepEqual([whole.length, broken.length], [1, 1], 'nothing of it reached the upstream');
+});
+
+test("an app's request that ends before the upstream answers ends the upstream request", { timeout: 60_000 }, async () => {
+  const arrived = new Promise<{ ended: Promise<void> }>((resolve) => (onHang = resolve));
+  // The request's signal fires after 300 ms, as Cloudflare's does when the caller hangs up (the Worker's `?abort-after`).
+  const ended = await fetch(`http://${worker.address}:${worker.port}/use/yousign/hang?abort-after=300`, {
+    headers: { authorization: `DPoP coffre_wl_${'t'.repeat(43)}`, dpop: 'checked on Node' },
+  });
+  assert.equal(ended.status, 502);
+  assert.match(((await ended.json()) as { message: string }).message, /did not answer/);
+  const { ended: ending } = await arrived;
+  const timeout = new Promise<string>((resolve) => setTimeout(() => resolve('still open'), 10_000).unref());
+  assert.equal(await Promise.race([ending.then(() => 'ended'), timeout]), 'ended', 'the upstream connection ends with the request');
+});
+
+test("every Workers deployment's app asks Cloudflare to fire a request's signal when its caller hangs up: coffre init's, and the dev stack's", () => {
+  for (const file of ['examples/workers/app/wrangler.jsonc', 'dev/deployment/app/wrangler.jsonc']) {
+    const config = readFileSync(new URL(`../../../${file}`, import.meta.url), 'utf8');
+    assert.match(config, /"compatibility_flags":\s*\[[^\]]*"enable_request_signal"/, file);
+  }
 });
