@@ -1,9 +1,13 @@
 import { TOMBSTONE } from '@coffre/core/schemas';
-import { accessAllowed } from '@coffre/db/log';
+import { accessAllowed, changesOf } from '@coffre/db/log';
 import { sql, type SQL } from 'drizzle-orm';
 
 import type { Asked } from './snapshot.ts';
 import { newestChangeJson } from './store.ts';
+
+/** An asked member's newest change, and a place's, each by its object's index (`changesOf`). */
+const MEMBER_CHANGE = changesOf('postgres', 'x', sql`log_object('principal', asked.principal)`);
+const PLACE_CHANGE = changesOf('postgres', 'l', sql`log_object('environment', g.id::text)`);
 
 /** An entry of `audit_log` aliased `e`, as JSON (`RawEntry`): whole numbers past 2^53 as text, bytes as hex. */
 const ENTRY = sql.raw(`json_build_object(
@@ -85,7 +89,7 @@ export function snapshotQuery(asked: Asked): SQL {
         FROM unnest(${principals}) AS asked (principal)
         LEFT JOIN principals m ON m.principal = asked.principal
         LEFT JOIN LATERAL (
-          SELECT x.* FROM log_changes x WHERE x.object = log_object('principal', asked.principal) ORDER BY x.number DESC LIMIT 1
+          SELECT x.* FROM log_changes x WHERE ${MEMBER_CHANGE.where} ORDER BY ${MEMBER_CHANGE.order} LIMIT 1
         ) l ON true
       ),`
         : sql``}
@@ -118,7 +122,7 @@ export function snapshotQuery(asked: Asked): SQL {
           WHERE NOT EXISTS (SELECT 1 FROM environments env JOIN projects project ON project.id = env.project_id WHERE env.id = a.id)
           OFFSET 0
         ) g
-        CROSS JOIN LATERAL (SELECT l.seal FROM log_changes l WHERE l.object = log_object('environment', g.id::text) ORDER BY l.number DESC LIMIT 1) l
+        CROSS JOIN LATERAL (SELECT l.seal FROM log_changes l WHERE ${PLACE_CHANGE.where} ORDER BY ${PLACE_CHANGE.order} LIMIT 1) l
       ),`
         : sql``}
       'ended', (

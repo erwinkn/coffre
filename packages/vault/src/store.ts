@@ -3,9 +3,9 @@ import type { StoredEntry } from '@coffre/core/audit';
 import { deletedWithProject, isTombstone, TOMBSTONE } from '@coffre/core/schemas';
 import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type CredentialColumns, type EnvironmentColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { later, laterRows, prepared, tablesOf, type Database, type Queryable, type Transaction } from '@coffre/db';
-import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
+import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth, type Engine } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
-import { accessAllowed, authoredBy, entriesOf, entryColumns, firstEntryUnder, newestVaultEntries, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
+import { accessAllowed, authoredBy, changesOf, entriesOf, entryColumns, firstEntryUnder, newestVaultEntries, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { canonical, indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref, type RoleInput } from './inputs.ts';
@@ -393,8 +393,9 @@ async function loggedEnvironments(db: Queryable, ids: readonly string[]): Promis
     return new Map(ids.flatMap((id) => (found.has(objectKey({ kind: 'environment', id })) ? [[id, found.get(objectKey({ kind: 'environment', id })) ?? null] as const] : [])));
   }
   // Still no row as of this statement: one made since the read before is no place deleted (review r6).
+  const environment = changesOf(db, 'l', sql`log_object('environment', g.id::text)`);
   const rows = await rowsOf<{ id: string; seal: Buffer | Uint8Array | null }>(db, sql`SELECT g.id::text AS id, l.seal FROM unnest(${sql.param([...ids])}::uuid[]) AS g (id)
-    CROSS JOIN LATERAL (SELECT l.seal FROM log_changes l WHERE l.object = log_object('environment', g.id::text) ORDER BY l.number DESC LIMIT 1) l
+    CROSS JOIN LATERAL (SELECT l.seal FROM log_changes l WHERE ${environment.where} ORDER BY ${environment.order} LIMIT 1) l
     WHERE NOT EXISTS (SELECT 1 FROM environments e JOIN projects p ON p.id = e.project_id WHERE e.id = g.id)`);
   return new Map(rows.map((row) => [row.id, bytes(row.seal)]));
 }
@@ -428,9 +429,10 @@ export type NewestColumns = {
 
 /** `newestChangeJson`, on Postgres: the newest change of the object `key` names, whole, one probe of `log_changes_object_idx`. */
 export function newestChangeJson(key: SQL): SQL {
+  const newest = changesOf('postgres', 'l', key);
   return sql`(SELECT json_build_object('at', l.at::text, 'request_id', l.request_id::text, 'object', l.object::text, 'actor', l.actor, 'payload', l.payload,
       'newest', encode(l.seal, 'hex'), 'mac', encode(l.mac, 'hex'))
-    FROM log_changes l WHERE l.object = ${key} ORDER BY l.number DESC LIMIT 1)`;
+    FROM log_changes l WHERE ${newest.where} ORDER BY ${newest.order} LIMIT 1)`;
 }
 
 /** The change `NewestColumns` reads, as its MAC covers it (`changeHolds`); null for none. */
@@ -558,13 +560,14 @@ function newestAccessSeq(p: SQL): SQL {
 }
 
 function memberLogsPostgres(principals: readonly string[]): SQL {
+  const newest = changesOf('postgres', 'x', sql`log_object('principal', p.principal)`);
   const asked = sql`unnest(${sql.param([...principals])}::text[])`;
   return sql`SELECT p.principal, m.seal, l.number, l.at, l.request_id::text AS request_id, l.object::text AS object, l.actor, l.payload, l.seal AS newest, l.mac,
       ${newestAccessSeq(sql`p.principal`)} AS access
     FROM ${asked} AS p (principal)
     LEFT JOIN principals m ON m.principal = p.principal
     LEFT JOIN LATERAL (
-      SELECT x.* FROM log_changes x WHERE x.object = log_object('principal', p.principal) ORDER BY x.number DESC LIMIT 1
+      SELECT x.* FROM log_changes x WHERE ${newest.where} ORDER BY ${newest.order} LIMIT 1
     ) l ON true`;
 }
 
@@ -1264,8 +1267,8 @@ export async function newestChange(db: Queryable, ref: Ref, macs: readonly LogMa
   const [row] = await db
     .select({ at: logChanges.at, requestId: logChanges.requestId, object: logChanges.object, actor: logChanges.actor, payload: logChanges.payload, seal: logChanges.seal, mac: logChanges.mac })
     .from(logChanges)
-    .where(eq(logChanges.object, objectKey(ref)))
-    .orderBy(desc(logChanges.number))
+    .where(changesOf(db, 'log_changes', objectKey(ref)).where)
+    .orderBy(changesOf(db, 'log_changes', objectKey(ref)).order)
     .limit(1);
   if (row === undefined) return null;
   const seal = row.seal == null ? null : Buffer.from(row.seal);
@@ -1282,8 +1285,8 @@ async function newestSeal(db: Queryable, ref: Ref): Promise<{ seal: Buffer | nul
   const [row] = await db
     .select({ seal: logChanges.seal })
     .from(logChanges)
-    .where(eq(logChanges.object, objectKey(ref)))
-    .orderBy(desc(logChanges.number))
+    .where(changesOf(db, 'log_changes', objectKey(ref)).where)
+    .orderBy(changesOf(db, 'log_changes', objectKey(ref)).order)
     .limit(1);
   return row === undefined ? null : { seal: row.seal ?? null };
 }
@@ -1293,10 +1296,11 @@ async function newestSeal(db: Queryable, ref: Ref): Promise<{ seal: Buffer | nul
  * `previous` the one before it too, one probe each of its changes, newest first (`log_changes_object_idx`); then those
  * rows by number, with every column their MAC covers.
  */
-export function loggedChangesQuery(refs: readonly Ref[], previous: readonly Ref[] = []): SQL {
+export function loggedChangesQuery(refs: readonly Ref[], previous: readonly Ref[] = [], engine: Engine = 'postgres'): SQL {
+  const newest = (ref: Ref) => changesOf(engine, 'd', objectKey(ref));
   const numbers = [
-    ...refs.map((ref) => sql`(SELECT d.number FROM log_changes d WHERE d.object = ${objectKey(ref)} ORDER BY d.number DESC LIMIT 1)`),
-    ...previous.map((ref) => sql`(SELECT d.number FROM log_changes d WHERE d.object = ${objectKey(ref)} ORDER BY d.number DESC LIMIT 1 OFFSET 1)`),
+    ...refs.map((ref) => sql`(SELECT d.number FROM log_changes d WHERE ${newest(ref).where} ORDER BY ${newest(ref).order} LIMIT 1)`),
+    ...previous.map((ref) => sql`(SELECT d.number FROM log_changes d WHERE ${newest(ref).where} ORDER BY ${newest(ref).order} LIMIT 1 OFFSET 1)`),
   ];
   return sql`SELECT c.number, c.at, c.request_id, c.object, c.actor, c.payload, c.seal, c.mac FROM log_changes c WHERE c.number IN (${sql.join(numbers, sql`, `)})`;
 }
@@ -1321,7 +1325,7 @@ export async function loggedChanges(db: Queryable, macs: readonly LogMacKey[], r
   const found = new Map<string, CheckedChange[]>();
   if (refs.length === 0) return found;
   type Read = { number: string | number; at: string | number; request_id: string; object: string; actor: string; payload: string; seal: Buffer | Uint8Array | null; mac: Buffer | Uint8Array };
-  for (const row of await rowsOf<Read>(db, loggedChangesQuery(refs, previous))) {
+  for (const row of await rowsOf<Read>(db, loggedChangesQuery(refs, previous, engineOf(db)))) {
     const seal = bytes(row.seal);
     const at = Number(row.at);
     const mac = Buffer.from(row.mac);
@@ -1717,9 +1721,10 @@ async function heldSeal(db: Queryable, ref: Ref): Promise<Buffer | null> {
  */
 export async function roleRows(db: Queryable): Promise<StoredRole[]> {
   if (engineOf(db) === 'postgres') {
+    const role = changesOf(db, 'c', sql`log_object('role', r.scope || '/' || r.name)`);
     const rows = await rowsOf<{ scope: string; name: string; definition: unknown; seal: Buffer | Uint8Array | null; found: boolean; newest: Buffer | Uint8Array | null }>(db, sql`
       SELECT r.scope, r.name, r.definition, r.seal, l.number IS NOT NULL AS found, l.seal AS newest FROM roles r
-        LEFT JOIN LATERAL (SELECT c.number, c.seal FROM log_changes c WHERE c.object = log_object('role', r.scope || '/' || r.name) ORDER BY c.number DESC LIMIT 1) l ON true`);
+        LEFT JOIN LATERAL (SELECT c.number, c.seal FROM log_changes c WHERE ${role.where} ORDER BY ${role.order} LIMIT 1) l ON true`);
     return rows.map((row) => ({
       scope: row.scope, name: row.name, definition: roleRow('', row.definition).definition, seal: bytes(row.seal), newest: row.found ? bytes(row.newest) : undefined,
     }));
@@ -1794,7 +1799,8 @@ export async function issuingCredential(db: Queryable, id: string, macs: readonl
   const object = objectKey({ kind: 'credential', id });
   // The credential's columns as 0036's function answers them (the vault's login reads no credential otherwise), and
   // beside them, in the same statement, its newest change's columns, which the vault's login reads.
-  const newest = sql`SELECT l.number, l.at, l.request_id, l.actor, l.payload, l.seal, l.mac FROM log_changes l WHERE l.object = ${object} ORDER BY l.number DESC LIMIT 1`;
+  const change = changesOf(db, 'l', object);
+  const newest = sql`SELECT l.number, l.at, l.request_id, l.actor, l.payload, l.seal, l.mac FROM log_changes l WHERE ${change.where} ORDER BY ${change.order} LIMIT 1`;
   const [row] = engineOf(db) === 'postgres'
     ? await rowsOf<Read>(db, sql`SELECT c.id, c.principal, c.kind, c.scope, c.revoked, c.expires_at, c.not_after, c.generation, c.seal,
         l.number, l.at, l.request_id, l.actor, l.payload, l.seal AS newest, l.mac

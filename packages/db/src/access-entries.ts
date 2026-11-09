@@ -2,7 +2,7 @@ import { ACCESS_ACTIONS } from '@coffre/core/vault';
 import { asc, desc, eq, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 import type { Queryable } from './database.ts';
-import { engineOf } from './dialect.ts';
+import { engineOf, type Engine } from './dialect.ts';
 
 /**
  * The vault's allowed access entries in 0.14's log: an add, restore, role
@@ -115,4 +115,42 @@ export function keyedBy(db: Queryable, column: SQLWrapper, seq: SQLWrapper, orde
   const by = order === 'asc' ? asc : desc;
   if (engineOf(db) !== 'postgres') return { where: eq(column as never, value), orderBy: [by(seq as never)] };
   return { where: sql`${column} = ANY(${values}::text[])`, orderBy: [by(column as never), by(seq as never)] };
+}
+
+/**
+ * One object's changes in 0.15's log (`log_changes`, as `alias`), and the
+ * order that reads them by number, newest first (`desc`) or oldest:
+ * through `log_changes_object_idx`, `(object, number)`, whatever else the
+ * log holds (R48). `where` the condition on the object, `order` the order,
+ * for `… WHERE ${where} ORDER BY ${order} LIMIT 1`. Asked plainly
+ * (`object = $1 ORDER BY number DESC`), Postgres drops the object from the
+ * order, which the primary key then yields, and where its statistics hold
+ * the object common it walks the primary key back from the newest change,
+ * every other object's on the way: 441 pages for an object's newest change
+ * behind 20,000 of another's, under a plan for its value as under one for
+ * any (Postgres 16; 4 by the index). `= ANY` of the one object does not
+ * fix it, so only the object's index yields the order (`keyedBy`).
+ * `object` is SQL that names a uuid: a column, `log_object(…)`, or a
+ * value, which the cast types; `db` the database, or its engine. SQLite,
+ * which takes the object's index, asks it plainly.
+ */
+export function changesOf(db: Queryable | Engine, alias: string, object: SQLWrapper | string, order: 'asc' | 'desc' = 'desc'): { where: SQL; order: SQL } {
+  const as = sql.raw(alias);
+  const by = sql.raw(order === 'asc' ? 'ASC' : 'DESC');
+  if ((typeof db === 'string' ? db : engineOf(db)) !== 'postgres') return { where: sql`${as}.object = ${object}`, order: sql`${as}.number ${by}` };
+  return { where: sql`${as}.object = ANY(ARRAY[CAST(${object} AS uuid)])`, order: sql`${as}.object ${by}, ${as}.number ${by}` };
+}
+
+/**
+ * The change a tamper report names (its metadata's `change`, a string): a
+ * report of 0.15's log, which stands while that change is its member's
+ * newest; null for 0.14's, which name none. As `audit_log_tamper_idx` keys
+ * it, after the member: a lookup of either kind (`tamperReportsAbout`,
+ * `findingsOf`) reads its member's reports of that kind alone, never the
+ * other's (T245, R48).
+ */
+export function changeNamed(engine: Engine, metadata: SQLWrapper): SQL<string | null> {
+  return engine === 'postgres'
+    ? sql`(CASE WHEN jsonb_typeof(${metadata}::jsonb -> 'change') = 'string' THEN ${metadata}::jsonb ->> 'change' END)`
+    : sql`(CASE WHEN json_type(${metadata}, '$.change') = 'text' THEN json_extract(${metadata}, '$.change') END)`;
 }

@@ -13,8 +13,9 @@ import { indexOf } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
 import { policySeqAndSettings } from '../src/db/answers.ts';
-import { latestCheckpoint, latestTallied, talliedAfter } from '../src/db/queries.ts';
+import { auditPage, latestCheckpoint, latestTallied, memberAccess, talliedAfter } from '../src/db/queries.ts';
 import { newestAppEntry, newestMove, wroteUnder } from '../src/db/rotation.ts';
+import { frozenTargets } from '../src/db/workloads.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { emptyLog, openTestDatabase, TEST_ENGINE, withLogUnlocked } from './db/engine.ts';
 
@@ -30,7 +31,7 @@ const PAGES = 16;
 const RUN = TEST_ENGINE === 'postgres' ? 30_000 : 3_000;
 const TAIL = TEST_ENGINE === 'postgres' ? 20_000 : 2_000;
 
-type Rows = { author: 'app' | 'vault'; action: string; decision?: 'allow' | 'deny'; code?: string; key?: string; count?: number; signs?: boolean };
+type Rows = { author: 'app' | 'vault'; action: string; decision?: 'allow' | 'deny'; code?: string; key?: string; count?: number; signs?: boolean; actor?: string; subject?: string; metadata?: string };
 
 type Lookup = {
   name: string;
@@ -39,10 +40,13 @@ type Lookup = {
   tail: Rows[];
   /** The indexes its statements on the audit log take: each takes one of them. */
   indexes: string[];
+  /** The most pages each may read, if not `PAGES`. */
+  pages?: number;
   ask: (app: Database, run: { first: bigint; newest: bigint }) => Promise<void>;
 };
 
 const ZERO = Buffer.alloc(32);
+const FREEZE = JSON.stringify({ target: 'instance' });
 
 const LOOKUPS: Lookup[] = [
   {
@@ -79,6 +83,45 @@ const LOOKUPS: Lookup[] = [
       assert.deepEqual((await talliedAfter(app, newest - 1n, 32)).map(({ entry }) => entry), [newest]);
     },
   },
+  {
+    // A target's freezes, most of the app's entries, then a long tail of others (`sign_in`'s, the functions' test).
+    name: 'frozenTargets',
+    run: { author: 'app', action: 'workload.freeze', metadata: FREEZE },
+    tail: [{ author: 'app', action: 'secret.read', metadata: FREEZE }],
+    indexes: ['audit_log_frozen_idx'],
+    ask: async (app) => assert.deepEqual(await frozenTargets(app, ['instance', 'binding:none']), ['instance']),
+  },
+  {
+    // A member's newest access entry, then a long run of reads about them (the member page's, beside their grants).
+    name: 'memberAccess',
+    run: { author: 'vault', action: 'access.grant', subject: 'user:u1' },
+    tail: [{ author: 'vault', action: 'secret.read', subject: 'user:u1' }],
+    indexes: ['audit_log_access_idx'],
+    // One statement of nine probes: the member's row, their findings of either kind, their newest change and access
+    // entry, their grants and the projects; a step each.
+    pages: 2 * PAGES,
+    ask: async (app) => {
+      // Their row, which the read starts from: its MAC unchecked here.
+      await rowsOf(db.owner, sql`INSERT INTO principals (principal, status, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
+        VALUES ('user:u1', 'active', 0, 'system:coffre', 0, 'system:coffre', 0, ${ZERO}) ON CONFLICT DO NOTHING`);
+      assert.equal((await memberAccess(app, 'user:u1', new Date())).member?.tampered, false);
+    },
+  },
+  {
+    // A member's page of the log, after a long run of another's: their newest, and the page by seq.
+    name: 'auditPage (actors)',
+    run: { author: 'app', action: 'secret.read', actor: 'user:u1' },
+    tail: [{ author: 'app', action: 'secret.read', actor: 'user:u2' }],
+    indexes: ['audit_log_actor_idx', 'audit_log_pkey'],
+    // A page of 32 entries is 32 steps of the primary key, about three pages each, however long the log.
+    pages: PAGES + 3 * 32,
+    ask: async (app, { newest }) => {
+      const page = await auditPage(app, { actors: ['user:u1', 'token:u1'], limit: 1 });
+      assert.deepEqual([page.rows.map(({ seq }) => seq), page.more], [[newest], true]);
+      const older = await auditPage(app, { actors: ['user:u1', 'token:u1'], limit: 32, beforeSeq: newest });
+      assert.deepEqual(older.rows.map(({ seq }) => seq), Array.from({ length: 32 }, (_, i) => newest - 1n - BigInt(i)));
+    },
+  },
   ...(['policy', 'settings'] as const).map((kind): Lookup => ({
     name: `policySeqAndSettings (${kind})`,
     run: { author: 'vault', action: `${kind}.change` },
@@ -92,14 +135,14 @@ const LOOKUPS: Lookup[] = [
 ];
 
 async function append(entries: Rows): Promise<void> {
-  const { author, action, decision = entries.code === undefined ? 'allow' : 'deny', code = null, key = `${author}:k`, count = RUN, signs = false } = entries;
+  const { author, action, decision = entries.code === undefined ? 'allow' : 'deny', code = null, key = `${author}:k`, count = RUN, signs = false, actor = 'system:coffre', subject = null, metadata = '{}' } = entries;
   // A recursive count, which both engines have (Postgres's `generate_series` SQLite has not), 20,000 at a time.
   for (let left = count; left > 0; left -= 20_000) {
     await withLogUnlocked(db.owner, (tx) => rowsOf(tx, sql`
       WITH RECURSIVE g (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM g WHERE n < ${Math.min(20_000, left)})
-      INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, code, related_seq, prev_hash, mac, hash, metadata)
-      SELECT head.newest + g.n, ${author}, ${key}, CAST(${Date.now()} AS BIGINT) + g.n, 'system:coffre', ${action}, ${decision}, ${code},
-        CASE WHEN ${signs ? 1 : 0} = 1 AND head.newest + g.n > 1 THEN head.newest + g.n - 1 END, ${ZERO}, ${ZERO}, ${ZERO}, '{}'
+      INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, code, subject_principal, related_seq, prev_hash, mac, hash, metadata)
+      SELECT head.newest + g.n, ${author}, ${key}, CAST(${Date.now()} AS BIGINT) + g.n, ${actor}, ${action}, ${decision}, ${code}, ${subject},
+        CASE WHEN ${signs ? 1 : 0} = 1 AND head.newest + g.n > 1 THEN head.newest + g.n - 1 END, ${ZERO}, ${ZERO}, ${ZERO}, ${metadata}
       FROM (SELECT coalesce(max(seq), 0) AS newest FROM audit_log) head, g`));
   }
 }
@@ -153,7 +196,8 @@ async function measure(statement: Statement): Promise<{ pages: number; indexes: 
   if (TEST_ENGINE !== 'postgres') {
     const client = (db.owner as unknown as { session: { client: Libsql } }).session.client;
     const { rows } = await client.execute({ sql: `EXPLAIN QUERY PLAN ${statement.text}`, args: statement.values.map((value) => (typeof value === 'object' && value !== null && !Buffer.isBuffer(value) ? null : value)) });
-    return { pages: 0, indexes: rows.flatMap(({ detail }) => [...detail.matchAll(/USING (?:COVERING )?INDEX (\w+)/g)].map((found) => found[1]!)) };
+    // A table's rowid, SQLite's primary key, as Postgres names its index.
+    return { pages: 0, indexes: rows.flatMap(({ detail }) => [...detail.matchAll(/USING (?:COVERING )?INDEX (\w+)|(\w+) USING INTEGER PRIMARY KEY/g)].map((found) => found[1] ?? `${found[2]!}_pkey`)) };
   }
   const one = postgresClient(TEST_RUNTIME_DATABASE_URL, { max: 1 });
   try {
@@ -183,7 +227,7 @@ for (const lookup of LOOKUPS) {
       const { pages, indexes } = await measure(statement);
       const said = JSON.stringify({ statement: statement.text, pages, indexes });
       assert.ok(indexes.some((index) => lookup.indexes.includes(index)), `takes one of ${lookup.indexes.join(', ')}: ${said}`);
-      assert.ok(pages <= PAGES, `reads at most ${PAGES} pages: ${said}`);
+      assert.ok(pages <= (lookup.pages ?? PAGES), `reads at most ${lookup.pages ?? PAGES} pages: ${said}`);
     }
   });
 }

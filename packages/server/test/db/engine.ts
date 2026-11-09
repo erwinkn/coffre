@@ -91,7 +91,7 @@ export function withLogUnlocked<T>(owner: Database, work: (db: Queryable) => Pro
  * them for one transaction; SQLite has no such switch, so they are dropped
  * and made again.
  */
-export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' | 'secret_versions', work: (db: Queryable) => Promise<T>): Promise<T> {
+export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' | 'secret_versions' | 'log_changes', work: (db: Queryable) => Promise<T>): Promise<T> {
   if (TEST_ENGINE === 'postgres') {
     return owner.transaction(async (tx) => {
       await tx.execute(sql.raw(`ALTER TABLE ${table} DISABLE TRIGGER USER`));

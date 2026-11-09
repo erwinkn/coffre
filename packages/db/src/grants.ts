@@ -19,7 +19,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, like, lt, or, sql, type SQL } 
 import { tablesOf, type Queryable } from './database.ts';
 import { prepared } from './prepared.ts';
 import { engineOf, rowsOf, tombstone, truth } from './dialect.ts';
-import { accessAllowed, entriesOf, entryColumns, keyedBy, logObject, newestAuthentic, type Authenticity, type Newest } from './log.ts';
+import { accessAllowed, changeNamed, changesOf, entriesOf, entryColumns, keyedBy, logObject, newestAuthentic, type Authenticity, type Newest } from './log.ts';
 
 /**
  * One grant, as `grants` holds it: on a project (`environmentId`
@@ -326,10 +326,7 @@ export function findingMetadata(change: string): string {
  * apart, `reportStands`). A name that is no change's names none that is newest, and settles at once.
  */
 function weighedBy(db: Queryable): SQL<string | null> {
-  const { auditLog } = tablesOf(db);
-  return engineOf(db) === 'postgres'
-    ? sql`(CASE WHEN jsonb_typeof(${auditLog.metadata}::jsonb -> 'change') = 'string' THEN ${auditLog.metadata}::jsonb ->> 'change' END)`
-    : sql`(CASE WHEN json_type(${auditLog.metadata}, '$.change') = 'text' THEN json_extract(${auditLog.metadata}, '$.change') END)`;
+  return changeNamed(engineOf(db), tablesOf(db).auditLog.metadata);
 }
 
 /**
@@ -350,7 +347,8 @@ export function findingStands(newest: { legacy: bigint | null; access: bigint | 
 /** A member's newest change's name (`changeName`) in SQL, `object` its object in the log: one probe of `log_changes_object_idx` (R48). */
 function newestNamed(db: Queryable, object: SQL): SQL<string> {
   const hex = engineOf(db) === 'postgres' ? sql`encode(c.mac, 'hex')` : sql`lower(hex(c.mac))`;
-  return sql`coalesce((SELECT ${hex} FROM log_changes c WHERE c.object = ${object} ORDER BY c.number DESC LIMIT 1), ${sql.raw(`'${NO_CHANGE}'`)})`;
+  const newest = changesOf(db, 'c', object);
+  return sql`coalesce((SELECT ${hex} FROM log_changes c WHERE ${newest.where} ORDER BY ${newest.order} LIMIT 1), ${sql.raw(`'${NO_CHANGE}'`)})`;
 }
 
 /**
@@ -381,9 +379,12 @@ export async function newestChangeNames(db: Queryable, principals: readonly stri
 export function findingsOf(db: Queryable, principal: string): { legacy: SQL<string | null>; named: SQL<number> } {
   const { auditLog: log } = tablesOf(db);
   const weighed = weighedBy(db);
-  const of = sql`${log.author} = 'vault' AND ${log.action} = 'vault.tampered' AND ${log.code} IN ('mac', 'stale') AND ${log.subjectPrincipal} = ${principal}`;
+  const about = reportsAbout(db, principal);
+  const of = sql`${entriesOf('tamper')} AND ${about.where}`;
   return {
-    legacy: sql`(SELECT CAST(max(${log.seq}) AS text) FROM ${log} WHERE ${of} AND ${weighed} IS NULL)`,
+    // The newest of 0.14's by `audit_log_tamper_idx`, `(member, change, seq)`: as the greatest `seq`, Postgres walked
+    // the member's reports of 0.15's back, or the vault's entries, 1,088 pages behind 20,000 of them (T245).
+    legacy: sql`(SELECT CAST(${log.seq} AS text) FROM ${log} WHERE ${of} AND ${weighed} IS NULL ORDER BY ${about.order} LIMIT 1)`,
     named: sql`(CASE WHEN EXISTS (SELECT 1 FROM ${log} WHERE ${of} AND ${weighed} = ${newestNamed(db, sql`${logObject('principal', principal)}`)}) THEN 1 ELSE 0 END)`,
   };
 }
@@ -462,18 +463,37 @@ async function tamperReportsAbout(
 ): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
   const weighed = weighedBy(db);
+  const about = reportsAbout(db, principal);
   const rows = await db
     .select(entryColumns(db))
     .from(auditLog)
     .where(
       and(
         entriesOf('tamper'),
-        eq(auditLog.subjectPrincipal, principal),
+        about.where,
         'names' in which ? sql`${weighed} = ${which.names}` : and(sql`${weighed} IS NULL`, gt(auditLog.seq, which.after)),
         before === undefined ? undefined : lt(auditLog.seq, before),
       ),
     )
-    .orderBy(desc(auditLog.seq))
+    .orderBy(about.order)
     .limit(limit);
   return rows as StoredEntry[];
+}
+
+/**
+ * A member's tamper reports of one kind, 0.15's naming one change or
+ * 0.14's naming none, newest first: steps of `audit_log_tamper_idx`,
+ * `(member, change, seq)`, however many of the other kind, or of other
+ * changes, came since. On Postgres through `= ANY` of the member, ordered
+ * by the member, the change, then `seq` (`keyedBy`): ordered by `seq`
+ * alone, Postgres walked `audit_log_vault_idx` back, 1,397 pages behind
+ * 40,000 reports naming another change (T245, R48).
+ */
+function reportsAbout(db: Queryable, principal: string): { where: SQL; order: SQL } {
+  const { auditLog } = tablesOf(db);
+  if (engineOf(db) !== 'postgres') return { where: sql`${auditLog.subjectPrincipal} = ${principal}`, order: sql`${auditLog.seq} DESC` };
+  return {
+    where: sql`${auditLog.subjectPrincipal} = ANY(${sql.param([principal])}::text[])`,
+    order: sql`${auditLog.subjectPrincipal} DESC, ${weighedBy(db)} DESC, ${auditLog.seq} DESC`,
+  };
 }

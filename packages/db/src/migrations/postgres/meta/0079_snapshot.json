@@ -601,6 +601,12 @@
               "nulls": "last"
             },
             {
+              "expression": "(CASE WHEN jsonb_typeof(\"metadata\"::jsonb -> 'change') = 'string' THEN \"metadata\"::jsonb ->> 'change' END)",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            },
+            {
               "expression": "seq",
               "isExpression": false,
               "asc": true,

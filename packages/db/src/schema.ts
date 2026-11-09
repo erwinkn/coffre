@@ -20,7 +20,7 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
-import { accessAllowed, authoredBy, entriesOf, indexOf } from './access-entries.ts';
+import { accessAllowed, authoredBy, changeNamed, entriesOf, indexOf } from './access-entries.ts';
 import { ACTIVE_SUBJECT } from './active-subject.ts';
 import { recordField, recorded } from './change-records.ts';
 
@@ -464,7 +464,8 @@ export const auditLog = pgTable(
     index('audit_log_app_idx').on(table.seq).where(sql`${table.author} = 'app'`).concurrently(),
     // Each kind of entry a runtime read asks the newest of, an index of its own with the kind's condition (`KINDS`):
     // one step however long the run of other entries since its newest, which Postgres otherwise walks back by `seq`
-    // whenever its statistics hold the kind common (T245, R48). By `seq` alone, the tamper reports by member.
+    // whenever its statistics hold the kind common (T245, R48). By `seq` alone, the tamper reports by member and the
+    // change they name (`changeNamed`), so that a lookup of either kind reads no report of the other.
     // Built without blocking writes (`online-indexes.ts`).
     index(indexOf('checkpoint')).on(table.seq).where(entriesOf('checkpoint')).concurrently(),
     index(indexOf('signed')).on(table.seq).where(entriesOf('signed')).concurrently(),
@@ -474,7 +475,7 @@ export const auditLog = pgTable(
     index(indexOf('rotation')).on(table.seq).where(entriesOf('rotation')).concurrently(),
     index(indexOf('intent')).on(table.seq).where(entriesOf('intent')).concurrently(),
     index(indexOf('keyCheck')).on(table.seq).where(entriesOf('keyCheck')).concurrently(),
-    index(indexOf('tamper')).on(table.subjectPrincipal, table.seq).where(entriesOf('tamper')).concurrently(),
+    index(indexOf('tamper')).on(table.subjectPrincipal, changeNamed('postgres', table.metadata), table.seq).where(entriesOf('tamper')).concurrently(),
     index(indexOf('moves')).on(table.seq).where(entriesOf('moves')).concurrently(),
     // The allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
     // however many refusals the log holds about them (T239, R48). No `author` in its key, which the condition fixes:

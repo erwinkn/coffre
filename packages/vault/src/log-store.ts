@@ -1,6 +1,7 @@
 import { entryLeaf, parseCheckpoint, splitNote, tileLeaves, type LogEntry, type PairNotes, type StoredPair, type Tile, type TileKey, type TreeName } from '@coffre/core/merkle';
 import type { Database } from '@coffre/db';
 import { engineOf, rowsOf } from '@coffre/db/dialect';
+import { changesOf } from '@coffre/db/log';
 import { sql, type SQL } from 'drizzle-orm';
 
 import { REFRESH_MAX_MS, REFRESH_WINDOW_SHARE, USE_AHEAD_MS, USE_DEADLINE_MS } from './bulk.ts';
@@ -390,9 +391,10 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
     async retention() {
       // The newest at or below the newest checkpoint (sealed, as far as the database says: log_cut's), by its object's
       // index; then its place, as a proof reads it.
+      const retained = changesOf('postgres', 'c', RETENTION_OBJECT);
       const [r] = await rowsOf<{ n: string | null }>(db, sql`SELECT (SELECT c.number FROM log_changes c
-          WHERE c.object = ${RETENTION_OBJECT}::uuid AND c.number <= (SELECT coalesce(max(k.upto), -1) FROM log_checkpoints k)
-          ORDER BY c.number DESC LIMIT 1)::text AS n`);
+          WHERE ${retained.where} AND c.number <= (SELECT coalesce(max(k.upto), -1) FROM log_checkpoints k)
+          ORDER BY ${retained.order} LIMIT 1)::text AS n`);
       return r?.n == null ? null : this.locate(BigInt(r.n), { tree: 'changes' });
     },
     async days() {
@@ -657,6 +659,9 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
   const made = new Set<string>();
   const id = (value: string | null) => (value === null ? sql`NULL` : postgres ? sql`CAST(${value} AS uuid)` : sql`${value}`);
   const text = (column: string) => sql.raw(postgres ? `CAST(${column} AS text)` : column);
+  // An asked object's first change and its newest below a number, each by its index (`changesOf`).
+  const oldest = changesOf(db, 'b', sql.raw('a.object'), 'asc');
+  const newest = changesOf(db, 'b', sql.raw('a.object'));
   return {
     async readsCursor() {
       const [row] = await rowsOf<{ through: string | number; pair: string | number; at: string | number; mac: Uint8Array | null }>(db, sql`SELECT through, pair, at, mac FROM log_reads_cursor WHERE only_row`);
@@ -678,8 +683,8 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
         const read = await rowsOf<{ i: number | string; n: string | number; at: string | number; request_id: string; object: string; actor: string; payload: string; seal: Uint8Array | null; mac: Uint8Array }>(db, sql`
           SELECT a.i, c.number AS n, ${text('c.at')} AS at, ${text('c.request_id')} AS request_id, ${text('c.object')} AS object, c.actor, c.payload, c.seal, c.mac FROM (${rows}) a
             JOIN log_changes c ON c.number = CASE WHEN a.first = 1
-              THEN (SELECT min(b.number) FROM log_changes b WHERE b.object = a.object)
-              ELSE (SELECT max(b.number) FROM log_changes b WHERE b.object = a.object AND b.number < a.below) END`);
+              THEN (SELECT b.number FROM log_changes b WHERE ${oldest.where} ORDER BY ${oldest.order} LIMIT 1)
+              ELSE (SELECT b.number FROM log_changes b WHERE ${newest.where} AND b.number < a.below ORDER BY ${newest.order} LIMIT 1) END`);
         const byIndex = new Map(read.map((r) => [Number(r.i), r]));
         for (let i = 0; i < batch.length; i += 1) {
           const r = byIndex.get(i);

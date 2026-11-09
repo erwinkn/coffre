@@ -38,10 +38,15 @@ function namedTarget(db: Queryable): SQL<string> {
  */
 function frozen(db: Queryable, target: SQL | string): SQL<boolean> {
   const { auditLog } = tablesOf(db);
+  // On Postgres the target through `= ANY`, ordered by the target then `seq` (`keyedBy`): asked plainly, Postgres drops
+  // the target from the order and, under a plan for any target, walked `audit_log_app_idx` back from the newest entry,
+  // 701 pages behind 20,000 of the app's other entries (`sign_in`'s, 0082).
+  const postgres = dialect.engineOf(db) === 'postgres';
+  const named = namedTarget(db);
   const newest = sql`(SELECT ${auditLog.action} FROM ${auditLog} WHERE ${auditLog.author} = 'app'
     AND ${auditLog.action} IN (${sql.raw(FREEZE_ACTIONS.map((action) => `'${action}'`).join(', '))}) AND ${auditLog.decision} = 'allow'
-    AND ${namedTarget(db)} = ${target} ORDER BY ${auditLog.seq} DESC LIMIT 1)`;
-  return truth(sql`COALESCE(${newest} = 'workload.freeze', ${dialect.engineOf(db) === 'postgres' ? sql`false` : sql`0`})`);
+    AND ${postgres ? sql`${named} = ANY(ARRAY[CAST(${target} AS text)]) ORDER BY ${named} DESC, ${auditLog.seq} DESC` : sql`${named} = ${target} ORDER BY ${auditLog.seq} DESC`} LIMIT 1)`;
+  return truth(sql`COALESCE(${newest} = 'workload.freeze', ${postgres ? sql`false` : sql`0`})`);
 }
 
 /** Whether binding `id` (a column, as text) has a tombstone, as a boolean (`hasTombstone`). */

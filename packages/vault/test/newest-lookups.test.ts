@@ -13,16 +13,18 @@ import assert from 'node:assert/strict';
 import { createDatabase, type Database } from '@coffre/db';
 import { openDatabase, postgresClient } from '@coffre/db/connect';
 import { rowsOf } from '@coffre/db/dialect';
-import { newestAccess, reportStands } from '@coffre/db/grants';
-import { indexOf, newestVaultSeq } from '@coffre/db/log';
+import { findingsOf, newestAccess, newestChangeNames, reportStands } from '@coffre/db/grants';
+import { changesOf, indexOf, newestVaultSeq } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
+import { objectKey, type Ref } from '../src/inputs.ts';
 import { snapshot } from '../src/snapshot.ts';
 import {
-  firstVaultEntryUnder, keyChecks, latestRotation, latestSigned, latestTallied, memberLogs, newestBrokenLog, newestCheckpointEntry,
-  newestVaultEntries, talliedAfter, vaultPage,
+  firstVaultEntryUnder, keyChecks, latestRotation, latestSigned, latestTallied, loggedChanges, memberLogs, newestBrokenLog, newestChange,
+  newestCheckpointEntry, newestVaultEntries, talliedAfter, vaultPage,
 } from '../src/store.ts';
-import { ENGINE, openTestDatabase, rows, run, VAULT_URL, withLogUnlocked, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, rows, run, VAULT_URL, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -45,17 +47,37 @@ type Lookup = {
   name: string;
   /** Before the run, for a read of the oldest. */
   head?: Rows[];
-  run: Rows;
+  run?: Rows;
   tail: Rows[];
-  /** The indexes its statements on the audit log take: each takes one of them. */
+  /** 0.15's log after the audit log's history, oldest first: a run of changes of each object (`Changes`). */
+  changes?: Changes[];
+  /** The indexes its statements on the logs take: each takes one of them. */
   indexes: string[];
+  /** Why SQLite reads it otherwise, if it does: no deployment runs on SQLite (AGENTS.md), whose plans alone are held here. */
+  sqlite?: string;
   /** The read, as the runtime asks it, holding its answer to `newest`, the run's last entry, and `first`, its first. */
   ask: (vault: Database, run: { first: bigint; newest: bigint }) => Promise<void>;
 };
 
+/** Changes of one object in 0.15's log, by its key (`objectKey`), each sealed. */
+type Changes = { object: string; count?: number };
+
 const ZERO = Buffer.alloc(32);
+/** A change's seal and its MAC, both 16 bytes: no MAC of the vault's, which the reads here do not check. */
+const SEAL = Buffer.alloc(16);
 const FREEZE = JSON.stringify({ target: 'instance' });
 const unwraps = (count = TAIL): Rows => ({ author: 'vault', action: 'key.unwrap', count });
+/** A member's tamper reports: of 0.15's log, naming change `change`; of 0.14's, naming none. */
+const reports = (change: string | null, count = RUN): Rows => ({
+  author: 'vault', action: 'vault.tampered', decision: 'deny', code: 'mac', subject: 'user:u1', count, metadata: JSON.stringify(change === null ? {} : { change }),
+});
+const SECRET: Ref = { kind: 'secret', id: '00000000-0000-4000-8000-00000000000a' };
+const MEMBER: Ref = { kind: 'principal', id: 'user:u1' };
+/** Another object's changes, after the run of the one asked about. */
+const others = (count = TAIL): Changes => ({ object: objectKey({ kind: 'secret', id: '00000000-0000-4000-8000-00000000000b' }), count });
+const check = { authentic: () => true, forged: () => {} };
+/** SQLite's tamper index has no change in its key (Postgres's does, `changeNamed`): past a member's reports of the other kind it walks its rowid. */
+const TAMPER_ON_SQLITE = "SQLite's tamper index leaves out the change a report names, and past a member's reports of the other kind it walks its rowid";
 
 const LOOKUPS: Lookup[] = [
   {
@@ -143,11 +165,79 @@ const LOOKUPS: Lookup[] = [
   },
   {
     name: 'reportStands (tamper reports)',
-    run: { author: 'vault', action: 'vault.tampered', decision: 'deny', code: 'mac', subject: 'user:u1' },
+    run: reports(null),
     tail: [{ author: 'vault', action: 'secret.read', subject: 'user:u1' }],
     indexes: ['audit_log_access_idx', indexOf('tamper')],
     ask: async (vault) => {
-      assert.equal(await reportStands(vault, 'user:u1', { authentic: () => true, forged: () => {} }, null), true);
+      assert.equal(await reportStands(vault, 'user:u1', check, null), true);
+    },
+  },
+  {
+    // 0.15's reports naming one change, then a long run naming another: the first's newest, and one naming a third,
+    // which none does, and then 0.14's, of which there are none.
+    name: 'reportStands (named), findingsOf',
+    run: reports('change:a'),
+    tail: [reports('change:b', TAIL)],
+    indexes: ['audit_log_access_idx', indexOf('tamper')],
+    sqlite: TAMPER_ON_SQLITE,
+    ask: async (vault) => {
+      assert.equal(await reportStands(vault, 'user:u1', check, 'change:a'), true);
+      assert.equal(await reportStands(vault, 'user:u1', check, 'change:c'), false);
+      const { legacy, named } = findingsOf(vault, 'user:u1');
+      assert.deepEqual(await rowsOf(vault, sql`SELECT ${legacy} AS legacy, ${named} AS named`), [{ legacy: null, named: 0 }]);
+    },
+  },
+  {
+    // 0.14's, then a long run of 0.15's naming a change: 0.14's newest, past them.
+    name: 'reportStands (legacy), findingsOf',
+    run: reports(null),
+    tail: [reports('change:b', TAIL)],
+    indexes: ['audit_log_access_idx', indexOf('tamper')],
+    sqlite: TAMPER_ON_SQLITE,
+    ask: async (vault, { newest }) => {
+      assert.equal(await reportStands(vault, 'user:u1', check, null), true);
+      const { legacy } = findingsOf(vault, 'user:u1');
+      assert.deepEqual(await rowsOf(vault, sql`SELECT ${legacy} AS legacy`), [{ legacy: String(newest) }]);
+    },
+  },
+  {
+    // An object's newest change, a long run of another's since (0.15's log, `changesOf`).
+    name: 'newestChange, loggedChanges',
+    tail: [],
+    changes: [{ object: objectKey(SECRET) }, others()],
+    indexes: ['log_changes_object_idx'],
+    ask: async (vault) => {
+      assert.equal((await newestChange(vault, SECRET, []))?.holds, false);
+      assert.equal((await loggedChanges(vault, [], [SECRET], [SECRET])).get(objectKey(SECRET))?.length, 2);
+    },
+  },
+  {
+    name: 'memberLogs, newestChangeNames, snapshot (changes)',
+    tail: [],
+    changes: [{ object: objectKey(MEMBER) }, others()],
+    indexes: ['log_changes_object_idx'],
+    ask: async (vault) => {
+      assert.notEqual((await memberLogs(vault, ['user:u1'])).get('user:u1')?.newest, null);
+      assert.notEqual((await newestChangeNames(vault, ['user:u1'])).get('user:u1'), 'none');
+      if (ENGINE === 'postgres') assert.notEqual((await snapshot(vault, { principals: ['user:u1'], seals: true })).memberLogs.get('user:u1')?.newest, null);
+    },
+  },
+  {
+    // The shape every newest change goes through on Postgres (`changesOf`), of a value, of `log_object(…)`, and of a
+    // column of the row it is read beside, as the functions read them; under a plan for any value, the functions' test.
+    name: 'changesOf',
+    tail: [],
+    changes: [{ object: objectKey(MEMBER) }, others()],
+    indexes: ['log_changes_object_idx'],
+    ask: async (vault) => {
+      const value = changesOf(vault, 'x', objectKey(MEMBER));
+      assert.equal((await rowsOf(vault, sql`SELECT x.number FROM log_changes x WHERE ${value.where} ORDER BY ${value.order} LIMIT 1`)).length, 1);
+      if (ENGINE !== 'postgres') return;
+      const named = changesOf(vault, 'x', sql`log_object('principal', 'user:u1')`);
+      assert.equal((await rowsOf(vault, sql`SELECT x.number FROM log_changes x WHERE ${named.where} ORDER BY ${named.order} LIMIT 1`)).length, 1);
+      const beside = changesOf(vault, 'x', sql`k.object`);
+      assert.equal((await rowsOf(vault, sql`SELECT l.number FROM (VALUES (CAST(${objectKey(MEMBER)} AS uuid))) k (object)
+        CROSS JOIN LATERAL (SELECT x.number FROM log_changes x WHERE ${beside.where} ORDER BY ${beside.order} LIMIT 1) l`)).length, 1);
     },
   },
   {
@@ -181,6 +271,19 @@ async function append(entries: Rows): Promise<void> {
   }
 }
 
+/** Appends `count` changes of `object` to 0.15's log, after its newest, as the owner with its triggers lifted. */
+async function appendChanges({ object, count = RUN }: Changes): Promise<void> {
+  const uuid = ENGINE === 'postgres' ? sql`CAST(${object} AS uuid)` : sql`${object}`;
+  for (let left = count; left > 0; left -= 20_000) {
+    await withTriggersLifted(db.owner, 'log_changes', (tx) => rowsOf(tx, sql`
+      WITH RECURSIVE g (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM g WHERE n < ${Math.min(20_000, left)})
+      INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+      SELECT head.newest + g.n, CAST(${Date.now()} AS BIGINT) + g.n, 'request:' || CAST(head.newest + g.n AS TEXT), ${uuid}, 'system:coffre', '{}', ${SEAL}, ${SEAL}
+      FROM (SELECT coalesce(max(number), 0) AS newest FROM log_changes) head, g`));
+  }
+}
+
+
 async function newestSeq(): Promise<bigint> {
   const [row] = await rows<{ seq: string | null }>(db.owner, sql`SELECT CAST(coalesce(max(seq), 0) AS TEXT) AS seq FROM audit_log`);
   return BigInt(row!.seq ?? 0);
@@ -188,17 +291,20 @@ async function newestSeq(): Promise<bigint> {
 
 async function startOver(): Promise<void> {
   // Truncated on Postgres: a delete checks each entry's `related_seq` against the rest, which no index serves.
-  if (ENGINE === 'postgres') await withLogUnlocked(db.owner, (tx) => rowsOf(tx, sql`TRUNCATE audit_log CASCADE`));
-  else await withLogUnlocked(db.owner, async (tx) => {
-    await run(tx, sql`UPDATE audit_log SET related_seq = NULL WHERE related_seq IS NOT NULL`);
-    await run(tx, sql`DELETE FROM audit_log`);
-  });
+  if (ENGINE === 'postgres') await withLogUnlocked(db.owner, (tx) => rowsOf(tx, sql`TRUNCATE audit_log, log_changes CASCADE`));
+  else {
+    await withLogUnlocked(db.owner, async (tx) => {
+      await run(tx, sql`UPDATE audit_log SET related_seq = NULL WHERE related_seq IS NOT NULL`);
+      await run(tx, sql`DELETE FROM audit_log`);
+    });
+    await withTriggersLifted(db.owner, 'log_changes', (tx) => run(tx, sql`DELETE FROM log_changes`));
+  }
 }
 
 type Statement = { text: string; values: unknown[] };
 type Node = { 'Shared Hit Blocks': number; 'Shared Read Blocks': number; 'Index Name'?: string; Plans?: Node[] };
 
-/** Each statement on the audit log `work` sends, through a client of the vault's login: Postgres's, or SQLite's. */
+/** Each statement on the logs (0.14's, 0.15's changes) `work` sends, through a client of the vault's login: Postgres's, or SQLite's. */
 async function sent(work: (vault: Database) => Promise<unknown>): Promise<Statement[]> {
   const seen: Statement[] = [];
   if (ENGINE === 'postgres') {
@@ -230,7 +336,7 @@ async function sent(work: (vault: Database) => Promise<unknown>): Promise<Statem
       await opened.close();
     }
   }
-  return seen.filter(({ text }) => /\baudit_log\b/.test(text) && /^\s*(select|with)\b/i.test(text));
+  return seen.filter(({ text }) => /\b(audit_log|log_changes)\b/.test(text) && /^\s*(select|with)\b/i.test(text));
 }
 
 /** The pages `statement` reads, run again under EXPLAIN as the vault's login, and the indexes it reads them by; on SQLite, its plan's indexes alone. */
@@ -255,14 +361,16 @@ async function measure(statement: Statement): Promise<{ pages: number; indexes: 
 }
 
 /** A log of `head`, then `run`, then `tail`, its statistics fresh: the run's first entry and its newest. */
-async function history({ head = [], run: matching, tail }: Pick<Lookup, 'head' | 'run' | 'tail'>): Promise<{ first: bigint; newest: bigint }> {
+async function history({ head = [], run: matching, tail, changes = [] }: Pick<Lookup, 'head' | 'run' | 'tail' | 'changes'>): Promise<{ first: bigint; newest: bigint }> {
   await startOver();
   for (const rows of head) await append(rows);
   const first = (await newestSeq()) + 1n;
-  await append(matching);
+  if (matching !== undefined) await append(matching);
   const newest = await newestSeq();
   for (const rows of tail) await append(rows);
-  await rowsOf(db.owner, ENGINE === 'postgres' ? sql`VACUUM (ANALYZE, PARALLEL 0) audit_log` : sql`ANALYZE`);
+  for (const run of changes) await appendChanges(run);
+  if (ENGINE === 'postgres') for (const table of ['audit_log', 'log_changes']) await rowsOf(db.owner, sql.raw(`VACUUM (ANALYZE, PARALLEL 0) ${table}`));
+  else await rowsOf(db.owner, sql`ANALYZE`);
   return { first, newest };
 }
 
@@ -270,10 +378,11 @@ for (const lookup of LOOKUPS) {
   test(`${lookup.name}: one step of its index, however long the run of other entries since (T245, R48)`, { timeout: 300_000 }, async () => {
     const { first, newest } = await history(lookup);
     const statements = await sent((vault) => lookup.ask(vault, { first, newest }));
-    assert.ok(statements.length > 0, 'the read asked the audit log');
+    assert.ok(statements.length > 0, 'the read asked the logs');
     for (const statement of statements) {
       const { pages, indexes } = await measure(statement);
       const said = JSON.stringify({ statement: statement.text, pages, indexes });
+      if (ENGINE === 'sqlite' && lookup.sqlite !== undefined) continue;
       assert.ok(indexes.some((index) => lookup.indexes.includes(index)), `takes one of ${lookup.indexes.join(', ')}: ${said}`);
       assert.ok(pages <= PAGES, `reads at most ${PAGES} pages: ${said}`);
     }
@@ -281,9 +390,9 @@ for (const lookup of LOOKUPS) {
 }
 
 /**
- * The database's functions' lookups (a use's, a sign-in's, an issue's): each of these kinds, as they write it, and the
- * history that is worst for it. PL/pgSQL plans a statement for any values from its sixth call, so each is held to its
- * index under a generic plan, its variable a parameter.
+ * The database's functions' lookups of 0.14's log (a use's, a sign-in's, an issue's): each of these kinds, as they write
+ * it, and the history that is worst for it. PL/pgSQL plans a statement for its values for a session's first five
+ * calls, then for any values, so each is held to its index under both plans, its variable a parameter.
  */
 const FUNCTION_KINDS = [
   {
@@ -301,51 +410,38 @@ const FUNCTION_KINDS = [
     history: { run: { author: 'vault', action: 'access.grant', subject: 'user:u1' }, tail: [{ author: 'vault', action: 'secret.read', subject: 'user:u1' }] },
   },
   {
+    // A target's freezes and lifts, most of the app's entries, then a long tail of others: through `= ANY` of the
+    // target, ordered by it (`keyedBy`), only `audit_log_frozen_idx` yields the order; asked by `= target`, a plan for
+    // any target walked `audit_log_app_idx` back, 701 pages behind 20,000 (0082).
     kind: 'freeze',
-    where: /^a\.author = 'app' AND a\.action IN \('workload\.freeze', 'workload\.unfreeze'\) AND a\.decision = 'allow' AND \(a\.metadata::jsonb ->> 'target'\) = ([\w.]+)$/,
+    where: /^a\.author = 'app' AND a\.action IN \('workload\.freeze', 'workload\.unfreeze'\) AND a\.decision = 'allow' AND \(a\.metadata::jsonb ->> 'target'\) = ANY\(ARRAY\[([\w.]+)\]\)$/,
     index: 'audit_log_frozen_idx',
     value: 'instance',
-    // 200 freezes of one target, a churn no person makes, among a long tail of the app's entries. A plan for any target
-    // reads the target's freezes and lifts by `audit_log_frozen_idx` and sorts them, which it expects few of: a cost
-    // that grows with them, not with the log (69 pages at 2,000). Were they most of the app's entries, it would walk
-    // `audit_log_app_idx` back instead, which only ordering by the target first (`keyedBy`) rules out: that takes
-    // `sign_in` written again, left to its next change (T245).
-    history: { run: { author: 'app', action: 'workload.freeze', metadata: FREEZE, count: 200 }, tail: [{ author: 'app', action: 'secret.read', metadata: FREEZE }] },
+    history: { run: { author: 'app', action: 'workload.freeze', metadata: FREEZE }, tail: [{ author: 'app', action: 'secret.read', metadata: FREEZE }] },
   },
 ] satisfies { kind: string; where: RegExp; index: string; value: string | null; history: Pick<Lookup, 'run' | 'tail'> }[];
 
-test("every newest lookup in the database's functions is a kind held here, one step of its index under a generic plan (T245, R48)", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its functions', timeout: 300_000 }, async () => {
+/** The functions' bodies, comments out and on one line. */
+async function functionBodies(): Promise<{ name: string; flat: string }[]> {
   const functions = await rows<{ name: string; body: string }>(db.owner, sql`
-    SELECT p.proname AS name, p.prosrc AS body FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.prosrc ~ 'audit_log'`);
-  const found = new Map<string, string[]>(FUNCTION_KINDS.map(({ kind }) => [kind, []]));
-  const unknown: string[] = [];
-  for (const { name, body } of functions) {
-    const flat = body.replace(/--[^\n]*/g, '').replace(/\s+/g, ' ');
-    const lookups = [...flat.matchAll(/\(\s*SELECT ([\w.:]+) FROM public\.audit_log a WHERE ((?:(?!SELECT |FROM ).)+?) ORDER BY a\.seq DESC LIMIT 1\s*\)/g)];
-    // Any other order of the log by `seq`, which the pattern would miss.
-    if ([...flat.matchAll(/ORDER BY a\.seq/g)].length !== lookups.length) unknown.push(`${name}: a lookup of another shape`);
-    for (const [, column, where] of lookups) {
-      const kind = FUNCTION_KINDS.find((known) => known.where.test(where!));
-      if (kind === undefined) unknown.push(`${name}: ${where}`);
-      else found.get(kind.kind)!.push(`SELECT ${column} FROM public.audit_log a WHERE ${where!.replace(kind.where, (whole, variable: string | number) => (typeof variable === 'string' ? whole.replace(variable, () => '$1') : whole))} ORDER BY a.seq DESC LIMIT 1`);
-    }
-  }
-  assert.deepEqual(unknown, [], 'a lookup in a function none of FUNCTION_KINDS names: name its kind, with its index and its worst history');
-  for (const { kind, index, value, history: worst } of FUNCTION_KINDS) {
-    const statements = [...new Set(found.get(kind))];
-    assert.ok(statements.length > 0, `the functions look ${kind} up`);
-    await history(worst);
-    const one = postgresClient(VAULT_URL, { max: 1, connection: { plan_cache_mode: 'force_generic_plan' } });
+    SELECT p.proname AS name, p.prosrc AS body FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.prosrc ~ '(audit_log|log_changes)'`);
+  return functions.map(({ name, body }) => ({ name, flat: body.replace(/--[^\n]*/g, '').replace(/\s+/g, ' ') }));
+}
+
+/** `statements`, each its one parameter of type `type` set to `value` (none if null), under a plan for its values, then one for any: the index each takes and the pages it reads. */
+async function heldUnderBothPlans(statements: string[], type: string, value: string | null, index: string): Promise<void> {
+  for (const mode of ['force_custom_plan', 'force_generic_plan']) {
+    const one = postgresClient(VAULT_URL, { max: 1, connection: { plan_cache_mode: mode } });
     try {
       for (const [i, text] of statements.entries()) {
-        await one.unsafe(value === null ? `PREPARE lookup${i} AS ${text}` : `PREPARE lookup${i} (text) AS ${text}`);
+        await one.unsafe(value === null ? `PREPARE lookup${i} AS ${text}` : `PREPARE lookup${i} (${type}) AS ${text}`);
         const explained = `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE lookup${i}${value === null ? '' : `('${value}')`}`;
         await one.unsafe(explained);
         const [row] = await one.unsafe(explained);
         const plan = (row as unknown as { 'QUERY PLAN': [{ Plan: Node }] })['QUERY PLAN'][0].Plan;
         const indexes = (node: Node): string[] => [...(node['Index Name'] === undefined ? [] : [node['Index Name']]), ...(node.Plans ?? []).flatMap(indexes)];
         const pages = plan['Shared Hit Blocks'] + plan['Shared Read Blocks'];
-        const said = JSON.stringify({ text, pages, indexes: indexes(plan) });
+        const said = JSON.stringify({ mode, text, pages, indexes: indexes(plan) });
         assert.ok(indexes(plan).includes(index), `takes ${index}: ${said}`);
         assert.ok(pages <= PAGES, `reads at most ${PAGES} pages: ${said}`);
       }
@@ -353,4 +449,58 @@ test("every newest lookup in the database's functions is a kind held here, one s
       await one.end();
     }
   }
+}
+
+test("every newest lookup of 0.14's log in the database's functions is a kind held here, one step of its index under either plan (T245, R48)", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its functions', timeout: 600_000 }, async () => {
+  const found = new Map<string, string[]>(FUNCTION_KINDS.map(({ kind }) => [kind, []]));
+  const unknown: string[] = [];
+  for (const { name, flat } of await functionBodies()) {
+    const lookups = [...flat.matchAll(/\(\s*SELECT ([\w.:]+) FROM public\.audit_log a WHERE ((?:(?!SELECT |FROM ).)+?) ORDER BY ((?:\(a\.metadata::jsonb ->> 'target'\) DESC, )?a\.seq DESC) LIMIT 1\s*\)/g)];
+    // Any other order of the log by `seq`, or its newest by `max`, which the pattern would miss.
+    if ([...flat.matchAll(/ORDER BY (?:[^;]{0,60}, )?a\.seq|\b(?:max|min)\(a\.seq\)/g)].length !== lookups.length) unknown.push(`${name}: a lookup of another shape`);
+    for (const [, column, where, order] of lookups) {
+      const kind = FUNCTION_KINDS.find((known) => known.where.test(where!));
+      if (kind === undefined) unknown.push(`${name}: ${where}`);
+      else found.get(kind.kind)!.push(`SELECT ${column} FROM public.audit_log a WHERE ${where!.replace(kind.where, (whole, variable: string | number) => (typeof variable === 'string' ? whole.replace(variable, () => '$1') : whole))} ORDER BY ${order} LIMIT 1`);
+    }
+  }
+  assert.deepEqual(unknown, [], 'a lookup in a function none of FUNCTION_KINDS names: name its kind, with its index and its worst history');
+  for (const { kind, index, value, history: worst } of FUNCTION_KINDS) {
+    const statements = [...new Set(found.get(kind))];
+    assert.ok(statements.length > 0, `the functions look ${kind} up`);
+    await history(worst);
+    await heldUnderBothPlans(statements, 'text', value, index);
+  }
+});
+
+test("every lookup of an object's newest change in the database's functions is `changesOf`'s, one step of the object's index under either plan (T245, R48)", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its functions', timeout: 600_000 }, async () => {
+  const statements = new Set<string>();
+  const unknown: string[] = [];
+  // The log's newest change of all, the primary key's first step, with nothing to filter.
+  const head = /FROM public\.log_changes (\w+) ORDER BY \1\.number DESC LIMIT 1/g;
+  const keyed = /FROM public\.log_changes (\w+) WHERE \1\.object = ANY\(ARRAY\[(.+?)::uuid\]\)((?:(?!ORDER BY|;).)*?) ORDER BY \1\.object DESC, \1\.number DESC LIMIT 1/g;
+  for (const { name, flat } of await functionBodies()) {
+    const lookups = [...flat.matchAll(keyed)];
+    // Every order of the changes by number, or their newest or oldest by `max` or `min`, its table the one its alias
+    // names last before it: each one of the two shapes.
+    const ordered = [...flat.matchAll(/ORDER BY (?:[^;]{0,60}?, )?(\w+)\.number\b|\b(?:max|min)\((\w+)\.number\)/g)].filter((order) => {
+      const alias = order[1] ?? order[2]!;
+      // An order's FROM comes before it; an aggregate's after it, before the next.
+      const upTo = order[1] === undefined ? order.index + order[0].length + 60 : order.index;
+      const tables = [...flat.slice(0, upTo).matchAll(new RegExp(`\\bpublic\\.(\\w+) ${alias}\\b`, 'g'))];
+      return tables.at(-1)?.[1] === 'log_changes';
+    }).length;
+    if (ordered !== lookups.length + [...flat.matchAll(head)].length) unknown.push(`${name}: a lookup of its changes of another shape`);
+    for (const [, alias, , rest] of lookups) {
+      statements.add(`SELECT ${alias}.* FROM public.log_changes ${alias} WHERE ${alias}.object = ANY(ARRAY[$1::uuid])${rest} ORDER BY ${alias}.object DESC, ${alias}.number DESC LIMIT 1`);
+    }
+  }
+  assert.deepEqual(unknown, [], "a lookup of an object's changes in a function by another shape than `changesOf`'s: the primary key's walk back");
+  assert.ok(statements.size > 0, 'the functions look changes up');
+  // `changesOf`'s own, of a value, as the sources ask it.
+  const value = changesOf('postgres', 'x', sql.raw('$1'));
+  const { sql: text } = new PgDialect().sqlToQuery(sql`SELECT x.* FROM log_changes x WHERE ${value.where} ORDER BY ${value.order} LIMIT 1`);
+  statements.add(text);
+  await history({ tail: [], changes: [{ object: objectKey(MEMBER) }, others()] });
+  await heldUnderBothPlans([...statements], 'uuid', objectKey(MEMBER), 'log_changes_object_idx');
 });

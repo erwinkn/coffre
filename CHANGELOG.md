@@ -26,10 +26,30 @@
   their reads: 956 to 4). A sign-in's freeze check never used the freeze
   index, keyed `seq DESC NULLS LAST` against its `ORDER BY seq DESC`, and
   walked the app's entries back to the target's newest freeze (1,024 pages
-  to 4); `audit_log_freeze_idx` goes in 0.17. A test holds each of these
-  reads to its index against a run of its kind then a long tail of others,
-  and fails on a new one in the sources or the database's functions that
-  it does not list (`packages/db/test/newest-lookups.test.ts`). Migration
+  to 4); `audit_log_freeze_idx` goes in 0.17. An object's newest change in
+  0.15's log, read by every use, write, issue, sign-in and member check,
+  walked the primary key back past every other object's changes whenever
+  its statistics held the object common (441 pages to 4, behind 20,000 of
+  another's): each such read now asks for the object through `= ANY` and
+  orders by it first, so that only the object's index yields the order, in
+  the sources (`changesOf`) and in fourteen of the database's functions,
+  which 0082 replaces with that alone changed (their signatures, settings
+  and answers 0.15's; the use's and the route's warm-up marks move to
+  `0082`, so a session plans the new bodies before it takes the fence). So
+  do a sign-in's freeze check (701 pages to 4 under a plan for any target),
+  a member's newest access entry on their page, and an audit page by
+  member, which reads each of their names by `audit_log_actor_idx`, then
+  its entries by seq (613 pages behind 20,000 of another member's, now a
+  step of each name's). The
+  tamper reports are keyed by member, then the change they name, then
+  `seq`, so a lookup of 0.15's reports or of 0.14's reads no report of the
+  other kind (1,397 pages to 3). A test holds each of these reads to its
+  index against a run of its kind then a long tail of others, under a plan
+  for its values and one for any, and fails on a new one in the sources or
+  the database's functions that it does not list, or a read of an object's
+  changes not through `changesOf` (`packages/db/test/newest-lookups.test.ts`).
+  Two reads still go over a whole kind's history, every member's findings
+  and an audit page's count of what it hides, which T248 bounds. Migration
   0082 adds the seventeen indexes, built after the migrations commit
   without blocking writes: fifteen on `audit_log`, `log_uses (number)` (the
   checkpointer's window after an hour's backlog of 3.5 million uses: 776 ms

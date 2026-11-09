@@ -1,11 +1,11 @@
 import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
 import { BEARER_PROFILES } from '@coffre/core/identity';
 import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
-import { ACCESS_ACTIONS, MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type LoggedChange, type SecretColumns } from '@coffre/core/vault';
+import { MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type LoggedChange, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { accessAllowed, entriesOf, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
+import { accessAllowed, changesOf, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -1075,14 +1075,16 @@ export type MemberAccessRows = {
  */
 export async function memberAccess(db: Queryable, principal: string, now: Date): Promise<MemberAccessRows> {
   const { principals: m, grants: g, environments: e, projects: p, auditLog: log } = tablesOf(db);
-  const actions = sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `);
   const place = sql`coalesce(${g.projectId}, ${e.projectId})`;
   const found = findingsOf(db, principal);
+  // Their newest access entry, one step of `audit_log_access_idx` (`keyedBy`): as the greatest `seq` of their entries,
+  // Postgres could walk the vault's back past every read about them since (T245, R48).
+  const changed = keyedBy(db, log.subjectPrincipal, log.seq, 'desc', m.principal, sql`ARRAY[${m.principal}]`);
   const query = sql`
     SELECT ${m.status} AS status, ${m.owner} AS owner, ${m.role} AS member_role, ${m.scope} AS scope, ${m.statusChangedBy} AS status_changed_by,
       ${found.legacy} AS found_seq, ${found.named} AS found_named,
-      (SELECT CAST(max(${log.seq}) AS text) FROM ${log} WHERE ${log.author} = 'vault' AND ${log.decision} = 'allow'
-        AND ${log.action} IN (${actions}) AND ${log.subjectPrincipal} = ${m.principal}) AS changed_seq,
+      (SELECT CAST(${log.seq} AS text) FROM ${log} WHERE ${accessAllowed()} AND ${changed.where}
+        ORDER BY ${sql.join(changed.orderBy, sql`, `)} LIMIT 1) AS changed_seq,
       x.kind, x.project_id, x.project_slug, x.environment_id, x.environment_slug, x.role, x.expires_at
     FROM ${m}
     LEFT JOIN (
@@ -2057,7 +2059,7 @@ const NO_CHANGES: NewestChanges = { member: null, bindings: new Map() };
 export function newestChangeColumns(db: Queryable, principal: string, binding: AnyColumn): { memberChange?: SQL<string | null>; bindingChange?: SQL<string | null> } {
   if (dialect.engineOf(db) !== 'postgres') return {};
   const newest = (object: SQL) => sql<string | null>`(SELECT json_build_array(c.number::text, c.at, c.request_id, c.actor, c.payload, encode(c.seal, 'base64'), encode(c.mac, 'base64'))::text
-    FROM log_changes c WHERE c.object = ${object} ORDER BY c.number DESC LIMIT 1)`;
+    FROM log_changes c WHERE ${changesOf(db, 'c', object).where} ORDER BY ${changesOf(db, 'c', object).order} LIMIT 1)`;
   return { memberChange: newest(sql`${logObject('principal', principal)}::uuid`), bindingChange: newest(sql`log_object('binding', ${binding}::text)`) };
 }
 
@@ -3580,8 +3582,10 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
  */
 export async function auditPage(db: Queryable, filter: AuditFilter) {
   const { auditLog, projects, environments, secrets } = tablesOf(db);
-  const where = auditWhere(db, filter);
-  const page = await withinBytes(db, where, filter.limit, 'desc');
+  // The members asked for, each a stream of their own entries (`withinBytes`' `by`); then the page's entries by seq,
+  // never the run between its first and its last, which holds every other member's since (T245, R48).
+  const page = await withinBytes(db, auditWhere(db, { ...filter, actors: undefined }), filter.limit, 'desc',
+    filter.actors === undefined ? undefined : { column: auditLog.actor, values: filter.actors });
   if (page === null) return { rows: [], more: false };
   const rows = await db
     .select({ ...auditColumns(auditLog), project: projects.slug, environment: environments.slug, key: secrets.key })
@@ -3589,7 +3593,7 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
     .leftJoin(projects, eq(projects.id, auditLog.projectId))
     .leftJoin(environments, eq(environments.id, auditLog.environmentId))
     .leftJoin(secrets, eq(secrets.id, auditLog.secretId))
-    .where(and(where, lte(auditLog.seq, page.from), gte(auditLog.seq, page.to)))
+    .where(inArray(auditLog.seq, page.seqs))
     .orderBy(desc(auditLog.seq));
   return { rows: rows.map(shown), more: page.cut || page.count === filter.limit };
 }
