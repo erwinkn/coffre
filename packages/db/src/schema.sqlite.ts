@@ -15,7 +15,7 @@ import {
   type AnySQLiteColumn,
 } from 'drizzle-orm/sqlite-core';
 
-import { accessAllowed } from './access-entries.ts';
+import { accessAllowed, signedCheckpoints } from './access-entries.ts';
 import { ACTIVE_SUBJECT } from './active-subject.ts';
 import { recordField, recorded } from './change-records.ts';
 
@@ -435,10 +435,10 @@ export const auditLog = sqliteTable(
     // the key index, its `author` matched, and sorts every entry of that author's.
     index('audit_log_vault_idx').on(table.author, table.seq).where(sql`${table.author} = 'vault'`),
     index('audit_log_app_idx').on(table.author, table.seq).where(sql`${table.author} = 'app'`),
-    // The vault's newest allowed entry of an action (`latestVaultEntry`), and its newest refusal of an action for a reason
+    // The vault's newest signed checkpoint (`latestSigned`), and its newest refusal of an action for a reason
     // (`newestRefusal`), each in one step however many refusals came after or beside them (T245, R48). Keyed with every
     // equality the lookup names, unlike Postgres's: SQLite otherwise takes `audit_log_action_idx`, which matches two.
-    index('audit_log_vault_allowed_idx').on(table.author, table.action, table.decision, table.seq).where(sql`${table.author} = 'vault' AND ${table.decision} = 'allow'`),
+    index('audit_log_signed_idx').on(table.author, table.action, table.decision, table.seq).where(signedCheckpoints()),
     index('audit_log_vault_refused_idx').on(table.author, table.action, table.decision, table.code, table.seq).where(sql`${table.author} = 'vault' AND ${table.decision} = 'deny'`),
     // Of those, the allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
     // however many refusals the log holds about them (T239, R48). Keyed as the subject index, `author` first, unlike

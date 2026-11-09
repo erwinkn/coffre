@@ -306,8 +306,8 @@
           "isUnique": false,
           "where": "\"audit_log\".\"author\" = 'app'"
         },
-        "audit_log_vault_allowed_idx": {
-          "name": "audit_log_vault_allowed_idx",
+        "audit_log_signed_idx": {
+          "name": "audit_log_signed_idx",
           "columns": [
             "author",
             "action",
@@ -315,7 +315,7 @@
             "seq"
           ],
           "isUnique": false,
-          "where": "\"audit_log\".\"author\" = 'vault' AND \"audit_log\".\"decision\" = 'allow'"
+          "where": "author = 'vault' AND action = 'audit.checkpoint' AND decision = 'allow'"
         },
         "audit_log_vault_refused_idx": {
           "name": "audit_log_vault_refused_idx",

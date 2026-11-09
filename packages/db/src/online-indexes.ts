@@ -71,6 +71,9 @@ export async function buildOnline(session: OnlineSession, index: OnlineIndex): P
     await concurrently(session, index.name, `CREATE ${unique}INDEX CONCURRENTLY ${quoteIdentifier(index.name)} ON ${quoteIdentifier(index.table)} ${index.body}`);
     return;
   }
+  // Valid once every day has its own (a day made since takes one as it is made): built. Asked first, since even
+  // CREATE INDEX IF NOT EXISTS takes the table's SHARE lock, which holds its inserts, before it finds the index there.
+  if (await valid(client, index.name)) return;
   await session.waitShort();
   await session.briefly(() => client.unsafe(`CREATE ${unique}INDEX IF NOT EXISTS ${quoteIdentifier(index.name)} ON ONLY ${quoteIdentifier(index.table)} ${index.body}`));
   let remade = false;
@@ -180,6 +183,12 @@ function dayIndexName(index: OnlineIndex, day: string): string {
   const name = `${day}_${suffix}`;
   if (Buffer.byteLength(name) > NAME_BYTES) throw new Error(`index name ${name} is longer than Postgres keeps`);
   return name;
+}
+
+/** Whether index `name` is there and valid: built, and on a partitioned table, on every day. */
+export async function valid(client: OnlineSession['client'], name: string): Promise<boolean> {
+  const [found] = await client.unsafe<{ valid: boolean }[]>('SELECT i.indisvalid AS valid FROM pg_index i WHERE i.indexrelid = to_regclass($1)', [`public.${quoteIdentifier(name)}`]);
+  return found?.valid === true;
 }
 
 /** `create`, a concurrent build of index `name`, unless it is built; an invalid one, a build cut short, dropped first. */

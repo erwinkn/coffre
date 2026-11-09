@@ -30,12 +30,12 @@ import * as sqlite from '../src/schema.sqlite.ts';
  * otherwise picks over it for matching more equalities. `audit_log_vault_idx`
  * and `audit_log_app_idx` (T245): by `seq` alone on Postgres; `author` first
  * on SQLite, which otherwise takes `audit_log_key_idx` for its `author` and
- * sorts every entry of that author's. `audit_log_vault_allowed_idx` and
- * `audit_log_vault_refused_idx` (T245): without `author` and `decision`,
- * which their conditions fix, on Postgres; with them on SQLite, which
- * otherwise picks `audit_log_action_idx`.
+ * sorts every entry of that author's. `audit_log_signed_idx` and
+ * `audit_log_vault_refused_idx` (T245): without the columns their
+ * conditions fix on Postgres (`seq` alone for the first); with them on
+ * SQLite, which otherwise picks `audit_log_action_idx`.
  */
-const KEYED_APART = new Set(['audit_log_access_idx', 'audit_log_vault_idx', 'audit_log_app_idx', 'audit_log_vault_allowed_idx', 'audit_log_vault_refused_idx']);
+const KEYED_APART = new Set(['audit_log_access_idx', 'audit_log_vault_idx', 'audit_log_app_idx', 'audit_log_signed_idx', 'audit_log_vault_refused_idx']);
 
 type Config = ReturnType<typeof postgresConfig>;
 type AnyColumn = Config['columns'][number];

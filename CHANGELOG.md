@@ -19,8 +19,8 @@
   app's key rotation, for a key that never wrote: 186 ms to 0.2 ms at 1.2
   million entries), the vault's entries by `seq` and the app's (the app's
   newest entry, at its cold start, past 100,000 of the vault's: 3,050
-  pages to 3), the vault's allowed entries by action and its refusals by
-  action and reason (the newest signed checkpoint, and a broken log's
+  pages to 3), the vault's signed checkpoints and its refusals by action
+  and reason (the newest signed checkpoint, and a broken log's
   refusal since, at each checkpoint and verification, past 100,000
   checkpoints refused for a wrong KEK: 3,253 pages to 8), `log_uses (number)` (the
   checkpointer's window after an hour's backlog of 3.5 million uses: 776 ms
@@ -38,7 +38,8 @@
   next; a verification counts the newest million, and the checkpoints'
   refusal stands for it. The migrator builds a migration's `CREATE INDEX
   CONCURRENTLY` after its transaction, on every run until it is built
-  (`docs/deploy.md`, "Upgrading").
+  (`docs/deploy.md`, "Upgrading": on an instance whose days of uses hold
+  tens of millions, run 0.16's first migrate from a shell).
 - **The credential proxy ends its upstream request when the app's request
   ends, and sets no time bound of its own (W365, config Q7).** It passes the
   incoming request's abort signal to the upstream `fetch`: an app that

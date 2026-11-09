@@ -8,6 +8,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { generateToken, github, hashToken, signin, tokenHint } from '@coffre/core/identity';
 import { createDatabase, type Database } from '@coffre/db';
+import { postgresClient } from '@coffre/db/connect';
 import { appendEntries, KeyRetired, lockLogHead } from '@coffre/db/log';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { asc, desc, eq, sql } from 'drizzle-orm';
@@ -579,24 +580,39 @@ test("the app's newest entry is one step of the log however many of the vault's 
   await append('app', 20_000);
   const [newest] = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.author, 'app')).orderBy(desc(auditLog.seq)).limit(1);
   const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
-  /** The pages the app's start reads for its newest entry, as its own login, after `count` more of the vault's. */
+  // A plan for any values, as a named statement gets from its sixth run, proves a partial index's condition only from constants.
+  const generic = postgresClient(TEST_RUNTIME_DATABASE_URL, { max: 1, connection: { plan_cache_mode: 'force_generic_plan' } });
+  /** The pages the app's start reads for its newest entry, as its own login, after `count` more of the vault's: planned for its values, and for any. */
   const read = async (count: number) => {
     await append('vault', count);
     await db.owner.execute(sql`ANALYZE audit_log`);
     const seen: { text: string; values: unknown[] }[] = [];
     const found = await newestAppEntry(createDatabase(watched(pool, ({ text, values }) => void seen.push({ text, values }))));
     assert.equal(found?.seq, newest!.seq);
-    const [explained] = await pool.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${seen[0]!.text}`, seen[0]!.values as never[]);
-    const plan = (explained as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
-    return plan['Shared Hit Blocks'] + plan['Shared Read Blocks'];
+    const { text, values } = seen[0]!;
+    const pages = async (client: typeof generic, statement: string, bound: unknown[]) => {
+      const [explained] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement}`, bound as never[]);
+      const plan = (explained as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
+      return plan['Shared Hit Blocks'] + plan['Shared Read Blocks'];
+    };
+    // EXPLAIN of a statement given its values plans for them whatever plan_cache_mode says; EXPLAIN EXECUTE of a named one takes its generic plan.
+    await generic.unsafe(`PREPARE measured AS ${text}`);
+    try {
+      // Its values as literals: a parameter in a utility statement has no type Postgres can infer.
+      const literals = values.map((value) => `'${String(value).replaceAll("'", "''")}'`).join(', ');
+      return [await pages(pool, text, values), await pages(generic, `EXECUTE measured${values.length === 0 ? '' : `(${literals})`}`, [])];
+    } finally {
+      await generic.unsafe('DEALLOCATE measured');
+    }
   };
   try {
     // Walked back by `seq`, 307 pages past 10,000 and 3,050 past 100,000: now the app's partial index, a few pages.
     for (const count of [10_000, 90_000]) {
-      const pages = await read(count);
-      assert.ok(pages <= 8, `${pages} pages for the app's newest entry`);
+      const [custom, any] = await read(count);
+      assert.ok(custom! <= 8 && any! <= 8, `${custom} pages for the app's newest entry, ${any} under a generic plan`);
     }
   } finally {
+    await generic.end();
     await pool.end();
   }
 });

@@ -1439,7 +1439,7 @@ class VaultService implements Vault {
     const sync = log015 && !prepared.rolesSynced;
     if (!settle && !convert && !cutover && !limit && !sync) return null;
     const asked: StartReads = {
-      rotation: settle ? store.latestVaultEntry(db, [KEY_ROTATE]) : undefined,
+      rotation: settle ? store.latestVaultEntry(db, KEY_ROTATE) : undefined,
       newest: settle ? store.vaultPage(db, undefined, 1).then(([entry]) => entry) : undefined,
       // None once a rotation to the key is logged (R48): `#settle` reads it again if it needs it after all.
       first: settle ? store.firstVaultEntryUnder(db, prepared.logKey.keyId, { unlessRotated: true }) : undefined,
@@ -1630,7 +1630,7 @@ class VaultService implements Vault {
     for (let attempt = 1; ; attempt += 1) {
       // The start's reads first; a retry, after a rotation that raced another, reads again.
       const asked = attempt === 1 ? start : undefined;
-      const rotation = await (asked?.rotation ?? store.latestVaultEntry(this.#db, [KEY_ROTATE]));
+      const rotation = await (asked?.rotation ?? store.latestVaultEntry(this.#db, KEY_ROTATE));
       if (rotation?.keyId === current && this.#authentic(rotation)) {
         prepared.since = rotation.seq;
         return;
@@ -1776,7 +1776,7 @@ class VaultService implements Vault {
     const head = held?.head ?? undefined;
     await this.#weigh(tx, entries);
     const appended = await appendEntries(tx, prepared.logKey, entries, async (locked) => {
-      const rotation = head === undefined ? await store.latestVaultEntry(locked, [KEY_ROTATE]) : head.rotation ?? undefined;
+      const rotation = head === undefined ? await store.latestVaultEntry(locked, KEY_ROTATE) : head.rotation ?? undefined;
       if (rotation !== undefined && !prepared.logKeys.some((key) => key.keyId === rotation.keyId)) {
         prepared.superseded = `the log moved on to ${rotation.keyId}, a key this vault does not hold: a vault given a newer vault key replaced it, and a replaced key writes nothing more`;
         throw new Error(prepared.superseded);
@@ -3707,7 +3707,7 @@ class VaultService implements Vault {
       for (const entry of found) if (!d.reports.includes(entry)) d.reports.push(entry);
       // Checkpoints one at a time, each against the one before.
       const head = await lockLogHead(d.tx);
-      const latest = await store.latestVaultEntry(d.tx, [CHECKPOINT]);
+      const latest = await store.latestSigned(d.tx);
       const refused = (code: RefusalCode, detail: Record<string, unknown>, message = REFUSAL_MESSAGES[code]) =>
         new Refused(refusal(code, message), [
           { actor: SCHEDULER, action: CHECKPOINT, decision: 'deny', code, metadata: JSON.stringify(detail) },
@@ -3858,7 +3858,7 @@ class VaultService implements Vault {
    * another kind since, a wrong KEK, hides none.
    */
   async #standingRefusal(db: Queryable): Promise<{ failedAtSeq?: number | null; reason?: string } | null> {
-    const signed = await store.latestVaultEntry(db, [CHECKPOINT]);
+    const signed = await store.latestSigned(db);
     const refused = await store.newestRefusal(db, CHECKPOINT, 'log_broken', signed?.seq ?? -1n);
     if (refused === undefined || !this.#authentic(refused)) return null;
     return JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };

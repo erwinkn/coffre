@@ -6,7 +6,7 @@ import { HOT_LOCK_TIMEOUT_MS, HOT_STATEMENT_TIMEOUT_MS, LOCK_WAIT_MS } from '@co
 
 import { engineOfUrl } from './connect.ts';
 import { lockNotAvailable, type Engine } from './dialect.ts';
-import { buildOnline, onlineIndex, onlineIndexes, unbuiltReason, type OnlineIndex, type UnbuiltIndex } from './online-indexes.ts';
+import { buildOnline, onlineIndex, onlineIndexes, unbuiltReason, valid, type OnlineIndex, type UnbuiltIndex } from './online-indexes.ts';
 export { unbuiltNote, type UnbuiltIndex } from './online-indexes.ts';
 import { postgresSession, quoteIdentifier, type PostgresClient } from './postgres.ts';
 
@@ -43,9 +43,9 @@ const MIGRATION_LOCK_KEY = '7165058122361679213';
  * older than it, a statement waiting for a lock included: built under the
  * migration lock, it would wait for another run's wait for that lock, which
  * waits for it, a deadlock (as two builds deploying at once, each Worker's,
- * would make). A run that finds another building leaves the builds to it.
+ * would make). A run that finds another building leaves the builds to it, and says which are not built yet.
  */
-const ONLINE_LOCK_KEY = '7165058122361679214';
+export const ONLINE_LOCK_KEY = '7165058122361679214';
 
 /**
  * How long each of a migration's statements waits for a lock, once the
@@ -764,7 +764,14 @@ async function postgresMigrator(url: string): Promise<Migrator> {
     },
     async online(indexes) {
       const [{ got }] = await client.unsafe<[{ got: boolean }]>('SELECT pg_try_advisory_lock($1::bigint) AS got', [ONLINE_LOCK_KEY]);
-      if (!got) return [];
+      if (!got) {
+        // Another run builds them: say which are not built yet, as that run will.
+        const unbuilt: UnbuiltIndex[] = [];
+        for (const index of indexes) {
+          if (!(await valid(client, index.name))) unbuilt.push({ name: index.name, table: index.table, reason: 'another migration run is building it' });
+        }
+        return unbuilt;
+      }
       try {
         return await buildAll(indexes);
       } finally {

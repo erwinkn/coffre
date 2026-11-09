@@ -420,9 +420,14 @@ second on an audit log of 440,000 entries, 1.3 to 1.9 s on 1.2 million
 (measured), and minutes on a day of uses. A concurrent build holds up no
 write, but waits for every transaction older than it to end, a backup's
 `pg_dump` included, up to 5 minutes, and takes as long as the table is big:
-about 4.9 s for 0.16's seven on a log of 1.2 million entries (measured). One that
-gave up is said, and the next run builds it; coffre works without it
-meanwhile, only slower on a large log. On a table partitioned by day
+about 4.6 s for 0.16's seven on a log of 1.2 million entries, and 1.6 s for
+a day of 3.5 million uses (measured). One that gave up, or that another run
+is building, is said, and the next run builds it; coffre works without it
+meanwhile, only slower on a large log. An instance whose days of uses hold
+tens of millions each spends minutes building their indexes on its first
+0.16 migrate: run that one from a shell before the deploy, where a
+pipeline's time limit (Workers Builds') cannot cut it. A run cut short
+keeps the days it built, and the next goes on from there. On a table partitioned by day
 (`log_uses`, `log_reads`), each day is built apart and attached, and the
 days coffre makes ahead take theirs as they are made. A day retention
 detaches while its index is built can leave the table's index marked

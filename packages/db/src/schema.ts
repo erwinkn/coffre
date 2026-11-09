@@ -20,7 +20,7 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
-import { accessAllowed } from './access-entries.ts';
+import { accessAllowed, signedCheckpoints } from './access-entries.ts';
 import { ACTIVE_SUBJECT } from './active-subject.ts';
 import { recordField, recorded } from './change-records.ts';
 
@@ -459,12 +459,12 @@ export const auditLog = pgTable(
     // holds that author's alone. Built without blocking writes (`online-indexes.ts`).
     index('audit_log_vault_idx').on(table.seq).where(sql`${table.author} = 'vault'`).concurrently(),
     index('audit_log_app_idx').on(table.seq).where(sql`${table.author} = 'app'`).concurrently(),
-    // The vault's newest allowed entry of an action (`latestVaultEntry`: the checkpoint signed last, the last rotation),
-    // and its newest refusal of an action for a reason since (`newestRefusal`: a broken log's), each in one step however
-    // many refusals came after the one or of other reasons beside the other: a vault refused its checkpoint for a wrong
-    // KEK every beat walked them all, at each checkpoint and verification (T245, R48). Keyed without `author` and
-    // `decision`, which their conditions fix (`audit_log_access_idx`). Built without blocking writes (`online-indexes.ts`).
-    index('audit_log_vault_allowed_idx').on(table.action, table.seq).where(sql`${table.author} = 'vault' AND ${table.decision} = 'allow'`).concurrently(),
+    // The vault's newest signed checkpoint (`latestSigned`, `latestTallied`), and its newest refusal of an action for a
+    // reason since (`newestRefusal`: a broken log's), each in one step however many refusals came after the one or of
+    // other reasons beside the other: a vault refused its checkpoint for a wrong KEK every beat walked them all, at each
+    // checkpoint and verification (T245, R48). The first with its whole condition (`signedCheckpoints`), the second
+    // keyed without `author` and `decision`, which its condition fixes. Built without blocking writes (`online-indexes.ts`).
+    index('audit_log_signed_idx').on(table.seq).where(signedCheckpoints()).concurrently(),
     index('audit_log_vault_refused_idx').on(table.action, table.code, table.seq).where(sql`${table.author} = 'vault' AND ${table.decision} = 'deny'`).concurrently(),
     // Of those, the allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
     // however many refusals the log holds about them (T239, R48). No `author` in its key, which the condition fixes:

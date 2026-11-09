@@ -3,7 +3,7 @@
 import type { StoredEntry } from '@coffre/core/audit';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, engineOf, forUpdate, rowsOf } from '@coffre/db/dialect';
-import { entryColumns, MOVES_FROM } from '@coffre/db/log';
+import { authoredBy, entryColumns, MOVES_FROM } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 
 import type { AuthRow, AuthTable } from '../auth-rows.ts';
@@ -50,7 +50,7 @@ export async function wroteUnder(db: Queryable, keyId: string): Promise<boolean>
  */
 export async function newestAppEntry(db: Queryable): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
-  const [row] = await db.select(entryColumns(db)).from(auditLog).where(eq(auditLog.author, 'app')).orderBy(desc(auditLog.seq)).limit(1);
+  const [row] = await db.select(entryColumns(db)).from(auditLog).where(authoredBy('app')).orderBy(desc(auditLog.seq)).limit(1);
   return row as StoredEntry | undefined;
 }
 

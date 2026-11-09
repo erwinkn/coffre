@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { migrateDatabase, migrationsFolder } from '../src/migrate.ts';
+import { migrateDatabase, migrationsFolder, ONLINE_LOCK_KEY } from '../src/migrate.ts';
 import { buildOnline, onlineIndex, onlineIndexes, unbuiltReason, type OnlineSession } from '../src/online-indexes.ts';
 import { postgresClient, postgresSession, quoteIdentifier } from '../src/postgres.ts';
 
@@ -45,7 +45,7 @@ test('a migration CONCURRENTLY index is read whole, comments before it or not; a
     'audit_log.audit_log_key_idx',
     'audit_log.audit_log_vault_idx',
     'audit_log.audit_log_app_idx',
-    'audit_log.audit_log_vault_allowed_idx',
+    'audit_log.audit_log_signed_idx',
     'audit_log.audit_log_vault_refused_idx',
     'log_reads.log_reads_by_number_idx',
     'log_uses.log_uses_by_number_idx',
@@ -133,6 +133,39 @@ test('an index a cut-short build left invalid is dropped and built again; one bu
     assert.equal(kept!.oid, before!.oid, 'a valid index is not built again');
   } finally {
     await session.end();
+  }
+});
+
+test("a run that finds every index built takes no lock a use's insert waits for: a partitioned table's index is asked first", { skip }, async () => {
+  const session = postgresSession(url);
+  const writer = postgresSession(url);
+  try {
+    // A use's and a read's insert, open: CREATE INDEX IF NOT EXISTS ... ON ONLY would wait for them (SHARE), and they for it.
+    await writer.unsafe('BEGIN');
+    await writer.unsafe('LOCK TABLE log_uses, log_reads IN ROW EXCLUSIVE MODE');
+    const started = Date.now();
+    assert.deepEqual(await migrateDatabase(url), { unbuilt: [] });
+    const [waited] = await session.unsafe<{ n: number }[]>("SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted");
+    assert.equal(waited!.n, 0);
+    assert.ok(Date.now() - started < 5_000, `${Date.now() - started} ms`);
+  } finally {
+    await writer.unsafe('ROLLBACK').catch(() => {});
+    await Promise.all([session.end(), writer.end()]);
+  }
+});
+
+test('a run that finds another building its indexes says which are not built yet; the next builds them', { skip }, async () => {
+  const session = postgresSession(url);
+  const other = postgresSession(url);
+  try {
+    await session.unsafe('DROP INDEX audit_log_key_idx');
+    await other.unsafe('SELECT pg_advisory_lock($1::bigint)', [ONLINE_LOCK_KEY]);
+    assert.deepEqual(await migrateDatabase(url), { unbuilt: [{ name: 'audit_log_key_idx', table: 'audit_log', reason: 'another migration run is building it' }] });
+    await other.unsafe('SELECT pg_advisory_unlock($1::bigint)', [ONLINE_LOCK_KEY]);
+    assert.deepEqual(await migrateDatabase(url), { unbuilt: [] });
+    assert.ok((await state(session)).every(({ valid }) => valid));
+  } finally {
+    await Promise.all([session.end(), other.end()]);
   }
 });
 

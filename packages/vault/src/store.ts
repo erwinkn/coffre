@@ -5,7 +5,7 @@ import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type Crede
 import { later, laterRows, prepared, tablesOf, type Database, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
-import { entryColumns, newestVaultEntries, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
+import { authoredBy, entryColumns, newestVaultEntries, signedCheckpoints, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { canonical, indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref, type RoleInput } from './inputs.ts';
@@ -671,7 +671,7 @@ export async function entriesFrom(db: Queryable, fromSeq: bigint, limit: number)
 /** Up to `limit` of the vault's entries after `afterSeq`, oldest first: every one, whatever its action or decision. */
 export async function vaultEntriesAfter(db: Queryable, afterSeq: bigint, limit: number): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
-  const vault = eq(auditLog.author, 'vault' satisfies Author);
+  const vault = authoredBy('vault');
   const batch = await withinBytes(db, and(vault, gt(auditLog.seq, afterSeq)), limit);
   if (batch === null) return [];
   const rows = await db
@@ -712,7 +712,7 @@ export async function vaultPage(db: Queryable, before: bigint | undefined, limit
   const rows = await db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault' satisfies Author), before === undefined ? undefined : lt(auditLog.seq, before)))
+    .where(and(authoredBy('vault'), before === undefined ? undefined : lt(auditLog.seq, before)))
     .orderBy(desc(auditLog.seq))
     .limit(limit);
   return stored(rows);
@@ -865,16 +865,28 @@ export async function restoredNatures(
   return items.map(({ secretId, from }) => (currentOf.get(secretId) === from ? null : natureOf.get(from) ?? 'secret'));
 }
 
-/** The vault's newest entry of any of these actions, allowed, or undefined: for one action, one step of `audit_log_vault_allowed_idx` (T245, R48), however many refusals came since. */
-export async function latestVaultEntry(db: Queryable, actions: readonly string[]): Promise<StoredEntry | undefined> {
+/** The vault's newest allowed entry of `action`, or undefined: a step of `audit_log_action_idx` and a walk back through that action's refusals, which only checkpoints come in runs of (`latestSigned` for those). */
+export async function latestVaultEntry(db: Queryable, action: string): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
   const [row] = await db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), inArray(auditLog.action, [...actions]), eq(auditLog.decision, 'allow')))
+    .where(and(authoredBy('vault', 'allow'), eq(auditLog.action, action)))
     .orderBy(desc(auditLog.seq))
     .limit(1);
   return row === undefined ? undefined : stored([row])[0];
+}
+
+/** The vault's newest signed checkpoint that `also` holds, or undefined: one step of `audit_log_signed_idx` (`signedCheckpoints`; T245, R48), however many refusals came since. */
+async function newestSigned(db: Queryable, also?: SQL): Promise<StoredEntry | undefined> {
+  const { auditLog } = tablesOf(db);
+  const [row] = await db.select(entryColumns(db)).from(auditLog).where(and(signedCheckpoints(), also)).orderBy(desc(auditLog.seq)).limit(1);
+  return row === undefined ? undefined : stored([row])[0];
+}
+
+/** The vault's newest signed checkpoint, or undefined (`newestSigned`). */
+export async function latestSigned(db: Queryable): Promise<StoredEntry | undefined> {
+  return newestSigned(db);
 }
 
 /**
@@ -884,13 +896,7 @@ export async function latestVaultEntry(db: Queryable, actions: readonly string[]
  */
 export async function latestTallied(db: Queryable): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
-  const [row] = await db
-    .select(entryColumns(db))
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'audit.checkpoint'), eq(auditLog.decision, 'allow'), isNotNull(auditLog.relatedSeq)))
-    .orderBy(desc(auditLog.seq))
-    .limit(1);
-  return row === undefined ? undefined : stored([row])[0];
+  return newestSigned(db, isNotNull(auditLog.relatedSeq));
 }
 
 /** The vault's newest `audit.checkpoint` entry, signed or refused, or undefined. */
@@ -899,7 +905,7 @@ export async function newestCheckpointEntry(db: Queryable): Promise<StoredEntry 
   const [row] = await db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'audit.checkpoint')))
+    .where(and(authoredBy('vault'), eq(auditLog.action, 'audit.checkpoint')))
     .orderBy(desc(auditLog.seq))
     .limit(1);
   return row === undefined ? undefined : stored([row])[0];
@@ -913,7 +919,7 @@ export async function newestCheckpointEntry(db: Queryable): Promise<StoredEntry 
 export async function talliedWithin(db: Queryable, after: bigint, through: bigint, limit: number): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
   const tallied = and(
-    eq(auditLog.author, 'vault'), eq(auditLog.action, 'audit.checkpoint'), eq(auditLog.decision, 'allow'), isNotNull(auditLog.relatedSeq),
+    authoredBy('vault', 'allow'), eq(auditLog.action, 'audit.checkpoint'), isNotNull(auditLog.relatedSeq),
     gt(auditLog.seq, after), lte(auditLog.seq, through),
   );
   const batch = await withinBytes(db, tallied, limit);
@@ -929,7 +935,7 @@ export async function newestRefusal(db: Queryable, action: string, code: string,
   const [row] = await db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), gt(auditLog.seq, after), eq(auditLog.decision, 'deny'), eq(auditLog.code, code)))
+    .where(and(authoredBy('vault', 'deny'), eq(auditLog.action, action), gt(auditLog.seq, after), eq(auditLog.code, code)))
     .orderBy(desc(auditLog.seq))
     .limit(1);
   return row === undefined ? undefined : stored([row])[0];
@@ -942,9 +948,8 @@ export async function talliedAfter(db: Queryable, after: bigint, limit: number):
     .select({ seq: auditLog.seq, signs: auditLog.relatedSeq })
     .from(auditLog)
     .where(and(
-      eq(auditLog.author, 'vault'),
+      authoredBy('vault', 'allow'),
       eq(auditLog.action, 'audit.checkpoint'),
-      eq(auditLog.decision, 'allow'),
       isNotNull(auditLog.relatedSeq),
       gt(auditLog.seq, after),
     ))
