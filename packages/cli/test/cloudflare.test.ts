@@ -548,8 +548,8 @@ test("with an organization whose members alone sign in: the app is the organizat
     assert.deepEqual(JSON.parse(form.manifest), manifest);
   }
   // An organization's login, as GitHub allows one.
-  for (const login of ['acme', 'Acme-Corp', 'a1', 'x'.repeat(39)]) assert.equal(organizationProblem(login), null, login);
-  for (const login of ['-acme', 'acme-', 'ac--me', 'acme/api', 'github.com/acme', 'x'.repeat(40), 'ac me']) assert.match(organizationProblem(login) ?? '', /not an organization's login/, login);
+  for (const login of ['acme', 'Acme-Corp', 'a1', 'x'.repeat(39), `${'x-'.repeat(19)}x`]) assert.equal(organizationProblem(login), null, login);
+  for (const login of ['-acme', 'acme-', 'ac--me', 'acme/api', 'github.com/acme', 'x'.repeat(40), `${'x-'.repeat(19)}xx`, `${'x-'.repeat(38)}x`, 'ac me']) assert.match(organizationProblem(login) ?? '', /not an organization's login/, login);
 });
 
 test("a manifest's code converts once, into the client ID and secret; the private key is dropped", LIMIT, async () => {

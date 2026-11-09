@@ -686,7 +686,7 @@ export class WorkloadService {
     let wantedReads: unknown;
     try {
       policy = checkBinding(input, { allowLoopback: this.#deps.config.allowLoopback, uploaded: uploaded !== null });
-      if (!isBearerProfile(policy.profile) || input.policy !== undefined || this.#deps.config.useOnly) {
+      if (!isBearerProfile(policy.profile) || input.policy !== undefined || this.#deps.signin.config.useOnly) {
         if (input.policy !== undefined && (typeof input.policy !== 'object' || input.policy === null || Array.isArray(input.policy))) throw new BindingInvalid('a policy is an object');
         const { reads, ...rest } = (input.policy ?? {}) as Record<string, unknown>;
         rules = checkPolicy(policy.profile, rest, { service: member });

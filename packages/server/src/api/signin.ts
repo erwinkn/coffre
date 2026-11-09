@@ -2041,7 +2041,7 @@ export class SigninService {
    * with a key, and the tokens it holds already are refused at use.
    */
   #bearersIssued(): void {
-    if (this.#deps.signin.workloads?.useOnly === true) {
+    if (this.#deps.signin.useOnly) {
       throw new ApiError('forbidden', 'this instance issues no service token (useOnly): trust the workload with a binding, and it signs in with its key', 'use_only');
     }
   }

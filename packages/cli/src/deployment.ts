@@ -437,7 +437,7 @@ function inline(value: unknown): string {
   return JSON.stringify(value, null, 1).replace(/\n\s*/g, ' ').replace(/\[ /g, '[').replace(/ \]/g, ']');
 }
 
-/** A change to a wrangler.jsonc: a value at a path, and, for a new property, the one it goes after. */
+/** A change to a wrangler.jsonc: a value at a path, and, for a new property, the one it goes after. `undefined` removes the property. */
 export type Change = { path: JSONPath; value: unknown; after?: string };
 
 /** Make `changes` to the file at `path`, leaving the rest as it is, comments and all. Says which changed anything. */
@@ -445,12 +445,12 @@ export function editWorker(dir: string, path: string, changes: readonly Change[]
   const MARK = '\u0000coffre\u0000';
   let text = readFileSync(join(dir, path), 'utf8');
   const changed = changes.map((change) => {
-    const edits = modify(text, change.path, MARK, {
+    const edits = modify(text, change.path, change.value === undefined ? undefined : MARK, {
       formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
       getInsertionIndex: change.after === undefined ? undefined : (properties) => properties.indexOf(change.after!) + 1,
     });
     const before = text;
-    text = applyEdits(text, edits.map((edit) => ({ ...edit, content: edit.content.replace(JSON.stringify(MARK), inline(change.value)) })));
+    text = change.value === undefined ? applyEdits(text, edits) : applyEdits(text, edits.map((edit) => ({ ...edit, content: edit.content.replace(JSON.stringify(MARK), inline(change.value)) })));
     return text !== before;
   });
   writeFileSync(join(dir, path), text);

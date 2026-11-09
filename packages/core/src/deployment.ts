@@ -56,7 +56,8 @@ export type DeploymentOptions = {
      * behind one NAT being one address. On Workers, Cloudflare reads the
      * number from `app/wrangler.jsonc`'s `SIGN_IN_PER_SOURCE` binding, and
      * the build (`@coffre/ui/vite`) fails unless the two agree; on Node,
-     * `processLimits(deployment)` counts to it.
+     * `processLimits({ perSource: deployment.services.signInsPerAddress })`
+     * counts to it.
      */
     signInsPerAddress?: number;
     /** No service token issued or taken: services sign in with a key, into key-bound sessions (docs/design/workload-access.md, 6.3). */

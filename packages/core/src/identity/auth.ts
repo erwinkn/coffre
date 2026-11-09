@@ -151,15 +151,17 @@ function movedSettings(options: SigninOptions): MovedSetting[] {
 
 /** Sign-in's options, its lifetimes and services' switches the deployment's (`deployment.ts`) when given. */
 function toSignin(options: SigninOptions, deployment?: Deployment) {
+  // `useOnly` is sign-in's whole (no service token, workloads on or not); `noReads` is the bindings', so the workloads'.
   const workloads = options.workloads === undefined || deployment === undefined
     ? options.workloads
-    : { ...options.workloads, useOnly: deployment.services.useOnly, noReads: deployment.services.noReads };
+    : { ...options.workloads, useOnly: undefined, noReads: deployment.services.noReads };
   return {
     providers: options.providers,
     page: { title: options.title, note: options.note },
     browserSessionHours: deployment?.people.browserSessionHours ?? options.browserSessionHours,
     cliSessionDays: deployment?.people.cliSessionDays ?? options.cliSessionDays,
     serviceTokenMaxDays: deployment?.services.tokenMaxDays ?? options.serviceTokenMaxDays,
+    useOnly: deployment?.services.useOnly ?? options.workloads?.useOnly,
     workloads,
     mcp: options.mcp,
     passkeys: options.passkeys,

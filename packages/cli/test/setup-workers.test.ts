@@ -685,6 +685,8 @@ test("a second deployment on the same account: it takes names of its own, and th
   // Its database on a server of its own, as two deployments' must be: a login is the server's.
   await asSuperuser('postgres', (client) => client.unsafe('CREATE DATABASE setup_workers_two'), OTHER_CLUSTER);
   const second = another('second');
+  // An organization an earlier run wrote, before its app was made: answered none, it goes, or nobody could sign in.
+  editWorker(second, 'app/wrangler.jsonc', [{ path: ['vars', 'GITHUB_ORGANIZATION'], value: 'acme', after: 'GITHUB_CLIENT_ID' }]);
   const pages = openedAll('http://127.0.0.1:').length;
   const { output, code } = await setup(
     async (terminal) => {
@@ -701,9 +703,9 @@ test("a second deployment on the same account: it takes names of its own, and th
       terminal.send('\x15coffre-try\r');
       await terminal.waitFor('First Owner');
       terminal.send('\r');
-      // No organization: any GitHub account an Owner adds.
+      // No organization: any GitHub account an Owner adds. The earlier run's, offered, cleared.
       await terminal.waitFor('GitHub organization');
-      terminal.send('\r');
+      terminal.send('\x15\r');
       await terminal.waitFor("GitHub: create coffre's app");
       await fetch(await submitManifest(await (await fetch(await opened('http://127.0.0.1:', pages))).text()));
       await terminal.waitFor('reveal all');

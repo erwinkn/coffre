@@ -77,7 +77,7 @@ export function appManifest(publicUrl: string, redirect: string, organization: s
 
 /** A GitHub organization's login, as GitHub allows one: letters, digits and single dashes, 39 at most. */
 export function organizationProblem(answer: string): string | null {
-  return /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/.test(answer) ? null : "that is not an organization's login: its name as in github.com/<organization>";
+  return answer.length <= 39 && /^[A-Za-z0-9](?:-?[A-Za-z0-9])*$/.test(answer) ? null : "that is not an organization's login: its name as in github.com/<organization>";
 }
 
 /** Where the manifest goes: GitHub's form for a new app, owned by the organization when there is one, else by whoever is signed in. */

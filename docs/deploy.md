@@ -188,7 +188,9 @@ limit's number from `app/wrangler.jsonc` and nowhere else, so the number
 is written twice: in `deployment.ts` and in the `SIGN_IN_PER_SOURCE`
 binding's `simple: { limit, period }`, `period` 10. The app's build
 (`coffre()` in `app/vite.config.ts`, given the deployment) fails when the
-two differ. On Node, `processLimits` counts to the field.
+two differ. On Node, `processLimits({ perSource:
+deployment.services.signInsPerAddress })` counts to the field, as the
+Node example's `app/src/coffre.ts` passes it.
 
 **`audit.keepUsesDays`: what keeping uses costs.** Every use of a key
 leaves about 800 bytes in the database: its row, its share of the audit
@@ -1210,11 +1212,12 @@ auth: signin({
 Cloudflare counts the limit per location, approximately, and takes a
 `period` of 10 or 60 seconds; a flood from many places can reach the limit
 times the locations it comes through. On Node, `processLimits()` from
-`@coffre/server/node` counts per process, 10,000 per 10 seconds unless
-`perSource` says otherwise:
+`@coffre/server/node` counts per process, to the number `perSource` gives,
+`deployment.ts`'s `services.signInsPerAddress` (10,000 per 10 seconds
+unless set):
 
 ```ts
-const limits = processLimits();
+const limits = processLimits({ perSource: deployment.services.signInsPerAddress });
 // …
 workloads: { limits },
 ```
@@ -1549,7 +1552,7 @@ beside `workloads`:
 mcp: { limits: { perSource: env.SIGN_IN_PER_SOURCE } },
 ```
 
-On Node, the same `processLimits()`:
+On Node, the same `limits`:
 
 ```ts
 mcp: { limits },

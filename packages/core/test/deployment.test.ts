@@ -80,8 +80,14 @@ test("sign-in takes its lifetimes and the services' switches from the object", (
   assert.equal(resolved.signin.browserSessionHours, 8);
   assert.equal(resolved.signin.cliSessionDays, 7);
   assert.equal(resolved.signin.serviceTokenMaxDays, 30);
-  assert.equal(resolved.signin.workloads?.useOnly, true);
+  assert.equal(resolved.signin.useOnly, true);
   assert.equal(resolved.signin.workloads?.noReads, true);
+  // `useOnly` holds with workloads off too: no service token is issued or taken, whatever else signs services in.
+  const off = signin({ providers }).resolve('https://secrets.acme.example', deployment);
+  assert.deepEqual(off.mode === 'signin' && [off.signin.useOnly, off.signin.workloads], [true, null]);
+  // 0.15's place, still read, with workloads on.
+  const legacy = signin({ providers, workloads: { limits, useOnly: true } }).resolve('https://secrets.acme.example');
+  assert.equal(legacy.mode === 'signin' && legacy.signin.useOnly, true);
   // What the deployment still writes in signin is named, for the object it moved to.
   const old = signin({ providers, serviceTokenMaxDays: 90, workloads: { limits, useOnly: true } });
   assert.deepEqual(old.moved, [

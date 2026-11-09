@@ -749,10 +749,14 @@ export class Cloudflare {
     this.#edit('app', [
       { path: ['vars', 'GITHUB_CLIENT_ID'], value: app.clientId, what: "GitHub's client ID" },
       // The app's src/coffre.ts reads it: `github({ app, organization: env.GITHUB_ORGANIZATION })`.
-      ...(organization === null ? [] : [{ path: ['vars', 'GITHUB_ORGANIZATION'], value: organization, after: 'GITHUB_CLIENT_ID', what: 'the GitHub organization' }]),
+      // None asked for: one an earlier run wrote goes, or the new app, which reads no organization's members, would let nobody in.
+      ...(organization === null && this.workers.app.vars.GITHUB_ORGANIZATION === undefined
+        ? []
+        : [{ path: ['vars', 'GITHUB_ORGANIZATION'], value: organization ?? undefined, after: 'GITHUB_CLIENT_ID', what: 'the GitHub organization' }]),
     ]);
     this.workers.app.vars.GITHUB_CLIENT_ID = app.clientId;
-    if (organization !== null) this.workers.app.vars.GITHUB_ORGANIZATION = organization;
+    if (organization === null) delete this.workers.app.vars.GITHUB_ORGANIZATION;
+    else this.workers.app.vars.GITHUB_ORGANIZATION = organization;
     // Its logo is the one thing neither the manifest nor GitHub's API can set: uploaded on its page, by hand.
     say.link(`For its logo, upload ${logoPath(this.#dir)}, under Display information, at`, app.settings);
     // GitHub shows an organization's members only to an app installed on it: until then, nobody signs in.
