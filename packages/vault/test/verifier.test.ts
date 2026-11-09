@@ -2,6 +2,7 @@
 // it by its MAC and request, held to the signer's memory, over a vault that keeps 0.15's log under a real checkpointer,
 // on both engines. Changes are the vault's own (admit, setAccess) and the cutover's genesis; uses go through the use
 // path.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -73,6 +74,7 @@ async function instance() {
     owners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+    deployment: defineDeployment(),
   };
   const seed = config.signingKeys[0]!;
   const memory = variableMemory();

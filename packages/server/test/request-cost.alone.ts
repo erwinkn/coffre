@@ -7,6 +7,7 @@
 // entries as on one of thousands, among a handful of members or hundreds,
 // after one change to the policy or many.
 // `pnpm bench:workers` measures the CPU itself (packages/conformance/scripts/bench.ts).
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -265,7 +266,7 @@ before(async () => {
   const deps: FixtureDeps = { ...base, signin: signinService };
   const runtime: CoffreRuntime = {
     db: deps.db, vault, chainKey: deps.chainKey, previousChainKeys: [], signin: signinService, workloads: null, mcp: null, auth, publicUrl: ORIGIN,
-    verifier: signinService, waitUntil, schema: { migrated: true }, appKey: { settled: true }, accesses, rotateAfterDays: 365, plugins: [],
+    verifier: signinService, waitUntil, schema: { migrated: true }, appKey: { settled: true }, accesses, rotateAfterDays: 365, deployment: defineDeployment(), plugins: [],
   };
   root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
@@ -420,7 +421,7 @@ before(async () => {
   const credentials = { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response(null, { status: 204 }) } } };
   const verifiers = { webhook: hmac('WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) };
   // The proxy's cache keeps an answer 60 s and asks the vault again in the last 15: that one request costs 4 statements
-  // and 7 of the vault's, not 1. A Cloudflare call's answer is kept 60 s whatever `cacheSeconds` says (a binding has no
+  // and 7 of the vault's, not 1. A Cloudflare call's answer is kept 60 s whatever `proxy.cacheValues` says (a binding has no
   // session to outlast it), so a request warmed at second 44 of an entry's life and measured at 45, as a loaded runner
   // does after a long test, was that request. Each `warm` renews the proxy: its entries are then as old as the gap
   // between the warm-up and the measurement.
@@ -435,7 +436,8 @@ before(async () => {
   renewProxy = () => void (proxied = proxy());
   const forgetful = {
     ...proxied,
-    plugins: checkPlugins([credentialProxy({ cacheSeconds: 0, credentials, verifiers })]),
+    deployment: defineDeployment({ proxy: { cacheValues: false } }),
+    plugins: checkPlugins([credentialProxy({ credentials, verifiers })]),
   } satisfies CoffreRuntime;
   const through = (at: CoffreRuntime) => async () => {
     const url = `${ORIGIN}/use/stripe/v1/charges`;

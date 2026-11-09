@@ -1,3 +1,4 @@
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -185,6 +186,7 @@ test('a vault given the wrong KEK answers every request with 503, its entries st
     waitUntil,
     schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
+    deployment: defineDeployment(),
     plugins: [],
   };
   const asOwner = (path: string, init: RequestInit = {}) => fetchApi(
@@ -229,6 +231,7 @@ test('a removed member stays out despite a live session, until the vault admits 
     waitUntil,
     schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
+    deployment: defineDeployment(),
     plugins: [],
   };
   const reveal = () =>

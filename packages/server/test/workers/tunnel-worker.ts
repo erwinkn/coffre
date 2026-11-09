@@ -6,6 +6,7 @@
 // a stand-in VPC Network binding, which local workerd cannot run: it says
 // it is asked for the replica's address, and connects to the suite's database.
 import { CoffreError } from '@coffre/client';
+import { defineDeployment } from '@coffre/core/deployment';
 
 import { forwardSocket, socketsObject, type SocketsNamespace } from '../../src/cloudflare-sockets.ts';
 import { inTime } from '../../src/socket-admission.ts';
@@ -76,8 +77,6 @@ export const CoffreSockets = socketsObject<Env>((env) => {
     },
     // The suite's database is on loopback: only the direct tunnel needs this, never the replica's.
     insecureUpstreams: true,
-    recheckSeconds: 0.5,
-    cacheSeconds: 0,
   });
   const uses = new Map<string, number>();
   let refusals = 0;
@@ -87,6 +86,9 @@ export const CoffreSockets = socketsObject<Env>((env) => {
   const replica = `postgres://${real.username}:${real.password}@${REPLICA}:5432${real.pathname}?sslmode=disable`;
   const coffre = {
     publicUrl: 'https://secrets.acme.example',
+    // No values kept, and R 1 s: checks every 500 ms, each given 500 ms. Below R's 3 s floor, a test's own object,
+    // which `defineDeployment` refuses.
+    deployment: { ...defineDeployment(), proxy: { revokedWithinSeconds: 1, cacheValues: false, editable: false } },
     // A handle's request is no workload's.
     workload: async () => null,
     // As coffre's, a database read away: admissions in a burst overlap, as on Cloudflare.

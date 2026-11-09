@@ -10,6 +10,8 @@ import { credentialProxy, postgres as tunnel, privateKey, query } from '@coffre/
 import { vaultKv } from '@coffre/server/plugins/vault-kv';
 import { auditWatch } from '@coffre/server/plugins/audit-watch';
 
+import { deployment } from '../../deployment';
+
 export type Env = {
   HYPERDRIVE: { connectionString: string };
   VAULT: VaultEntry;
@@ -73,6 +75,7 @@ export const coffre = createCoffre((env: Env) => {
     publicUrl: env.COFFRE_PUBLIC_URL,
     database: postgres(env.HYPERDRIVE),
     vault: env.VAULT,
+    deployment,
     auth: signin({
       providers: [
         github({ app }),
@@ -98,7 +101,7 @@ export const coffre = createCoffre((env: Env) => {
     // The credential proxy at /use (routes/use.$.ts), its tunnels' WebSockets in the SOCKETS Durable Object:
     // `coffre run market/dev -- psql "$DATABASE_URL"`. Local databases are plain TCP on loopback, which only
     // insecureUpstreams reaches. Code defines a few items, which each environment's Proxy tab shows locked beside its
-    // own, which `editable` lets Owners write there (seeded by dev/seed.mjs).
+    // own, which deployment.ts's `proxy.editable` lets Owners write there (seeded by dev/seed.mjs).
     plugins: [
       vaultKv(),
       credentialProxy({
@@ -108,7 +111,6 @@ export const coffre = createCoffre((env: Env) => {
         tunnels: { db: tunnel('DATABASE_URL'), replica: tunnel('REPLICA_URL', { hosts: ['10.0.1.5'], environments: ['market/prod'] }) },
         signers: { 'dfns-key': privateKey('DFNS_PRIVATE_KEY', { limit: { perMinute: 10 } }) },
         insecureUpstreams: true,
-        editable: true,
       }),
       auditWatch({ anchor: durableAnchor(env.ANCHOR) }),
     ],

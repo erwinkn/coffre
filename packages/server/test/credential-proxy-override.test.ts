@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { bodyDigest, contentDigest } from '@coffre/client/dpop';
+import { defineDeployment } from '@coffre/core/deployment';
 
 import type { PluginContext, UseAsked, WorkloadUse } from '../src/plugins.ts';
 import { credentialProxy, header, type Credential } from '../src/plugins/credential-proxy.ts';
@@ -19,11 +20,15 @@ const SESSION = `coffre_wl_${'w'.repeat(43)}`;
 const LATER = new Date(Date.now() + 3_600_000).toISOString();
 const SECRET = 'sk_live_0123456789abcdef';
 
+/** The deployment: no values kept, so that each request opens its own (`proxy.cacheValues`). */
+const NO_CACHE = defineDeployment({ proxy: { cacheValues: false } });
+
 /** coffre, as a plugin sees it: the handle, or a workload's session narrowed to `constraints` (its proof signing `hdr`), stands for `market/dev`. */
 function fake(opened: string[], constraints: WorkloadUse['constraints'] = null, hdr = ['content-type', 'x-http-method-override']): PluginContext {
   const workload = { path: 'market/dev', place: 'market/dev', places: ['market/dev'], nonce: null, constraints, hdr, credentialId: 'c', principal: 'service:api' };
   return {
     publicUrl: PUBLIC,
+    deployment: NO_CACHE,
     workload: async (request: Request) => (request.headers.get('authorization')?.startsWith('DPoP ') ? workload : null),
     handle: async () => ({ expiresAt: LATER, paths: ['market/dev'] }),
     use: async (_handle: unknown, asked: UseAsked) => {
@@ -41,7 +46,7 @@ function proxy(credential: Partial<Credential>, constraints: WorkloadUse['constr
     reached.push({ method: init.method!, url, headers: new Headers(init.headers), body: init.body == null ? '' : await new Response(init.body).text() });
     return new Response('ok');
   } };
-  const plugin = credentialProxy({ cacheSeconds: 0, credentials: { api: { upstream: 'https://api.example/v1', inject: header('x-api-key', '{KEY}'), egress, ...credential } } });
+  const plugin = credentialProxy({ credentials: { api: { upstream: 'https://api.example/v1', inject: header('x-api-key', '{KEY}'), egress, ...credential } } });
   const coffre = fake(opened, constraints, hdr);
   const ask = async (path: string, init: RequestInit & { as?: 'handle' | 'workload' } = {}) => {
     const headers = new Headers(init.headers);

@@ -742,6 +742,24 @@ test('useOnly: no service token is issued or taken, and /api/auth/oidc answers 4
   assert.equal((await me(held)).status, 200);
 });
 
+test("deployment.ts's useOnly holds with workloads off: no service token is issued or taken", async () => {
+  const root = clientFor(deps, ROOT);
+  const kept = (await root.tokens.issue(MEMBER, { label: 'ci', expiresInDays: 30 })).token;
+  const config = resolveConfig({
+    publicUrl: ORIGIN,
+    vault: deps.vault,
+    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }),
+    deployment: { services: { useOnly: true } },
+    auditChainKey: deps.chainKey.toString('base64'),
+  });
+  const strict = createRuntime(config, deps.db, deps.vault, transport, undefined, () => gate);
+  assert.equal(strict.workloads, null);
+  const refused = await read(await answer(new Request(`${ORIGIN}/api/me`, { headers: { authorization: `Bearer ${kept}` } }), strict, ui, IP));
+  assert.deepEqual([refused.status, refused.body.reason], [401, 'use_only']);
+  const ctx = await contextFor(deps, ROOT);
+  await assert.rejects(strict.signin!.issueServiceToken(ctx, SERVICE, { label: 'ci', expiresInDays: 1 }), { reason: 'use_only' });
+});
+
 test('noReads: no binding lists reads, and one that does makes no session', async () => {
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });

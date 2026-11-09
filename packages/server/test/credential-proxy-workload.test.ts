@@ -17,6 +17,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { bodyDigest, bodyLine, contentDigest, createProof, generateProofKey, thumbprint, UNSIGNED_BODY, type ProofKey } from '@coffre/client/dpop';
 import { keyAudience, workload } from '@coffre/client/workload';
+import { defineDeployment } from '@coffre/core/deployment';
 import { github, hashToken, signin, type WorkloadAlert } from '@coffre/core/identity';
 import { BODY_READ_WHOLE_BYTES } from '@coffre/core/memory';
 import type { Database } from '@coffre/db';
@@ -82,7 +83,7 @@ const transport: WorkloadTransport = {
   },
 };
 
-function proxy(options: { recheckSeconds?: number } = {}) {
+function proxy() {
   return credentialProxy({
     credentials: {
       stripe: { upstream: `${upstreamAt}/stripe`, inject: header('authorization', `Bearer {STRIPE_KEY}`) },
@@ -97,19 +98,24 @@ function proxy(options: { recheckSeconds?: number } = {}) {
     verifiers: { webhook: hmac('WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) },
     tunnels: { db: postgres('DATABASE_URL') },
     insecureUpstreams: true,
-    ...(options.recheckSeconds === undefined ? {} : { recheckSeconds: options.recheckSeconds }),
   });
 }
 
-function makeRuntime(options: { recheckSeconds?: number; plugins?: ReturnType<typeof checkPlugins>; vault?: FixtureDeps['vault'] } = {}): CoffreRuntime {
+/**
+ * The deployment, its R `revokedWithinSeconds` where a case sets it, below its 3 s floor where a case needs a tunnel's
+ * checks in milliseconds: a test's own object, which `defineDeployment` refuses, given to the runtime once made.
+ */
+function makeRuntime(options: { revokedWithinSeconds?: number; plugins?: ReturnType<typeof checkPlugins>; vault?: FixtureDeps['vault'] } = {}): CoffreRuntime {
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault: options.vault ?? deps.vault,
     auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000 }), alert: (alert) => void alerts.push(alert) } }),
     auditChainKey: deps.chainKey.toString('base64'),
-    plugins: options.plugins ?? checkPlugins([proxy(options)]),
+    plugins: options.plugins ?? checkPlugins([proxy()]),
   });
-  return createRuntime(config, deps.db, options.vault ?? deps.vault, transport, (promise) => void background.push(promise), gates);
+  const made = createRuntime(config, deps.db, options.vault ?? deps.vault, transport, (promise) => void background.push(promise), gates);
+  if (options.revokedWithinSeconds !== undefined) made.deployment = { ...defineDeployment(), proxy: { ...made.deployment.proxy, revokedWithinSeconds: options.revokedWithinSeconds } };
+  return made;
 }
 
 before(async () => {
@@ -672,7 +678,7 @@ test("a Cloudflare call is its binding's: every header the calling Worker set go
 });
 
 test("a code workload tunnel's admission answered after a whole bound is let in, and lasts: its clock starts at the group, as a handle's (#485)", { timeout: 30_000 }, async () => {
-  // recheckSeconds 1.5: a bound of 1.5 s. While `holding`, every vault call answers 1.6 s late, so the admission is
+  // R 1.5 s: a bound of 1.5 s. While `holding`, every vault call answers 1.6 s late, so the admission is
   // answered past the bound however its clock is counted: a refusal as a UI tunnel's (`late`) fails here. A watchdog
   // armed from the admission's start alone would not: the arming recheck it runs at once answers before it fires.
   let holding = false;
@@ -691,7 +697,7 @@ test("a code workload tunnel's admission answered after a whole bound is let in,
       };
     },
   });
-  runtime = makeRuntime({ recheckSeconds: 1.5, vault });
+  runtime = makeRuntime({ revokedWithinSeconds: 1.5, vault });
   await bind();
   const who = await session();
   const server = createServer((_, response) => response.writeHead(404).end());
@@ -721,7 +727,7 @@ test("a code workload tunnel's admission answered after a whole bound is let in,
 });
 
 test('a workload tunnel ends within one recheck of a freeze, and stands while nothing changes', { timeout: 30_000 }, async () => {
-  runtime = makeRuntime({ recheckSeconds: 1.5 });
+  runtime = makeRuntime({ revokedWithinSeconds: 1.5 });
   await bind();
   const held = await session();
   const server = createServer((_, response) => response.writeHead(404).end());

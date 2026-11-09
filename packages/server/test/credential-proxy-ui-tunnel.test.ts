@@ -12,6 +12,7 @@ import { once } from 'node:events';
 import { WebSocket } from 'ws';
 
 import type { CoffreClient } from '@coffre/client';
+import { defineDeployment, type Deployment } from '@coffre/core/deployment';
 import { github, signin } from '@coffre/core/identity';
 import type { ProxyDefinition } from '@coffre/core/vault';
 
@@ -23,7 +24,7 @@ import { deps, DEV, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './m
 import { createCoffre as nodeCoffre } from '../src/node.ts';
 import { publicConnect, upgrade } from '../src/node-sockets.ts';
 import { checkPlugins, pluginSocket, type CoffrePlugin } from '../src/plugins.ts';
-import { proxyCodeOf } from '../src/proxy-code.ts';
+import { proxyCodeWith } from '../src/proxy-code.ts';
 import { credentialProxy, forgetUiItems } from '../src/plugins/credential-proxy.ts';
 import { publicLookup } from '../src/workloads/node-transport.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
@@ -143,9 +144,18 @@ async function handleFor(path: string): Promise<string> {
   return ((await made.json()) as { token: string }).token;
 }
 
+/**
+ * A deployment whose Proxy tab writes, its R `seconds`, below its 3 s floor where a case needs a tunnel's checks in
+ * milliseconds: a test's own object, which `defineDeployment` refuses. Checks every R − d, each given d = min(R ÷ 2,
+ * 10 s), a bound of R.
+ */
+const within = (seconds: number): Deployment => ({ ...defineDeployment(), proxy: { revokedWithinSeconds: seconds, cacheValues: true, editable: true } });
+
 useMcp(async () => {
-  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, editable: true, insecureUpstreams: true, recheckSeconds: 0.2 })]);
-  deps.proxy = proxyCodeOf(runtime.plugins);
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, insecureUpstreams: true })]);
+  // Checks every 200 ms, each given 200 ms: a bound of 400 ms.
+  runtime.deployment = within(0.4);
+  deps.proxy = proxyCodeWith(runtime.plugins, runtime.deployment);
   root = clientFor(deps, ROOT);
   await root.members.add(`user:${DEV}`);
   await root.projects.create('market');
@@ -272,14 +282,15 @@ test("a fork's tunnel is its parent's item and key, found through the chain", ON
   assert.equal((await upgraded('/use/market/dev-eu/db') as { status: number }).status, 403);
 });
 
-/** The case's proxy, as `useMcp` made it but for `options`, its own until the case ends. */
-async function withProxy(options: Partial<Parameters<typeof credentialProxy>[0]>, body: () => Promise<void>): Promise<void> {
-  const kept = runtime.plugins;
-  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, editable: true, insecureUpstreams: true, recheckSeconds: 0.2, ...options })]);
+/** The case's proxy, as `useMcp` made it but for `options` and its R, `seconds`, its own until the case ends. */
+async function withProxy(options: Partial<Parameters<typeof credentialProxy>[0]>, seconds: number, body: () => Promise<void>): Promise<void> {
+  const kept = { plugins: runtime.plugins, deployment: runtime.deployment };
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, insecureUpstreams: true, ...options })]);
+  runtime.deployment = within(seconds);
   try {
     await body();
   } finally {
-    runtime.plugins = kept;
+    Object.assign(runtime, kept);
   }
 }
 
@@ -295,7 +306,7 @@ test('a host an Owner typed is dialled only where it resolves to a public addres
   const port = (trap.address() as AddressInfo).port;
   const kept = runtime.publicConnect;
   try {
-    await withProxy({ insecureUpstreams: false }, async () => {
+    await withProxy({ insecureUpstreams: false }, 0.4, async () => {
       await root.secrets.set('market/dev', { DATABASE_URL: { value: `postgres://coffre_runtime:pw@db.attacker.example:${port}/coffre?sslmode=require`, sensitivity: 'sensitive' } });
       await save({ db: database(['db.attacker.example']) });
       // A runtime with no connect that checks where a name resolves dials none, refused before the use.
@@ -349,7 +360,7 @@ test('the public connect dials no address written as one that is not public, nor
 });
 
 test("an admission answered after its whole bound lets nothing in: the item may have been narrowed since it was decided (review r1 of #485)", ON, async () => {
-  // recheckSeconds 0.2: a bound of 400 ms. The vault decides the old item, the Owner narrows it, and the answer comes 600 ms on.
+  // R 0.4 s: a bound of 400 ms. The vault decides the old item, the Owner narrows it, and the answer comes 600 ms on.
   holding = async () => {
     await save({ db: database(['127.0.0.1', 'db.acme.example']) });
     await sleep(600);
@@ -361,7 +372,7 @@ test("an admission answered after its whole bound lets nothing in: the item may 
 });
 
 test("a group's watchdog counts from its admission: one answered late, its first check stalled, ends by the admission's bound (review r1 of #485)", { ...ON, timeout: 20_000 }, async () => {
-  await withProxy({ recheckSeconds: 1 }, async () => {
+  await withProxy({}, 2, async () => {
     // A bound of 2 s. The answer comes 1.7 s after the use started, and the check due at once does not answer: the
     // watchdog, armed from the admission, ends the session 0.3 s on, before that check's deadline a second on.
     let answeredAt = 0;
@@ -382,7 +393,7 @@ test("a group's watchdog counts from its admission: one answered late, its first
 });
 
 test("a group's clock starts from its admission: one answered late is checked at once, not a whole recheck after (review r1 of #485)", { ...ON, timeout: 20_000 }, async () => {
-  await withProxy({ recheckSeconds: 1 }, async () => {
+  await withProxy({}, 2, async () => {
     // A bound of 2 s. The vault decides the old item, the Owner saves it anew, and the answer comes 1.3 s after the use
     // started: past the admission's first recheck, inside its bound.
     let answeredAt = 0;

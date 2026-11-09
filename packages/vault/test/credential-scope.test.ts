@@ -1,3 +1,4 @@
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -33,6 +34,7 @@ test('every call that takes a credential scope decides on it: within it a call g
     owners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+    deployment: defineDeployment(),
   });
   // Root signs in first, and the bootstrap makes them the Owner.
   await vault.access(ROOT);

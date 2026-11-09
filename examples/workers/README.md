@@ -15,6 +15,9 @@ Two Workers, configured in code:
 - `vault/src/worker.ts`, the vault: the keys, and the members and grants,
   which it keeps in the same database through a login of its own. It has no
   URL of its own.
+- `deployment.ts`, what the instance allows: session lengths, service
+  tokens, the bulk read limit, the credential proxy, the audit log. Both
+  Workers read it, each holding its own part, and every field has a default.
 
 Settings that are not secret are `vars` in each `wrangler.jsonc`; secrets are
 Worker secrets. Everything below runs from this directory.

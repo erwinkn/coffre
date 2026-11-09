@@ -1,5 +1,5 @@
 // What the credential proxy's `/use` costs with 0.15's uses (T135, R42, R44, R48), a person's handle at a proxy that
-// keeps nothing (`cacheSeconds: 0`), the hot path at its worst. On the app's connection, one `app_read` (migration
+// keeps nothing (`proxy: { cacheValues: false }`), the hot path at its worst. On the app's connection, one `app_read` (migration
 // 0031): the handle's credential, the place and the key, in one call; then the vault's one `use_credential`, which
 // decides on the credential's standing itself, its generation included (T145): no `credentialStill` after it. The stable URL first checks the handle, its
 // credential read ahead and the vault asked about its person, for which environments it was made; then the use, as the
@@ -14,6 +14,7 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
+import { defineDeployment } from '@coffre/core/deployment';
 import { github, signin } from '@coffre/core/identity';
 import { createDatabase } from '@coffre/db';
 import type { PostgresClient } from '@coffre/db/connect';
@@ -23,7 +24,7 @@ import { sql } from 'drizzle-orm';
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { checkPlugins } from '../src/plugins.ts';
-import { proxyCodeOf } from '../src/proxy-code.ts';
+import { proxyCodeWith } from '../src/proxy-code.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import type { ProxyDefinition } from '@coffre/core/vault';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
@@ -129,7 +130,8 @@ before(async () => {
   ));
   const config = resolveConfig({
     publicUrl: ORIGIN, vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64'),
-    plugins: [credentialProxy({ credentials: { api: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`, inject: header('x-api-key', '{API_KEY}') } }, insecureUpstreams: true, cacheSeconds: 0 })],
+    plugins: [credentialProxy({ credentials: { api: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`, inject: header('x-api-key', '{API_KEY}') } }, insecureUpstreams: true })],
+    deployment: { proxy: { cacheValues: false } },
   });
   runtime = createRuntime(config, createDatabase(app.client), vault, transport);
   runtime.plugins = checkPlugins(config.plugins);
@@ -245,9 +247,9 @@ test("a handle's /use of a UI route is the vault's one call too, at either URL a
     allow: null, limit: { perMinute: null, perDay: null }, placeholder: null, egress: null,
   });
   // The same deployment with the Proxy tab on: `api` is code's, `ui` the environment's.
-  const plugins = checkPlugins([credentialProxy({ credentials: { api: { upstream: upstreamUrl, inject: header('x-api-key', '{API_KEY}') } }, insecureUpstreams: true, cacheSeconds: 0, editable: true })]);
-  const ui = { ...runtime, plugins } satisfies CoffreRuntime;
-  deps.proxy = proxyCodeOf(plugins);
+  const plugins = checkPlugins([credentialProxy({ credentials: { api: { upstream: upstreamUrl, inject: header('x-api-key', '{API_KEY}') } }, insecureUpstreams: true })]);
+  const ui = { ...runtime, plugins, deployment: defineDeployment({ proxy: { cacheValues: false, editable: true } }) } satisfies CoffreRuntime;
+  deps.proxy = proxyCodeWith(plugins, ui.deployment);
   const save = async (items: Record<string, ProxyDefinition>) => root.proxy.save('market/dev', { seal: (await root.proxy.get('market/dev')).seal, items });
   await save({ ui: route('ui') });
   const measure = async () => {

@@ -1139,7 +1139,8 @@ placeholders (the SDK sends DPoP, not a value in a slot):
 ### 6.3 The strict instance, and the path from today
 
 ```ts
-auth: signin({ workloads: { limits, useOnly: true } })
+// deployment.ts (0.16; 0.15 took it as signin({ workloads: { useOnly } }))
+defineDeployment({ services: { useOnly: true } })
 ```
 
 **`useOnly: true`** leaves services nothing but key-bound sessions, which

@@ -97,7 +97,8 @@ before(async () => {
   const runtimeOf = (auth: ReturnType<typeof signin>) => {
     const config = resolveConfig({
       publicUrl: ORIGIN, vault, auth, auditChainKey: deps.chainKey.toString('base64'),
-      plugins: [credentialProxy({ credentials: { api: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`, inject: header('x-api-key', '{API_KEY}') } }, insecureUpstreams: true, cacheSeconds: 0 })],
+      plugins: [credentialProxy({ credentials: { api: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`, inject: header('x-api-key', '{API_KEY}') } }, insecureUpstreams: true })],
+      deployment: { proxy: { cacheValues: false } },
     });
     const runtime = createRuntime(config, createDatabase(app.client), vault, transport);
     runtime.plugins = checkPlugins(config.plugins);

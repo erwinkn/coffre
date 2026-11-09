@@ -134,11 +134,12 @@ one package is seen by the others without a build. Builds leave it off.
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
 
 Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey,
-previousAuditChainKeys?, rotateAfterDays? }` (the app keys `auditChainKey`
-replaced, which verify the log from before each rotation; the days a value may go unchanged before the UI and
-`coffre list` flag it for rotation: 365 if left out, `null` for none)
+previousAuditChainKeys?, deployment? }` (the app keys `auditChainKey`
+replaced, which verify the log from before each rotation; `deployment`,
+what the instance allows, the deployment's `deployment.ts`:
+[deploy.md](deploy.md#deploymentts-what-the-instance-allows))
 and, for the vault, `{ database, kek, previousKeks?, owners,
-signingKey?, previousSigningKeys?, bulkLimit? }`, a vault key being a local key or `awsKms(…)`
+signingKey?, previousSigningKeys?, deployment? }`, the same `deployment`, a vault key being a local key or `awsKms(…)`
 ([keys.md](keys.md)). The vault derives its signing key from a local vault key;
 `signingKey` is required only with a vault key a key service holds, and the
 ones it replaced stay in `previousSigningKeys`.
@@ -303,7 +304,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | the keys an environment lacks of those its siblings have, read or not, by name; dismiss or restore them | `GET /api/projects/market/dev/missing`, `PATCH /api/projects/market/dev/dismissals {"SENTRY_DSN": true, "OLD": null}` |
 | a version of what reading an environment would open, which changes whenever that does, inherited keys included: for pollers, with read on it and on each parent it inherits from; it reads no value and is not logged. A poller compares it with the version its last read answered, not with one asked before that read: a change undone in between brings that one back | `GET /api/projects/market/prod/version` → `{"version": "…"}` |
 | fork an environment: a new one with each key's current value and folder, read and written in the caller's name | `PUT /api/projects/market/staging {"from": "prod"}` |
-| list an environment's secrets, never their values: who wrote each value and when (a reference's, its source's current version), and the deployment's `rotateAfterDays` | `GET /api/secrets/market/prod` |
+| list an environment's secrets, never their values: who wrote each value and when (a reference's, its source's current version), and the deployment's `values.rotateAfterDays` | `GET /api/secrets/market/prod` |
 | set, add or archive secrets, one or many, in one transaction | `PATCH /api/secrets/market/prod {"DATABASE_URL": "…", "OLD_KEY": null}` |
 | set a secret to a value the client generated, with its recipe (below) | `PATCH /api/secrets/market/prod {"SESSION_SECRET": {"value": "…", "generated": {"recipe": "bytes:32:hex"}}}` |
 | what that write would do, per key, without values and without writing | `PATCH /api/secrets/market/prod?dryRun=1 {…}` → `{"dryRun": true, "keys": {"DATABASE_URL": "changed", "OLD_KEY": "archived"}}` |
@@ -594,7 +595,7 @@ moves both Workers; nothing serves across two releases.
 
 | | App (Worker `coffre`) | Vault (Worker `coffre-vault`) |
 |---|---|---|
-| Config | `auditChainKey`, `auth` (sign-in or Access settings), `rotateAfterDays` | `kek`, `previousKeks`, `owners`, `bulkLimit`; `signingKey` with a KMS key |
+| Config | `auditChainKey`, `auth` (sign-in or Access settings), `deployment.ts` | `kek`, `previousKeks`, `owners`, `deployment.ts` (the bulk limit, the longest service token, the uses' cover and retention); `signingKey` with a KMS key |
 | Tables it writes | projects, environments, ciphertext and wrapped keys, the directory, sessions; app entries in `audit_log` | `principals`, `grants`; vault entries in `audit_log` |
 | Connection | `coffre_runtime`, through `HYPERDRIVE` or a Node Postgres URL | `coffre_vault_runtime`, through `VAULT_HYPERDRIVE` or a Node Postgres URL |
 
@@ -650,7 +651,7 @@ of a change's refusal.
 
 ### The bulk limit
 
-At most `bulkLimit` distinct data keys unwrapped per principal in any rolling window,
+At most `reads.bulkLimit` (`deployment.ts`) distinct data keys unwrapped per principal in any rolling window,
 `{ count: 1000, windowMinutes: 15 }` by default: a thousand different secrets, which no
 person or pipeline reads in a quarter of an hour, while a script pulling every
 value it can reach stops within seconds. A key counts once in the window however

@@ -3,14 +3,14 @@ import { isDeploying, type Vault } from '@coffre/core/vault';
 import { keeps015 } from './api/changes.ts';
 import { ApiError } from './api/errors.ts';
 import { askedOnce, askOnce, type AskedOnce } from './asked-once.ts';
-import type { ProxyCode } from './proxy-code.ts';
+import type { PluginCode } from './proxy-code.ts';
 
 /**
  * The gate (0.16, T186 PR C; docs/design/proxy-ui.md, section 6; formal/Routing.tla, CodeGate): before an isolate
  * serves its first proxy request, or the Proxy tab reads or writes, the names its code defines are reserved in the
  * vault's log (`reserveProxy`, a `proxy.code` change when it adds one, which deletes the UI items of those names,
  * audited). So no UI item a name code holds is served or shown by any isolate after one ran this code, and none
- * returns when a later deployment drops the name. `editable: false` included: `editable` decides what the tab may write,
+ * returns when a later deployment drops the name. `proxy.editable: false` included: it decides what the tab may write,
  * never whether code's names are reserved.
  *
  * Per isolate, per vault, per code, asked once (asked-once.ts): the isolate's first requests make one call, the others
@@ -28,7 +28,7 @@ export function forgetProxyGates(): void {
   GATES = new WeakMap();
 }
 
-export async function gateProxy(vault: Vault, code: ProxyCode | null): Promise<void> {
+export async function gateProxy(vault: Vault, code: Pick<PluginCode, 'names'> | null): Promise<void> {
   if (code === null) return;
   const key = code.names.join('\n');
   let gates = GATES.get(vault);
@@ -38,7 +38,7 @@ export async function gateProxy(vault: Vault, code: ProxyCode | null): Promise<v
   await askOnce(gate, () => reserve(vault, code));
 }
 
-async function reserve(vault: Vault, code: ProxyCode): Promise<void> {
+async function reserve(vault: Vault, code: Pick<PluginCode, 'names'>): Promise<void> {
   let answer: Awaited<ReturnType<Vault['reserveProxy']>> | null;
   try {
     // A vault of 0.14's log holds no proxy definitions (0.15's log's objects), and makes none: nothing to reserve. Its

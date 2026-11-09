@@ -1,7 +1,8 @@
+import { resolveDeployment, type Deployment, type DeploymentOptions, type MovedSetting } from '@coffre/core/deployment';
 import { publicOrigin, type Auth, type AuthConfig } from '@coffre/core/identity';
 import type { VaultEntry } from '@coffre/core/vault';
 
-import { checkPlugins, type CoffrePlugin } from './plugins.ts';
+import { checkPlugins, movedByPlugin, type CoffrePlugin } from './plugins.ts';
 
 /**
  * What every deployment writes, on either runtime. The runtime adds where
@@ -36,10 +37,12 @@ export type CoffreConfig = {
    */
   previousAuditChainKeys?: readonly string[];
   /**
-   * Days a value may go unchanged before the web UI and `coffre list` flag
-   * it for rotation: 365 if left out, `null` for no flag. A rename is no
-   * change; a reference's value is its source's.
+   * What the deployment chooses, its `deployment.ts`: `defineDeployment({…})`
+   * from `@coffre/core/deployment`, the same object the vault is given. The
+   * defaults if left out (docs/design/config.md).
    */
+  deployment?: Deployment | DeploymentOptions;
+  /** @deprecated In `deployment.ts` since 0.16, `values.rotateAfterDays`: read until 0.17, which refuses it here. */
   rotateAfterDays?: number | null;
   /**
    * What the deployment adds to coffre, each answering paths of its own as
@@ -51,15 +54,13 @@ export type CoffreConfig = {
 
 export type ResolvedConfig = {
   publicUrl: string;
+  deployment: Deployment;
   auth: AuthConfig;
   auditChainKey: Buffer;
   previousAuditChainKeys: readonly Buffer[];
   rotateAfterDays: number | null;
   plugins: readonly CoffrePlugin[];
 };
-
-/** A year: what a value may go unchanged before it is flagged, unless the deployment says. */
-const ROTATE_AFTER_DAYS = 365;
 
 /** Check a deployment's configuration, failing on the first problem. */
 export function resolveConfig(config: CoffreConfig): ResolvedConfig {
@@ -72,17 +73,21 @@ export function resolveConfig(config: CoffreConfig): ResolvedConfig {
     .map((text, i) => appKey(`previousAuditChainKeys[${i}]`, text))
     .filter((key, i, keys) => !key.equals(auditChainKey) && keys.findIndex((other) => other.equals(key)) === i);
   if (config.vault === undefined || config.vault === null) throw new Error('vault is required');
-  const rotateAfterDays = config.rotateAfterDays === undefined ? ROTATE_AFTER_DAYS : config.rotateAfterDays;
-  if (rotateAfterDays !== null && !(Number.isSafeInteger(rotateAfterDays) && rotateAfterDays > 0)) {
-    throw new Error(`rotateAfterDays must be a whole number of days, at least 1, or null for no flag; got ${String(rotateAfterDays)}`);
-  }
+  const plugins = checkPlugins(config.plugins ?? []);
+  const moved: MovedSetting[] = [
+    ...(config.rotateAfterDays === undefined ? [] : [{ old: 'createCoffre({ rotateAfterDays })', options: { values: { rotateAfterDays: config.rotateAfterDays } } }]),
+    ...(config.auth.moved ?? []),
+    ...plugins.flatMap(movedByPlugin),
+  ];
+  const deployment = resolveDeployment(config.deployment, moved);
   return {
     publicUrl,
-    auth: config.auth.resolve(publicUrl),
+    deployment,
+    auth: config.auth.resolve(publicUrl, deployment),
     auditChainKey,
     previousAuditChainKeys,
-    rotateAfterDays,
-    plugins: checkPlugins(config.plugins ?? []),
+    rotateAfterDays: deployment.values.rotateAfterDays,
+    plugins,
   };
 }
 

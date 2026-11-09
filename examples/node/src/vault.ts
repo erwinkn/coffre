@@ -6,6 +6,8 @@
 // run one vault per database. Settings come from vault.env.
 import { serveVault } from '@coffre/vault/node';
 
+import { deployment } from '../deployment.ts';
+
 function env(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is not set; see vault.env.example`);
@@ -26,6 +28,8 @@ const vault = await serveVault({
   // previousKeks: [{ id: 'vault-2026-04-01-k7q2xm', key: env('OLD_VAULT_KEY') }],
   // The Owners of the whole instance, whatever its database says: nobody demotes them while listed.
   owners: env('OWNERS').split(',').map((email) => email.trim()),
+  // What this instance allows, the vault's part held here whatever the server says: ../deployment.ts.
+  deployment,
   // The vault derives its signing key from the vault key. With a key a key
   // service holds, such as awsKms(…), it needs one of its own: signingKey: env('SIGNING_KEY').
 });

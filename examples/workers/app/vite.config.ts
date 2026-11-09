@@ -4,6 +4,8 @@ import { tanstackStart } from '@tanstack/react-start/plugin/vite';
 import viteReact from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
+import { deployment } from '../deployment';
+
 export default defineConfig(({ command }) => ({
   plugins: [
     cloudflare({
@@ -13,6 +15,7 @@ export default defineConfig(({ command }) => ({
     }),
     tanstackStart(),
     viteReact(),
-    coffre(),
+    // Checks app/wrangler.jsonc's SIGN_IN_PER_SOURCE against deployment.ts's `services.signInsPerAddress`.
+    coffre({ deployment }),
   ],
 }));

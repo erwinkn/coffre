@@ -26,7 +26,7 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 
 import type { Witness } from './checkpointer.ts';
 import { checkpointerObject, durableHeldOutside, durableSealing, durableSealThrough, startCheckpointer, startProjector, type ObjectNamespace } from './checkpointer-workers.ts';
-import { resolveVaultConfig, type VaultConfig } from './config.ts';
+import { resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from './config.ts';
 import { openVault, prepareVault, type PreparedVault } from './vault.ts';
 
 export type { Vault, VaultConfig, VaultEntry };
@@ -54,8 +54,19 @@ export type WorkersVaultConfig = VaultConfig & {
   hotDatabase: PostgresDatabase;
   checkpointer: ObjectNamespace;
   witnesses?: readonly Witness[];
+  /** `coverMs` is deprecated: in `deployment.ts` since 0.16, `audit.repeatsWithinSeconds`, read until 0.17, which refuses it here. */
   uses?: { inFlight?: number; connections?: number; coverMs?: number; names?: number; batch?: number };
 };
+
+/**
+ * The vault's configuration resolved with its uses' options: the cover a repeat rides, the deployment's
+ * `audit.repeatsWithinSeconds`, which `uses.coverMs` gave until 0.16.
+ */
+function resolved(config: WorkersVaultConfig): { vault: ResolvedVaultConfig; uses: NonNullable<WorkersVaultConfig['uses']> } {
+  const coverMs = config.uses?.coverMs;
+  const vault = resolveVaultConfig(config, coverMs === undefined ? [] : [{ old: 'vault({ uses: { coverMs } })', options: { audit: { repeatsWithinSeconds: coverMs / 1000 } } }]);
+  return { vault, uses: { ...config.uses, coverMs: vault.deployment.audit.repeatsWithinSeconds * 1000 } };
+}
 
 /** Set when the Worker's module runs `vault(…)`, before any call comes in. */
 let configure: ((env: never) => WorkersVaultConfig) | null = null;
@@ -232,8 +243,9 @@ export class VaultEntrypoint extends WorkerEntrypoint implements VaultEntry {
       if (configure === null) throw new Error('the vault Worker must export default vault(…)');
       const config = configure(env as never);
       const { checkpointer: namespace, hotDatabase } = checked(config);
-      const prepared = await prepareVault(resolveVaultConfig(config), {
-        ...(config.uses === undefined ? {} : { uses: config.uses }),
+      const { vault: resolvedConfig, uses } = resolved(config);
+      const prepared = await prepareVault(resolvedConfig, {
+        uses,
         log: '0.15',
         sealThrough: durableSealThrough(namespace),
         heldOutside: durableHeldOutside(namespace),
@@ -313,7 +325,9 @@ export function checkpointer() {
   return checkpointerObject((env: object) => {
     if (configure === null) throw new Error('the vault Worker must export default vault(…)');
     const config = configure(env as never);
-    return { hyperdrive: config.database.hyperdrive, signingKeys: resolveVaultConfig(config).signingKeys, witnesses: config.witnesses };
+    const { vault: resolvedConfig } = resolved(config);
+    // Days of uses kept: the deployment's `audit.keepUsesDays`, every day when null (retention.ts).
+    return { hyperdrive: config.database.hyperdrive, signingKeys: resolvedConfig.signingKeys, witnesses: config.witnesses, retainDays: resolvedConfig.deployment.audit.keepUsesDays };
   });
 }
 

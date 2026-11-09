@@ -12,6 +12,7 @@ import { createHmac, generateKeyPairSync } from 'node:crypto';
 import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 import { credential } from '@coffre/client/credential';
+import { defineDeployment } from '@coffre/core/deployment';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { clientFor, LOG, usesLogged } from './api-fixture.ts';
@@ -268,7 +269,7 @@ function fake(key: string, secret: string): PluginContext {
   };
   const later = new Date(Date.now() + 3_600_000).toISOString();
   return {
-    publicUrl: 'https://coffre.example', api: unused, exchange: unused, signOut: unused, recheck: unused,
+    publicUrl: 'https://coffre.example', deployment: defineDeployment(), api: unused, exchange: unused, signOut: unused, recheck: unused,
     workload: async () => null,
     handle: async () => ({ expiresAt: later, paths: ['market/dev'] }),
     use: async (_handle: unknown, _asked: UseAsked) => ({ values: { [key]: secret }, plain: [], keys: [key], environment: { path: 'market/dev', personal: false }, expiresAt: later }),

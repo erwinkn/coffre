@@ -6,6 +6,8 @@ import { createCoffre, durableAnchor, github, githubApp, postgres, signin, type 
 import { auditWatch } from '@coffre/server/plugins/audit-watch';
 import { credentialProxy } from '@coffre/server/plugins/credential-proxy';
 
+import { deployment } from '../../deployment';
+
 export type Env = {
   HYPERDRIVE: Hyperdrive;
   VAULT: VaultEntry;
@@ -15,6 +17,8 @@ export type Env = {
   /** Set for GitHub Enterprise Server; github.com otherwise. */
   GITHUB_URL?: string;
   GITHUB_API_URL?: string;
+  /** Only this GitHub organization's members sign in, when set: a var, which `coffre setup` asks for (docs/github-app.md). */
+  GITHUB_ORGANIZATION?: string;
   APP_KEY: string;
   /** Who signs in with a passkey after GitHub: app/wrangler.jsonc's var (docs/deployment-auth.md, "Passkeys"). */
   PASSKEYS: PasskeyPolicy;
@@ -43,17 +47,20 @@ export const coffre = createCoffre((env: Env) => {
     publicUrl: env.PUBLIC_URL,
     database: postgres(env.HYPERDRIVE),
     vault: env.VAULT,
+    // What this instance allows: ../../deployment.ts, which the vault reads too.
+    deployment,
     auth: signin({
-      providers: [app ? github({ app }) : github(client)],
+      // GITHUB_ORGANIZATION, when set, lets only its members sign in.
+      providers: [github(app ? { app, organization: env.GITHUB_ORGANIZATION } : { ...client, organization: env.GITHUB_ORGANIZATION })],
       // A passkey after GitHub: `optional` asks it of whoever holds one, and
       // of every Owner; `required`, of everyone; `off`, of no one, the
       // recovery when the last Owner lost theirs (docs/deployment-auth.md).
       passkeys: env.PASSKEYS,
       // CI runs and apps may sign in as services with their platform's proof,
       // through the trust bindings owners make (docs/design/oidc.md), into
-      // key-bound sessions or, for now, bearer credentials; `useOnly: true`
-      // leaves them key-bound sessions only (docs/design/workload-access.md,
-      // section 6.3).
+      // key-bound sessions or, for now, bearer credentials; deployment.ts's
+      // `services.useOnly` leaves them key-bound sessions only
+      // (docs/design/workload-access.md, section 6.3).
       workloads: {
         limits: { perSource: env.SIGN_IN_PER_SOURCE },
         allowLoopbackIssuersForDevelopment: env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
@@ -72,11 +79,12 @@ export const coffre = createCoffre((env: Env) => {
     // someone runs `coffre verify log` (docs/deploy.md, "The audit watch").
     // The credential proxy (docs/design/credential-proxy.md): apps run with
     // `coffre run` reach their APIs through <PUBLIC_URL>/use, with the keys
-    // filled in, which they never hold. `editable` lets Owners write routes,
-    // signers, verifiers and databases per environment in its Proxy tab;
-    // add your own to `credentials` (and `tunnels`, `signers`, `verifiers`)
-    // to keep them in code, where they win the name in every environment.
-    plugins: [auditWatch({ anchor: durableAnchor(env.ANCHOR) }), credentialProxy({ credentials: {}, editable: true })],
+    // filled in, which they never hold. deployment.ts's `proxy.editable` lets
+    // Owners write routes, signers, verifiers and databases per environment
+    // in its Proxy tab; add your own to `credentials` (and `tunnels`,
+    // `signers`, `verifiers`) to keep them in code, where they win the name
+    // in every environment.
+    plugins: [auditWatch({ anchor: durableAnchor(env.ANCHOR) }), credentialProxy({ credentials: {} })],
     // Where plugins' WebSockets run, one object per `coffre run` and database: the
     // credential proxy's tunnel, once you add it (docs/design/credential-proxy.md).
     sockets: env.SOCKETS,

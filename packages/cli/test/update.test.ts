@@ -184,6 +184,24 @@ test('update ends with what the release asks of the database', () => {
   );
 });
 
+test("editWorker removes a property given undefined, and leaves the file's comments", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-edit-'));
+  try {
+    mkdirSync(join(dir, 'app'));
+    const file = join(dir, 'app', 'wrangler.jsonc');
+    writeFileSync(file, '{\n  // kept\n  "vars": { "GITHUB_CLIENT_ID": "Iv23", "GITHUB_ORGANIZATION": "acme" }\n}\n');
+    assert.deepEqual(editWorker(dir, 'app/wrangler.jsonc', [{ path: ['vars', 'GITHUB_ORGANIZATION'], value: undefined }]), [true]);
+    const text = readFileSync(file, 'utf8');
+    assert.match(text, /\/\/ kept/);
+    assert.ok(!text.includes('GITHUB_ORGANIZATION'), text);
+    assert.match(text, /"GITHUB_CLIENT_ID": "Iv23"/);
+    // Already gone, nothing changes.
+    assert.deepEqual(editWorker(dir, 'app/wrangler.jsonc', [{ path: ['vars', 'GITHUB_ORGANIZATION'], value: undefined }]), [false]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a Workers deployment whose own setup does Hyperdrive alone, and whose vault binds no hot config, is told to run it: it migrates too", () => {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-update-hot-'));
   try {

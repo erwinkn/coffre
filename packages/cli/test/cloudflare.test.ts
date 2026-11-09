@@ -12,7 +12,7 @@ import { parse } from 'jsonc-parser';
 import { localCallback } from '../src/browser.ts';
 import { callbackOf, CloudflareApi, cloudflareToken, deploymentWrangler, deployWorker, originOf, stopWranglers } from '../src/cloudflare.ts';
 import { deploymentKind, editWorker, placeholder, readWorker } from '../src/deployment.ts';
-import { appManifest, appName, appSettings, convert, createGitHubApp, logoPath, manifestAddress, manifestPage } from '../src/github-app.ts';
+import { appManifest, appName, appSettings, convert, createGitHubApp, logoPath, manifestAddress, manifestPage, organizationProblem } from '../src/github-app.ts';
 import { templateDir } from '../src/init.ts';
 import { Steps } from '../src/steps.ts';
 import { Cancelled } from '../src/tty.ts';
@@ -536,6 +536,20 @@ test('the page and the data: address post the same manifest, to GitHub and nowhe
   assert.match(address, /"callback_urls":\["https:\/\/secrets\.acme\.test\/auth\/callback\/github"\]/, 'readable as it is');
   assert.ok(!/\s/.test(address), 'one word, to paste whole');
   assert.ok(address.length < 700, `short enough to copy: ${address.length}`);
+});
+
+test("with an organization whose members alone sign in: the app is the organization's, and may read who they are", () => {
+  const github = { web: 'https://github.com', api: 'https://api.github.com' };
+  const manifest = appManifest('https://secrets.acme.test', 'http://127.0.0.1:5000/created', 'acme');
+  assert.deepEqual(manifest.default_permissions, { emails: 'read', members: 'read' });
+  for (const html of [manifestPage(github, manifest, 'st4te', 'acme'), decodeURIComponent(manifestAddress(github, manifest, 'st4te', 'acme').slice('data:text/html,'.length))]) {
+    const form = manifestForm(html);
+    assert.equal(form.action, 'https://github.com/organizations/acme/settings/apps/new?state=st4te');
+    assert.deepEqual(JSON.parse(form.manifest), manifest);
+  }
+  // An organization's login, as GitHub allows one.
+  for (const login of ['acme', 'Acme-Corp', 'a1', 'x'.repeat(39), `${'x-'.repeat(19)}x`]) assert.equal(organizationProblem(login), null, login);
+  for (const login of ['-acme', 'acme-', 'ac--me', 'acme/api', 'github.com/acme', 'x'.repeat(40), `${'x-'.repeat(19)}xx`, `${'x-'.repeat(38)}x`, 'ac me']) assert.match(organizationProblem(login) ?? '', /not an organization's login/, login);
 });
 
 test("a manifest's code converts once, into the client ID and secret; the private key is dropped", LIMIT, async () => {

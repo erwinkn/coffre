@@ -63,7 +63,8 @@ function runtimeOver(vault: Vault, auth: 'github' | 'google' | 'access' = 'githu
       ? cloudflareAccess({ teamDomain: 'acme.cloudflareaccess.com', audience: 'coffre-aud' })
       : signin({ providers: [(auth === 'github' ? github : google)({ clientId: 'a', clientSecret: 'b' })] }),
     auditChainKey: deps.chainKey.toString('base64'),
-    plugins: [credentialProxy({ credentials, cacheSeconds: 0 })],
+    deployment: { proxy: { cacheValues: false } },
+    plugins: [credentialProxy({ credentials })],
   });
   const made = createRuntime(config, database, vault, { json: async (url) => { throw new Error(`no fetch of ${url.href} here`); } });
   made.plugins = checkPlugins(config.plugins);

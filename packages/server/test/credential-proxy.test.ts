@@ -15,6 +15,7 @@ import type { AddressInfo } from 'node:net';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { credential } from '@coffre/client/credential';
+import { defineDeployment } from '@coffre/core/deployment';
 import { hashToken } from '@coffre/core/identity';
 import { replayStored } from '@coffre/vault/node';
 import { eq } from 'drizzle-orm';
@@ -186,6 +187,7 @@ function proxyOptions(overrides: Partial<CredentialProxyOptions> = {}): Credenti
 useMcp(
   async () => {
     runtime.plugins = checkPlugins([credentialProxy(proxyOptions()), vaultKv()]);
+    runtime.deployment = defineDeployment();
     received.length = 0;
     const root = clientFor(deps, ROOT);
     await root.members.add(`user:${DEV}`);
@@ -322,7 +324,8 @@ test('a handle stands in for its environment and reaches nothing but the proxy; 
   const listed = await bearer(session).tokens.list(`user:${DEV}`);
   assert.ok(listed.tokens.some((token) => token.id === made.id));
   const schumann = new SchumannApiClient({ baseUrl: `${ORIGIN}/use/market/dev/schumann`, apiKey: made.token });
-  runtime.plugins = checkPlugins([credentialProxy(proxyOptions({ cacheSeconds: 0 }))]);
+  runtime.plugins = checkPlugins([credentialProxy(proxyOptions())]);
+  runtime.deployment = defineDeployment({ proxy: { cacheValues: false } });
   await schumann.get('/companies');
   // A request whose body is still coming when the handle is revoked sends nothing: the handle is checked as it goes out.
   let finish!: () => void;
@@ -768,7 +771,8 @@ test("the stable URL, /use/<credential>, is the handle's environment's: a fork's
   assert.equal((await route('/use/market/dev-eu/schumann/companies', { headers: { 'x-api-key': both.token } })).status, 200);
 
   // Renamed, it is the same environment: the handle keeps it by id, and the stable URL follows within the cache's minute.
-  runtime.plugins = checkPlugins([credentialProxy(proxyOptions({ cacheSeconds: 0 }))]);
+  runtime.plugins = checkPlugins([credentialProxy(proxyOptions())]);
+  runtime.deployment = defineDeployment({ proxy: { cacheValues: false } });
   await clientFor(deps, ROOT).environments.update('market/dev-eu', { slug: 'europe' });
   assert.equal((await stable('/companies', fork.token)).status, 200);
   const moved = await stable('/companies', both.token);

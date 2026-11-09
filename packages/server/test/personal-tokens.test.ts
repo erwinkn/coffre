@@ -2,6 +2,7 @@
 // at most what they held then, and at each request what both its scope and
 // they hold now. It reaches their secrets and places, never their access or
 // sign-in, and every entry made with it names it (docs/design/personal-tokens.md).
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -59,6 +60,7 @@ beforeEach(async () => {
     waitUntil,
     schema: { migrated: true }, appKey: { settled: true },
     rotateAfterDays: 365,
+    deployment: defineDeployment(),
     plugins: [],
   } as CoffreRuntime;
   root = clientFor(deps, ROOT);

@@ -1,6 +1,7 @@
 // coffre as MCP clients' OAuth authorization server (docs/design/mcp.md,
 // section 4): its metadata, consent, codes, tokens, refresh and
 // revocation, each over HTTP as a client and the consent page send them.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -64,7 +65,7 @@ before(async () => {
   if (auth.mode !== 'signin') throw new Error('unreachable');
   const service = new SigninService({ ...deps, signin: auth.signin });
   const mcp = new McpService({ ...deps, config: auth.signin.mcp!, signin: auth.signin, publicUrl: ORIGIN, transport });
-  runtime = { db: deps.db, vault: deps.vault, chainKey: deps.chainKey, previousChainKeys: [], signin: service, workloads: null, mcp, auth, publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, plugins: [] };
+  runtime = { db: deps.db, vault: deps.vault, chainKey: deps.chainKey, previousChainKeys: [], signin: service, workloads: null, mcp, auth, publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, deployment: defineDeployment(), plugins: [] };
   off = { ...runtime, mcp: null };
 });
 

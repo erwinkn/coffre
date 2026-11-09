@@ -5,6 +5,7 @@
 // changed around the vault is shown as it says, and decides nothing, since
 // no other route takes such a caller and the vault decides everything the
 // caller asks for next.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -53,7 +54,7 @@ before(async () => {
   const service = new SigninService({ ...deps, vault: counted, signin: auth.signin });
   runtime = {
     db: deps.db, vault: counted, chainKey: deps.chainKey, previousChainKeys: [], signin: service, workloads: null, mcp: null, auth,
-    publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, plugins: [],
+    publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, deployment: defineDeployment(), plugins: [],
   };
 });
 

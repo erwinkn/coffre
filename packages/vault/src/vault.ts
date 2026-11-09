@@ -4493,7 +4493,7 @@ class VaultService implements Vault {
   async #issueOnce(log015: NonNullable<PreparedVault['log015']>, input: IssueTokenInput, scope: CredentialScope): Promise<IssueTokenOutcome> {
     const read = await this.#issuerRead(log015, { ...input, scope, service: input.credential.kind === 'service' });
     if ('refused' in read) return read;
-    const why = weighIssue(input, scope, read.holder, read.places, read.via?.columns ?? null, read.issue.at, read.service);
+    const why = weighIssue(input, scope, read.holder, read.places, read.via?.columns ?? null, read.issue.at, read.service, this.#config.deployment.services.tokenMaxDays);
     if (why !== null) {
       await this.#record(read.reports);
       return { ok: false, refused: 'refused', why };

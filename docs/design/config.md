@@ -1,6 +1,13 @@
 # One config object: what a deployment chooses, and what coffre derives
 
-Status: **proposal, for Erwin's one-pass review (D172), for 0.16.** Written
+Status: **approved by Erwin on 2026-11-08 (D172), built in 0.16** as
+`@coffre/core/deployment` and each deployment's `deployment.ts`, with two
+changes made while building it: the object and its file are named
+`deployment`, not `policy`, since the instance's access policy (`Policy`,
+the roles and protected environments an Owner edits, which the vault keeps
+in its log) already has that name; and `people.passkeys` stays in
+`signin({ passkeys })` (below, "What is not in it"). Q1, Q2, Q3, Q5 and Q7
+land in PRs of their own. Written
 against `main` at `f9261451`, with the values of the open PRs that change
 limits at their heads: #519 (`f5d3eb02`, proxy memory), #520 (`66815898`,
 sign-in limits), #533 (`2d390835`, body bounds), #538 (`231e66d1`, locks and
@@ -26,7 +33,7 @@ Four parts:
 
 ## 1. The object
 
-Today a deployment's choices sit in six places: `signin({…})` (passkeys,
+Before 0.16 a deployment's choices sat in six places: `signin({…})` (passkeys,
 session lifetimes, the longest service token, and in `workloads` whether
 services may hold bearer tokens or list reads), `vault({…})` on Workers and
 `serveVault({…})` on Node (the bulk read cap, the `uses` block),
@@ -35,18 +42,17 @@ value is flagged for rotation), five rate-limiting bindings in
 `app/wrangler.jsonc`, and a retention setting no standard deployment can
 reach. Most deployments set none of them, so the defaults are the policy.
 
-The proposal: one file, `policy.ts`, beside `app/` and `vault/`. The app and
+The proposal: one file, `deployment.ts`, beside `app/` and `vault/`. The app and
 the vault each import it at build time and each enforce their part; neither
 takes policy from the other at run time, so a compromised app cannot loosen
 what the vault holds.
 
 ```ts
-// policy.ts: what this instance allows. Imported by the app and by the vault.
-import { definePolicy } from '@coffre/core/policy';
+// deployment.ts: what this instance allows. Imported by the app, the vault and the build.
+import { defineDeployment } from '@coffre/core/deployment';
 
-export const policy = definePolicy({
+export const deployment = defineDeployment({
   people: {
-    passkeys: 'optional', // 'off' | 'optional' | 'required'
     browserSessionHours: 12, // above 0, at most 168
     cliSessionDays: 30, // above 0, at most 365
   },
@@ -78,12 +84,12 @@ Each runtime passes the same object, once per side:
 
 ```ts
 // Workers: app/src/coffre.ts and vault/src/worker.ts
-createCoffre((env) => ({ /* wiring as today */ policy }));
-vault((env) => ({ /* wiring as today */ policy }));
+createCoffre((env) => ({ /* wiring as today */ deployment }));
+vault((env) => ({ /* wiring as today */ deployment }));
 
 // Node: app/src/coffre.ts and src/vault.ts
-createCoffre({ /* wiring as today */ policy });
-await serveVault({ /* wiring as today */ policy });
+createCoffre({ /* wiring as today */ deployment });
+await serveVault({ /* wiring as today */ deployment });
 ```
 
 A Workers deployment has no other knob, and neither has a Node one: pool
@@ -93,7 +99,6 @@ sizes come from the database (Q2), and the `uses` block goes (section 4).
 
 | Field | Default | Enforced by | Today | Why it is a choice |
 |---|---|---|---|---|
-| `people.passkeys` | `'optional'` | app | `signin({ passkeys })` | how much a person proves beyond the provider ([passkeys.md](passkeys.md)). `rpId` stays in `signin`: it names a domain, it is wiring |
 | `people.browserSessionHours` | 12; above 0, at most 168, as today | app | `signin({ browserSessionHours })` | how often a person signs in again in a browser |
 | `people.cliSessionDays` | 30; above 0, at most 365, as today | app | `signin({ cliSessionDays })` | the same for `coffre login` |
 | `services.tokenMaxDays` | 365, 1 to 365 | app **and vault** | `signin({ serviceTokenMaxDays })`, app only (#516) | R76. New: the vault holds an issue to the deployment's number too, where today it holds only the 365. The default lifetime offered stays min(90, this) |
@@ -224,7 +229,7 @@ count repeats.
 number from the binding in `wrangler.jsonc` and nowhere else; the code cannot
 set it. So the number must be written there too. Proposal: the deployment's
 build (`@coffre/ui/vite`, which already fails on drifted pins) fails when the
-binding's `limit` and `period` differ from the policy. On Node the policy is
+binding's `limit` and `period` differ from `deployment.ts`. On Node `deployment.ts` is
 the only place. If Erwin prefers, this field can instead stay out of the
 object and live where each platform keeps it; the object is then one field
 shorter, and Workers deployments set it in `wrangler.jsonc`.
@@ -239,6 +244,15 @@ Access, which owns their sessions: the `people` fields do not apply there.
   `auditChainKey` and the keys they replaced), the providers, the plugins
   and what they define (`generate`, the credentials, tunnels, signers),
   witnesses, `passkeys.rpId`.
+- **`signin({ passkeys })`**, though it is a policy: how much a person
+  proves beyond the provider ([passkeys.md](passkeys.md)). It differs per
+  environment, as `owners` does, and is switched without a rebuild: the
+  examples read it from a var (`PASSKEYS`), the dev stack from
+  `COFFRE_DEV_PASSKEYS`, conformance restarts the app under each value,
+  and `off` is the recovery when the last Owner lost their passkey
+  ([deployment-auth.md](../deployment-auth.md)), which an Owner sets in
+  the platform's dashboard. A field in a file the build reads would make
+  that recovery a rebuild. So it stays in `signin`, `optional` unless set.
 - **`credentialProxy({ insecureUpstreams })`**, though it is a policy: it
   lets the proxy's upstreams be plain HTTP and private addresses. Default
   `false`, which is the right default. It stays beside the credentials
@@ -275,7 +289,8 @@ Access, which owns their sessions: the `people` fields do not apply there.
 ### Moving to it
 
 0.16 reads the old places for one release, warns, and refuses them in 0.17,
-as #520 does for its limits. `coffre init` writes `policy.ts`; the examples
+as #520 does for its limits; given both, the old place and the object, the
+app or vault refuses to start. `coffre init` writes `deployment.ts`; the examples
 show it; `docs/deploy.md` gets one section on it.
 
 ## 2. Everything else: fixed or derived
@@ -850,20 +865,20 @@ it ends at 30 s with the app's.
 
 | Knob | Before | After |
 |---|---|---|
-| The vault's `uses` block on Workers (`inFlight`, `connections`, `coverMs`, `names`, `batch`) | five settings, none set by any deployment | gone: the in-flight count derived (Q1), `coverMs` the policy's `audit.repeatsWithinSeconds`, the rest internal constants at today's defaults (10,000, 100; section 2.3) |
+| The vault's `uses` block on Workers (`inFlight`, `connections`, `coverMs`, `names`, `batch`) | five settings, none set by any deployment | gone: the in-flight count derived (Q1), `coverMs` the object's `audit.repeatsWithinSeconds`, the rest internal constants at today's defaults (10,000, 100; section 2.3) |
 | `DEFAULT_CONNECTIONS` and Node's pool probe | 10 per isolate or process; the probe always reads nothing | gone, with Q1's step 1 |
 | `USES_AT_ONCE` (4 per request) | "leaves the isolate's admission room" | gone with the count it protects |
 | Node pool size (`max ?? 10`) | 10 per pool; a deployment passing a URL cannot change it | derived from the database at start (Q2) |
 | `coffre setup`'s Hyperdrive maximum | 20, Free's, on Paid too | the plan's maximum (limits.md #12) |
 | `READ_HEAD_WAITERS` | 16, whatever the database | min(16, request connections − 2), the share computed (Q3) |
-| `signin({ workloads: { useOnly, noReads } })` | in `signin`'s `workloads`, both `false` | `policy.services.useOnly`, `policy.services.noReads`; `workloads` keeps its wiring (the limiters' bindings, `github`, `alert`) |
-| `vault({ bulkLimit })`, `serveVault({ bulkLimit })` | in the vault's config | `policy.reads.bulkLimit` |
-| `signin({ passkeys, browserSessionHours, cliSessionDays, serviceTokenMaxDays })` | in `signin` | `policy.people.*`, `policy.services.tokenMaxDays`; `passkeys.rpId` stays in `signin` |
-| `credentialProxy({ cacheSeconds, recheckSeconds })` | two settings, both 60: a tunnel's bound 70 s | `policy.proxy.revokedWithinSeconds`, the tunnel's checks derived to fit it; `cacheSeconds: 0` becomes `policy.proxy.cacheValues: false` |
-| `credentialProxy({ editable })` | in the plugin's options | `policy.proxy.editable` |
-| `createCoffre({ rotateAfterDays })` | in `createCoffre` | `policy.values.rotateAfterDays` |
-| `retainDays` | only through `runCheckpointer`/`keepCheckpointer` on Node | `policy.audit.keepUsesDays`, default every day, as today (Q6) |
-| Sign-in rate limits | five Workers bindings (per address and in all, for workloads and MCP; MCP per connection), 30 / 300 / 120 a minute; `processLimits` the same | one, per address, 10,000 per 10 s (#520), its number in the policy |
+| `signin({ workloads: { useOnly, noReads } })` | in `signin`'s `workloads`, both `false` | `deployment.services.useOnly`, `deployment.services.noReads`; `workloads` keeps its wiring (the limiters' bindings, `github`, `alert`) |
+| `vault({ bulkLimit })`, `serveVault({ bulkLimit })` | in the vault's config | `deployment.reads.bulkLimit` |
+| `signin({ browserSessionHours, cliSessionDays, serviceTokenMaxDays })` | in `signin` | `deployment.people.*`, `deployment.services.tokenMaxDays`; `passkeys` stays in `signin` |
+| `credentialProxy({ cacheSeconds, recheckSeconds })` | two settings, both 60: a tunnel's bound 70 s | `deployment.proxy.revokedWithinSeconds`, the tunnel's checks derived to fit it; `cacheSeconds: 0` becomes `deployment.proxy.cacheValues: false` |
+| `credentialProxy({ editable })` | in the plugin's options | `deployment.proxy.editable` |
+| `createCoffre({ rotateAfterDays })` | in `createCoffre` | `deployment.values.rotateAfterDays` |
+| `retainDays` | only through `runCheckpointer`/`keepCheckpointer` on Node | `deployment.audit.keepUsesDays`, default every day, as today (Q6) |
+| Sign-in rate limits | five Workers bindings (per address and in all, for workloads and MCP; MCP per connection), 30 / 300 / 120 a minute; `processLimits` the same | one, per address, 10,000 per 10 s (#520), its number in `deployment.ts` |
 | The per-binding count | 60 sign-ins a minute, in the app, the vault and `sign_in` | gone (#520, R76) |
 | `exchangeLimit.inFlight` | 32, unsourced | a memory bound, once a sign-in has a deadline (limits.md #35) |
 | The vault's 15 s write lock wait (`LOCK_TIMEOUT_MS`) | 15 s | `LOCK_WAIT_MS`, 500 ms, retried for up to 5 s from the first attempt (#538) |
@@ -877,4 +892,4 @@ it ends at 30 s with the app's.
 | KMS's attempt timeout and key budget | 5 s each; 5 s in all | 706 ms each, measured; 3,118 ms per operations batch, a ceiling sized to one operation's retries; a cold vault's KEK checks each get their own, all inside the call's 8.1 s (2.4) |
 
 What a deployment writes after all of this: its wiring, as today, and
-`policy.ts`, fourteen fields, each with a default it can leave alone.
+`deployment.ts`, thirteen fields, each with a default it can leave alone.

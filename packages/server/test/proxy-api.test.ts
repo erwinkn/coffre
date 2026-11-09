@@ -8,6 +8,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createClient, type CoffreClient } from '@coffre/client';
+import { defineDeployment } from '@coffre/core/deployment';
 import { defineSignin, github, signin } from '@coffre/core/identity';
 import { RELEASE, versioned, type ProxyDefinition, type VaultEntry } from '@coffre/core/vault';
 import { and, asc, eq } from 'drizzle-orm';
@@ -64,13 +65,13 @@ const STRIPE = { definition: { ...route('stripe', ['STRIPE_SECRET_KEY'], 'api.st
 beforeEach(async () => {
   await resetDatabase(db.owner);
   deps = testDeps(db.runtime, [ROOT]);
-  deps.proxy = { editable: true, insecureUpstreams: false, names: ['stripe'], items: [STRIPE], cacheSeconds: 60 };
+  deps.proxy = { editable: true, insecureUpstreams: false, names: ['stripe'], items: [STRIPE], windowSeconds: 60 };
   const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: SIGNIN });
   deps.signin = signin;
   runtime = {
     db: deps.db, vault: deps.vault, chainKey: deps.chainKey, previousChainKeys: [], signin, workloads: null, mcp: null,
     auth: { mode: 'signin', signin: SIGNIN }, publicUrl: ORIGIN, verifier: signin, waitUntil,
-    schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, plugins: [],
+    schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, deployment: defineDeployment(), plugins: [],
   } as CoffreRuntime;
   root = clientFor(deps, ROOT);
   ada = clientFor(deps, 'ada@acme.example');
@@ -253,10 +254,10 @@ test('who may save at all: the tab writes only where the deployment says, a pers
   const ci = clientFor(deps, 'ci', 'service');
   assert.equal((await refusal(ci.proxy.save('market/dev', { seal: null, items: { openai: route('openai') } }))).status, 403);
   // Under `editable: false`, the default: the deployment's code keeps them.
-  deps.proxy = { editable: false, insecureUpstreams: false, names: [], items: [], cacheSeconds: 60 };
+  deps.proxy = { editable: false, insecureUpstreams: false, names: [], items: [], windowSeconds: 60 };
   assert.equal((await root.proxy.get('market/dev')).editable, false);
   assert.deepEqual(await refusal(root.proxy.save('market/dev', { seal: null, items: { openai: route('openai') } })),
-    { status: 409, reason: 'not_editable', message: "this deployment's code keeps its proxy definitions: credentialProxy({ editable: true }) lets the UI write them" });
+    { status: 409, reason: 'not_editable', message: "this deployment's code keeps its proxy definitions: proxy: { editable: true } in its deployment.ts lets the UI write them" });
   // No credential proxy at all: the same.
   deps.proxy = null;
   assert.equal((await refusal(root.proxy.save('market/dev', { seal: null, items: { openai: route('openai') } }))).status, 409);
@@ -264,7 +265,7 @@ test('who may save at all: the tab writes only where the deployment says, a pers
   assert.deepEqual(await denials('proxy.save'), ['reserved', 'invalid', 'not_a_person', 'not_editable', 'not_editable']);
   // A personal token, at the front door: refused there, before any handler.
   const token = await root.tokens.issue(`user:${ROOT}`, { label: 'agent', expiresInMinutes: 60, scope: { market: 'maintainer' } });
-  deps.proxy = { editable: true, insecureUpstreams: false, names: [], items: [], cacheSeconds: 60 };
+  deps.proxy = { editable: true, insecureUpstreams: false, names: [], items: [], windowSeconds: 60 };
   assert.equal((await refusal(bearer(token.token).proxy.save('market/dev', { seal: null, items: { openai: route('openai') } }))).status, 403);
   assert.deepEqual((await bearer(token.token).proxy.get('market/dev')).items, []);
 });

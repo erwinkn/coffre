@@ -1,3 +1,4 @@
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -36,6 +37,7 @@ const config = (): ResolvedVaultConfig => ({
   owners: ['root@acme.example'],
   signingKeys: [randomBytes(32)],
   bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+  deployment: defineDeployment(),
 });
 
 /** market/prod/DATABASE_URL, a value; billing/prod, where references are held; and the three people. */

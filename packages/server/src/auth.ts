@@ -168,7 +168,7 @@ export function refusedByKind(runtime: Pick<CoffreRuntime, 'auth'>, token: strin
   // as a bearer: its hash covers its prefix, so neither is ever looked up as one (docs/design/workload-access.md).
   if (kind === 'enrollment') return errorResponse(new ApiError('unauthenticated', 'an enrollment code is no credential: a workload exchanges it at /api/auth/workload', 'enrollment'));
   // A strict instance leaves services nothing but key-bound sessions (section 6.3): a bearer service token, kept or exchanged, reads nothing.
-  if (kind === 'service' && runtime.auth.mode === 'signin' && runtime.auth.signin.workloads?.useOnly === true) {
+  if (kind === 'service' && runtime.auth.mode === 'signin' && runtime.auth.signin.useOnly) {
     return errorResponse(new ApiError('unauthenticated', 'this instance takes no service token (useOnly): sign the service in at /api/auth/workload, with its key', 'use_only'));
   }
   return null;

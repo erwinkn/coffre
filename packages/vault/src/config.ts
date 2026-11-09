@@ -1,3 +1,4 @@
+import { resolveDeployment, type Deployment, type DeploymentOptions, type MovedSetting } from '@coffre/core/deployment';
 import { derivedSigningKey, KekRegistry, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 
 /** At most `count` distinct data keys unwrapped per principal in any `windowMs`. */
@@ -34,6 +35,9 @@ export type ResolvedVaultConfig = {
    * signed, so a rotation leaves earlier records verifying.
    */
   signingKeys: readonly Uint8Array[];
+  /** What the deployment chose, its `deployment.ts`: the vault holds its own part of it, whatever the app says. */
+  deployment: Deployment;
+  /** `deployment.reads.bulkLimit`, its window in milliseconds. */
   bulkLimit: BulkLimit;
 };
 
@@ -77,9 +81,12 @@ export type VaultConfig = {
    */
   previousSigningKeys?: readonly string[];
   /**
-   * At most `count` distinct data keys unwrapped per principal in any `windowMinutes`; 1000 in 15 unless set. The
-   * window is a day at most: the releases it counts are kept a day and an hour (`prune_vault_releases`).
+   * What the deployment chooses, its `deployment.ts`: `defineDeployment({…})` from `@coffre/core/deployment`, the
+   * same object the app is given. The vault holds its part: the bulk limit, the longest service token, how long a
+   * repeat rides a use's entry and how many days of uses are kept. The defaults if left out (docs/design/config.md).
    */
+  deployment?: Deployment | DeploymentOptions;
+  /** @deprecated In `deployment.ts` since 0.16, `reads.bulkLimit`: read until 0.17, which refuses it here. */
   bulkLimit?: { count: number; windowMinutes: number };
   /**
    * @deprecated Gone in 0.10, and refused: each key says who sees it now. Mark
@@ -147,8 +154,11 @@ function kek(entry: Kek): { provider: KekProvider; signingKey: Buffer | null } {
   return { provider: entry, signingKey: null };
 }
 
-/** Check a deployment's vault configuration, failing on the first problem. */
-export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
+/**
+ * Check a deployment's vault configuration, failing on the first problem. `moved`: the settings its runtime's own
+ * options still give that `deployment.ts` now holds (`vault({ uses: { coverMs } })`), read until 0.17.
+ */
+export function resolveVaultConfig(config: VaultConfig, moved: readonly MovedSetting[] = []): ResolvedVaultConfig {
   if ('people' in config && config.people !== undefined) {
     throw new Error(
       `people is gone in 0.10 (it was ${JSON.stringify(config.people)}): each key says who sees it now. Remove people, mark the keys no person may read sensitive ` +
@@ -160,11 +170,16 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
   const refs = [current, ...previous].map(({ provider, keyId }) => `${provider}:${keyId}`);
   const twice = refs.find((ref, i) => refs.indexOf(ref) !== i);
   if (twice !== undefined) throw new Error(`two vault keys share an id: ${twice}`);
+  const deployment = resolveDeployment(config.deployment, [
+    ...(config.bulkLimit === undefined ? [] : [{ old: 'vault({ bulkLimit })', options: { reads: { bulkLimit: config.bulkLimit } } }]),
+    ...moved,
+  ]);
   return {
     keks: new KekRegistry(current, previous),
     owners: checkOwners(config.owners ?? config.bootstrapOwners ?? config.rootAdmins ?? []),
     signingKeys: signingKeys(config.signingKey, config.previousSigningKeys ?? [], keks),
-    bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
+    deployment,
+    bulkLimit: checkBulkLimit(deployment.reads.bulkLimit),
   };
 }
 

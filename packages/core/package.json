@@ -27,6 +27,11 @@
       "types": "./dist/audit.d.ts",
       "default": "./dist/audit.js"
     },
+    "./deployment": {
+      "coffre:source": "./src/deployment.ts",
+      "types": "./dist/deployment.d.ts",
+      "default": "./dist/deployment.js"
+    },
     "./dotenv": {
       "coffre:source": "./src/dotenv.ts",
       "types": "./dist/dotenv.d.ts",

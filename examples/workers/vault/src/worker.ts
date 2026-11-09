@@ -4,6 +4,8 @@
 // checkpointer, a Durable Object that signs the audit log every half second.
 import { checkpointer, postgres, vault } from '@coffre/vault/cloudflare';
 
+import { deployment } from '../../deployment';
+
 type Env = {
   VAULT_HYPERDRIVE: Hyperdrive;
   HOT_HYPERDRIVE: Hyperdrive;
@@ -25,6 +27,8 @@ export default vault((env: Env) => ({
   // previousKeks: [{ id: 'vault-2026-04-01-k7q2xm', key: env.OLD_VAULT_KEY }],
   // The Owners of the whole instance, whatever its database says: nobody demotes them while listed.
   owners: env.OWNERS.split(',').map((email) => email.trim()),
+  // What this instance allows, the vault's part held here whatever the app says: ../../deployment.ts.
+  deployment,
   // The vault derives its signing key from the vault key. With a key a key
   // service holds, such as awsKms(…), it needs one of its own: signingKey: env.SIGNING_KEY.
 }));

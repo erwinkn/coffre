@@ -1,6 +1,7 @@
 import { checkPasskeysOption, defineSignin, type McpOptions, type PasskeysOptions, type SigninConfig, type WorkloadsOptions } from './signin/config.ts';
 import type { SigninProvider } from './signin/types.ts';
 import type { AccessVerifierConfig } from './types.ts';
+import type { Deployment, MovedSetting } from '../deployment.ts';
 
 /**
  * Who vouches for the person at the other end of a request.
@@ -29,7 +30,10 @@ export type AuthConfig =
  * deployment's public URL, which its callbacks are built from.
  */
 export type Auth = {
-  resolve(publicUrl: string): AuthConfig;
+  /** Sign-in finished against the public URL, with what the deployment chose (`deployment.ts`): its people's and services' fields. */
+  resolve(publicUrl: string, deployment?: Deployment): AuthConfig;
+  /** What the deployment still writes here that 0.16 moved to `deployment.ts`: read until 0.17. */
+  moved?: readonly MovedSetting[];
 };
 
 function httpsOrigin(what: string, value: string): URL {
@@ -95,11 +99,11 @@ export type SigninOptions = {
   title?: string;
   /** One line under it, e.g. "Use your acme.example Google account." */
   note?: string;
-  /** Absolute lifetime of a browser session; 12 hours unless set, at most a week. */
+  /** @deprecated In `deployment.ts` since 0.16, `people.browserSessionHours`: read until 0.17, which refuses it here. */
   browserSessionHours?: number;
-  /** Absolute lifetime of a CLI session; 30 days unless set, at most a year. */
+  /** @deprecated In `deployment.ts` since 0.16, `people.cliSessionDays`: read until 0.17, which refuses it here. */
   cliSessionDays?: number;
-  /** The longest a service account's token may last, in whole days; a year unless set lower (R76). */
+  /** @deprecated In `deployment.ts` since 0.16, `services.tokenMaxDays`: read until 0.17, which refuses it here. */
   serviceTokenMaxDays?: number;
   /** Lets CI runs sign in as services with their platform's ID token: `{}` turns it on. */
   workloads?: WorkloadsOptions;
@@ -126,18 +130,39 @@ export function signin(options: SigninOptions): Auth {
   checkPasskeysOption(options.passkeys);
   defineSignin({ ...toSignin(options), passkeys: 'off', publicUrl: 'http://127.0.0.1' });
   return {
-    resolve: (publicUrl) => ({ mode: 'signin', signin: defineSignin({ ...toSignin(options), publicUrl }) }),
+    resolve: (publicUrl, deployment) => ({ mode: 'signin', signin: defineSignin({ ...toSignin(options, deployment), publicUrl }) }),
+    moved: movedSettings(options),
   };
 }
 
-function toSignin(options: SigninOptions) {
+/** The settings `signin` took in 0.15 that `deployment.ts` holds since 0.16, as this deployment still writes them. */
+function movedSettings(options: SigninOptions): MovedSetting[] {
+  const moved: MovedSetting[] = [];
+  const one = (old: string, value: unknown, group: string, field: string) => {
+    if (value !== undefined) moved.push({ old, options: { [group]: { [field]: value } } });
+  };
+  one('signin({ browserSessionHours })', options.browserSessionHours, 'people', 'browserSessionHours');
+  one('signin({ cliSessionDays })', options.cliSessionDays, 'people', 'cliSessionDays');
+  one('signin({ serviceTokenMaxDays })', options.serviceTokenMaxDays, 'services', 'tokenMaxDays');
+  one('signin({ workloads: { useOnly } })', options.workloads?.useOnly, 'services', 'useOnly');
+  one('signin({ workloads: { noReads } })', options.workloads?.noReads, 'services', 'noReads');
+  return moved;
+}
+
+/** Sign-in's options, its lifetimes and services' switches the deployment's (`deployment.ts`) when given. */
+function toSignin(options: SigninOptions, deployment?: Deployment) {
+  // `useOnly` is sign-in's whole (no service token, workloads on or not); `noReads` is the bindings', so the workloads'.
+  const workloads = options.workloads === undefined || deployment === undefined
+    ? options.workloads
+    : { ...options.workloads, useOnly: undefined, noReads: deployment.services.noReads };
   return {
     providers: options.providers,
     page: { title: options.title, note: options.note },
-    browserSessionHours: options.browserSessionHours,
-    cliSessionDays: options.cliSessionDays,
-    serviceTokenMaxDays: options.serviceTokenMaxDays,
-    workloads: options.workloads,
+    browserSessionHours: deployment?.people.browserSessionHours ?? options.browserSessionHours,
+    cliSessionDays: deployment?.people.cliSessionDays ?? options.cliSessionDays,
+    serviceTokenMaxDays: deployment?.services.tokenMaxDays ?? options.serviceTokenMaxDays,
+    useOnly: deployment?.services.useOnly ?? options.workloads?.useOnly,
+    workloads,
     mcp: options.mcp,
     passkeys: options.passkeys,
   };

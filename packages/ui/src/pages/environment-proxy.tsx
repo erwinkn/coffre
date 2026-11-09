@@ -93,7 +93,7 @@ function ProxyTab({ place, page, parents, keys }: { place: Place; page: ProxyVie
         </Notice>
       )}
       {page.readOnly?.reason === 'not_editable' && (
-        <p className="hint proxy-readonly">This deployment&apos;s code keeps its proxy definitions. Set <span className="mono">credentialProxy({'{'} editable: true {'}'})</span> to write them here.</p>
+        <p className="hint proxy-readonly">This deployment&apos;s code keeps its proxy definitions. Set <span className="mono">proxy: {'{'} editable: true {'}'}</span> in its <span className="mono">deployment.ts</span> to write them here.</p>
       )}
       {stop !== null && (
         <p className="hint proxy-readonly">

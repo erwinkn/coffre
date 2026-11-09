@@ -5,6 +5,7 @@
 //
 //   COFFRE_TEST_DATABASE=coffre_bench ./scripts/setup-test-database.sh
 //   COFFRE_TEST_DATABASE=coffre_bench node --conditions=coffre:source packages/server/test/bench/scheduled-tick.ts --entries 10000
+import { defineDeployment } from '@coffre/core/deployment';
 import { parseArgs } from 'node:util';
 
 import { github, signin } from '@coffre/core/identity';
@@ -34,6 +35,7 @@ const runtime = (plugins: CoffreRuntime['plugins']): CoffreRuntime => ({
   waitUntil,
   schema: { migrated: true }, appKey: { settled: true },
   rotateAfterDays: 365,
+  deployment: defineDeployment(),
   plugins,
 });
 const watched = runtime([auditWatch({ anchor: deps.anchor })]);

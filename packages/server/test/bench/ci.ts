@@ -20,7 +20,7 @@
 // seconds): what a sign-in costs the hot path (R58). `--signin-only` leaves each job's list and reveal out.
 // With `--proxy <rate>` instead, the uses beside are the whole app's `/use`, the credential proxy on 100 people's
 // handles (proxy-uses.ts, PR 5b): 0.14's unwrap or, with `--log 0.15`, 0.15's use. `--proxy-cache <s>` is the proxy's
-// `cacheSeconds` (0, the default here: every request opens its key); `--proxy-stable` sends each to the stable URL;
+// values' lifetime, `proxy.revokedWithinSeconds` (0, the default here: none kept, every request opens its key); `--proxy-stable` sends each to the stable URL;
 // `--proxy-names <n>` caps 0.15's vault's map of names at n a thread, its handles picked at random (0: every request cold).
 // `--proxy-pair` gives the proxy's credential two keys, `API_KEY` and `API_SECRET` in one header: each `/use` a request of
 // several keys, the vault's named batch (T165, PR 2); `--proxy-unnamed` hides that batch from the app, as a vault older
@@ -62,6 +62,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Worker } from 'node:worker_threads';
 
+import { defineDeployment } from '@coffre/core/deployment';
 import { github, signin } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 import { createDatabase, type Client } from '@coffre/db';
@@ -79,7 +80,7 @@ import { FetchRefused, type WorkloadTransport } from '../../src/workloads/transp
 import { auditWatch } from '../../src/plugins/audit-watch.ts';
 import { credentialProxy } from '../../src/plugins/credential-proxy.ts';
 import { checkPlugins } from '../../src/plugins.ts';
-import { proxyCodeOf } from '../../src/proxy-code.ts';
+import { proxyCodeWith } from '../../src/proxy-code.ts';
 import { clientFor, entryOf, contextFor, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
 import { answer, type Pages } from '../start-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from '../db/connections.ts';
@@ -452,7 +453,7 @@ try {
       uiUpstream = createServer((request, response) => void response.writeHead(request.headers['x-api-key'] === expected ? 200 : 403).end());
       await new Promise<void>((resolve) => uiUpstream!.listen(0, '127.0.0.1', resolve));
       load.ui = { upstream: `http://127.0.0.1:${(uiUpstream.address() as AddressInfo).port}/v1` };
-      deps.proxy = proxyCodeOf(checkPlugins([credentialProxy({ credentials: {}, editable: true, insecureUpstreams: true })]));
+      deps.proxy = proxyCodeWith(checkPlugins([credentialProxy({ credentials: {}, insecureUpstreams: true })]), defineDeployment({ proxy: { editable: true } }));
       const items = { api: {
         kind: 'route' as const, name: 'api', upstream: load.ui.upstream, inject: [{ kind: 'header' as const, name: 'x-api-key', template: load.secret === undefined ? '{API_KEY}' : '{API_KEY}:{API_SECRET}' }],
         allow: null, limit: { perMinute: null, perDay: null }, placeholder: null, egress: null,

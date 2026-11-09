@@ -70,7 +70,9 @@ export type NodeVaultConfig = VaultConfig & {
  * with no checkpoint yet. A configuration without what 0.15 needs is refused.
  */
 export async function localVault(config: NodeVaultConfig, options: VaultOptions = {}): Promise<LocalVault> {
-  const resolved = resolveVaultConfig(config);
+  // The cover a repeat rides is the deployment's `audit.repeatsWithinSeconds`, which `uses.coverMs` gave until 0.16.
+  const coverMs = options.uses?.coverMs;
+  const resolved = resolveVaultConfig(config, coverMs === undefined ? [] : [{ old: 'serveVault(config, { uses: { coverMs } })', options: { audit: { repeatsWithinSeconds: coverMs / 1000 } } }]);
   const log015 = (options.log ?? '0.15') === '0.15';
   const own = log015 && options.sealThrough === undefined;
   if (log015 && config.hotDatabase === undefined) {
@@ -99,13 +101,14 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
     const hot = config.hotDatabase === undefined ? undefined : config.hotDatabase === config.database ? db : await open(config.hotDatabase);
     // A use holds one of the hot pool's connections from its call to its answer: at most that many in flight.
     const connections = (hot as { $client?: { options?: { max?: number } } } | undefined)?.$client?.options?.max;
-    const uses = { ...(connections === undefined ? {} : { connections }), ...options.uses };
+    const uses = { ...(connections === undefined ? {} : { connections }), ...options.uses, coverMs: resolved.deployment.audit.repeatsWithinSeconds * 1000 };
     if (own) {
       // On Postgres, a connection of its own, which it cuts once it stalls (T169): what a stalled tick awaits holds none of
       // the vault's. On SQLite, the vault's one: two to one file wait on each other's writes.
       const url = typeof config.database === 'string' && engineOfUrl(config.database) === 'postgres' ? config.database : null;
       const where = url === null ? { database: db } : { connect: () => openDatabase(url, { max: 2 }) };
-      const kept = (checkpointer = await keepCheckpointer({ ...where, signingKeys: resolved.signingKeys, memory: config.checkpointer!.memory }));
+      // Days of uses kept: the deployment's `audit.keepUsesDays`, every day when null (retention.ts).
+      const kept = (checkpointer = await keepCheckpointer({ ...where, signingKeys: resolved.signingKeys, memory: config.checkpointer!.memory, retainDays: resolved.deployment.audit.keepUsesDays }));
       options = { ...options, sealThrough: kept.sealThrough, heldOutside: kept.heldOutside, sealing: kept.sealing };
     }
     return await openLocalVault(db, resolved, { ...options, uses }, close, hot);

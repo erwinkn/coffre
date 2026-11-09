@@ -73,6 +73,12 @@ export type SigninConfig = {
   cliSessionDays: number;
   /** The longest a service account's token may last here, in whole days: `MAX_SERVICE_TOKEN_DAYS` unless set lower (R76). */
   serviceTokenMaxDays: number;
+  /**
+   * No service token is issued or taken: services sign in only with a key,
+   * through `workloads` (`deployment.ts`'s `services.useOnly`; section 6.3 of
+   * docs/design/workload-access.md). It holds whether workloads are on or not.
+   */
+  useOnly: boolean;
   /** CI runs signing in as services with their platform's ID token, when on (`workloads.ts`). */
   workloads: WorkloadsConfig | null;
   /** MCP clients acting as the people who connect them, when on (docs/design/mcp.md). */
@@ -132,15 +138,9 @@ export type WorkloadsOptions = {
    * and only public ones' IDs are looked up.
    */
   github?: GitHubApp;
-  /**
-   * Leaves services nothing but key-bound sessions (docs/design/
-   * workload-access.md, section 6.3): no service token is issued or taken,
-   * and `/api/auth/oidc` answers 410. Its sessions still read their
-   * bindings' listed `reads`. Taken, and not yet enforced: that design's PR
-   * 1a does.
-   */
+  /** @deprecated In `deployment.ts` since 0.16, `services.useOnly`: read until 0.17, which refuses it here. */
   useOnly?: boolean;
-  /** Stricter still: no binding may list `reads`, so services read plain values only. Taken, and not yet enforced (PR 1a). */
+  /** @deprecated In `deployment.ts` since 0.16, `services.noReads`: read until 0.17, which refuses it here. */
   noReads?: boolean;
   /** The deployment's own delivery of a workload's alerts, called in the background after the response: a Slack webhook, a pager. */
   alert?: (alert: WorkloadAlert) => unknown;
@@ -165,7 +165,6 @@ export type WorkloadsConfig = {
   allowLoopback: boolean;
   limits: { perSource: RateLimiter };
   github: GitHubApp | null;
-  useOnly: boolean;
   noReads: boolean;
   alert: ((alert: WorkloadAlert) => unknown) | null;
 };
@@ -424,6 +423,8 @@ export function defineSignin(options: {
   cliSessionDays?: number;
   /** The longest a service token may last, in whole days, 1 to `MAX_SERVICE_TOKEN_DAYS` (a year), which it is unless set. */
   serviceTokenMaxDays?: number;
+  /** No service token issued or taken (`SigninConfig.useOnly`); 0.15's `workloads.useOnly` when left out. */
+  useOnly?: boolean;
   workloads?: WorkloadsOptions;
   mcp?: McpOptions;
   /** The passkey policy, `optional` unless set, and the RP ID (sections 2 and 7.1 of docs/design/passkeys.md). */
@@ -438,6 +439,7 @@ export function defineSignin(options: {
     if (seen.has(provider.id)) throw new Error(`sign-in provider id "${provider.id}" is used twice`);
     seen.add(provider.id);
   }
+  if (options.useOnly !== undefined && typeof options.useOnly !== 'boolean') throw new Error('useOnly is true or false');
   return {
     publicUrl: publicOrigin(options.publicUrl),
     providers: options.providers,
@@ -448,6 +450,7 @@ export function defineSignin(options: {
     browserSessionHours: lifetime(options.browserSessionHours, 'browserSessionHours', 12, 24 * 7),
     cliSessionDays: lifetime(options.cliSessionDays, 'cliSessionDays', 30, 365),
     serviceTokenMaxDays: wholeDays(options.serviceTokenMaxDays, 'serviceTokenMaxDays', MAX_SERVICE_TOKEN_DAYS),
+    useOnly: options.useOnly ?? options.workloads?.useOnly === true,
     workloads: options.workloads === undefined ? null : workloadsConfig(options.workloads, publicOrigin(options.publicUrl)),
     mcp: options.mcp === undefined ? null : mcpConfig(options.mcp, publicOrigin(options.publicUrl)),
     passkeys: passkeysConfig(options.passkeys, publicOrigin(options.publicUrl)),
@@ -539,7 +542,6 @@ function workloadsConfig(options: WorkloadsOptions, publicUrl: string): Workload
     allowLoopback: loopback,
     limits: { perSource: options.limits.perSource },
     github: app ?? null,
-    useOnly: options.useOnly === true,
     noReads: options.noReads === true,
     alert: options.alert ?? null,
   };

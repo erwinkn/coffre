@@ -1,3 +1,4 @@
+import { defineDeployment } from '@coffre/core/deployment';
 import assert from 'node:assert/strict';
 import test, { after, before } from 'node:test';
 import { randomUUID } from 'node:crypto';
@@ -82,7 +83,7 @@ async function scenario(operations: readonly Operation[]) {
     ...deps, previousChainKeys: [], signin, workloads: null, mcp: null,
 
     auth: { mode: 'signin', signin: signinConfig },
-    publicUrl: 'https://coffre.test', verifier: signin, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, plugins: [],
+    publicUrl: 'https://coffre.test', verifier: signin, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, deployment: defineDeployment(), plugins: [],
   };
   const root = clientFor(deps, ROOT);
   const model = {

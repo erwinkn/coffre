@@ -1,6 +1,8 @@
 // The vault Worker `pnpm dev` runs beside the app, as examples/workers does.
 import { checkpointer, postgres, vault, type ObjectNamespace } from '@coffre/vault/cloudflare';
 
+import { deployment } from '../../deployment';
+
 type Env = {
   VAULT_HYPERDRIVE: { connectionString: string };
   HOT_HYPERDRIVE: { connectionString: string };
@@ -16,5 +18,6 @@ export default vault((env: Env) => ({
   checkpointer: env.CHECKPOINTER,
   kek: { id: env.COFFRE_VAULT_KEY_ID, key: env.COFFRE_VAULT_KEY },
   owners: env.COFFRE_OWNERS.split(','),
+  deployment,
 }));
 export const CoffreCheckpointer = checkpointer();

@@ -583,15 +583,18 @@ databases per environment, in the environment's **Proxy** tab, beside its
 Secrets ([proxy-ui.md](proxy-ui.md) is the design):
 
 ```ts
-plugins: [credentialProxy({ credentials: { … }, editable: true })],
+// deployment.ts
+export const deployment = defineDeployment({ proxy: { editable: true } });
 ```
 
 `coffre init` writes `editable: true` from 0.16, with an empty
 `credentials`, and the `/use` route and the tab's route file
 (`app/src/routes/_coffre/projects.$project_.$environment_.proxy.tsx`). A
 deployment upgraded with `coffre update` gains the tab's route file and
-`/use`'s, and nothing else: unless its code says `editable: true`, the tab
-shows what code defines and writes nothing.
+`/use`'s, and nothing else: unless its `deployment.ts` says
+`proxy: { editable: true }`, the tab shows what code defines and writes
+nothing. (0.15's `credentialProxy({ editable })` is still read in 0.16,
+with a warning, and refused in 0.17.)
 
 What the tab shows and does:
 
@@ -616,8 +619,9 @@ What the tab shows and does:
   field by field, each copied item's keys and where they will go ("`schuman`
   will send market/prod's SCHUMAN_API_KEY to sandbox.schuman.example (copied
   from market/dev)"), and, when a destination changes, that requests already
-  decided may reach the old one for up to `cacheSeconds` (a minute unless
-  set), as a revoked handle's may. Another person's save since the page
+  decided may reach the old one for up to R, the deployment's
+  `proxy.revokedWithinSeconds` (a minute unless set), as a revoked
+  handle's may. Another person's save since the page
   loaded is a 409: the review then says what they changed, and saving again
   is a decision.
 - **Routes that no longer route.** An item whose editor no longer reads one
@@ -715,7 +719,7 @@ $ coffre run market/dev-eu -- pnpm dev     # → dev-eu's, or the key it inherit
   and costs nothing more. Where it does, the request carries a handle (in
   the slot of credential `<a>` or of `<c>`, or as a bearer, for a plan),
   whose environments' paths are asked of coffre (the handle's check, and
-  one read of their names) and kept for `cacheSeconds`, as values are. Its
+  one read of their names) and kept for R, as values are. Its
   values are opened and kept as an environment URL's are, in the same
   cache, so both URLs of one environment share one opening about every
   45 seconds.
@@ -1222,19 +1226,20 @@ the user and database are the real URL's. Measured locally: a query adds
 SCRAM. A pool pays that once per connection.
 
 **Revocation mid-session.** The open sessions of one handle, environment
-and tunnel are one group, with one timer: every `recheckSeconds` (60 unless
-set) it opens the database's URL again, as the vault decides it, for all of
-them at once, logged as a use. Ten pooled connections cost one read a
-minute, not ten. A check the vault has not answered within ten seconds
-(or the interval, if shorter) is a no, so a stalled vault ends the
-sessions rather than freeing them. The handle's end ends them too, on a
+and tunnel are one group, with one timer. With R the deployment's
+`proxy.revokedWithinSeconds` (60 unless set), each check is given
+d = min(R ÷ 2, 10 s) to answer, and every R − d (50 seconds by default)
+the group opens the database's URL again, as the vault decides it, for all
+of them at once, logged as a use. Ten pooled connections cost one read a
+check, not ten. A check the vault has not answered within d is a no, so a
+stalled vault ends the sessions rather than freeing them. The handle's end ends them too, on a
 timer of its own. A new group whose first session came in on a cached URL
 checks at once, so the interval always starts from the vault's own
 answer. The group lives as long as its sessions. So a revoked handle
 and a person's lost grant each end the sessions within the interval and
-a check's deadline, 70 seconds by default (formal/Tunnel.tla: revoked
-just after a check, the next comes a minute later and may take its ten
-seconds): the
+a check's deadline, R, 60 seconds by default (formal/Tunnel.tla: revoked
+just after a check, the next comes 50 seconds later and may take its ten
+seconds; 0.15's two settings made it 70): the
 first check that fails ends every session of that handle and tunnel at
 once, both sockets of each close, and the app's driver sees its
 connections drop. Every new
@@ -1297,7 +1302,7 @@ with the same handle, to the same path, so to the same object `9f3c…`,
 whose map has the key, and which sends the database its real one. No key
 names an object and none needs to: the bearer already does. The handle is
 revoked: the group's check, a timer in the object, gets a refusal within
-`recheckSeconds` and its deadline, and ends both sockets of every session; the next
+R, and ends both sockets of every session; the next
 connection is refused at admission.
 
 *Flow control.* A Workers WebSocket has no back-pressure either way: no
@@ -1759,7 +1764,7 @@ run` calls the same `credential(name).verify` from
   webhook comes on a request's path, and the vault is the instance's
   narrowest point, so a verify or an HMAC signature opens its secret as a
   request through a credential opens its key: once per handle or session,
-  environment and name for `cacheSeconds` (60), one `secret.read` and one
+  environment and name for R (60 s), one `secret.read` and one
   `credential.use` entry (`hmac: true`) each time. A warm verify by a
   workload costs its session's one statement and its gate's check, and
   nothing of the vault's; by a handle, nothing of the database's. A cold
@@ -1792,7 +1797,8 @@ exchange with the real key. That changes app code or its configuration.
 of the environment, against that credential's upstream, for as long as the
 handle lives. It can, for example, call Schumann's API with the real key,
 which is the point. It cannot read a value, send one to another host, or
-keep using one after the handle is revoked (within `cacheSeconds`) or
+keep using one after the handle is revoked (within R, the deployment's
+`proxy.revokedWithinSeconds`) or
 expires. Every use is logged against the person and the handle.
 
 **A database the tunnel reaches must accept connections only from coffre.**
@@ -1851,7 +1857,7 @@ each after 20 to warm up, median:
 |---|---|---|
 | Direct to the upstream | 0.39 ms | 0.36 ms |
 | Through the proxy, values cached | 0.48 ms | 0.43 ms |
-| Through the proxy, values opened (first call of the minute, or `cacheSeconds: 0`) | 7.8 ms | 14.9 ms |
+| Through the proxy, values opened (first call of the minute, or `cacheValues: false`) | 7.8 ms | 14.9 ms |
 
 A cached call costs a route match, the handle's lookup (none: the cache
 is keyed by the handle) and the header rewrite. An opened call adds the
@@ -1865,7 +1871,7 @@ would have spent anyway.
 every 45 seconds while it is used: a vault `secret.read` naming the keys
 (purpose `use`, the bulk shape of #242), and a `credential.use` entry
 naming the credential and its host, sharing its operation id. An entry
-serves a minute (`cacheSeconds`) from when the vault was asked, and in its
+serves R, a minute unless the deployment says (`proxy.revokedWithinSeconds`), from when the vault was asked, and in its
 last quarter one request opens the keys again while the others are served
 it, so a steady caller meets no lapse. A dev loop that calls Schumann 500
 times a minute writes under 3 entries a minute for it, not 1,000. A call per
@@ -1874,7 +1880,10 @@ request of the instance. And it would run into the vault's bulk limit
 (1,000 keys per 15 minutes per person) in under a minute of
 tests. The cost: between openings the log says "used schumann from 10:41"
 rather than each call, and a revoked handle keeps working for up to the
-cache's minute (`cacheSeconds: 0` turns both off).
+cache's minute (`proxy: { cacheValues: false }` turns both off). Whatever
+is kept, a request sends within R of when its values were decided, or not
+at all (503 `late`): a request that paused after they opened goes out
+with none.
 
 **What `coffre run` makes a placeholder, and what it leaves out.** A person
 on an instance with the proxy gets the plan (section 4): placeholders for each
@@ -1981,7 +1990,7 @@ is reversible.
 5. **12 hours, a week at most, never past the personal token that made
    it.**
 6. **Logged per credential per handle about every 45 seconds while used**
-   (`cacheSeconds: 60`, opened again in its last quarter), not per call:
+   (values kept R, 60 s, opened again in its last quarter), not per call:
    see the audit volume above.
 7. **Handles need coffre's sign-in.** Behind Cloudflare Access the proxy
    has no handles. *Later:* keep handles in coffre's own table whatever the
@@ -2186,7 +2195,7 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
     the provider sends, and an entry each would be an append to the log,
     under its head, per webhook: the lock every write of the instance
     waits for. The cache holds the secret no longer than a credential's
-    key (`cacheSeconds`), and a revoked handle or a frozen session stops
+    key (R), and a revoked handle or a frozen session stops
     at once or within it, as for requests. *Alternative:* an entry per
     verify, naming the body's SHA-256, as `sign` with a private key does.
 

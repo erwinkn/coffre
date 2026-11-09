@@ -44,7 +44,7 @@ import {
 import { cappedLimit } from './connections.ts';
 import { deployOnPush, gitRemote, repositoryOf, SECRETS, WORKFLOW } from './deploy-on-push.ts';
 import { BUILT_APP, buildApp, editWorker, hyperdriveBindings, placeholder, readWorker, type Change, type WorkerConfig } from './deployment.ts';
-import { createGitHubApp, GITHUB, type GitHub, logoPath } from './github-app.ts';
+import { createGitHubApp, GITHUB, type GitHub, logoPath, organizationProblem } from './github-app.ts';
 import { recordLines, recordsToAdd, Refused, saasZone, type Served, serveThrough, standing, tokenNeeded, waitForRecords, zoneOf } from './hostname.ts';
 import { generateKeys, keyValues, type Keys } from './keys.ts';
 import type { GuideBlock, Screen, Value } from './secrets.ts';
@@ -325,7 +325,14 @@ function checked(found: Found, workers: Record<Component, WorkerConfig>, databas
 type Checked = { missing: Record<Component, boolean>; newPasswords: Record<Config, boolean> };
 
 /** What setup asks of a run that deploys: coffre's address, its Owners, how it is reached, and a token wrangler's login was refused for. */
-type Answers = { address: string; owners: { name: OwnersVar; value: string }; serving: Serving; token: string | null };
+type Answers = {
+  address: string;
+  owners: { name: OwnersVar; value: string };
+  /** The GitHub organization whose members alone may sign in, for the app this run makes; null for none. */
+  organization: string | null;
+  serving: Serving;
+  token: string | null;
+};
 
 export class Cloudflare {
   readonly #dir: string;
@@ -563,9 +570,18 @@ export class Cloudflare {
       .split(',')
       .map((email) => email.trim())
       .join(',');
+    // Asked of the run that makes the GitHub App, which then may see who the organization's members are.
+    const organization = placeholder(workers.app.vars.GITHUB_CLIENT_ID)
+      ? (await textLine(keys, out, s, 'GitHub organization', 'whose members alone may sign in, as in github.com/<organization>; Enter for none', {
+          initial: workers.app.vars.GITHUB_ORGANIZATION ?? '',
+          none: 'none: any GitHub account an Owner adds',
+          note: "With one, a person signs in only while they are its member, and the organization owns coffre's GitHub App: make it as one of its owners.",
+          check: organizationProblem,
+        })) || null
+      : null;
     out.write('\n');
     const { serving, token } = kind === 'saas' ? await serveElsewhere(found, active, address, out, keys, describe, secrets) : { serving: { kind }, token: null };
-    return new Cloudflare(dir, wrangler, workers, found, database, { address, owners: { name, value: owners }, serving, token }, settled, options.resetPasswords, secrets);
+    return new Cloudflare(dir, wrangler, workers, found, database, { address, owners: { name, value: owners }, organization, serving, token }, settled, options.resetPasswords, secrets);
   }
 
   /**
@@ -726,14 +742,26 @@ export class Cloudflare {
       );
       return { text: `Took a new client secret for coffre's GitHub App, client ID ${id}`, details: [] };
     }
-    const app = await createGitHubApp(step, say, this.#github, url);
+    const { organization } = this.#answered();
+    const app = await createGitHubApp(step, say, this.#github, url, organization);
     this.#clientSecret = app.clientSecret;
     this.#secrets.push(app.clientSecret);
-    this.#edit('app', [{ path: ['vars', 'GITHUB_CLIENT_ID'], value: app.clientId, what: "GitHub's client ID" }]);
+    this.#edit('app', [
+      { path: ['vars', 'GITHUB_CLIENT_ID'], value: app.clientId, what: "GitHub's client ID" },
+      // The app's src/coffre.ts reads it: `github({ app, organization: env.GITHUB_ORGANIZATION })`.
+      // None asked for: one an earlier run wrote goes, or the new app, which reads no organization's members, would let nobody in.
+      ...(organization === null && this.workers.app.vars.GITHUB_ORGANIZATION === undefined
+        ? []
+        : [{ path: ['vars', 'GITHUB_ORGANIZATION'], value: organization ?? undefined, after: 'GITHUB_CLIENT_ID', what: 'the GitHub organization' }]),
+    ]);
     this.workers.app.vars.GITHUB_CLIENT_ID = app.clientId;
+    if (organization === null) delete this.workers.app.vars.GITHUB_ORGANIZATION;
+    else this.workers.app.vars.GITHUB_ORGANIZATION = organization;
     // Its logo is the one thing neither the manifest nor GitHub's API can set: uploaded on its page, by hand.
     say.link(`For its logo, upload ${logoPath(this.#dir)}, under Display information, at`, app.settings);
-    return { text: `Made coffre's GitHub App, ${app.slug}`, details: app.url === '' ? [] : [app.url] };
+    // GitHub shows an organization's members only to an app installed on it: until then, nobody signs in.
+    if (organization !== null && app.url !== '') say.link(`Install it on ${organization}, or nobody can sign in, at`, `${app.url}/installations/new`);
+    return { text: `Made coffre's GitHub App, ${app.slug}${organization === null ? '' : `, ${organization}'s`}`, details: app.url === '' ? [] : [app.url] };
   }
 
   /**

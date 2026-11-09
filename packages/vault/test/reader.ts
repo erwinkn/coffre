@@ -1,5 +1,6 @@
 // A second process reading through a vault of its own, over the same SQLite
 // file: what vault.test.ts runs beside itself. It prints how each read came out.
+import { defineDeployment } from '@coffre/core/deployment';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { UnwrapInput } from '@coffre/core/vault';
 import { openDatabase } from '@coffre/db/connect';
@@ -21,6 +22,7 @@ const vault = openVault(
     owners: ['root@acme.example'],
     signingKeys: [Buffer.from(signingKey, 'base64')],
     bulkLimit,
+    deployment: defineDeployment(),
   }, { log: '0.14' }),
 );
 const outcomes = await Promise.all(inputs.map((input) => vault.unwrap(input)));

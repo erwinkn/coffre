@@ -6,6 +6,7 @@
 // project with a fork. Not a test: run with the test database's settings, on a database migrated as the tests' are,
 //
 //   COFFRE_TEST_DATABASE=<a migrated scratch database> node --conditions=coffre:source packages/server/test/bench/pages.ts
+import { defineDeployment } from '@coffre/core/deployment';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import type { CoffreClient } from '@coffre/client';
@@ -45,7 +46,7 @@ const accesses = new Accesses();
 const setupSignin = new SigninService({ ...base, signin: signinConfig, accesses });
 const runtime: CoffreRuntime = {
   db: base.db, vault: base.vault, chainKey: base.chainKey, previousChainKeys: [], signin: setupSignin, workloads: null, mcp: null, auth, publicUrl: ORIGIN,
-  verifier: setupSignin, waitUntil, schema: { migrated: true }, appKey: { settled: true }, accesses, rotateAfterDays: 365, plugins: [],
+  verifier: setupSignin, waitUntil, schema: { migrated: true }, appKey: { settled: true }, accesses, rotateAfterDays: 365, deployment: defineDeployment(), plugins: [],
 };
 
 const root = clientFor({ ...base, signin: setupSignin }, ROOT);

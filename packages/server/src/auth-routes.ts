@@ -177,7 +177,7 @@ async function admission(workloads: WorkloadService, entry: 'exchange' | 'worklo
 
 /** Whether this instance leaves services nothing but key-bound sessions (`useOnly`, docs/design/workload-access.md, section 6.3). */
 function useOnly(runtime: CoffreRuntime): boolean {
-  return runtime.auth.mode === 'signin' && runtime.auth.signin.workloads?.useOnly === true;
+  return runtime.auth.mode === 'signin' && runtime.auth.signin.useOnly;
 }
 
 /**

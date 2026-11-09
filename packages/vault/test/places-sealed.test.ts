@@ -5,6 +5,7 @@
 // and keeps it protected with its slug unknown; an issue that names it, an issue to a service account that holds a
 // grant on it, a change of that account by its manager, a grant there and a key's wrap there are refused. Uses decide on the place's seal too (use.test.ts, use-named.test.ts).
 // Both engines, whatever the suite's log.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -48,6 +49,7 @@ function configure(): ResolvedVaultConfig {
     owners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+    deployment: defineDeployment(),
   };
 }
 

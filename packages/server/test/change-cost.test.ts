@@ -127,7 +127,7 @@ before(async () => {
       // The credential proxy, its Proxy tab writing (0.16): what a save of an environment's definitions costs.
       resolveConfig({
         publicUrl: ORIGIN, vault: entryOf(counted), auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], passkeys }),
-        auditChainKey: deps.chainKey.toString('base64'), plugins: [credentialProxy({ credentials: {}, editable: true })],
+        auditChainKey: deps.chainKey.toString('base64'), plugins: [credentialProxy({ credentials: {} })], deployment: { proxy: { editable: true } },
       }),
       createDatabase(appClient.client),
       counted,

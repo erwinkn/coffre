@@ -1,6 +1,7 @@
 // The vault issues tokens itself (T149, PR 2; credentials.ts; migration 0036): a service account's token, a person's
 // personal token, a handle, each weighed by the vault on what it reads (formal/Lifecycle.tla's IssueRead), then written
 // in one statement that holds those rows as read (IssuerLocked, IssuerCAS). Both engines unless a case says otherwise.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -41,6 +42,7 @@ function configure(): ResolvedVaultConfig {
     owners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+    deployment: defineDeployment(),
   };
 }
 
@@ -210,7 +212,7 @@ test("a token's end may run past its longest by CLOCK_SKEW_MS, the app's clock a
   const holder: Holdings = { role: 'member', scope: EVERYWHERE, grants: [] };
   const ending = (input: IssueTokenInput, expiresAt: number): IssueTokenInput => ({ ...input, credential: { ...input.credential, expiresAt } });
   const longest = [
-    { make: () => asked(w), ms: MAX_SERVICE_TOKEN_DAYS * 86_400_000, why: `a service token lasts at most ${MAX_SERVICE_TOKEN_DAYS} days` },
+    { make: () => asked(w), ms: MAX_SERVICE_TOKEN_DAYS * 86_400_000, why: `a service token lasts at most ${MAX_SERVICE_TOKEN_DAYS} days here` },
     { make: () => personal(w), ms: MAX_PERSONAL_TOKEN_MINUTES * 60_000, why: 'a personal token lasts at most a week' },
     { make: () => handleOf(w, null), ms: MAX_PERSONAL_TOKEN_MINUTES * 60_000, why: 'a handle lasts at most a week, and never past the token that made it' },
   ];
@@ -219,6 +221,10 @@ test("a token's end may run past its longest by CLOCK_SKEW_MS, the app's clock a
     assert.notEqual(weigh(at + ms + CLOCK_SKEW_MS), why, `${why}: its longest and a minute is kept`);
     assert.equal(weigh(at + ms + CLOCK_SKEW_MS + 1), why, `${why}: a millisecond past is refused`);
   }
+  // The deployment's own longest service token (`services.tokenMaxDays`), which the vault holds as the app does.
+  const month = (expiresAt: number) => weighIssue(ending(asked(w), expiresAt), [], holder, [], null, at, null, 30);
+  assert.notEqual(month(at + 30 * 86_400_000 + CLOCK_SKEW_MS), 'a service token lasts at most 30 days here');
+  assert.equal(month(at + 30 * 86_400_000 + CLOCK_SKEW_MS + 1), 'a service token lasts at most 30 days here');
 });
 
 test("a handle names each environment it reaches, and stands in for those alone: no project's grant, no place it does not reach, no mapping it cannot read (review r3)", async () => {

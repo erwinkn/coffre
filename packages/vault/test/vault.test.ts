@@ -1,3 +1,4 @@
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, afterEach, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -97,6 +98,7 @@ function configure(overrides: Partial<ResolvedVaultConfig> = {}): ResolvedVaultC
     owners: ['root@acme.example'],
     signingKeys: [SIGNING_KEY],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+    deployment: defineDeployment(),
     ...overrides,
   };
 }

@@ -3,6 +3,7 @@
 // it beside its row (`app_change`, migration 0025). Each case names the part of formal/HotPathOne.tla or
 // formal/Migration015.tla it holds, and runs on both engines unless it says otherwise: SQLite runs `app_change`'s twin
 // (@coffre/db/log), under its one writer. The app's transaction is the owner's here: the grants are test:schema's.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -47,6 +48,7 @@ function configure(): ResolvedVaultConfig {
     owners: ['root@acme.example'],
     signingKeys: [randomBytes(32)],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 },
+    deployment: defineDeployment(),
   };
 }
 

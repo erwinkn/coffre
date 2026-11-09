@@ -101,7 +101,8 @@ before(async () => {
     vault: deps.vault,
     auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }),
     auditChainKey: deps.chainKey.toString('base64'),
-    plugins: [probe, credentialProxy({ credentials, cacheSeconds: 0 })],
+    plugins: [probe, credentialProxy({ credentials })],
+    deployment: { proxy: { cacheValues: false } },
   });
   runtime = createRuntime(config, deps.db, deps.vault, { json: async (url) => { throw new Error(`no fetch of ${url.href} here`); } });
   runtime.plugins = checkPlugins(config.plugins);

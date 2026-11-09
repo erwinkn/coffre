@@ -934,8 +934,8 @@ patterns, and the email bounds (254 / 64 / 63: RFC 5321 and 1035).
 | S18 | `TOUCH_INTERVAL_MS` | 5 min; 3 copies; not claimed once | `workload-sessions.ts:52`; `api/signin.ts:319`; `mcp/service.ts:63` | e | "one write per credential per five minutes" | mild herd | one constant; claim the write once (UPDATE … WHERE last_used < …) |
 | S19 | `USES_AT_ONCE` | 4 a request | `api/keys.ts:182` | e | "leaves the isolate's admission room (R44)" | | delete with V1 |
 | S20 | `USE_DEADLINE_SECONDS` | 3 | `api/proxy.ts:89` | c | copy of `USE_DEADLINE_MS` | | #15 |
-| S21 | `DEFAULT_CACHE_SECONDS` | 60 | `api/proxy.ts:88` | c | copy of `cacheSeconds ?? 60` | | one constant |
-| S22 | `cacheSeconds`, `recheckSeconds` | 60 s; 0 to 3,600 | `credential-proxy.ts:469-472` | b | revocation bound (#249, #252) | | keep |
+| S21 | `DEFAULT_CACHE_SECONDS` | 60 | `api/proxy.ts:88` | c | copy of `cacheSeconds ?? 60` | | one constant; done in 0.16: gone, the Proxy tab reads R from `deployment.ts` |
+| S22 | `cacheSeconds`, `recheckSeconds` | 60 s; 0 to 3,600 | `credential-proxy.ts:469-472` | b | revocation bound (#249, #252) | | keep; in 0.16 one field, `deployment.ts`'s `proxy.revokedWithinSeconds` ([config.md](config.md), section 1) |
 | S23 | `RECHECK_DEADLINE_MS` | 10 s | `credential-proxy.ts:532` | e | "the vault has that long to answer" | | derive from the vault call's bound |
 | S24 | `WORKLOAD_RECHECK_MS` | 15 s | `credential-proxy.ts:534` | b | design §8.2 | | keep |
 | S25 | `refreshWindow`, `REFRESH_ATTEMPT_MS`, `REFRESH_RETRY_MS` | min(cache ÷ 4, 15 s), 5 s, 1 s | `credential-proxy.ts:595-602` | e | none | | derive from `cacheSeconds` and the use deadline |

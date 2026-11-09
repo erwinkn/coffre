@@ -1,3 +1,4 @@
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { mock, after, before } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -44,6 +45,7 @@ function freshRuntime(): CoffreRuntime {
     waitUntil,
     schema: { migrated: false }, appKey: { settled: false },
     rotateAfterDays: 365,
+    deployment: defineDeployment(),
     plugins: [],
   };
 }

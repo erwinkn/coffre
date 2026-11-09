@@ -1,4 +1,4 @@
-import { proxyCodeOf } from './proxy-code.ts';
+import { proxyCodeWith } from './proxy-code.ts';
 import type { RemovalBudget } from './removal.ts';
 import { AccessIdentityVerifier, type AccessVerifierConfig, type IdentityVerifier } from '@coffre/core/identity';
 import type { Confirmation, Vault } from '@coffre/core/vault';
@@ -39,6 +39,8 @@ export type CoffreRuntime = {
   verifier: IdentityVerifier;
   /** Background work that must outlive the response, that is explicitly scheduled. */
   waitUntil: (promise: Promise<unknown>) => void;
+  /** What the deployment chose, its `deployment.ts` (`@coffre/core/deployment`). */
+  deployment: ResolvedConfig['deployment'];
   /** Days a value may go unchanged before it is flagged for rotation, or null for no flag. */
   rotateAfterDays: number | null;
   /** What the deployment added, in its configuration's order (`plugins.ts`). */
@@ -136,6 +138,7 @@ export function createRuntime(
     appKey,
     cutover,
     accesses,
+    deployment: config.deployment,
     rotateAfterDays: config.rotateAfterDays,
     plugins: config.plugins,
     gates,
@@ -197,7 +200,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     personalToken: identity.personalToken,
     credentialExpiresAt: identity.credentialExpiresAt,
     rotateAfterDays: runtime.rotateAfterDays,
-    proxy: proxyCodeOf(runtime.plugins),
+    proxy: proxyCodeWith(runtime.plugins, runtime.deployment),
     publicUrl: runtime.publicUrl,
     ...(render === undefined ? {} : { render }),
   };

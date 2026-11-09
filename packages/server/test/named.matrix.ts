@@ -295,8 +295,8 @@ before(async () => {
         // Two keys, the proxy's several by name (T165): API_KEY, and OTHER, which no cell makes.
         pair: { upstream: 'https://api.example', inject: header('x-api-key', '{API_KEY}:{OTHER}'), egress },
       },
-      cacheSeconds: 0,
     })],
+    deployment: { proxy: { cacheValues: false } },
   });
   runtime = createRuntime(config, deps.db, deps.vault, { json: async (url) => { throw new Error(`no fetch of ${url.href} here`); } });
   runtime.plugins = checkPlugins(config.plugins);

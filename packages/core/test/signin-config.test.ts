@@ -224,6 +224,7 @@ test('defineSignin needs a provider, and each needs a client id and secret', () 
       browserSessionHours: 4,
       cliSessionDays: 30,
       serviceTokenMaxDays: 365,
+      useOnly: false,
       workloads: null,
       mcp: null,
       // Passkeys default to `optional` (docs/design/passkeys.md, section 2).

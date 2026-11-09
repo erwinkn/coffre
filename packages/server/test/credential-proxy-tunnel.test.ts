@@ -14,6 +14,7 @@ import { once } from 'node:events';
 import { Duplex } from 'node:stream';
 
 import { WebSocket } from 'ws';
+import { defineDeployment, type Deployment } from '@coffre/core/deployment';
 
 
 import { clientFor, LOG, usesLogged } from './api-fixture.ts';
@@ -117,9 +118,17 @@ function tracked(runtime: CoffreRuntime): CoffreRuntime {
   return { ...runtime, plugins };
 }
 
+/**
+ * A deployment whose R is `seconds`, below its 3 s floor where a case needs a tunnel's checks in milliseconds: a test's
+ * own object, which `defineDeployment` refuses. Checks every R − d, each given d = min(R ÷ 2, 10 s), a bound of R.
+ */
+const within = (seconds: number): Deployment => ({ ...defineDeployment(), proxy: { revokedWithinSeconds: seconds, cacheValues: true, editable: false } });
+
 useMcp(
   async () => {
-    runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 0.2 })]);
+    runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, insecureUpstreams: true })]);
+    // Checks every 200 ms, each given 200 ms: a bound of 400 ms.
+    runtime.deployment = within(0.4);
     const root = clientFor(deps, ROOT);
     await root.members.add(`user:${DEV}`);
     await root.projects.create('market');
@@ -495,7 +504,7 @@ test('a check the vault never answers is a no, by its deadline: the sessions do 
 });
 
 test("a code tunnel's admission answered after a whole bound is let in, and its session lasts: its clock starts at the group, as a pool's burst needs (#485)", postgresOnly, async () => {
-  // recheckSeconds 0.2: a bound of 400 ms. The vault opens the URL, and its answer comes 600 ms on, as a burst of a
+  // R 0.4 s: a bound of 400 ms. The vault opens the URL, and its answer comes 600 ms on, as a burst of a
   // pool's connections taking turns brings it (credential-proxy-tunnel-workers.test.ts holds 16 s and 20 s of it). A
   // UI tunnel's admission is refused past its bound instead (credential-proxy-ui-tunnel.test.ts); a code tunnel's is
   // let in, and its group's clock starts when it is made: armed from the admission's start, it would end at once.
@@ -520,8 +529,8 @@ test("a code tunnel's admission answered after a whole bound is let in, and its 
 });
 
 test("a new group let in on a cached URL decides at once: a grant lost meanwhile ends it, not an interval later", postgresOnly, async () => {
-  // Checked every 5 seconds: an interval later is seconds on, which no load makes of at once.
-  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 5 })]);
+  // Checked every 5 seconds (R 10 s): an interval later is seconds on, which no load makes of at once.
+  runtime.deployment = defineDeployment({ proxy: { revokedWithinSeconds: 10 } });
   const first = appClientOf();
   await first.unsafe('SELECT 1');
   await first.end();
@@ -536,14 +545,17 @@ test("a new group let in on a cached URL decides at once: a grant lost meanwhile
 });
 
 test("a check answered once its group's last session has gone arms nothing: a newer group is let in on the URL the cache holds", postgresOnly, async () => {
-  // Checked every 2 seconds, a check given as long: a group's bytes stop 4 seconds past its last good check.
-  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 2 })]);
+  // R 4 s: checked every 2 seconds, a check given as long, a group's bytes stopping 4 seconds past its last good check,
+  // and the URL kept 4 seconds from when it was opened.
+  runtime.deployment = defineDeployment({ proxy: { revokedWithinSeconds: 4 } });
   // 0.14's openings of the URL, its checks apart. 0.15's uses do not tell them apart (its row slim, R53): there, only
   // that the cases below hold.
   const opened = async () => (LOG === '0.14' ? (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'db' && entry.metadata.recheck !== true).length : 0);
+  const until = (at: number) => new Promise((resolve) => setTimeout(resolve, Math.max(0, at - Date.now())));
+  const started = Date.now();
   const first = appClientOf();
   await first.unsafe('SELECT 1');
-  // The group's first check, held in the vault until its one session has gone, then answered yes.
+  // The group's first check, 2 s on, held in the vault until its one session has gone, then answered yes.
   const open = opens();
   let entered!: () => void;
   const checking = new Promise<void>((resolve) => (entered = resolve));
@@ -562,12 +574,17 @@ test("a check answered once its group's last session has gone arms nothing: a ne
     openWith(open);
     release();
   }
-  // Past when the gone group's watchdog would have closed it, had the yes armed one, and dropped the URL from the cache.
-  await new Promise((resolve) => setTimeout(resolve, 4500));
-  const before = await opened();
+  // The URL the first opened lapses 4 s on; a second session opens it again, which the cache keeps 4 s from then.
+  await until(started + 4_200);
   const second = appClientOf();
   await second.unsafe('SELECT 1');
   await second.end();
+  const before = await opened();
+  // Past when the gone group's watchdog would have closed it, 6 s on, had the yes armed one, and dropped that URL.
+  await until(started + 6_500);
+  const third = appClientOf();
+  await third.unsafe('SELECT 1');
+  await third.end();
   assert.equal(await opened(), before, 'let in on the URL the cache holds, opened no more');
 });
 
@@ -727,7 +744,8 @@ test('a tunnel through a network binding reaches the private host it names, plai
   const replica = (query: string) => `postgres://coffre_runtime:local-runtime-only@10.9.8.7:5432${new URL(TEST_RUNTIME_DATABASE_URL).pathname}${query}`;
   await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: replica('?sslmode=disable') });
   // Each connection opens the URL afresh, as the vault holds it now.
-  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['10.9.8.7'], connect: network }) }, cacheSeconds: 0 })]);
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['10.9.8.7'], connect: network }) } })]);
+  runtime.deployment = defineDeployment({ proxy: { cacheValues: false } });
   const client = appClientOf();
   try {
     assert.deepEqual([...await client.unsafe('SELECT current_user AS who')], [{ who: 'coffre_runtime' }]);
@@ -744,7 +762,7 @@ test('a tunnel through a network binding reaches the private host it names, plai
   await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: replica('?sslmode=disable').replace('10.9.8.7', '10.9.8.8') });
   assert.equal((await upgradeRefusal()).status, 403);
   await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: replica('?sslmode=disable') });
-  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, cacheSeconds: 0 })]);
+  runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') } })]);
   assert.equal((await upgradeRefusal()).status, 403);
   assert.deepEqual(asked, ['10.9.8.7:5432'], 'no other dial through the binding');
 });
@@ -835,7 +853,8 @@ test("a dial through a network binding still under way when the app leaves is gi
         return new Promise<WorkersSocket>((done) => (answer = done));
       },
     };
-    runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['10.9.8.7'], connect: network }) }, cacheSeconds: 0 })]);
+    runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL', { hosts: ['10.9.8.7'], connect: network }) } })]);
+    runtime.deployment = defineDeployment({ proxy: { cacheValues: false } });
   });
   await clientFor(deps, ROOT).secrets.set('market/dev', { DATABASE_URL: 'postgres://u:p@10.9.8.7:5432/d?sslmode=disable' });
   const raw = tcp({ host: '127.0.0.1', port: listenerPort });

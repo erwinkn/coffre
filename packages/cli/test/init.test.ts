@@ -72,7 +72,7 @@ test('coffre init names the project after its directory and pins coffre at its o
   };
   assert.equal(pkg.name, 'acme-secrets');
   const ours = Object.entries(pkg.dependencies).filter(([name]) => name.startsWith('@coffre/'));
-  assert.deepEqual(Object.fromEntries(ours), { '@coffre/server': version, '@coffre/ui': version, '@coffre/vault': version });
+  assert.deepEqual(Object.fromEntries(ours), { '@coffre/core': version, '@coffre/server': version, '@coffre/ui': version, '@coffre/vault': version });
   // What its Start app shares with the pages, exactly as @coffre/ui is built with.
   const { peerDependencies } = JSON.parse(readFileSync(join(root, 'packages/ui/package.json'), 'utf8')) as { peerDependencies: Record<string, string> };
   for (const [name, wanted] of Object.entries(peerDependencies)) {

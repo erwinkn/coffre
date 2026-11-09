@@ -279,6 +279,8 @@ export async function fakeGitHub() {
   const keys = sodium.crypto_box_keypair();
   const state = {
     manifests: [] as Record<string, unknown>[],
+    /** The organization that owns each app made, by its slug: none for the person's own. */
+    owners: new Map<string, string>(),
     codes: new Map<string, { client_id: string; client_secret: string; slug: string }>(),
     /** The tokens that may set each repository's secrets, by token. */
     tokens: new Map<string, Set<string>>(),
@@ -311,12 +313,15 @@ export async function fakeGitHub() {
         return json(existed ? 204 : 201);
       }
     }
-    if (request.method === 'POST' && url.pathname === '/settings/apps/new') {
+    // A new app, for the person signed in, or owned by one of their organizations.
+    const owner = /^\/(?:organizations\/([^/]+)\/)?settings\/apps\/new$/.exec(url.pathname);
+    if (request.method === 'POST' && owner !== null) {
       const manifest = JSON.parse(new URLSearchParams(await body(request)).get('manifest')!) as Record<string, unknown>;
       // A manifest's permissions go by the form's names, as GitHub checks them: `emails`, not the API's `email_addresses`.
       const unknown = Object.keys((manifest.default_permissions ?? {}) as object).filter((name) => !['emails', 'members', 'metadata'].includes(name));
       if (unknown.length > 0) return response.writeHead(422).end('Default permission records resource is not included in the list');
       state.manifests.push(manifest);
+      if (owner[1] !== undefined) state.owners.set(String(manifest.name), owner[1]);
       const code = randomBytes(10).toString('hex');
       state.codes.set(code, { client_id: `Iv23li${randomBytes(7).toString('hex')}`, client_secret: randomBytes(20).toString('hex'), slug: String(manifest.name) });
       const back = new URL(String(manifest.redirect_url));
@@ -330,7 +335,7 @@ export async function fakeGitHub() {
       state.codes.delete(conversion[1]!);
       if (app === undefined) return response.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ message: 'Not Found' }));
       return response.writeHead(201, { 'content-type': 'application/json' }).end(
-        JSON.stringify({ ...app, id: 1, owner: { login: 'ops', type: 'User' }, pem: '-----BEGIN RSA PRIVATE KEY-----', webhook_secret: 'whsec', html_url: `https://github.com/apps/${app.slug}` }),
+        JSON.stringify({ ...app, id: 1, owner: state.owners.has(app.slug) ? { login: state.owners.get(app.slug), type: 'Organization' } : { login: 'ops', type: 'User' }, pem: '-----BEGIN RSA PRIVATE KEY-----', webhook_secret: 'whsec', html_url: `https://github.com/apps/${app.slug}` }),
       );
     }
     response.writeHead(404).end();

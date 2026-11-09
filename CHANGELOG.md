@@ -12,6 +12,61 @@
   `coffre init` writes, now carry it. A deployment that does not add it to
   its own `wrangler.jsonc` keeps the old behavior; `coffre update` does not
   edit that file.
+- **One file says what the instance allows: `deployment.ts` (D172,
+  [design/config.md](docs/design/config.md)).** `coffre init` writes it at
+  the deployment's root, beside `app/` and `vault/`, and the app
+  (`createCoffre({ …, deployment })`) and the vault (`vault(env => ({ …,
+  deployment }))`, `serveVault({ …, deployment })`) each import it and hold
+  their part; neither takes it from the other at run time.
+  `defineDeployment({…})`, from `@coffre/core/deployment`, checks it and
+  fills in every default, which are 0.15's behavior; a field it does not
+  know fails the build ([deploy.md](docs/deploy.md#deploymentts-what-the-instance-allows)).
+  - Thirteen fields: `people` (browser and CLI session lifetimes),
+    `services` (`tokenMaxDays`, `signInsPerAddress`, `useOnly`,
+    `noReads`), `reads.bulkLimit`, `values.rotateAfterDays`, `proxy`
+    (`revokedWithinSeconds`, `cacheValues`, `editable`) and `audit`
+    (`keepUsesDays`, `repeatsWithinSeconds`). `signin({ passkeys })`
+    stays where it is: it is switched per environment, without a rebuild.
+  - The vault holds a service token's end to `services.tokenMaxDays` too,
+    as the app does; it held only the 365.
+  - `proxy.revokedWithinSeconds` (60, 3 to 3,600) replaces the credential
+    proxy's `cacheSeconds` and `recheckSeconds`, which let a revoked
+    handle's tunnel carry bytes for 70 s at their defaults: values serve
+    from memory for at most R, a request sends or answers at most R after
+    its use was decided, on every path now, code-defined credentials'
+    forwarding, signing, verifying and presigning included (503 `late`
+    past it), and a tunnel checks every R − d, each check given d =
+    min(R ÷ 2, 10 s). `cacheSeconds: 0` is `proxy.cacheValues: false`.
+  - `audit.repeatsWithinSeconds` (60, 0 to 3,600; 0 logs every use)
+    replaces the vault's `uses.coverMs`, and `audit.keepUsesDays` (null:
+    every day kept, as before) reaches retention on both runtimes, which
+    no standard deployment could set; `deploy.md` gives what each kept day
+    costs, about 800 bytes a use.
+  - On Workers, `services.signInsPerAddress` must match `app/wrangler.jsonc`'s
+    `SIGN_IN_PER_SOURCE` binding, which Cloudflare reads: the app's build
+    (`coffre({ deployment })`) fails when they differ, in the Worker config
+    the Cloudflare plugin emits, so the environment it builds for
+    (`CLOUDFLARE_ENV`) is the one held.
+  - `coffre setup`, as it makes the GitHub App on Workers, asks for the
+    organization whose members may sign in (Enter for none): the app is
+    then the organization's, asks to read its members, and the deployment
+    gets `GITHUB_ORGANIZATION`, which the examples pass to
+    `github({ organization })`.
+  - The deployments `init` writes depend on `@coffre/core`, for
+    `defineDeployment`. `coffre update` adds no `deployment.ts`: a deployment that has
+    none runs on the defaults and its old places, warned of.
+  - The old places (`signin`'s lifetimes, `serviceTokenMaxDays` and
+    `workloads.useOnly`/`noReads`, `createCoffre`'s `rotateAfterDays`,
+    `credentialProxy`'s `cacheSeconds`, `recheckSeconds` and `editable`,
+    the vault's `bulkLimit` and `uses.coverMs`) are read until 0.17, with a
+    warning at start; a deployment that passes `deployment` and an old
+    place both fails to start, as does a `cacheSeconds` (above 0) or
+    `recheckSeconds` under 3 s, which no R can keep: it names the
+    `proxy.revokedWithinSeconds: 3` to write instead. 0.17 refuses them.
+  - Workers Free is best effort: its 10 ms of CPU is below the 20 ms
+    coffre's bounds are sized for, so a request at a bound may be ended by
+    Cloudflare; `deploy.md` says which.
+
 - **The credential proxy holds 1 MiB of a body at most, and an isolate's
   memory is split into named shares (W331, limits S11-S13, S26, S52).** A
   Worker's isolate has 128 MB; `@coffre/core/memory` now gives it shares:

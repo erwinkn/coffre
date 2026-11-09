@@ -6,6 +6,7 @@
 // one vouched for by the vault. Here a checkpointer seals and the projector
 // lists at `settle()`. Under 0.14's log the same lists show its own entries:
 // each test holds both.
+import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -82,7 +83,7 @@ beforeEach(async () => {
   runtime = {
     db: deps.db, vault: deps.vault, chainKey: deps.chainKey, previousChainKeys: [], signin, workloads: null, mcp: null,
     auth: { mode: 'signin', signin: SIGNIN }, publicUrl: ORIGIN, verifier: signin, waitUntil,
-    schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, plugins: [],
+    schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, deployment: defineDeployment(), plugins: [],
   } as CoffreRuntime;
   root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
