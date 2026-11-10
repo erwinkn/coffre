@@ -6,7 +6,7 @@ import type { SecretContext } from '../src/context.ts';
 import { awsKms, AwsKmsKekProvider, KMS_ATTEMPT_MS, KMS_ATTEMPTS, KMS_REQUEST_MAX_MS, type AwsKmsOptions } from '../src/kek/aws-kms.ts';
 import { operationSignal } from '../src/kek/cancellation.ts';
 import { signV4 } from '../src/kek/sigv4.ts';
-import { KekCancelledError, KekUnavailableError } from '../src/kek/types.ts';
+import { KekCancelledError, KekThrottledError, KekUnavailableError } from '../src/kek/types.ts';
 
 const ARN = 'arn:aws:kms:eu-west-3:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab';
 const CREDENTIALS = { accessKeyId: 'AKIAEXAMPLE123', secretAccessKey: 'abc/def+ghi' };
@@ -194,6 +194,47 @@ test('KMS throttling, failing or out of reach is retried, then an outage', async
     return true;
   });
   assert.equal(denied.calls.length, 1);
+});
+
+test("a call KMS throttled to its last try is turned away for load, a KekThrottledError; credentials refused, a key disabled or KMS's own failures are not (T250)", async () => {
+  const dek = randomBytes(32);
+  const ctx = context();
+  const wrapped = await kms(fakeKms()).wrap(dek, ctx);
+  const ended = async (canned: Canned[], options: Partial<AwsKmsOptions> = {}) => {
+    const fake = fakeKms(canned);
+    const error = await kms(fake, options).unwrap(wrapped, ctx).then(() => assert.fail('KMS answered'), (thrown: unknown) => thrown);
+    assert.ok(error instanceof KekUnavailableError, String(error));
+    return { error, sent: fake.calls.length };
+  };
+
+  // Past the account's quota: each try throttled, by name or by status; the message as any outage's.
+  for (const canned of [
+    [kmsError('ThrottlingException'), kmsError('ThrottlingException'), kmsError('ThrottlingException')],
+    [kmsError('KMSInternalException', 500), kmsError('TooManyRequests', 429), kmsError('ThrottlingException')],
+  ]) {
+    const { error, sent } = await ended(canned);
+    assert.ok(error instanceof KekThrottledError, error.message);
+    assert.equal(sent, KMS_ATTEMPTS);
+    assert.match(error.message, /^KMS Decrypt failed 3 times: ThrottlingException, ThrottlingException \(fake\)$/);
+    assert.equal(error.uncertain, false);
+  }
+
+  // Not for load: what the call ends on is a failure of another kind, whatever came before it.
+  const notLoad: [string, Canned[], Partial<AwsKmsOptions>?][] = [
+    ['credentials refused', [kmsError('AccessDeniedException', 403)]],
+    ['an unknown access key', [kmsError('UnrecognizedClientException', 403)]],
+    ['the key disabled', [kmsError('DisabledException')]],
+    ['the key not found', [kmsError('NotFoundException')]],
+    ['throttled, then refused', [kmsError('ThrottlingException'), kmsError('AccessDeniedException', 403)]],
+    ['KMS failing on its side', [500, 503, 500].map((status) => kmsError('KMSInternalException', status))],
+    ['throttled, then failing', [kmsError('ThrottlingException'), kmsError('ThrottlingException'), kmsError('ServiceUnavailable', 503)]],
+    ['a resource quota', [kmsError('LimitExceededException')]],
+    ['no credentials', [], { credentials: async () => Promise.reject(new Error('no instance role')) }],
+  ];
+  for (const [what, canned, options] of notLoad) {
+    const { error } = await ended(canned, options);
+    assert.ok(!(error instanceof KekThrottledError), `${what}: ${error.message}`);
+  }
 });
 
 test('credentials may be a function, asked before each call, and may carry a session token', async () => {

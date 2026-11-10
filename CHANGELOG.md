@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A use whose key AWS KMS throttled counts as overload to the `/use`
+  throttle, however fast it failed (T250).** KMS answers
+  `ThrottlingException` at once, so a use whose three tries were all
+  throttled failed within a second or so, before its 3 s deadline, and
+  counted as answered in time: an isolate kept sending a key service past
+  its quota full load. The adapter now ends such a call with
+  `KekThrottledError`, a `KekUnavailableError`, and the throttle counts it
+  as it counts `late`. Credentials refused or missing, a disabled key and
+  KMS's own 5xx still count in time: a misconfigured vault does not
+  throttle itself. Callers see the same answer as before.
 - **The credential proxy ends its upstream request when the app's request
   ends, and sets no time bound of its own (W365, config Q7).** It passes the
   incoming request's abort signal to the upstream `fetch`: an app that

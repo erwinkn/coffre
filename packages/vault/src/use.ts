@@ -1,6 +1,6 @@
 import { NOTHING } from '@coffre/core/access';
 import { ownerKey, type SecretContext } from '@coffre/core/envelope';
-import { KekBadClaimError, KekCancelledError, KekUnavailableError, type KekRegistry, type KeyOperation } from '@coffre/core/kek';
+import { KekBadClaimError, KekCancelledError, KekThrottledError, KekUnavailableError, type KekRegistry, type KeyOperation } from '@coffre/core/kek';
 import { CREDENTIAL_NAME } from '@coffre/core/identity';
 import { USES_IN_FLIGHT } from '@coffre/core/memory';
 import { HOT_STATEMENT_TIMEOUT_MS, MAX_PARENTS } from '@coffre/core/vault';
@@ -560,15 +560,18 @@ async function seated<I extends { at: number; deadline: number }, T>(
     answered = await answer({ ...path, seat }, input);
     return answered;
   } catch (error) {
-    refused = isUnreachable(error);
+    refused = isUnreachable(error) || error instanceof KekThrottledError;
     throw error;
   } finally {
     // In time: settled before its deadline, whatever it answered or threw, but `late` or a connection refused. `late`
     // is answered at the deadline, or before it when Postgres gave up for it (its lock_timeout, 1 s, or
     // statement_timeout, 2 s: `raced`), or when the names it read moved under it, statement after statement (rare, and
     // counted as any `late` is), as is an outage that waited it out. A connection refused at once (Postgres's 53300,
-    // Hyperdrive's pool with no slot to give: `isUnreachable`) is the database turning work away, the one failure the
-    // throttle is for however fast it came; any other that failed at once cost nothing to throttle, nor did bad input.
+    // Hyperdrive's pool with no slot to give: `isUnreachable`) is the database turning work away, and a key KMS
+    // throttled to the last try (`KekThrottledError`, its tries a second or so at most) the key service doing the same:
+    // the failures the throttle is for however fast they came. Any other that failed at once cost nothing to throttle
+    // (KMS refusing coffre's credentials, a key disabled: a misconfigured vault must not throttle itself), nor did bad
+    // input.
     const now = Date.now();
     throttle?.answered(now, now < input.deadline && !refused && !isLate(answered));
     seat.release();
