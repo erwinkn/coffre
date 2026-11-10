@@ -561,6 +561,13 @@
       "when": 1794253446928,
       "tag": "0082_flat_history",
       "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1794315572237,
+      "tag": "0083_flat_aggregates",
+      "breakpoints": true
     }
   ]
 }

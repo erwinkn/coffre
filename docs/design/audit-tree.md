@@ -645,7 +645,9 @@ cutover's seal. Now:
   thousands of uses; sealed whole, a tick would run past its bound and
   stall again, for good. A part ends at its last entry and signs as its
   floor the lowest `at` of the uses left above it, if below the barrier's
-  (HotPathOne's `ChunkFloor`), found by a probe of the uses' index; its
+  (HotPathOne's `ChunkFloor`), found by a walk of `log_uses (at, number)`
+  from one `at` to the next up to the barrier's floor, past each run of
+  uses sealed at one in a step, however many share it (T248); its
   time is its newest entry's, so the rest of the backlog is no replay.
   Every pair still has its uses within 63 s of its floor (`CeilingHolds`),
   by the `ahead` rule and the deadline on Postgres's clock. Measured

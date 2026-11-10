@@ -1,7 +1,7 @@
 import { ownsInstance, readsWholeLog, runsInstance } from '@coffre/core/access';
 import { describeAccessFault, useOfCode, type LogVerification, type ReadsVerification, type TreeVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
-import { missingEntry, newestWindow } from '@coffre/db/log';
+import { DETAIL_ACTIONS, missingEntry, newestWindow } from '@coffre/db/log';
 
 import { actorParts, appLogKey, CHAIN_START, CHAIN_WALK, walkChain, type ChainPoint } from '../db/audit.ts';
 import {
@@ -105,37 +105,8 @@ export type AuditEntryView = {
   metadata: Record<string, unknown>;
 };
 
-/**
- * Technical steps and sign-ins: in the log and its chain like everything
- * else, but not what someone did with secrets or access, so a page leaves
- * them out unless asked.
- */
-export const DETAIL_ACTIONS = [
-  'sign_in',
-  'sign_out',
-  'token.create',
-  'token.revoke',
-  'device.approve',
-  'device.deny',
-  // An MCP client's code redeemed, or its tokens refreshed: every hour of its use.
-  'mcp.token',
-  // A read-only tool's call through MCP that went through. Its refusals, and every change, are `mcp.call`, shown.
-  'mcp.read',
-  'account.link',
-  'account.unlink',
-  // A touch that stepped a session up (docs/design/passkeys.md, section 6.2): one per five minutes at most, in PR 5.
-  'passkey.check',
-  'key.wrap',
-  'key.rewrap',
-  // The vault's seal of a reference: the app's `secret.reference` says it in words.
-  'reference.create',
-  'key.intent',
-  'key.check',
-  'audit.heartbeat',
-  'audit.checkpoint',
-  // A step of the app key's rotation, a hundred rows signed again; its `key.rotate` is shown.
-  'key.reseal',
-] as const;
+/** The detail entries a page leaves out unless asked: `@coffre/db`'s, beside the index of the entries shown. */
+export { DETAIL_ACTIONS };
 
 /** Detail entries a page left out, by action. */
 export type HiddenCount = { action: string; count: number };
@@ -253,7 +224,10 @@ export type AuditQuery = {
  * stretch of the log, by action. A page's
  * stretch runs from its oldest entry, or the log's first on the last page,
  * up to where it started, the head or `before`: pages tile the log, and
- * each hidden entry is counted on exactly one.
+ * each hidden entry is counted on exactly one. Of 0.14's log, a page
+ * weighs the newest `HIDDEN_COUNTED` detail entries of its stretch at
+ * most, and says `hiddenMore` when it held more (T248, R48): a page that
+ * shows nothing older counted every heartbeat the log holds.
  *
  * With 0.15's log, a sign-in through a trust binding, and a token's issue,
  * revoke or sign-out, is its change alone (D147): asked to (`sealed`), the
@@ -278,7 +252,7 @@ export type AuditQuery = {
 export async function listAudit(
   ctx: ApiContext,
   query: AuditQuery,
-): Promise<{ entries: AuditEntryView[]; more: boolean; next: string | null; hidden?: HiddenCount[]; reads?: ReadsListed; readsOmitted?: ReadsOmitted }> {
+): Promise<{ entries: AuditEntryView[]; more: boolean; next: string | null; hidden?: HiddenCount[]; hiddenMore?: true; reads?: ReadsListed; readsOmitted?: ReadsOmitted }> {
   const filter: AuditFilter = {
     decision: query.decision,
     excludeActions: query.detail === true ? undefined : DETAIL_ACTIONS,
@@ -427,12 +401,12 @@ export async function listAudit(
   // older is left; nothing when the page before was the last of it. 0.14's stops at its oldest entry shown, or where
   // the page before stopped when it shows none; 0.15's at the time the page ended, or at its oldest sign-in when it
   // ended on one, or past them at the last of its records it counts.
-  const counts = await Promise.all([
-    before.seq === 'done' ? [] : auditActionCounts(ctx.db, filter, DETAIL_ACTIONS, page.oldStop === null ? undefined : BigInt(page.oldStop)),
+  const [old014, sealedCounts] = await Promise.all([
+    before.seq === 'done' ? { counts: [], more: false } : auditActionCounts(ctx.db, filter, page.oldStop === null ? undefined : BigInt(page.oldStop)),
     recorded ? sealedHidden(ctx.db, { actors: filter.actors, from: change ?? undefined, before: start }) : [],
   ]);
   const hidden = new Map<string, number>();
-  for (const { action, count } of counts.flat()) hidden.set(action, (hidden.get(action) ?? 0) + count);
+  for (const { action, count } of [...old014.counts, ...sealedCounts]) hidden.set(action, (hidden.get(action) ?? 0) + count);
   // Most of what is hidden first.
   return {
     entries,
@@ -440,6 +414,8 @@ export async function listAudit(
     next,
     ...listed,
     hidden: [...hidden].map(([action, count]) => ({ action, count })).sort((a, b) => b.count - a.count || (a.action < b.action ? -1 : a.action > b.action ? 1 : 0)),
+    // 0.14's weighed no further than `HIDDEN_COUNTED` detail entries back from the page's start: more may be left out.
+    ...(old014.more ? { hiddenMore: true as const } : {}),
   };
 }
 

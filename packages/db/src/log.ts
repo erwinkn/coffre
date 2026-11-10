@@ -10,7 +10,7 @@ import { later, laterRows } from './later.ts';
 import { prepared } from './prepared.ts';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf } from './dialect.ts';
 
-export { accessAllowed, authoredBy, changeNamed, changesOf, entriesOf, indexOf, keyedBy, KINDS, type Kind } from './access-entries.ts';
+export { accessAllowed, authoredBy, changeNamed, changesOf, DETAIL_ACTIONS, entriesOf, indexOf, keyedBy, KINDS, type Kind } from './access-entries.ts';
 export { recordField, recorded, RECORDS, type ChangeRecord } from './change-records.ts';
 
 /**

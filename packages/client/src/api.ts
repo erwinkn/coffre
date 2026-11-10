@@ -1232,6 +1232,7 @@ export type Api = {
         action: string;
         count: number;
       }[];
+      hiddenMore?: true;
       reads?: {
         through: string | null;
         behind: boolean;

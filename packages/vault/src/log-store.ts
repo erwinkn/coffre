@@ -145,12 +145,14 @@ function limitOf(limit: number | undefined): SQL {
 }
 
 /**
- * One tree's half of a bounded read, its first `limit` in its index's
- * order, so that the database too stops there rather than sort every entry
- * above the cursor (PR 8 reviews r2, r3): the changes by number, their key;
- * the uses by `at`, their one index (`log_uses_request_idx`). By number, a
- * use may lie past one of them later by `at`: a read that fills its limit
- * says so, and is not taken as all there is (`verifyLog`'s `above`).
+ * One tree's half of a bounded read, its first `limit` in `order`, so that
+ * the database too stops there rather than sort every entry above the
+ * cursor (PR 8 reviews r2, r3): by number, each tree's index by number
+ * (`log_uses_by_number_idx`, T245), the uses' `at` bounds a filter. By
+ * `at`, the uses' index by `at` read every use in the window's times and
+ * sorted them when a burst shared one: 365 pages for the first 1,001 of
+ * 20,000 (T248, R48); and its first by `at` were not the first by number,
+ * which a bounded read gives (`LogReader.entries`).
  */
 function first(half: SQL, order: SQL, limit: number | undefined): SQL {
   return limit === undefined ? half : sql`SELECT * FROM (${half} ORDER BY ${order} LIMIT ${limit}) f`;
@@ -270,16 +272,60 @@ async function located(found: Located | null | undefined, tiles: (keys: TileKey[
   throw new Refused(`use ${entry.number} is in none of its window's leaves: the database changed it since its tick`);
 }
 
-/** Postgres's read of the entries in (after, upto], by number, uses from `floor` to `ceiling`: the window's rows (`postgresStore`). */
-export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number, byNumber = false): SQL {
+/**
+ * Postgres's read of the entries in (after, upto], by number, uses from `floor` to `ceiling`: the window's rows
+ * (`postgresStore`). The ceiling a filter (`at + 0`), never an index's bound: a pair's ceiling, read in the statement,
+ * reads to Postgres as a narrow range of `at`, and it walked an index by `at` through every use sharing one, sorted
+ * them and kept the first (365 pages for 1,001 of 20,000; T248). The floor bounds the days read.
+ */
+export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number): SQL {
   return sql`
       ${first(sql`SELECT 'changes' AS tree, c.number AS n, c.at::text AS at, c.request_id, c.object::text AS object, c.actor, c.payload, c.seal, c.mac,
              NULL::text AS credential, NULL::text AS secret, NULL::smallint AS purpose, NULL::text AS place, NULL::text AS route
         FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}`, sql`c.number`, limit)}
       UNION ALL
       ${first(sql`SELECT 'uses', u.number, u.at::text, u.request_id::text, NULL::text, NULL::text, NULL::text, NULL::bytea, u.mac, u.credential::text, u.secret::text, u.purpose, u.place::text, u.route
-        FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, byNumber ? sql`u.number` : sql`u.at`, limit)}
+        FROM log_uses u WHERE u.at >= ${floor} AND u.at + 0 <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, sql`u.number`, limit)}
       ORDER BY n${limitOf(limit)}`;
+}
+
+/**
+ * The most rotations a log takes in its life (T248, R48): the most retired
+ * keys' tags, 4 bytes each, that keep the fence row, which every use reads,
+ * under Postgres's 2,032-byte threshold, past which it moves them out of
+ * the row and every use reads a page more (measured on 16.14: 246 inline,
+ * the 247th out). Each rotation is a row of the key's history every
+ * keyring reads (`keyringRows`): a log rotated past this, which only the
+ * vault's login could ask, would cost every keyring more. A key rotated
+ * every month takes twenty years to reach it. Migration 0083's
+ * `log_rotate_number` and `log_rotate` refuse the next on Postgres.
+ */
+export const ROTATIONS_HELD = 246;
+
+const rotatedTooOften = `the log has rotated its key ${ROTATIONS_HELD} times, the most its fence row holds: it takes no more rotation`;
+
+/**
+ * The entries of `log_uses_at_number_idx` a step of `lowestAbove` reads, about a leaf page of it: a run of uses sealed at
+ * one `at` longer than this is passed in a step more, from its `at` past the part's last number.
+ */
+const ABOVE_BATCH = 256;
+
+/**
+ * SQLite's `lowestAbove`, as Postgres's: a statement a step, each the next `ABOVE_BATCH` entries of the index, from
+ * past the last, or past the run of sealed uses at its `at`.
+ */
+async function sqliteLowestAbove(db: Database, after: bigint, upto: bigint, from: number, ceiling: number): Promise<number | null> {
+  let [at, number] = [from, after];
+  for (;;) {
+    const batch = await rowsOf<{ at: number; number: number | bigint }>(db, sql`
+      SELECT u.at, u.number FROM log_uses u WHERE u.at >= ${at} AND u.at <= ${ceiling} AND (u.at, u.number) > (${at}, ${number})
+       ORDER BY u.at, u.number LIMIT ${ABOVE_BATCH}`);
+    const found = batch.find((row) => BigInt(row.number) > after && BigInt(row.number) <= upto);
+    if (found !== undefined) return Number(found.at);
+    if (batch.length < ABOVE_BATCH) return null;
+    const last = batch.at(-1)!;
+    [at, number] = [Number(last.at), BigInt(last.number) <= after ? after : 9223372036854775807n];
+  }
 }
 
 function postgresStore(db: Database, range: number): CheckpointStore & Omit<RetentionStore, 'readsCursor'> & RotationStore {
@@ -293,15 +339,33 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
    * The window as rows, by number: the tick's read, 500 entries every 500 ms at R44's rate, so no JSON is built
    * for it (measured: the window read 6.0 ms p50 as JSON).
    */
-  const rows = (after: bigint, upto: bigint, floor: SQL, ceiling?: SQL, limit?: number, byNumber = false) =>
-    rowsOf<WindowRow>(db, postgresWindow(after, upto, floor, ceiling, limit, byNumber));
+  const rows = (after: bigint, upto: bigint, floor: SQL, ceiling?: SQL, limit?: number) =>
+    rowsOf<WindowRow>(db, postgresWindow(after, upto, floor, ceiling, limit));
   // The ranges this store made: each made once, not one statement more a tick. Retention (plan PR 7), which drops
   // ranges, forgets the ones it drops here (T119's item 2); and the days it made, which it forgets as it drops them.
   const made = new Set<number>();
   const madeDays = new Set<string>();
-  /** The lowest `at` of the uses in (after, upto] from `from` on, null for none: the index by `at`, to the first in range. */
-  const lowestAbove = async (after: bigint, upto: bigint, from: number) => {
-    const at = await one<string | null>(db, sql`SELECT min(u.at)::text AS v FROM log_uses u WHERE u.at >= ${from}::bigint AND u.number > ${after} AND u.number <= ${upto}`);
+  /**
+   * The lowest `at` of the uses in (after, upto] from `from` to `ceiling`, null for none (`lowestAbove`): a walk of
+   * `log_uses_at_number_idx` from `(from, after)`, `ABOVE_BATCH` entries a step, past each run of uses sealed at one
+   * `at` in a step. Asked as `min(at)`, Postgres walked the index by `at` through every use sealed at the `at` a
+   * backlog shares: 40 pages 2,000 uses in, 366 at 20,000, 7,069 at 400,000 (T248, R48).
+   */
+  const lowestAbove = async (after: bigint, upto: bigint, from: number, ceiling: number) => {
+    const at = await one<string | null>(db, sql`
+      WITH RECURSIVE s (at, number, found, done) AS (
+        SELECT ${from}::bigint, ${after}::bigint, NULL::bigint, false
+        UNION ALL
+        SELECT b.last_at, CASE WHEN b.last_number <= ${after}::bigint THEN ${after}::bigint ELSE 9223372036854775807 END, b.found,
+               b.found IS NOT NULL OR b.n < ${ABOVE_BATCH}
+          FROM s CROSS JOIN LATERAL (
+            SELECT min(w.at) FILTER (WHERE w.number > ${after}::bigint AND w.number <= ${upto}::bigint) AS found, max(w.at) AS last_at,
+                   (array_agg(w.number ORDER BY w.at DESC, w.number DESC))[1] AS last_number, count(*) AS n
+              FROM (SELECT u.at, u.number FROM log_uses u
+                     WHERE u.at >= s.at AND u.at <= ${ceiling}::bigint AND (u.at, u.number) > (s.at, s.number)
+                     ORDER BY u.at, u.number LIMIT ${ABOVE_BATCH}) w) b
+         WHERE NOT s.done)
+      SELECT min(found)::text AS v FROM s`);
     return at === null ? null : Number(at);
   };
   const tiles: LogStore['tiles'] = async (tree, keys) => {
@@ -325,14 +389,15 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
       told?.(upto);
       // The window by number, its first `limit` (T169): every use of the window read, sorted by number, which costs the
       // window's size; past the limit, the lowest `at` of the uses left above it, which the index finds past those read.
-      const read = (await rows(after, upto, sql`${from}::bigint`, undefined, limit === undefined ? undefined : limit + 1, true)).map(fromRow);
+      const read = (await rows(after, upto, sql`${from}::bigint`, undefined, limit === undefined ? undefined : limit + 1)).map(fromRow);
       const entries = capped(read, limit);
-      const more = entries === read ? null : { above: await lowestAbove(entries.at(-1)!.number, upto, from) };
+      const set = Number(barrier?.at_floor ?? 0);
+      const more = entries === read ? null : { above: await lowestAbove(entries.at(-1)!.number, upto, from, set) };
       return {
         upto,
         newest: toPair(barrier?.newest),
         entries,
-        floor: { found: barrier?.floor_found == null ? null : Number(barrier.floor_found), set: Number(barrier?.at_floor ?? 0), ceiling: Number(barrier?.ceiling) },
+        floor: { found: barrier?.floor_found == null ? null : Number(barrier.floor_found), set, ceiling: Number(barrier?.ceiling) },
         more,
       };
     },
@@ -470,10 +535,10 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
   const USE = sql.raw(`json_object('tree', 'uses', 'number', CAST(u.number AS TEXT), 'at', CAST(u.at AS TEXT), 'requestId', CAST(u.request_id AS TEXT),
     'credential', u.credential, 'secret', u.secret, 'purpose', u.purpose, 'mac', hex(u.mac), 'place', u.place, 'route', u.route)`);
   const PAIR = sql.raw(`json_object('upto', CAST(k.upto AS TEXT), 'changes', k.changes_note, 'uses', k.uses_note)`);
-  const window = (after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number, byNumber = false) => sql`(SELECT coalesce(json_group_array(json(e.v)), '[]') FROM (
+  const window = (after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number) => sql`(SELECT coalesce(json_group_array(json(e.v)), '[]') FROM (
       ${first(sql`SELECT c.number AS n, ${CHANGE} AS v FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}`, sql`c.number`, limit)}
       UNION ALL
-      ${first(sql`SELECT u.number, ${USE} AS v FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, byNumber ? sql`u.number` : sql`u.at`, limit)}
+      ${first(sql`SELECT u.number, ${USE} AS v FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, sql`u.number`, limit)}
       ORDER BY 1${limitOf(limit)}
     ) e)`;
   const NOW = sql.raw(`CAST(unixepoch('subsec') * 1000 AS INTEGER)`);
@@ -499,14 +564,11 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
       told?.(barrier.upto);
       const read = await one<{ newest: RawPair | null; entries: RawEntry[] }>(db, sql`SELECT json_object(
           'newest', json((SELECT ${PAIR} FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1)),
-          'entries', json(${window(after, barrier.upto, sql`${from}`, undefined, limit === undefined ? undefined : limit + 1, true)})) AS v`);
+          'entries', json(${window(after, barrier.upto, sql`${from}`, undefined, limit === undefined ? undefined : limit + 1)})) AS v`);
       const all = read.entries.map(toEntry);
       const entries = capped(all, limit);
       let more: { above: number | null } | null = null;
-      if (entries !== all) {
-        const at = await one<number | null>(db, sql`SELECT min(u.at) AS v FROM log_uses u WHERE u.at >= ${from} AND u.number > ${entries.at(-1)!.number} AND u.number <= ${barrier.upto}`);
-        more = { above: at === null ? null : Number(at) };
-      }
+      if (entries !== all) more = { above: await sqliteLowestAbove(db, entries.at(-1)!.number, barrier.upto, from, barrier.set) };
       return {
         upto: barrier.upto,
         newest: toPair(read.newest),
@@ -607,8 +669,11 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
       // One writer at a time: the transaction is the barrier's locks. The fence's retired tags are hex, a JSON array.
       return db.transaction(async (tx) => {
         const tag = retire.toString('hex');
-        const [fence] = await rowsOf<{ held: number }>(tx, sql`SELECT EXISTS (SELECT 1 FROM checkpoint_fence f, json_each(f.retired) j WHERE f.only_row AND j.value = ${tag}) AS held`);
+        const [fence] = await rowsOf<{ held: number; retired: number }>(tx, sql`
+          SELECT EXISTS (SELECT 1 FROM checkpoint_fence f, json_each(f.retired) j WHERE f.only_row AND j.value = ${tag}) AS held,
+                 (SELECT json_array_length(f.retired) FROM checkpoint_fence f WHERE f.only_row) AS retired`);
         if (Number(fence?.held) === 1) return null;
+        if (Number(fence?.retired) >= ROTATIONS_HELD) throw new Error(rotatedTooOften);
         const [next] = await rowsOf<{ n: string }>(tx, sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) + 1 AS TEXT) AS n`);
         const change = make(BigInt(next!.n));
         await rowsOf(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)

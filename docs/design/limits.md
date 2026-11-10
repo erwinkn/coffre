@@ -899,6 +899,7 @@ or move, pointing to section 3's #).
 | V81 | Input bounds | ids ≤ 100, `user:` ≤ 320, labels ≤ 120, jkt ≤ 128, run claims ≤ 32 × (64, 256), clientId ≤ 2,048 … | `credentials.ts:109-328`; `admit.ts:180`; `use.ts:436` | d | | | keep |
 | V82 | `MAX_RESERVED` | 1,000 names | `proxy.ts:19` | d | "far more than any deployment's code defines" | | keep |
 | V83 | `retainDays` | null: every day kept | `checkpointer-workers.ts:83`; `checkpointer-node.ts:92` | – | not in the standard setup: Workers' `checkpointer()` and `localVault`'s own checkpointer pass none. On Node, `runCheckpointer` and `keepCheckpointer` (`@coffre/vault/node`, `node.ts:36`) accept it, for a deployment that runs its checkpointer itself (`sealThrough`, `heldOutside`). 12.2 GB/day at 1,000/s for the uses' rows, 141 B a use as wired ([hot-path-one.md](hot-path-one.md), W211's row; the 13.6 GB/day there is the 158 B prototype's); about 69 GB/day with the reads' projection and the audit tree's tiles ([config.md](config.md), Q6) | | not a limit; see Q6 |
+| V84 | `ROTATIONS_HELD` | 246 rotations of the log's key, in its life | `log-store.ts`; migration 0083's `log_rotate_number`, `log_rotate` | b | R48 (T248): every use reads the fence row's retired tags, and past 246 of 4 bytes Postgres moves them out of the row (its 2,032-byte threshold, measured on 16.14), a page more for every use; every keyring reads each rotation | ⚠ the 247th rotation is refused: a key rotated every month reaches it in twenty years | keep |
 
 Format, fine: `MAC_BYTES` 16 (twice: `log-entry.ts:36`, `reads.ts:97`),
 `TAG_BYTES`, `SEAL_BYTES`, the HKDF outputs, the Ed25519 PKCS8 prefix,
@@ -970,7 +971,7 @@ patterns, and the email bounds (254 / 64 / 63: RFC 5321 and 1035).
 | S54 | `auditRange` default | 1,000 | `db/queries.ts:3055` | e | callers override | | drop the default |
 | S55 | `inArray` chunks | 1,000 | `db/queries.ts:438-440, 735, 2902-2919` | a | bind parameters | | keep |
 | S56 | `READS_PER_STATEMENT`, `STATEMENTS_AT_ONCE` | 250, 4 | `db/queries.ts:1942, 1951` | a | SQLite's 500 terms; 130k reads held 617 MiB | | keep |
-| S57 | `HIDDEN_COUNTED` | 1,000 | `db/queries.ts:2028` | b | R48 | | keep |
+| S57 | `HIDDEN_COUNTED` | 1,000 | `db/queries.ts` | b | R48: of 0.15's records a page hides, the most it counts past what it shows (`sealedReach`); of 0.14's detail entries, the most it weighs back from where it started, `hiddenMore` past them (T248) | | keep |
 | S58 | `SPENT_TOKENS_KEPT_MS` | 2 h | `db/queries.ts:2110`; SQL 0016 | c | token age + margin | | one source |
 | S59 | `RENEW_MARGIN_MS` | 5 s | `db/workloads.ts:285` | b | | | keep |
 | S60 | Sign-in field bounds | bodies 4 / 16 KiB, token 8 KiB, labels 120, codes 128 … | `auth-routes.ts:53-432` | d | | | keep |

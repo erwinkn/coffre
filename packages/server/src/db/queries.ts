@@ -5,7 +5,7 @@ import { MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, ty
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { accessAllowed, changesOf, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
+import { accessAllowed, changesOf, DETAIL_ACTIONS, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -1267,7 +1267,8 @@ export async function members(
 
 /**
  * Every allowed read, write and import of a secret by these actors, a read
- * of several once per secret it lists, then every restore, oldest first.
+ * of several once per secret it lists, then every restore of a secret
+ * they saw, oldest first.
  * Each row that names a secret carries it as it is now: its key, current
  * version, and whether it or its place is archived. Several reads, so the
  * caller runs them in one snapshot (`SNAPSHOT`): a restore committed between
@@ -1278,12 +1279,20 @@ export async function members(
  * through a reference its source's, as 0.14's entry named it. A caller that
  * read them already, beside its other reads, passes them: one round trip
  * fewer.
+ *
+ * None of it reads past what is theirs (T248, R48): their reads and writes
+ * in 0.14's log by `audit_log_seen_idx` (`seen`), which 0.15's uses and key
+ * writes replaced at its cutover, so they no longer grow; their reads and
+ * writes in 0.15's; then the restores of the keys they saw, by
+ * `audit_log_restore_idx`. Asked as one condition with every restore, every
+ * entry of the log was read for every report (2,484 pages behind 80,000).
  */
 export async function memberActivity(db: Queryable, actorIds: string[], readAlready?: Awaited<ReturnType<typeof readsBy>>) {
   const { auditLog, secrets, environments, projects } = tablesOf(db);
-  const allowed = eq(auditLog.decision, 'allow');
-  const entries = (where: SQL | undefined) => db
+  // Asked in no order, and put in order here: few, and an order by `seq` is one more way past them.
+  const entries = async (where: SQL | undefined) => (await db
     .select({
+      seq: auditLog.seq,
       actor: auditLog.actor,
       action: auditLog.action,
       secretId: auditLog.secretId,
@@ -1299,25 +1308,36 @@ export async function memberActivity(db: Queryable, actorIds: string[], readAlre
     .leftJoin(secrets, eq(secrets.id, auditLog.secretId))
     .leftJoin(environments, eq(environments.id, secrets.environmentId))
     .leftJoin(projects, eq(projects.id, secrets.projectId))
-    .where(where)
-    .orderBy(asc(auditLog.seq));
-  // Their reads and writes, and every restore, few, each someone's choice, for whichever secrets were seen: one statement.
-  // Beside it, their uses, under 0.15's log.
+    .where(where))
+    .sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0))
+    .map(({ seq: _seq, ...row }) => row);
+  // Their reads and writes in 0.14's log; beside it, their uses, under 0.15's log, and their key writes, which 0.15's log
+  // records alone (T179, 0.16.0), each a change naming its key and version by id.
   const members = actorIds.flatMap((id) => [`user:${id}`, `token:${id}`]);
-  // And their key writes 0.15's log records alone (T179, 0.16.0), each a change naming its key and version by id.
-  const [logged, used, wrote] = await Promise.all([
-    entries(and(allowed, or(and(inArray(auditLog.actor, members), inArray(auditLog.action, ['secret.read', 'secret.write'])), eq(auditLog.action, 'secret.restore')))),
+  // On Postgres a loop over the members, each a probe of `audit_log_seen_idx` planned for any of them, then their
+  // entries by `seq`: with their values, a member whose other entries are many reads as common, and Postgres walked
+  // `audit_log_shown_idx` instead, whose condition theirs implies, past everyone's reads (1,550 pages behind 40,000;
+  // T248); as `seq IN`, it joined them to every entry.
+  const theirs = dialect.engineOf(db) === 'postgres'
+    ? sql`${auditLog.seq} = ANY(ARRAY(SELECT s.seq FROM unnest(${sql.param(members)}::text[]) AS m (actor)
+        CROSS JOIN LATERAL (SELECT a.seq FROM audit_log a WHERE a.actor = m.actor AND ${entriesOf('seen')}) s))`
+    : and(inArray(auditLog.actor, members), entriesOf('seen'));
+  const [seen, used, wrote] = await Promise.all([
+    entries(theirs),
     readAlready ?? readsBy(db, members),
     writtenBy(db, members),
   ]);
-  const restores = logged.filter((row) => row.action === 'secret.restore');
-  const seen = logged.filter((row) => row.action !== 'secret.restore');
   const listedOf = (row: (typeof seen)[number]) => {
     const { secrets: listed } = JSON.parse(row.metadata) as { secrets?: unknown };
     return row.action !== 'secret.read' || row.secretId !== null || !Array.isArray(listed) ? null : listed as { secretId?: unknown }[];
   };
   const ids = seen.flatMap((row) => (listedOf(row) ?? []).flatMap(({ secretId }) => (typeof secretId === 'string' ? [secretId] : [])));
-  const [now, usedRows, wroteRows] = await Promise.all([secretPlaces(db, ids), readsOf(db, used), writesOf(db, wrote)]);
+  // The restores of every key they saw, few, each someone's choice: what makes a version they saw another's value.
+  const saw = [...new Set([...seen.flatMap((row) => (row.secretId === null ? [] : [row.secretId])), ...ids, ...used.map((one) => one.secret), ...wrote.map((one) => one.secret)])];
+  const [now, usedRows, wroteRows, restores] = await Promise.all([
+    secretPlaces(db, ids), readsOf(db, used), writesOf(db, wrote),
+    saw.length === 0 ? [] : entries(and(entriesOf('restore'), inArray(auditLog.secretId, saw))),
+  ]);
   const rows = seen.flatMap((row) => {
     const listed = listedOf(row);
     if (listed === null) return [row];
@@ -3581,7 +3601,9 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
     filter.decision === undefined ? undefined : eq(auditLog.decision, filter.decision),
     filter.excludeActions === undefined || filter.excludeActions.length === 0
       ? undefined
-      : notInArray(auditLog.action, [...filter.excludeActions]),
+      // The detail an ordinary page leaves out, as the condition of the index of what it shows, word for word
+      // (`audit_log_shown_idx`): a page back from the newest past every heartbeat since in one step (T248, R48).
+      : filter.excludeActions === DETAIL_ACTIONS ? entriesOf('shown') : notInArray(auditLog.action, [...filter.excludeActions]),
     filter.beforeSeq === undefined ? undefined : lt(auditLog.seq, filter.beforeSeq),
   );
 }
@@ -3695,31 +3717,36 @@ function talliedCheckpoints(db: Queryable, where?: SQL) {
 }
 
 /**
- * How many entries of each of `actions` match `filter`, but for its
- * exclusions and limit, from `fromSeq` on: one grouped count. Both authors
- * are named so that the log's (author, action, seq) index serves it, a
- * range per action, without reading the entries themselves when nothing
- * else is filtered on.
+ * How many of the detail entries a page leaves out (`DETAIL_ACTIONS`)
+ * match `filter`, but for its exclusions and limit, by action, from
+ * `fromSeq` on: of the stretch's newest `HIDDEN_COUNTED` detail entries,
+ * by `audit_log_detail_idx`, and whether it holds more (T248, R48). Counted
+ * whole, a page that showed nothing older counted every heartbeat the log
+ * holds (65 pages at 10,000, 355 at 40,000; Sol r7 of #556); and capped at
+ * what the filter matched, a page of refusals or of a key read past every
+ * heartbeat none of them matched (1,350 pages at 20,000). The filter weighs
+ * each entry read, and reads no other.
  */
 export async function auditActionCounts(
   db: Queryable,
   filter: AuditFilter,
-  actions: readonly string[],
   fromSeq?: bigint,
-): Promise<{ action: string; count: number }[]> {
+): Promise<{ counts: { action: string; count: number }[]; more: boolean }> {
   const { auditLog } = tablesOf(db);
-  return db
-    .select({ action: auditLog.action, count: count() })
+  const where = auditWhere(db, { ...filter, excludeActions: undefined, beforeSeq: undefined });
+  const rows = await db
+    .select({ action: auditLog.action, matched: where === undefined ? sql<boolean | number>`1` : truth(where) })
     .from(auditLog)
-    .where(
-      and(
-        inArray(auditLog.author, ['app', 'vault']),
-        inArray(auditLog.action, [...actions]),
-        fromSeq === undefined ? undefined : gte(auditLog.seq, fromSeq),
-        auditWhere(db, { ...filter, excludeActions: undefined }),
-      ),
-    )
-    .groupBy(auditLog.action);
+    .where(and(
+      entriesOf('detail'),
+      fromSeq === undefined ? undefined : gte(auditLog.seq, fromSeq),
+      filter.beforeSeq === undefined ? undefined : lt(auditLog.seq, filter.beforeSeq),
+    ))
+    .orderBy(desc(auditLog.seq))
+    .limit(HIDDEN_COUNTED + 1);
+  const counts = new Map<string, number>();
+  for (const { action, matched } of rows.slice(0, HIDDEN_COUNTED)) if (Number(matched) === 1 || matched === true) counts.set(action, (counts.get(action) ?? 0) + 1);
+  return { counts: [...counts].map(([action, count]) => ({ action, count })), more: rows.length > HIDDEN_COUNTED };
 }
 
 /**

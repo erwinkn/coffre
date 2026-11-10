@@ -341,6 +341,12 @@ anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
   vault apart. `--entries` and `--members` grow the instance first. Workers' Free plan
   gives an invocation 10 ms of CPU; `request-cost.alone.ts` holds a request's
   statements and rows to the same however the instance grows.
+- `pnpm sweep:history [--size <n>]` (`scripts/history-sweep.sh`) runs the request paths of
+  `packages/server/test/history.sweep.ts` on an instance whose history is `--size` entries long in
+  each of the shapes that hid a walk before, then ten times that, with auto_explain on the runtime
+  logins, and lists every statement that reads more at the larger size (`docs/history-sweep.md`, R48).
+  A release that adds a read reruns it. On a Postgres of your own only (`COMPOSE_PROJECT_NAME`,
+  `COFFRE_POSTGRES_PORT`): it turns auto_explain on for its databases and reads the server's log.
 - `pnpm formal` model-checks the locking protocol, `formal/Coffre.tla`, and
   the credentials, issuing, bulk-limit, audit-chain and tunnel protocols
   beside it, with TLC

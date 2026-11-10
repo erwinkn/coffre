@@ -38,6 +38,39 @@ export function authoredBy(author: 'app' | 'vault', decision?: 'allow' | 'deny')
 }
 
 /**
+ * Technical steps and sign-ins: in the log and its chain like everything
+ * else, but not what someone did with secrets or access, so an audit page
+ * leaves them out unless asked (`shown`). Here, beside the index of the
+ * entries shown, which names them word for word.
+ */
+export const DETAIL_ACTIONS = [
+  'sign_in',
+  'sign_out',
+  'token.create',
+  'token.revoke',
+  'device.approve',
+  'device.deny',
+  // An MCP client's code redeemed, or its tokens refreshed: every hour of its use.
+  'mcp.token',
+  // A read-only tool's call through MCP that went through. Its refusals, and every change, are `mcp.call`, shown.
+  'mcp.read',
+  'account.link',
+  'account.unlink',
+  // A touch that stepped a session up (docs/design/passkeys.md, section 6.2): one per five minutes at most, in PR 5.
+  'passkey.check',
+  'key.wrap',
+  'key.rewrap',
+  // The vault's seal of a reference: the app's `secret.reference` says it in words.
+  'reference.create',
+  'key.intent',
+  'key.check',
+  'audit.heartbeat',
+  'audit.checkpoint',
+  // A step of the app key's rotation, a hundred rows signed again; its `key.rotate` is shown.
+  'key.reseal',
+] as const;
+
+/**
  * Each kind of entry a runtime read asks the newest of (or the first, or a
  * page back from the newest), and the condition of the index that holds it
  * alone (T245, R48): one place for both, so that the read and its index
@@ -79,6 +112,21 @@ export const KINDS = {
   tamper: "author = 'vault' AND action = 'vault.tampered' AND code IN ('mac', 'stale')",
   /** The app's moves to a new key, resealed or rotated: the newest (`newestMove`). */
   moves: "author = 'app' AND action IN ('key.reseal', 'key.rotate')",
+  /**
+   * What an audit page shows unless asked for detail (`DETAIL_ACTIONS`): a page back from the newest, past every
+   * heartbeat and checkpoint since, which the primary key walked (82 pages 2,000 heartbeats in, 696 at 20,000; T248).
+   */
+  shown: `action NOT IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')})`,
+  /** And what it leaves out, which it counts back from where it started, a stretch's newest at most (`auditActionCounts`). */
+  detail: `action IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')})`,
+  /**
+   * The reads and writes 0.14's log records of a key, by whom (`memberActivity`): a member's, through their actor,
+   * where the log's whole was read for every report (2,484 pages behind 80,000 entries; T248). 0.15's log records
+   * every use and key write since its cutover (R53, T179): these no longer grow.
+   */
+  seen: "decision = 'allow' AND action IN ('secret.read', 'secret.write')",
+  /** A key's restores, which a report follows back from its current version (`memberActivity`), by key. */
+  restore: "decision = 'allow' AND action = 'secret.restore'",
 } as const;
 
 /** A kind of entry with an index of its own (`KINDS`). */

@@ -68,7 +68,7 @@ const explain = async (label: string, query: ReturnType<typeof sql>) => {
   const plan = rows[0]!['QUERY PLAN'][0]!;
   console.log(`${label}: ${plan['Execution Time'].toFixed(1)} ms, ${plan.Plan['Actual Rows']} rows`);
 };
-await explain('window read, first part', postgresWindow(after, BigInt(upto), sql`${floor}::bigint`, undefined, WINDOW_MAX + 1, true));
+await explain('window read, first part', postgresWindow(after, BigInt(upto), sql`${floor}::bigint`, undefined, WINDOW_MAX + 1));
 const k = after + BigInt(WINDOW_MAX);
 await explain('probe past it', sql`SELECT min(u.at) FROM log_uses u WHERE u.at >= ${floor}::bigint AND u.number > ${k} AND u.number <= ${BigInt(upto)}`);
 

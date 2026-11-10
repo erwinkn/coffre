@@ -93,6 +93,42 @@
   `CREATE INDEX CONCURRENTLY` after its transaction, on every run until it
   is built (`docs/deploy.md`, "Upgrading": on an instance whose days of
   uses hold tens of millions, run 0.16's first migrate from a shell).
+- **The reads that went over a whole kind of history at once cost the same
+  however long it grows (T248, R48), found by a sweep a release can rerun.**
+  `pnpm sweep:history` (`docs/history-sweep.md`) runs every request path on
+  an instance whose history is 2,000 entries long in each shape that hid a
+  walk before, then 20,000, with auto_explain on the runtime logins, and
+  lists each statement that read more at the larger. Its first run found,
+  beside the five T245 left: the default audit page walked back past every
+  heartbeat since (82 pages to 696); a member's page read 0.14's whole log
+  for their activity, every entry for an `OR` with every restore (265 to
+  2,484); and a proof's or the projector's window read every use sharing
+  one `at` by an index by `at`, then sorted them (96 to 422). Now, each
+  however long its history: every member's findings (the members list, a
+  sign-in) a step of `audit_log_tamper_idx` from one member reported to
+  the next, then a probe each (1,177 pages at 40,000 reports before); a
+  page's count of what it hides weighs its stretch's newest 1,000 detail
+  entries (`HIDDEN_COUNTED`) and says `hiddenMore` when there were more,
+  where it counted every heartbeat a page with nothing older held, or
+  walked past every one its filter did not match; an offboarding report's
+  reads a step for each key and version a member read, a day at a time
+  (797 pages at 30,000 reads), and their activity in 0.14's log their own
+  reads and writes, then the restores of the keys they saw; the
+  checkpointer's lowest `at` above a part of its window a walk from one
+  `at` to the next, past each run of uses sealed at one in a step (7,069
+  pages past 390,000 uses sharing an `at`), the floor it signs the same
+  (HotPathOne.tla's `Above`, which reads only up to the barrier's floor, as
+  the floor signed is capped there); and a window's bounded read its first
+  entries by number, its ceiling a filter. A log takes 246 rotations of its
+  key in its life (`ROTATIONS_HELD`), the most retired keys that keep the
+  fence row every use reads in one page, and refuses the next: every
+  keyring reads each one. Migration 0083 adds six indexes, built without
+  blocking writes: `audit_log_shown_idx` and `audit_log_detail_idx` (each
+  entry is in one), a member's 0.14 reads and writes, a key's restores,
+  `log_reads (principal, key, version, at)` and `log_uses (at, number)`, an
+  index entry more for each use and each read. The query inventory
+  (`packages/db/test/newest-lookups.test.ts`) lists every aggregate over a
+  log too, with the test that holds it, or why none needs one.
 - **The credential proxy ends its upstream request when the app's request
   ends, and sets no time bound of its own (W365, config Q7).** It passes the
   incoming request's abort signal to the upstream `fetch`: an app that

@@ -95,7 +95,9 @@ export type CheckpointStore = LogReader & {
    *
    * With `limit` (T169), the window's first `limit` entries by number, and
    * `more` when there were more: `more.above`, the lowest `at` of the uses
-   * the window holds above the last of them, from `from` on (null: none).
+   * the window holds above the last of them, from `from` up to the floor
+   * the barrier set (null: none there, where the part signs the barrier's
+   * floor all the same; HotPathOne.tla's Above, T248).
    * `barrier`, told the barrier's `upto` before the window is read.
    */
   close(after: bigint, from: number, limit?: number, barrier?: (upto: bigint) => void): Promise<{

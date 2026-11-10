@@ -257,42 +257,54 @@ export async function unsealedCredentials(db: Queryable, at: Date): Promise<Unse
  * their row (`mac`) or an older one put back (`stale`) stands by
  * `findingStands`: one 0.15's log weighed, while the change it names is
  * still their newest; one of 0.14's, while it is newer than their newest
- * access entry. Two rounds: the findings, by the log's (author, action,
- * seq) and (author, subject, seq) indexes (findings are few), each change
- * they name once, then for those they name their newest access entry and
- * their newest change, one probe each (R48).
+ * access entry. Two statements, neither of which reads a member's findings
+ * past the newest of a kind (T248, R48): the members any finding is about,
+ * a step of `audit_log_tamper_idx` each (`reportedMembers`); then for each,
+ * as for one (`findingsAt`), their newest finding of 0.14's, whether one of
+ * 0.15's names their newest change, and their newest access entry, a probe
+ * each. Grouped, the findings were read whole: 295 pages at 10,000 reports
+ * about one member, 1,177 at 40,000, for two groups (Sol r6 of #556).
  */
 export async function tamperedMembers(db: Queryable, principal?: string): Promise<Set<string>> {
+  const members = principal === undefined ? await reportedMembers(db) : [principal];
+  if (members.length === 0) return new Set();
+  const keys = members.map((member) => logObject('principal', member));
+  const postgres = engineOf(db) === 'postgres';
+  const [member, object] = postgres ? [sql`k.principal`, sql`k.object`] : [sql`json_extract(k.value, '$[0]')`, sql`json_extract(k.value, '$[1]')`];
+  const { legacy, named } = findingsAt(db, member, object);
+  const found = await rowsOf<{ principal: string; legacy: string | number | null; access: string | number | null; named: number | boolean }>(db, sql`
+    SELECT ${member} AS principal, ${legacy} AS legacy, ${newestAccessOf(db, member)} AS access, ${named} AS named
+      FROM ${postgres
+        ? sql`unnest(${sql.param(members)}::text[], ${sql.param(keys)}::text[]) AS k (principal, object)`
+        : sql`json_each(${JSON.stringify(members.map((one, i) => [one, keys[i]]))}) k`}`);
+  return new Set(found.filter((row) => findingStands({
+    legacy: row.legacy === null ? null : BigInt(row.legacy),
+    access: row.access === null ? null : BigInt(row.access),
+    named: Number(row.named) === 1,
+  })).map((row) => String(row.principal)));
+}
+
+/**
+ * The members the vault's findings are about, each once: a skip of
+ * `audit_log_tamper_idx`, keyed by member first, from one member to the
+ * next, a step each however many findings about them (T248, R48). As a
+ * `DISTINCT` or a `GROUP BY`, every finding is read.
+ */
+async function reportedMembers(db: Queryable): Promise<string[]> {
   const { auditLog } = tablesOf(db);
-  const weighed = weighedBy(db);
-  const found = await db
-    .select({ principal: auditLog.subjectPrincipal, weighed: sql<string | null>`${weighed}`, seq: sql<string>`CAST(max(${auditLog.seq}) AS text)` })
-    .from(auditLog)
-    .where(and(entriesOf('tamper'), principal === undefined ? undefined : eq(auditLog.subjectPrincipal, principal)))
-    .groupBy(auditLog.subjectPrincipal, weighed);
-  if (found.length === 0) return new Set();
-  const legacy = new Map(found.flatMap((row) => (row.weighed === null ? [[row.principal!, BigInt(row.seq)] as const] : [])));
-  const named = [...new Set(found.flatMap((row) => (row.weighed === null ? [] : [row.principal!])))];
-  const [access, changes] = await Promise.all([
-    legacy.size === 0
-      ? []
-      : db
-          .select({ principal: auditLog.subjectPrincipal, seq: sql<string>`CAST(max(${auditLog.seq}) AS text)` })
-          .from(auditLog)
-          .where(and(accessAllowed(), inArray(auditLog.subjectPrincipal, [...legacy.keys()])))
-          .groupBy(auditLog.subjectPrincipal),
-    newestChangeNames(db, named),
-  ]);
-  const accessOf = new Map(access.map((row) => [row.principal!, BigInt(row.seq)]));
-  // One pass over the findings: those naming their member's newest change (review r2 of #476: a lookup per member
-  // grew with the findings squared).
-  const naming = new Set(found.flatMap((row) => (row.weighed !== null && row.weighed === changes.get(row.principal!) ? [row.principal!] : [])));
-  const principals = new Set(found.map((row) => row.principal!));
-  return new Set([...principals].filter((principal) => findingStands({
-    legacy: legacy.get(principal) ?? null,
-    access: accessOf.get(principal) ?? null,
-    named: naming.has(principal),
-  })));
+  const next = (after: SQL | null) => sql`(SELECT ${auditLog.subjectPrincipal} FROM ${auditLog} WHERE ${entriesOf('tamper')}
+    AND ${auditLog.subjectPrincipal} ${after === null ? sql`IS NOT NULL` : sql`> ${after}`} ORDER BY ${auditLog.subjectPrincipal} LIMIT 1)`;
+  const rows = await rowsOf<{ principal: string }>(db, sql`
+    WITH RECURSIVE reported (principal) AS (SELECT ${next(null)} UNION ALL SELECT ${next(sql`r.principal`)} FROM reported r WHERE r.principal IS NOT NULL)
+    SELECT principal FROM reported WHERE principal IS NOT NULL`);
+  return rows.map((row) => String(row.principal));
+}
+
+/** A member's newest access entry's `seq`, in SQL, `member` the SQL that names them: a step of `audit_log_access_idx` (R48). */
+function newestAccessOf(db: Queryable, member: SQL): SQL<string | null> {
+  const { auditLog } = tablesOf(db);
+  const about = keyedBy(db, auditLog.subjectPrincipal, auditLog.seq, 'desc', member, sql`ARRAY[${member}]`);
+  return sql`(SELECT CAST(${auditLog.seq} AS text) FROM ${auditLog} WHERE ${accessAllowed()} AND ${about.where} ORDER BY ${sql.join(about.orderBy, sql`, `)} LIMIT 1)`;
 }
 
 /** What a finding names for a member 0.15's log holds no change of (`changeName`). */
@@ -377,16 +389,7 @@ export async function newestChangeNames(db: Queryable, principals: readonly stri
  * 0.15's names their newest change (1 or 0), read beside the rest of a statement (`memberAccess`).
  */
 export function findingsOf(db: Queryable, principal: string): { legacy: SQL<string | null>; named: SQL<number> } {
-  const { auditLog: log } = tablesOf(db);
-  const weighed = weighedBy(db);
-  const about = reportsAbout(db, principal);
-  const of = sql`${entriesOf('tamper')} AND ${about.where}`;
-  return {
-    // The newest of 0.14's by `audit_log_tamper_idx`, `(member, change, seq)`: as the greatest `seq`, Postgres walked
-    // the member's reports of 0.15's back, or the vault's entries, 1,088 pages behind 20,000 of them (T245).
-    legacy: sql`(SELECT CAST(${log.seq} AS text) FROM ${log} WHERE ${of} AND ${weighed} IS NULL ORDER BY ${about.order} LIMIT 1)`,
-    named: sql`(CASE WHEN EXISTS (SELECT 1 FROM ${log} WHERE ${of} AND ${weighed} = ${newestNamed(db, sql`${logObject('principal', principal)}`)}) THEN 1 ELSE 0 END)`,
-  };
+  return findingsAt(db, sql`${principal}`, sql`${logObject('principal', principal)}`);
 }
 
 /**
@@ -463,7 +466,7 @@ async function tamperReportsAbout(
 ): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
   const weighed = weighedBy(db);
-  const about = reportsAbout(db, principal);
+  const about = reportsAbout(db, sql`${principal}`);
   const rows = await db
     .select(entryColumns(db))
     .from(auditLog)
@@ -481,19 +484,36 @@ async function tamperReportsAbout(
 }
 
 /**
+ * `findingsOf` of the member `principal` names, a value or a column of the statement's (`tamperedMembers`), `object`
+ * their object in 0.15's log: a probe of `audit_log_tamper_idx` each, and one of `log_changes_object_idx`.
+ */
+function findingsAt(db: Queryable, principal: SQL, object: SQL): { legacy: SQL<string | null>; named: SQL<number> } {
+  const { auditLog: log } = tablesOf(db);
+  const weighed = weighedBy(db);
+  const about = reportsAbout(db, principal);
+  const of = sql`${entriesOf('tamper')} AND ${about.where}`;
+  return {
+    // The newest of 0.14's by `audit_log_tamper_idx`, `(member, change, seq)`: as the greatest `seq`, Postgres walked
+    // the member's reports of 0.15's back, or the vault's entries, 1,088 pages behind 20,000 of them (T245).
+    legacy: sql`(SELECT CAST(${log.seq} AS text) FROM ${log} WHERE ${of} AND ${weighed} IS NULL ORDER BY ${about.order} LIMIT 1)`,
+    named: sql`(CASE WHEN EXISTS (SELECT 1 FROM ${log} WHERE ${of} AND ${weighed} = ${newestNamed(db, object)}) THEN 1 ELSE 0 END)`,
+  };
+}
+
+/**
  * A member's tamper reports of one kind, 0.15's naming one change or
  * 0.14's naming none, newest first: steps of `audit_log_tamper_idx`,
  * `(member, change, seq)`, however many of the other kind, or of other
  * changes, came since. On Postgres through `= ANY` of the member, ordered
- * by the member, the change, then `seq` (`keyedBy`): ordered by `seq`
+ * by the member, the change, then `seq` (`keyedBy`); `principal` a value, or a column of the statement's: ordered by `seq`
  * alone, Postgres walked `audit_log_vault_idx` back, 1,397 pages behind
  * 40,000 reports naming another change (T245, R48).
  */
-function reportsAbout(db: Queryable, principal: string): { where: SQL; order: SQL } {
+function reportsAbout(db: Queryable, principal: SQL): { where: SQL; order: SQL } {
   const { auditLog } = tablesOf(db);
   if (engineOf(db) !== 'postgres') return { where: sql`${auditLog.subjectPrincipal} = ${principal}`, order: sql`${auditLog.seq} DESC` };
   return {
-    where: sql`${auditLog.subjectPrincipal} = ANY(${sql.param([principal])}::text[])`,
+    where: sql`${auditLog.subjectPrincipal} = ANY(ARRAY[CAST(${principal} AS text)])`,
     order: sql`${auditLog.subjectPrincipal} DESC, ${weighedBy(db)} DESC, ${auditLog.seq} DESC`,
   };
 }

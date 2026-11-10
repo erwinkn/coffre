@@ -128,6 +128,7 @@ pnpm check:pins        # every dependency, action, image, download and install p
 pnpm check:workflows   # zizmor over every workflow and action, each pinned to its commit
 pnpm check:contrast    # every colour pair in the UI meets WCAG AA
 pnpm check:docs        # every path and script the docs name exists
+pnpm sweep:history     # every statement whose cost grows with history, at two sizes (docs/history-sweep.md; a Postgres of your own)
 ```
 
 `scripts/restore-drill.sh` restores a backup end to end on this machine

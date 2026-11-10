@@ -1129,8 +1129,9 @@ LateBarrier ==
 \* index from the previous barrier's floor) and signs their numbers.
 \* With Chunks, only a prefix of it, up to k (T169): the next barrier closes the rest, read from the
 \* floor this one signs (ChunkFloor), the lowest `at` of the uses left above it if below the
-\* barrier's; or, without, the barrier's.
-Above(k) == {d.at : d \in {e \in UsesIn(log) : k < e.seq /\ e.seq <= cp.upto /\ e.at >= cp.readFloor}}
+\* barrier's; or, without, the barrier's. Only those at or below the barrier's floor are read for it
+\* (T248): one above it could not lower what the part signs, the lesser of the two.
+Above(k) == {d.at : d \in {e \in UsesIn(log) : k < e.seq /\ e.seq <= cp.upto /\ e.at >= cp.readFloor /\ e.at <= cp.floor}}
 ChunkFloorOf(k) ==
     IF k = cp.upto \/ ~ChunkFloor THEN cp.floor
     ELSE Max(cp.readFloor, IF Above(k) = {} THEN cp.floor ELSE Min(cp.floor, CHOOSE a \in Above(k) : \A b \in Above(k) : a <= b))

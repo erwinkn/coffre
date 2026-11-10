@@ -5,7 +5,7 @@
 // use paths (plans PR 4 and 5), which write the entries, and a database
 // writer where a case says so.
 import assert from 'node:assert/strict';
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 
 import { leafHash, macData, pairSigners, pairVerifiers, parseCheckpoint, splitNote, verifyInclusion, verifyLog, type PairNotes, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
@@ -14,9 +14,9 @@ import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
 import { Checkpointer } from '../src/checkpointer.ts';
-import { authentic, entryMac, logMacKey, type LogMacKey, type UseRow } from '../src/log-entry.ts';
+import { authentic, entryMac, KEY_OBJECT, logMacKey, rotationPayload, type LogMacKey, type UseRow } from '../src/log-entry.ts';
 import { logWriter } from './log-entries.ts';
-import { logStore, postgresWindow, tileKeys } from '../src/log-store.ts';
+import { logStore, postgresWindow, ROTATIONS_HELD, tileKeys } from '../src/log-store.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 
@@ -319,7 +319,7 @@ test('T245: the window by number reads its first entries in one step of the inde
       FROM generate_series(1, 400000) g`);
   // The rows earlier tests deleted gone from the indexes too, as a vacuum leaves a live log.
   await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) log_changes, log_uses`);
-  const window = postgresWindow(-1n, 2n ** 62n, sql`0`, undefined, 10_001, true);
+  const window = postgresWindow(-1n, 2n ** 62n, sql`0`, undefined, 10_001);
   type Node = { 'Shared Hit Blocks': number; 'Shared Read Blocks': number; 'Index Name'?: string; Plans?: Node[] };
   const indexesOf = (node: Node): string[] => [...(node['Index Name'] === undefined ? [] : [node['Index Name']]), ...(node.Plans ?? []).flatMap(indexesOf)];
   const measured = async (unindexed: boolean) => {
@@ -361,15 +361,15 @@ test("T245: a pair's reads listed by number read the pair's, not every read in t
 // under EXPLAIN as the vault's login: the part 2,000 uses in, then the part 20,000 in, ten times the uses sealed behind
 // the cursor. Uses stamped one after another (the cursor's floor follows them), and uses that share one `at`, a burst
 // of a millisecond or a clock that stood still: there the floor stays put, and `lowestAbove`, the lowest `at` of the
-// uses left above the part, walks the `at` index through every use the backlog's parts sealed before it (7,069 pages
-// past 390,000). A floor read from the skew bound would cost one step but sign a floor other than the lowest `at`
-// above (HotPathOne.tla's ChunkFloor) and miss a use the clock stamped low, which the test after the next seals: T248,
-// the model first (R45).
-for (const [what, stamp, todo] of [
-  ['uses stamped one after another', (t0: number) => sql`${t0}::bigint + g`, false],
-  ['uses sharing one `at`', (t0: number) => sql`${t0}::bigint`, 'T248: `lowestAbove` walks the uses sealed at the shared `at` (HotPathOne.tla first, R45)'],
+// uses left above the part, walked the `at` index through every use the backlog's parts sealed before it (7,069 pages
+// past 390,000). It walks `log_uses_at_number_idx` now, from one `at` to the next, past the run of uses sealed at each
+// in a step, and reads only up to the barrier's floor, which caps the floor it signs anyway (T248; HotPathOne.tla's
+// Above): the same floor, the lowest `at` above.
+for (const [what, stamp] of [
+  ['uses stamped one after another', (t0: number) => sql`${t0}::bigint + g`],
+  ['uses sharing one `at`', (t0: number) => sql`${t0}::bigint`],
 ] as const) {
-  test(`T245, review r8: close() reads as many pages 20,000 uses into a backlog as 2,000 in, ${what}`, { ...(ENGINE === 'postgres' ? {} : { skip: 'Postgres only: its plans' }), todo, timeout: 300_000 }, async () => {
+  test(`T245, review r8: close() reads as many pages 20,000 uses into a backlog as 2,000 in, ${what}`, { ...(ENGINE === 'postgres' ? {} : { skip: 'Postgres only: its plans' }), timeout: 300_000 }, async () => {
     const PART = 1_000;
     // Stamped before the barrier's floor, as a stall leaves them: each part then signs the lowest `at` left above it.
     const t0 = Date.now() - 60_000;
@@ -420,6 +420,87 @@ for (const [what, stamp, todo] of [
     }
   });
 }
+
+// T248 (R48): every keyring reads each rotation of the log's key (`keyringRows`), and every use the fence row's retired
+// tags. A log takes `ROTATIONS_HELD` of them, the most that keep that row inline, and no more: then the keyring reads as
+// many pages behind 20,000 changes of other objects as behind 2,000.
+test('T248: the log takes no rotation past `ROTATIONS_HELD`, and a keyring at the cap reads as many pages however many other changes', async () => {
+  const store = logStore(db.vault, { tileRange: RANGE });
+  const tag = (i: number) => Buffer.from(i.toString(16).padStart(8, '0'), 'hex');
+  const make = (number: bigint) => {
+    const row = { at: Date.now(), requestId: randomUUID(), object: KEY_OBJECT, actor: 'system:vault', payload: rotationPayload('coffre.log/a', 'coffre.log/b', number), seal: null };
+    return { ...row, mac: entryMac(macKey, { tree: 'changes', row }) };
+  };
+  // The fence as a log rotated one short of the cap leaves it, written by the owner.
+  const retired = Array.from({ length: ROTATIONS_HELD - 1 }, (_, i) => tag(i + 1));
+  await run(db.owner, ENGINE === 'postgres'
+    ? sql`UPDATE checkpoint_fence SET retired = ${sql.param(retired)}::bytea[] WHERE only_row`
+    : sql`UPDATE checkpoint_fence SET retired = ${JSON.stringify(retired.map((one) => one.toString('hex')))} WHERE only_row`);
+  assert.notEqual(await store.rotate(make, tag(0xfffffff0)), null, `the ${ROTATIONS_HELD}th`);
+  await assert.rejects(store.rotate(make, tag(0xfffffff1)), (e: Error) => new RegExp(`rotated its key ${ROTATIONS_HELD} times`).test(`${e.message} ${(e.cause as Error | undefined)?.message}`));
+  if (ENGINE !== 'postgres') return;
+  // The keyring's read at the cap, its rotations among a growing history of other objects' changes.
+  await run(db.owner, sql`ALTER TABLE log_changes DISABLE TRIGGER USER`);
+  await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+    SELECT nextval('log_number'), 0, 'rotation-' || g, ${KEY_OBJECT}::uuid, 'system:vault', '{}', NULL, '\\x00000000000000000000000000000000'::bytea FROM generate_series(2, ${ROTATIONS_HELD}) g`);
+  const pages: number[] = [];
+  for (const others of [2_000, 18_000]) {
+    await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+      SELECT nextval('log_number'), 0, 'other-' || g || '-' || ${others}, gen_random_uuid(), 'x', '{}', NULL, '\\x00000000000000000000000000000000'::bytea FROM generate_series(1, ${others}) g`);
+    await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) log_changes`);
+    const client = postgresClient(VAULT_URL, { max: 1 });
+    const sent: { text: string; values: unknown[] }[] = [];
+    const unsafe = client.unsafe;
+    (client as { unsafe: unknown }).unsafe = (text: string, values: unknown[] = [], ...rest: unknown[]) => {
+      if (/^\s*select json_build_object\(\s*'rotations'/i.test(text)) sent.push({ text, values });
+      return (unsafe as (...args: unknown[]) => unknown)(text, values, ...rest);
+    };
+    try {
+      const { rotations } = await logStore(createDatabase(client), { tileRange: RANGE }).keyringRows();
+      assert.equal(rotations.length, ROTATIONS_HELD);
+      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sent[0]!.text}`, sent[0]!.values as never[]) as unknown as [{ 'QUERY PLAN': [{ Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }] }];
+      const top = plan['QUERY PLAN'][0].Plan;
+      pages.push(top['Shared Hit Blocks'] + top['Shared Read Blocks']);
+    } finally {
+      await client.end();
+    }
+  }
+  await run(db.owner, sql`ALTER TABLE log_changes ENABLE TRIGGER USER`);
+  assert.ok(!(pages[1]! >= 2 * pages[0]! && pages[1]! - pages[0]! >= 8), `${pages[0]} pages behind 2,000 other changes, ${pages[1]} behind 20,000`);
+});
+
+// T248 (R48): a bounded read of the window (`entries`, the reads' projection's and a proof's), past uses sharing one
+// `at`, reads its first entries by number, as `close()` does (T245): read through an index by `at`, which a ceiling
+// that Postgres takes for a narrow range invites, it read every use sharing the `at` and sorted them (365 pages for the
+// first 1,001 of 20,000).
+test('T248: a bounded read of the window reads as many pages 20,000 uses sharing one `at` in as 2,000', { ...(ENGINE === 'postgres' ? {} : { skip: 'Postgres only: its plans' }), timeout: 300_000 }, async () => {
+  const t0 = Date.now() - 60_000;
+  await run(db.owner, sql`SELECT make_day(${new Date(t0).toISOString().slice(0, 10)}::date)`);
+  const pages: number[] = [];
+  for (const count of [2_000, 18_000]) {
+    await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
+      SELECT nextval('log_number'), ${t0}::bigint, g + ${count}, gen_random_uuid(), gen_random_uuid(), 1, '\\x00000000000000000000000000000000'::bytea
+        FROM generate_series(1, ${count}) g`);
+    await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) log_uses`);
+    const client = postgresClient(VAULT_URL, { max: 1 });
+    const sent: { text: string; values: unknown[] }[] = [];
+    const unsafe = client.unsafe;
+    (client as { unsafe: unknown }).unsafe = (text: string, values: unknown[] = [], ...rest: unknown[]) => {
+      sent.push({ text, values });
+      return (unsafe as (...args: unknown[]) => unknown)(text, values, ...rest);
+    };
+    try {
+      const read = await logStore(createDatabase(client), { tileRange: RANGE }).entries(0n, 2n ** 62n, { floor: t0, limit: 1_001 });
+      assert.equal(read.length, 1_001);
+      const window = sent.find(({ text }) => /FROM log_uses u/.test(text))!;
+      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${window.text}`, window.values as never[]) as unknown as [{ 'QUERY PLAN': [{ Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }] }];
+      pages.push(plan['QUERY PLAN'][0].Plan['Shared Hit Blocks'] + plan['QUERY PLAN'][0].Plan['Shared Read Blocks']);
+    } finally {
+      await client.end();
+    }
+  }
+  assert.ok(!(pages[1]! >= 2 * pages[0]! && pages[1]! - pages[0]! >= 8), `${pages[0]} pages 2,000 uses in, ${pages[1]} at 20,000`);
+});
 
 test('T169: a backlog far past the window drains a part a tick, each part a pair whose floor is the lowest `at` left above it, and the whole log verifies, every entry provable', async () => {
   const { cp, store, memory, alerts } = await open(variableMemory(), 200);

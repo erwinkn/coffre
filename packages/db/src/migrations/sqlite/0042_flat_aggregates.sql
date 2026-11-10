@@ -1,0 +1,6 @@
+CREATE INDEX `audit_log_shown_idx` ON `audit_log` (`seq`) WHERE action NOT IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal');--> statement-breakpoint
+CREATE INDEX `audit_log_detail_idx` ON `audit_log` (`seq`) WHERE action IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal');--> statement-breakpoint
+CREATE INDEX `audit_log_seen_idx` ON `audit_log` (`actor`,`seq`) WHERE decision = 'allow' AND action IN ('secret.read', 'secret.write');--> statement-breakpoint
+CREATE INDEX `audit_log_restore_idx` ON `audit_log` (`secret_id`,`seq`) WHERE decision = 'allow' AND action = 'secret.restore';--> statement-breakpoint
+CREATE INDEX `log_reads_seen_idx` ON `log_reads` (`principal`,coalesce("source", "secret"),`version`,`at`) WHERE version IS NOT NULL;--> statement-breakpoint
+CREATE INDEX `log_uses_at_number_idx` ON `log_uses` (`at`,`number`);

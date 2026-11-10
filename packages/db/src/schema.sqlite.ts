@@ -450,6 +450,10 @@ export const auditLog = sqliteTable(
     index(indexOf('keyCheck')).on(table.author, table.action, table.decision, table.seq).where(entriesOf('keyCheck')),
     index(indexOf('tamper')).on(table.author, table.subjectPrincipal, table.action, table.seq).where(entriesOf('tamper')),
     index(indexOf('moves')).on(table.author, table.seq).where(entriesOf('moves')),
+    index(indexOf('shown')).on(table.seq).where(entriesOf('shown')),
+    index(indexOf('detail')).on(table.seq).where(entriesOf('detail')),
+    index(indexOf('seen')).on(table.actor, table.seq).where(entriesOf('seen')),
+    index(indexOf('restore')).on(table.secretId, table.seq).where(entriesOf('restore')),
     // The allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
     // however many refusals the log holds about them (T239, R48). Keyed as the subject index, `author` first, unlike
     // Postgres's: SQLite weighs an index by the equalities it matches, and picks the subject index over one that matches
@@ -1152,6 +1156,7 @@ export const logUses = sqliteTable(
     // The checkpointer's window by number (T245, R48): its first entries in one step, however far behind it is, where the
     // index by `at` read every use from the floor and sorted them.
     index('log_uses_by_number_idx').on(table.number),
+    index('log_uses_at_number_idx').on(table.at, table.number),
   ],
 );
 
@@ -1181,6 +1186,7 @@ export const logReads = sqliteTable(
     // times, a stall's worth, for the few thousand a pair holds.
     index('log_reads_by_number_idx').on(table.number),
     index('log_reads_principal_idx').on(table.principal, table.at, table.number),
+    index('log_reads_seen_idx').on(table.principal, sql`coalesce(${table.source}, ${table.secret})`, table.version, table.at).where(sql.raw("version IS NOT NULL")),
     // A place's reads (T175): each column naming a place a read is at, newest first. Its key's, its environment's and its
     // project's; the fork it was read in; through a reference, the source's three. Those that only some reads name are
     // partial. A page of a place reads each of its few streams no further than a page (`log_reads_at`).

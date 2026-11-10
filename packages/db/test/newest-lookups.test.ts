@@ -12,7 +12,9 @@
 // Two shapes more walk a log as far (Sol r8 of #556): an `EXISTS` gate over a log, which the vault's start asked of
 // every rotation (4,741 pages past 40,000), and the least or greatest of a column of 0.15's uses, which the
 // checkpointer's `lowestAbove` asks past every use sealed at the `at` a backlog shares (7,069 pages past 390,000). Each
-// is listed too, with its test or why none needs one.
+// is listed too, with its test or why none needs one. And every aggregate over a log (T248): a count, a greatest or
+// least, a `json_agg` or a `GROUP BY` reads every entry it aggregates, as every member's findings did (1,177 pages at
+// 40,000 reports) and an audit page's count of what it hid (355 at 40,000 heartbeats), unless something bounds them.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -23,12 +25,13 @@ const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 const VAULT = 'packages/vault/test/newest-lookups.test.ts';
 const SERVER = 'packages/server/test/newest-lookups.test.ts';
+const AGGREGATES_TEST = 'packages/server/test/history-aggregates.test.ts';
 
 /**
  * Each place in the sources that reads so (`file#function`, then `#2`… for a second in the same function): the test
  * that holds it, and the name that test asks it by; or why none needs to.
  */
-const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | { none: string }> = {
+const SITES: Record<string, { by: typeof VAULT | typeof SERVER | typeof AGGREGATES_TEST; as: string } | { none: string }> = {
   'packages/db/src/grants.ts#accessEntries': { by: VAULT, as: 'newestAccess' },
   'packages/db/src/grants.ts#tamperReportsAbout': { by: VAULT, as: 'reportStands' },
   'packages/db/src/log.ts#vaultEntries': { by: VAULT, as: 'newestVaultEntries' },
@@ -62,13 +65,14 @@ const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   // Whether a member no row names has an access entry: as an `EXISTS`, a scan past every refusal about them (review r8).
   'packages/server/src/db/queries.ts#missingMembers': { by: SERVER, as: 'missingMembers' },
   // A member's tamper reports of either kind, by `audit_log_tamper_idx` (`reportsAbout`): the newest of 0.14's beside a
-  // statement's other reads.
-  'packages/db/src/grants.ts#findingsOf': { by: VAULT, as: 'findingsOf' },
-  // Over all of a kind's history at once, which T248 bounds (Sol r6 of #556, items 5 and 6): every member's findings,
-  // and every member's newest access entry, a pass over the vault (its start on 0.14's log alone, a cutover).
-  'packages/db/src/grants.ts#tamperedMembers': { none: "every member's findings, grouped: T248" },
-  'packages/db/src/grants.ts#tamperedMembers#2': { none: "the newest access entry of each member with 0.14's findings, grouped: T248" },
-  'packages/vault/src/store.ts#newestAccessEntries': { none: "every member's newest access entry, grouped, a pass over the vault: T248" },
+  // statement's other reads (`findingsOf`), or each reported member's (`tamperedMembers`, T248), with their newest
+  // access entry.
+  'packages/db/src/grants.ts#findingsAt': { by: VAULT, as: 'findingsOf' },
+  'packages/db/src/grants.ts#newestAccessOf': { by: AGGREGATES_TEST, as: 'tamperedMembers' },
+  // Every member's newest access entry: the sweep of 0.14's log alone, and its one cutover to 0.15's (`AGGREGATES`).
+  'packages/vault/src/store.ts#newestAccessEntries': { none: "every member's newest access entry, grouped: the sweep of 0.14's log alone, and its one cutover to 0.15's" },
+  // A page's count of what it hides: its stretch's newest `HIDDEN_COUNTED` (T248).
+  'packages/server/src/db/queries.ts#auditActionCounts': { by: AGGREGATES_TEST, as: 'auditActionCounts' },
   'packages/server/src/db/audit.ts#appVerifier': { none: "the first of the app's moves from each previous key, grouped: the moves alone, a few for each change of key" },
   'packages/db/src/log.ts#underHead': { none: 'the newest entry of all: the primary key\'s first step, with nothing to filter' },
   'packages/db/src/log.ts#missingEntry': { none: 'the first entry after a gap, by the primary key, with nothing to filter' },
@@ -135,6 +139,7 @@ const SQLITE_CHANGES = new Set([
 ]);
 
 const LOG_STORE = 'packages/vault/test/log-store.test.ts';
+const REQUEST_COST = 'packages/server/test/request-cost.alone.ts';
 
 /**
  * Each `EXISTS` gate over a log (0.14's, 0.15's changes or uses), by the function it is in: the test that holds it to
@@ -142,7 +147,7 @@ const LOG_STORE = 'packages/vault/test/log-store.test.ts';
  */
 const GATES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> = {
   // 0.15's named findings, by `audit_log_tamper_idx` and the change it names.
-  'packages/db/src/grants.ts#findingsOf': { by: VAULT, as: 'findingsOf' },
+  'packages/db/src/grants.ts#findingsAt': { by: VAULT, as: 'findingsOf' },
   // Whether an append's key was moved from, by `audit_log_subject_idx` keyed by the key.
   'packages/db/src/log.ts#underHead': { by: VAULT, as: 'lockLogHeadRead' },
   'packages/server/src/db/queries.ts#hasTombstone': { by: SERVER, as: 'hasTombstone' },
@@ -153,10 +158,9 @@ const GATES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> = 
  * the test that holds it, or why none needs one.
  */
 const USES: Record<string, { by: typeof LOG_STORE; as: string } | { none: string }> = {
-  // The lowest `at` of the uses a part of a capped window left above it (T169). Uses stamped one after another move the
-  // floor it reads from with the cursor, which the test holds; past uses sharing one `at` it walks every use sealed at
-  // it: T248, its floor from the skew bound changes what HotPathOne.tla's ChunkFloor signs, the model first (R45). The
-  // test's case for it is a todo until then.
+  // The lowest `at` of the uses a part of a capped window left above it (T169): a walk of `log_uses_at_number_idx`, past
+  // each run of uses sealed at one `at` in a step (T248), which the test holds as a backlog drains, its uses stamped one
+  // after another or sharing one `at`.
   'packages/vault/src/log-store.ts#postgresStore': { by: LOG_STORE, as: 'lowestAbove' },
   // SQLite's own: its numbering (both trees one sequence, each table's greatest number, a step of its rowid) and its
   // checkpointer's reads. Kept for tests and local development, no deployment runs on it (AGENTS.md).
@@ -165,7 +169,43 @@ const USES: Record<string, { by: typeof LOG_STORE; as: string } | { none: string
   'packages/vault/src/store.ts#nextNumber': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
   'packages/vault/src/credentials.sqlite.ts#nextNumber': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
   'packages/vault/src/use.sqlite.ts#NEXT': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
-  ...Object.fromEntries(['', '#2', '#3', '#4', '#5'].map((nth) => [`packages/vault/src/log-store.ts#sqliteStore${nth}`, { none: "SQLite's checkpointer: its numbering, and the lowest `at` above a part as Postgres's, no deployment's engine" }])),
+  ...Object.fromEntries(['', '#2', '#3', '#4'].map((nth) => [`packages/vault/src/log-store.ts#sqliteStore${nth}`, { none: "SQLite's checkpointer: its numbering, no deployment's engine" }])),
+};
+
+const SQLITE_NUMBERING = "SQLite's numbering: each tree's greatest number, no deployment's engine";
+
+/**
+ * Each aggregate over a log (a count, a greatest or least, a sum, a `json_agg` or `json_group_array`, an `array_agg`,
+ * or a `GROUP BY`), in SQL's words or Drizzle's, by the function it is in: the test that holds it to a flat cost, or
+ * why none needs one (T248, R48). The least or greatest of a column of 0.15's uses are `USES`'s.
+ */
+const AGGREGATES: Record<string, { by: typeof VAULT | typeof AGGREGATES_TEST | typeof REQUEST_COST | typeof LOG_STORE; as: string } | { none: string }> = {
+  // A member's reads by key and version, grouped over the newest of each a day's skip found (T248).
+  'packages/server/src/db/reads.ts#readsBySql': { by: AGGREGATES_TEST, as: 'readsBy' },
+  'packages/server/src/db/reads.ts#readsBySql#2': { by: AGGREGATES_TEST, as: 'readsBy' },
+  // 0.15's records a page hides, counted over a stretch `sealedReach` bounds to `HIDDEN_COUNTED` of them.
+  'packages/server/src/db/queries.ts#sealedHidden': { by: REQUEST_COST, as: 'sealedHidden' },
+  'packages/server/src/db/queries.ts#sealedHidden#2': { by: REQUEST_COST, as: 'sealedHidden' },
+  // The rotations of the log's key, every one, which the keyring weighs: no more than `ROTATIONS_HELD` (T248).
+  'packages/vault/src/log-store.ts#postgresStore#2': { by: LOG_STORE, as: 'ROTATIONS_HELD' },
+  'packages/vault/src/log-store.ts#postgresStore#3': { by: LOG_STORE, as: 'ROTATIONS_HELD' },
+  // The lowest `at` above a part, of the steps of its walk (T248).
+  'packages/vault/src/log-store.ts#postgresStore': { by: LOG_STORE, as: 'lowestAbove' },
+  'packages/vault/src/log-store.ts#postgresStore#4': { none: "a use's place among its window's changes: those between the pair before it and it, a window's at most (`locate`)" },
+  // The newest of each kind a snapshot reads, each a step of its index (the vault's test's `snapshot`).
+  'packages/vault/src/snapshot.postgres.ts#snapshotQuery': { by: VAULT, as: 'snapshot' },
+  'packages/vault/src/snapshot.sqlite.ts#snapshotQuery': { by: VAULT, as: 'snapshot' },
+  'packages/db/src/log.ts#missingEntry': { none: 'a count of a stretch of the primary key, `COUNTED_AT_ONCE` entries at most (T245)' },
+  'packages/server/src/db/audit.ts#appVerifier': { none: "the first of the app's moves from each previous key, grouped: the moves alone, a few for each change of key" },
+  'packages/server/src/db/audit.ts#appVerifier#2': { none: "the first of the app's moves from each previous key, grouped: the moves alone, a few for each change of key" },
+  'packages/vault/src/store.ts#newestAccessEntries': { none: "every member's newest access entry, grouped: the sweep of 0.14's log alone, and its one cutover to 0.15's, whose sweep reads each member's by `memberLogs`" },
+  'packages/vault/src/store.ts#newestAccessEntries#2': { none: "every member's newest access entry, grouped: the sweep of 0.14's log alone, and its one cutover to 0.15's, whose sweep reads each member's by `memberLogs`" },
+  ...Object.fromEntries([
+    'packages/db/src/log.ts#changeOnSqlite', 'packages/vault/src/credentials.sqlite.ts#nextNumber', 'packages/vault/src/store.ts#changeOnSqlite', 'packages/vault/src/store.ts#nextNumber',
+    'packages/vault/src/store.ts#memberLogsSqlite', 'packages/vault/src/store.ts#newestChangesQuery', 'packages/vault/src/store.ts#newestSealsQuery',
+    'packages/vault/src/use.sqlite.ts#CHUNK', 'packages/vault/src/use.sqlite.ts#NEXT',
+    ...['', '#2', '#3', '#4'].map((nth) => `packages/vault/src/log-store.ts#sqliteStore${nth}`),
+  ].map((site) => [site, { none: SQLITE_NUMBERING }])),
 };
 
 /** The sources of the packages that run (core, db, vault, server), each with its text. */
@@ -277,6 +317,8 @@ const NOT_LOGS: Record<string, string> = {
   '${m}': "the members, `memberAccess`'s name for `principals` (queries.ts)",
   sealing: "the checkpoint a use's number falls under, one row of `log_checkpoints` (log-store.ts)",
   spent: 'the ID token spent by a sign-in, its one row (queries.ts)',
+  grants: 'the grants', unnest: 'a list of values the statement gives, each a probe of its own',
+  log_read_place_days: 'the days a place was read on, a row each',
 };
 
 /** Whether a statement's `from` reads no log, by what `NOT_LOGS` says it is; a log, or a name it cannot follow, is to list. */
@@ -308,7 +350,7 @@ test('every read of the newest entries of a kind in the sources is listed, with 
   const found = sites();
   assert.deepEqual(found.filter((site) => !(site in SITES)), [], 'a read the list does not name: list it with its test, which seeds a run of its kind then a long tail of others');
   assert.deepEqual(Object.keys(SITES).filter((site) => !found.includes(site)), [], 'a site listed that no longer reads so');
-  const tests = new Map([VAULT, SERVER].map((file) => [file, readFileSync(`${ROOT}${file}`, 'utf8')]));
+  const tests = new Map([VAULT, SERVER, AGGREGATES_TEST].map((file) => [file, readFileSync(`${ROOT}${file}`, 'utf8')]));
   for (const [site, held] of Object.entries(SITES)) {
     if ('as' in held) assert.match(tests.get(held.by)!, new RegExp(`\\b${held.as}\\b`), `${site}: ${held.by} asks ${held.as}`);
   }
@@ -340,6 +382,56 @@ test("every least or greatest of 0.15's uses in the sources is listed, with the 
   }
 });
 
+/**
+ * Each aggregate over a log in `files`: in SQL's words, one whose statement's next table is a log or one the scan
+ * cannot follow (the least or greatest of a column of 0.15's uses aside, `useSites`'); Drizzle's, a `select` of
+ * `count()`, `max(…)`, `min(…)` or `sum(…)` from a log's table; and a `GROUP BY` or `.groupBy(` of a statement that
+ * names a log. By the function each is in, `#2`… for a second.
+ */
+function aggregateSites(files: Source[] = sources()): string[] {
+  const found: string[] = [];
+  const words = new RegExp(String.raw`\b(count|max|min|sum|json_agg|jsonb_agg|json_group_array|array_agg|string_agg|bool_and|bool_or)\((?:(?!\bFROM\b|` + '`' + String.raw`|\(SELECT\b).){0,240}?\bFROM\s+(\$\{[\w.]+\}|\w+)`, 'gs');
+  const drizzle = /\.select\(\{((?:[^{}]|\{[^{}]*\})*)\}\)\s*\.from\((\w+)\)/gs;
+  const grouped = /\bGROUP BY\b|\.groupBy\(/g;
+  const logVar = /^(?:auditLog|logChanges|logUses|logReads)$/;
+  for (const { file, text } of files) {
+    const at = new Set<number>();
+    for (const match of text.matchAll(words)) {
+      const from = match[2]!;
+      // The least or greatest of a column of 0.15's uses: `USES`'s.
+      if (/^(?:max|min)$/.test(match[1]!) && LOG_USES.test(from)) continue;
+      if (LOG.test(from) || /^(?:log_reads|\$\{logReads\})$/.test(from) || unlisted(from)) at.add(match.index!);
+    }
+    for (const match of text.matchAll(drizzle)) if (/\b(?:count|max|min|sum)\(/.test(match[1]!) && logVar.test(match[2]!)) at.add(match.index!);
+    for (const match of text.matchAll(grouped)) {
+      // SQL's within its statement, from the backtick that opens it; Drizzle's of the table its chain selects from.
+      const before = text.slice(Math.max(0, match.index! - 1500), match.index);
+      const names = match[0] === 'GROUP BY'
+        ? /\b(?:audit_log|log_changes|log_uses|log_reads)\b|\$\{(?:auditLog|logChanges|logUses|logReads)\}/.test(before.slice(before.lastIndexOf('`') + 1))
+        : logVar.test([...before.matchAll(/\.from\((\w+)\)/g)].pop()?.[1] ?? '');
+      if (names) at.add(match.index!);
+    }
+    const seen = new Map<string, number>();
+    for (const index of [...at].sort((a, b) => a - b)) {
+      if (/^\s*(?:\/\/|\*)/.test(text.slice(text.lastIndexOf('\n', index) + 1, index))) continue;
+      const site = `${file}#${within(text, index)}`;
+      const nth = (seen.get(site) ?? 0) + 1;
+      seen.set(site, nth);
+      found.push(nth === 1 ? site : `${site}#${nth}`);
+    }
+  }
+  return found;
+}
+
+test('every aggregate over a log in the sources is listed, with the test that holds it to a flat cost, or why none needs one (T248, R48)', () => {
+  const found = aggregateSites();
+  assert.deepEqual(found.filter((site) => !(site in AGGREGATES)), [], 'an aggregate over a log the list does not name: list it with its test, which grows the history it reads ten times over (`holdsFlat`)');
+  assert.deepEqual(Object.keys(AGGREGATES).filter((site) => !found.includes(site)), [], 'an aggregate listed that no longer reads so');
+  for (const [site, held] of Object.entries(AGGREGATES)) {
+    if ('as' in held) assert.match(readFileSync(`${ROOT}${held.by}`, 'utf8'), new RegExp(`\\b${held.as}\\b`), `${site}: ${held.by} asks ${held.as}`);
+  }
+});
+
 test('the scans list a gate or an aggregate whose table they cannot follow: a CTE, a log under a name of its own, a query built elsewhere (review r9 of #556)', () => {
   const one = (name: string, body: string): Source[] => [{ file: 'x.ts', text: `export function ${name}(db) {\n${body}\n}\n` }];
   // A gate over a CTE of the log's entries, over the log under a name of its own, and Drizzle's of a query built elsewhere.
@@ -349,7 +441,12 @@ test('the scans list a gate or an aggregate whose table they cannot follow: a CT
   // The uses' least under a name of their own, and their greatest beside another column.
   assert.deepEqual(useSites(one('named', 'const { logUses: uses } = tablesOf(db);\nreturn sql`SELECT min(${uses.at}) FROM ${uses} WHERE ${uses.number} > 1`;')), ['x.ts#named']);
   assert.deepEqual(useSites(one('beside', 'return sql`SELECT max(u.at), count(*) AS n FROM log_uses u`;')), ['x.ts#beside']);
+  // An aggregate over a log in SQL, over one under a name of its own, in Drizzle, and a log's statement grouped (T248).
+  assert.deepEqual(aggregateSites(one('words', "return sql`SELECT subject_principal, max(seq) FROM audit_log WHERE action = 'x' GROUP BY 1`;")), ['x.ts#words', 'x.ts#words#2']);
+  assert.deepEqual(aggregateSites(one('named', 'const { logReads: history } = tablesOf(db);\nreturn sql`SELECT json_agg(r.at) FROM ${history} r`;')), ['x.ts#named']);
+  assert.deepEqual(aggregateSites(one('drizzle', 'return db.select({ n: count() }).from(auditLog).where(x);')), ['x.ts#drizzle']);
+  assert.deepEqual(aggregateSites(one('grouped', 'return db.select({ a: auditLog.action }).from(auditLog).groupBy(auditLog.action);')), ['x.ts#grouped']);
   // What reads no log, by what `NOT_LOGS` says it is, is no site.
   const none = one('none', 'return sql`SELECT EXISTS (SELECT 1 FROM principals p) AS any, (SELECT max(v.created_at) FROM secret_versions v) AS at`;');
-  assert.deepEqual([...gateSites(none), ...useSites(none)], []);
+  assert.deepEqual([...gateSites(none), ...useSites(none), ...aggregateSites(none)], []);
 });
