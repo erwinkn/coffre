@@ -2421,8 +2421,9 @@ credentialProxy({
   gains `passthrough: ["clerk-fapi"]` beside `credentials`, for the
   sidecar (section 10.4). A client of 0.16 ignores the field (the CLI
   casts the plan, `packages/cli/src/main.ts:1450`). The sidecar's
-  refresh reads that list alone, `GET /use/<place>?passthrough`, which
-  opens no value and writes no log entry (section 10.4).
+  refresh reads that list alone, `GET /use?passthrough=<place>`, which
+  opens no value and writes no log entry, on 0.17 and on the releases
+  before it (section 10.4).
 
 A passthrough route still has its upstream, its allow list, its
 `limit`, its redaction and its log entries, exactly as any other, and
@@ -2441,7 +2442,7 @@ server. Sections 10.2 to 10.4 give the rules these rows rely on:
 |---|---|---|
 | A 0.16 vault, a 0.17 app | the save is refused `503 deploying` before the vault reads it: app and vault answer only the same release (`versioned`, `packages/core/src/vault-entry.ts:138`). A 0.16 vault on its own would also refuse the field, `no field "passthrough"` (`only()`, `proxy.ts:143`) | yes: nothing saved |
 | A 0.16 app isolate, a 0.17 item | it can reach the item only through a vault of its own release, so not once the vault runs 0.17. If it had read it, it would ignore the field and serve an ordinary route: `Set-Cookie` dropped, off-upstream redirects 502 | yes, closed: Clerk fails for the minutes of the deploy |
-| App and vault rolled back to 0.16, a marked item stored | the vault hands a stored definition back as sealed, unvalidated (`canonicalDefinition` runs on a save, `vault.ts:4852`, never on a read), and the 0.16 app ignores the field: an ordinary route, as the row above. A 0.16 Proxy tab that saves the item again writes it without the field, so the mark is gone, and after the roll forward the route serves plain until an Owner marks it again | yes, closed both times: Clerk fails until the release, and after it until the mark is saved again. The roll-forward's notes tell Owners to check their passthrough routes |
+| App and vault rolled back to 0.16, a marked item stored | the vault hands a stored definition back as sealed, unvalidated (`canonicalDefinition` runs on a save, `vault.ts:4852`, never on a read), and the 0.16 app ignores the field: an ordinary route, as the row above. A 0.16 Proxy tab cannot save the item again: `normalized()` keeps the field it does not know (`packages/ui/src/lib/proxy.ts:551`), and the vault's check, which the tab runs first (`:419`), refuses it, `clerk-fapi: no field "passthrough"` (`only()`, `packages/core/src/proxy.ts:143`). The stored mark survives the rollback, and the route passes again after the roll forward, unless an Owner deleted or replaced the item meanwhile | yes, closed: Clerk fails until the release; the item is read-only in the old tab, whose refusal names the field |
 | A 0.17 sidecar, a 0.16 server (or a rollback to one) | the plan names no passthrough credential, so the sidecar wraps nothing and signs no `pass` claim. Within R of a rollback, a stale plan still marks one: the sidecar wraps that credential's requests and signs `"pass": true`, a claim 0.16 does not know. 0.16 refuses any claim it does not know, so it answers 401 `invalid_dpop_proof` (`malformed`) before it reads the session or calls the upstream (`CLAIMS` and `parseProof()`, `packages/core/src/identity/dpop.ts:83` and `:124`, called at `packages/server/src/workload-sessions.ts:253`) | yes, closed: that credential's requests fail until the plan is next read, within R; the others are unaffected |
 | A 0.16 sidecar, a 0.17 server | the old sidecar forwards any `coffre-pass-*` the app copied from a browser, signed. Its proof has no `pass` claim, so coffre drops them all (section 10.2, step 5), and answers 400 to a name off the list (step 2), which only a browser that wrote it gets | yes: passthrough is off for that sidecar until it is upgraded |
 | An app calling `unwrap`, a 0.16 server | 0.16 passes an upstream's own `coffre-proxy` header, so the credential's upstream could forge the envelope. That upstream is the one the app treats as passthrough (it calls `unwrap` only on that route), and the envelope gives it nothing a 0.17 server would not: every header the app gets back passes through the app's own checks (section 10.5) | yes, given that rule: `unwrap` is never applied to an answer from another credential |
@@ -2741,14 +2742,27 @@ section 10.1), and unwraps only answers it can tell are coffre's:
   so polling it would open every value each minute to learn one list of
   names, and add up to 1,440 log entries a day per pod and place, which
   section 10.6(a)'s figures do not count. The poll is a read of its own,
-  `GET /use/<place>?passthrough`, answering the marked names alone: the
+  `GET /use?passthrough=<place>`, answering the marked names alone: the
   code's credentials' marks and the UI items' (the `proxyItem` call the
   plan makes), with no `coffre.use`, so no value opened and no entry
   written. It lists every marked credential that serves the place, held or
-  not; wrapping a request coffre then refuses costs nothing. A poll that
-  fails (unreachable, a 503 `forged`) keeps the last list and is retried
-  at the next tick; the list is only ever up to R plus the outage stale,
-  which fails closed as below.
+  not; wrapping a request coffre then refuses costs nothing. Not
+  `GET /use/<place>?passthrough`: a server before 0.17 ignores the query
+  and serves that URL the plan (`credential-proxy.ts:821`), the logged
+  `expose` read the poll exists to avoid. `GET /use` is the root every
+  release answers without a session or a vault call, `{ proxy, credentials }`
+  (`:697`, what `coffre run` asks first; 0.15.0 has it too), and ignores
+  the query. So the poll reads three answers three ways:
+  - a 200 with a `passthrough` list: the marks, which replace the last;
+  - a 200 without one, or a 404 or 405: a server that has no passthrough.
+    The marks are cleared at once, so a rollback stops the wrapping within
+    R, not at the next restart. During a deploy that alternates isolates
+    of both releases, the list can flip from tick to tick, and each state
+    fails closed as the rollback rows of section 10.1 say;
+  - anything else (unreachable, a 401, a 5xx, a 503 `forged` or
+    `deploying`): no answer about the marks. The last list is kept and the
+    poll retried at the next tick, so the list is only ever up to R plus
+    the outage stale, which fails closed as below.
 - Repeated `Cookie` headers from the app (an HTTP/2 client sends one per
   cookie, RFC 9113, section 8.2.3) are joined with `"; "` before
   wrapping, as that RFC says. `Headers.append`, which today's forwarder
@@ -3125,7 +3139,13 @@ fire it. Nothing here needs a new limit.
   `tampered`; a 0.16 vault refuses saving it.
 - The sidecar wraps nothing for a credential its plan does not mark, and
   against a server whose plan has no `passthrough`. Its mark poll is no
-  logged use and opens no value; a poll that fails keeps the last list.
+  logged use and opens no value, against 0.17 and against the last release
+  before it: the poll, run against that release, answers its
+  `{ proxy, credentials }` root, writes no log entry (no `expose`, no
+  `use_credential`) and returns no `values`. Against that release the
+  sidecar, whose list marked a credential, clears it at the next tick and
+  wraps the next request to it no longer; a poll that fails (unreachable,
+  401, 5xx, 503) keeps the last list.
 - A nonce retry on a marked credential through the sidecar: coffre's
   `dpop-nonce` is read before the answer is rebuilt, the retry is wrapped
   and signs `"pass": true` again, and the answer's marker names the
@@ -3196,7 +3216,7 @@ AAD and the chain verifier, none of which changes.
 
 | PR | What |
 |---|---|
-| A | `passthrough` on `Credential` and `ProxyRoute` (canonical only when true; refused beside `sigv4`), the request unwrap in `outbound()` (the list's names only, a session's only under `"pass": true`), the door's 400 for a name off the list, the envelope in `redacted()` (the marker's `jti` on a session's answer), `coffre-pass-*` and an upstream's `coffre-proxy` dropped everywhere else, the plan's `passthrough` list and its value-free read, `?passthrough`, the tests above but the sidecar's, conformance |
+| A | `passthrough` on `Credential` and `ProxyRoute` (canonical only when true; refused beside `sigv4`), the request unwrap in `outbound()` (the list's names only, a session's only under `"pass": true`), the door's 400 for a name off the list, the envelope in `redacted()` (the marker's `jti` on a session's answer), `coffre-pass-*` and an upstream's `coffre-proxy` dropped everywhere else, the plan's `passthrough` list and its value-free read, `GET /use?passthrough=<place>`, the tests above but the sidecar's, conformance |
 | B | `@coffre/client/passthrough`: `wrap`, `unwrap`, and the session fetch's `pass` claim for a request `wrap` made |
 | C | `coffre serve`: drops the app's `coffre-*` always, polls the marks every R, joins repeated `Cookie` with `"; "`, wraps by the marks with `pass`, unwraps by the `jti`, building the answer from the envelope alone |
 | D | The Proxy tab's toggle and its line in the save's review |
