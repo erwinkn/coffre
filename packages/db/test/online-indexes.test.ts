@@ -155,8 +155,11 @@ test("a run that finds every index built takes no lock a use's insert waits for:
     await writer.unsafe('LOCK TABLE log_uses, log_reads IN ROW EXCLUSIVE MODE');
     const started = Date.now();
     assert.deepEqual(await migrateDatabase(url), { unbuilt: [] });
-    const [waited] = await session.unsafe<{ n: number }[]>("SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted");
-    assert.equal(waited!.n, 0);
+    // In this database: pg_locks lists the cluster's, and another test file's waiter is not the run's (two in another
+    // file of 0.14's suite failed it, the run having waited for nothing).
+    const waiting = await session.unsafe<{ lock: string }[]>(`SELECT l.locktype || ' ' || l.mode || coalesce(' on ' || l.relation::regclass::text, '') AS lock
+       FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`);
+    assert.equal(waiting.length, 0, waiting.map(({ lock }) => lock).join(', '));
     assert.ok(Date.now() - started < 5_000, `${Date.now() - started} ms`);
   } finally {
     await writer.unsafe('ROLLBACK').catch(() => {});

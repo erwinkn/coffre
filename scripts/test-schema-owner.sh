@@ -111,15 +111,21 @@ docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres <<'SQL'
 CREATE ROLE migration_member LOGIN INHERIT IN ROLE migration_owner PASSWORD 'local-member-only';
 SQL
 psql_owner -d postgres -c "CREATE DATABASE member"
-# migrate_through <database> <login> <password> [<last tag>]: drizzle's migrator over the journal up to that tag.
+# migrate_through <database> <login> <password> <last tag>: drizzle's migrator over the journal up to that tag, as coffre
+# migrated before T193. Never past `$before_t193`, the newest migration then: every later one only coffre's own migrator
+# has applied (`db:migrate`), and only it can, since it builds 0082's indexes CONCURRENTLY after its transaction commits
+# (`online-indexes.ts`), where drizzle's runs every statement inside it.
+before_t193=0073_passkeys_in_vault
 migrate_through() {
-    local tree="$scratch/migrations-${4:-all}"
+    node -e 'const j = require("./packages/db/src/migrations/postgres/meta/_journal.json"), [last, bound] = process.argv.slice(1), idx = (t) => j.entries.find((e) => e.tag === t)?.idx;
+if (idx(last) === undefined || idx(last) > idx(bound)) { console.error(`drizzle migrates only through ${bound}, not ${last}: the rest is for coffre\u2019s own migrator (db:migrate)`); process.exit(1); }' "${4:-}" "$before_t193"
+    local tree="$scratch/migrations-$4"
     rm -rf "$tree"
     cp -r packages/db/src/migrations/postgres "$tree"
     node -e 'const fs = require("fs"), path = require("path"), [tree, last] = process.argv.slice(1), f = path.join(tree, "meta/_journal.json"), j = JSON.parse(fs.readFileSync(f, "utf8"));
-const cut = last ? j.entries.find((e) => e.tag === last).idx : Infinity;
+const cut = j.entries.find((e) => e.tag === last).idx;
 for (const e of j.entries.filter((e) => e.idx > cut)) { fs.rmSync(path.join(tree, `${e.tag}.sql`)); fs.rmSync(path.join(tree, "meta", `${String(e.idx).padStart(4, "0")}_snapshot.json`), { force: true }); }
-j.entries = j.entries.filter((e) => e.idx <= cut); fs.writeFileSync(f, JSON.stringify(j))' "$tree" "${4:-}"
+j.entries = j.entries.filter((e) => e.idx <= cut); fs.writeFileSync(f, JSON.stringify(j))' "$tree" "$4"
     (cd packages/db && node --conditions=coffre:source --input-type=module -e '
         const { postgresClient } = await import("./src/postgres.ts");
         const { createDatabase } = await import("./src/database.ts");
@@ -194,7 +200,7 @@ migrate_through member migration_member local-member-only 0072_passkeys_principa
 use_grants member 8
 # 0073 makes `use_credential` and `use_named_batch` again, with `p_passkeys` (T216): both the member's now, while
 # 0048's `use_batch` stays the owner's and must be granted the new `use_credential`, which the drop took from it.
-migrate_through member migration_member local-member-only
+migrate_through member migration_member local-member-only "$before_t193"
 expected="${expected/use_named_batch=migration_owner/use_named_batch=migration_member}"
 [[ "$(owners)" == "$expected" ]] || { echo "after 0073, the use functions' owners: $(owners)" >&2; exit 1; }
 use_grants member 8
@@ -215,7 +221,9 @@ answer="$(docker exec -i -e PGPASSWORD=local-vault-only "$container" \
 # they run, as their owner: each must be granted it, or every key write and member add fails with a permission error.
 psql_owner -d postgres -c "CREATE DATABASE split"
 migrate_through split migration_owner local-owner-only 0062_admit_inputs
-migrate_through split migration_member local-member-only
+migrate_through split migration_member local-member-only "$before_t193"
+# split_holds <after what>: what the owner's functions read and write, the member's tables, they may.
+split_holds() {
 psql_owner -d split <<'SQL'
 DO $$
 DECLARE
@@ -257,8 +265,14 @@ token="'\x$(printf '00%.0s' {1..32})'::bytea"
 for call in "write_request($now, $token, 'p', 'e', '{k}')" "admit_read($now, $token, 'user:nobody', '{}')"; do
     answer="$(docker exec -i -e PGPASSWORD=local-vault-only "$container" \
         psql -X -At -v ON_ERROR_STOP=1 -h 127.0.0.1 -U coffre_vault_runtime -d split -c "SELECT $call ->> 'state'")"
-    [[ "$answer" == read ]] || { echo "after 0073, ${call%%(*} answered: $answer" >&2; exit 1; }
+    [[ "$answer" == read ]] || { echo "after $1, ${call%%(*} answered: $answer" >&2; exit 1; }
 done
+}
+split_holds 0073
+# Then coffre's migrator, as the member, the rest (0081's `policy` and `roles` among them), handing what the member made
+# over to the owner: the owner's functions still read and write all of it.
+DATABASE_URL="postgresql://migration_member:local-member-only@127.0.0.1:$port/split" pnpm --filter @coffre/db run db:migrate
+split_holds "coffre's migrator"
 
 # The above is how a member migrated before T193, by drizzle's migrator, which leaves what it makes the member's, and
 # what the shipped migrations' grants must still answer. coffre's own migrator, as the member, applies the rest of the
