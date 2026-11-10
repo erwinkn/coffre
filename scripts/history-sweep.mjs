@@ -95,6 +95,28 @@ export function growing(small, large) {
   return grown.sort((a, b) => b.after.pages - a.after.pages);
 }
 
+/** The statements `small` ran that `large` did not: a path that stopped short at the larger size, its plans never logged. */
+export function vanished(small, large) {
+  return [...small].filter(([id]) => !large.has(id)).map(([id, at]) => ({ id, at }));
+}
+
+/** What each path answered in a run's output (`sweep outcomes`, history.sweep.ts), or null when it printed none. */
+export function outcomesOf(text) {
+  const line = text.split('\n').filter((one) => one.includes('sweep outcomes ')).at(-1);
+  return line === undefined ? null : JSON.parse(line.slice(line.indexOf('sweep outcomes ') + 'sweep outcomes '.length));
+}
+
+/** The paths that answered otherwise at the two sizes, or ran at one alone. */
+export function changedOutcomes(small, large) {
+  return [...new Set([...Object.keys(small), ...Object.keys(large)])].filter((name) => small[name] !== large[name])
+    .map((name) => ({ name, small: small[name] ?? 'not run', large: large[name] ?? 'not run' }));
+}
+
+/** The statements the server cancelled in a log (a statement or lock timeout, or a cancel): plans auto_explain never logs. */
+export function cancelled(text) {
+  return text.split('\n').filter((line) => /ERROR:\s+canceling statement/.test(line));
+}
+
 function report(grown) {
   for (const { id, why, before, after } of grown) {
     const was = before === null ? 'not run' : `${before.pages} pages, ${before.runs} runs`;
@@ -105,12 +127,13 @@ function report(grown) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const [smallLog, largeLog] = process.argv.slice(2);
-  if (smallLog === undefined || largeLog === undefined) {
-    console.error('usage: node scripts/history-sweep.mjs <small.log> <large.log>');
+  const [smallLog, largeLog, smallOut, largeOut] = process.argv.slice(2);
+  if (smallLog === undefined || largeLog === undefined || (smallOut === undefined) !== (largeOut === undefined)) {
+    console.error('usage: node scripts/history-sweep.mjs <small.log> <large.log> [<small.out> <large.out>]');
     process.exit(2);
   }
-  const [small, large] = [smallLog, largeLog].map((file) => statementsOf(plansOf(readFileSync(file, 'utf8'))));
+  const [smallText, largeText] = [smallLog, largeLog].map((file) => readFileSync(file, 'utf8'));
+  const [small, large] = [smallText, largeText].map((text) => statementsOf(plansOf(text)));
   if (small.size === 0 || large.size === 0) {
     console.error(`no plans in ${small.size === 0 ? smallLog : largeLog}: was auto_explain on for the runtime logins?`);
     process.exit(2);
@@ -119,5 +142,18 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const flagged = grown.filter(({ why }) => why !== 'new');
   console.log(`${large.size} statements measured; ${flagged.length} grow with history, ${grown.length - flagged.length} ran at the larger size alone`);
   report(grown);
-  process.exit(flagged.length === 0 ? 0 : 1);
+  // A sweep is clean only if both runs went the same way to the end: a statement too slow at the larger size, cut by a
+  // timeout, leaves no plan behind, and would otherwise read as none that grew (review r1 of #559).
+  const problems = [];
+  for (const { at } of vanished(small, large)) problems.push(`GONE  ran at the smaller size alone: ${at.text.slice(0, 200)} (in: ${[...at.paths].slice(0, 2).join('; ')})`);
+  for (const [file, text] of [[smallLog, smallText], [largeLog, largeText]]) {
+    for (const line of cancelled(text)) problems.push(`CANCELLED in ${file}: ${line.slice(0, 200)}`);
+  }
+  if (smallOut !== undefined) {
+    const [before, after] = [smallOut, largeOut].map((file) => outcomesOf(readFileSync(file, 'utf8')));
+    if (before === null || after === null) problems.push(`no outcomes in ${before === null ? smallOut : largeOut}: the run did not finish`);
+    else for (const { name, small: was, large: now } of changedOutcomes(before, after)) problems.push(`ANSWER ${name}: ${was} at the smaller size, ${now} at the larger`);
+  }
+  for (const problem of problems) console.log(problem);
+  process.exit(flagged.length === 0 && problems.length === 0 ? 0 : 1);
 }

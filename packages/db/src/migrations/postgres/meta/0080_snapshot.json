@@ -1,5 +1,5 @@
 {
-  "id": "c9e52ce9-cfbf-461c-804e-d03eaabbefec",
+  "id": "e8ef597f-4c00-4faa-9ee7-d99e71defcab",
   "prevId": "ef3f7cdc-4479-4834-89bb-860ef6e45424",
   "version": "7",
   "dialect": "postgresql",
@@ -646,7 +646,7 @@
             }
           ],
           "isUnique": false,
-          "where": "action NOT IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal')",
+          "where": "action NOT IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal') AND seq >= 0",
           "concurrently": true,
           "method": "btree",
           "with": {}
@@ -662,7 +662,7 @@
             }
           ],
           "isUnique": false,
-          "where": "action IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal')",
+          "where": "action IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal') AND seq >= 0",
           "concurrently": true,
           "method": "btree",
           "with": {}
@@ -696,6 +696,12 @@
               "expression": "secret_id",
               "isExpression": false,
               "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "(CASE WHEN jsonb_typeof(\"metadata\"::jsonb -> 'version') = 'number' THEN \"metadata\"::jsonb ->> 'version' END)",
+              "asc": true,
+              "isExpression": true,
               "nulls": "last"
             },
             {

@@ -113,18 +113,24 @@
   walked past every one its filter did not match; an offboarding report's
   reads a step for each key and version a member read, a day at a time
   (797 pages at 30,000 reads), and their activity in 0.14's log their own
-  reads and writes, then the restores of the keys they saw; the
+  reads and writes, then the restores its current values come from, each
+  key's walked back from its current version a restore a step (where every
+  restore of a key the member saw was read, and an owner putting version 1
+  back again and again made them many); the
   checkpointer's lowest `at` above a part of its window a walk from one
   `at` to the next, past each run of uses sealed at one in a step (7,069
   pages past 390,000 uses sharing an `at`), the floor it signs the same
   (HotPathOne.tla's `Above`, which reads only up to the barrier's floor, as
-  the floor signed is capped there); and a window's bounded read its first
-  entries by number, its ceiling a filter. A log takes 246 rotations of its
+  the floor signed is capped there); and a window's read its first entries
+  by number, its bounds read first and given to it as values, so that
+  Postgres plans the window's days alone, not every day of uses after it. A
+  log takes 246 rotations of its
   key in its life (`ROTATIONS_HELD`), the most retired keys that keep the
   fence row every use reads in one page, and refuses the next: every
   keyring reads each one. Migration 0083 adds six indexes, built without
   blocking writes: `audit_log_shown_idx` and `audit_log_detail_idx` (each
-  entry is in one), a member's 0.14 reads and writes, a key's restores,
+  entry is in one), a member's 0.14 reads and writes, a key's restores by
+  the version each made,
   `log_reads (principal, key, version, at)` and `log_uses (at, number)`, an
   index entry more for each use and each read. The query inventory
   (`packages/db/test/newest-lookups.test.ts`) lists every aggregate over a

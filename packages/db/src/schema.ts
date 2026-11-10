@@ -20,7 +20,7 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
-import { accessAllowed, authoredBy, changeNamed, entriesOf, indexOf } from './access-entries.ts';
+import { accessAllowed, authoredBy, changeNamed, entriesOf, indexOf, restoreMade } from './access-entries.ts';
 import { ACTIVE_SUBJECT } from './active-subject.ts';
 import { recordField, recorded } from './change-records.ts';
 
@@ -479,11 +479,12 @@ export const auditLog = pgTable(
     index(indexOf('moves')).on(table.seq).where(entriesOf('moves')).concurrently(),
     // What an audit page shows unless asked for detail (`shown`): a page back from the newest in one step, however many
     // heartbeats and checkpoints since (T248, R48). A member's reads and writes in 0.14's log (`seen`), by actor, which
-    // an offboarding report weighs, past none of their other entries nor anyone else's.
+    // an offboarding report weighs, past none of their other entries nor anyone else's; and a key's restores by the
+    // version each made (`restoreMade`), which the report follows back from the current one, a step a restore.
     index(indexOf('shown')).on(table.seq).where(entriesOf('shown')).concurrently(),
     index(indexOf('detail')).on(table.seq).where(entriesOf('detail')).concurrently(),
     index(indexOf('seen')).on(table.actor, table.seq).where(entriesOf('seen')).concurrently(),
-    index(indexOf('restore')).on(table.secretId, table.seq).where(entriesOf('restore')).concurrently(),
+    index(indexOf('restore')).on(table.secretId, restoreMade('postgres', table.metadata), table.seq).where(entriesOf('restore')).concurrently(),
     // The allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
     // however many refusals the log holds about them (T239, R48). No `author` in its key, which the condition fixes:
     // Postgres takes a clause the condition implies for no bound, so a step past a principal would scan from the start.

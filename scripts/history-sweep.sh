@@ -30,11 +30,22 @@ fi
 mkdir -p "$out"
 ./scripts/ensure-postgres.sh
 
+# A run that fails fails the sweep: its statements stop where it did, and the comparison would miss the rest.
+failed=0
 for n in "$size" "$((size * 10))"; do
     since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "sweeping at $n entries of each shape"
-    COFFRE_SWEEP_SIZE="$n" COFFRE_TEST_DATABASE=coffre_sweep ./scripts/test-suite.sh --files packages/server/test/history.sweep.ts | tee "$out/$n.out" | grep -E '^(# (pass|fail)|not ok|sweep outcomes)' || true
+    status=0
+    COFFRE_SWEEP_SIZE="$n" COFFRE_TEST_DATABASE=coffre_sweep ./scripts/test-suite.sh --files packages/server/test/history.sweep.ts > "$out/$n.out" 2>&1 || status=$?
+    grep -E '^(# (pass|fail)|not ok|sweep outcomes)' "$out/$n.out" | cut -c1-400 || true
     docker compose logs --no-log-prefix --since "$since" postgres > "$out/$n.log" 2>&1
+    if [ "$status" -ne 0 ]; then
+        echo "the run at $n entries failed (exit $status): $out/$n.out" >&2
+        failed=1
+    fi
 done
 echo "logs in $out"
-node scripts/history-sweep.mjs "$out/$size.log" "$out/$((size * 10)).log"
+compared=0
+node scripts/history-sweep.mjs "$out/$size.log" "$out/$((size * 10)).log" "$out/$size.out" "$out/$((size * 10)).out" || compared=$?
+if [ "$failed" -ne 0 ]; then exit 1; fi
+exit "$compared"

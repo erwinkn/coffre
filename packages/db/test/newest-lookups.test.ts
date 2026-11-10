@@ -319,6 +319,11 @@ const NOT_LOGS: Record<string, string> = {
   spent: 'the ID token spent by a sign-in, its one row (queries.ts)',
   grants: 'the grants', unnest: 'a list of values the statement gives, each a probe of its own',
   log_read_place_days: 'the days a place was read on, a row each',
+  // Drizzle's tables, by the names their chains give them (review r1 of #559).
+  '${environments}': 'the environments', '${grants}': 'the grants', '${principals}': 'the members', '${identities}': "the members' identities",
+  '${passkeys}': 'the passkeys', '${secretVersions}': "the secrets' versions",
+  '${live}': "a place's live keys, a CTE of `secrets` (`countedPlaceRows`, queries.ts)",
+  '${keys}': "each place's count of `live`'s keys, a subquery (`countedPlaceRows`, queries.ts)",
 };
 
 /** Whether a statement's `from` reads no log, by what `NOT_LOGS` says it is; a log, or a name it cannot follow, is to list. */
@@ -385,15 +390,17 @@ test("every least or greatest of 0.15's uses in the sources is listed, with the 
 /**
  * Each aggregate over a log in `files`: in SQL's words, one whose statement's next table is a log or one the scan
  * cannot follow (the least or greatest of a column of 0.15's uses aside, `useSites`'); Drizzle's, a `select` of
- * `count()`, `max(…)`, `min(…)` or `sum(…)` from a log's table; and a `GROUP BY` or `.groupBy(` of a statement that
- * names a log. By the function each is in, `#2`… for a second.
+ * `count()`, `max(…)`, `min(…)` or `sum(…)` from a log's table, or from one under a name `NOT_LOGS` does not place (a
+ * log's table under a name of its own: review r1 of #559); and a `GROUP BY` or `.groupBy(` of a statement that names
+ * a log, or such a name. By the function each is in, `#2`… for a second.
  */
 function aggregateSites(files: Source[] = sources()): string[] {
   const found: string[] = [];
   const words = new RegExp(String.raw`\b(count|max|min|sum|json_agg|jsonb_agg|json_group_array|array_agg|string_agg|bool_and|bool_or)\((?:(?!\bFROM\b|` + '`' + String.raw`|\(SELECT\b).){0,240}?\bFROM\s+(\$\{[\w.]+\}|\w+)`, 'gs');
   const drizzle = /\.select\(\{((?:[^{}]|\{[^{}]*\})*)\}\)\s*\.from\((\w+)\)/gs;
   const grouped = /\bGROUP BY\b|\.groupBy\(/g;
-  const logVar = /^(?:auditLog|logChanges|logUses|logReads)$/;
+  // Drizzle's table, by the name its chain gives it: a log's, or one the scan cannot follow, as `${name}` in SQL's words.
+  const logVar = (name: string) => /^(?:auditLog|logChanges|logUses|logReads)$/.test(name) || unlisted(`\${${name}}`);
   for (const { file, text } of files) {
     const at = new Set<number>();
     for (const match of text.matchAll(words)) {
@@ -402,13 +409,13 @@ function aggregateSites(files: Source[] = sources()): string[] {
       if (/^(?:max|min)$/.test(match[1]!) && LOG_USES.test(from)) continue;
       if (LOG.test(from) || /^(?:log_reads|\$\{logReads\})$/.test(from) || unlisted(from)) at.add(match.index!);
     }
-    for (const match of text.matchAll(drizzle)) if (/\b(?:count|max|min|sum)\(/.test(match[1]!) && logVar.test(match[2]!)) at.add(match.index!);
+    for (const match of text.matchAll(drizzle)) if (/\b(?:count|max|min|sum)\(/.test(match[1]!) && logVar(match[2]!)) at.add(match.index!);
     for (const match of text.matchAll(grouped)) {
       // SQL's within its statement, from the backtick that opens it; Drizzle's of the table its chain selects from.
       const before = text.slice(Math.max(0, match.index! - 1500), match.index);
       const names = match[0] === 'GROUP BY'
         ? /\b(?:audit_log|log_changes|log_uses|log_reads)\b|\$\{(?:auditLog|logChanges|logUses|logReads)\}/.test(before.slice(before.lastIndexOf('`') + 1))
-        : logVar.test([...before.matchAll(/\.from\((\w+)\)/g)].pop()?.[1] ?? '');
+        : logVar([...before.matchAll(/\.from\((\w+)\)/g)].pop()?.[1] ?? 'grants');
       if (names) at.add(match.index!);
     }
     const seen = new Map<string, number>();
@@ -446,6 +453,9 @@ test('the scans list a gate or an aggregate whose table they cannot follow: a CT
   assert.deepEqual(aggregateSites(one('named', 'const { logReads: history } = tablesOf(db);\nreturn sql`SELECT json_agg(r.at) FROM ${history} r`;')), ['x.ts#named']);
   assert.deepEqual(aggregateSites(one('drizzle', 'return db.select({ n: count() }).from(auditLog).where(x);')), ['x.ts#drizzle']);
   assert.deepEqual(aggregateSites(one('grouped', 'return db.select({ a: auditLog.action }).from(auditLog).groupBy(auditLog.action);')), ['x.ts#grouped']);
+  // Drizzle's over a log's table under a name of its own, counted or grouped (review r1 of #559).
+  assert.deepEqual(aggregateSites(one('aliased', 'const { auditLog: history } = tablesOf(db);\nreturn db.select({ n: count() }).from(history);')), ['x.ts#aliased']);
+  assert.deepEqual(aggregateSites(one('aliasedGroup', 'const { logReads: history } = tablesOf(db);\nreturn db.select({ a: history.principal }).from(history).groupBy(history.principal);')), ['x.ts#aliasedGroup']);
   // What reads no log, by what `NOT_LOGS` says it is, is no site.
   const none = one('none', 'return sql`SELECT EXISTS (SELECT 1 FROM principals p) AS any, (SELECT max(v.created_at) FROM secret_versions v) AS at`;');
   assert.deepEqual([...gateSites(none), ...useSites(none), ...aggregateSites(none)], []);

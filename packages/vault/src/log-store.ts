@@ -274,9 +274,10 @@ async function located(found: Located | null | undefined, tiles: (keys: TileKey[
 
 /**
  * Postgres's read of the entries in (after, upto], by number, uses from `floor` to `ceiling`: the window's rows
- * (`postgresStore`). The ceiling a filter (`at + 0`), never an index's bound: a pair's ceiling, read in the statement,
- * reads to Postgres as a narrow range of `at`, and it walked an index by `at` through every use sharing one, sorted
- * them and kept the first (365 pages for 1,001 of 20,000; T248). The floor bounds the days read.
+ * (`postgresStore`). Both bounds are values, never read in the statement (`entries`): there, Postgres knows neither as
+ * it plans, takes `at` between them for a narrow range, and walked an index by `at` through every use sharing one,
+ * sorted them and kept the first (365 pages for 1,001 of 20,000; T248, R48). As values, it plans the window's days
+ * alone, no later one (partition pruning), and reads each by number.
  */
 export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number): SQL {
   return sql`
@@ -285,7 +286,7 @@ export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling:
         FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}`, sql`c.number`, limit)}
       UNION ALL
       ${first(sql`SELECT 'uses', u.number, u.at::text, u.request_id::text, NULL::text, NULL::text, NULL::text, NULL::bytea, u.mac, u.credential::text, u.secret::text, u.purpose, u.place::text, u.route
-        FROM log_uses u WHERE u.at >= ${floor} AND u.at + 0 <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, sql`u.number`, limit)}
+        FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, sql`u.number`, limit)}
       ORDER BY n${limitOf(limit)}`;
 }
 
@@ -352,7 +353,9 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
    * backlog shares: 40 pages 2,000 uses in, 366 at 20,000, 7,069 at 400,000 (T248, R48).
    */
   const lowestAbove = async (after: bigint, upto: bigint, from: number, ceiling: number) => {
-    const at = await one<string | null>(db, sql`
+    // `from` and `ceiling` as values too, beside the step's `at`, so that Postgres plans only their days; and the walk
+    // inside a `select`, a plain read (`plainRead`).
+    const at = await one<string | null>(db, sql`SELECT (
       WITH RECURSIVE s (at, number, found, done) AS (
         SELECT ${from}::bigint, ${after}::bigint, NULL::bigint, false
         UNION ALL
@@ -362,10 +365,10 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
             SELECT min(w.at) FILTER (WHERE w.number > ${after}::bigint AND w.number <= ${upto}::bigint) AS found, max(w.at) AS last_at,
                    (array_agg(w.number ORDER BY w.at DESC, w.number DESC))[1] AS last_number, count(*) AS n
               FROM (SELECT u.at, u.number FROM log_uses u
-                     WHERE u.at >= s.at AND u.at <= ${ceiling}::bigint AND (u.at, u.number) > (s.at, s.number)
+                     WHERE u.at >= ${from}::bigint AND u.at >= s.at AND u.at <= ${ceiling}::bigint AND (u.at, u.number) > (s.at, s.number)
                      ORDER BY u.at, u.number LIMIT ${ABOVE_BATCH}) w) b
          WHERE NOT s.done)
-      SELECT min(found)::text AS v FROM s`);
+      SELECT min(found)::text FROM s) AS v`);
     return at === null ? null : Number(at);
   };
   const tiles: LogStore['tiles'] = async (tree, keys) => {
@@ -415,8 +418,11 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
     async entries(after, upto, options = {}) {
       // The uses after `after` were admitted at or above the floor its barrier set (FloorChecked): read from there, up to
       // the slack past the floor of the barrier that sealed `upto`. Past the newest pair, unbounded: the head is near.
+      // The bounds first, then the window with them as values (`postgresWindow`): a statement more, two probes of the
+      // checkpoints' key, so that the window plans its own days alone, however many came after them (T248, R48).
       const [floor, ceiling] = bounds(after, upto, options.floor);
-      return (await rows(after, upto, floor, ceiling, options.limit)).map(fromRow);
+      const [low, high] = await one<[string, string]>(db, sql`SELECT json_build_array((${floor})::text, (${ceiling})::text) AS v`);
+      return (await rows(after, upto, sql`${BigInt(low)}::bigint`, sql`${BigInt(high)}::bigint`, options.limit)).map(fromRow);
     },
     tiles,
     async write(row, tiles) {

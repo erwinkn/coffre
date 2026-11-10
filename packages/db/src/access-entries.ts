@@ -115,17 +115,21 @@ export const KINDS = {
   /**
    * What an audit page shows unless asked for detail (`DETAIL_ACTIONS`): a page back from the newest, past every
    * heartbeat and checkpoint since, which the primary key walked (82 pages 2,000 heartbeats in, 696 at 20,000; T248).
+   * `seq >= 0`, which every entry is (the chain's first is 0) and no other read says, keeps every other read off its
+   * index: a partial index on `seq` alone whose condition a read implies, Postgres may read whole as a bitmap and AND
+   * with another, which a key's page, for its tokens' origins (`originsOf`, `token.create`), did through `detail`'s:
+   * 1,231 pages with the history grown, 350 before (review r1 of #559).
    */
-  shown: `action NOT IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')})`,
-  /** And what it leaves out, which it counts back from where it started, a stretch's newest at most (`auditActionCounts`). */
-  detail: `action IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')})`,
+  shown: `action NOT IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')}) AND seq >= 0`,
+  /** And what it leaves out, which it counts back from where it started, a stretch's newest at most (`auditActionCounts`); `seq >= 0` as `shown`'s. */
+  detail: `action IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')}) AND seq >= 0`,
   /**
    * The reads and writes 0.14's log records of a key, by whom (`memberActivity`): a member's, through their actor,
    * where the log's whole was read for every report (2,484 pages behind 80,000 entries; T248). 0.15's log records
    * every use and key write since its cutover (R53, T179): these no longer grow.
    */
   seen: "decision = 'allow' AND action IN ('secret.read', 'secret.write')",
-  /** A key's restores, which a report follows back from its current version (`memberActivity`), by key. */
+  /** A key's restores, which a report follows back from its current version (`memberActivity`), by key and the version each made (`restoreMade`). */
   restore: "decision = 'allow' AND action = 'secret.restore'",
 } as const;
 
@@ -187,6 +191,20 @@ export function changesOf(db: Queryable | Engine, alias: string, object: SQLWrap
   const by = sql.raw(order === 'asc' ? 'ASC' : 'DESC');
   if ((typeof db === 'string' ? db : engineOf(db)) !== 'postgres') return { where: sql`${as}.object = ${object}`, order: sql`${as}.number ${by}` };
   return { where: sql`${as}.object = ANY(ARRAY[CAST(${object} AS uuid)])`, order: sql`${as}.object ${by}, ${as}.number ${by}` };
+}
+
+/**
+ * The version a restore made (its metadata's `version`, a number), as
+ * `audit_log_restore_idx` keys it after the key: text on Postgres, an
+ * integer on SQLite, null for metadata that holds none. A report follows a
+ * value back from a key's current version (`memberActivity`), a step of the
+ * index each restore it passes, however many restores of the key came
+ * besides (T248, R48).
+ */
+export function restoreMade(engine: Engine, metadata: SQLWrapper): SQL<string | number | null> {
+  return engine === 'postgres'
+    ? sql`(CASE WHEN jsonb_typeof(${metadata}::jsonb -> 'version') = 'number' THEN ${metadata}::jsonb ->> 'version' END)`
+    : sql`(CASE WHEN json_type(${metadata}, '$.version') = 'integer' THEN json_extract(${metadata}, '$.version') END)`;
 }
 
 /**

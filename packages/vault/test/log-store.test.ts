@@ -502,6 +502,66 @@ test('T248: a bounded read of the window reads as many pages 20,000 uses sharing
   assert.ok(!(pages[1]! >= 2 * pages[0]! && pages[1]! - pages[0]! >= 8), `${pages[0]} pages 2,000 uses in, ${pages[1]} at 20,000`);
 });
 
+// T248 (R48), review r1 of #559: a window read under an old pair, a proof's or the reads' projection's, plans the days
+// its bounds hold and no later one. Its ceiling read in the statement, Postgres planned every day of uses after it and
+// probed each one, a day more for every day of history.
+test('T248: a window under an old pair reads its own days alone, as many pages 20 days of uses after it as 2', { ...(ENGINE === 'postgres' ? {} : { skip: 'Postgres only: its plans' }), timeout: 300_000 }, async () => {
+  const DAY = 86_400_000;
+  const base = (Math.floor(Date.now() / DAY) - 60) * DAY;
+  const made: string[] = [];
+  const day = async (at: number) => {
+    const date = new Date(at).toISOString().slice(0, 10);
+    made.push(`log_uses_${date.replaceAll('-', '')}`);
+    await run(db.owner, sql`SELECT make_day(${date}::date)`);
+  };
+  const plant = (at: number, count: number) => run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
+    SELECT nextval('log_number'), ${at}::bigint + g, g, gen_random_uuid(), gen_random_uuid(), 1, '\\x00000000000000000000000000000000'::bytea
+      FROM generate_series(1, ${count}) g`);
+  try {
+    await day(base);
+    await plant(base, 200);
+    const [last] = await rows<{ n: string }>(db.owner, sql`SELECT max(number)::text AS n FROM log_uses`);
+    const upto = BigInt(last!.n);
+    const zero = Buffer.alloc(32);
+    await run(db.owner, sql`INSERT INTO log_checkpoints (upto, at, at_floor, changes_size, changes_root, changes_note, uses_size, uses_root, uses_note)
+      VALUES (${upto}, ${base + 1_000}, ${base}, 0, ${zero}, '', 0, ${zero}, '')`);
+    const seen: { pages: number; days: string[] }[] = [];
+    let newer = 0;
+    for (const days of [2, 20]) {
+      for (; newer < days; newer += 1) {
+        await day(base + (newer + 1) * DAY);
+        await plant(base + (newer + 1) * DAY, 200);
+      }
+      await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) log_uses`);
+      const client = postgresClient(VAULT_URL, { max: 1 });
+      const sent: { text: string; values: unknown[] }[] = [];
+      const unsafe = client.unsafe;
+      (client as { unsafe: unknown }).unsafe = (text: string, values: unknown[] = [], ...rest: unknown[]) => {
+        sent.push({ text, values });
+        return (unsafe as (...args: unknown[]) => unknown)(text, values, ...rest);
+      };
+      try {
+        const read = await logStore(createDatabase(client), { tileRange: RANGE }).entries(0n, upto, { floor: base });
+        assert.equal(read.filter((entry) => entry.tree === 'uses').length, 200);
+        const window = sent.find(({ text }) => /FROM log_uses u/.test(text))!;
+        type Node = { 'Relation Name'?: string; Plans?: Node[]; 'Shared Hit Blocks': number; 'Shared Read Blocks': number };
+        const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${window.text}`, window.values as never[]) as unknown as [{ 'QUERY PLAN': [{ Plan: Node }] }];
+        const root = plan['QUERY PLAN'][0].Plan;
+        const relations = (node: Node): string[] => [...(node['Relation Name'] === undefined ? [] : [node['Relation Name']]), ...(node.Plans ?? []).flatMap(relations)];
+        seen.push({ pages: root['Shared Hit Blocks'] + root['Shared Read Blocks'], days: [...new Set(relations(root).filter((name) => name.startsWith('log_uses_')))].sort() });
+      } finally {
+        await client.end();
+      }
+    }
+    assert.deepEqual(seen[1]!.days, seen[0]!.days, `the days read 2 days after the window, then 20: ${JSON.stringify(seen)}`);
+    assert.deepEqual(seen[0]!.days, [made[0]]);
+    assert.ok(!(seen[1]!.pages >= 2 * seen[0]!.pages && seen[1]!.pages - seen[0]!.pages >= 8), JSON.stringify(seen));
+  } finally {
+    await run(db.owner, sql`DELETE FROM log_checkpoints WHERE at_floor = ${base}`);
+    for (const name of made) await run(db.owner, sql.raw(`DROP TABLE IF EXISTS public.${name}`));
+  }
+});
+
 test('T169: a backlog far past the window drains a part a tick, each part a pair whose floor is the lowest `at` left above it, and the whole log verifies, every entry provable', async () => {
   const { cp, store, memory, alerts } = await open(variableMemory(), 200);
   await use();

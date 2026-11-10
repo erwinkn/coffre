@@ -15,7 +15,7 @@ import {
   type AnySQLiteColumn,
 } from 'drizzle-orm/sqlite-core';
 
-import { accessAllowed, authoredBy, entriesOf, indexOf } from './access-entries.ts';
+import { accessAllowed, authoredBy, entriesOf, indexOf, restoreMade } from './access-entries.ts';
 import { ACTIVE_SUBJECT } from './active-subject.ts';
 import { recordField, recorded } from './change-records.ts';
 
@@ -453,7 +453,7 @@ export const auditLog = sqliteTable(
     index(indexOf('shown')).on(table.seq).where(entriesOf('shown')),
     index(indexOf('detail')).on(table.seq).where(entriesOf('detail')),
     index(indexOf('seen')).on(table.actor, table.seq).where(entriesOf('seen')),
-    index(indexOf('restore')).on(table.secretId, table.seq).where(entriesOf('restore')),
+    index(indexOf('restore')).on(table.secretId, restoreMade('sqlite', table.metadata), table.seq).where(entriesOf('restore')),
     // The allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
     // however many refusals the log holds about them (T239, R48). Keyed as the subject index, `author` first, unlike
     // Postgres's: SQLite weighs an index by the equalities it matches, and picks the subject index over one that matches

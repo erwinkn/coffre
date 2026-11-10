@@ -16,7 +16,8 @@ COMPOSE_PROJECT_NAME=coffre_mine COFFRE_POSTGRES_PORT=56432 pnpm sweep:history -
 It needs a Postgres of its own (it refuses the shared one on :55432): it turns
 auto_explain on for its own databases, which logs a plan for every statement,
 and reads the server's log through `docker compose logs`. A release that adds
-a read, or a shape of history, reruns it. It exits 1 when a statement grows.
+a read, or a shape of history, reruns it. It exits 1 when a statement grows,
+or when the two runs did not go the same way to the end (below).
 
 ## What it does
 
@@ -36,8 +37,10 @@ on a fresh clone of the migrated template:
    before, oldest first: another member's reads in 0.14's log, a thousand to an
    `occurred_at`; the vault's findings about one member, 0.14's and 0.15's; the
    access grants and refusals about someone no member row names; 0.15's changes
-   of other objects and rotations of the log's key; one member's reads, all on
-   one day; uses sharing one `at`, unsealed; and, newest, the heartbeats an
+   of other objects and rotations of the log's key; one member's reads of the
+   same four keys at their versions (one through a reference), a thousand a
+   day, over a day for each thousand; uses sharing one `at`, unsealed; and,
+   newest, the heartbeats an
    ordinary audit page hides. Then the watch and the vault catch up with it, as
    a deployment's do between beats, so that what a beat walks is what came since.
 4. **Every request path, twice**: every GET route of the API (from the
@@ -59,6 +62,14 @@ an index level at most, a page for each index it steps down, and its rows; the
 rule is growth, not a budget of pages (R70). The cost tests use the same rule
 ([`packages/server/test/db/growth.ts`](../packages/server/test/db/growth.ts)).
 
+A statement too slow at the larger size leaves no plan behind if something
+cancels it, so a sweep that only compared plans would read it as one that did
+not grow. So the sweep also fails when either run's runner failed (its exit
+status is kept), when a path answered otherwise at the two sizes (each path's
+outcome, by a name the same at both, is printed as `sweep outcomes`), when a
+statement the smaller run completed is missing from the larger's log, or when
+either log holds a statement the server cancelled (review r1 of #559).
+
 Two things it does not count. A statement's first run on a backend reads the
 catalog to plan a function's statements (`prune_bulk`'s first call, 1,295
 pages on an empty database as on a grown one, 18 after): only its later runs
@@ -74,13 +85,13 @@ The first sweep, 2,000 and 20,000 entries of each shape, on #556's head:
 
 | Statement | 2,000 | 20,000 | Fix |
 |---|---|---|---|
-| A member's activity in 0.14's log (`memberActivity`), on every member page | 265 | 2,484 | A sequential scan, for its `OR` with every restore: now a probe of `audit_log_seen_idx` for each of the member's names, then the restores of the keys they saw by `audit_log_restore_idx` |
+| A member's activity in 0.14's log (`memberActivity`), on every member page | 265 | 2,484 | A sequential scan, for its `OR` with every restore: now a probe of `audit_log_seen_idx` for each of the member's names, then the restores its current values come from, walked back from each key's current version by `audit_log_restore_idx` (key, version made) |
 | Every member's findings (`tamperedMembers`), the members list's | 151 | 1,454 | A skip of `audit_log_tamper_idx` from one member reported to the next, then a probe each |
 | An ordinary audit page, past the heartbeats since | 82 | 696 | `audit_log_shown_idx`, the entries a page shows |
 | An audit page's count of what it hides (`auditActionCounts`) | 99 | 336 | The newest `HIDDEN_COUNTED` of its stretch at most, and `hiddenMore` |
-| A member's reads by key and version (`readsBy`), an offboarding report's | 66 | 494 | A skip of `log_reads_seen_idx` from one key and version to the next, a day at a time |
+| A member's reads by key and version (`readsBy`), an offboarding report's | 66 | 494 | A skip of `log_reads_seen_idx` from one key and version to the next, a day at a time: still a probe of each day the member read on (open, review r1 of #559) |
 | The keyring's rotations (`rotations`, `keyringRows`) | 56 | 452 | No more than `ROTATIONS_HELD` (246) rotations in a log's life |
-| The window a proof or the projector reads (`entries`), past uses sharing an `at` | 70 | 396 | Its first entries by number, `log_uses_by_number_idx` (T245) |
+| The window a proof or the projector reads (`entries`), past uses sharing an `at` | 70 | 396 | Its first entries by number, `log_uses_by_number_idx` (T245), its bounds read first and given as values, so that it plans its own days alone |
 
 And the checkpointer's `lowestAbove`, which a forged backlog does not reach,
 by its own test (7,069 pages past 390,000 uses sharing one `at`): a walk of

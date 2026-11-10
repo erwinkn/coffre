@@ -185,16 +185,35 @@ async function grow(): Promise<void> {
       FROM generate_series(1, ${ROTATIONS + SIZE}) g`));
   const day = new Date(now).toISOString().slice(0, 10);
   await rowsOf(db.owner, sql`SELECT make_day(${day}::date)`);
-  await rowsOf(db.owner, sql`SELECT make_reads_day(${day}::date)`);
-  const [place] = await rowsOf<{ secret: string; environment: string; project: string; credential: string }>(db.owner, sql`
-    SELECT s.id::text AS secret, s.environment_id::text AS environment, s.project_id::text AS project,
+  // One member's reads of market/dev's three keys, each at its version, and through market/prod's reference to its
+  // API_KEY, whose version a read through it names: the same four again and again, a thousand a day, over a day for
+  // every thousand (`readsBy` walks each key and version of each of their days; review r1 of #559).
+  const keys = await rowsOf<{ secret: string; environment: string; project: string; version: string; credential: string }>(db.owner, sql`
+    SELECT s.id::text AS secret, s.environment_id::text AS environment, s.project_id::text AS project, s.current_version_id::text AS version,
            (SELECT c.id::text FROM credentials c LIMIT 1) AS credential
-      FROM secrets s WHERE s.key = 'API_KEY' LIMIT 1`);
-  await rowsOf(db.owner, sql`
-    INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, mac)
-    SELECT nextval('log_number'), ${now}::bigint + g, ${place!.credential}::uuid, 1, ${`user:${LEAVER}`}, ${place!.secret}::uuid, ${place!.environment}::uuid, ${place!.project}::uuid, ${ZERO16}::bytea
-      FROM generate_series(1, ${SIZE}) g`);
-  await rowsOf(db.owner, sql`INSERT INTO log_read_days (principal, day) VALUES (${`user:${LEAVER}`}, ${Math.floor(now / 86_400_000)}) ON CONFLICT DO NOTHING`);
+      FROM secrets s JOIN environments e ON e.id = s.environment_id JOIN projects p ON p.id = s.project_id
+     WHERE p.slug = 'market' AND e.slug = 'dev' ORDER BY s.key`);
+  // API_KEY, first by name: the uses' key, and the source of the reference's reads.
+  const [place] = keys;
+  const [through] = await rowsOf<{ secret: string; environment: string; project: string }>(db.owner, sql`
+    SELECT s.id::text AS secret, s.environment_id::text AS environment, s.project_id::text AS project
+      FROM secrets s JOIN environments e ON e.id = s.environment_id JOIN projects p ON p.id = s.project_id
+     WHERE p.slug = 'market' AND e.slug = 'prod' AND s.key = 'API_KEY'`);
+  const days = Math.max(1, Math.floor(SIZE / 1_000));
+  const today = Math.floor(now / 86_400_000);
+  const pick = (column: 'secret' | 'environment' | 'project' | 'version') => sql.raw(`CASE g % 4 ${keys.map((key, i) => `WHEN ${i} THEN '${key[column]}'`).join(' ')} ELSE '${column === 'version' ? place!.version : through![column]}' END`);
+  for (let back = days - 1; back >= 0; back -= 1) {
+    const start = (today - back) * 86_400_000;
+    await rowsOf(db.owner, sql`SELECT make_reads_day(${new Date(start).toISOString().slice(0, 10)}::date)`);
+    await rowsOf(db.owner, sql`
+      INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, source, source_environment, source_project, version, mac)
+      SELECT nextval('log_number'), ${back === 0 ? now : start}::bigint + g, ${place!.credential}::uuid, 1, ${`user:${LEAVER}`},
+             CAST(${pick('secret')} AS uuid), CAST(${pick('environment')} AS uuid), CAST(${pick('project')} AS uuid),
+             CASE WHEN g % 4 = 3 THEN ${place!.secret}::uuid END, CASE WHEN g % 4 = 3 THEN ${place!.environment}::uuid END, CASE WHEN g % 4 = 3 THEN ${place!.project}::uuid END,
+             CAST(${pick('version')} AS uuid), ${ZERO16}::bytea
+        FROM generate_series(1, ${Math.min(SIZE, 1_000)}) g`);
+    await rowsOf(db.owner, sql`INSERT INTO log_read_days (principal, day) VALUES (${`user:${LEAVER}`}, ${today - back}) ON CONFLICT DO NOTHING`);
+  }
   await rowsOf(db.owner, sql`
     INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
     SELECT nextval('log_number'), ${Date.now()}::bigint, g, ${place!.credential}::uuid, ${place!.secret}::uuid, 1, ${ZERO16}::bytea
@@ -206,7 +225,7 @@ async function grow(): Promise<void> {
 function getRoutes(): string[] {
   const api = readFileSync(fileURLToPath(new URL('../../client/src/api.ts', import.meta.url)), 'utf8');
   const values: Record<string, string> = {
-    project: 'market', environment: 'dev', key: 'API_KEY', member: `user:${READER}`, id: randomUUID(), code: 'ABCD-EFGH', role: 'developer', folder: 'none',
+    project: 'market', environment: 'dev', key: 'API_KEY', member: `user:${READER}`, id: '00000000-0000-4000-8000-000000000000', code: 'ABCD-EFGH', role: 'developer', folder: 'none',
   };
   return [...api.matchAll(/^ {2}"GET (\/[^"]*)": \{/gm)].map((found) => found[1]!.replace(/:(\w+)/g, (_, name: string) => encodeURIComponent(values[name] ?? 'none')));
 }
@@ -279,7 +298,8 @@ test(`the request paths, warm, then measured, at ${SIZE.toLocaleString('en')} en
     }
   }
   await mark('end');
-  // What each path answered, for the report: a path that fails at both sizes still ran its statements up to there.
+  // What each path answered, by a name the same at every size (no random id), for `history-sweep.mjs`: a path that
+  // fails at both sizes still ran its statements up to there; one that answers otherwise at the larger fails the sweep.
   console.log(`sweep outcomes ${JSON.stringify(outcomes)}`);
   assert.ok(Object.keys(outcomes).length > 0);
 });

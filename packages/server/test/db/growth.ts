@@ -89,9 +89,16 @@ type Libsql = { execute: (query: unknown) => Promise<{ rows: { detail: string }[
 /** What `statement` reads run again as the app's login: its pages and indexes on Postgres; on SQLite, its plan's lines. */
 async function measure(owner: Database, statement: Statement): Promise<{ pages: number; indexes: string[]; plan: string[] }> {
   if (TEST_ENGINE !== 'postgres') {
-    const client = (owner as unknown as { session: { client: Libsql } }).session.client;
-    const { rows } = await client.execute({ sql: `EXPLAIN QUERY PLAN ${statement.text}`, args: statement.values.map((value) => (typeof value === 'object' && value !== null && !Buffer.isBuffer(value) ? null : value)) });
-    return { pages: 0, indexes: [], plan: rows.map(({ detail }) => detail) };
+    // On a connection of its own, closed after: libsql keeps the read lock of the next read of a connection that ran an
+    // `EXPLAIN QUERY PLAN`, and the next case's writes would wait on it.
+    const opened = await openDatabase(process.env.COFFRE_TEST_DATABASE_URL!);
+    try {
+      const client = (opened.db as unknown as { session: { client: Libsql } }).session.client;
+      const { rows } = await client.execute({ sql: `EXPLAIN QUERY PLAN ${statement.text}`, args: statement.values.map((value) => (typeof value === 'object' && value !== null && !Buffer.isBuffer(value) ? null : value)) });
+      return { pages: 0, indexes: [], plan: rows.map(({ detail }) => detail) };
+    } finally {
+      await opened.close();
+    }
   }
   const one = postgresClient(TEST_RUNTIME_DATABASE_URL, { max: 1 });
   try {
@@ -121,7 +128,10 @@ export type Growth = {
 
 /**
  * Holds `read` flat: the same statements at both sizes, each reading no more at the larger by the sweep's rule; and
- * on SQLite, none scanning a log whole (a `SCAN` of one, by an index or not, which `SEARCH` is not).
+ * on SQLite, none scanning a log whole (a `SCAN` of one, by an index or not, which `SEARCH` is not), but for a walk
+ * under the statement's `LIMIT`, of one of the read's own indexes or of the log in its key's order, which SQLite says
+ * as a `SCAN` too: a page back from the newest by `audit_log_shown_idx` stops at the page. Whether such a walk passes
+ * entries it does not keep, Postgres's pages say: SQLite's plans hold the shape alone.
  */
 export async function holdsFlat(owner: Database, read: Growth): Promise<void> {
   const measured: { text: string; values: unknown[]; pages: number; indexes: string[]; plan: string[] }[][] = [];
@@ -140,7 +150,9 @@ export async function holdsFlat(owner: Database, read: Growth): Promise<void> {
     const text = at.text.replace(/\s+/g, ' ');
     const said = JSON.stringify({ statement: text.length > 600 ? `${text.slice(0, 300)} … ${text.slice(-300)}` : text, values: small[i]!.values, pages: [small[i]!.pages, at.pages], plan: at.plan }, (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value));
     if (TEST_ENGINE !== 'postgres') {
-      assert.deepEqual(at.plan.filter((line) => new RegExp(`^SCAN (${LOGS.join('|')})\\b`).test(line)), [], `scans no log whole: ${said}`);
+      const limited = /\blimit\b/i.test(at.text);
+      const walk = (line: string) => limited && (new RegExp(`^SCAN (${LOGS.join('|')})$`).test(line) || (read.indexes ?? []).some((index) => new RegExp(`USING (COVERING )?INDEX ${index}\\b`).test(line)));
+      assert.deepEqual(at.plan.filter((line) => new RegExp(`^SCAN (${LOGS.join('|')})\\b`).test(line) && !walk(line)), [], `scans no log whole: ${said}`);
       continue;
     }
     assert.ok(!(at.pages >= 2 * small[i]!.pages && at.pages - small[i]!.pages >= 8), `reads as many pages ${LARGE.toLocaleString('en')} entries in as ${SMALL.toLocaleString('en')}: ${said}`);

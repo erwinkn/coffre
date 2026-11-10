@@ -294,9 +294,10 @@ async function reportedMembers(db: Queryable): Promise<string[]> {
   const { auditLog } = tablesOf(db);
   const next = (after: SQL | null) => sql`(SELECT ${auditLog.subjectPrincipal} FROM ${auditLog} WHERE ${entriesOf('tamper')}
     AND ${auditLog.subjectPrincipal} ${after === null ? sql`IS NOT NULL` : sql`> ${after}`} ORDER BY ${auditLog.subjectPrincipal} LIMIT 1)`;
+  // A `select` around the `WITH`: a plain read, sent with the others asked beside it (`plainRead`, `groupReads`).
   const rows = await rowsOf<{ principal: string }>(db, sql`
-    WITH RECURSIVE reported (principal) AS (SELECT ${next(null)} UNION ALL SELECT ${next(sql`r.principal`)} FROM reported r WHERE r.principal IS NOT NULL)
-    SELECT principal FROM reported WHERE principal IS NOT NULL`);
+    SELECT principal FROM (WITH RECURSIVE reported (principal) AS (SELECT ${next(null)} UNION ALL SELECT ${next(sql`r.principal`)} FROM reported r WHERE r.principal IS NOT NULL)
+    SELECT principal FROM reported) AS reported WHERE principal IS NOT NULL`);
   return rows.map((row) => String(row.principal));
 }
 

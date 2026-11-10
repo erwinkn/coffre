@@ -86,20 +86,27 @@ test("a member's reads by key and version, an offboarding report's (`readsBy`): 
 }));
 
 test("a member's activity in 0.14's log, an offboarding report's (`memberActivity`): their reads and writes, and the restores of the keys they saw", { timeout: 600_000 }, () => holdsFlat(db.owner, {
-  // A few reads and a write of theirs, and a restore of a key they read; then, growing, everyone else's reads, entries
-  // of theirs of other kinds, and restores of keys they never saw.
+  // A few reads and a write of theirs, and the restores that make the value of a key they read its current one: 7 put
+  // back from 5, 5 from 1, which they read, and one a writer planted pointing up, which the walk back passes by. Then,
+  // growing, everyone else's reads, entries of theirs of other kinds, restores of a key they never saw, and of the
+  // key they read, from 1 again and again, none of which its current value comes from (review r1 of #559).
   grow: async (owner, size) => {
     const [a, b] = keys;
+    await rowsOf(owner, sql`UPDATE secrets SET current_version = 7 WHERE id = ${a!.id}`);
     await append(owner, { author: 'vault', action: 'secret.read', count: 3, actor: MEMBER, secret: a!.id, project: a!.project, metadata: JSON.stringify({ version: 1 }) });
     await append(owner, { author: 'app', action: 'secret.write', count: 1, actor: MEMBER, secret: b!.id, project: b!.project, metadata: JSON.stringify({ version: 1 }) });
-    await append(owner, { author: 'app', action: 'secret.restore', count: 1, actor: `user:${ROOT}`, secret: a!.id, project: a!.project, metadata: JSON.stringify({ version: 2, from: 1 }) });
+    await append(owner, { author: 'app', action: 'secret.restore', count: 1, actor: `user:${ROOT}`, secret: a!.id, project: a!.project, metadata: JSON.stringify({ version: 7, from: 5 }) });
+    await append(owner, { author: 'app', action: 'secret.restore', count: 1, actor: `user:${ROOT}`, secret: a!.id, project: a!.project, metadata: JSON.stringify({ version: 5, from: 1 }) });
+    await append(owner, { author: 'app', action: 'secret.restore', count: 1, actor: `user:${ROOT}`, secret: a!.id, project: a!.project, metadata: JSON.stringify({ version: 5, from: 9 }) });
     await append(owner, { author: 'vault', action: 'secret.read', count: size, actor: OTHER, secret: a!.id, project: a!.project, metadata: JSON.stringify({ version: 1 }) });
     await append(owner, { author: 'app', action: 'sign_in', count: size, actor: MEMBER });
     await append(owner, { author: 'app', action: 'secret.restore', count: size / 10, actor: `user:${ROOT}`, secret: keys[2]!.id, project: a!.project, metadata: JSON.stringify({ version: 2, from: 1 }) });
+    await append(owner, { author: 'app', action: 'secret.restore', count: size / 10, actor: `user:${ROOT}`, secret: a!.id, project: a!.project, metadata: JSON.stringify({ version: 3, from: 1 }) });
   },
   ask: async (app) => {
     const activity = await memberActivity(app, ['m1@acme.example']);
-    assert.deepEqual(activity.map((row) => row.action).sort(), ['secret.read', 'secret.read', 'secret.read', 'secret.restore', 'secret.write']);
+    assert.deepEqual(activity.map((row) => row.action).sort(), ['secret.read', 'secret.read', 'secret.read', 'secret.restore', 'secret.restore', 'secret.write']);
+    assert.deepEqual(activity.filter((row) => row.action === 'secret.restore').map((row) => JSON.parse(row.metadata) as unknown).sort((x, y) => JSON.stringify(x) < JSON.stringify(y) ? -1 : 1), [{ from: 1, version: 5 }, { from: 5, version: 7 }]);
   },
   indexes: ['audit_log_seen_idx', 'audit_log_restore_idx'],
 }));
@@ -115,11 +122,13 @@ test('an ordinary audit page back from the newest, past every heartbeat since (`
 
 test("a page's count of what it hides, with nothing older to show (`auditActionCounts`): of `HIDDEN_COUNTED` at most, whatever its filter, and whether there were more", { timeout: 600_000 }, () => holdsFlat(db.owner, {
   grow: async (owner, size) => append(owner, { author: 'app', action: 'audit.heartbeat', count: size }),
-  ask: async (app) => {
-    assert.deepEqual(await auditActionCounts(app, { limit: 100 }), { counts: [{ action: 'audit.heartbeat', count: HIDDEN_COUNTED }], more: true });
+  ask: async (app, size) => {
+    // Past `HIDDEN_COUNTED` (SQLite's smaller size is not), the count stops there and says there were more.
+    const more = size > HIDDEN_COUNTED;
+    assert.deepEqual(await auditActionCounts(app, { limit: 100 }), { counts: [{ action: 'audit.heartbeat', count: Math.min(size, HIDDEN_COUNTED) }], more });
     // A project's page and a page of refusals, which none of them is: as many weighed, none counted.
-    assert.deepEqual(await auditActionCounts(app, { projectId: keys[0]!.project, limit: 100 }), { counts: [], more: true });
-    assert.deepEqual(await auditActionCounts(app, { decision: 'deny', limit: 100 }), { counts: [], more: true });
+    assert.deepEqual(await auditActionCounts(app, { projectId: keys[0]!.project, limit: 100 }), { counts: [], more });
+    assert.deepEqual(await auditActionCounts(app, { decision: 'deny', limit: 100 }), { counts: [], more });
   },
   indexes: ['audit_log_detail_idx'],
 }));
