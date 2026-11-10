@@ -16517,7 +16517,7 @@ function deriveLogKey(author, secret) {
 	};
 }
 //#endregion
-//#region ../core/dist/types-Cp3lB_-W.js
+//#region ../core/dist/types-R8BelyKX.js
 /**
 * Version prefix for the AAD encoding. If the encoding ever changes, this
 * changes with it, and old ciphertexts keep decrypting under the old rule.
