@@ -98,24 +98,24 @@ The first sweep, 2,000 and 20,000 entries of each shape, on #556's head:
 
 | Statement | 2,000 | 20,000 | Fix |
 |---|---|---|---|
-| A member's activity in 0.14's log (`memberActivity`), on every member page | 265 | 2,484 | A sequential scan, for its `OR` with every restore: now a probe of `audit_log_seen_idx` for each of the member's names, then the restores its current values come from, walked back from each key's current version (T252 replaces the walk) |
+| A member's activity in 0.14's log (`memberActivity`), on every member page | 265 | 2,484 | A sequential scan, for its `OR` with every restore: now a probe of `audit_log_seen_idx` for each of the member's names, then a probe of each version they saw and of its key's current one, the same value when the ciphertext is (T252: a walk back of each restore of a restore before) |
 | Every member's findings (`tamperedMembers`), the members list's | 151 | 1,454 | A skip of `audit_log_tamper_idx` from one member reported to the next, then a probe each |
 | An ordinary audit page, past the heartbeats since | 82 | 696 | `audit_log_shown_idx`, the entries a page shows |
 | An audit page's count of what it hides (`auditActionCounts`) | 99 | 336 | The newest `HIDDEN_COUNTED` of its stretch at most, and `hiddenMore` |
-| A member's reads by key and version (`readsBy`), an offboarding report's | 66 | 494 | Open: T252's (below) |
+| A member's reads by key and version (`readsBy`), an offboarding report's | 66 | 494 | `log_read_newest`, a row for each key and version the member read (T252: each day the member read on before, a day at a time) |
 | The keyring's rotations (`rotations`, `keyringRows`) | 56 | 452 | No more than `ROTATIONS_HELD` (246) rotations in a log's life |
 | The window a proof or the projector reads (`entries`), past uses sharing an `at` | 70 | 396 | Its first entries by number, `log_uses_by_number_idx` (T245), its bounds read first and given as values, so that it plans its own days alone |
 
-Two of an offboarding report's reads still grow, and are T252's. `readsBy`
-grows with what the member did: it reads every read of theirs, a day at a
-time. The walk back from each key's current version to the restores its
-value came from grows with the key's history, whoever made it: it reads
-every entry naming the key at each step, so that everyone's writes and
-reveals of a key the member once read add to it, after they left too. A restore copies the old version's ciphertext and rewraps only its key,
-so two versions hold one value exactly when their ciphertexts match: T252
-replaces the walk with a probe of each version seen, and `readsBy` with the
-newest read of each key and version, which a trigger keeps as reads are
-written.
+Two of an offboarding report's reads still grew after it, with what one
+member did rather than with the instance: `readsBy` probed each day the
+member read on (a member who read every day for a year is 365 probes, and a
+read projected keeps every day unless `retainDays` says otherwise), and the
+restores its activity followed back were one step each of a chain an owner
+made (restore version 6 back, then the version that made, and on: 7 from 6,
+8 from 7, …). T252 reads `log_read_newest` instead, each member's newest
+read of each key and version, which a trigger writes with the reads
+(`formal/Reads.tla`), and finds a value carried forward by its ciphertext,
+whose IV and tag a restore copies and every new value draws afresh.
 
 And the checkpointer's `lowestAbove`, which a forged backlog does not reach,
 by its own test (7,069 pages past 390,000 uses sharing one `at`): a walk of

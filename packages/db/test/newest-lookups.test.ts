@@ -306,6 +306,7 @@ const NOT_LOGS: Record<string, string> = {
   checkpoint_fence: "the uses' fence, one row",
   log_checkpoints: "0.15's checkpoints, one row each",
   log_read_days: 'the days a member read on, a row each',
+  log_read_newest: "each member's newest read of each key and version, a row each (T252)",
   '${reads}': 'the reads of members by their days (reads.ts), no log of these',
   principals: 'the members', passkeys: 'the passkeys', environments: 'the environments',
   secret_versions: "the secrets' versions", secret_references: "the secrets' references",

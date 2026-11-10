@@ -238,31 +238,19 @@ export async function readsPageStanding(db: Queryable, filter: ReadFilter): Prom
 /**
  * What these members read under 0.15's log, by key and version: each key
  * they read, or through a reference each source, every version they read of
- * it, and when last, from their days that hold any (`log_read_days`): never
- * a probe of each day the log holds. What an offboarding report weighs
- * (`memberActivity`). Like 0.14's report, it reads every read of theirs:
- * T252 replaces it with the newest read of each key and version, which a
- * trigger keeps as reads are written (R48).
+ * it, and when last. What an offboarding report weighs (`memberActivity`).
+ * One entry each of `log_read_newest`, which the projector's writes keep
+ * (formal/Reads.tla, T252): a step for each key and version they read,
+ * however many times and on however many days (R48). Each day they read on
+ * was a probe, and retention keeps every day by default (review r1 of #559).
  */
 function readsBySql(db: Queryable, members: readonly string[]): SQL {
-  const engine = dialect.engineOf(db);
-  const text = (column: string) => sql.raw(engine === 'postgres' ? `CAST(${column} AS text)` : column);
   const named = sql.join(members.map((member) => sql`${member}`), sql`, `);
-  // On Postgres each of the member's days reads its own partition, a day at a time: `OFFSET 0` keeps the lateral a loop
-  // over the days, whose bounds prune the partitions as it runs; flattened into a join, the planner may read every
-  // day's partition first (review r8: 80 buffers, then 322 with 100 newer days of others' reads). SQLite has no
-  // partitions to read.
-  const reads = engine === 'postgres'
-    ? sql`log_read_days d CROSS JOIN LATERAL (
-        SELECT r.principal, r.source, r.secret, r.version, r.at FROM log_reads r
-         WHERE r.principal = d.principal AND r.at >= CAST(d.day AS bigint) * 86400000 AND r.at < (CAST(d.day AS bigint) + 1) * 86400000 OFFSET 0) r`
-    : sql`log_read_days d JOIN log_reads r ON r.principal = d.principal AND r.at >= d.day * 86400000 AND r.at < (d.day + 1) * 86400000`;
+  const secret = dialect.engineOf(db) === 'postgres' ? sql`CAST(n.secret AS text)` : sql`n.secret`;
   return sql`
-    SELECT r.principal AS actor, ${text('coalesce(r.source, r.secret)')} AS secret, v.version, max(r.at) AS read_at
-      FROM ${reads}
-      JOIN secret_versions v ON v.id = r.version
-     WHERE d.principal IN (${named})
-     GROUP BY r.principal, coalesce(r.source, r.secret), v.version`;
+    SELECT n.principal AS actor, ${secret} AS secret, v.version, n.at AS read_at
+      FROM log_read_newest n JOIN secret_versions v ON v.id = n.version
+     WHERE n.principal IN (${named})`;
 }
 
 const membersOf = (actors: readonly string[]) => actors.filter((actor) => actor.startsWith('user:') || actor.startsWith('token:'));

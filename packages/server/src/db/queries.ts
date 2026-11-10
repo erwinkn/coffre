@@ -5,7 +5,7 @@ import { MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, ty
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { accessAllowed, changesOf, DETAIL_ACTIONS, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, restoreMade, withinBytes, type ChangeRecord } from '@coffre/db/log';
+import { accessAllowed, changesOf, DETAIL_ACTIONS, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -1267,12 +1267,11 @@ export async function members(
 
 /**
  * Every allowed read, write and import of a secret by these actors, a read
- * of several once per secret it lists, then every restore of a secret
- * they saw, oldest first.
+ * of several once per secret it lists, oldest first.
  * Each row that names a secret carries it as it is now: its key, current
  * version, and whether it or its place is archived. Several reads, so the
  * caller runs them in one snapshot (`SNAPSHOT`): a restore committed between
- * two would show its version without the one it restored.
+ * two would show its version without saying it holds a value they saw.
  *
  * With 0.15's log a read is a use (T166), whose version the vault's
  * projection of it says (`readsBy`): each version of each key they read,
@@ -1280,13 +1279,20 @@ export async function members(
  * read them already, beside its other reads, passes them: one round trip
  * fewer.
  *
+ * Each row says whether the version it names holds the value its key's
+ * current version holds (`current`): its very ciphertext, by its IV and tag
+ * (`sameValue`), as a restore and a key marked stricter copy it, and no new
+ * value ever does (T252).
+ *
  * None of it reads past what is theirs (T248, R48): their reads and writes
  * in 0.14's log by `audit_log_seen_idx` (`seen`), which 0.15's uses and key
  * writes replaced at its cutover, so they no longer grow; their reads and
- * writes in 0.15's; then the restores the current values of the keys they
- * saw come from (`restoresBack`), each a read of its key's entries, which
- * T252 replaces. Asked as one condition with every restore, every entry of
- * the log was read for every report (2,484 pages behind 80,000).
+ * writes in 0.15's; then a probe of each version they saw, and of its key's
+ * current one. Asked as one condition with every restore, every entry of the
+ * log was read for every report (2,484 pages behind 80,000); followed back
+ * from each key's current version, a step each restore of its lineage,
+ * which an owner putting a value back again and again makes as long (review
+ * r2 of #559).
  */
 export async function memberActivity(db: Queryable, actorIds: string[], readAlready?: Awaited<ReturnType<typeof readsBy>>) {
   const { auditLog, secrets, environments, projects } = tablesOf(db);
@@ -1333,13 +1339,19 @@ export async function memberActivity(db: Queryable, actorIds: string[], readAlre
     return row.action !== 'secret.read' || row.secretId !== null || !Array.isArray(listed) ? null : listed as { secretId?: unknown }[];
   };
   const ids = seen.flatMap((row) => (listedOf(row) ?? []).flatMap(({ secretId }) => (typeof secretId === 'string' ? [secretId] : [])));
-  // The restores that make a version they saw another's value: from each key's current version back (`exposure`).
-  const saw = [...new Set([...seen.flatMap((row) => (row.secretId === null ? [] : [row.secretId])), ...ids, ...used.map((one) => one.secret), ...wrote.map((one) => one.secret)])]
-    .filter((id) => UUID.test(id));
-  const back = restoresBack(db, saw);
-  const [now, usedRows, wroteRows, restores] = await Promise.all([
+  // Each version they saw, by its key and number, or by id for their 0.15 writes: whether it is the current value.
+  const versionOf = (metadata: unknown) => {
+    const version = (metadata as { version?: unknown } | null)?.version;
+    return Number.isSafeInteger(version) ? (version as number) : undefined;
+  };
+  const numbered = [
+    ...seen.flatMap((row) => (row.secretId === null ? [] : [{ secret: row.secretId, version: versionOf(JSON.parse(row.metadata)) }])),
+    ...seen.flatMap((row) => (listedOf(row) ?? []).flatMap((one) => (typeof one.secretId === 'string' ? [{ secret: one.secretId, version: versionOf(one) }] : []))),
+    ...used,
+  ];
+  const [now, usedRows, wroteRows, current] = await Promise.all([
     secretPlaces(db, ids), readsOf(db, used), writesOf(db, wrote),
-    saw.length === 0 ? [] : entries(dialect.engineOf(db) === 'postgres' ? sql`${auditLog.seq} = ANY(ARRAY(${back}))` : sql`${auditLog.seq} IN (${back})`),
+    sameValue(db, numbered.flatMap(({ secret, version }) => (version === undefined ? [] : [{ secret, version }])), wrote.map(({ version }) => version)),
   ]);
   const rows = seen.flatMap((row) => {
     const listed = listedOf(row);
@@ -1359,41 +1371,45 @@ export async function memberActivity(db: Queryable, actorIds: string[], readAlre
       }];
     });
   });
-  return [...rows, ...usedRows, ...wroteRows, ...restores].map(shown);
+  return [...rows, ...usedRows, ...wroteRows].map((row) => ({
+    ...shown(row),
+    current: row.secretId !== null && current.has(`${row.secretId}:${versionOf(JSON.parse(row.metadata))}`),
+  }));
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
- * The `seq`s of the restores an offboarding report follows back from each of these keys' current version (`exposure`):
- * the restore that made it, then the one that made the version that one restored, and on, until a version no restore
- * made: the lineage of the key's value, never its other restores (review r1 of #559). Each step to a lower version, so
- * that a cycle a database writer planted ends. No index of its own: each step reads the key's entries by
- * `audit_log_secret_idx`, as many as the key's history holds. On Postgres a lateral loop (`OFFSET 0`) over the steps:
- * joined, the planner hashes the whole log instead (762 pages 4,000 entries in, 7,449 at 40,000). SQLite, which has
- * no lateral, loops over a join's steps by the index itself. T252 replaces the walk with a
- * probe of each version seen, by its value (a restore copies the old version's ciphertext), and this read goes.
+ * Of these versions, each by its key and number or by its id, those that hold their key's current value, as
+ * `${secret}:${version}`: the very ciphertext of the key's current version, by its IV and tag (`memberActivity`). Every
+ * new value is sealed under a fresh data key and IV (`encrypt`, @coffre/core/envelope), the same value set again
+ * included; only a restore and a key marked stricter copy a version's ciphertext into a new one (`restoreVersion`,
+ * the vault's rewrap), and a version is never rewritten but erased, which empties its ciphertext and keeps both
+ * (`secret_versions_erase_only`). So a value carried forward is found however many restores it passed, and one only
+ * re-marked too (T252), in a probe of each version and of its key's current one: never a walk of its restores.
  */
-function restoresBack(db: Queryable, keys: readonly string[]): SQL {
-  const engine = dialect.engineOf(db);
-  const made = restoreMade(engine, sql`a.metadata`);
-  const postgres = engine === 'postgres';
-  // As numbers of any size, so that no metadata a writer planted fails the statement.
-  const from = postgres
-    ? sql`(CASE WHEN jsonb_typeof(a.metadata::jsonb -> 'from') = 'number' THEN (a.metadata::jsonb ->> 'from')::numeric END)`
-    : sql`(CASE WHEN json_type(a.metadata, '$.from') = 'integer' THEN json_extract(a.metadata, '$.from') END)`;
-  const restore = sql`a.decision = 'allow' AND a.action = 'secret.restore'`;
-  // The keys as one value, however many: a report's keys may be past an engine's bound on a statement's parameters.
-  const these = postgres ? sql`s.id = ANY(${sql.param(keys)}::uuid[])` : sql`s.id IN (SELECT value FROM json_each(${JSON.stringify(keys)}))`;
-  return sql`SELECT r.seq FROM (WITH RECURSIVE back (secret, version, seq) AS (
-      SELECT s.id, ${postgres ? sql`CAST(s.current_version AS numeric)` : sql`s.current_version`}, ${postgres ? sql`CAST(NULL AS bigint)` : sql`NULL`} FROM secrets s WHERE ${these}
-      UNION ALL
-      ${postgres
-        ? sql`SELECT b.secret, a.version, a.seq FROM back b CROSS JOIN LATERAL (
-            SELECT ${from} AS version, a.seq FROM audit_log a
-             WHERE a.secret_id = b.secret AND ${made} = CAST(b.version AS text) AND ${restore} AND ${from} < b.version OFFSET 0) a`
-        : sql`SELECT b.secret, ${from}, a.seq FROM back b JOIN audit_log a ON a.secret_id = b.secret AND ${made} = b.version AND ${restore} WHERE ${from} < b.version`})
-    SELECT seq FROM back) r WHERE r.seq IS NOT NULL`;
+async function sameValue(db: Queryable, numbered: readonly { secret: string; version: number }[], ids: readonly string[]): Promise<Set<string>> {
+  // Ids and numbers anything planted may have written: looked up only as such.
+  const pairs = numbered.filter(({ secret, version }) => UUID.test(secret) && version > 0 && version <= 2_147_483_647).map(({ secret, version }) => [secret, version] as const);
+  const byId = ids.filter((id) => UUID.test(id));
+  if (pairs.length === 0 && byId.length === 0) return new Set();
+  // Each list as one value, however long: a report's may be past an engine's bound on a statement's parameters.
+  const seen = dialect.engineOf(db) === 'postgres'
+    ? sql`(SELECT v.secret_id, v.version, v.iv, v.auth_tag FROM unnest(${sql.param(pairs.map(([secret]) => secret))}::uuid[], ${sql.param(pairs.map(([, version]) => version))}::integer[]) AS p (secret, version)
+          JOIN secret_versions v ON v.secret_id = p.secret AND v.version = p.version
+        UNION ALL
+        SELECT v.secret_id, v.version, v.iv, v.auth_tag FROM secret_versions v WHERE v.id = ANY(${sql.param(byId)}::uuid[]))`
+    : sql`(SELECT v.secret_id, v.version, v.iv, v.auth_tag FROM json_each(${JSON.stringify(pairs)}) AS p
+          JOIN secret_versions v ON v.secret_id = json_extract(p.value, '$[0]') AND v.version = json_extract(p.value, '$[1]')
+        UNION ALL
+        SELECT v.secret_id, v.version, v.iv, v.auth_tag FROM secret_versions v WHERE v.id IN (SELECT value FROM json_each(${JSON.stringify(byId)})))`;
+  // From the versions seen, each a probe of its key and of that key's current version: SQLite keeps a CROSS JOIN's
+  // order, and would otherwise scan every key first.
+  const rows = await dialect.rowsOf<{ secret: string; version: number | string }>(db, sql`
+    SELECT DISTINCT ${dialect.engineOf(db) === 'postgres' ? sql`CAST(sv.secret_id AS text)` : sql`sv.secret_id`} AS secret, sv.version
+      FROM ${seen} sv CROSS JOIN secrets s CROSS JOIN secret_versions c
+     WHERE s.id = sv.secret_id AND c.secret_id = s.id AND c.version = s.current_version AND c.iv = sv.iv AND c.auth_tag = sv.auth_tag`);
+  return new Set(rows.map(({ secret, version }) => `${secret}:${Number(version)}`));
 }
 
 /**

@@ -7,7 +7,7 @@ import { defineSignin, generateToken, github, hashToken } from '@coffre/core/ide
 import { appendEntries } from '@coffre/db/log';
 import { eq, isNull } from 'drizzle-orm';
 
-import { auditLog, credentials, identities, secrets } from './db/tables.ts';
+import { auditLog, credentials, identities, secrets, secretVersions } from './db/tables.ts';
 import { CredentialUncheckable, SigninService } from '../src/api/signin.ts';
 import { authenticateRequest } from '../src/auth.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
@@ -246,6 +246,62 @@ test('the report lists the current values someone saw, until each is rotated', a
   assert.equal(report.exposed[0].project, 'market');
   assert.equal(report.exposed[0].environment, 'prod');
   assert.ok(Date.parse(report.exposed[0].at) <= Date.now());
+});
+
+/** Each version of the key, by number: its IV and tag, the ciphertext's identity (`sameValue`). */
+const ciphertexts = async (key: string) => new Map((await db.owner.select({ version: secretVersions.version, iv: secretVersions.iv, tag: secretVersions.authTag })
+  .from(secretVersions).innerJoin(secrets, eq(secrets.id, secretVersions.secretId)).where(eq(secrets.key, key)))
+  .map(({ version, iv, tag }) => [version, `${Buffer.from(iv).toString('hex')}:${Buffer.from(tag).toString('hex')}`]));
+
+test('a value set again as it was is a new value: a fresh IV and tag, and the report counts the key rotated (T252)', async () => {
+  await root.secrets.set('market/prod', { API_KEY: 'api-1' });
+  await dev.secrets.reveal('market/prod/API_KEY');
+  await root.secrets.set('market/prod', { API_KEY: 'api-1' });
+  const seen = await ciphertexts('API_KEY');
+  assert.deepEqual([...seen.keys()].sort(), [1, 2]);
+  assert.notEqual(seen.get(2), seen.get(1));
+  const report = await root.members.get(`user:${DEV}`);
+  assert.deepEqual([report.exposed, report.rotated], [[], 1]);
+});
+
+test('a value put back again and again, each restore of the last restore, is the one they saw however long the chain (T252, review r2 of #559)', async () => {
+  await root.secrets.set('market/prod', { API_KEY: 'api-1' });
+  await dev.secrets.reveal('market/prod/API_KEY');
+  // v2 a new value, v3 v1's put back; v4 new, v5 v3's put back; v6 new, v7 v5's.
+  for (const [value, back] of [['api-2', 1], ['api-3', 3], ['api-4', 5]] as const) {
+    await root.secrets.set('market/prod', { API_KEY: value });
+    await root.secrets.restore('market/prod/API_KEY', back);
+  }
+  const seen = await ciphertexts('API_KEY');
+  assert.deepEqual([3, 5, 7].map((version) => seen.get(version)), [1, 1, 1].map((version) => seen.get(version)), 'a restore copies the ciphertext');
+  assert.deepEqual((await root.members.get(`user:${DEV}`)).exposed.map(({ key, version, how }) => `${key} v${version} ${how}`), ['API_KEY v7 read']);
+});
+
+test('a key marked stricter after they read it holds the value they read: not rotated (T252)', async () => {
+  // Read v3, then sensitive: v4, v3's ciphertext rewrapped. Followed back by restores alone, v4 came from none, and the
+  // report called the key rotated.
+  for (const value of ['api-1', 'api-2', 'api-3']) await root.secrets.set('market/prod', { API_KEY: value });
+  await dev.secrets.reveal('market/prod/API_KEY');
+  await root.secrets.set('market/prod', { API_KEY: { sensitivity: 'sensitive' } });
+  const seen = await ciphertexts('API_KEY');
+  assert.equal(seen.get(4), seen.get(3), 'marking copies the ciphertext');
+  const report = await root.members.get(`user:${DEV}`);
+  assert.deepEqual([report.exposed.map(({ key, version, how }) => `${key} v${version} ${how}`), report.rotated], [['API_KEY v4 read'], 0]);
+});
+
+test("a restore's entry carries no value forward: the versions' own ciphertext says which hold the one they saw (T252)", async () => {
+  // A database writer's restore entries, under the app's key, naming a version they read as the current one's source.
+  await root.secrets.set('market/prod', { API_KEY: 'api-1' });
+  await dev.secrets.reveal('market/prod/API_KEY');
+  const [secret] = await db.owner.select({ id: secrets.id, projectId: secrets.projectId, environmentId: secrets.environmentId }).from(secrets).where(eq(secrets.key, 'API_KEY'));
+  await root.secrets.set('market/prod', { API_KEY: 'api-2' });
+  for (const metadata of ['{"key":"API_KEY","version":2,"from":1}', '{"key":"API_KEY","version":2,"from":1.0}']) {
+    await db.owner.transaction((tx) => appendEntries(tx, deriveLogKey('app', deps.chainKey), [{
+      actor: `user:${ROOT}`, action: 'secret.restore', decision: 'allow', secretId: secret!.id, projectId: secret!.projectId, environmentId: secret!.environmentId, metadata,
+    }], undefined, undefined, [], true));
+  }
+  const report = await root.members.get(`user:${DEV}`);
+  assert.deepEqual([report.exposed, report.rotated], [[], 1]);
 });
 
 test('the report reads any number of secrets a member\'s reads listed, past every engine\'s bound on a query\'s parameters', async () => {

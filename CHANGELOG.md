@@ -134,6 +134,23 @@
   `log_uses (at, number)`, an index entry more for each use. The query inventory
   (`packages/db/test/newest-lookups.test.ts`) lists every aggregate over a
   log too, with the test that holds it, or why none needs one.
+- **An offboarding report costs the same however long the member's history
+  grows (T252, R48).** Its two reads that grew with what one member did no
+  longer walk: the reads it weighs are `log_read_newest`, each member's
+  newest read of each key and version, which a trigger on `log_reads`
+  writes with the reads, whoever writes them, its time only moved up, and
+  which retention drops with each day (`formal/Reads.tla`: removing any of
+  those fails a property, as does the full verify not holding each listed
+  read to its entry, which `coffre verify log` now names). Where it
+  probed each day the member read on, 47 pages over 4 days, 447 over 40, it
+  reads 4 and 7. And a value they saw is still current when the key's
+  current version holds its very ciphertext, by IV and tag, which a restore
+  and a key marked stricter copy and every new value draws afresh: one probe
+  of each version they saw, where it walked each restore of a restore. A
+  key marked sensitive after they read it is no longer called rotated, and
+  a restore's metadata no longer decides it. Migration 0084 (SQLite 0043)
+  adds the table, its triggers, and its one-time fill from the reads
+  already listed.
 - **The credential proxy ends its upstream request when the app's request
   ends, and sets no time bound of its own (W365, config Q7).** It passes the
   incoming request's abort signal to the upstream `fetch`: an app that

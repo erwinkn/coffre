@@ -1205,6 +1205,16 @@ export const logReadDays = sqliteTable(
   (table) => [primaryKey({ name: 'log_read_days_pkey', columns: [table.principal, table.day] })],
 );
 
+/** Each member's newest read of each key and version (schema.ts). */
+export const logReadNewest = sqliteTable(
+  'log_read_newest',
+  { principal: text().notNull(), secret: text().notNull(), version: text().notNull(), at: integer({ mode: 'number' }).notNull() },
+  (table) => [
+    primaryKey({ name: 'log_read_newest_pkey', columns: [table.principal, table.secret, table.version] }),
+    index('log_read_newest_at_idx').on(table.at),
+  ],
+);
+
 /** The days each place's reads are in (schema.ts). */
 export const logReadPlaceDays = sqliteTable(
   'log_read_place_days',

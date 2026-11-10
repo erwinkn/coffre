@@ -2002,6 +2002,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
   } finally {
     await db.owner.execute(sql`DELETE FROM log_reads WHERE number > 5000000`);
     await db.owner.execute(sql`DELETE FROM log_read_days`);
+    await db.owner.execute(sql`DELETE FROM log_read_newest`);
     // The days made ahead, but those the migration made the uses of, which `drop_reads_day` keeps while the log does.
     await db.owner.execute(sql`SELECT drop_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${made}) d`);
   }

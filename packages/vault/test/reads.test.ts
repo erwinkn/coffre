@@ -113,6 +113,8 @@ test("a projector another overtook writes nothing: never the reads retention has
       if (ENGINE === 'postgres') for (const day of named) await run(db.owner, sql.raw(`DROP TABLE log_reads_${day}`));
       else await run(db.owner, sql`DELETE FROM log_reads`);
       await run(db.owner, sql`DELETE FROM log_read_days`);
+      // And their entries of the offboarding report's, as retention drops them with the day (NewestRetired, T252).
+      await run(db.owner, sql`DELETE FROM log_read_newest`);
       wrote = await real.writeReads(...args);
       return wrote;
     },
@@ -122,6 +124,8 @@ test("a projector another overtook writes nothing: never the reads retention has
     assert.equal(wrote, false);
     assert.equal(await count('log_reads'), 0);
     assert.equal(await count('log_read_days'), 0);
+    // Nor their entries again: the report would name reads retention dropped (RetiredUnnamed).
+    assert.equal(await count('log_read_newest'), 0);
     if (ENGINE === 'postgres') {
       const today = new Date().toISOString().slice(0, 10).replaceAll('-', '');
       assert.equal((await rows<{ found: boolean }>(db.owner, sql`SELECT to_regclass(${`public.log_reads_${today}`}) IS NOT NULL AS found`))[0]!.found, false, 'made again');

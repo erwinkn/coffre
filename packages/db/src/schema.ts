@@ -1428,6 +1428,26 @@ export const logReadDays = pgTable(
 );
 
 /**
+ * Each member's newest read of each key and version (T252): the key as an
+ * offboarding report names it, the source through a reference
+ * (`coalesce(source, secret)`), and the time of the newest read of that
+ * version. The report reads these, never each day the member read, which
+ * grew with their history (R48). A trigger on `log_reads` writes them with
+ * the reads, whoever writes those, its time only moved up; retention drops
+ * them with their day; the reads check holds each read to its entry
+ * (formal/Reads.tla, migration 0084).
+ */
+export const logReadNewest = pgTable(
+  'log_read_newest',
+  { principal: text().notNull(), secret: uuid().notNull(), version: uuid().notNull(), at: bigint({ mode: 'number' }).notNull() },
+  (table) => [
+    primaryKey({ name: 'log_read_newest_pkey', columns: [table.principal, table.secret, table.version] }),
+    // Retention's drop of a day.
+    index('log_read_newest_at_idx').on(table.at),
+  ],
+);
+
+/**
  * The days each place's reads are in (T175): a key, an environment or a
  * project, by its id, for each day `log_reads` holds a read at it, so that a
  * page of a place reads those days alone, never a probe of each day's

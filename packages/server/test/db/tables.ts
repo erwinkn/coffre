@@ -42,6 +42,7 @@ export const {
   logTiles,
   logReads,
   logReadDays,
+  logReadNewest,
   logReadPlaceDays,
   logReadsCursor,
   proxyDefinitions,

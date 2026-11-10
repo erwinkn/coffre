@@ -437,11 +437,14 @@ export async function listMembers(
 }
 
 type Activity = Awaited<ReturnType<typeof memberActivity>>[number];
-type Seen = { version: number; wrote: boolean; at: string };
+type Seen = { wrote: boolean; at: string };
 
 /**
  * What each of these members read or wrote that is still a live secret's
- * current version: a value they saw that is still current is one to rotate.
+ * current value: a value they saw that is still current is one to rotate.
+ * Its current version, or any other holding the same value, which a restore
+ * or a key marked stricter carries forward (`current`, `memberActivity`):
+ * a member who read version 1, restored as version 3, has seen version 3.
  */
 function exposure(
   members: MemberRef[],
@@ -449,37 +452,28 @@ function exposure(
 ): Map<string, { exposed: ExposedSecret[]; rotated: number }> {
   const result = new Map(members.map((member) => [formatMember(member), { exposed: [] as ExposedSecret[], rotated: 0 }]));
 
-  // Per member, per secret, per version: whether they wrote it, and when they last saw it.
-  const seen = new Map<string, Map<string, Map<number, Seen>>>();
-  // A restore is a new version holding an older one's value, so whoever saw
-  // that value has seen the restored version too.
-  const restoredFrom = new Map<string, number>();
+  // Per member, per secret: whether they saw its current value, whether they wrote it, and when they last saw it.
+  const seen = new Map<string, Map<string, Seen | null>>();
   const current = new Map<string, Activity>();
   for (const row of activity) {
     if (row.secretId === null) continue;
-    const metadata = JSON.parse(row.metadata) as { version?: unknown; from?: unknown };
-    if (row.action === 'secret.restore') {
-      if (typeof metadata.version === 'number' && typeof metadata.from === 'number') {
-        restoredFrom.set(`${row.secretId}:${metadata.version}`, metadata.from);
-      }
-      continue;
-    }
     const { actorType, actorId } = actorParts(row.actor);
     const key = formatMember({ type: actorType as 'user' | 'service', id: actorId });
     if (!result.has(key)) continue;
-    const version = metadata.version;
-    if (typeof version !== 'number') continue;
+    // Whole numbers alone, as `memberActivity` looks the versions up.
+    if (!Number.isSafeInteger((JSON.parse(row.metadata) as { version?: unknown }).version)) continue;
     if (row.key !== null && !row.archived && row.currentVersion! > 0) current.set(row.secretId, row);
-    const bySecret = seen.get(key) ?? new Map<string, Map<number, Seen>>();
+    const bySecret = seen.get(key) ?? new Map<string, Seen | null>();
     seen.set(key, bySecret);
-    const byVersion = bySecret.get(row.secretId) ?? new Map<number, Seen>();
-    bySecret.set(row.secretId, byVersion);
-    const previous = byVersion.get(version);
-    byVersion.set(version, {
-      version,
+    const previous = bySecret.get(row.secretId) ?? null;
+    if (!row.current) {
+      bySecret.set(row.secretId, previous);
+      continue;
+    }
+    bySecret.set(row.secretId, {
       wrote: (previous?.wrote ?? false) || row.action !== 'secret.read',
       // The latest: 0.15's log's key writes come after 0.14's entries and reads, not in time with them (T179, review r2 of #490).
-      at: previous !== undefined && Date.parse(previous.at) > Date.parse(row.occurredAt) ? previous.at : row.occurredAt,
+      at: previous !== null && Date.parse(previous.at) > Date.parse(row.occurredAt) ? previous.at : row.occurredAt,
     });
   }
 
@@ -489,15 +483,9 @@ function exposure(
   for (const [key, bySecret] of seen) {
     const report = result.get(key)!;
     for (const secret of secrets) {
-      const byVersion = bySecret.get(secret.secretId!);
-      if (byVersion === undefined) continue;
-      // Restores only point back, so this walk ends.
-      let version: number | undefined = secret.currentVersion!;
-      let hit: Seen | undefined;
-      while (version !== undefined && (hit = byVersion.get(version)) === undefined) {
-        version = restoredFrom.get(`${secret.secretId}:${version}`);
-      }
-      if (hit === undefined) {
+      if (!bySecret.has(secret.secretId!)) continue;
+      const hit = bySecret.get(secret.secretId!);
+      if (hit === null || hit === undefined) {
         report.rotated += 1;
         continue;
       }

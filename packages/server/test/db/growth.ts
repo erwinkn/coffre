@@ -46,13 +46,13 @@ export async function append(owner: Database, rows: Rows): Promise<void> {
 export async function emptyLogs(owner: Database): Promise<void> {
   await emptyLog(owner);
   await withTriggersLifted(owner, 'log_changes', (tx) => rowsOf(tx, sql.raw(TEST_ENGINE === 'postgres' ? 'TRUNCATE log_changes CASCADE' : 'DELETE FROM log_changes')));
-  for (const table of ['log_uses', 'log_reads', 'log_read_days']) await rowsOf(owner, sql.raw(`DELETE FROM ${table}`));
+  for (const table of ['log_uses', 'log_reads', 'log_read_days', 'log_read_newest']) await rowsOf(owner, sql.raw(`DELETE FROM ${table}`));
 }
 
 type Statement = { text: string; values: unknown[] };
 
-/** Each statement on a log that `work` sends as the app's login: through a client of its own on Postgres, as Drizzle prepares it on SQLite. */
-export async function sent(work: (app: Database) => Promise<unknown>): Promise<Statement[]> {
+/** Each statement on a log, or on one of `tables`, that `work` sends as the app's login: through a client of its own on Postgres, as Drizzle prepares it on SQLite. */
+export async function sent(work: (app: Database) => Promise<unknown>, tables: readonly string[] = LOGS): Promise<Statement[]> {
   const seen: Statement[] = [];
   if (TEST_ENGINE === 'postgres') {
     const client = postgresClient(TEST_RUNTIME_DATABASE_URL, { max: 1 });
@@ -80,7 +80,7 @@ export async function sent(work: (app: Database) => Promise<unknown>): Promise<S
       await opened.close();
     }
   }
-  return seen.filter(({ text }) => LOGS.some((log) => new RegExp(`\\b${log}\\b`).test(text)) && /^\s*(select|with)\b/i.test(text));
+  return seen.filter(({ text }) => tables.some((log) => new RegExp(`\\b${log}\\b`).test(text)) && /^\s*(select|with)\b/i.test(text));
 }
 
 type Node = { 'Node Type': string; 'Relation Name'?: string; 'Shared Hit Blocks': number; 'Shared Read Blocks': number; 'Index Name'?: string; Plans?: Node[] };
@@ -124,6 +124,11 @@ export type Growth = {
   ask: (app: Database, size: number) => Promise<void>;
   /** Indexes the read's statements take between them on Postgres, each one of them. */
   indexes?: string[];
+  /**
+   * Tables besides the logs that grow with the history `grow` makes, held as the logs are: what a summary of a log
+   * keeps (`log_read_newest`, T252), or a key's versions, which its restores add to.
+   */
+  also?: string[];
 };
 
 /**
@@ -135,12 +140,13 @@ export type Growth = {
  */
 export async function holdsFlat(owner: Database, read: Growth): Promise<void> {
   const measured: { text: string; values: unknown[]; pages: number; indexes: string[]; plan: string[] }[][] = [];
+  const held = [...LOGS, ...(read.also ?? [])];
   for (const size of [SMALL, LARGE]) {
     await emptyLogs(owner);
     await read.grow(owner, size);
-    if (TEST_ENGINE === 'postgres') for (const table of LOGS) await rowsOf(owner, sql.raw(`VACUUM (ANALYZE, PARALLEL 0) ${table}`));
+    if (TEST_ENGINE === 'postgres') for (const table of held) await rowsOf(owner, sql.raw(`VACUUM (ANALYZE, PARALLEL 0) ${table}`));
     else await rowsOf(owner, sql`ANALYZE`);
-    const statements = await sent((app) => read.ask(app, size));
+    const statements = await sent((app) => read.ask(app, size), held);
     assert.ok(statements.length > 0, 'the read asked a log');
     measured.push(await Promise.all(statements.map(async (statement) => ({ text: statement.text, values: statement.values, ...(await measure(owner, statement)) }))));
   }
@@ -150,7 +156,10 @@ export async function holdsFlat(owner: Database, read: Growth): Promise<void> {
     const text = at.text.replace(/\s+/g, ' ');
     const said = JSON.stringify({ statement: text.length > 600 ? `${text.slice(0, 300)} … ${text.slice(-300)}` : text, values: small[i]!.values, pages: [small[i]!.pages, at.pages], plan: at.plan }, (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value));
     if (TEST_ENGINE !== 'postgres') {
-      assert.deepEqual(at.plan.filter((line) => new RegExp(`^SCAN (${LOGS.join('|')})\\b`).test(line)), [], `scans no log whole: ${said}`);
+      // SQLite's plan names a table by the statement's name for it (`SCAN r` for `log_reads r`): each such name too.
+      const names = [...held, ...held.flatMap((table) => [...at.text.matchAll(new RegExp(`\\b${table}\\s+(?:AS\\s+)?(\\w+)`, 'gi'))].map((match) => match[1]!))]
+        .filter((name) => !/^(?:WHERE|JOIN|LEFT|INNER|CROSS|ON|USING|GROUP|ORDER|LIMIT|UNION|SET|VALUES|WITH|AS|SELECT|FROM|INDEXED|NOT)$/i.test(name));
+      assert.deepEqual(at.plan.filter((line) => new RegExp(`^SCAN (${names.join('|')})\\b`).test(line)), [], `scans no log whole: ${said}`);
       continue;
     }
     assert.ok(!(at.pages >= 2 * small[i]!.pages && at.pages - small[i]!.pages >= 8), `reads as many pages ${LARGE.toLocaleString('en')} entries in as ${SMALL.toLocaleString('en')}: ${said}`);

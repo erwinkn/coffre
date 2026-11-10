@@ -192,18 +192,6 @@ export function changesOf(db: Queryable | Engine, alias: string, object: SQLWrap
 }
 
 /**
- * The version a restore made (its metadata's `version`, a number): text on
- * Postgres, an integer on SQLite, null for metadata that holds none. What a
- * report follows a value back by, from a key's current version
- * (`restoresBack`, which T252 replaces).
- */
-export function restoreMade(engine: Engine, metadata: SQLWrapper): SQL<string | number | null> {
-  return engine === 'postgres'
-    ? sql`(CASE WHEN jsonb_typeof(${metadata}::jsonb -> 'version') = 'number' THEN ${metadata}::jsonb ->> 'version' END)`
-    : sql`(CASE WHEN json_type(${metadata}, '$.version') = 'integer' THEN json_extract(${metadata}, '$.version') END)`;
-}
-
-/**
  * The change a tamper report names (its metadata's `change`, a string): a
  * report of 0.15's log, which stands while that change is its member's
  * newest; null for 0.14's, which name none. As `audit_log_tamper_idx` keys
