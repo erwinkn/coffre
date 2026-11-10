@@ -3074,7 +3074,11 @@ fire it. Nothing here needs a new limit.
 - The sidecar drops a `coffre-pass-x-forwarded-for` the app sent, on
   every credential. That includes the transition where its plan, still
   stale, says unmarked while the server has just marked the credential:
-  the upstream sees the backend's own address, not the forged one.
+  the upstream sees no forged address and no caller-address header at
+  all (coffre drops plain `X-Forwarded-*`, `Forwarded`, `X-Real-IP`,
+  `True-Client-IP` and `CF-*`, `credential-proxy.ts:417-419` and
+  `:2675`); the test leaves the transport's own peer address
+  unspecified.
 - A rollback, against 0.16's own verifier (`parseProof()` and the
   session check as the last release before 0.17 ships them, not a stand-in): a 0.17
   sidecar under a stale plan that still marks the credential signs
