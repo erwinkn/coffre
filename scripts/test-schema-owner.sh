@@ -231,7 +231,8 @@ DECLARE
 BEGIN
     -- Every function that runs as its owner and reads a table the member made after 0062, `passkeys` (0063) and T178's
     -- `policy` and `roles` (0081), itself or through a helper that runs as its caller, read from their bodies.
-    WITH made(tbl) AS (VALUES ('passkeys'), ('policy'), ('roles')),
+    -- Those there yet: 0081's come with coffre's migrator, after the check at 0073.
+    WITH made(tbl) AS (SELECT t FROM (VALUES ('passkeys'), ('policy'), ('roles')) AS v(t) WHERE to_regclass('public.' || t) IS NOT NULL),
     helpers AS (
         SELECT proname, prosrc FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND NOT prosecdef
     )
@@ -245,7 +246,7 @@ BEGIN
        AND NOT has_table_privilege(p.proowner, 'public.' || m.tbl, 'SELECT');
     IF v_missing IS NOT NULL THEN RAISE EXCEPTION '%', v_missing; END IF;
     -- And each one that writes them (`change_input`), what it writes.
-    WITH made(tbl) AS (VALUES ('policy'), ('roles')),
+    WITH made(tbl) AS (SELECT t FROM (VALUES ('policy'), ('roles')) AS v(t) WHERE to_regclass('public.' || t) IS NOT NULL),
     writes(privilege, pattern) AS (VALUES ('INSERT', 'INSERT INTO public\.'), ('UPDATE', 'UPDATE public\.'), ('DELETE', 'DELETE FROM public\.'))
     SELECT string_agg(format('%s, running as %s, cannot %s %s', p.oid::regprocedure, pg_get_userbyid(p.proowner), w.privilege, m.tbl), E';\n')
       INTO v_missing
