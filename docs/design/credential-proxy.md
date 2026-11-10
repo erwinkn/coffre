@@ -2439,7 +2439,7 @@ server. Sections 10.2 to 10.4 give the rules these rows rely on:
 | A 0.16 vault, a 0.17 app | the save is refused `503 deploying` before the vault reads it: app and vault answer only the same release (`versioned`, `packages/core/src/vault-entry.ts:138`). A 0.16 vault on its own would also refuse the field, `no field "passthrough"` (`only()`, `proxy.ts:143`) | yes: nothing saved |
 | A 0.16 app isolate, a 0.17 item | it can reach the item only through a vault of its own release, so not once the vault runs 0.17. If it had read it, it would ignore the field and serve an ordinary route: `Set-Cookie` dropped, off-upstream redirects 502 | yes, closed: Clerk fails for the minutes of the deploy |
 | A 0.17 sidecar, a 0.16 server (or a rollback to one) | the plan names no passthrough credential, so the sidecar wraps nothing and signs no `pass` claim. Within R of a rollback, a stale plan still marks one: the sidecar wraps that credential's requests and signs `"pass": true`, a claim 0.16 does not know. 0.16 refuses any claim it does not know, so it answers 401 `invalid_dpop_proof` (`malformed`) before it reads the session or calls the upstream (`CLAIMS` and `parseProof()`, `packages/core/src/identity/dpop.ts:83` and `:124`, called at `packages/server/src/workload-sessions.ts:253`) | yes, closed: that credential's requests fail until the plan is next read, within R; the others are unaffected |
-| A 0.16 sidecar, a 0.17 server | the old sidecar forwards any `coffre-pass-*` the app copied from a browser, signed. Its proof has no `pass` claim, so coffre drops them all (section 10.2, step 5) | yes: passthrough is off for that sidecar until it is upgraded |
+| A 0.16 sidecar, a 0.17 server | the old sidecar forwards any `coffre-pass-*` the app copied from a browser, signed. Its proof has no `pass` claim, so coffre drops them all (section 10.2, step 5), and answers 400 to a name off the list (step 2), which only a browser that wrote it gets | yes: passthrough is off for that sidecar until it is upgraded |
 | An app calling `unwrap`, a 0.16 server | 0.16 passes an upstream's own `coffre-proxy` header, so the credential's upstream could forge the envelope. That upstream is the one the app treats as passthrough (it calls `unwrap` only on that route), and the envelope gives it nothing a 0.17 server would not: every header the app gets back passes through the app's own checks (section 10.5) | yes, given that rule: `unwrap` is never applied to an answer from another credential |
 
 ### 10.2 Requests: `coffre-pass-<name>`
@@ -2456,41 +2456,59 @@ On a passthrough credential:
    header the caller wrote on purpose, under a name no browser or CDN
    writes, may stand in for the end user.
 2. Each `coffre-pass-<name>: <value>` goes on as `<name>: <value>`,
-   replacing a plain header of the same name. No list says which names
-   may pass: ordinary headers (`Clerk-Proxy-Url`, `Origin`,
-   `User-Agent`) already pass plain, so the prefix is needed only for the
-   few `sent()` drops as naming the caller. The exception is a short list
-   of names that would break or forge the hop itself: `host`, `connection`,
-   `keep-alive`, `proxy-connection`, `proxy-authorization`, `te`,
-   `trailer`, `transfer-encoding`, `upgrade`, `content-length`, `expect`,
-   `cdn-loop` (Cloudflare's loop detection), `x-coffre-handle`, `cf-*` and
-   `coffre-*`. Wrapped, any of them is a 400 naming it: an app that wraps
-   `Host` has a bug it should see.
+   replacing a plain header of the same name, for a short list of names:
+   `cookie`, `authorization`, `forwarded`, `x-forwarded-*`, `x-real-ip`
+   and `true-client-ip`. These are exactly the names that some hop between the
+   app and the upstream drops or replaces (`sent()` drops all of them but
+   `authorization`, which a session replaces with its own), and exactly
+   what `wrap` renames (section 10.4); a test holds the server's list and
+   the client's equal. Every other header (`Clerk-Proxy-Url`, `Origin`,
+   `User-Agent`) already passes plain, so wrapping it gains nothing, and a
+   wrapped header that one of coffre's checks reads would split the
+   request in two: what coffre checked, and what the upstream gets (step
+   4). A request carrying any other `coffre-pass-<name>` is a 400 naming
+   it, at the door: before the handle is found, the body read or the
+   proof checked, on every credential, marked or not, whoever the caller
+   is. The check reads only the request's header names, so it answers the
+   same on a UI route whose item is not known yet. An app that wraps
+   `Host` or `Content-Type` has a bug it should see.
 3. The credential's rules then set what they set (`send()`,
    `credential-proxy.ts:3074`), replacing whatever the caller sent under
    that name, plain or wrapped. `coffre-pass-clerk-secret-key: x` reaches
    Clerk as the real key, once.
-4. Every check reads one set of headers: what goes upstream, computed
-   once, before the first check. That is `outbound()`
-   (`credential-proxy.ts:2462`): the proof's filter (step 5), then the
-   unwrap. Today the two session paths check the body first and call
-   `outbound()` after (`fieldsIn()` at `:2773`, `outbound()` at `:2779`;
-   `:2900` and `:2905`), and `fieldsIn()` asks `bodyKind()` (`:3607`),
-   which reads `Content-Type` and `Content-Encoding` from the request
-   itself. Left that way, a JSON-rule credential would refuse a request
-   whose `coffre-pass-content-type: application/json` is what the
-   upstream gets, 415, because the plain type is another. And a wrapped
-   `coffre-pass-content-encoding: gzip` over no plain encoding would pass
-   the check that refuses a compressed body, while the upstream reads the
-   body as gzip. So `outbound()` moves before the body checks on both
-   paths, and `fieldsIn()`, `bodyKind()` and the UI routes' handle scan
-   (`uiHandle()`, `:841`, whose body scan picks its decoding by
-   `bodyKind()`, `:849`) take its headers, not the request. The move
-   closes a gap today's code has too: a session's plain `Content-Type`
-   that the proof does not sign is what `fieldsIn()` reads, and
-   `outbound()` then drops it. With one set of headers, the method override check (`overridden()`, `:2429`) sees `X-HTTP-Method-Override`,
-   not `coffre-pass-x-http-method-override`: a wrapped `DELETE` is refused
-   as a plain one is. The leak check (`:3133`) sees `Cookie`, not
+4. Every check reads the request as it does today, because no name a
+   check reads can be wrapped (step 2). Those names are:
+   - `Content-Type` and `Content-Encoding`, by which `bodyKind()`
+     (`credential-proxy.ts:3607`) decodes a body for the field rules
+     (`fieldsIn()`) and for the UI routes' handle scan (`uiHandle()`,
+     `:841`);
+   - `Content-Length`, `Content-Digest` and `x-amz-content-sha256`, which
+     decide whether a body streams and hold its bytes to its digest
+     (`carriedAs()`, `:2496`), choose the body's line in the proof (`bodyLine`,
+     which `@coffre/client/workload` computes from the same headers,
+     `packages/client/src/workload.ts:429`), and must be signed under their
+     own names (`hdr`, `:2767` and `:2846`);
+   - `x-coffre-handle`, and `X-HTTP-Method-Override` (`overridden()`,
+     `:2429`).
+
+   Each of them reaches the upstream as the header coffre checked, or not
+   at all. Rounds 2 and 3 of this design's review showed what a wrapped
+   one would break. A JSON-rule credential would refuse
+   `coffre-pass-content-type: application/json` over a plain `text/plain`
+   with a 415, though the upstream reads the body as JSON.
+   `coffre-pass-content-encoding: gzip` would pass the check that refuses
+   a compressed body. `coffre-pass-content-digest` would replace the
+   digest coffre held the bytes to with one nobody checked. And a UI route
+   would have to decide whether to unwrap before it has found the handle
+   that names its item, so before it knows the item's mark. With the list,
+   none of this needs an order: `outbound()` (`:2462`) unwraps where it
+   runs today, after the body checks, and touches no name they read. A
+   wrapped `DELETE` override is a 400 at the door, like any name off the
+   list. (One gap today's code has, apart from passthrough: through a
+   session, `fieldsIn()` reads a plain `Content-Type` the proof does not
+   sign, which `outbound()` then drops. It deserves its own fix.)
+
+   The leak check (`:3133`) sees `Cookie`, not
    `coffre-pass-cookie`, but it checks only for what authenticated the
    caller, and passthrough does not widen that. For a handle caller, any
    string shaped like a handle, wrapped or plain, is a 400 (`secret`,
@@ -2692,9 +2710,10 @@ section 10.1), and unwraps only answers it can tell are coffre's:
 
 Why the plan, and why the `jti`. A sidecar is often newer than its server,
 and a server can be rolled back under it. A 0.17 sidecar that wrapped
-every request for a 0.16 server would turn the app's cookies into
-`coffre-pass-cookie`, which 0.16 forwards as an ordinary header to every
-upstream. The plan stops that: a 0.16 server marks nothing. Wrapping
+every request regardless of the plan would sign `"pass": true` on each
+of them, which a 0.16 server refuses (section 10.1's table), so every
+credential behind it would answer 401. The plan stops that: a 0.16
+server marks nothing, so the sidecar wraps nothing and signs no `pass`. Wrapping
 by mistake is otherwise harmless, since a 0.17 server drops `coffre-pass-*`
 on an unmarked credential. Unwrapping by mistake is not, so it does not
 rest on the plan: it waits for a marker no upstream can write. The plan
@@ -2974,9 +2993,14 @@ fire it. Nothing here needs a new limit.
   `coffre-upstream-set-cookie-0` and does not become a cookie.
 - Injected headers beat the caller's: `coffre-pass-clerk-secret-key` and
   a plain `clerk-secret-key` both reach the upstream as the real key, once.
-- A wrapped hop header (`coffre-pass-host`, `-content-length`,
-  `-transfer-encoding`, `-x-coffre-handle`, `-cf-connecting-ip`) is a 400
-  naming it.
+- A wrapped name off the list (`coffre-pass-host`, `-content-length`,
+  `-content-type`, `-content-encoding`, `-content-digest`,
+  `-x-amz-content-sha256`, `-x-coffre-handle`,
+  `-x-http-method-override`, `-cf-connecting-ip`) is a 400 naming it,
+  before the body is read, on a marked credential and an unmarked one,
+  on a code route and a cold UI route (no copy of its item kept), through
+  a binding, a session and a handle. On the UI route the vault is not
+  asked. The server's list and `wrap`'s are equal.
 - The leak check, per caller, as section 10.2 states it: a handle's
   shape inside a wrapped header is a 400 for a handle caller; the
   session's own token inside one is a 400 for a session; a binding's
@@ -3024,15 +3048,14 @@ fire it. Nothing here needs a new limit.
   passthrough` and `coffre-set-cookie-0`, with and without a guessed
   `jti`. The sidecar leaves the answer alone. A 0.16 sidecar's forwarded
   `coffre-pass-*` reaches no upstream of a 0.17 server.
-- Wrapped body headers, on a code route and a UI route, through a
-  session and a handle. On a JSON-rule passthrough credential, a wrapped
-  `coffre-pass-content-type: application/json` over a plain `text/plain`
-  has its field found and filled, not a 415. A wrapped
-  `coffre-pass-content-encoding: gzip` over no plain encoding is a 415,
-  as a plain one is. A UI route's handle scan reads a form-encoded handle
-  (`coffre%5Fuse_…`) under a wrapped form type. Through a session, a plain
-  `Content-Type` the proof does not sign is not what the field check
-  reads.
+- The body checks read the headers coffre forwards: on a JSON-rule
+  passthrough credential with a wrapped `Cookie`, the field is found
+  and filled by the plain `Content-Type`, which reaches the upstream
+  unchanged. A 2 MiB body with a plain `Content-Digest` streams through
+  both topologies, checked against that digest. A UI route's handle,
+  form-encoded in the body (`coffre%5Fuse_…`), is found beside a wrapped
+  `Cookie`, and a UI route whose mark changes between two requests
+  answers each by the mark of the item the vault decided for it.
 - The sidecar's answer order: an upstream's own `DPoP-Nonce` reaches the
   app; coffre's does not; an upstream's `Location` that points at
   coffre's `/use/` comes back unchanged, not rewritten onto the listener.
@@ -3066,7 +3089,7 @@ AAD and the chain verifier, none of which changes.
 
 | PR | What |
 |---|---|
-| A | `passthrough` on `Credential` and `ProxyRoute` (canonical only when true; refused beside `sigv4`), the request unwrap in `outbound()` (a session's only under `"pass": true`), moved before the body checks, which read its headers, the envelope in `redacted()` (the marker's `jti` on a session's answer), `coffre-pass-*` and an upstream's `coffre-proxy` dropped everywhere else, the plan's `passthrough` list, the tests above but the sidecar's, conformance |
+| A | `passthrough` on `Credential` and `ProxyRoute` (canonical only when true; refused beside `sigv4`), the request unwrap in `outbound()` (the list's names only, a session's only under `"pass": true`), the door's 400 for a name off the list, the envelope in `redacted()` (the marker's `jti` on a session's answer), `coffre-pass-*` and an upstream's `coffre-proxy` dropped everywhere else, the plan's `passthrough` list, the tests above but the sidecar's, conformance |
 | B | `@coffre/client/passthrough`: `wrap`, `unwrap`, and the session fetch's `pass` claim for a request `wrap` made |
 | C | `coffre serve`: drops the app's `coffre-*` always, wraps by the plan with `pass`, unwraps by the `jti` |
 | D | The Proxy tab's toggle and its line in the save's review |
