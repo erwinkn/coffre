@@ -20,7 +20,7 @@ import { objectKey, roleObject, roleRef, sealKey, sealOf, type Input, type Op, t
 import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
-import { newRequestId } from '../src/use.ts';
+import { newRequestId, UseCache, useLimits, type UsePath } from '../src/use.ts';
 import { emptyReads, ENGINE, projectSlug, rows, run, type TestDatabase } from './database.ts';
 import { freshKeyId } from './window-fixture.ts';
 
@@ -79,6 +79,24 @@ export const LOG_015: VaultOptions = {
 
 /** The cutover's change this fixture stands in for, by its number (`cutOverStandIn`). */
 let cutoverNumber: bigint | null = null;
+
+/**
+ * An isolate's use path whose statements Postgres gives up on (`code`: its lock_timeout, 55P03, or its
+ * statement_timeout, 57014) from the `after`-th on, the ones before sent as usual: `raced` answers `late` at once,
+ * before the deadline. Its cache is its own, throttle on (config.md, Q1, step 2); `batch`, the keys a statement reads.
+ */
+export function timingOut(code: string, after = 0, batch?: number): UsePath {
+  return failing(Object.assign(new Error('canceling statement'), { code }), after, batch);
+}
+
+/** A hot path whose statements fail with `error` once `after` of them are sent, `batch` keys to a statement. */
+export function failing(error: Error, after = 0, batch?: number): UsePath {
+  let sent = 0;
+  return {
+    db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits(batch === undefined ? {} : { batch })),
+    ready: () => (sent++ < after ? Promise.resolve() : Promise.reject(error)),
+  };
+}
 
 /**
  * A key service that holds every unwrap until `free`, counting those waiting there; `failing`, the first one asked

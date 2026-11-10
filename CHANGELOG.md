@@ -66,6 +66,25 @@
   - Workers Free is best effort: its 10 ms of CPU is below the 20 ms
     coffre's bounds are sized for, so a request at a bound may be ended by
     Cloudflare; `deploy.md` says which.
+- **An isolate refuses part of its `/use` calls at once while it answers
+  fewer than two in three in time (W363; docs/design/config.md, Q1,
+  step 2).** Adaptive throttling, from Google's SRE book: each isolate or
+  process counts, over the last 6 s (two use deadlines), the uses it
+  answered or refused and those it answered before their deadline (a
+  connection the database refused counts as not in time, however fast),
+  and refuses a new use with 503 `overloaded`, before any statement or
+  place, at the rate max(0, (requests − 1.5 × accepts) ÷ (requests + 1)).
+  At 2,500 uses a second against a database that answers 1,040, about 38%
+  are refused at once and a third of the excess still answers `late`; a
+  model of that burst predicts full service again about 10 s after the load
+  drops to 500 a second (about 17 s at 50), which a second Cloudflare run
+  is to confirm. The book's
+  K = 2 and two minutes let half such a burst go `late` and kept refusing
+  a light load for minutes after, on Cloudflare. A use counts once
+  answered, so a cold isolate's burst never refuses itself, and the
+  refusals are spread at that rate, one in five at p = 1/5, not drawn at
+  random.
+
 - **An isolate refuses `/use` only past the keys it can carry, 1,250, not
   past 10 calls (W363; docs/design/config.md, Q1, step 1).** The vault
   refused an isolate's or process's 11th use in flight with 503

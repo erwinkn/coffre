@@ -18,12 +18,12 @@ import { applyOp, itemDigest, objectKey, ROLES_REF, type Input, type Op, type Pr
 import { purposeCode, replayStored } from '../src/log-replay.ts';
 import { callRoute as postgresRoute, callRouteNamed as postgresNamed } from '../src/use.postgres.ts';
 import { callRoute as sqliteRoute, callRouteNamed as sqliteNamed } from '../src/use.sqlite.ts';
-import type { Names, RouteCall, UseCall } from '../src/use.ts';
+import { useRoute, type Names, type RouteCall, type UseCall } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
 import { deletesSettled, horizonHeld, weigh, weighingSession, WORLD_TABLES, type HotCall } from '../../../scripts/matrix-weigh.ts';
-import { change, CONFIG, emptyLog, heldKeks, isolate, LOG_015, seal, SIGNING_KEY, until, useDatabases } from './use-world.ts';
+import { change, CONFIG, emptyLog, heldKeks, isolate, LOG_015, seal, SIGNING_KEY, timingOut, until, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
 let hot: Database;
@@ -146,6 +146,21 @@ test('a route use takes a place in admission for each of its keys while they ope
   held.free();
   assert.deepEqual(values(await first), { [nameA]: 'access-key', [nameB]: 'secret-key' });
   assert.equal(cache.inFlight, 0);
+});
+
+test("a route use whose keys' second statement Postgres gave up on, before its deadline, counts as late to the throttle: answered as the route's own busy, never inside a route's answer (config.md, Q1, step 2; Sol's review r2 of #554)", async () => {
+  const w = await routeWorld(db);
+  const [nameA, nameB] = [await w.nameOf(await w.key('access-key')), await w.nameOf(await w.key('secret-key'))];
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ s3: { definition: route('s3', [nameA, nameB]), editor: ada } });
+  for (const code of ['55P03', '57014']) {
+    // One key a statement: the first reads the route and its first key, the second the other key.
+    const path = timingOut(code, 1, 1);
+    const asked = { ...w.askRoute('s3'), ...now() };
+    assert.deepEqual(await useRoute(path, asked), { served: true, route: 'busy', outcome: { ok: false, busy: 'late', retryAfter: 1 } }, code);
+    assert.ok(Date.now() < asked.deadline, 'answered well before its deadline');
+    assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 2, `${code}: one answered, none in time`);
+  }
 });
 
 test("T216: a person's credential no passkey stands behind, presented as a handle's, is refused at its gate as the policy says, cold and warm, a route of one key and of two: nothing used, nothing logged (review r4 of #528; docs/design/passkeys.md, section 6.2)", async () => {

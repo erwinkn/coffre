@@ -31,7 +31,7 @@ import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, useMany,
 import { openVault, prepareVault } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, postgresOnly, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
-import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, heldKeks, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, until, useDatabases, world } from './use-world.ts';
+import { ask, change, CONFIG, DAY, emptyLog, failing, FENCE, genesis, heldKeks, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, timingOut, until, useDatabases, world } from './use-world.ts';
 import { resolveVaultConfig } from '../src/config.ts';
 
 let db: TestDatabase;
@@ -761,6 +761,10 @@ test("a call that never settles, as a Workers call whose request ended, gives it
   assert.equal(workers.readies(), 1, 'the call refused asked nothing');
   await sleep(at + 3_000 + HELD_PAST_DEADLINE_MS + 50 - Date.now());
   assert.equal(workers.path.cache.inFlight, 0, 'the place lapsed');
+  // Its two uses answered late or refused, its throttle refuses the next (p = 2/3, with the 1/2 the second owed); the
+  // one after, its place free, is served (config.md, Q1, step 2).
+  assert.deepEqual(await use(workers.path, ask(w, id)), { ok: false, busy: 'overloaded', retryAfter: 1 });
+  assert.equal(workers.readies(), 1, 'the throttle refused before anything was asked');
   assert.ok(heard(await use(workers.path, ask(w, id))).ok, 'the isolate serves again');
   // On Node a call's I/O is never torn down under it: it holds its place, as its pool's connection, until it settles.
   assert.equal(node.path.cache.inFlight, 1);
@@ -921,6 +925,75 @@ test('a key that fails to open answers the call at once, and its other keys keep
   assert.deepEqual(await use(held.path, ask(w, ids[0]!)), { ok: false, busy: 'overloaded', retryAfter: 1 });
   held.free();
   await until(() => held.path.cache.inFlight === 0);
+});
+
+test('an isolate that answered its uses late refuses part of the next at once, holding no place; one answering in time refuses none (config.md, Q1, step 2)', async () => {
+  const w = await world();
+  const id = await w.key('opened');
+  const { keks, free } = heldKeks();
+  const path: UsePath = { db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks, cache: new UseCache(useLimits()) };
+  const at = Date.now();
+  const late = use(path, ask(w, id, { at, deadline: at + 100 }));
+  await sleep(at + 150 - Date.now());
+  free();
+  assert.deepEqual(await late, { ok: false, busy: 'late', retryAfter: 1 });
+  assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 2, 'one answered, none in time');
+  // At p = 1/2, of the next two asked together one goes and one is refused; the one that went was in time.
+  const [first, second] = await Promise.all([use(path, ask(w, id)), use(path, ask(w, id))]);
+  assert.ok(heard(first).ok);
+  assert.deepEqual(second, { ok: false, busy: 'overloaded', retryAfter: 1 });
+  assert.equal(path.cache.throttle!.rate(Date.now()), 3 / 8, 'three answered, one in time: (3 - 1.5) / 4');
+  assert.equal(path.cache.inFlight, 0);
+  // Another isolate, its uses answered in time: nothing refused.
+  const fresh: UsePath = { ...path, cache: new UseCache(useLimits()) };
+  for (let i = 0; i < 3; i += 1) assert.ok(heard(await use(fresh, ask(w, id))).ok);
+  assert.equal(fresh.cache.throttle!.rate(Date.now()), 0);
+});
+
+test("a use Postgres gave up on before its deadline, its lock or its statement timed out, counts as late to the throttle (config.md, Q1, step 2; Sol's review r1 of #554)", async () => {
+  const w = await world();
+  const id = await w.key();
+  for (const code of ['55P03', '57014']) {
+    const path = timingOut(code);
+    const at = Date.now();
+    assert.deepEqual(await use(path, ask(w, id, { at, deadline: at + 3_000 })), { ok: false, busy: 'late', retryAfter: 1 }, code);
+    assert.ok(Date.now() < at + 3_000, 'answered well before its deadline');
+    assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 2, `${code}: one answered, none in time`);
+  }
+});
+
+test("a use whose connection the database refused at once counts as not in time to the throttle (config.md, Q1, step 2; Fable's review r4 of #554)", async () => {
+  const w = await world();
+  const id = await w.key();
+  const refusals = [
+    Object.assign(new Error('sorry, too many clients already'), { code: '53300' }),
+    new Error('Failed to acquire a connection from the pool'),
+  ];
+  for (const error of refusals) {
+    const path = failing(error);
+    const at = Date.now();
+    await assert.rejects(use(path, ask(w, id, { at, deadline: at + 3_000 })), (thrown) => thrown === error);
+    assert.ok(Date.now() < at + 3_000, 'failed well before its deadline');
+    assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 2, `${error.message}: one answered, none in time`);
+    assert.equal(path.cache.inFlight, 0);
+  }
+  // Any other failure at once is in time: it cost the database nothing.
+  const path = failing(new Error('a bug of the vault'));
+  await assert.rejects(use(path, ask(w, id)));
+  assert.equal(path.cache.throttle!.rate(Date.now()), 0);
+});
+
+test("a use already past its deadline when the vault reads it counts as not in time; one whose deadline is past the bound, bad input, counts as nothing (Fable's review r4 of #554)", async () => {
+  const w = await world();
+  const id = await w.key();
+  const path = timingOut('57014', 1_000);
+  const at = Date.now() - 3_000;
+  assert.deepEqual(await use(path, ask(w, id, { at, deadline: at + 2_000 })), { ok: false, busy: 'late', retryAfter: 1 });
+  assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 2);
+  const fresh = timingOut('57014', 1_000);
+  const now = Date.now();
+  assert.deepEqual(await use(fresh, ask(w, id, { at: now, deadline: now + 60_000 })), { ok: false, busy: 'late', retryAfter: 1 });
+  assert.equal(fresh.cache.throttle!.rate(Date.now()), 0);
 });
 
 test('before the policy is logged, a use does nothing', async () => {

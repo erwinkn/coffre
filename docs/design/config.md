@@ -618,26 +618,127 @@ most, which 50 ms would break.
 throttling (Google SRE book, "Handling Overload"). Each isolate counts, over
 a trailing window, the uses it was asked (`requests`) and those the vault
 answered in time (`accepts`), and refuses a new use with probability
-max(0, (requests − K × accepts) ÷ (requests + 1)). It has two numbers, both
-from the source: K = 2 and a 2-minute window. The window is how much history
-an isolate keeps, not how long an overload must last or how long refusals
-outlive it: the probability follows the ratio of requests to accepts in that
-window. K = 2 means nothing is refused until requests exceed twice the
-accepts. Two consequences, both from the formula: a cold isolate whose first
-use failed (1 request, 0 accepts) refuses the next with probability 1 ÷ 2;
-and successes after an overload bring the probability back to 0 while the
-failures are still in the window, once accepts are half the requests again.
-The probability stays below 1, so it never shuts and needs no reopening
-rule. A needs three numbers nobody has measured (window, percentile,
-reopening rate) and risks every isolate shutting at once. *Example:* 2,500
-uses a second offered against W208's ceiling of 1,040, for two minutes:
-300,000 requests, 124,800 accepts. A new use is refused with probability
-(300,000 − 2 × 124,800) ÷ 300,001 ≈ 17%. The rest of the excess still goes
-`late`, so K = 2 trades some lateness for fewer refusals while the vault
-still answers more than half of what it is asked. Either rule needs one run on Erwin's Cloudflare (R34, under $5, about
+max(0, (requests − K × accepts) ÷ (requests + 1)). It has two numbers. The
+book's are K = 2 and a 2-minute window; the first run on Cloudflare showed
+both wrong for this vault, and they are now K = 1.5 and 6 s, derived below.
+K = 1.5 means nothing is refused until requests exceed one and a half times
+the accepts. Two consequences, both from the formula: a cold isolate whose
+first use failed (1 request, 0 accepts) refuses the next with probability
+1 ÷ 2; and successes after an overload bring the probability back to 0 while
+the failures are still in the window, once accepts are two thirds of the
+requests again. The probability stays below 1, so it never shuts and needs
+no reopening rule. A needs three numbers nobody has measured (window,
+percentile, reopening rate) and risks every isolate shutting at once.
+*Example:* 2,500 uses a second offered against W208's ceiling of 1,040, for
+a window: 15,000 requests, 6,240 accepts. A new use is refused with
+probability (15,000 − 1.5 × 6,240) ÷ 15,001 ≈ 38%, about 940 a second; the
+1,560 let through are one and a half times what is answered, and the other
+520 still go `late`. Either rule needs one run on Erwin's Cloudflare (R34, under $5, about
 an hour) before it ships. Without that run, there is no step 2: the excess
 is answered `late` within 3 s, as W208 measured, and R44's "refused fast"
-waits.
+waits. The run came, and changed both numbers (below).
+
+Built (W363, B: `Throttle`, `packages/vault/src/throttle.ts`, consulted
+by every use entry before its place is taken), with two departures from
+the book, both about when and how it refuses, not how much:
+
+- **A use counts once its outcome is known**, refused, or settled in time
+  (before its deadline, whatever it answered or threw, but `late`) or not
+  (`late`, even one Postgres gave up on early, its lock or statement timed
+  out; an outage that waited it out; a connection the database refused, at
+  once or not: Postgres out of connections, Hyperdrive's pool with no slot
+  to give; a use already past its deadline when the vault reads it), never
+  on arrival. The book's client counts a request when it sends it,
+  which a cold isolate cannot afford: 200 uses in its first second at
+  80 ms each are 16 in flight, and the 17th would see 16 requests and no
+  accept, p = 16 ÷ 17. Counted on its outcome, an in-flight use is
+  neither, and a cold burst refuses nothing until a use has failed.
+- **Refusals are spread, not drawn.** Each use adds p to a credit and is
+  refused when the credit reaches 1. *Example:* at p = 1/5, the 5th, 10th,
+  15th… are refused. The same rate as a random draw, but a test or a
+  bench sees the same sequence each run.
+
+A use refused by admission (`overloaded`, its places taken) counts as a
+request, not an accept, as the throttle's own refusals do. A call counts
+once, whatever its keys.
+
+**The first run on Cloudflare, with the book's numbers** (W363, 2026-11-09,
+Erwin's account: a Postgres of its own behind a tunnel, Hyperdrive's hot
+pool 40, 2,500 uses a second for 2 minutes, then 500 a second; raw data
+with #554):
+
+| | ok a second in the burst | late | refused | after the burst, at 500 a second |
+|---|---|---|---|---|
+| Step 1 alone | 143 | 94% | 0 | full service within ~15 s |
+| Step 2, K = 2, 2 minutes | 716 | 47% | 24% | refused 55% of it the first minute, still 10% three minutes on |
+
+Both failures come from the same fact: the excess an isolate lets through
+here is not refused cheaply downstream, as the book's backends refuse it,
+but waits its whole deadline and answers `late`, holding its place and a
+hot connection for 3 s. So the numbers are this vault's, derived from that:
+
+- **The window is two deadlines, 6 s** (`2 × USE_DEADLINE_MS`). A use's
+  outcome is known at most one deadline after it is asked, a `late` one
+  exactly then. A window of one deadline would weigh each second's `late`
+  uses against the in-time answers of later asks; two weigh the asks whose
+  outcomes are in. The 6 s is nominal: the window is six buckets of a
+  second, so a count leaves it 5 to 6 s after it lands, by where in its
+  second it fell, and just after a bucket empties the asks with every
+  outcome in span about two seconds, not three. And it forgets: the
+  burst's last `late` uses settle one deadline after it ends, and leave the
+  window about one window later. Two minutes kept a two-minute burst's
+  refusals for two more.
+- **K is bounded on both sides, and nothing derives a point between.**
+  Under an overload an isolate lets through K times what it answers in time,
+  refuses the rest, and the K − 1 between goes `late`. *Above:* at the run's
+  2,500 a second against about 1,000 answered, the `late` ((K − 1) × 1,000)
+  outnumber the refused (2,500 − K × 1,000) from K = 1.75 up; K = 2 let
+  half the burst go late. *Below:* a refused use counts as a request, so
+  once the load drops what an isolate lets through grows each window by
+  roughly K (each lets through about K times what the last answered). That
+  is a large-count approximation, not a bound: windows overlap, so it can
+  grow faster (in the model below, at K = 1.5, from 52% let through to
+  100% within one window, 1.92 times), and the `+ 1` lets even K = 1
+  recover, at a trickle. It says why K must sit well above 1: near 1 the
+  refusals long outlive the overload. The model's recovery times are the
+  numbers: at K = 1.25 it takes 15 to 20 s after the run's burst, at 1.5,
+  9 to 12 s, step 1's ~15 s with room. K = 1.5 is that pick: it lets
+  through half again what was answered in time.
+
+The model: one isolate, the vault answering a fixed number in time each
+second and the rest it lets through `late` after 3 s; with, or without, the
+late ones wasting part of that capacity (fitted to step 1's collapse to 143).
+At 2,500 a second against 1,000:
+
+| K, window | ok a second | late | refused | back to full service at 500 a second |
+|---|---|---|---|---|
+| 2, 2 minutes (run 1) | 620 to 1,000 | 1,070 to 1,370 | 130 to 820 | over a minute |
+| 2, 6 s | 720 to 1,000 | 770 to 1,030 | 470 to 1,010 | 8 s |
+| 1.5, 6 s | 810 to 1,000 | 460 to 540 | 950 to 1,230 | 10 s |
+| 1.25, 6 s | 860 to 1,000 | 270 to 300 | 1,200 to 1,380 | 15 to 16 s |
+
+Recovery grows with the overload, by the log of its ratio: at K = 1.5, about
+15 s after 5 times the capacity and 20 s after 10 times. It also grows as
+the load after it shrinks, since fewer asks a second bring fewer in-time
+answers into the window: about 17 s when the run's burst drops to 50 a
+second, not 500. And between 1 and 1.5 times the capacity nothing is
+refused: that excess goes `late`, as without step 2, until the isolate
+answers fewer than two in three in time. In the steady state of an
+overload, K = 1.5 at 2.5 times the capacity refuses exactly two for each
+`late`; asks spread through each second, and outcomes settling as they
+come, land under that.
+
+`packages/vault/test/throttle.test.ts` holds one isolate to the run's
+shape, asks spread through each second, in-time answers settling 100 ms
+later and `late` ones 3 s later: during 2.5 times its capacity, most of the
+excess refused (about 10,700 refused to 5,800 `late`; K = 2 and two minutes
+give 4,700 to 11,800, and fail it); after it, half its capacity let through
+in full within two windows, 12 s (the model takes 9).
+
+The second run, with these numbers, is to pass three checks, written before
+it: at 500 a second, nothing refused or `late`; in the burst, clearly more
+than step 1's 143 ok a second, most of the excess refused rather than
+`late`; after it, full service again within about 15 s.
 
 ### Q2. Node pools, and processes beyond one
 

@@ -273,6 +273,11 @@ export type VaultOptions = {
    * connection closed by then (cloudflare.ts). Not a deployment's to set.
    */
   callsEndWithRequest?: boolean;
+  /**
+   * Whether the isolate's throttle refuses uses while fewer than two in three are answered in time (use.ts, `Throttle`). Always
+   * on but in a test about something else whose isolate answers uses `late` on purpose. Not a deployment's to set.
+   */
+  throttled?: boolean;
 };
 
 
@@ -294,7 +299,7 @@ export type PreparedVault = {
   logKey: LogKey;
   /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
-  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'sealing' | 'uses' | 'callsEndWithRequest'>> & { walks: Walks };
+  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'sealing' | 'uses' | 'callsEndWithRequest' | 'throttled'>> & { walks: Walks };
   /**
    * 0.15's log, when it is on: the keys its changes are sealed and MACed
    * with, from the vault's signing keys, and what each waits on to answer.
@@ -353,7 +358,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     cutover: false,
     marked: false,
     verifier: null,
-    uses: new UseCache(useLimits(options.uses), { callsEndWithRequest: options.callsEndWithRequest === true }),
+    uses: new UseCache(useLimits(options.uses), { callsEndWithRequest: options.callsEndWithRequest === true, throttled: options.throttled !== false }),
     verified: START,
     reported: new Set(),
     since: null,

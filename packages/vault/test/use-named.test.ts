@@ -618,7 +618,8 @@ test("past a grant's end, which no change records, the use is decided first, bef
 test('a read of ids left behind at its deadline keeps its place in admission until it settles (review r1 of #412)', postgresOnly('a table lock'), async () => {
   const w = await named();
   const name = await w.nameOf(await w.key());
-  const { vault } = await isolate({ uses: { inFlight: 1 } });
+  // Its throttle off: its first use is `late` on purpose, which would have it refuse a later one (config.md, Q1, step 2).
+  const { vault } = await isolate({ uses: { inFlight: 1 }, throttled: false });
   // The credentials table locked: the use's read of its names waits for it, past the request's deadline.
   const [first, second] = await holding(sql`LOCK TABLE credentials IN ACCESS EXCLUSIVE MODE`, async () => {
     const at = Date.now();

@@ -12,10 +12,11 @@ import { createDatabase, type Database } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
+import { useNamedMany } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { ENGINE, HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
 import { namedWorld } from './named-world.ts';
-import { CONFIG, emptyLog, heldKeks, isolate, LOG_015, onePeriod, until, useDatabases, world } from './use-world.ts';
+import { CONFIG, emptyLog, heldKeks, isolate, LOG_015, onePeriod, timingOut, until, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -167,6 +168,19 @@ test('every key the place holds takes a place in admission while its key opens, 
   held.free();
   assert.deepEqual(Object.values(values(await all)).sort(), ['x', 'y', 'z']);
   assert.equal(cache.inFlight, 0);
+});
+
+test("a batch past its gate whose keys' statement Postgres gave up on, before its deadline, counts as late to the throttle (config.md, Q1, step 2; Sol's review r2 of #554)", async () => {
+  const w = await named();
+  const names = [await w.nameOf(await w.key('x')), await w.nameOf(await w.key('y'))];
+  for (const code of ['55P03', '57014']) {
+    const path = timingOut(code, 1);
+    const at = Date.now();
+    const answer = await useNamedMany(path, many(w, names, { at, deadline: at + 3_000 }));
+    assert.deepEqual(byName(answer).outcome, { ok: false, busy: 'late', retryAfter: 1 }, code);
+    assert.ok(Date.now() < at + 3_000, 'answered well before its deadline');
+    assert.equal(path.cache.throttle!.rate(Date.now()), 1 / 2, `${code}: one answered, none in time`);
+  }
 });
 
 test('every key the place holds, listed by the vault, sorted by name', async () => {

@@ -9,7 +9,7 @@ import {
   type ProxyItemInput, type ProxyItemOutcome, type RouteFound, type RouteUseInput, type RouteUseOutcome, type UseBusy, type UseInput, type UseManyInput, type UseManyOutcome, type UseOutcome, type UsedValue,
 } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
-import { engineOf } from '@coffre/db/dialect';
+import { engineOf, isUnreachable } from '@coffre/db/dialect';
 
 import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
@@ -19,6 +19,7 @@ import { changeHolds, entryMac, MAC_BYTES, TAG_BYTES, type LogMacKey } from './l
 import { bindingObject, configObject, connectionObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { PURPOSES, purposeCode, WAYS } from './log-replay.ts';
 import { proxyServing, routeEditorRefusal, routeLookup, type RouteLevel } from './proxy.ts';
+import { Throttle } from './throttle.ts';
 import { callBatch as batchPostgres, callNamedBatch as namedPostgres, callRoute as routePostgres, callRouteNamed as routeNamedPostgres, callUse as callPostgres } from './use.postgres.ts';
 import { callBatch as batchSqlite, callNamedBatch as namedSqlite, callRoute as routeSqlite, callRouteNamed as routeNamedSqlite, callUse as callSqlite } from './use.sqlite.ts';
 
@@ -176,10 +177,16 @@ export class UseCache {
   readonly routeKeys = new Map<string, RouteKeys>();
   readonly limits: UseLimits;
   readonly max: number;
+  /**
+   * Refuses part of the uses asked while fewer than two in three are answered in time (`Throttle`; config.md, Q1, step 2), or
+   * null, off, in a test about something else (`VaultOptions.throttled`).
+   */
+  readonly throttle: Throttle | null;
 
-  constructor(limits: UseLimits, { max = 10_000, callsEndWithRequest = false }: { max?: number; callsEndWithRequest?: boolean } = {}) {
+  constructor(limits: UseLimits, { max = 10_000, callsEndWithRequest = false, throttled = true }: { max?: number; callsEndWithRequest?: boolean; throttled?: boolean } = {}) {
     this.limits = limits;
     this.max = max;
+    this.throttle = throttled ? new Throttle() : null;
     this.#lapses = callsEndWithRequest;
   }
 
@@ -527,19 +534,56 @@ const busyNamed = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served
 /**
  * `answer`, within the call's places in admission (`UseCache.admit`): `places`, one for each key it knows it uses, from
  * here until it has answered and nothing it started still runs (`Seat`). Refused at once, holding nothing, `late` past
- * its deadline, as the database would (deadline_max), or `overloaded` with the isolate's places taken (R44).
+ * its deadline, as the database would (deadline_max), or `overloaded`: by the isolate's throttle, while it answers
+ * fewer than two in three of its uses in time (`Throttle`), or with its places taken (R44). Each call counts toward the
+ * throttle once, whatever its keys.
  */
 async function seated<I extends { at: number; deadline: number }, T>(
   path: UsePath, input: I, places: number, busyAs: (outcome: Extract<UseOutcome, { busy: UseBusy }>) => T, answer: (path: UsePath, input: I) => Promise<T>,
 ): Promise<T> {
-  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busyAs(busy('late'));
+  const { throttle } = path.cache;
+  if (input.deadline > input.at + USE_DEADLINE_MS) return busyAs(busy('late'));
+  // Past its deadline before it is seated (on Node, a vault too busy to read its socket in time): asked, not in time.
+  if (Date.now() >= input.deadline) {
+    throttle?.answered(Date.now(), false);
+    return busyAs(busy('late'));
+  }
+  if (throttle?.refuses(Date.now())) return busyAs(busy('overloaded'));
   const seat = path.cache.admit(input.deadline, places);
-  if (seat === null) return busyAs(busy('overloaded'));
+  if (seat === null) {
+    throttle?.answered(Date.now(), false);
+    return busyAs(busy('overloaded'));
+  }
+  let answered: T | undefined;
+  let refused = false;
   try {
-    return await answer({ ...path, seat }, input);
+    answered = await answer({ ...path, seat }, input);
+    return answered;
+  } catch (error) {
+    refused = isUnreachable(error);
+    throw error;
   } finally {
+    // In time: settled before its deadline, whatever it answered or threw, but `late` or a connection refused. `late`
+    // is answered at the deadline, or before it when Postgres gave up for it (its lock_timeout, 1 s, or
+    // statement_timeout, 2 s: `raced`), or when the names it read moved under it, statement after statement (rare, and
+    // counted as any `late` is), as is an outage that waited it out. A connection refused at once (Postgres's 53300,
+    // Hyperdrive's pool with no slot to give: `isUnreachable`) is the database turning work away, the one failure the
+    // throttle is for however fast it came; any other that failed at once cost nothing to throttle, nor did bad input.
+    const now = Date.now();
+    throttle?.answered(now, now < input.deadline && !refused && !isLate(answered));
     seat.release();
   }
+}
+
+/**
+ * Whether a use path answered `late`: `{ busy: 'late' }`, or a named answer whose `outcome` is, whatever its route: the
+ * vault's own (`busyNamed`, `route: 'busy'`), or a named batch's or a route's past its gate (`route: 'name'`), a later
+ * statement timed out.
+ */
+function isLate(answer: unknown): boolean {
+  if (typeof answer !== 'object' || answer === null) return false;
+  const { busy, outcome } = answer as { busy?: unknown; outcome?: { busy?: unknown } };
+  return busy === 'late' || outcome?.busy === 'late';
 }
 
 /** One use, end to end (the module's comment says how): one place in admission. */
