@@ -5,6 +5,7 @@ import {
   DEK_BYTES,
   KekBadClaimError,
   KekCancelledError,
+  KekThrottledError,
   KekUnavailableError,
   type KeyOperation,
   type KekProvider,
@@ -176,7 +177,9 @@ export class AwsKmsKekProvider implements KekProvider {
    * One KMS call, tried up to three times while KMS throttles, fails on its
    * side or does not answer. Every failure but a ciphertext that does not
    * open is a `KekUnavailableError`, retried or not: a key KMS will not use
-   * or credentials it refuses say nothing about the claim either.
+   * or credentials it refuses say nothing about the claim either. One whose
+   * last try KMS throttled is a `KekThrottledError`: KMS is past its quota,
+   * which a vault's `/use` throttle counts as overload.
    */
   async #call(action: 'Encrypt' | 'Decrypt', request: object, operation?: KeyOperation): Promise<Record<string, string>> {
     const body = JSON.stringify(request);
@@ -205,7 +208,8 @@ export class AwsKmsKekProvider implements KekProvider {
           throw new KekBadClaimError(`KMS ${action}: ${answer.type}`);
         }
         if (!answer.retry || attempt === KMS_ATTEMPTS) {
-          throw new KekUnavailableError(`KMS ${action} failed${attempt > 1 ? ` ${attempt} times` : ''}: ${answer.failure}`, uncertain);
+          const failed = answer.throttled ? KekThrottledError : KekUnavailableError;
+          throw new failed(`KMS ${action} failed${attempt > 1 ? ` ${attempt} times` : ''}: ${answer.failure}`, uncertain);
         }
         // No pause that would end past the deadline: no attempt could start after it, so the call ends now, cancelled by
         // its deadline as it would be at it (`KekCancelledError`), rather than wait for it.
@@ -227,7 +231,7 @@ export class AwsKmsKekProvider implements KekProvider {
     credentials: AwsCredentials,
     signal?: AbortSignal,
     operation?: KeyOperation,
-  ): Promise<{ data: Record<string, string> } | { type: string; failure: string; retry: boolean; uncertain: boolean }> {
+  ): Promise<{ data: Record<string, string> } | { type: string; failure: string; retry: boolean; uncertain: boolean; throttled: boolean }> {
     const headers = signV4({
       method: 'POST',
       url: this.#url,
@@ -255,24 +259,31 @@ export class AwsKmsKekProvider implements KekProvider {
       });
       text = await response.text();
     } catch (error) {
-      return { type: 'network', failure: messageOf(error), retry: sent, uncertain: sent };
+      return { type: 'network', failure: messageOf(error), retry: sent, uncertain: sent, throttled: false };
     }
     const parsed = parse(text);
     if (response.ok) {
       const complete =
         parsed !== null && (action === 'Encrypt' ? typeof parsed.CiphertextBlob === 'string' : typeof parsed.Plaintext === 'string');
       if (complete) return { data: parsed as Record<string, string> };
-      return { type: 'malformed', failure: `KMS answered ${response.status} without a result`, retry: true, uncertain: true };
+      return { type: 'malformed', failure: `KMS answered ${response.status} without a result`, retry: true, uncertain: true, throttled: false };
     }
     // `__type` may carry a namespace (`com.amazonaws.kms#…`), the header a URL after `:`.
     const raw = response.headers.get('x-amzn-errortype') ?? (typeof parsed?.__type === 'string' ? parsed.__type : '');
     const type = raw.split(':')[0]!.split('#').pop() || `HTTP ${response.status}`;
     const message = parsed?.message ?? parsed?.Message;
+    // Turned away for load: `ThrottlingException`, the one error KMS documents for a request past its quota (its
+    // request-quotas page; Encrypt's and Decrypt's own errors name none), or a 429, which the AWS SDK classes as
+    // throttling too (@smithy's `isThrottlingError`). Not `LimitExceededException`, which the SDK also classes so: KMS
+    // answers it for resource quotas (grants, aliases, keys), and neither Encrypt nor Decrypt lists it. Nor a 5xx,
+    // KMS failing on its side, which the SDK classes as transient, not throttling.
+    const throttled = type === 'ThrottlingException' || response.status === 429;
     return {
       type,
       failure: `${type}${typeof message === 'string' ? `, ${message}` : ''}`,
       uncertain: false,
-      retry: response.status >= 500 || response.status === 429 || type === 'ThrottlingException',
+      retry: response.status >= 500 || throttled,
+      throttled,
     };
   }
 }

@@ -12,7 +12,7 @@ import { verifyEntries, type StoredEntry } from '@coffre/core/audit';
 import { decrypt } from '@coffre/core/envelope';
 import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog } from '@coffre/core/merkle';
 import { USE_DEADLINE_MS, type UseOutcome } from '@coffre/core/vault';
-import { awsKms, KMS_REQUEST_MAX_MS, type KeyOperation } from '@coffre/core/kek';
+import { awsKms, KekThrottledError, KekUnavailableError, KMS_REQUEST_MAX_MS, type KeyOperation } from '@coffre/core/kek';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
 import { newestAccess } from '@coffre/db/grants';
 import { appendEntries } from '@coffre/db/log';
@@ -981,6 +981,62 @@ test("a use whose connection the database refused at once counts as not in time 
   const path = failing(new Error('a bug of the vault'));
   await assert.rejects(use(path, ask(w, id)));
   assert.equal(path.cache.throttle!.rate(Date.now()), 0);
+});
+
+test("a use whose key KMS throttled, however fast, counts as not in time to the throttle; one KMS refused for credentials or config counts in time (T250; Sol's review r11 of #554)", async () => {
+  // AWS KMS that wraps, then answers every Decrypt at once as `failure` says. Throttled, each try is answered within
+  // a few ms and the call fails after its three, its pauses a second at most: well before its 3 s deadline.
+  const arn = 'arn:aws:kms:eu-west-3:123456789012:key/busy';
+  const w = await world();
+  type Failure = 'ThrottlingException' | 'AccessDeniedException' | 'DisabledException' | 'no credentials';
+  const kmsFailing = async (failure: Failure) => {
+    let decrypts = 0;
+    let wrapped = false;
+    const kms = awsKms({
+      keyArn: arn,
+      credentials: async () => {
+        if (wrapped && failure === 'no credentials') throw new Error('no instance role');
+        return { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'secret' };
+      },
+      fetch: async (_input, init) => {
+        if (new Headers(init?.headers).get('x-amz-target') === 'TrentService.Encrypt') return Response.json({ CiphertextBlob: randomBytes(48).toString('base64'), KeyId: arn });
+        decrypts += 1;
+        return Response.json({ __type: failure, message: 'fake' }, { status: failure === 'AccessDeniedException' ? 403 : 400 });
+      },
+    });
+    const config = resolveVaultConfig({ kek: kms, previousKeks: [KEK], signingKey: SIGNING_KEY.toString('base64'), owners: ['root@acme.example'] });
+    const id = await w.key(failure, false, w.dev, null, config.keks);
+    wrapped = true;
+    const { use, cache } = await isolate({}, config);
+    const failed = async () => {
+      const input = ask(w, id);
+      const error = await use(input).then((outcome) => assert.fail(`answered ${JSON.stringify(outcome)}`), (thrown: unknown) => thrown);
+      assert.ok(Date.now() < input.deadline - 1_000, 'failed well before its deadline');
+      assert.ok(error instanceof KekUnavailableError, String(error));
+      return error;
+    };
+    return { use: () => use(ask(w, id)), failed, rate: () => cache.throttle!.rate(Date.now()), decrypts: () => decrypts };
+  };
+
+  // Throttled: each use counts as not in time, as a `late` would, and the third is refused at once, KMS not asked.
+  const busy = await kmsFailing('ThrottlingException');
+  for (const p of [1 / 2, 2 / 3]) {
+    const error = await busy.failed();
+    assert.ok(error instanceof KekThrottledError, String(error));
+    assert.match((error as Error).message, /^KMS Decrypt failed 3 times: ThrottlingException, fake$/);
+    assert.equal(busy.rate(), p);
+  }
+  const asked = busy.decrypts();
+  assert.deepEqual(await busy.use(), { ok: false, busy: 'overloaded', retryAfter: 1 });
+  assert.equal(busy.decrypts(), asked, 'refused before KMS was asked');
+
+  // Credentials refused or missing, a key disabled: as fast, as often, and nothing refused; KMS asked each time.
+  for (const failure of ['AccessDeniedException', 'DisabledException', 'no credentials'] as const) {
+    const refusing = await kmsFailing(failure);
+    for (let i = 0; i < 3; i += 1) assert.ok(!((await refusing.failed()) instanceof KekThrottledError), failure);
+    assert.equal(refusing.rate(), 0, failure);
+    assert.equal(refusing.decrypts(), failure === 'no credentials' ? 0 : 3, failure);
+  }
 });
 
 test("a use already past its deadline when the vault reads it counts as not in time; one whose deadline is past the bound, bad input, counts as nothing (Fable's review r4 of #554)", async () => {

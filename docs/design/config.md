@@ -647,7 +647,10 @@ the book, both about when and how it refuses, not how much:
   (`late`, even one Postgres gave up on early, its lock or statement timed
   out; an outage that waited it out; a connection the database refused, at
   once or not: Postgres out of connections, Hyperdrive's pool with no slot
-  to give; a use already past its deadline when the vault reads it), never
+  to give; a key KMS throttled to its last try, `ThrottlingException` past
+  the account's quota, which fails a use within a second or so, but not KMS
+  refusing coffre's credentials or a disabled key, which no load causes; a
+  use already past its deadline when the vault reads it), never
   on arrival. The book's client counts a request when it sends it,
   which a cold isolate cannot afford: 200 uses in its first second at
   80 ms each are 16 in flight, and the 17th would see 16 requests and no

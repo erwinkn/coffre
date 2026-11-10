@@ -32,7 +32,8 @@ export type KeyOperation = { deadline: number; signal: AbortSignal };
  * context (`aws-kms.ts`). Scaleway's Audit Trail does not log Key Manager
  * Decrypt at all, which is why AWS came first.
  *
- * `unwrap` throws `KekUnavailableError` when the service cannot answer, and
+ * `unwrap` throws `KekUnavailableError` when the service cannot answer
+ * (`KekThrottledError` when it turned the call away for load), and
  * `KekBadClaimError` when the wrapped DEK does not open under `ctx`. Other
  * errors are unexpected faults; the vault records them and fails the call.
  */
@@ -71,6 +72,16 @@ export class KekCancelledError extends KekUnavailableError {
   constructor(uncertain = false) {
     super('key operation was cancelled', uncertain);
   }
+}
+
+/**
+ * The key service turned the call away for load: its last try was throttled (AWS KMS's `ThrottlingException`, past
+ * the account's request quota). Still unavailable to every caller, and answered as any outage is; only a vault's own
+ * `/use` throttle reads the difference, counting it as overload, not as answered in time (config.md, Q1, step 2).
+ * Credentials refused, a key disabled or KMS failing on its side are no such reason.
+ */
+export class KekThrottledError extends KekUnavailableError {
+  override readonly name = 'KekThrottledError';
 }
 
 /** The ciphertext does not open under the claimed key and context. */
