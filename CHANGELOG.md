@@ -111,16 +111,11 @@
   entries (`HIDDEN_COUNTED`) and says `hiddenMore` when there were more,
   where it counted every heartbeat a page with nothing older held, or
   walked past every one its filter did not match; an offboarding report's
-  reads a step for each key and version a member read, a day at a time
-  (797 pages at 30,000 reads), and their activity in 0.14's log their own
-  reads and writes, then the restores its current values come from, each
-  key's walked back from its current version a restore a step (where every
-  restore of a key the member saw was read, and an owner putting version 1
-  back again and again made them many), a restore's numbers read as whole
-  numbers however spelt (`5.0` is 5, which Postgres's jsonb and SQLite each
-  read otherwise); two of the report's still grow with what one member did,
-  T252's: a probe of each day they read on, and a step of each restore in a
-  chain of restores of restores; the
+  activity in 0.14's log their own reads and writes, then only the
+  restores its current values come from (where every restore of every key
+  the member saw was read); two of the report's still grow with what one
+  member did, T252's: their reads, every one, a day at a time, and the
+  restores' walk, which reads a key's entries a step; the
   checkpointer's lowest `at` above a part of its window a walk from one
   `at` to the next, past each run of uses sealed at one in a step (7,069
   pages past 390,000 uses sharing an `at`), the floor it signs the same
@@ -131,12 +126,10 @@
   log takes 246 rotations of its
   key in its life (`ROTATIONS_HELD`), the most retired keys that keep the
   fence row every use reads in one page, and refuses the next: every
-  keyring reads each one. Migration 0083 adds six indexes, built without
+  keyring reads each one. Migration 0083 adds four indexes, built without
   blocking writes: `audit_log_shown_idx` and `audit_log_detail_idx` (each
-  entry is in one), a member's 0.14 reads and writes, a key's restores by
-  the version each made,
-  `log_reads (principal, key, version, at)` and `log_uses (at, number)`, an
-  index entry more for each use and each read. The query inventory
+  entry is in one), a member's 0.14 reads and writes, and
+  `log_uses (at, number)`, an index entry more for each use. The query inventory
   (`packages/db/test/newest-lookups.test.ts`) lists every aggregate over a
   log too, with the test that holds it, or why none needs one.
 - **The credential proxy ends its upstream request when the app's request

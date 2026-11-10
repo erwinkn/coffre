@@ -129,8 +129,6 @@ export const KINDS = {
    * every use and key write since its cutover (R53, T179): these no longer grow.
    */
   seen: "decision = 'allow' AND action IN ('secret.read', 'secret.write')",
-  /** A key's restores, which a report follows back from its current version (`memberActivity`), by key and the version each made (`restoreMade`). */
-  restore: "decision = 'allow' AND action = 'secret.restore'",
 } as const;
 
 /** A kind of entry with an index of its own (`KINDS`). */
@@ -194,34 +192,15 @@ export function changesOf(db: Queryable | Engine, alias: string, object: SQLWrap
 }
 
 /**
- * A version number in an entry's JSON metadata, at `field` (a restore's `version`, the one it made, or its `from`, the
- * one it put back): a JSON number whose value is whole, as that number however it is spelt (`5`, `5.0` and `5e0` are
- * all 5: Postgres's `jsonb` keeps `5.0` as written, and SQLite calls it a `real`), and null for anything else. One
- * value for the index (`restoreMade`), the lineage's lookup and step (`restoresBack`), and the report's walk
- * (`exposure`, by `wholeNumber`), so that a version none of them reads alike is none of theirs (review r2 of #559).
- * `numeric` on Postgres, an integer on SQLite. Nested, so that no engine casts what is not a number.
- */
-export function wholeNumberAt(engine: Engine, metadata: SQLWrapper, field: 'version' | 'from'): SQL<string | number | null> {
-  if (engine === 'postgres') {
-    const value = sql`(${metadata}::jsonb ->> ${sql.raw(`'${field}'`)})::numeric`;
-    return sql`(CASE WHEN jsonb_typeof(${metadata}::jsonb -> ${sql.raw(`'${field}'`)}) = 'number' THEN (CASE WHEN ${value} = trunc(${value}) THEN trunc(${value}) END) END)`;
-  }
-  const value = sql`json_extract(${metadata}, ${sql.raw(`'$.${field}'`)})`;
-  return sql`(CASE WHEN json_type(${metadata}, ${sql.raw(`'$.${field}'`)}) IN ('integer', 'real') THEN (CASE WHEN ${value} = CAST(${value} AS INTEGER) THEN CAST(${value} AS INTEGER) END) END)`;
-}
-
-/** `wholeNumberAt`'s value of a metadata field `JSON.parse` read: a whole number, or undefined. */
-export function wholeNumber(value: unknown): number | undefined {
-  return Number.isSafeInteger(value) ? (value as number) : undefined;
-}
-
-/**
- * The version a restore made (`wholeNumberAt` its metadata's `version`), as `audit_log_restore_idx` keys it after the
- * key. A report follows a value back from a key's current version (`memberActivity`), a step of the index each
- * restore it passes (T248, R48).
+ * The version a restore made (its metadata's `version`, a number): text on
+ * Postgres, an integer on SQLite, null for metadata that holds none. What a
+ * report follows a value back by, from a key's current version
+ * (`restoresBack`, which T252 replaces).
  */
 export function restoreMade(engine: Engine, metadata: SQLWrapper): SQL<string | number | null> {
-  return wholeNumberAt(engine, metadata, 'version');
+  return engine === 'postgres'
+    ? sql`(CASE WHEN jsonb_typeof(${metadata}::jsonb -> 'version') = 'number' THEN ${metadata}::jsonb ->> 'version' END)`
+    : sql`(CASE WHEN json_type(${metadata}, '$.version') = 'integer' THEN json_extract(${metadata}, '$.version') END)`;
 }
 
 /**

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "05243dfa-fc8f-42e3-ad77-0e0f8d45dacc",
+  "id": "78eca4ae-5b4c-43e4-8ca5-21277ae65f67",
   "prevId": "858d471a-7ad7-4b44-a70f-d9be1ebdfc0f",
   "tables": {
     "audit_chain_head": {
@@ -449,16 +449,6 @@
           ],
           "isUnique": false,
           "where": "decision = 'allow' AND action IN ('secret.read', 'secret.write')"
-        },
-        "audit_log_restore_idx": {
-          "name": "audit_log_restore_idx",
-          "columns": [
-            "secret_id",
-            "(CASE WHEN json_type(\"metadata\", '$.version') IN ('integer', 'real') THEN (CASE WHEN json_extract(\"metadata\", '$.version') = CAST(json_extract(\"metadata\", '$.version') AS INTEGER) THEN CAST(json_extract(\"metadata\", '$.version') AS INTEGER) END) END)",
-            "seq"
-          ],
-          "isUnique": false,
-          "where": "decision = 'allow' AND action = 'secret.restore'"
         },
         "audit_log_access_idx": {
           "name": "audit_log_access_idx",
@@ -2565,17 +2555,6 @@
             "number"
           ],
           "isUnique": false
-        },
-        "log_reads_seen_idx": {
-          "name": "log_reads_seen_idx",
-          "columns": [
-            "principal",
-            "coalesce(\"source\", \"secret\")",
-            "version",
-            "at"
-          ],
-          "isUnique": false,
-          "where": "version IS NOT NULL"
         },
         "log_reads_secret_idx": {
           "name": "log_reads_secret_idx",
@@ -4811,13 +4790,6 @@
   },
   "internal": {
     "indexes": {
-      "audit_log_restore_idx": {
-        "columns": {
-          "(CASE WHEN json_type(\"metadata\", '$.version') IN ('integer', 'real') THEN (CASE WHEN json_extract(\"metadata\", '$.version') = CAST(json_extract(\"metadata\", '$.version') AS INTEGER) THEN CAST(json_extract(\"metadata\", '$.version') AS INTEGER) END) END)": {
-            "isExpression": true
-          }
-        }
-      },
       "audit_log_unbind_idx": {
         "columns": {
           "json_extract(\"metadata\", '$.bindingId')": {
@@ -4905,13 +4877,6 @@
       "log_changes_refused_write_actor_environment_idx": {
         "columns": {
           "json_extract(\"payload\", '$.environmentId')": {
-            "isExpression": true
-          }
-        }
-      },
-      "log_reads_seen_idx": {
-        "columns": {
-          "coalesce(\"source\", \"secret\")": {
             "isExpression": true
           }
         }

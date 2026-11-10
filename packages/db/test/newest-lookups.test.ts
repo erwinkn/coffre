@@ -180,9 +180,6 @@ const SQLITE_NUMBERING = "SQLite's numbering: each tree's greatest number, no de
  * why none needs one (T248, R48). The least or greatest of a column of 0.15's uses are `USES`'s.
  */
 const AGGREGATES: Record<string, { by: typeof VAULT | typeof AGGREGATES_TEST | typeof REQUEST_COST | typeof LOG_STORE; as: string } | { none: string }> = {
-  // A member's reads by key and version, grouped over the newest of each a day's skip found (T248).
-  'packages/server/src/db/reads.ts#readsBySql': { by: AGGREGATES_TEST, as: 'readsBy' },
-  'packages/server/src/db/reads.ts#readsBySql#2': { by: AGGREGATES_TEST, as: 'readsBy' },
   // 0.15's records a page hides, counted over a stretch `sealedReach` bounds to `HIDDEN_COUNTED` of them.
   'packages/server/src/db/queries.ts#sealedHidden': { by: REQUEST_COST, as: 'sealedHidden' },
   'packages/server/src/db/queries.ts#sealedHidden#2': { by: REQUEST_COST, as: 'sealedHidden' },

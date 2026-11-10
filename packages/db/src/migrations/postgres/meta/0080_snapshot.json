@@ -1,5 +1,5 @@
 {
-  "id": "deebc6f4-57be-40fd-9526-05737642eef5",
+  "id": "7883872c-c26e-4eb5-9e1a-8be9d73efe95",
   "prevId": "ef3f7cdc-4479-4834-89bb-860ef6e45424",
   "version": "7",
   "dialect": "postgresql",
@@ -685,34 +685,6 @@
           ],
           "isUnique": false,
           "where": "decision = 'allow' AND action IN ('secret.read', 'secret.write')",
-          "concurrently": true,
-          "method": "btree",
-          "with": {}
-        },
-        "audit_log_restore_idx": {
-          "name": "audit_log_restore_idx",
-          "columns": [
-            {
-              "expression": "secret_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "(CASE WHEN jsonb_typeof(\"metadata\"::jsonb -> 'version') = 'number' THEN (CASE WHEN (\"metadata\"::jsonb ->> 'version')::numeric = trunc((\"metadata\"::jsonb ->> 'version')::numeric) THEN trunc((\"metadata\"::jsonb ->> 'version')::numeric) END) END)",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "seq",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "decision = 'allow' AND action = 'secret.restore'",
           "concurrently": true,
           "method": "btree",
           "with": {}
@@ -3370,40 +3342,6 @@
           ],
           "isUnique": false,
           "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "log_reads_seen_idx": {
-          "name": "log_reads_seen_idx",
-          "columns": [
-            {
-              "expression": "principal",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "coalesce(\"source\", \"secret\")",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "version",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "version IS NOT NULL",
-          "concurrently": true,
           "method": "btree",
           "with": {}
         },

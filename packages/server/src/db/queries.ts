@@ -5,7 +5,7 @@ import { MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, ty
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { accessAllowed, changesOf, DETAIL_ACTIONS, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, restoreMade, wholeNumberAt, withinBytes, type ChangeRecord } from '@coffre/db/log';
+import { accessAllowed, changesOf, DETAIL_ACTIONS, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, restoreMade, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -1283,9 +1283,10 @@ export async function members(
  * None of it reads past what is theirs (T248, R48): their reads and writes
  * in 0.14's log by `audit_log_seen_idx` (`seen`), which 0.15's uses and key
  * writes replaced at its cutover, so they no longer grow; their reads and
- * writes in 0.15's; then the restores of the keys they saw, by
- * `audit_log_restore_idx`. Asked as one condition with every restore, every
- * entry of the log was read for every report (2,484 pages behind 80,000).
+ * writes in 0.15's; then the restores the current values of the keys they
+ * saw come from (`restoresBack`), each a read of its key's entries, which
+ * T252 replaces. Asked as one condition with every restore, every entry of
+ * the log was read for every report (2,484 pages behind 80,000).
  */
 export async function memberActivity(db: Queryable, actorIds: string[], readAlready?: Awaited<ReturnType<typeof readsBy>>) {
   const { auditLog, secrets, environments, projects } = tablesOf(db);
@@ -1366,27 +1367,32 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /**
  * The `seq`s of the restores an offboarding report follows back from each of these keys' current version (`exposure`):
  * the restore that made it, then the one that made the version that one restored, and on, until a version no restore
- * made. A step of `audit_log_restore_idx` each, by key and the version a restore made (`restoreMade`): the lineage of
- * the key's value, never its other restores, which an owner putting one old version back again and again makes many
- * (T248, R48; review r1 of #559). Each step to a lower version, so that a cycle a database writer planted ends.
- * Still a step for each restore of the chain, which an owner putting back the version a restore made, again and again,
- * makes as long (review r2 of #559): T252's, the version each value came from, which a restore writes as it makes it.
+ * made: the lineage of the key's value, never its other restores (review r1 of #559). Each step to a lower version, so
+ * that a cycle a database writer planted ends. No index of its own: each step reads the key's entries by
+ * `audit_log_secret_idx`, as many as the key's history holds. On Postgres a lateral loop (`OFFSET 0`) over the steps:
+ * joined, the planner hashes the whole log instead (762 pages 4,000 entries in, 7,449 at 40,000). SQLite, which has
+ * no lateral, loops over a join's steps by the index itself. T252 replaces the walk with a
+ * probe of each version seen, by its value (a restore copies the old version's ciphertext), and this read goes.
  */
 function restoresBack(db: Queryable, keys: readonly string[]): SQL {
   const engine = dialect.engineOf(db);
-  // Both as `exposure` reads them, whole numbers however spelt (`wholeNumberAt`): as numbers of any size, so that no
-  // metadata a writer planted fails the statement.
   const made = restoreMade(engine, sql`a.metadata`);
-  const from = wholeNumberAt(engine, sql`a.metadata`, 'from');
   const postgres = engine === 'postgres';
+  // As numbers of any size, so that no metadata a writer planted fails the statement.
+  const from = postgres
+    ? sql`(CASE WHEN jsonb_typeof(a.metadata::jsonb -> 'from') = 'number' THEN (a.metadata::jsonb ->> 'from')::numeric END)`
+    : sql`(CASE WHEN json_type(a.metadata, '$.from') = 'integer' THEN json_extract(a.metadata, '$.from') END)`;
+  const restore = sql`a.decision = 'allow' AND a.action = 'secret.restore'`;
   // The keys as one value, however many: a report's keys may be past an engine's bound on a statement's parameters.
   const these = postgres ? sql`s.id = ANY(${sql.param(keys)}::uuid[])` : sql`s.id IN (SELECT value FROM json_each(${JSON.stringify(keys)}))`;
   return sql`SELECT r.seq FROM (WITH RECURSIVE back (secret, version, seq) AS (
       SELECT s.id, ${postgres ? sql`CAST(s.current_version AS numeric)` : sql`s.current_version`}, ${postgres ? sql`CAST(NULL AS bigint)` : sql`NULL`} FROM secrets s WHERE ${these}
       UNION ALL
-      SELECT b.secret, ${from}, a.seq FROM back b JOIN audit_log a
-          ON a.secret_id = b.secret AND ${made} = b.version AND ${entriesOf('restore')}
-       WHERE ${from} < b.version)
+      ${postgres
+        ? sql`SELECT b.secret, a.version, a.seq FROM back b CROSS JOIN LATERAL (
+            SELECT ${from} AS version, a.seq FROM audit_log a
+             WHERE a.secret_id = b.secret AND ${made} = CAST(b.version AS text) AND ${restore} AND ${from} < b.version OFFSET 0) a`
+        : sql`SELECT b.secret, ${from}, a.seq FROM back b JOIN audit_log a ON a.secret_id = b.secret AND ${made} = b.version AND ${restore} WHERE ${from} < b.version`})
     SELECT seq FROM back) r WHERE r.seq IS NOT NULL`;
 }
 

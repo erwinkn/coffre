@@ -63,8 +63,6 @@ test('a migration CONCURRENTLY index is read whole, comments before it or not; a
     'audit_log.audit_log_shown_idx',
     'audit_log.audit_log_detail_idx',
     'audit_log.audit_log_seen_idx',
-    'audit_log.audit_log_restore_idx',
-    'log_reads.log_reads_seen_idx',
     'log_uses.log_uses_at_number_idx',
   ]);
   assert.deepEqual(onlineIndex('-- why\n--\nCREATE UNIQUE INDEX CONCURRENTLY "t_x_idx" ON "t" USING btree ("x") WHERE "t"."y" = 1;'), {

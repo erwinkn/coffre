@@ -240,46 +240,29 @@ export async function readsPageStanding(db: Queryable, filter: ReadFilter): Prom
  * they read, or through a reference each source, every version they read of
  * it, and when last, from their days that hold any (`log_read_days`): never
  * a probe of each day the log holds. What an offboarding report weighs
- * (`memberActivity`). On Postgres, a member's day is a skip of
- * `log_reads_seen_idx` from one key and version to the next, the newest
- * read of each first: a step for each they read that day, however many
- * times (T248, R48). Grouped, every read of theirs was read, 797 pages at
- * 30,000 (Sol r6 of #556). SQLite, which no deployment runs on, groups them
- * by the same index. Still a probe of each day the member read on, which a
- * member who reads every day makes grow, a day at a time (review r1 of #559):
- * T252's, a summary of each member's newest read of each key and version that
- * the projector keeps as it writes.
+ * (`memberActivity`). Like 0.14's report, it reads every read of theirs:
+ * T252 replaces it with the newest read of each key and version, which a
+ * trigger keeps as reads are written (R48).
  */
 function readsBySql(db: Queryable, members: readonly string[]): SQL {
   const engine = dialect.engineOf(db);
+  const text = (column: string) => sql.raw(engine === 'postgres' ? `CAST(${column} AS text)` : column);
   const named = sql.join(members.map((member) => sql`${member}`), sql`, `);
-  if (engine !== 'postgres') {
-    return sql`
-      SELECT r.principal AS actor, coalesce(r.source, r.secret) AS secret, v.version, max(r.at) AS read_at
-        FROM log_read_days d JOIN log_reads r ON r.principal = d.principal AND r.at >= d.day * 86400000 AND r.at < (d.day + 1) * 86400000
-        JOIN secret_versions v ON v.id = r.version
-       WHERE d.principal IN (${named}) AND r.version IS NOT NULL
-       GROUP BY r.principal, coalesce(r.source, r.secret), v.version`;
-  }
-  // Each of the member's days reads its own partition, a day at a time: the lateral is a loop over the days, whose
-  // bounds prune the partitions as it runs (review r8 of #556: flattened into a join, the planner may read every day's
-  // partition first). Within a day, from the newest read of the greatest key and version down, each step the next
-  // below the last, ordered as the index is, so that each is its first entry.
-  const day = sql`r.principal = d.principal AND r.at >= CAST(d.day AS bigint) * 86400000 AND r.at < (CAST(d.day AS bigint) + 1) * 86400000 AND r.version IS NOT NULL`;
-  const key = sql`coalesce(r.source, r.secret)`;
-  const order = sql`ORDER BY r.principal DESC, ${key} DESC, r.version DESC, r.at DESC LIMIT 1`;
+  // On Postgres each of the member's days reads its own partition, a day at a time: `OFFSET 0` keeps the lateral a loop
+  // over the days, whose bounds prune the partitions as it runs; flattened into a join, the planner may read every
+  // day's partition first (review r8: 80 buffers, then 322 with 100 newer days of others' reads). SQLite has no
+  // partitions to read.
+  const reads = engine === 'postgres'
+    ? sql`log_read_days d CROSS JOIN LATERAL (
+        SELECT r.principal, r.source, r.secret, r.version, r.at FROM log_reads r
+         WHERE r.principal = d.principal AND r.at >= CAST(d.day AS bigint) * 86400000 AND r.at < (CAST(d.day AS bigint) + 1) * 86400000 OFFSET 0) r`
+    : sql`log_read_days d JOIN log_reads r ON r.principal = d.principal AND r.at >= d.day * 86400000 AND r.at < (d.day + 1) * 86400000`;
   return sql`
-    SELECT d.principal AS actor, CAST(r.secret AS text) AS secret, v.version, max(r.at) AS read_at
-      FROM log_read_days d CROSS JOIN LATERAL (
-        WITH RECURSIVE seen (secret, version, at) AS (
-          (SELECT ${key}, r.version, r.at FROM log_reads r WHERE ${day} ${order})
-          UNION ALL
-          SELECT n.secret, n.version, n.at FROM seen s CROSS JOIN LATERAL (
-            SELECT ${key} AS secret, r.version, r.at FROM log_reads r WHERE ${day} AND (${key}, r.version) < (s.secret, s.version) ${order}) n)
-        SELECT * FROM seen) r
+    SELECT r.principal AS actor, ${text('coalesce(r.source, r.secret)')} AS secret, v.version, max(r.at) AS read_at
+      FROM ${reads}
       JOIN secret_versions v ON v.id = r.version
      WHERE d.principal IN (${named})
-     GROUP BY d.principal, r.secret, v.version`;
+     GROUP BY r.principal, coalesce(r.source, r.secret), v.version`;
 }
 
 const membersOf = (actors: readonly string[]) => actors.filter((actor) => actor.startsWith('user:') || actor.startsWith('token:'));
