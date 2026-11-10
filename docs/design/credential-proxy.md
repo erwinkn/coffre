@@ -2438,7 +2438,7 @@ server. Sections 10.2 to 10.4 give the rules these rows rely on:
 |---|---|---|
 | A 0.16 vault, a 0.17 app | the save is refused `503 deploying` before the vault reads it: app and vault answer only the same release (`versioned`, `packages/core/src/vault-entry.ts:138`). A 0.16 vault on its own would also refuse the field, `no field "passthrough"` (`only()`, `proxy.ts:143`) | yes: nothing saved |
 | A 0.16 app isolate, a 0.17 item | it can reach the item only through a vault of its own release, so not once the vault runs 0.17. If it had read it, it would ignore the field and serve an ordinary route: `Set-Cookie` dropped, off-upstream redirects 502 | yes, closed: Clerk fails for the minutes of the deploy |
-| A 0.17 sidecar, a 0.16 server (or a rollback to one) | the plan names no passthrough credential, so the sidecar wraps nothing. Within R of a rollback, a stale plan still marks one: its wrapped headers reach that credential's own upstream under names it ignores, and no answer is unwrapped, because a 0.16 marker is not bound to the sidecar's proof (section 10.4) | yes: as 0.16 |
+| A 0.17 sidecar, a 0.16 server (or a rollback to one) | the plan names no passthrough credential, so the sidecar wraps nothing and signs no `pass` claim. Within R of a rollback, a stale plan still marks one: the sidecar wraps that credential's requests and signs `"pass": true`, a claim 0.16 does not know. 0.16 refuses any claim it does not know, so it answers 401 `invalid_dpop_proof` (`malformed`) before it reads the session or calls the upstream (`CLAIMS` and `parseProof()`, `packages/core/src/identity/dpop.ts:83` and `:124`, called at `packages/server/src/workload-sessions.ts:253`) | yes, closed: that credential's requests fail until the plan is next read, within R; the others are unaffected |
 | A 0.16 sidecar, a 0.17 server | the old sidecar forwards any `coffre-pass-*` the app copied from a browser, signed. Its proof has no `pass` claim, so coffre drops them all (section 10.2, step 5) | yes: passthrough is off for that sidecar until it is upgraded |
 | An app calling `unwrap`, a 0.16 server | 0.16 passes an upstream's own `coffre-proxy` header, so the credential's upstream could forge the envelope. That upstream is the one the app treats as passthrough (it calls `unwrap` only on that route), and the envelope gives it nothing a 0.17 server would not: every header the app gets back passes through the app's own checks (section 10.5) | yes, given that rule: `unwrap` is never applied to an answer from another credential |
 
@@ -2470,9 +2470,25 @@ On a passthrough credential:
    `credential-proxy.ts:3074`), replacing whatever the caller sent under
    that name, plain or wrapped. `coffre-pass-clerk-secret-key: x` reaches
    Clerk as the real key, once.
-4. Every check that reads what goes upstream reads the unwrapped headers.
-   The unwrap is in `outbound()` (`credential-proxy.ts:2462`), so the
-   method override check (`overridden()`, `:2429`) sees `X-HTTP-Method-Override`,
+4. Every check reads one set of headers: what goes upstream, computed
+   once, before the first check. That is `outbound()`
+   (`credential-proxy.ts:2462`): the proof's filter (step 5), then the
+   unwrap. Today the two session paths check the body first and call
+   `outbound()` after (`fieldsIn()` at `:2773`, `outbound()` at `:2779`;
+   `:2900` and `:2905`), and `fieldsIn()` asks `bodyKind()` (`:3607`),
+   which reads `Content-Type` and `Content-Encoding` from the request
+   itself. Left that way, a JSON-rule credential would refuse a request
+   whose `coffre-pass-content-type: application/json` is what the
+   upstream gets, 415, because the plain type is another. And a wrapped
+   `coffre-pass-content-encoding: gzip` over no plain encoding would pass
+   the check that refuses a compressed body, while the upstream reads the
+   body as gzip. So `outbound()` moves before the body checks on both
+   paths, and `fieldsIn()`, `bodyKind()` and the UI routes' handle scan
+   (`uiHandle()`, `:841`, whose body scan picks its decoding by
+   `bodyKind()`, `:849`) take its headers, not the request. The move
+   closes a gap today's code has too: a session's plain `Content-Type`
+   that the proof does not sign is what `fieldsIn()` reads, and
+   `outbound()` then drops it. With one set of headers, the method override check (`overridden()`, `:2429`) sees `X-HTTP-Method-Override`,
    not `coffre-pass-x-http-method-override`: a wrapped `DELETE` is refused
    as a plain one is. The leak check (`:3133`) sees `Cookie`, not
    `coffre-pass-cookie`, but it checks only for what authenticated the
@@ -2488,7 +2504,10 @@ On a passthrough credential:
    wrapped one. A `coffre-pass-*` header added on the way, unsigned, is
    dropped. And the proof must also say that its signer did the wrapping:
    a claim of coffre's, `"pass": true`, beside `hdr` and `req`
-   (`packages/client/src/dpop.ts:30`). Only a 0.17 sidecar, or
+   (`packages/client/src/dpop.ts:30`), which joins the claims the
+   server's parser takes (`CLAIMS`, `packages/core/src/identity/dpop.ts:83`).
+   That parser refuses every claim it does not know, so a 0.16 server
+   refuses such a proof outright (section 10.1's table). Only a 0.17 sidecar, or
    `@coffre/client`'s session fetch given a request `wrap` made (`wrap`
    records the requests it returns), writes that claim. Without it, every
    `coffre-pass-*` is dropped, even signed ones. The reason is a 0.16
@@ -2679,12 +2698,16 @@ upstream. The plan stops that: a 0.16 server marks nothing. Wrapping
 by mistake is otherwise harmless, since a 0.17 server drops `coffre-pass-*`
 on an unmarked credential. Unwrapping by mistake is not, so it does not
 rest on the plan: it waits for a marker no upstream can write. The plan
-can be up to R stale, and a 0.16 server, after a rollback, passes an
-upstream's own `coffre-proxy` header on; neither can produce the `jti` of
-a proof the upstream never saw. A stale plan fails closed both ways. A
+can be up to R stale. Against a 0.16 server, after a rollback, a stale
+mark cannot reach an upstream at all: the `pass` claim makes 0.16 refuse
+the proof first (section 10.1's table). The `jti` does not depend on
+that: a server that passed an upstream's own `coffre-proxy` header on, as
+0.16 does on every answer, still could not give it the `jti` of a proof
+the upstream never saw. A stale plan fails closed every way. A
 credential that was just marked gets no cookie for up to a minute. One
 that was just unmarked gets `coffre-pass-*`, which coffre drops, and an
-answer with no marker, which the sidecar leaves alone.
+answer with no marker, which the sidecar leaves alone. One rolled back
+to 0.16 gets 401s, until the plan is next read.
 
 **The checks that need the brands stay with the app.** Only the app
 knows which hosts are its brands and which origins its sign-ins may
@@ -2989,12 +3012,27 @@ fire it. Nothing here needs a new limit.
   every credential. That includes the transition where its plan, still
   stale, says unmarked while the server has just marked the credential:
   the upstream sees the backend's own address, not the forged one.
-- Mixed versions, adversarially. An upstream behind a server that passes
-  its headers on (0.16's behaviour, simulated) sends `coffre-proxy:
+- A rollback, against 0.16's own verifier (`parseProof()` and the
+  session check as the last release before 0.17 ships them, not a stand-in): a 0.17
+  sidecar under a stale plan that still marks the credential signs
+  `"pass": true`, gets 401 `invalid_dpop_proof` (`malformed`), and the
+  upstream sees no request. The sidecar's next plan read, with no mark,
+  ends the 401s.
+- The marker, adversarially, apart from any release's behaviour: a
+  simulated server that takes the `pass` claim and passes an upstream's
+  headers on, as no release does, lets the upstream send `coffre-proxy:
   passthrough` and `coffre-set-cookie-0`, with and without a guessed
-  `jti`. The sidecar leaves the answer alone, under a stale plan that
-  still marks the credential too. A 0.16 sidecar's forwarded
+  `jti`. The sidecar leaves the answer alone. A 0.16 sidecar's forwarded
   `coffre-pass-*` reaches no upstream of a 0.17 server.
+- Wrapped body headers, on a code route and a UI route, through a
+  session and a handle. On a JSON-rule passthrough credential, a wrapped
+  `coffre-pass-content-type: application/json` over a plain `text/plain`
+  has its field found and filled, not a 415. A wrapped
+  `coffre-pass-content-encoding: gzip` over no plain encoding is a 415,
+  as a plain one is. A UI route's handle scan reads a form-encoded handle
+  (`coffre%5Fuse_…`) under a wrapped form type. Through a session, a plain
+  `Content-Type` the proof does not sign is not what the field check
+  reads.
 - The sidecar's answer order: an upstream's own `DPoP-Nonce` reaches the
   app; coffre's does not; an upstream's `Location` that points at
   coffre's `/use/` comes back unchanged, not rewritten onto the listener.
@@ -3028,7 +3066,7 @@ AAD and the chain verifier, none of which changes.
 
 | PR | What |
 |---|---|
-| A | `passthrough` on `Credential` and `ProxyRoute` (canonical only when true; refused beside `sigv4`), the request unwrap in `outbound()` (a session's only under `"pass": true`), the envelope in `redacted()` (the marker's `jti` on a session's answer), `coffre-pass-*` and an upstream's `coffre-proxy` dropped everywhere else, the plan's `passthrough` list, the tests above but the sidecar's, conformance |
+| A | `passthrough` on `Credential` and `ProxyRoute` (canonical only when true; refused beside `sigv4`), the request unwrap in `outbound()` (a session's only under `"pass": true`), moved before the body checks, which read its headers, the envelope in `redacted()` (the marker's `jti` on a session's answer), `coffre-pass-*` and an upstream's `coffre-proxy` dropped everywhere else, the plan's `passthrough` list, the tests above but the sidecar's, conformance |
 | B | `@coffre/client/passthrough`: `wrap`, `unwrap`, and the session fetch's `pass` claim for a request `wrap` made |
 | C | `coffre serve`: drops the app's `coffre-*` always, wraps by the plan with `pass`, unwraps by the `jti` |
 | D | The Proxy tab's toggle and its line in the save's review |
