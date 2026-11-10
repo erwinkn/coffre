@@ -2359,7 +2359,8 @@ Set-Cookie: __client_uat=1793004000; Path=/; Domain=marque.com; Expires=Thu, 11 
 ```
 
 coffre answers the Worker with every one of Clerk's headers renamed, and
-its own plain:
+its own plain, the security headers its door adds to every answer
+included (section 10.3):
 
 ```http
 HTTP/1.1 200 OK
@@ -2368,6 +2369,11 @@ Content-Type: application/octet-stream
 Cache-Control: no-store
 Content-Security-Policy: sandbox; default-src 'none'; frame-ancestors 'none'
 X-Content-Type-Options: nosniff
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+X-Frame-Options: DENY
+Referrer-Policy: same-origin
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Resource-Policy: same-origin
 coffre-upstream-content-type: application/json
 coffre-upstream-cache-control: no-cache
 coffre-upstream-x-clerk-trace-id: 3f9a…
@@ -2380,7 +2386,8 @@ coffre-set-cookie-1: __client_uat=1793004000; Path=/; Domain=marque.com; Expires
 A browser that loaded this from coffre's origin would download an opaque
 file: no cookie set, no redirect followed, no CORS grant read, no script
 run. The Worker unwraps it (`unwrap` from `@coffre/client`, below) into
-Clerk's answer as Clerk sent it, checks the cookies' `Domain`, and answers
+Clerk's answer as Clerk sent it, with none of coffre's plain headers (its
+HSTS must never reach the brand), checks the cookies' `Domain`, and answers
 the browser on `invest.marque.com`.
 
 ### 10.1 The mark
