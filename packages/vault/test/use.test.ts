@@ -11,7 +11,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { verifyEntries, type StoredEntry } from '@coffre/core/audit';
 import { decrypt } from '@coffre/core/envelope';
 import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog } from '@coffre/core/merkle';
-import type { UseOutcome } from '@coffre/core/vault';
+import { USE_DEADLINE_MS, type UseOutcome } from '@coffre/core/vault';
+import { awsKms, KMS_REQUEST_MAX_MS, type KeyOperation } from '@coffre/core/kek';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
 import { newestAccess } from '@coffre/db/grants';
 import { appendEntries } from '@coffre/db/log';
@@ -30,7 +31,8 @@ import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, useMany,
 import { openVault, prepareVault } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, postgresOnly, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
-import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, heldKeks, isolate, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, until, useDatabases, world } from './use-world.ts';
+import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, heldKeks, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, until, useDatabases, world } from './use-world.ts';
+import { resolveVaultConfig } from '../src/config.ts';
 
 let db: TestDatabase;
 /** The hot path's login, as an isolate's uses run on it. */
@@ -231,6 +233,41 @@ test('DeadlineChecked, in Postgres: a use held past its deadline by its principa
   // The call it left behind does nothing once it gets its lock (DeadlineChecked), however late it runs.
   await sleep(200);
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 0);
+});
+
+test("a use whose key service never answers is answered late by its 3 s: its deadline is the key service's (W331)", async () => {
+  // AWS KMS that wraps, then hangs on every Decrypt. The adapter's timing against a deadline, each attempt cut at what
+  // is left of it and no attempt nor pause started past it, is held on a mocked clock (core kek-aws-kms.test.ts); here,
+  // that a use hands the key service its own deadline, one operation for the call, and is answered late by it.
+  const arn = 'arn:aws:kms:eu-west-3:123456789012:key/hung';
+  const blob = randomBytes(48).toString('base64');
+  const attempts: { ended: boolean }[] = [];
+  const kms = awsKms({ keyArn: arn, credentials: { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'secret' }, fetch: async (_input, init) => {
+    if (new Headers(init?.headers).get('x-amz-target') === 'TrentService.Encrypt') return Response.json({ CiphertextBlob: blob, KeyId: arn });
+    const attempt = { ended: false };
+    attempts.push(attempt);
+    return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => { attempt.ended = true; reject(new Error('aborted')); }, { once: true }));
+  } });
+  const operations: (KeyOperation | undefined)[] = [];
+  const unwrap = kms.unwrap.bind(kms);
+  kms.unwrap = (wrapped, context, operation) => (operations.push(operation), unwrap(wrapped, context, operation));
+  const config = resolveVaultConfig({ kek: kms, previousKeks: [KEK], signingKey: SIGNING_KEY.toString('base64'), owners: ['root@acme.example'] });
+  const w = await world();
+  const id = await w.key('hung', false, w.dev, null, config.keks);
+  const { use } = await isolate({}, config);
+  const input = ask(w, id);
+  assert.equal(input.deadline - input.at, USE_DEADLINE_MS);
+  const outcome = await use(input);
+  const answered = Date.now();
+  assert.deepEqual(outcome, { ok: false, busy: 'late', retryAfter: 1 });
+  // The key service had the use's deadline, and nothing of the call was left at KMS when it was answered.
+  assert.equal(operations.length, 1);
+  assert.equal(operations[0]?.deadline, input.deadline);
+  assert.ok(attempts.length >= 1 && attempts.every((attempt) => attempt.ended), `${attempts.length} attempts, ${attempts.filter((a) => !a.ended).length} still at KMS`);
+  // How soon, by the host's clock: at its deadline, and the outcome's log entry, well before one request's worst case
+  // (KMS_REQUEST_MAX_MS) would have it. A loose bound, a check of responsiveness rather than of the timing above.
+  assert.ok(USE_DEADLINE_MS < KMS_REQUEST_MAX_MS);
+  assert.ok(answered - input.at < USE_DEADLINE_MS + 1_000, `answered ${answered - input.at} ms after it was asked`);
 });
 
 test('FloorChecked: a use stamped below the floor of `at` writes nothing', async () => {

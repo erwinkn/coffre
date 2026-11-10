@@ -16664,6 +16664,7 @@ var LocalKekProvider = class LocalKekProvider {
 function equalBytes(a, b) {
 	return a.length === b.length && timingSafeEqual(a, b);
 }
+3 * (506 + (124 + Math.max(248, 200))) + Array.from({ length: 2 }, (_, i) => 200 * 4 ** i).reduce((a, b) => a + b, 0);
 /** The known value a check wraps: the size of a data key. */
 const KEY_CHECK_VALUE = createHash("sha256").update("coffre.kek.check.v1").digest();
 const NIL = "00000000-0000-0000-0000-000000000000";

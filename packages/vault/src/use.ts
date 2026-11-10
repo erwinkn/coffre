@@ -1,6 +1,6 @@
 import { NOTHING } from '@coffre/core/access';
 import { ownerKey, type SecretContext } from '@coffre/core/envelope';
-import { KekBadClaimError, KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
+import { KekBadClaimError, KekCancelledError, KekUnavailableError, type KekRegistry, type KeyOperation } from '@coffre/core/kek';
 import { CREDENTIAL_NAME } from '@coffre/core/identity';
 import { USES_IN_FLIGHT } from '@coffre/core/memory';
 import { HOT_STATEMENT_TIMEOUT_MS, MAX_PARENTS } from '@coffre/core/vault';
@@ -1656,6 +1656,21 @@ function checkedOf(keys: SealKeys, view: UseView, request: UseRequest, accounted
  * leaves (`late`). A key that does not open as this value's is a claim the
  * rows do not bear out (`bad_claim`).
  */
+/**
+ * One key operation for every key a call opens (a batch's, a route's), as the vault's other calls have one
+ * (`settle`): its requests then take turns among themselves, six at once (core kek/aws-kms.ts, `CONCURRENCY`), never
+ * queued by the runtime behind each other's headers with their attempts' clocks running (review r1 of #549). Each call
+ * has a path of its own (vault.ts, `#usePath`), and one deadline; its signal aborts at it.
+ */
+const operations = new WeakMap<UsePath, KeyOperation>();
+function operationOf(path: UsePath, deadline: number): KeyOperation {
+  const kept = operations.get(path);
+  if (kept !== undefined && kept.deadline === deadline) return kept;
+  const operation = { deadline, signal: AbortSignal.timeout(Math.max(0, deadline - Date.now())) };
+  operations.set(path, operation);
+  return operation;
+}
+
 async function open(path: UsePath, view: UseView, row: UseRow, deadline: number): Promise<UsedValue | 'late' | 'bad_claim'> {
   const secret = view.secret.row!;
   const value = secret.source === null ? secret : view.source!.row!;
@@ -1665,20 +1680,17 @@ async function open(path: UsePath, view: UseView, row: UseRow, deadline: number)
     ...(owner === null ? {} : { owner: ownerKey(owner) }),
     ...(value.nature === 'sensitive' ? { sensitive: true as const } : {}),
   };
-  const left = deadline - Date.now();
-  if (left <= 0) return 'late';
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), left);
+  if (deadline - Date.now() <= 0) return 'late';
+  const operation = operationOf(path, deadline);
   let dek: Buffer;
   try {
     const wrapped = value.key!;
-    dek = await path.keks.unwrap({ ...wrapped, bytes: Buffer.from(wrapped.bytes, 'base64') }, context, { deadline, signal: controller.signal });
+    dek = await path.keks.unwrap({ ...wrapped, bytes: Buffer.from(wrapped.bytes, 'base64') }, context, operation);
   } catch (error) {
     if (error instanceof KekBadClaimError) return 'bad_claim';
-    if (error instanceof KekUnavailableError && controller.signal.aborted) return 'late';
+    // Cancelled by its deadline: by its signal, or by the key service, which starts no try it cannot finish.
+    if (error instanceof KekCancelledError || (error instanceof KekUnavailableError && operation.signal.aborted)) return 'late';
     throw error;
-  } finally {
-    clearTimeout(timer);
   }
   try {
     // Opened after its deadline: it never leaves.

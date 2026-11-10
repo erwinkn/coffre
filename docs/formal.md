@@ -33,6 +33,8 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
   - [`formal/AppKey.tla`](../formal/AppKey.tla), the app key's rotation,
     against instances still under the old key and someone who holds it
     ([below](#appkeytla)).
+  - [`formal/KeyService.tla`](../formal/KeyService.tla), whose requests a
+    call to AWS KMS waits behind ([below](#keyservicetla)).
 
   A configuration names the module of its scenarios on its second line,
   `\* model MCCredentials`; one that names none is `MC.tla`'s.
@@ -515,6 +517,28 @@ reaches its caller at the commit after its decision, a transaction later,
 so a window of releases rather than decisions may hold one more read's
 keys at its edge, by that transaction's length: milliseconds, against a
 window of fifteen minutes. #292's review.
+
+### KeyService.tla
+
+One isolate's calls at AWS KMS (W331, R75): two uses of one key each, a read
+of three and a rewrap of two, their keys under the vault's kek or a previous
+one, with two slots, while KMS answers in any
+order, late or never, which nothing makes it do (no fairness): a brownout.
+Each call's requests take turns among themselves alone (`aws-kms.ts`, six
+per operation). Before W331 one pool served every call of a provider object,
+which a Worker keeps for the isolate: a use's key waited behind a read's hung
+requests past its deadline, measured at 5 s behind eight, and for a promise
+another request settled.
+
+| Protection, in the code | Turned off, TLC finds |
+|---|---|
+| Each operation's requests take turns among themselves alone (`slotsOf`, by operation) | a request waiting for a slot another call's request holds (`WaitsOnlyBehindItsOwn`), and a use waiting at all (`UsesNeverWait`) |
+| One operation's slots span every KEK it asks, whichever provider object (`slotsOf` is the module's, not a provider's) | a read across a rotation, its keys under the kek and a previous one, with more requests in flight than its slots (`InFlightBounded`), which Workers would queue with their attempts' clocks running |
+
+How long an attempt waits (878 ms, `KMS_ATTEMPT_MS`) and that none starts
+past its operation's deadline are timing, which the model leaves to the tests
+(`kek-aws-kms.test.ts`; `use.test.ts`, a hung KMS under a use answered by its
+3 s).
 
 ### Probing.tla
 

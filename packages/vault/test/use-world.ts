@@ -210,14 +210,14 @@ export async function world(options: {
   const keys: { id: string; value: string; object: Input }[] = [];
   /** A key in `dev`, or another environment of the project, with a value of its own, sealed. */
   /** A key in `environment` (`dev` by default), sealed; `owner`, a personal config's, whose wrap binds them. */
-  const key = async (value = `value-${keys.length}`, sensitive = false, environment = dev, owner: string | null = null) => {
+  const key = async (value = `value-${keys.length}`, sensitive = false, environment = dev, owner: string | null = null, keks: KekRegistry = CONFIG.keks) => {
     // Made as its period starts for the world's principal (T204): a test has a minute before it turns.
     const id = freshKeyId(principal);
     const version = randomUUID();
     const dek = freshDek();
     const sealed = encrypt(Buffer.from(value), { projectId: project, environmentId: environment, secretId: id }, dek);
     const context = { projectId: project, environmentId: environment, secretId: id, ...(owner === null ? {} : { owner: ownerKey(owner) }), ...(sensitive ? { sensitive: true as const } : {}) };
-    const wrapped = await CONFIG.keks.wrap(dek, context, { deadline: Date.now() + 5000, signal: new AbortController().signal });
+    const wrapped = await keks.wrap(dek, context, { deadline: Date.now() + 5000, signal: new AbortController().signal });
     await db.owner.insert(t.secrets).values({ id, projectId: project, environmentId: environment, key: `KEY_${keys.length}_${id.slice(0, 4)}` });
     await db.owner.insert(t.secretVersions).values({
       id: version, secretId: id, version: 1, envelopeVersion: sealed.envelopeVersion, ciphertext: sealed.ciphertext, iv: sealed.iv, authTag: sealed.authTag,

@@ -87,6 +87,21 @@
     the fence), now from Erwin's rule that revoking pauses `/use` a few
     ms at most: the uses that arrive meanwhile wait, none refused.
 
+- **A KMS call waits for its own requests only, and an attempt 878 ms at most
+  (W331, R75).** AWS KMS requests took turns in one pool of eight per
+  isolate, so a use's key waited behind any eight of the isolate's (a read's
+  hung requests, a rewrap's): 5 s, measured, past the use's 3 s. Each call's
+  requests now take turns among themselves alone, six at once (Workers'
+  simultaneous open connections of one invocation), and never another's
+  (`formal/KeyService.tla`). An attempt KMS does not answer is cut at
+  `KMS_ATTEMPT_MS`, 878 ms (from 5 s): the slowest p99 measured, 506 ms (a
+  Worker an ocean from its key, on a new connection), and one TCP
+  retransmission on that path, 372 ms (Linux's first RTO after a 124 ms
+  handshake, the round trip and twice it). Each attempt is cut at
+  what is left of its operation's deadline, and no attempt nor pause starts
+  past it, so a use is answered by its 3 s; `KMS_REQUEST_MAX_MS`, 3,634 ms,
+  bounds a request only on a path with no deadline.
+
 - **The credential proxy holds 1 MiB of a body at most, and an isolate's
   memory is split into named shares (W331, limits S11-S13, S26, S52).** A
   Worker's isolate has 128 MB; `@coffre/core/memory` now gives it shares:
