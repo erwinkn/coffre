@@ -2347,11 +2347,18 @@ reads' first, is `retention.test.ts`'s); and who sees which rows
   its updates, as T175's `log_read_place_days` are written (postgres
   `0084_reads_newest`, sqlite `0043_reads_newest`); GreatestAt its upsert's
   `GREATEST`. NewestChecked is `checkReads`' `newest`, beside `dayed`.
-  NewestRetired is `drop_reads_day` (SQLite's `dropDay`). Retention drops
-  a day at a time, oldest first, and both the rows and the entries go by
-  the day of their time, which the model's cut by number stands for: an
-  entry whose time is in the day goes with the day, and a newer read of
-  the same key and version is in a later day, which stays. The writers
+  NewestRetired is, on Postgres, `drop_reads_day`, which drops every
+  entry older than the oldest day of reads left (each read lies in its
+  day's partition), and on SQLite a trigger on the reads' deletes, which
+  drops a deleted read's entry unless a later read keeps it newer.
+  Retention drops a day at a time, oldest first, so either is the model's
+  cut at the time of the newest read it drops: a newer read of the same
+  key and version is in a later day, which stays. Both hold whoever drops
+  the days, the previous release's retention included, which runs on the
+  new schema until the deploy: on SQLite its deletes fire the trigger; on
+  Postgres the function is the new one, but for a call of the old body
+  already waiting on the migration's lock, whose day's entries the next
+  call drops (the model has no previous release). The writers
   (`/use`) write none of it; the projector writes it under the lock it
   already holds, and `drop_reads_day`'s `lock_timeout` makes retention
   give way to it.

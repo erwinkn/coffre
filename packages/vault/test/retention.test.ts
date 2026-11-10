@@ -441,6 +441,38 @@ test("a reader holding a day's reads past drop_reads_day's lock timeout makes th
   assert.ok((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_place_days WHERE day > ${day}`))[0]!.n > 0, "the later days' places stay");
 });
 
+test("T252, review r1 of #560: the previous release's retention, which runs on this schema until the deploy, leaves the report no entry of the reads it drops", async () => {
+  const owner = ENGINE === 'sqlite' ? db.vault : db.owner;
+  const start = (day: string) => Date.parse(`${day}T00:00:00Z`);
+  if (ENGINE === 'postgres') await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
+  const uuid = (value: string) => (ENGINE === 'postgres' ? sql`CAST(${value} AS uuid)` : sql`${value}`);
+  const [secret, environment, project, v1, v2] = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+  const principal = 'user:alice@acme.example';
+  // Alice reads v1 and v2 on D10, and v2 again on D9: v1's entry is D10's, v2's D9's.
+  const planted = [[1, start(D10) + 1000, v1], [2, start(D10) + 2000, v2], [3, start(D9) + 1000, v2]] as const;
+  for (const [number, at, version] of planted) {
+    await run(owner, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, version, mac)
+      VALUES (${number}, ${at}, ${uuid(randomUUID())}, 1, ${principal}, ${uuid(secret)}, ${uuid(environment)}, ${uuid(project)}, ${uuid(version)}, ${Buffer.alloc(16)})`);
+  }
+  const entries = async () => (await rows<{ version: string; at: string | number }>(owner, sql`SELECT version, at FROM log_read_newest ORDER BY at`)).map((row) => [String(row.version), Number(row.at)]);
+  assert.deepEqual(await entries(), [[v1, start(D10) + 1000], [v2, start(D9) + 1000]]);
+  // 0.15's drop of D10, as it runs on this schema: on SQLite its deletes, on Postgres the partition dropped by a call of
+  // its body that waited on the migration's lock (any later call is this release's `drop_reads_day`). Neither knows the entries.
+  if (ENGINE === 'sqlite') {
+    await run(owner, sql`DELETE FROM log_reads WHERE at >= ${start(D10)} AND at < ${start(D9)}`);
+    await run(owner, sql`DELETE FROM log_read_days WHERE day = ${start(D10) / DAY_MS}`);
+    await run(owner, sql`DELETE FROM log_read_place_days WHERE day = ${start(D10) / DAY_MS}`);
+    await run(owner, sql`DELETE FROM log_uses WHERE at >= ${start(D10)} AND at < ${start(D9)}`);
+  } else {
+    await run(db.owner, sql.raw(`DROP TABLE log_reads_${D10.replaceAll('-', '')}`));
+    // Left for the next call: D9's, still in the log, kept, drops it.
+    assert.deepEqual(await entries(), [[v1, start(D10) + 1000], [v2, start(D9) + 1000]]);
+    assert.equal((await rows<{ state: string }>(db.vault, sql`SELECT drop_reads_day(${D9}::date) AS state`))[0]!.state, 'kept');
+  }
+  // v1's entry gone with its only read; v2's stays, its newest read still listed on D9.
+  assert.deepEqual(await entries(), [[v2, start(D9) + 1000]]);
+});
+
 /**
  * The store with the first barriers' floors given, as days past would have left them: the signer signs them as it
  * signs any floor, and reads each window from them. After the last, the database's own floor again.

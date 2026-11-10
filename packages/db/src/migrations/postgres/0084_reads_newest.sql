@@ -36,31 +36,39 @@ SELECT r.principal, coalesce(r.source, r.secret), r.version, max(r.at) FROM "log
  WHERE r.version IS NOT NULL
  GROUP BY r.principal, coalesce(r.source, r.secret), r.version
 ON CONFLICT (principal, secret, version) DO UPDATE SET at = excluded.at WHERE log_read_newest.at < excluded.at;--> statement-breakpoint
--- A day of reads dropped (0050), the entries whose newest read was in it with it (NewestRetired). Retention drops the days
--- in order, oldest first, so a key and version read later too has its entry in a later day, which stays.
+-- A day of reads dropped (0050), and with it every entry older than the oldest day of reads left (NewestRetired): each
+-- read lies in a day's partition (no default one), so no entry below the first holds a read the log still lists. That
+-- holds whoever dropped the days, in whatever order. A call of 0.15's body, started before this migration and waiting on
+-- the lock it holds on `log_reads`, drops its day after the commit and leaves its entries: the next call goes past them,
+-- 'kept' included, which retention makes each run a day is due. Until then the report names reads the log has retired, a
+-- day's at most, read all the same.
 CREATE OR REPLACE FUNCTION drop_reads_day(p_day date) RETURNS text
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET lock_timeout = '100ms' AS $$
 DECLARE
     parent text;
     name text;
+    kept boolean;
+    oldest date;
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhparent = to_regclass('public.log_uses')
-                  AND i.inhrelid = to_regclass('public.' || quote_ident('log_uses_' || to_char(p_day, 'YYYYMMDD')))) THEN
-        RETURN 'kept';
-    END IF;
-    FOREACH parent IN ARRAY ARRAY['log_reads'] LOOP
-        name := parent || '_' || to_char(p_day, 'YYYYMMDD');
-        IF to_regclass('public.' || quote_ident(name)) IS NOT NULL THEN
-            IF NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = to_regclass('public.' || quote_ident(name)) AND i.inhparent = to_regclass('public.' || parent)) THEN
-                RAISE EXCEPTION '% is not a day of %', name, parent;
+    kept := EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhparent = to_regclass('public.log_uses')
+                       AND i.inhrelid = to_regclass('public.' || quote_ident('log_uses_' || to_char(p_day, 'YYYYMMDD'))));
+    IF NOT kept THEN
+        FOREACH parent IN ARRAY ARRAY['log_reads'] LOOP
+            name := parent || '_' || to_char(p_day, 'YYYYMMDD');
+            IF to_regclass('public.' || quote_ident(name)) IS NOT NULL THEN
+                IF NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = to_regclass('public.' || quote_ident(name)) AND i.inhparent = to_regclass('public.' || parent)) THEN
+                    RAISE EXCEPTION '% is not a day of %', name, parent;
+                END IF;
+                EXECUTE format('DROP TABLE public.%I', name);
             END IF;
-            EXECUTE format('DROP TABLE public.%I', name);
-        END IF;
-    END LOOP;
-    DELETE FROM public.log_read_days WHERE day = p_day - date '1970-01-01';
-    DELETE FROM public.log_read_place_days WHERE day = p_day - date '1970-01-01';
-    DELETE FROM public.log_read_newest WHERE at >= (p_day - date '1970-01-01')::bigint * 86400000 AND at < ((p_day - date '1970-01-01')::bigint + 1) * 86400000;
-    RETURN 'dropped';
+        END LOOP;
+        DELETE FROM public.log_read_days WHERE day = p_day - date '1970-01-01';
+        DELETE FROM public.log_read_place_days WHERE day = p_day - date '1970-01-01';
+    END IF;
+    SELECT min(to_date(right(c.relname, 8), 'YYYYMMDD')) INTO oldest FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+     WHERE i.inhparent = 'public.log_reads'::regclass AND c.relname ~ '^log_reads_[0-9]{8}$';
+    DELETE FROM public.log_read_newest WHERE at < coalesce((oldest - date '1970-01-01')::bigint * 86400000, 9223372036854775807);
+    RETURN CASE WHEN kept THEN 'kept' ELSE 'dropped' END;
 END
 $$;--> statement-breakpoint
 REVOKE ALL ON FUNCTION log_reads_newest() FROM PUBLIC;--> statement-breakpoint

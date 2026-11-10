@@ -848,8 +848,7 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
       await rowsOf(db, sql`DELETE FROM log_reads WHERE at >= ${from} AND at < ${from + 86_400_000}`);
       await rowsOf(db, sql`DELETE FROM log_read_days WHERE day = ${from / 86_400_000}`);
       await rowsOf(db, sql`DELETE FROM log_read_place_days WHERE day = ${from / 86_400_000}`);
-      // The entries whose newest read was that day's (NewestRetired; postgres `drop_reads_day`, 0084).
-      await rowsOf(db, sql`DELETE FROM log_read_newest WHERE at >= ${from} AND at < ${from + 86_400_000}`);
+      // The entries whose newest read was that day's went with the reads: the delete's trigger (NewestRetired; sqlite 0043).
     },
   };
 }
