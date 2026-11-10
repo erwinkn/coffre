@@ -50,10 +50,19 @@
   for its values and one for any, and fails on a new one in the sources or
   the database's functions that it does not list, or a read of an object's
   changes not through `changesOf` (`packages/db/test/newest-lookups.test.ts`).
-  Four reads still go over a whole history, which T248 bounds: every
+  A fresh vault isolate's start no longer skips its key's first entry once a
+  rotation to the key is logged: the `NOT EXISTS` that checked walked every
+  rotation (4,741 pages past 40,000), and the entry is a step of its index
+  now. A check of a member no row names read the log past every refusal
+  about them (1,604 pages behind 20,000), and now takes their newest access
+  entry and change by their indexes. The same test lists every `EXISTS`
+  over a log and every least or greatest of a column of the uses.
+  Five reads still go over a whole history, which T248 bounds: every
   member's findings, an audit page's count of what it hides, an
-  offboarding report's reads of its members, and the vault keyring's
-  rotations. Migration
+  offboarding report's reads of its members, the vault keyring's
+  rotations, and the checkpointer's lowest `at` left above a part of a
+  backlog whose uses share one `at` (40 pages 2,000 uses in, 366 at
+  20,000), whose fix changes the floor a checkpoint signs. Migration
   0082 adds the seventeen indexes, built after the migrations commit
   without blocking writes: fifteen on `audit_log`, `log_uses (number)` (the
   checkpointer's window after an hour's backlog of 3.5 million uses: 776 ms

@@ -13,7 +13,7 @@ import { indexOf, logObject } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
 import { policySeqAndSettings } from '../src/db/answers.ts';
-import { auditPage, latestCheckpoint, latestTallied, memberAccess, originsOf, talliedAfter } from '../src/db/queries.ts';
+import { auditPage, hasTombstone, latestCheckpoint, latestTallied, memberAccess, missingMembers, originsOf, talliedAfter } from '../src/db/queries.ts';
 import { newestAppEntry, newestMove, wroteUnder } from '../src/db/rotation.ts';
 import { frozenTargets } from '../src/db/workloads.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
@@ -47,6 +47,8 @@ type Lookup = {
   indexes: string[];
   /** The most pages each may read, if not `PAGES`. */
   pages?: number;
+  /** Why its plan on SQLite is not held, if it is not: no deployment runs on SQLite (AGENTS.md). */
+  sqlite?: string;
   ask: (app: Database, run: { first: bigint; newest: bigint }) => Promise<void>;
 };
 
@@ -143,6 +145,36 @@ const LOOKUPS: Lookup[] = [
     ask: async (app) => {
       const origin = (await originsOf(app, [CREDENTIAL])).get(CREDENTIAL);
       assert.deepEqual(origin?.kind === 'signIn' && [origin.seq, origin.run], [BigInt(TAIL) + 1n, { job: 'deploy' }]);
+    },
+  },
+  {
+    // Whether a member no row names is one the logs hold (`EXISTS` gates, review r8): of 0.15's changes, by the object's
+    // index, behind a long run of another's; of the allowed access entries, by `audit_log_access_idx`, behind a long run
+    // about another member and refusals about this one. Members no other case adds a row for.
+    name: 'missingMembers',
+    run: { author: 'vault', action: 'access.grant', subject: 'user:m2' },
+    tail: [{ author: 'vault', action: 'access.grant', decision: 'deny', code: 'forbidden', subject: 'user:m1' }],
+    changes: [{ object: logObject('principal', 'user:m2'), count: TAIL }],
+    indexes: ['log_changes_object_idx', 'audit_log_access_idx'],
+    ask: async (app) => {
+      assert.deepEqual(await missingMembers(app, { type: 'user', id: 'm1' }), []);
+      assert.deepEqual(await missingMembers(app, { type: 'user', id: 'm2' }), ['user:m2']);
+    },
+  },
+  {
+    // Whether a binding has a tombstone (`EXISTS`, review r8): one probe of `audit_log_unbind_idx` keyed by the binding,
+    // past a long run of other bindings' unbinds.
+    name: 'hasTombstone',
+    run: { author: 'app', action: 'token.unbind', metadata: JSON.stringify({ bindingId: 'binding:other' }) },
+    tail: [{ author: 'app', action: 'secret.read' }],
+    indexes: ['audit_log_unbind_idx'],
+    sqlite: "SQLite's planner takes `audit_log_action_idx`, every unbind of the app's, over the binding's own index",
+    ask: async (app) => {
+      const [none, other] = await Promise.all(['binding:none', 'binding:other'].map(async (id) => {
+        const [row] = await rowsOf<{ t: boolean | number }>(app, sql`SELECT ${hasTombstone(app, id)} AS t`);
+        return Boolean(row!.t);
+      }));
+      assert.deepEqual([none, other], [false, true]);
     },
   },
   ...(['policy', 'settings'] as const).map((kind): Lookup => ({
@@ -264,6 +296,7 @@ for (const lookup of LOOKUPS) {
     for (const statement of statements) {
       const { pages, indexes } = await measure(statement);
       const said = JSON.stringify({ statement: statement.text, pages, indexes });
+      if (TEST_ENGINE !== 'postgres' && lookup.sqlite !== undefined) continue;
       assert.ok(indexes.some((index) => lookup.indexes.includes(index)), `takes one of ${lookup.indexes.join(', ')}: ${said}`);
       assert.ok(pages <= (lookup.pages ?? PAGES), `reads at most ${lookup.pages ?? PAGES} pages: ${said}`);
     }

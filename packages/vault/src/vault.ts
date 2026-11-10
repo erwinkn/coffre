@@ -1441,8 +1441,7 @@ class VaultService implements Vault {
     const asked: StartReads = {
       rotation: settle ? store.latestRotation(db) : undefined,
       newest: settle ? store.vaultPage(db, undefined, 1).then(([entry]) => entry) : undefined,
-      // None once a rotation to the key is logged (R48): `#settle` reads it again if it needs it after all.
-      first: settle ? store.firstVaultEntryUnder(db, prepared.logKey.keyId, { unlessRotated: true }) : undefined,
+      first: settle ? store.firstVaultEntryUnder(db, prepared.logKey.keyId) : undefined,
       cutover: cutover ? store.cutoverNumber(db) : undefined,
       checkpoint: cutover && convert ? logStore(db).newest() : undefined,
       holders: convert ? store.everyProjectHolders(db) : undefined,
@@ -1638,8 +1637,7 @@ class VaultService implements Vault {
       const newest = await (asked?.newest ?? store.vaultPage(this.#db, undefined, 1).then(([entry]) => entry));
       // A log the vault has not written to: nothing to settle until it does.
       if (newest === undefined) return;
-      // The start's says only where it found one: none may mean a rotation to the key it did not walk past.
-      const first = (await asked?.first) ?? (await store.firstVaultEntryUnder(this.#db, current));
+      const first = await (asked?.first ?? store.firstVaultEntryUnder(this.#db, current));
       if (first !== undefined && newest.keyId === current) {
         prepared.since = first;
         return;

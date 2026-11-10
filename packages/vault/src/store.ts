@@ -723,14 +723,13 @@ export async function vaultPage(db: Queryable, before: bigint | undefined, limit
  * The seq of the vault's first entry under `keyId`, or undefined: one step
  * of `audit_log_vault_key_idx` (`firstEntryUnder`; T245, R48), whether or not the key ever wrote.
  * Until 0.16 no index served it, and a key that never wrote, a new KEK's
- * before its rotation lands, read the whole log. With `unlessRotated`, none
- * once a `key.rotate` of the vault's is under `keyId`, an index probe of the
- * few such entries: asked before the start knows whether it needs it
- * (`#start` in vault.ts, T206). Undefined then says nothing.
+ * before its rotation lands, read the whole log; a fresh isolate's start
+ * (`#start` in vault.ts, T206) skipped it once a rotation to the key was
+ * logged, by a `NOT EXISTS` over the rotations that grew with them (4,741
+ * pages past 40,000). One step now, it asks it plainly.
  */
-export async function firstVaultEntryUnder(db: Queryable, keyId: string, { unlessRotated = false } = {}): Promise<bigint | undefined> {
-  const due = sql`NOT EXISTS (SELECT 1 FROM audit_log r WHERE r.author = 'vault' AND r.action = 'key.rotate' AND r.decision = 'allow' AND r.key_id = ${keyId})`;
-  return firstEntryUnder(db, 'vault', keyId, unlessRotated ? due : undefined);
+export async function firstVaultEntryUnder(db: Queryable, keyId: string): Promise<bigint | undefined> {
+  return firstEntryUnder(db, 'vault', keyId);
 }
 
 /** The entries at these seqs, any author, by seq: what a reference names as its seal. */

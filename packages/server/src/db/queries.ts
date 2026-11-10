@@ -1152,10 +1152,16 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
 export async function missingMembers(db: Queryable, member?: { type: string; id: string }): Promise<string[]> {
   if (member !== undefined) {
     const principal = principalOf(member);
+    // Their newest access entry, one step of `audit_log_access_idx` (`keyedBy`), and their newest change, of the object's
+    // index (`changesOf`): as an `EXISTS` of an entry, Postgres took a match among the entries about them for likely and
+    // scanned the log, past every refusal about them (1,604 pages behind 20,000; T245, R48, review r8).
+    const { auditLog: log } = tablesOf(db);
+    const access = keyedBy(db, log.subjectPrincipal, log.seq, 'desc', principal, sql`ARRAY[${principal}]`);
+    const change = changesOf(db, 'c', logObject('principal', principal));
     const rows = await dialect.rowsOf<{ principal: string }>(db, sql`SELECT CAST(${principal} AS text) AS principal
       WHERE NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = ${principal})
-        AND (EXISTS (SELECT 1 FROM log_changes WHERE log_changes.object = ${logObject('principal', principal)})
-          OR EXISTS (SELECT 1 FROM audit_log WHERE ${accessAllowed()} AND subject_principal = ${principal}))`);
+        AND ((SELECT c.number FROM log_changes c WHERE ${change.where} ORDER BY ${change.order} LIMIT 1) IS NOT NULL
+          OR (SELECT ${log.seq} FROM ${log} WHERE ${accessAllowed()} AND ${access.where} ORDER BY ${sql.join(access.orderBy, sql`, `)} LIMIT 1) IS NOT NULL)`);
     return rows.map((row) => row.principal);
   }
   const next = (after: SQL | null) => sql`(SELECT subject_principal FROM audit_log WHERE ${accessAllowed()} AND subject_principal ${after === null ? sql`IS NOT NULL` : sql`> ${after}`} ORDER BY subject_principal LIMIT 1)`;

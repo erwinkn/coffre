@@ -14,7 +14,8 @@ import { createDatabase, type Database } from '@coffre/db';
 import { openDatabase, postgresClient } from '@coffre/db/connect';
 import { rowsOf } from '@coffre/db/dialect';
 import { findingsOf, newestAccess, newestChangeNames, reportStands } from '@coffre/db/grants';
-import { changesOf, indexOf, newestVaultSeq } from '@coffre/db/log';
+import { changesOf, indexOf, KeyRetired, lockLogHeadRead, newestVaultSeq } from '@coffre/db/log';
+import type { LogKey } from '@coffre/core/audit';
 import { sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 
@@ -248,12 +249,34 @@ const LOOKUPS: Lookup[] = [
     ask: async (vault, { newest }) => assert.equal((await vaultPage(vault, undefined, 32))[0]?.seq, newest),
   },
   {
+    // What a fresh isolate's start asks (`#start`, T206): its key's first entry, past the vault's entries under the
+    // keys before it and every rotation between them, which its old `NOT EXISTS` gate walked (4,741 pages past 40,000).
     name: 'firstVaultEntryUnder',
-    head: [{ ...unwraps(), key: 'vault:old' }],
+    head: [{ ...unwraps(), key: 'vault:old' }, { author: 'vault', action: 'key.rotate', key: 'vault:old', count: TAIL }],
     run: { author: 'vault', action: 'key.unwrap', key: 'vault:new' },
-    tail: [],
+    tail: [{ author: 'vault', action: 'key.rotate', key: 'vault:newer', count: TAIL }],
     indexes: ['audit_log_vault_key_idx'],
     ask: async (vault, { first }) => assert.equal(await firstVaultEntryUnder(vault, 'vault:new'), first),
+  },
+  {
+    // An append's read under the head: whether its key was moved from (`retired`, an `EXISTS` of the moves from it), by
+    // `audit_log_subject_idx` keyed by the key, past a long run of the vault's reseals and rotations from other keys and
+    // the app's; and the newest entry, the primary key's first step.
+    name: 'lockLogHeadRead',
+    head: [{ author: 'vault', action: 'key.reseal', subject: 'vault:older' }],
+    run: { author: 'vault', action: 'key.rotate', subject: 'vault:old', count: 1 },
+    tail: [{ author: 'app', action: 'key.reseal', subject: 'app:old' }],
+    indexes: ['audit_log_subject_idx', 'audit_log_pkey'],
+    sqlite: "a transaction's statements, which the capture here sees on Postgres's connection alone",
+    ask: async (vault) => {
+      for (const [keyId, retired] of [['vault:k', false], ['vault:old', true]] as const) {
+        const held = await vault.transaction((tx) => lockLogHeadRead(tx, { author: 'vault', keyId } as LogKey)).then(() => false, (error: unknown) => {
+          if (error instanceof KeyRetired) return true;
+          throw error;
+        });
+        assert.equal(held, retired, keyId);
+      }
+    },
   },
 ];
 
@@ -309,10 +332,19 @@ async function sent(work: (vault: Database) => Promise<unknown>): Promise<Statem
   const seen: Statement[] = [];
   if (ENGINE === 'postgres') {
     const client = postgresClient(VAULT_URL, { max: 1 });
-    const unsafe = client.unsafe;
-    (client as { unsafe: unknown }).unsafe = (text: string, values: unknown[] = [], ...rest: unknown[]) => {
-      seen.push({ text, values });
-      return (unsafe as (...args: unknown[]) => unknown)(text, values, ...rest);
+    const kept = (on: { unsafe: unknown }) => {
+      const unsafe = on.unsafe as (...args: unknown[]) => unknown;
+      on.unsafe = (text: string, values: unknown[] = [], ...rest: unknown[]) => {
+        seen.push({ text, values });
+        return unsafe.call(on, text, values, ...rest);
+      };
+    };
+    kept(client as { unsafe: unknown });
+    // A transaction's statements, on the connection its BEGIN holds (`Session.transaction`, @coffre/db).
+    const begin = client.begin as (...args: unknown[]) => unknown;
+    (client as { begin: unknown }).begin = (...args: unknown[]) => {
+      const work = args.pop() as (tx: { unsafe: unknown }) => unknown;
+      return begin.call(client, ...args, (tx: { unsafe: unknown }) => (kept(tx), work(tx)));
     };
     try {
       await work(createDatabase(client));
@@ -378,13 +410,22 @@ for (const lookup of LOOKUPS) {
   test(`${lookup.name}: one step of its index, however long the run of other entries since (T245, R48)`, { timeout: 300_000 }, async () => {
     const { first, newest } = await history(lookup);
     const statements = await sent((vault) => lookup.ask(vault, { first, newest }));
+    // Its answers held on both engines (`ask`), its plans on SQLite only where it says.
+    if (ENGINE === 'sqlite' && lookup.sqlite !== undefined) return;
     assert.ok(statements.length > 0, 'the read asked the logs');
     for (const statement of statements) {
       const { pages, indexes } = await measure(statement);
       const said = JSON.stringify({ statement: statement.text, pages, indexes });
-      if (ENGINE === 'sqlite' && lookup.sqlite !== undefined) continue;
       assert.ok(indexes.some((index) => lookup.indexes.includes(index)), `takes one of ${lookup.indexes.join(', ')}: ${said}`);
       assert.ok(pages <= PAGES, `reads at most ${PAGES} pages: ${said}`);
+      // SQLite counts no pages: every index its plan reads of the log the lookup is about is then one the lookup names,
+      // or a subquery's walk of another kind's entries (the start's old gate over the rotations, review r8) passes as
+      // the outer read's. Of the other log, a statement that reads both (the snapshot) is held by that log's lookup.
+      if (ENGINE === 'sqlite') {
+        const logs = new Set(lookup.indexes.map((index) => /^(audit_log|log_changes)_/.exec(index)?.[1]));
+        const others = indexes.filter((index) => logs.has(/^(audit_log|log_changes)_/.exec(index)?.[1]) && !lookup.indexes.includes(index));
+        assert.deepEqual(others, [], `reads only ${lookup.indexes.join(', ')} of the logs: ${said}`);
+      }
     }
   });
 }

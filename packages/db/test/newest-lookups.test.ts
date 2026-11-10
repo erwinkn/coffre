@@ -9,6 +9,10 @@
 // it, or why it needs none. A read of an object's changes goes through `changesOf` (access-entries.ts) on Postgres, or
 // is SQLite's alone: asked plainly, Postgres walked the primary key back past every other object's changes, 441 pages
 // behind 20,000 of another's. The database's functions' own are the vault's test's to list and hold.
+// Two shapes more walk a log as far (Sol r8 of #556): an `EXISTS` gate over a log, which the vault's start asked of
+// every rotation (4,741 pages past 40,000), and the least or greatest of a column of 0.15's uses, which the
+// checkpointer's `lowestAbove` asks past every use sealed at the `at` a backlog shares (7,069 pages past 390,000). Each
+// is listed too, with its test or why none needs one.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -55,6 +59,8 @@ const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   'packages/server/src/db/workloads.ts#frozen': { by: SERVER, as: 'frozenTargets' },
   'packages/server/src/db/workloads.ts#frozen#2': { by: SERVER, as: 'frozenTargets' },
   'packages/server/src/db/queries.ts#memberAccess': { by: SERVER, as: 'memberAccess' },
+  // Whether a member no row names has an access entry: as an `EXISTS`, a scan past every refusal about them (review r8).
+  'packages/server/src/db/queries.ts#missingMembers': { by: SERVER, as: 'missingMembers' },
   // A member's tamper reports of either kind, by `audit_log_tamper_idx` (`reportsAbout`): the newest of 0.14's beside a
   // statement's other reads.
   'packages/db/src/grants.ts#findingsOf': { by: VAULT, as: 'findingsOf' },
@@ -104,6 +110,8 @@ const CHANGES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> 
   'packages/server/src/db/queries.ts#newestChangeColumns': { by: VAULT, as: 'changesOf' },
   // A credential's first change, its sign-in or issue, behind other objects' changes before it.
   'packages/server/src/db/queries.ts#originsOf': { by: SERVER, as: 'originsOf' },
+  // Whether a member no row names has a change, beside their access entry.
+  'packages/server/src/db/queries.ts#missingMembers': { by: SERVER, as: 'missingMembers' },
 };
 
 /**
@@ -125,6 +133,40 @@ const SQLITE_CHANGES = new Set([
   'packages/vault/src/use.sqlite.ts#CHUNK',
   'packages/vault/src/use.sqlite.ts#useOnce',
 ]);
+
+const LOG_STORE = 'packages/vault/test/log-store.test.ts';
+
+/**
+ * Each `EXISTS` gate over a log (0.14's, 0.15's changes or uses), by the function it is in: the test that holds it to
+ * the same cost however long the run of other entries.
+ */
+const GATES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> = {
+  // 0.15's named findings, by `audit_log_tamper_idx` and the change it names.
+  'packages/db/src/grants.ts#findingsOf': { by: VAULT, as: 'findingsOf' },
+  // Whether an append's key was moved from, by `audit_log_subject_idx` keyed by the key.
+  'packages/db/src/log.ts#underHead': { by: VAULT, as: 'lockLogHeadRead' },
+  'packages/server/src/db/queries.ts#hasTombstone': { by: SERVER, as: 'hasTombstone' },
+};
+
+/**
+ * Each least or greatest of a column of 0.15's uses (`min(…)`, `max(…)` … `FROM log_uses`), by the function it is in:
+ * the test that holds it, or why none needs one.
+ */
+const USES: Record<string, { by: typeof LOG_STORE; as: string } | { none: string }> = {
+  // The lowest `at` of the uses a part of a capped window left above it (T169). Uses stamped one after another move the
+  // floor it reads from with the cursor, which the test holds; past uses sharing one `at` it walks every use sealed at
+  // it: T248, its floor from the skew bound changes what HotPathOne.tla's ChunkFloor signs, the model first (R45). The
+  // test's case for it is a todo until then.
+  'packages/vault/src/log-store.ts#postgresStore': { by: LOG_STORE, as: 'lowestAbove' },
+  // SQLite's own: its numbering (both trees one sequence, each table's greatest number, a step of its rowid) and its
+  // checkpointer's reads. Kept for tests and local development, no deployment runs on it (AGENTS.md).
+  'packages/db/src/log.ts#changeOnSqlite': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
+  'packages/vault/src/store.ts#changeOnSqlite': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
+  'packages/vault/src/store.ts#nextNumber': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
+  'packages/vault/src/credentials.sqlite.ts#nextNumber': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
+  'packages/vault/src/use.sqlite.ts#NEXT': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
+  ...Object.fromEntries(['', '#2', '#3', '#4', '#5'].map((nth) => [`packages/vault/src/log-store.ts#sqliteStore${nth}`, { none: "SQLite's checkpointer: its numbering, and the lowest `at` above a part as Postgres's, no deployment's engine" }])),
+};
 
 /** The sources of the packages that run (core, db, vault, server), each with its text. */
 function sources(): { file: string; text: string }[] {
@@ -188,6 +230,46 @@ function changeSites(): { keyed: string[]; plain: string[] } {
   return { keyed: [...keyed], plain: [...plain] };
 }
 
+/** Each place in the sources that `pattern` finds, outside comments, by the function it is in, then `#2`… for a second in the same function. */
+function placesOf(pattern: RegExp): string[] {
+  const found: string[] = [];
+  for (const { file, text } of sources()) {
+    const seen = new Map<string, number>();
+    for (const match of text.matchAll(pattern)) {
+      if (/^\s*(?:\/\/|\*)/.test(text.slice(text.lastIndexOf('\n', match.index) + 1, match.index))) continue;
+      const site = `${file}#${within(text, match.index)}`;
+      const nth = (seen.get(site) ?? 0) + 1;
+      seen.set(site, nth);
+      found.push(nth === 1 ? site : `${site}#${nth}`);
+    }
+  }
+  return found;
+}
+
+/** A log, as a statement names it: its table, or Drizzle's (`${auditLog}`, or `${log}` as `findingsOf` calls it). */
+const LOG = String.raw`(?:audit_log|log_changes|log_uses|\$\{(?:auditLog|logChanges|logUses|log)\})(?!\w)`;
+
+/**
+ * Each `EXISTS` (or `NOT EXISTS`) whose subquery's first table is a log, in SQL's words or Drizzle's columns; and
+ * Drizzle's `exists(q)` or `notExists(q)` of a query `q` from a log's table.
+ */
+function gateSites(): string[] {
+  const words = placesOf(new RegExp(String.raw`\bEXISTS\s*\(\s*SELECT\b(?:(?!\bFROM\b|\`).){0,160}?\bFROM\s+` + LOG, 'gs'));
+  const drizzle: string[] = [];
+  for (const { file, text } of sources()) {
+    for (const use of text.matchAll(/\b(?:exists|notExists)\((\w+)\)/g)) {
+      const from = new RegExp(String.raw`\b${use[1]}\s*=[^;]*?\.from\((\w+)\)`).exec(text.slice(Math.max(0, use.index - 800), use.index))?.[1];
+      if (from !== undefined && /^(auditLog|logChanges|logUses)$/.test(from)) drizzle.push(`${file}#${within(text, use.index)}`);
+    }
+  }
+  return [...words, ...drizzle];
+}
+
+/** Each `min(…)` or `max(…)` straight from 0.15's uses (`FROM log_uses`, or Drizzle's `${logUses}`). */
+function useSites(): string[] {
+  return placesOf(/\b(?:max|min)\((?:\$\{\w+\.\w+\}|[\w.]+)\)(?:::\w+)?(?:\s+AS\s+\w+)?\s+FROM\s+(?:log_uses|\$\{logUses\})(?!\w)/g);
+}
+
 test('every read of the newest entries of a kind in the sources is listed, with the test that holds it to a flat cost, or why none needs one (T245, R48)', () => {
   const found = sites();
   assert.deepEqual(found.filter((site) => !(site in SITES)), [], 'a read the list does not name: list it with its test, which seeds a run of its kind then a long tail of others');
@@ -206,4 +288,20 @@ test("every read of an object's newest changes in the sources goes through `chan
   assert.deepEqual(Object.keys(CHANGES).filter((site) => !keyed.includes(site)), [], 'a site listed that no longer reads so');
   const vault = readFileSync(`${ROOT}${VAULT}`, 'utf8');
   for (const [site, held] of Object.entries(CHANGES)) assert.match(held.by === VAULT ? vault : readFileSync(`${ROOT}${SERVER}`, 'utf8'), new RegExp(`\\b${held.as}\\b`), `${site}: ${held.by} asks ${held.as}`);
+});
+
+test('every `EXISTS` gate over a log in the sources is listed, with the test that holds it to a flat cost (T245, R48, Sol r8 of #556)', () => {
+  const found = gateSites();
+  assert.deepEqual(found.filter((site) => !(site in GATES)), [], 'an `EXISTS` over a log the list does not name: list it with its test, which seeds a long run of the entries it must not walk');
+  assert.deepEqual(Object.keys(GATES).filter((site) => !found.includes(site)), [], 'a gate listed that no longer reads so');
+  for (const [site, held] of Object.entries(GATES)) assert.match(readFileSync(`${ROOT}${held.by}`, 'utf8'), new RegExp(`\\b${held.as}\\b`), `${site}: ${held.by} asks ${held.as}`);
+});
+
+test("every least or greatest of 0.15's uses in the sources is listed, with the test that holds it, or why none needs one (T245, R48, Sol r8 of #556)", () => {
+  const found = useSites();
+  assert.deepEqual(found.filter((site) => !(site in USES)), [], 'a `min` or `max` over the uses the list does not name: list it with its test');
+  assert.deepEqual(Object.keys(USES).filter((site) => !found.includes(site)), [], 'a read listed that no longer reads so');
+  for (const [site, held] of Object.entries(USES)) {
+    if ('as' in held) assert.match(readFileSync(`${ROOT}${held.by}`, 'utf8'), new RegExp(`\\b${held.as}\\b`), `${site}: ${held.by} asks ${held.as}`);
+  }
 });
