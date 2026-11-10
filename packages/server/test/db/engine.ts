@@ -53,6 +53,12 @@ export async function openTestDatabase(): Promise<{ owner: Database; runtime: Da
 }
 
 let vaultDatabase: Promise<Database> | null = null;
+let vaultPool: { end(): Promise<void> } | null = null;
+
+/** Ends `openVaultDatabase`'s pool, for a process whose pools keep their connections (`keepTestConnections`). */
+export async function closeVaultDatabase(): Promise<void> {
+  await vaultPool?.end();
+}
 
 /**
  * The integration database as the vault: on Postgres, the vault's own
@@ -62,7 +68,9 @@ let vaultDatabase: Promise<Database> | null = null;
 export function openVaultDatabase(): Promise<Database> {
   vaultDatabase ??= (async () => {
     if (TEST_ENGINE === 'postgres') {
-      return createDatabase(testPostgresPool(TEST_VAULT_DATABASE_URL, true));
+      const pool = testPostgresPool(TEST_VAULT_DATABASE_URL, true);
+      vaultPool = pool;
+      return createDatabase(pool);
     }
     const url = process.env.COFFRE_TEST_DATABASE_URL;
     if (!url) throw new Error(`COFFRE_TEST_DATABASE_URL is required on ${TEST_ENGINE}; see scripts/setup-test-database.sh`);

@@ -35,19 +35,25 @@ export function plansOf(text) {
   return plans;
 }
 
-/** A statement's text as the two runs share it: its spaces collapsed, its strings and numbers (not `$1`) left out. */
+/**
+ * A statement's text as the two runs share it: its spaces collapsed, its strings and numbers left out, and each list of
+ * parameters (`$1`, or `$3, $4, $5` for an `IN` of three) one `$?`, so that an `IN` as long as a page's rows is one
+ * statement however long, and its runs after the first on a backend are warm ones (review r3 of #559).
+ */
 export function shapeOf(text) {
-  return text.replace(/\s+/g, ' ').trim().replace(/'(?:[^']|'')*'/g, "'?'").replace(/(?<![\w$.])\d+(?:\.\d+)?(?![\w.])/g, '?');
+  return text.replace(/\s+/g, ' ').trim().replace(/'(?:[^']|'')*'/g, "'?'").replace(/\$\d+(?:\s*,\s*\$\d+)*/g, '$?')
+    .replace(/(?<![\w$.])\d+(?:\.\d+)?(?![\w.])/g, '?');
 }
 
 /**
  * The statements of each measured path, by the path and the statement's shape (`shapeOf`): the most pages one run of
  * it read there, how many times it ran there, and its text. A statement ran between the mark of its path and the next.
  * By path, not by shape alone: a statement many paths share (a member's access, read by every route) is as many
- * statements, so that one path's walk is not hidden under another's larger, flat run of it (review r2 of #559). The pages of
- * a statement's first run on a backend are its own only when it never ran there again: a function's statements are
- * planned in its call's execution, and a backend's first plan of one reads the catalog (`prune_bulk`'s first call on
- * a session, 1,295 pages on an empty database as on a grown one, 18 after).
+ * statements, so that one path's walk is not hidden under another's larger, flat run of it (review r2 of #559). Its pages
+ * are those of its warm runs alone, never of a backend's first run of it, which reads the catalog too, as much at
+ * either size or more (`prune_bulk`'s first call on a session, 1,295 pages on an empty database as on a grown one,
+ * 18 after): `cold` keeps those apart, and a path whose runs of a statement were all first runs is `warm: false`, which
+ * `unwarmed` reports rather than compare (review r3 of #559: by path, a first run on a backend another path warmed).
  */
 export function statementsOf(plans) {
   const statements = new Map();
@@ -67,12 +73,11 @@ export function statementsOf(plans) {
     const id = `${path}\u0000${shape}`;
     const seen = statements.get(id) ?? { path, pages: 0, cold: 0, warm: false, runs: 0, text: plan.text.replace(/\s+/g, ' ').trim() };
     if (first) seen.cold = Math.max(seen.cold, plan.pages);
-    else seen.pages = seen.warm ? Math.max(seen.pages, plan.pages) : plan.pages;
+    else seen.pages = Math.max(seen.pages, plan.pages);
     seen.warm ||= !first;
     seen.runs += 1;
     statements.set(id, seen);
   }
-  for (const seen of statements.values()) if (!seen.warm) seen.pages = seen.cold;
   return statements;
 }
 
@@ -80,7 +85,8 @@ export function statementsOf(plans) {
  * Each statement that grows from `small` to `large`: reads at least twice the pages and eight more (a flat
  * statement gains an index level at most, a page for each index it steps down, and its rows), or runs at least twice
  * as often (a statement asked once for each entry of a history). One the larger run alone ran is listed too: a path
- * that took another branch there, whose statements the smaller never measured.
+ * that took another branch there, whose statements the smaller never measured. One without a warm run at either size is
+ * `unwarmed`'s, not compared here.
  */
 export function growing(small, large) {
   const grown = [];
@@ -90,6 +96,7 @@ export function growing(small, large) {
       grown.push({ id, why: 'new', before: null, after: at });
       continue;
     }
+    if (!before.warm || !at.warm) continue;
     const pages = at.pages >= 2 * before.pages && at.pages - before.pages >= 8;
     const runs = at.runs >= 2 * before.runs && at.runs - before.runs >= 2;
     if (pages || runs) grown.push({ id, why: pages ? 'pages' : 'runs', before, after: at });
@@ -100,6 +107,15 @@ export function growing(small, large) {
 /** The statements `small` ran that `large` did not: a path that stopped short at the larger size, its plans never logged. */
 export function vanished(small, large) {
   return [...small].filter(([id]) => !large.has(id)).map(([id, at]) => ({ id, at }));
+}
+
+/**
+ * The statements a path ran at both sizes with no warm run at one of them or both: their pages there are a backend's
+ * first run's, the catalog's with them, so the sweep cannot say whether they grew, and fails rather than pass them.
+ */
+export function unwarmed(small, large) {
+  return [...large].filter(([id, at]) => small.has(id) && !(small.get(id).warm && at.warm))
+    .map(([id, at]) => ({ id, at, small: small.get(id).warm, large: at.warm }));
 }
 
 /** What each path answered in a run's output (`sweep outcomes`, history.sweep.ts), or null when it printed none. */
@@ -147,6 +163,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // A sweep is clean only if both runs went the same way to the end: a statement too slow at the larger size, cut by a
   // timeout, leaves no plan behind, and would otherwise read as none that grew (review r1 of #559).
   const problems = [];
+  for (const { at, small: was, large: now } of unwarmed(small, large)) {
+    problems.push(`COLD  no warm run at the ${was ? 'larger size' : now ? 'smaller size' : 'two sizes'}: ${at.text.slice(0, 200)} (in: ${at.path})`);
+  }
   for (const { at } of vanished(small, large)) problems.push(`GONE  ran at the smaller size alone: ${at.text.slice(0, 200)} (in: ${at.path})`);
   for (const [file, text] of [[smallLog, smallText], [largeLog, largeText]]) {
     for (const line of cancelled(text)) problems.push(`CANCELLED in ${file}: ${line.slice(0, 200)}`);

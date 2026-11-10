@@ -43,19 +43,26 @@ on a fresh clone of the migrated template:
    newest, the heartbeats an
    ordinary audit page hides. Then the watch and the vault catch up with it, as
    a deployment's do between beats, so that what a beat walks is what came since.
-4. **Every request path, twice**: every GET route of the API (from the
+4. **Every request path, three times**: every GET route of the API (from the
    client's route table, its parameters filled), as an Owner and as a viewer;
    the audit page under each filter; each member's page; a sign-in, reveals, a
    key write, an access change, a heartbeat, readiness, the vault's checkpoint,
    the checkpointer's tick and the reads' projection, with and without a key it
-   replaced; then an offboarding, and the removed member's report. The first
-   round warms the plans; a statement in the second, between the marks
-   `/* sweep:<path> */` the file logs, is measured.
+   replaced; then an offboarding, and the removed member's report, of a
+   member of their own in each round (three of one history). The first round
+   warms the plans; a statement in the other two, between the marks
+   `/* sweep:<path> */` the file logs, is measured: twice, so that each path
+   has a run of each of its statements on a backend that ran it before. Its
+   pools hold one connection each, kept until the end
+   (`keepTestConnections`), as a request takes turns on one through
+   Hyperdrive: a pool that closed one idle for a second, or spread its
+   statements over ten, sent a path's next run to a backend new to it.
 
 [`scripts/history-sweep.mjs`](../scripts/history-sweep.mjs) then reads both
-logs. A statement is its path and its text with its literals left out (each
-run's database is another, and Postgres's query identifier hashes its tables'
-OIDs): by path, so that a statement many paths run, a member's access say, is
+logs. A statement is its path and its text with its literals left out, and
+each list of parameters one (an `IN` as long as a page's rows is one
+statement however long; each run's database is another, and Postgres's query
+identifier hashes its tables' OIDs): by path, so that a statement many paths run, a member's access say, is
 measured in each, and one path's walk is not hidden under another's larger,
 flat run of it (review r2 of #559). Its cost is the most pages (shared
 buffers hit or read) one run of it read in its path, and how many times it
@@ -75,8 +82,11 @@ either log holds a statement the server cancelled (review r1 of #559).
 
 Two things it does not count. A statement's first run on a backend reads the
 catalog to plan a function's statements (`prune_bulk`'s first call, 1,295
-pages on an empty database as on a grown one, 18 after): only its later runs
-count, unless it never ran again. And rows of 0.15's log carry no MAC of the
+pages on an empty database as on a grown one, 18 after, or anywhere between,
+by what the catalog's caches held): only its later runs count. A path whose
+runs of a statement at either size were all first runs on their backends
+is not compared, and fails the sweep (`COLD`), since its pages there are the
+catalog's as much as its own (review r3 of #559). And rows of 0.15's log carry no MAC of the
 vault's, so the checkpointer refuses at the first: it runs its reads first,
 which is what is measured, but a backlog it would drain stays where it is
 (`lowestAbove` and the checkpointer's window have tests of their own that
@@ -96,11 +106,12 @@ The first sweep, 2,000 and 20,000 entries of each shape, on #556's head:
 | The keyring's rotations (`rotations`, `keyringRows`) | 56 | 452 | No more than `ROTATIONS_HELD` (246) rotations in a log's life |
 | The window a proof or the projector reads (`entries`), past uses sharing an `at` | 70 | 396 | Its first entries by number, `log_uses_by_number_idx` (T245), its bounds read first and given as values, so that it plans its own days alone |
 
-Two of an offboarding report's reads still grow, with what one member did
-rather than with the instance, and are T252's. `readsBy` reads every read of
-the member, a day at a time. And the walk back from each key's current
-version to the restores its value came from reads the key's entries at each
-step. A restore copies the old version's ciphertext and rewraps only its key,
+Two of an offboarding report's reads still grow, and are T252's. `readsBy`
+grows with what the member did: it reads every read of theirs, a day at a
+time. The walk back from each key's current version to the restores its
+value came from grows with the key's history, whoever made it: it reads
+every entry naming the key at each step, so that everyone's writes and
+reveals of a key the member once read add to it, after they left too. A restore copies the old version's ciphertext and rewraps only its key,
 so two versions hold one value exactly when their ciphertexts match: T252
 replaces the walk with a probe of each version seen, and `readsBy` with the
 newest read of each key and version, which a trigger keeps as reads are

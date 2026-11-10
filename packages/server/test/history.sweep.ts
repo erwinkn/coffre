@@ -1,6 +1,6 @@
 // The history sweep's run at one size (R48; `scripts/history-sweep.sh`, docs/history-sweep.md): an instance with a
 // history grown `COFFRE_SWEEP_SIZE` entries long in each of the shapes that have hidden a walk before, then every
-// request path it can reach, once warm and once again, as the app's, the vault's and the hot path's logins, which
+// request path it can reach, once warm and twice measured (`ROUNDS`), as the app's, the vault's and the hot path's logins, which
 // auto_explain logs for this database alone, each statement's plan with its buffers. The script runs it at two
 // sizes and compares the logs: a statement that reads more at the larger is one whose cost grows with history.
 // Postgres only; not a test of the suite's (`pnpm test` runs `*.test.ts` and `*.alone.ts`).
@@ -27,9 +27,12 @@ import { appLogKey } from '../src/db/audit.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { auditReadiness, walkAuditBacklog, writeAuditHeartbeat } from './watch-fixture.ts';
 import { TEST_OWNER_DATABASE_URL } from './db/connections.ts';
-import { openVaultDatabase, postgresOnly, withLogUnlocked, withTriggersLifted } from './db/engine.ts';
+import { closeVaultDatabase, openVaultDatabase, postgresOnly, withLogUnlocked, withTriggersLifted } from './db/engine.ts';
+import { keepTestConnections } from './db/postgres-pool.ts';
 
 const POSTGRES = postgresOnly("auto_explain's plans, Postgres's");
+// Before any pool opens: each path's statements measured on backends that ran them before (`ROUNDS`).
+keepTestConnections();
 /** How long each shape of history grows: the script's two sizes, ten times apart. */
 const SIZE = Number(process.env.COFFRE_SWEEP_SIZE ?? 2_000);
 const ORIGIN = 'https://secrets.acme.example';
@@ -39,6 +42,17 @@ const READER = 'reader@acme.example';
 const TAMPERED = 'tampered@acme.example';
 /** A member who read a lot, then left: an offboarding report of `SIZE` reads. */
 const LEAVER = 'leaver@acme.example';
+/**
+ * Who leaves in each round, the last of them `LEAVER`, whom the other paths read until then: as many members of the
+ * same history as rounds, so that an offboarding runs in each, the measured ones' warm (`statementsOf`, history-sweep.mjs).
+ */
+const LEAVERS = ['leaver-warm@acme.example', 'leaver-first@acme.example', LEAVER];
+/**
+ * The rounds of request paths: one to warm the backends, then two measured. A pool's backend first runs a statement in
+ * any of them, and that run reads the catalog too; a path measured twice has a warm run of each of its statements, where
+ * one measured once had its run land on a backend new to it (review r3 of #559).
+ */
+const ROUNDS = ['warm', 'measured', 'measured'] as const;
 /** Someone no member row names, whom the vault granted and refused again and again (`missingMembers`). */
 const GHOST = 'user:ghost@acme.example';
 const SERVICE = 'token:ci-web';
@@ -111,7 +125,7 @@ before(async () => {
   await root.environments.create('shop/dev', { name: 'dev' });
   await root.secrets.set('shop/dev', { SHOP_KEY: 'fake-shop-key' });
   await root.environments.create('shop/dev-eu', { name: 'dev-eu', from: 'dev', inherit: true });
-  for (const member of [READER, TAMPERED, LEAVER]) {
+  for (const member of [READER, TAMPERED, ...LEAVERS]) {
     await root.members.add(`user:${member}`);
     await root.access.set(`user:${member}`, { 'market/dev': 'viewer' });
   }
@@ -120,7 +134,7 @@ before(async () => {
   await root.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 });
   await root.environments.protect('market/prod');
   // Real uses and reads, a few, then sealed and projected, so that the pages and the checkpointer have their own.
-  for (const member of [READER, LEAVER]) for (let i = 0; i < 3; i += 1) await clientFor(deps, member).secrets.reveal('market/dev');
+  for (const member of [READER, ...LEAVERS]) for (let i = 0; i < 3; i += 1) await clientFor(deps, member).secrets.reveal('market/dev');
   await deps.vault.listReads();
 
   // What the instance's own requests wrote to 0.14's log, beside 0.15's: the shapes `grow` adds to are those.
@@ -135,6 +149,7 @@ after(async () => {
   // `COFFRE_SWEEP_KEEP=1`, run outside the suite's clones: the grown database left as it is, to look into.
   if (process.env.COFFRE_SWEEP_KEEP !== '1') await resetDatabase(db.owner);
   await db.close();
+  await closeVaultDatabase();
 });
 
 /**
@@ -205,14 +220,14 @@ async function grow(): Promise<void> {
   for (let back = days - 1; back >= 0; back -= 1) {
     const start = (today - back) * 86_400_000;
     await rowsOf(db.owner, sql`SELECT make_reads_day(${new Date(start).toISOString().slice(0, 10)}::date)`);
-    await rowsOf(db.owner, sql`
+    for (const leaver of LEAVERS) await rowsOf(db.owner, sql`
       INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, source, source_environment, source_project, version, mac)
-      SELECT nextval('log_number'), ${back === 0 ? now : start}::bigint + g, ${place!.credential}::uuid, 1, ${`user:${LEAVER}`},
+      SELECT nextval('log_number'), ${back === 0 ? now : start}::bigint + g, ${place!.credential}::uuid, 1, ${`user:${leaver}`},
              CAST(${pick('secret')} AS uuid), CAST(${pick('environment')} AS uuid), CAST(${pick('project')} AS uuid),
              CASE WHEN g % 4 = 3 THEN ${place!.secret}::uuid END, CASE WHEN g % 4 = 3 THEN ${place!.environment}::uuid END, CASE WHEN g % 4 = 3 THEN ${place!.project}::uuid END,
              CAST(${pick('version')} AS uuid), ${ZERO16}::bytea
         FROM generate_series(1, ${Math.min(SIZE, 1_000)}) g`);
-    await rowsOf(db.owner, sql`INSERT INTO log_read_days (principal, day) VALUES (${`user:${LEAVER}`}, ${today - back}) ON CONFLICT DO NOTHING`);
+    for (const leaver of LEAVERS) await rowsOf(db.owner, sql`INSERT INTO log_read_days (principal, day) VALUES (${`user:${leaver}`}, ${today - back}) ON CONFLICT DO NOTHING`);
   }
   await rowsOf(db.owner, sql`
     INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
@@ -237,8 +252,11 @@ async function get(as: string, path: string): Promise<number> {
   return response.status;
 }
 
-/** A request path; `once`, one that changes what it reads (an offboarding), run in the measured round alone, last. */
-type Path = { name: string; run: () => Promise<unknown>; once?: boolean };
+/**
+ * A request path, `run` in each round (its index in `ROUNDS`); `last`, one that changes what it reads (an offboarding),
+ * run after the others, of the round's own leaver (`LEAVERS`).
+ */
+type Path = { name: string; run: (round: number) => Promise<unknown>; last?: boolean };
 
 function paths(): Path[] {
   const root = clientFor(deps, ROOT);
@@ -265,8 +283,8 @@ function paths(): Path[] {
     { name: "the checkpointer's tick and the reads' projection", run: () => deps.vault.listReads() },
     { name: "the checkpointer's tick and projection with a replaced key (the keyring)", run: () => replacedKeyTick() },
     // An offboarding of the member with every read, and their report after.
-    { name: 'an offboarding (owner)', run: () => root.members.remove(`user:${LEAVER}`), once: true },
-    { name: "GET the removed member's report (owner)", run: () => get(ROOT, `/members/${encodeURIComponent(`user:${LEAVER}`)}`), once: true },
+    { name: 'an offboarding (owner)', run: (round) => root.members.remove(`user:${LEAVERS[round]}`), last: true },
+    { name: "GET the removed member's report (owner)", run: (round) => get(ROOT, `/members/${encodeURIComponent(`user:${LEAVERS[round]}`)}`), last: true },
   ];
 }
 
@@ -283,17 +301,21 @@ async function replacedKeyTick(): Promise<void> {
   }
 }
 
-test(`the request paths, warm, then measured, at ${SIZE.toLocaleString('en')} entries of each shape`, { ...POSTGRES, timeout: 3_600_000 }, async () => {
+test(`the request paths, warm, then measured twice, at ${SIZE.toLocaleString('en')} entries of each shape`, { ...POSTGRES, timeout: 3_600_000 }, async () => {
   const outcomes: Record<string, string> = {};
-  for (const round of ['warm', 'measured'] as const) {
-    for (const { name, run, once } of paths()) {
-      if (once === true && round === 'warm') continue;
+  // Each round's answer, once when they agree: a path that answers otherwise in one round says so at both sizes.
+  const answer = (name: string, now: string) => {
+    outcomes[name] = outcomes[name] === undefined || outcomes[name] === now ? now : `${outcomes[name]} | ${now}`;
+  };
+  for (const [index, round] of ROUNDS.entries()) {
+    const all = paths();
+    for (const { name, run } of [...all.filter((path) => path.last !== true), ...all.filter((path) => path.last === true)]) {
       await mark(`${round}:${name}`);
       try {
-        const answered = await run();
-        outcomes[name] = typeof answered === 'number' ? String(answered) : 'ok';
+        const answered = await run(index);
+        answer(name, typeof answered === 'number' ? String(answered) : 'ok');
       } catch (error) {
-        outcomes[name] = `failed: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`;
+        answer(name, `failed: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`);
       }
     }
   }

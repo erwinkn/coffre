@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { growing, plansOf, statementsOf, vanished } from './history-sweep.mjs';
+import { growing, plansOf, shapeOf, statementsOf, unwarmed, vanished } from './history-sweep.mjs';
 
-/** A server log as auto_explain writes it: each `[statement, pages]` a plan of backend 7, after its path's mark. */
+/** A server log as auto_explain writes it: each `[statement, pages, backend = 7]` a plan, after its path's mark. */
 function logOf(paths) {
-  const plan = (text, pages) => [
-    '2026-11-10 20:00:00.000 UTC [7] LOG:  duration: 0.100 ms  plan:',
+  const plan = (text, pages, backend = 7) => [
+    `2026-11-10 20:00:00.000 UTC [${backend}] LOG:  duration: 0.100 ms  plan:`,
     ...JSON.stringify({ 'Query Text': text, Plan: { 'Shared Hit Blocks': pages, 'Shared Read Blocks': 0 } }, null, 1).split('\n').map((line) => `\t${line}`),
   ];
-  return Object.entries(paths).flatMap(([path, statements]) => [plan(`/* sweep:measured:${path} */ SELECT 1`, 0), ...statements.map(([text, pages]) => plan(text, pages))])
+  return Object.entries(paths).flatMap(([path, statements]) => [plan(`/* sweep:measured:${path} */ SELECT 1`, 0), ...statements.map(([text, pages, backend]) => plan(text, pages, backend))])
     .flat().join('\n');
 }
 
@@ -38,4 +38,29 @@ test('literals and spaces aside, a statement is the same at both sizes', () => {
   const [before, after] = [small, large].map((paths) => statementsOf(plansOf(logOf(paths))));
   assert.equal(after.size, 1);
   assert.deepEqual([growing(before, after), vanished(before, after)], [[], []]);
+});
+
+test("a path whose run of a statement was a backend's first is not compared as grown, but reported unwarmed", () => {
+  // At the smaller size, B warms backend 7 and A runs warm there; at the larger, A lands first on backend 8, which reads
+  // the catalog, and B runs warm on 7 (review r3 of #559).
+  const small = { 'GET /b': [[ACCESS, 1_295]], 'GET /a': [[ACCESS, 18]] };
+  const large = { 'GET /a': [[ACCESS, 1_295, 8]], 'GET /b': [[ACCESS, 1_295], [ACCESS, 18]] };
+  const [before, after] = [small, large].map((paths) => statementsOf(plansOf(logOf(paths))));
+  assert.deepEqual(growing(before, after), []);
+  assert.deepEqual(unwarmed(before, after).map(({ at, small, large }) => [at.path, small, large]), [['GET /a', true, false], ['GET /b', false, true]]);
+});
+
+test('a warm run grows though its first run on a backend read more', () => {
+  const small = { 'GET /a': [[ACCESS, 1_295], [ACCESS, 18]] };
+  const large = { 'GET /a': [[ACCESS, 1_295], [ACCESS, 400]] };
+  const [before, after] = [small, large].map((paths) => statementsOf(plansOf(logOf(paths))));
+  assert.deepEqual(growing(before, after).map(({ why, before, after }) => [why, before.pages, after.pages]), [['pages', 18, 400]]);
+  assert.deepEqual(unwarmed(before, after), []);
+});
+
+test("an IN of parameters is one statement however long, so that a path's later runs of it are warm", () => {
+  assert.equal(shapeOf('SELECT seq FROM audit_log WHERE seq IN ($1, $2, $3) AND actor = $4'), shapeOf('SELECT seq FROM audit_log WHERE seq IN ($1) AND actor = $2'));
+  const small = { 'GET /audit': [['SELECT * FROM audit_log WHERE seq IN ($1, $2)', 5], ['SELECT * FROM audit_log WHERE seq IN ($1, $2, $3)', 5]] };
+  const [before] = [small].map((paths) => statementsOf(plansOf(logOf(paths))));
+  assert.deepEqual([...before.values()].map(({ warm, runs }) => [warm, runs]), [[true, 2]]);
 });
