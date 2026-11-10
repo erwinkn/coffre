@@ -220,7 +220,7 @@ export async function withLogUnlocked<T>(owner: Database, work: (db: Queryable) 
 }
 
 /** `work`, as the owner, with `table`'s triggers lifted (`withLogUnlocked`): a secret version's erase-only, say. */
-export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' | 'secret_versions', work: (db: Queryable) => Promise<T>): Promise<T> {
+export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' | 'secret_versions' | 'log_changes', work: (db: Queryable) => Promise<T>): Promise<T> {
   if (ENGINE === 'postgres') {
     return owner.transaction(async (tx) => {
       await tx.execute(sql.raw(`ALTER TABLE ${table} DISABLE TRIGGER USER`));

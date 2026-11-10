@@ -20,7 +20,7 @@ export type SessionRow = Tables['credentials']['$inferSelect'];
 /** The freeze kinds the log holds (section 8.2): a target is frozen while its newest allowed one of these is a freeze. */
 const FREEZE_ACTIONS = ['workload.freeze', 'workload.unfreeze'] as const;
 
-/** The expression `audit_log_freeze_idx` indexes: the target an entry names. */
+/** The expression `audit_log_frozen_idx` indexes: the target an entry names. */
 function namedTarget(db: Queryable): SQL<string> {
   const { auditLog } = tablesOf(db);
   return dialect.engineOf(db) === 'postgres'
@@ -31,16 +31,22 @@ function namedTarget(db: Queryable): SQL<string> {
 /**
  * Whether `target` (a value, a column or an expression) is frozen now: its
  * newest allowed freeze or lift is a freeze. One index lookup each, through
- * `audit_log_freeze_idx`; a null target is never frozen. Their MACs are not
+ * `audit_log_frozen_idx`, its condition as constants, which every plan
+ * proves (T245, R48); a null target is never frozen. Their MACs are not
  * checked: a forged freeze can only refuse, and a deleted one breaks the
  * chain, which the next verification finds.
  */
 function frozen(db: Queryable, target: SQL | string): SQL<boolean> {
   const { auditLog } = tablesOf(db);
+  // On Postgres the target through `= ANY`, ordered by the target then `seq` (`keyedBy`): asked plainly, Postgres drops
+  // the target from the order and, under a plan for any target, walked `audit_log_app_idx` back from the newest entry,
+  // 701 pages behind 20,000 of the app's other entries (`sign_in`'s, 0082).
+  const postgres = dialect.engineOf(db) === 'postgres';
+  const named = namedTarget(db);
   const newest = sql`(SELECT ${auditLog.action} FROM ${auditLog} WHERE ${auditLog.author} = 'app'
-    AND ${auditLog.action} IN (${sql.join(FREEZE_ACTIONS.map((action) => sql`${action}`), sql`, `)}) AND ${auditLog.decision} = 'allow'
-    AND ${namedTarget(db)} = ${target} ORDER BY ${auditLog.seq} DESC LIMIT 1)`;
-  return truth(sql`COALESCE(${newest} = 'workload.freeze', ${dialect.engineOf(db) === 'postgres' ? sql`false` : sql`0`})`);
+    AND ${auditLog.action} IN (${sql.raw(FREEZE_ACTIONS.map((action) => `'${action}'`).join(', '))}) AND ${auditLog.decision} = 'allow'
+    AND ${postgres ? sql`${named} = ANY(ARRAY[CAST(${target} AS text)]) ORDER BY ${named} DESC, ${auditLog.seq} DESC` : sql`${named} = ${target} ORDER BY ${auditLog.seq} DESC`} LIMIT 1)`;
+  return truth(sql`COALESCE(${newest} = 'workload.freeze', ${postgres ? sql`false` : sql`0`})`);
 }
 
 /** Whether binding `id` (a column, as text) has a tombstone, as a boolean (`hasTombstone`). */
@@ -154,7 +160,7 @@ export function sessionStatement(db: Queryable) {
       place,
       placePath,
       now: clockMillis(db),
-      policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`,
+      policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy')})`,
     })
     .from(credentials)
     .leftJoin(principals, eq(principals.principal, credentials.principal))
@@ -194,7 +200,7 @@ const bindingCalls = prepared((db) => {
       place,
       placePath,
       now: clockMillis(db),
-      policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`,
+      policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy')})`,
     })
     .from(serviceBindings)
     .leftJoin(principals, eq(principals.principal, serviceBindings.principal))

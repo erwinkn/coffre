@@ -1,11 +1,11 @@
 import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
 import { BEARER_PROFILES } from '@coffre/core/identity';
 import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
-import { ACCESS_ACTIONS, MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type LoggedChange, type SecretColumns } from '@coffre/core/vault';
+import { MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type LoggedChange, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { accessAllowed, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
+import { accessAllowed, changesOf, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -341,13 +341,13 @@ export function policyNow(db: Queryable, ids: readonly string[]): Promise<{ seq:
   // Started now (`.then`), not once awaited: under `audited`, ahead of what the work asks next, a first `later` write
   // included, which could otherwise rename a protected environment before this reads it (postgres-js's `flush`).
   // Nothing protected, the newest change alone: a join on nothing still scans every environment on SQLite.
-  if (ids.length === 0) return newestVaultSeq(db, 'policy.change').then((seq) => ({ seq, slugs: new Map<string, string>() }));
+  if (ids.length === 0) return newestVaultSeq(db, 'policy').then((seq) => ({ seq, slugs: new Map<string, string>() }));
   const { projects, environments } = tablesOf(db);
   const live = sql`${and(inArray(environments.id, [...ids]), standing(environments.slug))}
     AND EXISTS (SELECT 1 FROM ${projects} WHERE ${projects.id} = ${environments.projectId} AND ${standing(projects.slug)})`;
   // One row for the newest change, whatever the environments: one more per live environment, each beside it.
   return dialect.rowsNow<{ seq: string | number | null; id: string | null; slug: string | null }>(db, sql`
-    SELECT (${newestSeqQuery(db, 'policy.change')}) AS seq, ${environments.id} AS id, ${environments.slug} AS slug
+    SELECT (${newestSeqQuery(db, 'policy')}) AS seq, ${environments.id} AS id, ${environments.slug} AS slug
     FROM (SELECT 1 AS one) AS here LEFT JOIN ${environments} ON ${live}`).then((rows) => {
     const seq = rows[0]?.seq ?? null;
     return {
@@ -1075,14 +1075,16 @@ export type MemberAccessRows = {
  */
 export async function memberAccess(db: Queryable, principal: string, now: Date): Promise<MemberAccessRows> {
   const { principals: m, grants: g, environments: e, projects: p, auditLog: log } = tablesOf(db);
-  const actions = sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `);
   const place = sql`coalesce(${g.projectId}, ${e.projectId})`;
   const found = findingsOf(db, principal);
+  // Their newest access entry, one step of `audit_log_access_idx` (`keyedBy`): as the greatest `seq` of their entries,
+  // Postgres could walk the vault's back past every read about them since (T245, R48).
+  const changed = keyedBy(db, log.subjectPrincipal, log.seq, 'desc', m.principal, sql`ARRAY[${m.principal}]`);
   const query = sql`
     SELECT ${m.status} AS status, ${m.owner} AS owner, ${m.role} AS member_role, ${m.scope} AS scope, ${m.statusChangedBy} AS status_changed_by,
       ${found.legacy} AS found_seq, ${found.named} AS found_named,
-      (SELECT CAST(max(${log.seq}) AS text) FROM ${log} WHERE ${log.author} = 'vault' AND ${log.decision} = 'allow'
-        AND ${log.action} IN (${actions}) AND ${log.subjectPrincipal} = ${m.principal}) AS changed_seq,
+      (SELECT CAST(${log.seq} AS text) FROM ${log} WHERE ${accessAllowed()} AND ${changed.where}
+        ORDER BY ${sql.join(changed.orderBy, sql`, `)} LIMIT 1) AS changed_seq,
       x.kind, x.project_id, x.project_slug, x.environment_id, x.environment_slug, x.role, x.expires_at
     FROM ${m}
     LEFT JOIN (
@@ -1150,10 +1152,16 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
 export async function missingMembers(db: Queryable, member?: { type: string; id: string }): Promise<string[]> {
   if (member !== undefined) {
     const principal = principalOf(member);
+    // Their newest access entry, one step of `audit_log_access_idx` (`keyedBy`), and their newest change, of the object's
+    // index (`changesOf`): as an `EXISTS` of an entry, Postgres took a match among the entries about them for likely and
+    // scanned the log, past every refusal about them (1,604 pages behind 20,000; T245, R48, review r8).
+    const { auditLog: log } = tablesOf(db);
+    const access = keyedBy(db, log.subjectPrincipal, log.seq, 'desc', principal, sql`ARRAY[${principal}]`);
+    const change = changesOf(db, 'c', logObject('principal', principal));
     const rows = await dialect.rowsOf<{ principal: string }>(db, sql`SELECT CAST(${principal} AS text) AS principal
       WHERE NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = ${principal})
-        AND (EXISTS (SELECT 1 FROM log_changes WHERE log_changes.object = ${logObject('principal', principal)})
-          OR EXISTS (SELECT 1 FROM audit_log WHERE ${accessAllowed()} AND subject_principal = ${principal}))`);
+        AND ((SELECT c.number FROM log_changes c WHERE ${change.where} ORDER BY ${change.order} LIMIT 1) IS NOT NULL
+          OR (SELECT ${log.seq} FROM ${log} WHERE ${accessAllowed()} AND ${access.where} ORDER BY ${sql.join(access.orderBy, sql`, `)} LIMIT 1) IS NOT NULL)`);
     return rows.map((row) => row.principal);
   }
   const next = (after: SQL | null) => sql`(SELECT subject_principal FROM audit_log WHERE ${accessAllowed()} AND subject_principal ${after === null ? sql`IS NOT NULL` : sql`> ${after}`} ORDER BY subject_principal LIMIT 1)`;
@@ -1489,7 +1497,7 @@ export async function findCredential(
 function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) => SQL, shown: 'answer' | 'settings' | null = null) {
   const { credentials, identities, passkeys } = tablesOf(db);
   // The newest policy change, as `newestPolicySeq` reads it on its own.
-  const newestPolicy = sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`;
+  const newestPolicy = sql<string | number | null>`(${newestSeqQuery(db, 'policy')})`;
   return db
     .select({
       credential: credentials, identity: identities, now: clock(db), policySeq: newestPolicy,
@@ -2005,7 +2013,7 @@ export async function exchangeCandidates(
     .select({
       binding: serviceBindings,
       spent: truth(exists(spent)),
-      policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`,
+      policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy')})`,
       ...newestChangeColumns(db, principal, serviceBindings.id),
       now: clock(db),
     })
@@ -2057,7 +2065,7 @@ const NO_CHANGES: NewestChanges = { member: null, bindings: new Map() };
 export function newestChangeColumns(db: Queryable, principal: string, binding: AnyColumn): { memberChange?: SQL<string | null>; bindingChange?: SQL<string | null> } {
   if (dialect.engineOf(db) !== 'postgres') return {};
   const newest = (object: SQL) => sql<string | null>`(SELECT json_build_array(c.number::text, c.at, c.request_id, c.actor, c.payload, encode(c.seal, 'base64'), encode(c.mac, 'base64'))::text
-    FROM log_changes c WHERE c.object = ${object} ORDER BY c.number DESC LIMIT 1)`;
+    FROM log_changes c WHERE ${changesOf(db, 'c', object).where} ORDER BY ${changesOf(db, 'c', object).order} LIMIT 1)`;
   return { memberChange: newest(sql`${logObject('principal', principal)}::uuid`), bindingChange: newest(sql`log_object('binding', ${binding}::text)`) };
 }
 
@@ -2165,8 +2173,9 @@ export type CredentialOrigin =
  * through `audit_log_exchange_idx` and `audit_log_token_create_idx`, whose
  * expressions this repeats; or, with 0.15's log, the credential's sign-in
  * or issue change (D147). Either makes its credential, so it is the
- * object's first change: one probe of `log_changes_object_idx` each,
- * however many renewals and revokes came after (R48). One statement.
+ * object's first change: one probe of `log_changes_object_idx` each
+ * (`changesOf`), however many renewals and revokes came after, and
+ * whatever other objects' changes came before (R48). One statement.
  */
 export async function originsOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, CredentialOrigin>> {
   if (credentialIds.length === 0) return new Map();
@@ -2186,7 +2195,12 @@ export async function originsOf(db: Queryable, credentialIds: readonly string[])
     ${entries('token.create', metadata('targetCredentialId'))}
     UNION ALL
     SELECT ${engine === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object}, ${logChanges.number}, ${logChanges.payload}, '0.15', NULL, ${logChanges.actor} FROM ${logChanges}
-     WHERE ${logChanges.number} IN (${sql.join([...objects.keys()].map((object) => sql`(SELECT min(${logChanges.number}) FROM ${logChanges} WHERE ${logChanges.object} = ${object})`), sql`, `)})
+     WHERE ${logChanges.number} IN (${sql.join([...objects.keys()].map((object) => {
+       // Its oldest change, by the object's index: `min(number)` by the object walks the primary key past every other
+       // object's changes before its first (381 pages behind 20,000 of them, Sol r7 of #556).
+       const first = changesOf(db, 'c', object, 'asc');
+       return sql`(SELECT c.number FROM log_changes c WHERE ${first.where} ORDER BY ${first.order} LIMIT 1)`;
+     }), sql`, `)})
        AND ${recorded(engine, logChanges.payload, 'signIn', 'issue')}`);
   return new Map(rows.flatMap((row): [string, CredentialOrigin][] => {
     const id = row.log === '0.14' ? row.credential : objects.get(row.credential);
@@ -3580,8 +3594,10 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
  */
 export async function auditPage(db: Queryable, filter: AuditFilter) {
   const { auditLog, projects, environments, secrets } = tablesOf(db);
-  const where = auditWhere(db, filter);
-  const page = await withinBytes(db, where, filter.limit, 'desc');
+  // The members asked for, each a stream of their own entries (`withinBytes`' `by`); then the page's entries by seq,
+  // never the run between its first and its last, which holds every other member's since (T245, R48).
+  const page = await withinBytes(db, auditWhere(db, { ...filter, actors: undefined }), filter.limit, 'desc',
+    filter.actors === undefined ? undefined : { column: auditLog.actor, values: filter.actors });
   if (page === null) return { rows: [], more: false };
   const rows = await db
     .select({ ...auditColumns(auditLog), project: projects.slug, environment: environments.slug, key: secrets.key })
@@ -3589,18 +3605,18 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
     .leftJoin(projects, eq(projects.id, auditLog.projectId))
     .leftJoin(environments, eq(environments.id, auditLog.environmentId))
     .leftJoin(secrets, eq(secrets.id, auditLog.secretId))
-    .where(and(where, lte(auditLog.seq, page.from), gte(auditLog.seq, page.to)))
+    .where(inArray(auditLog.seq, page.seqs))
     .orderBy(desc(auditLog.seq));
   return { rows: rows.map(shown), more: page.cut || page.count === filter.limit };
 }
 
-/** The newest of one author's allowed entries of `action`, with the database's clock beside it. */
-function newestEntry(db: Queryable, author: 'app' | 'vault', action: string) {
+/** The vault's newest signed checkpoint, with the database's clock beside it: one step of `audit_log_signed_idx` (`KINDS`; T245, R48). */
+function newestSigned(db: Queryable) {
   const { auditLog } = tablesOf(db);
   return db
     .select({ seq: auditLog.seq, occurredAt: auditLog.occurredAt, metadata: auditLog.metadata, now: clockMillis(db) })
     .from(auditLog)
-    .where(and(eq(auditLog.author, author), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
+    .where(entriesOf('signed'))
     .orderBy(desc(auditLog.seq))
     .limit(1);
 }
@@ -3610,7 +3626,7 @@ function newestEntry(db: Queryable, author: 'app' | 'vault', action: string) {
  * whose signature whoever shows it checks with the vault's public key.
  */
 export async function latestCheckpoint(db: Queryable): Promise<Checkpoint | null> {
-  const [row] = await newestEntry(db, 'vault', 'audit.checkpoint');
+  const [row] = await newestSigned(db);
   return row === undefined ? null : (JSON.parse(row.metadata) as Checkpoint);
 }
 
@@ -3670,7 +3686,7 @@ export async function talliedAfter(db: Queryable, after: bigint, limit: number):
 
 function talliedWhere(db: Queryable) {
   const { auditLog } = tablesOf(db);
-  return [eq(auditLog.author, 'vault'), eq(auditLog.action, 'audit.checkpoint'), eq(auditLog.decision, 'allow'), isNotNull(auditLog.relatedSeq)];
+  return [entriesOf('signed'), isNotNull(auditLog.relatedSeq)];
 }
 
 function talliedCheckpoints(db: Queryable, where?: SQL) {

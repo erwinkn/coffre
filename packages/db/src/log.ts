@@ -1,15 +1,16 @@
 import { createHash } from 'node:crypto';
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import type { PreparedChange } from '@coffre/core/vault';
-import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, lte, sql, type Placeholder, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, lte, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
+import { authoredBy, entriesOf, keyedBy, KINDS, type Kind } from './access-entries.ts';
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
 import { later, laterRows } from './later.ts';
 import { prepared } from './prepared.ts';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf } from './dialect.ts';
 
-export { accessAllowed } from './access-entries.ts';
+export { accessAllowed, authoredBy, changeNamed, changesOf, entriesOf, indexOf, keyedBy, KINDS, type Kind } from './access-entries.ts';
 export { recordField, recorded, RECORDS, type ChangeRecord } from './change-records.ts';
 
 /**
@@ -519,23 +520,33 @@ export const BATCH_BYTES = 8 * 1024 * 1024;
 /**
  * Of the entries `where` matches, in `order` of seq, the first `limit` or
  * fewer that hold no more than `BATCH_BYTES` of metadata between them, but
- * always the first: the seqs they run from and to, and whether the bytes
- * cut the run short of `limit`. Null when none matches. A reader asks this
- * first, then reads `where` between the two.
+ * always the first: the seqs they run from and to, each of them (`seqs`),
+ * and whether the bytes cut the run short of `limit`. Null when none
+ * matches. A reader asks this first, then reads `where` between the two, or
+ * the entries `seqs` names. `by`, the entries whose column is one of these
+ * values too: a stream of each value's, through the index keyed
+ * `(column, seq)` (`keyedBy`), merged; asked as one condition, Postgres
+ * walked the primary key back past every other value's entries, 613 pages
+ * for an actor's newest behind 20,000 of another's (T245, R48), and SQLite
+ * its rowid.
  */
 export async function withinBytes(
   db: Queryable,
   where: SQL | undefined,
   limit: number,
   order: 'asc' | 'desc' = 'asc',
-): Promise<{ from: bigint; to: bigint; cut: boolean; count: number } | null> {
+  by?: { column: AnyColumn; values: readonly string[] },
+): Promise<{ from: bigint; to: bigint; cut: boolean; count: number; seqs: bigint[] } | null> {
   const { auditLog } = tablesOf(db);
-  const sizes = await db
-    .select({ seq: auditLog.seq, bytes: sql<number | string>`length(${auditLog.metadata})` })
-    .from(auditLog)
-    .where(where)
-    .orderBy(order === 'asc' ? asc(auditLog.seq) : desc(auditLog.seq))
-    .limit(limit);
+  if (by !== undefined && by.values.length === 0) return null;
+  const sizes = by !== undefined
+    ? (await rowsOf<{ seq: string | number | bigint; bytes: number | string }>(db, streamsOf(db, where, limit, order, by))).map((row) => ({ seq: BigInt(row.seq), bytes: row.bytes }))
+    : await db
+      .select({ seq: auditLog.seq, bytes: sql<number | string>`length(${auditLog.metadata})` })
+      .from(auditLog)
+      .where(where)
+      .orderBy(order === 'asc' ? asc(auditLog.seq) : desc(auditLog.seq))
+      .limit(limit);
   let held = 0;
   let count = 0;
   for (const { bytes } of sizes) {
@@ -544,34 +555,85 @@ export async function withinBytes(
     count += 1;
   }
   if (count === 0) return null;
-  return { from: sizes[0]!.seq, to: sizes[count - 1]!.seq, cut: count < sizes.length, count };
+  return { from: sizes[0]!.seq, to: sizes[count - 1]!.seq, cut: count < sizes.length, count, seqs: sizes.slice(0, count).map(({ seq }) => seq) };
+}
+
+/** `withinBytes`' sizes of the entries whose `by.column` is one of `by.values`: each value's first `limit` by its index, then the first `limit` of them all. */
+function streamsOf(db: Queryable, where: SQL | undefined, limit: number, order: 'asc' | 'desc', by: { column: AnyColumn; values: readonly string[] }): SQL {
+  const { auditLog } = tablesOf(db);
+  const way = sql.raw(order === 'asc' ? 'ASC' : 'DESC');
+  const streams = [...new Set(by.values)].map((value) => {
+    const keyed = keyedBy(db, by.column, auditLog.seq, order, value, sql.param([value]));
+    // Each a table of its own, as SQLite takes a compound's terms.
+    return sql`SELECT * FROM (SELECT ${auditLog.seq} AS seq, length(${auditLog.metadata}) AS bytes FROM ${auditLog}
+      WHERE ${and(keyed.where, where)} ORDER BY ${sql.join(keyed.orderBy, sql`, `)} LIMIT ${limit}) AS ${sql.raw('v')}`;
+  });
+  return sql`SELECT s.seq, s.bytes FROM (${sql.join(streams, sql` UNION ALL `)}) s ORDER BY s.seq ${way} LIMIT ${limit}`;
 }
 
 /**
- * The first entry missing from the log up to `seq`, and the one found in
- * its place, or null when every one is there. Seqs are the primary key, so
+ * How many entries one count of the log holds at most (T245, R48), so that
+ * no count costs more as the log grows: a count is one pass over the
+ * primary key's index, 1.2 million entries in 58 ms on the compose
+ * Postgres (measured), and one entry's heap page more for each the
+ * visibility map has not caught up with, which an append-only log's newest
+ * fifth may be (autovacuum's insert threshold). A million keeps the worst
+ * of that, a million heap fetches from a cold cache, within the runtime
+ * logins' 5 s `statement_timeout`. A log of that many or fewer is counted
+ * whole at each checkpoint; a longer one a million at a time, a stretch a
+ * checkpoint, round the log (`COUNT_LAP` in the vault).
+ */
+export const COUNTED_AT_ONCE = 1_000_000n;
+
+/**
+ * The first entry missing from the log in [`from`, `seq`], and the one found
+ * in its place, or null when every one is there. Seqs are the primary key, so
  * a stretch is whole exactly when its count is its length: one pass over
  * the key's index, never the entries. Only a log with a gap pays for more,
- * a count per halving to find where.
+ * a count per halving to find where. A stretch longer than `COUNTED_AT_ONCE`
+ * is refused: its caller counts a window of it (`countWindow`).
  *
  *   entries 0..9, 4 cut:  { expected: 4n, found: 5n }
  */
-export async function missingEntry(db: Queryable, seq: bigint): Promise<{ expected: bigint; found: bigint | null } | null> {
+export async function missingEntry(db: Queryable, seq: bigint, from = 0n): Promise<{ expected: bigint; found: bigint | null } | null> {
+  if (seq - from + 1n > COUNTED_AT_ONCE) throw new Error(`a count of entries ${from} to ${seq} is longer than ${COUNTED_AT_ONCE.toLocaleString('en')} entries`);
   const { auditLog } = tablesOf(db);
-  const whole = async (to: bigint) => {
-    const [{ n }] = await db.select({ n: count() }).from(auditLog).where(and(gte(auditLog.seq, 0n), lte(auditLog.seq, to)));
-    return BigInt(n) === to + 1n;
+  const whole = async (start: bigint, to: bigint) => {
+    const [{ n }] = await db.select({ n: count() }).from(auditLog).where(and(gte(auditLog.seq, start), lte(auditLog.seq, to)));
+    return BigInt(n) === to - start + 1n;
   };
-  if (seq < 0n || (await whole(seq))) return null;
-  // The first stretch from 0 that is not whole ends at the missing entry.
-  let [low, high] = [0n, seq];
+  if (seq < from || (await whole(from, seq))) return null;
+  // The first stretch from `from` that is not whole ends at the missing entry.
+  let [low, high] = [from, seq];
   while (low < high) {
     const middle = (low + high) / 2n;
-    if (await whole(middle)) low = middle + 1n;
+    if (await whole(from, middle)) low = middle + 1n;
     else high = middle;
   }
   const [next] = await db.select({ seq: auditLog.seq }).from(auditLog).where(gt(auditLog.seq, low)).orderBy(asc(auditLog.seq)).limit(1);
   return { expected: low, found: (next?.seq as bigint | undefined) ?? null };
+}
+
+/**
+ * The stretch of the prefix through `seq` a count holds, from `at`, where the
+ * last one stopped (null for the first entry): the whole prefix when it is
+ * `COUNTED_AT_ONCE` or fewer; else `COUNTED_AT_ONCE` from `at`, round to the
+ * first entry again past the end. `next`: where the following count goes on
+ * from, null when this one reached the end, which ends a lap.
+ *
+ *   seq 9, at null:            { from: 0n, to: 9n, next: null }
+ *   seq 2,500,000, at null:    { from: 0n, to: 999,999n, next: 1,000,000n }
+ *   seq 2,500,000, at 2,000,000n: { from: 2,000,000n, to: 2,500,000n, next: null }
+ */
+export function countWindow(seq: bigint, at: bigint | null, size = COUNTED_AT_ONCE): { from: bigint; to: bigint; next: bigint | null } {
+  const from = at === null || at > seq ? 0n : at;
+  const to = seq - from + 1n > size ? from + size - 1n : seq;
+  return { from, to, next: to >= seq ? null : to + 1n };
+}
+
+/** Where a verification's count of the prefix through `seq` starts: its newest `size` entries, all of a log no longer. */
+export function newestWindow(seq: bigint, size = COUNTED_AT_ONCE): bigint {
+  return seq + 1n > size ? seq + 1n - size : 0n;
 }
 
 /**
@@ -581,50 +643,67 @@ export async function missingEntry(db: Queryable, seq: bigint): Promise<{ expect
  */
 export type Authenticity = { authentic: (entry: StoredEntry) => boolean; forged: (entry: StoredEntry) => void };
 
-/** Up to `limit` of the entries in the vault's name, allowed, of one `action`, before `before` (the newest when undefined), newest first. */
-export async function newestVaultEntries(db: Queryable, action: string, limit: number, before?: bigint): Promise<StoredEntry[]> {
-  const rows = before === undefined ? await newestEntries(db, { action, limit }) : await entriesBefore(db, { action, limit, before });
+/** Up to `limit` of the entries of `kind` (`KINDS`), before `before` (the newest when undefined), newest first: one step of the kind's index, then a row a step. */
+export async function newestVaultEntries(db: Queryable, kind: Kind, limit: number, before?: bigint): Promise<StoredEntry[]> {
+  const rows = before === undefined ? await newestEntries[kind](db, { limit }) : await entriesBefore[kind](db, { limit, before });
   return rows as StoredEntry[];
 }
 
-function vaultEntries(db: Queryable, before?: SQL) {
+function vaultEntries(db: Queryable, kind: Kind, before?: SQL) {
   const { auditLog } = tablesOf(db);
   return db
     .select(entryColumns(db))
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, sql.placeholder('action')), eq(auditLog.decision, 'allow'), before))
+    .where(and(entriesOf(kind), before))
     .orderBy(desc(auditLog.seq))
     .limit(sql.placeholder('limit'));
 }
 
-const newestEntries = prepared((db) => vaultEntries(db));
-const entriesBefore = prepared((db) => vaultEntries(db, lt(tablesOf(db).auditLog.seq, sql.placeholder('before'))));
-
-/**
- * The number of the newest entry in the vault's name, allowed, of one
- * `action`, or null for none: whether one was appended since, and nothing
- * of what it says, so its MAC is not checked. One indexed read.
- */
-export function newestVaultSeq(db: Queryable, action: string): Promise<bigint | null> {
-  // Started now (`.then`): `policyNow` reads it ahead of what a transaction's work asks next.
-  return newestSeq(db, { action }).then(([row]) => (row?.seq as bigint | undefined) ?? null);
+/** One built statement for each kind, whose condition is constants (`entriesOf`). */
+function byKind<T>(build: (kind: Kind) => T): Record<Kind, T> {
+  return Object.fromEntries((Object.keys(KINDS) as Kind[]).map((kind) => [kind, build(kind)])) as Record<Kind, T>;
 }
 
-const newestSeq = prepared((db) => newestSeqQuery(db, sql.placeholder('action')));
+const newestEntries = byKind((kind) => prepared((db) => vaultEntries(db, kind)));
+const entriesBefore = byKind((kind) => prepared((db) => vaultEntries(db, kind, lt(tablesOf(db).auditLog.seq, sql.placeholder('before')))));
+
+/**
+ * The number of the newest entry of `kind`, or null for none: whether one
+ * was appended since, and nothing of what it says, so its MAC is not
+ * checked. One step of the kind's index (`KINDS`).
+ */
+export function newestVaultSeq(db: Queryable, kind: Kind): Promise<bigint | null> {
+  // Started now (`.then`): `policyNow` reads it ahead of what a transaction's work asks next.
+  return newestSeq[kind](db).then(([row]) => (row?.seq as bigint | undefined) ?? null);
+}
+
+const newestSeq = byKind((kind) => prepared((db) => newestSeqQuery(db, kind)));
 
 /**
  * `newestVaultSeq`'s query, to run or to read inside another, as a
- * credential's read takes the newest `policy.change` with it: one rule for
+ * credential's read takes the newest policy change with it: one rule for
  * what the newest is, wherever it is read.
  */
-export function newestSeqQuery(db: Queryable, action: string | Placeholder) {
+export function newestSeqQuery(db: Queryable, kind: Kind) {
   const { auditLog } = tablesOf(db);
   return db
     .select({ seq: auditLog.seq })
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), eq(auditLog.decision, 'allow')))
+    .where(entriesOf(kind))
     .orderBy(desc(auditLog.seq))
     .limit(1);
+}
+
+/**
+ * The seq of `author`'s first entry under `keyId` that `also` holds, or
+ * undefined: one step of its key index (`audit_log_vault_key_idx`, `audit_log_app_key_idx`; `keyedBy`; T245, R48),
+ * whether the key wrote nothing, a little, or most of the log.
+ */
+export async function firstEntryUnder(db: Queryable, author: 'app' | 'vault', keyId: string, also?: SQL): Promise<bigint | undefined> {
+  const { auditLog } = tablesOf(db);
+  const key = keyedBy(db, auditLog.keyId, auditLog.seq, 'asc', keyId, sql.param([keyId]));
+  const [row] = await db.select({ seq: auditLog.seq }).from(auditLog).where(and(authoredBy(author), key.where, also)).orderBy(...key.orderBy).limit(1);
+  return (row?.seq as bigint | undefined) ?? undefined;
 }
 
 /** How many entries in its name the vault reads back, a page at a time, for its own newest of a kind (`newestAuthentic`). */

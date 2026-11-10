@@ -1,6 +1,7 @@
 import { MAX_BINDINGS } from '@coffre/core/identity';
 import { CLOCK_SKEW_MS } from '@coffre/core/vault';
 import { tablesOf, type Queryable } from '@coffre/db';
+import { entriesOf } from '@coffre/db/log';
 import { and, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 
 import { BINDING_LAST_USED_MS, type Answer, type BindingsCall, type IssueCall, type RevokeCall, type SignInCall, type SignInPin } from './credentials.ts';
@@ -78,7 +79,7 @@ export async function revokeOnSqlite(tx: Queryable, c: RevokeCall): Promise<Answ
   if (!same(newest?.seal ?? null, change.sealFrom)) return { state: 'stale' };
   if (policy !== null) {
     const [changed] = await tx.select({ seq: auditLog.seq }).from(auditLog)
-      .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'policy.change'), eq(auditLog.decision, 'allow'))).orderBy(desc(auditLog.seq)).limit(1);
+      .where(entriesOf('policy')).orderBy(desc(auditLog.seq)).limit(1);
     if ((changed === undefined ? null : String(changed.seq)) !== policy.seq) return { state: 'policy' };
     for (const { environmentId, slug } of policy.protected) {
       const [place] = await tx.select({ slug: environments.slug, project: projects.slug }).from(environments)
@@ -128,7 +129,7 @@ export async function issueOnSqlite(tx: Queryable, c: IssueCall): Promise<Answer
     }
   }
   const [changed] = await tx.select({ seq: auditLog.seq }).from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'policy.change'), eq(auditLog.decision, 'allow'))).orderBy(desc(auditLog.seq)).limit(1);
+    .where(entriesOf('policy')).orderBy(desc(auditLog.seq)).limit(1);
   if ((changed === undefined ? null : String(changed.seq)) !== input.policy.seq) return { state: 'policy' };
   for (const { environmentId, slug } of read.slugs) {
     const [place] = await tx.select({ slug: environments.slug, project: projects.slug }).from(environments).innerJoin(projects, eq(projects.id, environments.projectId)).where(eq(environments.id, environmentId));
@@ -214,7 +215,7 @@ export async function bindingsOnSqlite(tx: Queryable, c: BindingsCall): Promise<
     }
   }
   const [changed] = await tx.select({ seq: auditLog.seq }).from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'policy.change'), eq(auditLog.decision, 'allow'))).orderBy(desc(auditLog.seq)).limit(1);
+    .where(entriesOf('policy')).orderBy(desc(auditLog.seq)).limit(1);
   if ((changed === undefined ? null : String(changed.seq)) !== c.policy.seq) return { state: 'policy' };
   for (const { environmentId, slug } of c.policy.slugs) {
     const [place] = await tx.select({ slug: environments.slug, project: projects.slug }).from(environments).innerJoin(projects, eq(projects.id, environments.projectId)).where(eq(environments.id, environmentId));

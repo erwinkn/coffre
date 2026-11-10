@@ -5,6 +5,7 @@ import { getTableName, is, Table } from 'drizzle-orm';
 import { getTableConfig as postgresConfig } from 'drizzle-orm/pg-core';
 import { getTableConfig as sqliteConfig } from 'drizzle-orm/sqlite-core';
 
+import { indexOf, KINDS, type Kind } from '../src/access-entries.ts';
 import { ENGINES, journal, staleness } from '../src/baseline.ts';
 import { KNOWN_MIGRATIONS } from '../src/schema-version.ts';
 import * as postgres from '../src/schema.ts';
@@ -27,9 +28,17 @@ import * as sqlite from '../src/schema.sqlite.ts';
  * `author = 'vault'`, implied by its condition, for no bound, so `author`
  * first would leave each step past a principal to scan from the start; and
  * `author` first on SQLite, as the subject index, which SQLite's planner
- * otherwise picks over it for matching more equalities.
+ * otherwise picks over it for matching more equalities. `audit_log_vault_idx`
+ * and `audit_log_app_idx` (T245): by `seq` alone on Postgres; `author` first
+ * on SQLite, which otherwise takes a key index for its `author` and
+ * sorts every entry of that author's. `audit_log_vault_key_idx` and
+ * `audit_log_app_key_idx` (T245): the key first on Postgres (`keyedBy`),
+ * `author` first on SQLite, as the author indexes. The indexes of `KINDS`
+ * (T245): by `seq` alone on Postgres, after the principal for the tamper
+ * reports; with the columns their conditions fix on SQLite, which otherwise
+ * picks `audit_log_action_idx`.
  */
-const KEYED_APART = new Set(['audit_log_access_idx']);
+const KEYED_APART = new Set(['audit_log_access_idx', 'audit_log_vault_idx', 'audit_log_app_idx', 'audit_log_vault_key_idx', 'audit_log_app_key_idx', ...(Object.keys(KINDS) as Kind[]).map(indexOf)]);
 
 type Config = ReturnType<typeof postgresConfig>;
 type AnyColumn = Config['columns'][number];

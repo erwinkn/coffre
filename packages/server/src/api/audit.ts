@@ -1,7 +1,7 @@
 import { ownsInstance, readsWholeLog, runsInstance } from '@coffre/core/access';
 import { describeAccessFault, useOfCode, type LogVerification, type ReadsVerification, type TreeVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
-import { missingEntry } from '@coffre/db/log';
+import { missingEntry, newestWindow } from '@coffre/db/log';
 
 import { actorParts, appLogKey, CHAIN_START, CHAIN_WALK, walkChain, type ChainPoint } from '../db/audit.ts';
 import {
@@ -1221,8 +1221,10 @@ export async function verifyAudit(ctx: ApiContext, query: { from?: string } = {}
         if (target !== undefined && ends?.checkpoint === null) return failed('vault', target.entry, UNREADABLE, target.signs);
         if (target !== undefined && ends !== null) to = { entry: target.entry, at: pointOf(ends.checkpoint!), hash: ends.hash };
       }
-      // Every entry before where it starts still there: one count, and only a log with a gap pays to find where.
-      const gap = await missingEntry(tx, start.seq);
+      // Every entry before where it starts still there: one count, and only a log with a gap pays to find where. A count
+      // holds a million entries at most (T245): on a longer log the newest million, and the vault's checkpoints count
+      // round the rest, whose refusal the vault's verification below says.
+      const gap = await missingEntry(tx, start.seq, newestWindow(start.seq));
       if (gap !== null) return failed('app', gap.found, `sequence gap: expected seq ${gap.expected}, found ${gap.found}`, gap.expected - 1n);
       // A stretch runs to its checkpoint however far that is: one more than a walk apart only when the
       // checkpoints stopped for a while, and the vault cannot end a stretch anywhere else.

@@ -2,6 +2,7 @@ import { TOMBSTONE } from '@coffre/core/schemas';
 import { answerFrom, policyFrom, settingsFrom, type Access, type Settings } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { engineOf, rowsOf } from '@coffre/db/dialect';
+import { entriesOf, type Kind } from '@coffre/db/log';
 import { storedRole } from '@coffre/db/grants';
 import { sql, type SQL } from 'drizzle-orm';
 
@@ -93,13 +94,13 @@ export async function settingsShown(db: Queryable): Promise<Settings> {
 
 /** The same, with the newest `policy.change`'s number, which a request reads before it asks the vault (`newestPolicySeq`): one statement. */
 export async function policySeqAndSettings(db: Queryable): Promise<{ policySeq: bigint | null; settings: Settings }> {
-  const [row] = await rowsOf<{ seq: Int | null; settings: string | null }>(db, sql`SELECT (SELECT seq FROM (${newest('policy.change')}) AS policy) AS seq, (${settingsQuery()}) AS settings`);
+  const [row] = await rowsOf<{ seq: Int | null; settings: string | null }>(db, sql`SELECT (SELECT seq FROM (${newest('policy')}) AS policy) AS seq, (${settingsQuery()}) AS settings`);
   return { policySeq: row?.seq == null ? null : BigInt(row.seq), settings: settingsFrom(row?.settings ?? null) };
 }
 
 /** The newest `settings.change`'s metadata, to read inside another statement. */
 export function settingsQuery(): SQL {
-  return sql`SELECT metadata FROM (${newest('settings.change')}) AS settings`;
+  return sql`SELECT metadata FROM (${newest('settings')}) AS settings`;
 }
 
 /** Whole numbers come as JSON numbers or text, as each dialect's query writes them. */
@@ -117,13 +118,13 @@ type Raw = {
 
 const TOMB = `%${TOMBSTONE}%`;
 
-/** The newest allowed entry of `action` in the vault's name, as the vault reads its newest (`newestVaultEntries`). */
-const newest = (action: string) => sql`SELECT seq, metadata FROM audit_log WHERE author = 'vault' AND action = ${action} AND decision = 'allow' ORDER BY seq DESC LIMIT 1`;
+/** The newest entry of `kind`, as the vault reads its newest (`newestVaultEntries`): one step of the kind's index (`KINDS`). */
+const newest = (kind: Kind) => sql`SELECT seq, metadata FROM audit_log WHERE ${entriesOf(kind)} ORDER BY seq DESC LIMIT 1`;
 
 /** On Postgres: one JSON value, each part one index range, as the vault's own read (vault snapshot.postgres.ts). */
 function postgres(principal: SQL): SQL {
   return sql`
-    WITH policy AS (${newest('policy.change')})
+    WITH policy AS (${newest('policy')})
     SELECT json_build_object(
       'at', (extract(epoch from clock_timestamp()) * 1000)::bigint,
       'member', (
@@ -156,7 +157,7 @@ function postgres(principal: SQL): SQL {
 /** On SQLite, the same (vault snapshot.sqlite.ts): a JSON value leaving a subquery is wrapped in `json(…)`. */
 function sqlite(principal: SQL): SQL {
   return sql`
-    WITH policy AS (${newest('policy.change')})
+    WITH policy AS (${newest('policy')})
     SELECT json_object(
       'at', CAST(unixepoch('subsec') * 1000 AS INTEGER),
       'member', json((

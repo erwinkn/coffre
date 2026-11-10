@@ -413,6 +413,30 @@ changed, naming the statement and what held coffre's tables (a backup's
 `pg_dump`, a session idle in a transaction, a prepared transaction): wait
 for it to end, or end it, and migrate again.
 
+Some indexes are built after the migrations commit, without blocking
+writes (`CREATE INDEX CONCURRENTLY`; those a migration declares so). A
+plain `CREATE INDEX` holds its table's inserts for the whole build: half a
+second on an audit log of 440,000 entries, 1.3 to 1.9 s on 1.2 million
+(measured), and minutes on a day of uses. A concurrent build holds up no
+write, but waits for every transaction older than it to end, a backup's
+`pg_dump` included, up to 5 minutes, and takes as long as the table is big:
+0.3 to 0.9 s for each of 0.16's fifteen on a log of 1.2 million entries,
+about 6 s in all, and 1.6 s for a day of 3.5 million uses (measured; an
+entry written meanwhile commits in 4 ms). One that gave up, or that another run
+is building, is said, and the next run builds it; coffre works without it
+meanwhile, only slower on a large log. An instance whose days of uses hold
+tens of millions each spends minutes building their indexes on its first
+0.16 migrate: run that one from a shell before the deploy, where a
+pipeline's time limit (Workers Builds') cannot cut it. A run cut short
+keeps the days it built, and the next goes on from there. On a table partitioned by day
+(`log_uses`, `log_reads`), each day is built apart and attached, and the
+days coffre makes ahead take theirs as they are made. A day retention
+detaches while its index is built can leave the table's index marked
+invalid with every day still there indexed: Postgres 14.23, 15.18, 16.14
+and 17.10 (May 2026) and later check it again when a day's index is
+attached again; on earlier ones the run drops that index and builds every
+day's again, which holds up no write either.
+
 From a laptop, run it in the deployment's directory as well: anywhere else,
 it says where it runs, and asks for nothing.
 

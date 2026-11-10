@@ -1,5 +1,5 @@
 import { TOMBSTONE } from '@coffre/core/schemas';
-import { ACCESS_ACTIONS } from '@coffre/core/vault';
+import { accessAllowed } from '@coffre/db/log';
 import { sql, type SQL } from 'drizzle-orm';
 
 import type { Asked } from './snapshot.ts';
@@ -27,7 +27,6 @@ export function snapshotQuery(asked: Asked): SQL {
   const principals = JSON.stringify(asked.principals);
   const environments = JSON.stringify(asked.environments ?? []);
   const references = JSON.stringify((asked.references ?? []).map(Number));
-  const actions = JSON.stringify(ACCESS_ACTIONS);
   const tomb = `%${TOMBSTONE}%`;
   const released = asked.released;
   const head = asked.head === true;
@@ -60,7 +59,7 @@ export function snapshotQuery(asked: Asked): SQL {
         SELECT json_group_array(json(newest)) FROM (
           SELECT (
             SELECT ${ENTRY} FROM audit_log e
-            WHERE author = 'vault' AND subject_principal = asked.value AND action IN (SELECT value FROM json_each(${actions})) AND decision = 'allow'
+            WHERE ${accessAllowed()} AND subject_principal = asked.value
             ORDER BY seq DESC LIMIT 1
           ) AS newest
           FROM json_each(${principals}) AS asked

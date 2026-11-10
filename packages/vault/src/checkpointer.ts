@@ -248,9 +248,12 @@ export const WINDOW_MAX = 10_000;
 
 /**
  * How much longer than `TICK_BOUND_MS` a tick may run for each number its
- * barrier's window spans (review by Fable): its read sorts the window's
- * uses by number, which have no index by number, so it costs the whole
- * backlog left, 1.4 µs a use measured (1.6 s at a million). A tick is
+ * barrier's window spans (review by Fable): without an index by number,
+ * its read sorts the window's uses by number, so it costs the whole
+ * backlog left, 1.4 µs a use measured (1.6 s at a million). Since 0.16
+ * `log_uses_by_number_idx` reads the first `WINDOW_MAX` in one step of
+ * each day (T245), but a database whose index the migrator is still
+ * building online reads as before, so the allowance stays. A tick is
  * bounded by the work asked of it, never by a clock alone: a drain of
  * millions goes on, a few times slower than measured, and a stall is
  * still one.

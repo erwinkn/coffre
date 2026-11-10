@@ -22,7 +22,7 @@ import { AFTER_REMOVAL_CALLS, UNBIND_BATCH } from '../src/api/workloads.ts';
 import { countedEntry, countingCalls, WORKERS_BATCH, workersRemovalBudget } from '../src/removal.ts';
 import { serveApi } from '../src/api/router.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
-import { exchangeCandidates, exchangeStill, exchangeToken, issuedSoonest, pruneSpentTokens } from '../src/db/queries.ts';
+import { exchangeCandidates, exchangeStill, exchangeToken, issuedSoonest, liveIssued, pruneSpentTokens } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -362,7 +362,7 @@ test('the scheduled beat forgets a token two hours after it was spent, never soo
   assert.equal((await trade(jwt)).body.reason, 'replayed', 'the token just spent stays spent');
 });
 
-test("the beat forgets spent tokens in one scan of the table, deleting them by their place, not through the primary key (0080)", postgresOnly('it reads Postgres scan counts'), async () => {
+test("the beat forgets spent tokens by their place, a stretch of the table at a time, never through the primary key (0080, 0082)", postgresOnly('it reads Postgres scan counts'), async () => {
   // 50,000 spent within the two hours, three before.
   await run(sql`INSERT INTO spent_id_tokens (hash, consumed_at) SELECT sha256(int8send(i)), now() - interval '1 hour' FROM generate_series(1, 50000) i`);
   await run(sql`INSERT INTO spent_id_tokens (hash, consumed_at) SELECT sha256(int8send(-i)), now() - interval '3 hours' FROM generate_series(1, 3) i`);
@@ -377,9 +377,16 @@ test("the beat forgets spent tokens in one scan of the table, deleting them by t
     const [after] = await execute(stats);
     return { seq: Number(after!.seq) - Number(before!.seq), indexed: Number(after!.indexed) - Number(before!.indexed) };
   });
-  // 50,000 primary-key lookups were the 0.15 prune's cost on a full table (1.85 s on 7.5 million): none now.
-  assert.deepEqual(scans, { seq: 1, indexed: 0 });
+  // 50,000 primary-key lookups were the 0.15 prune's cost on a full table (1.85 s on 7.5 million): none now. Nor a scan
+  // of the whole table, 0080's: a TID range scan of at most 16,384 blocks (0082, T245), which Postgres counts as neither.
+  assert.deepEqual(scans, { seq: 0, indexed: 0 });
   assert.equal((await db.owner.select().from(spentIdTokens)).length, 50_000);
+  // The sweep goes on past the stretch it read, the table's end here, and round from its start the next time.
+  const next = async () => Number((await db.owner.execute<{ next: string }>(sql`SELECT next_block::text AS next FROM spent_tokens_sweep`) as unknown as [{ next: string }])[0].next);
+  assert.equal(await next(), 16_384);
+  await run(sql`INSERT INTO spent_id_tokens (hash, consumed_at) SELECT sha256(int8send(-i)), now() - interval '3 hours' FROM generate_series(10, 12) i`);
+  assert.equal(await pruneSpentTokens(db.owner, SPENT_TOKENS_PER_BEAT), 3);
+  assert.equal(await next(), 16_384);
   // Twice what R44's 1,000 sign-ins a second spend in a five-minute beat.
   assert.equal(SPENT_TOKENS_PER_BEAT, 600_000);
 });
@@ -2005,6 +2012,41 @@ test('a removal cuts its batches by bytes too: credentials reaching a hundred pl
   assert.deepEqual(await bindingState(wide), { live: 0, closed: true, ended: true });
   assert.ok(calls.length > 2 && calls.every(({ credentials, bytes }) => credentials < UNBIND_BATCH && bytes < 5 * 1024 * 1024), JSON.stringify(calls));
   assert.equal(calls.reduce((sum, { credentials }) => sum + credentials, 0), 800);
+});
+
+test("what a removal under way says is left costs the same however long the binding's history (T245)", postgresOnly('it reads Postgres query plans'), async () => {
+  // 3,000 live of the binding, 20,000 live of another binding of the service; then history, as it grows: credentials
+  // that ended long ago, a third revoked before they ended.
+  const insert = (count: number, by: string, ends: SQL, revoked: SQL = sql`NULL`) => run(sql`INSERT INTO credentials (kind, auth_mac, token_hash, token_hint, generation, principal, created_by, created_at, expires_at, revoked_at)
+    SELECT 'service', decode(repeat('00', 32), 'hex'), sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'coffre_svc_…', 0, ${MEMBER}, ${by}, now() - interval '31 days', ${ends}, ${revoked}
+    FROM generate_series(1, ${count}) n`);
+  await insert(3_000, `binding:${bound}`, sql`now() + n * interval '1 millisecond' + interval '2 minutes'`);
+  await insert(20_000, 'binding:00000000-0000-4000-8000-000000000000', sql`now() + n * interval '1 millisecond' + interval '1 minute'`);
+  const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
+  const left = async (history: number) => {
+    // In stretches, each well within the test pool's statement timeout.
+    for (let made = 0; made < history; made += 150_000) {
+      await insert(Math.min(150_000, history - made), `binding:${bound}`, sql`now() - interval '30 days'`, sql`CASE WHEN n % 3 = 0 THEN now() - interval '30 days' END`);
+    }
+    await run(sql`ANALYZE credentials`);
+    const seen: Statement[] = [];
+    assert.equal(await liveIssued(createDatabase(counted(pool, seen)), MEMBER, [bound], new Date()), 3_000);
+    return planOf(pool, seen[0]!, 'credentials');
+  };
+  try {
+    // At 150,000 ended and at five times that, the count reads the principal's live credentials alone, through
+    // `credentials_live_idx`: as the history grows, the share of credentials live falls, and with it Postgres's
+    // estimate of what the index reads, so no scan of the table, nor of the binding's history (the index by issuer),
+    // is ever cheaper.
+    const small = await left(150_000);
+    const grown = await left(600_000);
+    for (const plan of [small, grown]) {
+      assert.ok(plan.indexes.includes('credentials_live_idx'), `indexes [${plan.indexes.join(', ')}], visited ${plan.visited}`);
+      assert.ok(plan.visited <= 3_000 + 20_000 + 16, `visited ${plan.visited} credential rows for 3,000 live`);
+    }
+  } finally {
+    await pool.end();
+  }
 });
 
 test("a removal's batch read walks live credentials only, soonest to end, past the last batch: never the binding's history, and another binding's that end sooner once a removal (reviews r5, r6)", postgresOnly('it reads Postgres query plans'), async () => {

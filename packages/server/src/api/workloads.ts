@@ -1368,7 +1368,7 @@ export class WorkloadService {
         ctx: null, actor: SCHEDULE_ACTOR, via: null, actorAccess: null, connection: null,
         revokedBy: by.slice(by.indexOf(':') + 1),
         // An unbind weighs no protected environment; the policy only as its newest change stands, as the vault holds it.
-        policy: { seq: (await newestVaultSeq(db, 'policy.change'))?.toString() ?? null, protected: [] },
+        policy: { seq: (await newestVaultSeq(db, 'policy'))?.toString() ?? null, protected: [] },
         continues: { by, at: row.closedAt.getTime() },
       };
       const metadata = { bindingId: row.id, principalType: 'service', principalId: row.principal.slice('token:'.length) };

@@ -1,9 +1,13 @@
 import { TOMBSTONE } from '@coffre/core/schemas';
-import { ACCESS_ACTIONS } from '@coffre/core/vault';
+import { accessAllowed, changesOf } from '@coffre/db/log';
 import { sql, type SQL } from 'drizzle-orm';
 
 import type { Asked } from './snapshot.ts';
 import { newestChangeJson } from './store.ts';
+
+/** An asked member's newest change, and a place's, each by its object's index (`changesOf`). */
+const MEMBER_CHANGE = changesOf('postgres', 'x', sql`log_object('principal', asked.principal)`);
+const PLACE_CHANGE = changesOf('postgres', 'l', sql`log_object('environment', g.id::text)`);
 
 /** An entry of `audit_log` aliased `e`, as JSON (`RawEntry`): whole numbers past 2^53 as text, bytes as hex. */
 const ENTRY = sql.raw(`json_build_object(
@@ -20,7 +24,6 @@ export function snapshotQuery(asked: Asked): SQL {
   const principals = sql`${sql.param([...asked.principals])}::text[]`;
   const environments = sql`${sql.param([...(asked.environments ?? [])])}::uuid[]`;
   const references = sql`${sql.param((asked.references ?? []).map(String))}::bigint[]`;
-  const actions = sql`${sql.param([...ACCESS_ACTIONS])}::text[]`;
   const tomb = `%${TOMBSTONE}%`;
   const released = asked.released;
   const seals = asked.seals === true;
@@ -68,9 +71,11 @@ export function snapshotQuery(asked: Asked): SQL {
         SELECT coalesce(json_agg(${ENTRY}), '[]')
         FROM unnest(${principals}) AS asked (principal)
         CROSS JOIN LATERAL (
+          -- One step of audit_log_access_idx, its condition as constants (\`accessAllowed\`), the principal \`= ANY\` and
+          -- first in the order so that only that index yields it (\`keyedBy\`; T245, R48).
           SELECT * FROM audit_log
-          WHERE author = 'vault' AND subject_principal = asked.principal AND action = ANY(${actions}) AND decision = 'allow'
-          ORDER BY seq DESC LIMIT 1
+          WHERE ${accessAllowed()} AND subject_principal = ANY(ARRAY[asked.principal])
+          ORDER BY subject_principal DESC, seq DESC LIMIT 1
         ) e
       ),
       'policy', (SELECT ${ENTRY} FROM policy e),${seals
@@ -84,7 +89,7 @@ export function snapshotQuery(asked: Asked): SQL {
         FROM unnest(${principals}) AS asked (principal)
         LEFT JOIN principals m ON m.principal = asked.principal
         LEFT JOIN LATERAL (
-          SELECT x.* FROM log_changes x WHERE x.object = log_object('principal', asked.principal) ORDER BY x.number DESC LIMIT 1
+          SELECT x.* FROM log_changes x WHERE ${MEMBER_CHANGE.where} ORDER BY ${MEMBER_CHANGE.order} LIMIT 1
         ) l ON true
       ),`
         : sql``}
@@ -117,7 +122,7 @@ export function snapshotQuery(asked: Asked): SQL {
           WHERE NOT EXISTS (SELECT 1 FROM environments env JOIN projects project ON project.id = env.project_id WHERE env.id = a.id)
           OFFSET 0
         ) g
-        CROSS JOIN LATERAL (SELECT l.seal FROM log_changes l WHERE l.object = log_object('environment', g.id::text) ORDER BY l.number DESC LIMIT 1) l
+        CROSS JOIN LATERAL (SELECT l.seal FROM log_changes l WHERE ${PLACE_CHANGE.where} ORDER BY ${PLACE_CHANGE.order} LIMIT 1) l
       ),`
         : sql``}
       'ended', (

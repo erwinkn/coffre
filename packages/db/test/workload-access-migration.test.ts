@@ -89,7 +89,7 @@ test(`${TAG} keeps every credential and index on SQLite, and takes a workload's 
     }
     // The freeze index serves the per-request lookup, by its expression.
     const plan = await all(after.db, "EXPLAIN QUERY PLAN SELECT seq FROM audit_log WHERE json_extract(metadata, '$.target') = 'instance' AND author = 'app' AND action IN ('workload.freeze', 'workload.unfreeze') AND decision = 'allow' ORDER BY seq DESC LIMIT 1");
-    assert.match(JSON.stringify(plan), /audit_log_freeze_idx/);
+    assert.match(JSON.stringify(plan), /audit_log_froze(n)?_idx/);
 
     // The release before's own insert, which names none of the new columns, still goes in.
     await run(after.db, `INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, created_by, expires_at)

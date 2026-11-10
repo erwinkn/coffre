@@ -20,7 +20,7 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
-import { accessAllowed } from './access-entries.ts';
+import { accessAllowed, authoredBy, changeNamed, entriesOf, indexOf } from './access-entries.ts';
 import { ACTIVE_SUBJECT } from './active-subject.ts';
 import { recordField, recorded } from './change-records.ts';
 
@@ -450,7 +450,34 @@ export const auditLog = pgTable(
     index('audit_log_releases_idx').on(table.author, table.actor, table.action, table.decision, table.occurredAt),
     // What the vault logged about one member, in order.
     index('audit_log_subject_idx').on(table.author, table.subjectPrincipal, table.seq),
-    // Of those, the allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
+    // The first entry an author wrote under a key, or that it wrote none, in one step however long the log (T245, R48):
+    // the vault's start and the app's key rotation ask it of a key that may never have written, or wrote most of it.
+    // The key first, an index for each author: a lookup orders by the key, then `seq` (`keyedBy`), which Postgres 16
+    // reads in order through `= ANY` of a leading column alone. Built without blocking writes (`online-indexes.ts`).
+    index('audit_log_vault_key_idx').on(table.keyId, table.seq).where(authoredBy('vault')).concurrently(),
+    index('audit_log_app_key_idx').on(table.keyId, table.seq).where(authoredBy('app')).concurrently(),
+    // Each author's newest entries, in one step however many of the other's came after them (T245): the vault's
+    // (`vaultPage`) and the app's (`newestAppEntry`, at an app's cold start). Postgres walks the primary key back
+    // for either, which it expects to meet one soon, a long tail of the other's entries or not, unless an index
+    // holds that author's alone. Built without blocking writes (`online-indexes.ts`).
+    index('audit_log_vault_idx').on(table.seq).where(sql`${table.author} = 'vault'`).concurrently(),
+    index('audit_log_app_idx').on(table.seq).where(sql`${table.author} = 'app'`).concurrently(),
+    // Each kind of entry a runtime read asks the newest of, an index of its own with the kind's condition (`KINDS`):
+    // one step however long the run of other entries since its newest, which Postgres otherwise walks back by `seq`
+    // whenever its statistics hold the kind common (T245, R48). By `seq` alone, the tamper reports by member and the
+    // change they name (`changeNamed`), so that a lookup of either kind reads no report of the other.
+    // Built without blocking writes (`online-indexes.ts`).
+    index(indexOf('checkpoint')).on(table.seq).where(entriesOf('checkpoint')).concurrently(),
+    index(indexOf('signed')).on(table.seq).where(entriesOf('signed')).concurrently(),
+    index(indexOf('brokenLog')).on(table.seq).where(entriesOf('brokenLog')).concurrently(),
+    index(indexOf('policy')).on(table.seq).where(entriesOf('policy')).concurrently(),
+    index(indexOf('settings')).on(table.seq).where(entriesOf('settings')).concurrently(),
+    index(indexOf('rotation')).on(table.seq).where(entriesOf('rotation')).concurrently(),
+    index(indexOf('intent')).on(table.seq).where(entriesOf('intent')).concurrently(),
+    index(indexOf('keyCheck')).on(table.seq).where(entriesOf('keyCheck')).concurrently(),
+    index(indexOf('tamper')).on(table.subjectPrincipal, changeNamed('postgres', table.metadata), table.seq).where(entriesOf('tamper')).concurrently(),
+    index(indexOf('moves')).on(table.seq).where(entriesOf('moves')).concurrently(),
+    // The allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
     // however many refusals the log holds about them (T239, R48). No `author` in its key, which the condition fixes:
     // Postgres takes a clause the condition implies for no bound, so a step past a principal would scan from the start.
     index('audit_log_access_idx').on(table.subjectPrincipal, table.seq).where(accessAllowed()),
@@ -458,10 +485,17 @@ export const auditLog = pgTable(
     index('audit_log_unbind_idx')
       .on(sql`((${table.metadata})::jsonb ->> 'bindingId')`)
       .where(sql`${table.author} = 'app' AND ${table.action} = 'token.unbind' AND ${table.decision} = 'allow'`),
-    // Whether a target is frozen: its newest allowed freeze or lift (docs/design/workload-access.md, section 8.2).
+    // Whether a target is frozen: its newest allowed freeze or lift (docs/design/workload-access.md, section 8.2), one
+    // step back by `(target, seq)` however many of the app's entries came since (T245, R48). `audit_log_freeze_idx`,
+    // keyed `seq DESC NULLS LAST`, serves no lookup's `ORDER BY seq DESC` (nulls first): Postgres walked the app's
+    // entries back by `seq` instead, from the newest to the target's newest freeze. Unused, it goes in 0.17.
     index('audit_log_freeze_idx')
       .on(sql`((${table.metadata})::jsonb ->> 'target')`, table.seq.desc())
       .where(sql`${table.author} = 'app' AND ${table.action} IN ('workload.freeze', 'workload.unfreeze') AND ${table.decision} = 'allow'`),
+    index('audit_log_frozen_idx')
+      .on(sql`((${table.metadata})::jsonb ->> 'target')`, table.seq)
+      .where(sql`${table.author} = 'app' AND ${table.action} IN ('workload.freeze', 'workload.unfreeze') AND ${table.decision} = 'allow'`)
+      .concurrently(),
     // An enrollment code's tombstone: the app's successful `enrollment.supersede` naming it.
     index('audit_log_supersede_idx')
       .on(sql`((${table.metadata})::jsonb ->> 'enrollmentId')`)
@@ -1324,6 +1358,9 @@ export const logUses = pgTable(
   (table) => [
     check('log_uses_mac_check', sql`octet_length(${table.mac}) = 16`),
     uniqueIndex('log_uses_request_idx').on(table.at, table.requestId),
+    // The checkpointer's window by number (T245, R48): its first entries in one step, however far behind it is, where the
+    // index by `at` read every use from the floor and sorted them. Built without blocking writes (`online-indexes.ts`).
+    index('log_uses_by_number_idx').on(table.number).concurrently(),
   ],
 );
 
@@ -1357,6 +1394,9 @@ export const logReads = pgTable(
   (table) => [
     check('log_reads_mac_check', sql`octet_length(${table.mac}) = 16`),
     uniqueIndex('log_reads_number_idx').on(table.at, table.number),
+    // A pair's reads by number, which the reads check lists (T245, R48): the index by `at` read every read of the window's
+    // times, a stall's worth, for the few thousand a pair holds. Built without blocking writes (`online-indexes.ts`).
+    index('log_reads_by_number_idx').on(table.number).concurrently(),
     index('log_reads_principal_idx').on(table.principal, table.at, table.number),
     // A place's reads (T175): each column naming a place a read is at, newest first. Its key's, its environment's and its
     // project's; the fork it was read in; through a reference, the source's three. Those that only some reads name are

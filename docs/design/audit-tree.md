@@ -653,9 +653,13 @@ cutover's seal. Now:
   20 ms round trip added each statement): 240,000 uses drain in 24 ticks,
   7.4 s, each tick at most 403 ms (its window read 89 ms, the probe
   2 ms); 1,000,000 in 100 ticks, 56 s, the first and slowest 1.6 s. The
-  window read sorts what is left by number (the uses have no index by
-  number), so it grows with the backlog: an hour's at 1,000 a second
-  takes some 5 s a tick. So a tick's bound grows with its window
+  window read sorted what was left by number (the uses had no index by
+  number), so it grew with the backlog: an hour's at 1,000 a second
+  took some 5 s a tick. Since 0.16 `log_uses_by_number_idx` reads the
+  first 10,001 in one step of each day (T245): 3.8 ms and 182 buffers
+  after an hour's backlog of 3.5 million, where the sort took 776 ms and
+  50,003 (measured). A tick's bound still grows with its window, for a
+  database whose index is still being built online
   (`WINDOW_ENTRY_MS`, 10 µs a number the barrier's window spans, some
   seven times the measured sort): a drain of millions goes on, and a
   read that takes that long for a few entries is still a stall

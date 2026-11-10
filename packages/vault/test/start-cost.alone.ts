@@ -1,8 +1,7 @@
 // A fresh isolate's start costs the same however long the log grows (R48, T206): the reads each step of its start
 // begins with, asked together before it knows which it needs, read as many pages at a handful of days and entries as
-// at a hundred days and 100,000 entries more. One of them, the vault's first entry under its key, has no index: it
-// walks the log from its start, so it is asked only where the start, knowing more, would have walked too
-// (`firstVaultEntryUnder`'s `unlessRotated`).
+// at a hundred days and 100,000 entries more. One of them, the vault's first entry under its key, had no index until
+// 0.16 and walked the log from its start; now one step of `audit_log_vault_key_idx` (T245), whether the key wrote or not.
 //
 // It runs alone, after the suite (scripts/test-suite.sh): another test's migration in the cluster makes the next call
 // of every backend plan everything again (use-days.alone.ts), which reads the catalog, not the log.
@@ -104,25 +103,23 @@ test("a fresh isolate's start reads as many pages at a handful of days and entri
   }
 });
 
-test("the vault's first entry under its key, asked before the start knows it needs it, walks no entries of a key it rotated from", postgresOnly('the plans'), async () => {
+test("the vault's first entry under a key is one step of the index, whether the key wrote, wrote after 100,000 entries, or never wrote", postgresOnly('the plans'), async () => {
   const to = `vault:${randomBytes(4).toString('hex')}`;
-  const first = (unlessRotated: boolean) => firstVaultEntryUnder(db.vault, to, { unlessRotated });
-  const pagesOf = async (unlessRotated: boolean) => {
+  const pagesOf = async (key: string) => {
     const [row] = await rows<{ 'QUERY PLAN': [{ Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }] }>(db.owner, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-      SELECT seq FROM audit_log WHERE author = 'vault' AND key_id = ${to}
-      ${unlessRotated ? sql`AND NOT EXISTS (SELECT 1 FROM audit_log r WHERE r.author = 'vault' AND r.action = 'key.rotate' AND r.decision = 'allow' AND r.key_id = ${to})` : sql``}
-      ORDER BY seq LIMIT 1`);
+      SELECT seq FROM audit_log WHERE author = 'vault' AND key_id = ANY(ARRAY[CAST(${key} AS text)]) ORDER BY key_id, seq LIMIT 1`);
     const plan = row!['QUERY PLAN'][0].Plan;
     return plan['Shared Hit Blocks'] + plan['Shared Read Blocks'];
   };
-  // 100,000 entries of the vault's under the key it then rotated from, and the rotation: the start, finding it, never walks them.
+  // 100,000 entries of the vault's under the key it then rotated from, and the rotation: the start finds it without walking them.
   await older(100_000, 'vault', 'vault:old');
+  const [rotated] = await rows<{ seq: string }>(db.owner, sql`SELECT (max(seq) + 1)::text AS seq FROM audit_log`);
   await withLogUnlocked(db.owner, (tx) => tx.execute(sql`
     INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash, metadata)
-    VALUES ((SELECT max(seq) FROM audit_log) + 1, 'vault', ${to}, ${Date.now()}::bigint, 'system:vault', 'key.rotate', 'allow', ${ZERO}, ${ZERO}, ${ZERO}, '{}')`));
-  assert.equal(await first(true), undefined, 'none read once a rotation to the key is logged');
-  assert.notEqual(await first(false), undefined, 'the entry is there, past the entries it walks to it');
-  const [walked, probed] = [await pagesOf(false), await pagesOf(true)];
-  assert.ok(walked > 100, `the walk itself read ${walked} pages`);
-  assert.ok(probed <= 16, `${probed} pages once rotated, the walk ${walked}`);
+    VALUES (${rotated!.seq}::bigint, 'vault', ${to}, ${Date.now()}::bigint, 'system:vault', 'key.rotate', 'allow', ${ZERO}, ${ZERO}, ${ZERO}, '{}')`));
+  assert.equal(await firstVaultEntryUnder(db.vault, to), BigInt(rotated!.seq), 'the rotation, past the entries it would walk to it');
+  assert.equal(await firstVaultEntryUnder(db.vault, 'vault:never'), undefined);
+  for (const [what, pages] of [['found past the old key\'s', await pagesOf(to)], ['for a key that never wrote', await pagesOf('vault:never')]] as const) {
+    assert.ok(pages <= 16, `${pages} pages ${what}`);
+  }
 });

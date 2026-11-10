@@ -1,8 +1,9 @@
 
 import { personalOf } from '@coffre/core/schemas';
-import { ACCESS_ACTIONS, type CredentialAcceptance } from '@coffre/core/vault';
+import { type CredentialAcceptance } from '@coffre/core/vault';
 import type { Database, Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
+import { accessAllowed } from '@coffre/db/log';
 import { sql, type SQL } from 'drizzle-orm';
 
 import { periodOf, phaseOf, refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS } from './bulk.ts';
@@ -259,8 +260,8 @@ async function readRoute(tx: Queryable, layers: readonly string[], route: string
       FROM grants g LEFT JOIN environments e ON e.id = g.environment_id WHERE g.principal = ${principal}`);
     const last = await one<Changed>(sql`SELECT ${CHANGED} FROM log_changes c
       WHERE c.object = ${objectKey({ kind: 'principal', id: principal })} ORDER BY c.number DESC LIMIT 1`);
-    const access = await one<{ seq: string }>(sql`SELECT CAST(a.seq AS TEXT) AS seq FROM audit_log a WHERE a.author = 'vault' AND a.subject_principal = ${principal}
-      AND a.decision = 'allow' AND a.action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)}) ORDER BY a.seq DESC LIMIT 1`);
+    const access = await one<{ seq: string }>(sql`SELECT CAST(a.seq AS TEXT) AS seq FROM audit_log a WHERE ${accessAllowed()} AND a.subject_principal = ${principal}
+      ORDER BY a.seq DESC LIMIT 1`);
     if (last !== undefined && BigInt(last.number) > inputs) inputs = BigInt(last.number);
     const listOf = <T>(of: (grant: (typeof grants)[number]) => T) => (member === undefined || grants.length === 0 ? null : grants.map(of));
     editor = {
@@ -822,8 +823,8 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows, routed?: { read
   ]);
   const numbers = [lc, lm, lr, cached ? undefined : policy, ls, lx, ...le].flatMap((change) => (change === undefined ? [] : [BigInt(change.number)]));
   const inputs = numbers.length === 0 ? null : numbers.reduce((a, b) => (b > a ? b : a));
-  const access = c === undefined ? undefined : await once<{ seq: string }>(`access\n${c.principal}`, sql`SELECT CAST(a.seq AS TEXT) AS seq FROM audit_log a WHERE a.author = 'vault' AND a.subject_principal = ${c.principal}
-    AND a.decision = 'allow' AND a.action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)}) ORDER BY a.seq DESC LIMIT 1`);
+  const access = c === undefined ? undefined : await once<{ seq: string }>(`access\n${c.principal}`, sql`SELECT CAST(a.seq AS TEXT) AS seq FROM audit_log a WHERE ${accessAllowed()} AND a.subject_principal = ${c.principal}
+    ORDER BY a.seq DESC LIMIT 1`);
 
   // The cap's rule (bulk.ts, as 0022 and 0024 write it): the key's row, and the others only for a key not in the set.
   const refresh = refreshMs(limit);

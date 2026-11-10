@@ -12,6 +12,87 @@
   as it counts `late`. Credentials refused or missing, a disabled key and
   KMS's own 5xx still count in time: a misconfigured vault does not
   throttle itself. Callers see the same answer as before.
+- **No statement on the runtime logins costs more as history grows (T245,
+  R48), so that a statement timeout on them holds at any size.** Every read
+  of the newest entry of a kind (the newest policy, rotation, settings,
+  signed or refused checkpoint, move, key intent, the oldest key check),
+  of an author's newest, of a key's first or of a member's newest access
+  entry, a tamper report or a freeze, now takes an index that holds that
+  kind alone, keyed by `seq` (or by the key, member or target, then `seq`):
+  Postgres walked the log back by `seq` instead, past every entry since,
+  whenever its statistics held the kind common (the newest rotation, behind
+  20,000 checkpoints: 641 pages to 4; the newest checkpoint, behind 100,000
+  unwraps: 3,731 to 4; a member's newest access entry, behind 20,000 of
+  their reads: 956 to 4). A sign-in's freeze check never used the freeze
+  index, keyed `seq DESC NULLS LAST` against its `ORDER BY seq DESC`, and
+  walked the app's entries back to the target's newest freeze (1,024 pages
+  to 4); `audit_log_freeze_idx` goes in 0.17. An object's newest change in
+  0.15's log, read by every use, write, issue, sign-in and member check,
+  walked the primary key back past every other object's changes whenever
+  its statistics held the object common (441 pages to 4, behind 20,000 of
+  another's): each such read now asks for the object through `= ANY` and
+  orders by it first, so that only the object's index yields the order, in
+  the sources (`changesOf`) and in fourteen of the database's functions,
+  which 0082 replaces with that alone changed (their signatures, settings
+  and answers 0.15's; the use's and the route's warm-up marks move to
+  `0082`, so a session plans the new bodies before it takes the fence), and
+  an audit page's credential origins, a credential's first change (367
+  pages behind 20,000 of other objects' changes before it). So do a
+  sign-in's freeze check (701 pages to 4 under a plan for any target),
+  a member's newest access entry on their page, and an audit page by
+  member, which reads each of their names by `audit_log_actor_idx`, then
+  its entries by seq (613 pages behind 20,000 of another member's, now a
+  step of each name's). The
+  tamper reports are keyed by member, then the change they name, then
+  `seq`, so a lookup of 0.15's reports or of 0.14's reads no report of the
+  other kind (1,397 pages to 3). A test holds each of these reads to its
+  index against a run of its kind then a long tail of others, under a plan
+  for its values and one for any, and fails on a new one in the sources or
+  the database's functions that it does not list, or a read of an object's
+  changes not through `changesOf` (`packages/db/test/newest-lookups.test.ts`).
+  A fresh vault isolate's start no longer skips its key's first entry once a
+  rotation to the key is logged: the `NOT EXISTS` that checked walked every
+  rotation (4,741 pages past 40,000), and the entry is a step of its index
+  now. The start asks its reads together, each in a snapshot of its own,
+  so it settles from them alone only what each proves alone: a rotation to
+  write, or a verdict that the vault is superseded, is read again in order.
+  Another instance's rotation, landing between them, had looked like a log
+  under the new key with no first entry under it, and made a second
+  rotation, from the new key to itself. Read in order, still a snapshot
+  each, a first entry under the key above the newest entry read is that
+  rotation landing between them, and is read again too, rather than taken
+  for the log moving on to another key, which left the vault refusing every
+  change with `wrong_kek` until it restarted. A check of a member no row names read the log past every refusal
+  about them (1,604 pages behind 20,000), and now takes their newest access
+  entry and change by their indexes. The same test lists every `EXISTS`
+  over a log and every least or greatest of a column of the uses, and one
+  over a table it cannot follow (a CTE, a log under a name of its own)
+  until it is told what that table is.
+  Five reads still go over a whole history, which T248 bounds: every
+  member's findings, an audit page's count of what it hides, an
+  offboarding report's reads of its members, the vault keyring's
+  rotations, and the checkpointer's lowest `at` left above a part of a
+  backlog whose uses share one `at` (40 pages 2,000 uses in, 366 at
+  20,000), whose fix changes the floor a checkpoint signs. Migration
+  0082 adds the seventeen indexes, built after the migrations commit
+  without blocking writes: fifteen on `audit_log`, `log_uses (number)` (the
+  checkpointer's window after an hour's backlog of 3.5 million uses: 776 ms
+  to 3.8 ms; it was past 5 s from there) and `log_reads (number)` (the
+  reads check of a pair after a stall: 96,367 buffers to 60,219, flat in
+  the stall's length). Each entry is in at most four of the audit log's
+  new indexes (its author's, its author's by key, its kind's, its
+  member's); a use and a projected read each write one index entry more.
+  The spent tokens' prune reads a 128 MB stretch of its table a beat,
+  round the table, instead of all of it; a token's record is kept up to a
+  round (about 25 minutes at 1,000 sign-ins a second) past its two hours. A
+  checkpoint counts at most a million entries of the log's prefix: a
+  longer log's are counted a million a checkpoint, round the log, so a cut
+  in its middle is found within as many checkpoints as it has millions of
+  entries, not at the next; a verification counts the newest million, and
+  the checkpoints' refusal stands for it. The migrator builds a migration's
+  `CREATE INDEX CONCURRENTLY` after its transaction, on every run until it
+  is built (`docs/deploy.md`, "Upgrading": on an instance whose days of
+  uses hold tens of millions, run 0.16's first migrate from a shell).
 - **The credential proxy ends its upstream request when the app's request
   ends, and sets no time bound of its own (W365, config Q7).** It passes the
   incoming request's abort signal to the upstream `fetch`: an app that

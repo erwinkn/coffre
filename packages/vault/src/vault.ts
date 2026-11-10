@@ -180,7 +180,7 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { engineOf, isUnavailable, isUniqueViolation, lockNotAvailable, SNAPSHOT } from '@coffre/db/dialect';
 import { changeName, everyProjectConversion, findingMetadata, newestAccess, newestChangeNames, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
-import { appendEntries, HeadBusy, holdFence, holdIssues, isMovedChange, laterHead, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, COUNTED_AT_ONCE, countWindow, HeadBusy, holdFence, holdIssues, isMovedChange, laterHead, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestWindow, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { KeyAccounting } from './accounting.ts';
 import { addRefusal, callRefusal, openRefusal, refusalRow, writeRefusal } from './refusal.ts';
@@ -1439,10 +1439,9 @@ class VaultService implements Vault {
     const sync = log015 && !prepared.rolesSynced;
     if (!settle && !convert && !cutover && !limit && !sync) return null;
     const asked: StartReads = {
-      rotation: settle ? store.latestVaultEntry(db, [KEY_ROTATE]) : undefined,
+      rotation: settle ? store.latestRotation(db) : undefined,
       newest: settle ? store.vaultPage(db, undefined, 1).then(([entry]) => entry) : undefined,
-      // None once a rotation to the key is logged (R48): `#settle` reads it again if it needs it after all.
-      first: settle ? store.firstVaultEntryUnder(db, prepared.logKey.keyId, { unlessRotated: true }) : undefined,
+      first: settle ? store.firstVaultEntryUnder(db, prepared.logKey.keyId) : undefined,
       cutover: cutover ? store.cutoverNumber(db) : undefined,
       checkpoint: cutover && convert ? logStore(db).newest() : undefined,
       holders: convert ? store.everyProjectHolders(db) : undefined,
@@ -1627,10 +1626,10 @@ class VaultService implements Vault {
   async #settle(start?: StartReads): Promise<void> {
     const prepared = this.#prepared;
     const current = prepared.logKey.keyId;
-    for (let attempt = 1; ; attempt += 1) {
-      // The start's reads first; a retry, after a rotation that raced another, reads again.
-      const asked = attempt === 1 ? start : undefined;
-      const rotation = await (asked?.rotation ?? store.latestVaultEntry(this.#db, [KEY_ROTATE]));
+    // The start's reads first; a retry, after a rotation that raced another, reads again.
+    let asked = start;
+    for (let retries = 0; ; asked = undefined) {
+      const rotation = await (asked?.rotation ?? store.latestRotation(this.#db));
       if (rotation?.keyId === current && this.#authentic(rotation)) {
         prepared.since = rotation.seq;
         return;
@@ -1638,18 +1637,25 @@ class VaultService implements Vault {
       const newest = await (asked?.newest ?? store.vaultPage(this.#db, undefined, 1).then(([entry]) => entry));
       // A log the vault has not written to: nothing to settle until it does.
       if (newest === undefined) return;
-      // The start's says only where it found one: none may mean a rotation to the key it did not walk past.
-      const first = (await asked?.first) ?? (await store.firstVaultEntryUnder(this.#db, current));
+      const first = await (asked?.first ?? store.firstVaultEntryUnder(this.#db, current));
       if (first !== undefined && newest.keyId === current) {
         prepared.since = first;
         return;
       }
+      // The start asks its reads together, each in a snapshot of its own (T206): a rotation that lands between
+      // them can show as the newest entry, under this very key, beside no first entry under it, which would
+      // rotate the key to itself and move its predecessor's bound (review r9 of #556). Each settles alone only
+      // what it proves alone, above; a rotation or a verdict is read again, in order. Read so, each in a snapshot of
+      // its own still, a first entry above the newest says one landed between them, as another instance's rotation to
+      // this key would, which would read as the log moved on from it (review r10 of #556): read again then too. The
+      // log only grows and its first entry under a key never moves, so that is once.
+      if (asked !== undefined || (first !== undefined && first > newest.seq)) continue;
       if (first === undefined && prepared.logKeys.some((key) => key.keyId === newest.keyId)) {
         try {
           prepared.since = await this.#rotate(newest.keyId);
           return;
         } catch (error) {
-          if (attempt < 3 && error instanceof Retry) continue;
+          if (retries++ < 2 && error instanceof Retry) continue;
           throw error;
         }
       }
@@ -1776,7 +1782,7 @@ class VaultService implements Vault {
     const head = held?.head ?? undefined;
     await this.#weigh(tx, entries);
     const appended = await appendEntries(tx, prepared.logKey, entries, async (locked) => {
-      const rotation = head === undefined ? await store.latestVaultEntry(locked, [KEY_ROTATE]) : head.rotation ?? undefined;
+      const rotation = head === undefined ? await store.latestRotation(locked) : head.rotation ?? undefined;
       if (rotation !== undefined && !prepared.logKeys.some((key) => key.keyId === rotation.keyId)) {
         prepared.superseded = `the log moved on to ${rotation.keyId}, a key this vault does not hold: a vault given a newer vault key replaced it, and a replaced key writes nothing more`;
         throw new Error(prepared.superseded);
@@ -3201,7 +3207,7 @@ class VaultService implements Vault {
     const entry = await newestAuthentic(
       (limit, before) => (reads?.newestSettings !== undefined && before === undefined
         ? Promise.resolve(reads.newestSettings === null ? [] : [reads.newestSettings])
-        : store.newestVaultEntries(db, SETTINGS, limit, before)),
+        : store.newestVaultEntries(db, 'settings', limit, before)),
       this.#check(reports, null),
     );
     if (entry === 'none') return settingsFrom(null);
@@ -3231,7 +3237,7 @@ class VaultService implements Vault {
     const entry = await newestAuthentic(
       (limit, before) => (reads !== undefined && before === undefined
         ? Promise.resolve(reads.newestPolicy === null ? [] : [reads.newestPolicy])
-        : store.newestVaultEntries(db, POLICY, limit, before)),
+        : store.newestVaultEntries(db, 'policy', limit, before)),
       this.#check(reports, null),
     );
     if (entry === 'none') return { policy: DEFAULT_POLICY, edits: NO_EDITS, readable: true, seq: null };
@@ -3562,7 +3568,7 @@ class VaultService implements Vault {
   /** Each KEK's recorded check value, by `provider:keyId`, and the entry that holds it. */
   async #checkValues(db: Queryable): Promise<Map<string, { seq: bigint; wrapped: WrappedKey }>> {
     const checks = new Map<string, { seq: bigint; wrapped: WrappedKey }>();
-    for (const entry of await store.vaultEntriesOf(db, [KEY_CHECK], -1n, VERIFY_BATCH)) {
+    for (const entry of await store.keyChecks(db, VERIFY_BATCH)) {
       // A check in the vault's name that the vault did not write proves nothing either way.
       if (!this.#authentic(entry)) continue;
       const { kekProvider, kekId, kekVersion, bytes } = JSON.parse(entry.metadata) as WrappedKey;
@@ -3619,6 +3625,7 @@ class VaultService implements Vault {
         digest: read.tally.access.digest,
         carrier,
         scrub: read.scrub === null ? null : { at: positionOf(read.scrub.at), end: positionOf(read.scrub.end) },
+        count: typeof read.count === 'number' ? BigInt(read.count) : null,
       };
     });
   }
@@ -3668,6 +3675,8 @@ class VaultService implements Vault {
     const found: NewEntry[] = [];
     // The newest checkpoint entry, signed or refused, as this call's snapshot found it.
     let seen: StoredEntry | undefined;
+    // Where the next checkpoint's count goes on from (`countWindow`).
+    let counted: bigint | null = null;
     const resumed = await this.#db.transaction(async (tx) => {
       seen = await store.newestCheckpointEntry(tx);
       await this.#sweep(tx, found);
@@ -3677,7 +3686,11 @@ class VaultService implements Vault {
       if (!(await this.#holding(tx, [signed]))(signed)) {
         return { ok: false as const, failedAtSeq: null, reason: `the log up to entry ${signed.seq} is not the prefix the last checkpoint signed` };
       }
-      const gap = await missingEntry(tx, from.at.seq);
+      // The prefix whole, a count of it: all of it, or on a log longer than a count holds the stretch after the last
+      // checkpoint's, round the log a stretch a checkpoint (T245).
+      const window = countWindow(from.at.seq, from.count, walks.count);
+      counted = window.next;
+      const gap = await missingEntry(tx, window.to, window.from);
       if (gap !== null) return { ok: false as const, failedAtSeq: Number(gap.found), reason: `sequence gap: expected seq ${gap.expected}, found ${gap.found}` };
       return from;
     }, SNAPSHOT);
@@ -3700,7 +3713,7 @@ class VaultService implements Vault {
       for (const entry of found) if (!d.reports.includes(entry)) d.reports.push(entry);
       // Checkpoints one at a time, each against the one before.
       const head = await lockLogHead(d.tx);
-      const latest = await store.latestVaultEntry(d.tx, [CHECKPOINT]);
+      const latest = await store.latestSigned(d.tx);
       const refused = (code: RefusalCode, detail: Record<string, unknown>, message = REFUSAL_MESSAGES[code]) =>
         new Refused(refusal(code, message), [
           { actor: SCHEDULER, action: CHECKPOINT, decision: 'deny', code, metadata: JSON.stringify(detail) },
@@ -3768,7 +3781,7 @@ class VaultService implements Vault {
         signature: await this.#prepared.signer.sign(checkpointMessage(signed)),
       };
       const lap = scrub.next === null ? null : { at: headOf(scrub.next.at), end: headOf(scrub.next.end) };
-      const kept: TalliedCheckpoint = { ...checkpoint, tally: { v: TALLY_VERSION, ...tally, access }, scrub: lap };
+      const kept: TalliedCheckpoint = { ...checkpoint, tally: { v: TALLY_VERSION, ...tally, access }, scrub: lap, count: counted === null ? null : Number(counted) };
       d.log.push({ actor: SCHEDULER, action: CHECKPOINT, decision: 'allow', relatedSeq: at.seq, metadata: JSON.stringify(kept) });
       return stalled === null ? { checkpoint } : { checkpoint, warning: stalled };
     });
@@ -3851,8 +3864,8 @@ class VaultService implements Vault {
    * another kind since, a wrong KEK, hides none.
    */
   async #standingRefusal(db: Queryable): Promise<{ failedAtSeq?: number | null; reason?: string } | null> {
-    const signed = await store.latestVaultEntry(db, [CHECKPOINT]);
-    const refused = await store.newestRefusal(db, CHECKPOINT, 'log_broken', signed?.seq ?? -1n);
+    const signed = await store.latestSigned(db);
+    const refused = await store.newestBrokenLog(db, signed?.seq ?? -1n);
     if (refused === undefined || !this.#authentic(refused)) return null;
     return JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };
   }
@@ -5320,7 +5333,9 @@ class VaultService implements Vault {
       if (!(await this.#holding(tx, [headOf(from.at)]))(headOf(from.at))) {
         return { ok: false, failedAtSeq: Number(from.entry), reason: `the log up to entry ${from.at.seq} is not the prefix this checkpoint signed: it was rewritten` };
       }
-      const gap = await missingEntry(tx, from.at.seq);
+      // A count holds a million entries at most: on a longer log, the newest million of the prefix, and the checkpoints'
+      // counts round it the rest, whose refusal stands for every verification (`#standingRefusal`, T245).
+      const gap = await missingEntry(tx, from.at.seq, newestWindow(from.at.seq, walks.count));
       if (gap !== null) return { ok: false, failedAtSeq: Number(gap.found), reason: `sequence gap: expected seq ${gap.expected}, found ${gap.found}` };
       // Every checkpoint after it whose prefix the walk may pass, a stretch's end among them, signed while
       // the app walked or not: each tally is held to the walk where it gets there (`Walk.expect`).
@@ -5408,19 +5423,18 @@ class VaultService implements Vault {
         return { ok: false, failedAtSeq: rememberedHead.seq, reason: 'changed since the vault last verified it' };
       }
       if (walk.mismatch !== null) return { ok: false, failedAtSeq: Number(walk.mismatch.entry), reason: walk.mismatch.reason };
-      if (ends !== null) {
-        // The walk ends at the prefix the stretch's checkpoint signed, by its hash too: a chain made again from before it is not.
-        if ((upTo === null && through !== ends) || endSigned !== reached) {
-          return { ok: false, failedAtSeq: Number(to), reason: `the log up to entry ${ends} is not the prefix this checkpoint signed: it was rewritten` };
-        }
-        return { ok: true, entries: walk.entries, through: Number(ends) };
+      // The walk ends at the prefix the stretch's checkpoint signed, by its hash too: a chain made again from before it is not.
+      if (ends !== null && ((upTo === null && through !== ends) || endSigned !== reached)) {
+        return { ok: false, failedAtSeq: Number(to), reason: `the log up to entry ${ends} is not the prefix this checkpoint signed: it was rewritten` };
       }
       // A checkpoint refused since the newest was signed, for a broken log: what it found, the stretch of the
-      // past it rehashed among it, which no walk from a tally reads again.
+      // past it rehashed among it, or the count round the log that found a cut, which no walk from a tally reads
+      // again and no count of a stretch's newest million holds (T245): it stands for a stretch too.
       const standing = await this.#standingRefusal(tx);
       if (standing !== null) {
         return { ok: false, failedAtSeq: standing.failedAtSeq ?? null, reason: `the last checkpoint was refused: ${standing.reason ?? 'the log is broken'}` };
       }
+      if (ends !== null) return { ok: true, entries: walk.entries, through: Number(ends) };
       const verified = { ok: true as const, entries: walk.entries, through: Number(through) };
       if (!present) return verified;
       const at = await this.#now(tx);
@@ -5554,6 +5568,8 @@ type Resumed = {
   digest: string;
   carrier: bigint | null;
   scrub: Lap | null;
+  /** Where the next count of the prefix goes on from (`countWindow`), null for the first entry. */
+  count: bigint | null;
 };
 
 /** A lap of the rehash of the past: the last entry rehashed, and the prefix it rehashes to, signed when it began. */
@@ -5562,10 +5578,14 @@ type Lap = { at: Position; end: Position };
 /** Where the next rehash of the past goes on from, null for the first entry; or what it found. */
 type Scrubbed = { ok: true; next: Lap | null } | Broken;
 
-const FIRST_ENTRY: Resumed = { ok: true, entry: null, at: START, tally: EMPTY_TALLY, digest: accessDigest(EMPTY_TALLY.access), carrier: null, scrub: null };
+const FIRST_ENTRY: Resumed = { ok: true, entry: null, at: START, tally: EMPTY_TALLY, digest: accessDigest(EMPTY_TALLY.access), carrier: null, scrub: null, count: null };
 
-/** How far one call walks the log, in entries: a checkpoint's walk from the last, its rehash of the past, and a verification's own walk. */
-export type Walks = { checkpoint: number; scrub: number; verify: number };
+/**
+ * How far one call walks the log, in entries: a checkpoint's walk from the
+ * last, its rehash of the past, and a verification's own walk; and how many
+ * entries one count of the prefix holds (`COUNTED_AT_ONCE`, T245).
+ */
+export type Walks = { checkpoint: number; scrub: number; verify: number; count: bigint };
 
 /**
  * A walk rehashes, MACs and replays some 40 µs of CPU an entry, and 95
@@ -5574,7 +5594,7 @@ export type Walks = { checkpoint: number; scrub: number; verify: number };
  * a thousand a day. The rehash of the past is a hash an entry, 14 µs warm
  * and 55 cold, beside two reads: 100 entries keep it near 6 ms a beat.
  */
-const WALKS: Walks = { checkpoint: 10_000, scrub: 100, verify: 10_000 };
+const WALKS: Walks = { checkpoint: 10_000, scrub: 100, verify: 10_000, count: COUNTED_AT_ONCE };
 
 /** The digest of the members and grants a checkpoint keeps whole, beside the digest it says they have. */
 function keptDigest({ members, grants, newest }: AccessTally): string {

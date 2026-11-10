@@ -3,20 +3,20 @@
 import type { StoredEntry } from '@coffre/core/audit';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, engineOf, forUpdate, rowsOf } from '@coffre/db/dialect';
-import { entryColumns, MOVES_FROM } from '@coffre/db/log';
+import { authoredBy, entriesOf, entryColumns, firstEntryUnder, MOVES_FROM } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 
 import type { AuthRow, AuthTable } from '../auth-rows.ts';
 
-/** The app's newest `key.reseal` or `key.rotate`, unchecked. */
+/**
+ * The app's newest `key.reseal` or `key.rotate`, unchecked: one step of
+ * `audit_log_moves_idx` (`KINDS`; T245, R48), however many of the app's
+ * other entries came since. Before 0.16 Postgres could walk the log back
+ * by `seq` from the newest entry to the newest move.
+ */
 export async function newestMove(db: Queryable): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
-  const [row] = await db
-    .select(entryColumns(db))
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), inArray(auditLog.action, [...MOVES_FROM])))
-    .orderBy(desc(auditLog.seq))
-    .limit(1);
+  const [row] = await db.select(entryColumns(db)).from(auditLog).where(entriesOf('moves')).orderBy(desc(auditLog.seq)).limit(1);
   return row as StoredEntry | undefined;
 }
 
@@ -30,17 +30,19 @@ export async function movedFrom(db: Queryable, keyIds: readonly string[]): Promi
   return new Set(rows.map((row) => row.keyId!));
 }
 
-/** Whether the app wrote any entry under `keyId`: read until the first, which for a key replaced is among the oldest. */
+/** Whether the app wrote any entry under `keyId`: its first, one step of `audit_log_app_key_idx` (`firstEntryUnder`). */
 export async function wroteUnder(db: Queryable, keyId: string): Promise<boolean> {
-  const { auditLog } = tablesOf(db);
-  const [row] = await db.select({ seq: auditLog.seq }).from(auditLog).where(and(eq(auditLog.author, 'app'), eq(auditLog.keyId, keyId))).orderBy(asc(auditLog.seq)).limit(1);
-  return row !== undefined;
+  return (await firstEntryUnder(db, 'app', keyId)) !== undefined;
 }
 
-/** The app's newest entry, unchecked. */
+/**
+ * The app's newest entry, unchecked: one step of `audit_log_app_idx` (T245,
+ * R48), where the walk back by `seq` read every vault entry since the app's
+ * last, at each cold start of an app idle while the vault's beats went on.
+ */
 export async function newestAppEntry(db: Queryable): Promise<StoredEntry | undefined> {
   const { auditLog } = tablesOf(db);
-  const [row] = await db.select(entryColumns(db)).from(auditLog).where(eq(auditLog.author, 'app')).orderBy(desc(auditLog.seq)).limit(1);
+  const [row] = await db.select(entryColumns(db)).from(auditLog).where(authoredBy('app')).orderBy(desc(auditLog.seq)).limit(1);
   return row as StoredEntry | undefined;
 }
 

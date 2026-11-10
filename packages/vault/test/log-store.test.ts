@@ -9,6 +9,8 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 
 import { leafHash, macData, pairSigners, pairVerifiers, parseCheckpoint, splitNote, verifyInclusion, verifyLog, type PairNotes, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
+import { createDatabase } from '@coffre/db';
+import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
 import { Checkpointer } from '../src/checkpointer.ts';
@@ -16,7 +18,7 @@ import { authentic, entryMac, logMacKey, type LogMacKey, type UseRow } from '../
 import { logWriter } from './log-entries.ts';
 import { logStore, postgresWindow, tileKeys } from '../src/log-store.ts';
 import { variableMemory } from './audit-tree.ts';
-import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 
 let db: TestDatabase;
 let signers: PairSigners;
@@ -309,6 +311,115 @@ test('PR 8 review r3 (W240): a bounded read stops at its limit in the database t
   assert.ok(bounded < 200 && bounded * 10 < whole, `${bounded} buffers bounded, ${whole} whole`);
 });
 
+
+test('T245: the window by number reads its first entries in one step of the index, however long the backlog: 400,000 uses behind, a few pages', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its plan' }, async () => {
+  // A backlog as a stall leaves: uses numbered past the newest pair, stamped now, in today's day.
+  await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
+    SELECT nextval('log_number'), (extract(epoch FROM now()) * 1000)::bigint, g, gen_random_uuid(), gen_random_uuid(), 1, '\\x00000000000000000000000000000000'::bytea
+      FROM generate_series(1, 400000) g`);
+  // The rows earlier tests deleted gone from the indexes too, as a vacuum leaves a live log.
+  await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) log_changes, log_uses`);
+  const window = postgresWindow(-1n, 2n ** 62n, sql`0`, undefined, 10_001, true);
+  type Node = { 'Shared Hit Blocks': number; 'Shared Read Blocks': number; 'Index Name'?: string; Plans?: Node[] };
+  const indexesOf = (node: Node): string[] => [...(node['Index Name'] === undefined ? [] : [node['Index Name']]), ...(node.Plans ?? []).flatMap(indexesOf)];
+  const measured = async (unindexed: boolean) => {
+    let read = { buffers: 0, indexes: [] as string[] };
+    await db.owner.transaction(async (tx) => {
+      // 0.15's read, without the index: in a transaction that puts it back.
+      if (unindexed) await run(tx, sql`DROP INDEX log_uses_by_number_idx`);
+      const [plan] = await rows<{ 'QUERY PLAN': [{ Plan: Node }] }>(tx, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${window}`);
+      const top = plan!['QUERY PLAN'][0].Plan;
+      read = { buffers: top['Shared Hit Blocks'] + top['Shared Read Blocks'], indexes: indexesOf(top) };
+      if (unindexed) tx.rollback();
+    }).catch((error: unknown) => {
+      if (!unindexed || !(error instanceof Error && /rollback/i.test(error.message))) throw error;
+    });
+    return read;
+  };
+  const [indexed, sorted] = [await measured(false), await measured(true)];
+  // Measured: 182 buffers by the index after 3.5 million uses, where the sort read 50,003 (T245).
+  const said = `${indexed.buffers} buffers by [${indexed.indexes.join(', ')}], ${sorted.buffers} sorting the backlog`;
+  assert.ok(indexed.indexes.some((name) => name.endsWith('_by_number_idx')), said);
+  assert.ok(indexed.buffers < 400 && indexed.buffers * 5 < sorted.buffers, said);
+});
+
+test("T245: a pair's reads listed by number read the pair's, not every read in the window's times: 100,000 reads in them, a few pages", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its plan' }, async () => {
+  const now = Date.now();
+  await run(db.owner, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, mac)
+    SELECT g, ${now}::bigint - 100000 + g, gen_random_uuid(), 1, 'user:ada@acme.example', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), '\\x00000000000000000000000000000000'::bytea
+      FROM generate_series(1, 100000) g`);
+  await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) log_reads`);
+  // What `listing` asks of a pair of 1,000 after a stall: the window's times span every read.
+  const listed = sql`SELECT r.number FROM log_reads r WHERE r.at >= ${now - 200_000}::bigint AND r.at <= ${now}::bigint AND r.number > 50000 AND r.number <= 51000`;
+  const [plan] = await rows<{ 'QUERY PLAN': [{ Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number; 'Actual Rows': number } }] }>(db.vault, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${listed}`);
+  const top = plan!['QUERY PLAN'][0].Plan;
+  assert.equal(top['Actual Rows'], 1000);
+  assert.ok(top['Shared Hit Blocks'] + top['Shared Read Blocks'] < 100, `${top['Shared Hit Blocks'] + top['Shared Read Blocks']} buffers for a pair's 1,000`);
+});
+
+// T245 review r8 (R48): the whole of `close()` as a backlog drains, part after part, each statement it sends run again
+// under EXPLAIN as the vault's login: the part 2,000 uses in, then the part 20,000 in, ten times the uses sealed behind
+// the cursor. Uses stamped one after another (the cursor's floor follows them), and uses that share one `at`, a burst
+// of a millisecond or a clock that stood still: there the floor stays put, and `lowestAbove`, the lowest `at` of the
+// uses left above the part, walks the `at` index through every use the backlog's parts sealed before it (7,069 pages
+// past 390,000). A floor read from the skew bound would cost one step but sign a floor other than the lowest `at`
+// above (HotPathOne.tla's ChunkFloor) and miss a use the clock stamped low, which the test after the next seals: T248,
+// the model first (R45).
+for (const [what, stamp, todo] of [
+  ['uses stamped one after another', (t0: number) => sql`${t0}::bigint + g`, false],
+  ['uses sharing one `at`', (t0: number) => sql`${t0}::bigint`, 'T248: `lowestAbove` walks the uses sealed at the shared `at` (HotPathOne.tla first, R45)'],
+] as const) {
+  test(`T245, review r8: close() reads as many pages 20,000 uses into a backlog as 2,000 in, ${what}`, { ...(ENGINE === 'postgres' ? {} : { skip: 'Postgres only: its plans' }), todo, timeout: 300_000 }, async () => {
+    const PART = 1_000;
+    // Stamped before the barrier's floor, as a stall leaves them: each part then signs the lowest `at` left above it.
+    const t0 = Date.now() - 60_000;
+    await run(db.owner, sql`SELECT make_day(${new Date(t0).toISOString().slice(0, 10)}::date)`);
+    await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
+      SELECT nextval('log_number'), ${stamp(t0)}, g, gen_random_uuid(), gen_random_uuid(), 1, '\\x00000000000000000000000000000000'::bytea
+        FROM generate_series(1, 22 * ${PART}) g`);
+    await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) log_uses`);
+    // The vault's store on a client of its own, each statement it sends kept.
+    const sent: { text: string; values: unknown[] }[] = [];
+    const client = postgresClient(VAULT_URL, { max: 1 });
+    const unsafe = client.unsafe;
+    (client as { unsafe: unknown }).unsafe = (text: string, values: unknown[] = [], ...rest: unknown[]) => {
+      sent.push({ text, values });
+      return (unsafe as (...args: unknown[]) => unknown)(text, values, ...rest);
+    };
+    const pagesOf = async (statement: { text: string; values: unknown[] }) => {
+      const [row] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`, statement.values as never[]);
+      const [{ Plan: plan }] = (row as unknown as { 'QUERY PLAN': [{ Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }] })['QUERY PLAN'];
+      return plan['Shared Hit Blocks'] + plan['Shared Read Blocks'];
+    };
+    try {
+      const store = logStore(createDatabase(client), { tileRange: RANGE });
+      // The cursor as the checkpointer moves it: past the part's last entry, from the floor it signs (`signedFloor`).
+      let [after, from] = [0n, t0];
+      const measured = new Map<number, { text: string; pages: number }[]>();
+      for (let part = 1; part <= 20; part += 1) {
+        sent.length = 0;
+        const closed = await store.close(after, from, PART);
+        assert.ok(closed.more !== null && closed.more !== undefined, `part ${part} left more`);
+        assert.equal(closed.entries.length, PART);
+        if (part === 2 || part === 20) {
+          // The barrier (close_one) raises the floor again, as each tick's does; the reads after it are the window's.
+          const reads = sent.filter(({ text }) => /^\s*(select|with)\b/i.test(text) && !text.includes('close_one'));
+          measured.set(part, await Promise.all(reads.map(async (statement) => ({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: await pagesOf(statement) }))));
+        }
+        after = closed.entries.at(-1)!.number;
+        from = Math.max(from, Math.min(closed.floor.set, closed.more.above ?? closed.floor.set));
+      }
+      const [early, late] = [measured.get(2)!, measured.get(20)!];
+      assert.ok(early.length >= 2, `the window and the lowest \`at\` above it measured: ${early.map(({ text }) => text).join('; ')}`);
+      assert.deepEqual(late.map(({ text }) => text), early.map(({ text }) => text), 'the parts ran other statements');
+      for (const [i, { text, pages }] of early.entries()) {
+        assert.ok(late[i]!.pages <= 2 * pages + 16, `${text}: ${late[i]!.pages} pages 20,000 uses in, ${pages} 2,000 in`);
+      }
+    } finally {
+      await client.end();
+    }
+  });
+}
 
 test('T169: a backlog far past the window drains a part a tick, each part a pair whose floor is the lowest `at` left above it, and the whole log verifies, every entry provable', async () => {
   const { cp, store, memory, alerts } = await open(variableMemory(), 200);
