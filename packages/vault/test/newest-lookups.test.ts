@@ -332,19 +332,31 @@ async function sent(work: (vault: Database) => Promise<unknown>): Promise<Statem
   const seen: Statement[] = [];
   if (ENGINE === 'postgres') {
     const client = postgresClient(VAULT_URL, { max: 1 });
-    const kept = (on: { unsafe: unknown }) => {
+    type Asks = { unsafe: unknown; savepoint?: unknown };
+    const wrapped = new WeakSet<object>();
+    // Each client's statements, once however often it is handed out: the pool's, a transaction's, on the
+    // connection its BEGIN holds (`Session.transaction`, @coffre/db), and a savepoint's inside it, a client of
+    // its own (Drizzle's nested `tx.transaction`), so a read there is measured as any other (review r9 of #556).
+    const kept = (on: Asks) => {
+      if (wrapped.has(on)) return on;
+      wrapped.add(on);
       const unsafe = on.unsafe as (...args: unknown[]) => unknown;
       on.unsafe = (text: string, values: unknown[] = [], ...rest: unknown[]) => {
         seen.push({ text, values });
         return unsafe.call(on, text, values, ...rest);
       };
+      const savepoint = on.savepoint as ((...args: unknown[]) => unknown) | undefined;
+      if (savepoint !== undefined) on.savepoint = (...args: unknown[]) => {
+        const work = args.pop() as (sp: Asks) => unknown;
+        return savepoint.call(on, ...args, (sp: Asks) => work(kept(sp)));
+      };
+      return on;
     };
-    kept(client as { unsafe: unknown });
-    // A transaction's statements, on the connection its BEGIN holds (`Session.transaction`, @coffre/db).
+    kept(client as Asks);
     const begin = client.begin as (...args: unknown[]) => unknown;
     (client as { begin: unknown }).begin = (...args: unknown[]) => {
-      const work = args.pop() as (tx: { unsafe: unknown }) => unknown;
-      return begin.call(client, ...args, (tx: { unsafe: unknown }) => (kept(tx), work(tx)));
+      const work = args.pop() as (tx: Asks) => unknown;
+      return begin.call(client, ...args, (tx: Asks) => work(kept(tx)));
     };
     try {
       await work(createDatabase(client));
@@ -372,12 +384,15 @@ async function sent(work: (vault: Database) => Promise<unknown>): Promise<Statem
 }
 
 /** The pages `statement` reads, run again under EXPLAIN as the vault's login, and the indexes it reads them by; on SQLite, its plan's indexes alone. */
-async function measure(statement: Statement): Promise<{ pages: number; indexes: string[] }> {
+async function measure(statement: Statement): Promise<{ pages: number; indexes: string[]; scans?: string[] }> {
   if (ENGINE === 'sqlite') {
     const client = (db.owner as unknown as { session: { client: { execute: (query: unknown) => Promise<{ rows: { detail: string }[] }> } } }).session.client;
     const { rows } = await client.execute({ sql: `EXPLAIN QUERY PLAN ${statement.text}`, args: statement.values.map((value) => (typeof value === 'object' && value !== null && !Buffer.isBuffer(value) ? null : value)) });
     const details = rows.map((row) => row.detail);
-    return { pages: 0, indexes: details.flatMap((detail) => [...detail.matchAll(/USING (?:COVERING )?INDEX (\w+)/g)].map((found) => found[1]!)) };
+    // Every step that walks a table or an index whole (`SCAN …`, by an index or not) beside those that search one: but a
+    // constant row's, or a list's of values the statement gives (`json_each`, a virtual table, or `VALUES`).
+    const scans = details.filter((detail) => /^SCAN\b/.test(detail) && !/^SCAN (?:CONSTANT ROW|\w+ VIRTUAL TABLE\b|\d+-ROW VALUES CLAUSE)/.test(detail));
+    return { pages: 0, indexes: details.flatMap((detail) => [...detail.matchAll(/USING (?:COVERING )?INDEX (\w+)/g)].map((found) => found[1]!)), scans };
   }
   const one = postgresClient(VAULT_URL, { max: 1 });
   try {
@@ -414,14 +429,16 @@ for (const lookup of LOOKUPS) {
     if (ENGINE === 'sqlite' && lookup.sqlite !== undefined) return;
     assert.ok(statements.length > 0, 'the read asked the logs');
     for (const statement of statements) {
-      const { pages, indexes } = await measure(statement);
-      const said = JSON.stringify({ statement: statement.text, pages, indexes });
+      const { pages, indexes, scans = [] } = await measure(statement);
+      const said = JSON.stringify({ statement: statement.text, pages, indexes, scans });
       assert.ok(indexes.some((index) => lookup.indexes.includes(index)), `takes one of ${lookup.indexes.join(', ')}: ${said}`);
       assert.ok(pages <= PAGES, `reads at most ${PAGES} pages: ${said}`);
       // SQLite counts no pages: every index its plan reads of the log the lookup is about is then one the lookup names,
       // or a subquery's walk of another kind's entries (the start's old gate over the rotations, review r8) passes as
       // the outer read's. Of the other log, a statement that reads both (the snapshot) is held by that log's lookup.
       if (ENGINE === 'sqlite') {
+        // Nor does it walk anything whole, a log's subquery, or a log by an index it names (review r9 of #556).
+        assert.deepEqual(scans, [], `searches, scanning nothing: ${said}`);
         const logs = new Set(lookup.indexes.map((index) => /^(audit_log|log_changes)_/.exec(index)?.[1]));
         const others = indexes.filter((index) => logs.has(/^(audit_log|log_changes)_/.exec(index)?.[1]) && !lookup.indexes.includes(index));
         assert.deepEqual(others, [], `reads only ${lookup.indexes.join(', ')} of the logs: ${said}`);
@@ -429,6 +446,14 @@ for (const lookup of LOOKUPS) {
     }
   });
 }
+
+test("a lookup is held by every read it sends of the logs, one inside a transaction's savepoint too (review r9 of #556)", { skip: ENGINE === 'postgres' ? false : "a transaction's statements, which the capture here sees on Postgres's connection alone" }, async () => {
+  const statements = await sent((vault) => vault.transaction(async (tx) => {
+    await rowsOf(tx, sql`SELECT seq FROM audit_log WHERE seq = 1`);
+    await tx.transaction((inner) => rowsOf(inner, sql`SELECT seq FROM audit_log WHERE seq = 2`));
+  }));
+  assert.deepEqual(statements.map(({ text }) => /seq = (\d)/.exec(text)?.[1]), ['1', '2']);
+});
 
 /**
  * The database's functions' lookups of 0.14's log (a use's, a sign-in's, an issue's): each of these kinds, as they write

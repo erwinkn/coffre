@@ -21,7 +21,8 @@ import {
 } from '@coffre/core/kek';
 import { EVERYWHERE, type Scope } from '@coffre/core/access';
 import { ACCESS_ACTIONS, checkpointMessage, HOT_LOCK_TIMEOUT_MS, LOCK_WAIT_MS, USE_METADATA_LENGTH, verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
-import { tablesOf, type Database } from '@coffre/db';
+import { createDatabase, tablesOf, type Database } from '@coffre/db';
+import { postgresClient } from '@coffre/db/connect';
 import { everyProjectPreview, findingMetadata, newestChangeNames, reportStands, tamperedMembers } from '@coffre/db/grants';
 import { isUnavailable, SNAPSHOT } from '@coffre/db/dialect';
 import { appendEntries, BATCH_BYTES, forgetLogHeads, lockLogHead, LogHeadMismatch, LogRewound, logObject } from '@coffre/db/log';
@@ -58,6 +59,7 @@ import {
   sealed as sealedNow,
   withLogUnlocked,
   type TestDatabase,
+  VAULT_URL,
   openLocalVault,
   type LocalVault,
   START_OVER,
@@ -3694,6 +3696,57 @@ test('a KEK rotation moves the log and every member row to the new key at the fi
   // Nor does a checkpoint go on from a tally it keeps in an entry the old key wrote.
   const refused = await forgot.vault.checkpoint();
   assert.equal(!refused.ok && refused.refusal.code, 'log_broken');
+});
+
+test("a start whose newest-entry read lands after another's rotation, its other reads before it, writes no second rotation (review r9 of #556)", postgresOnly('the start\'s reads side by side, a connection each: SQLite asks them one after another'), async () => {
+  const placed = await places(db.owner);
+  const [old, next] = [localKek('kek-1'), localKek('kek-2')];
+  const before = await configured(placed, { kek: old });
+  await member(before, ADA, [[before.dev, 'developer']]);
+  const keys = resolveVaultConfig({ owners: ['root@acme.example'], kek: next, previousKeks: [old] });
+
+  // A's client holds back its start's read of the vault's newest entry, the one statement that orders the vault's
+  // entries by seq with nothing else to go by, until told; its other reads go on, and are seen through.
+  const client = postgresClient(VAULT_URL, { max: 4 });
+  type Query = PromiseLike<unknown> & { values(): PromiseLike<unknown> };
+  const unsafe = client.unsafe.bind(client) as (text: string, values?: unknown[]) => Query;
+  let hold: Promise<void> | null = null;
+  let reached!: () => void;
+  let release = () => {};
+  const others: PromiseLike<unknown>[] = [];
+  const asked: string[] = [];
+  (client as { unsafe: unknown }).unsafe = (text: string, values: unknown[] = []) => {
+    if (hold !== null) asked.push(text);
+    if (hold !== null && / where author = 'vault' order by "audit_log"\."seq" desc limit \$\d+$/i.test(text)) {
+      // Asked once let go: postgres.js sends a query when it is first awaited, as rows or as `values()`.
+      const later = hold.then(() => [unsafe(text, values)] as const);
+      hold = null;
+      reached();
+      return { values: () => later.then(([query]) => query.values()), then: (ok?: (v: unknown) => unknown, ko?: (e: unknown) => unknown) => later.then(([query]) => query).then(ok, ko) };
+    }
+    const query = unsafe(text, values);
+    if (hold !== null && /\baudit_log\b/.test(text)) others.push(query);
+    return query;
+  };
+  try {
+    const a = await openLocalVault(createDatabase(client), keys);
+    hold = new Promise<void>((resolve) => (release = resolve));
+    const at = new Promise<void>((resolve) => (reached = resolve));
+    const call = a.access(ADA);
+    await Promise.race([at, sleep(5_000).then(() => assert.fail(`no read of the newest entry: ${JSON.stringify(asked)}`))]);
+    // Its rotation and first-entry reads answered, before the rotation: none, and none under the new key.
+    for (const until = Date.now() + 3_000; others.length < 2 && Date.now() < until; ) await sleep(10);
+    await Promise.all(others);
+    // B rotates; then A's newest-entry read finds B's rotation, under A's own key.
+    const b = await configured(placed, { kek: next, previousKeks: [old] });
+    release();
+    assert.equal((await call).status, 'active');
+    assert.equal((await vaultLog(b)).filter((entry) => entry.action === 'key.rotate').length, 1, 'one rotation, B\'s');
+    assert.deepEqual(await bounds({ ...b, vault: a }), await bounds(b), 'the old key\'s bound where B put it');
+  } finally {
+    release();
+    await client.end();
+  }
 });
 
 test('after a rotation, the replaced KEK vouches for nothing new: entries and rows forged under its keys fail, and what it wrote before still verifies', async () => {

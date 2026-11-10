@@ -1626,9 +1626,9 @@ class VaultService implements Vault {
   async #settle(start?: StartReads): Promise<void> {
     const prepared = this.#prepared;
     const current = prepared.logKey.keyId;
-    for (let attempt = 1; ; attempt += 1) {
-      // The start's reads first; a retry, after a rotation that raced another, reads again.
-      const asked = attempt === 1 ? start : undefined;
+    // The start's reads first; a retry, after a rotation that raced another, reads again.
+    let asked = start;
+    for (let retries = 0; ; asked = undefined) {
       const rotation = await (asked?.rotation ?? store.latestRotation(this.#db));
       if (rotation?.keyId === current && this.#authentic(rotation)) {
         prepared.since = rotation.seq;
@@ -1642,12 +1642,17 @@ class VaultService implements Vault {
         prepared.since = first;
         return;
       }
+      // The start asks its reads together, each in a snapshot of its own (T206): a rotation that lands between
+      // them can show as the newest entry, under this very key, beside no first entry under it, which would
+      // rotate the key to itself and move its predecessor's bound (review r9 of #556). Each settles alone only
+      // what it proves alone, above; a rotation or a verdict is read again, in order.
+      if (asked !== undefined) continue;
       if (first === undefined && prepared.logKeys.some((key) => key.keyId === newest.keyId)) {
         try {
           prepared.since = await this.#rotate(newest.keyId);
           return;
         } catch (error) {
-          if (attempt < 3 && error instanceof Retry) continue;
+          if (retries++ < 2 && error instanceof Retry) continue;
           throw error;
         }
       }

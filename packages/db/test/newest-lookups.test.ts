@@ -230,13 +230,19 @@ function changeSites(): { keyed: string[]; plain: string[] } {
   return { keyed: [...keyed], plain: [...plain] };
 }
 
-/** Each place in the sources that `pattern` finds, outside comments, by the function it is in, then `#2`… for a second in the same function. */
-function placesOf(pattern: RegExp): string[] {
+type Source = { file: string; text: string };
+
+/**
+ * Each place in `files` that `pattern` finds, outside comments and that `keep` keeps, by the function it is in, then
+ * `#2`… for a second in the same function.
+ */
+function placesOf(pattern: RegExp, files: Source[], keep: (match: RegExpMatchArray, text: string) => boolean = () => true): string[] {
   const found: string[] = [];
-  for (const { file, text } of sources()) {
+  for (const { file, text } of files) {
     const seen = new Map<string, number>();
     for (const match of text.matchAll(pattern)) {
       if (/^\s*(?:\/\/|\*)/.test(text.slice(text.lastIndexOf('\n', match.index) + 1, match.index))) continue;
+      if (!keep(match, text)) continue;
       const site = `${file}#${within(text, match.index)}`;
       const nth = (seen.get(site) ?? 0) + 1;
       seen.set(site, nth);
@@ -247,27 +253,55 @@ function placesOf(pattern: RegExp): string[] {
 }
 
 /** A log, as a statement names it: its table, or Drizzle's (`${auditLog}`, or `${log}` as `findingsOf` calls it). */
-const LOG = String.raw`(?:audit_log|log_changes|log_uses|\$\{(?:auditLog|logChanges|logUses|log)\})(?!\w)`;
+const LOG = /^(?:audit_log|log_changes|log_uses|\$\{(?:auditLog|logChanges|logUses|log)\})$/;
+/** 0.15's uses, as a statement names them. */
+const LOG_USES = /^(?:log_uses|\$\{logUses\})$/;
 
 /**
- * Each `EXISTS` (or `NOT EXISTS`) whose subquery's first table is a log, in SQL's words or Drizzle's columns; and
- * Drizzle's `exists(q)` or `notExists(q)` of a query `q` from a log's table.
+ * What else a gate's subquery or an aggregate reads from, by the name a statement gives it: no log, each with what it
+ * is. A name neither a log nor here (a CTE, an alias, Drizzle's table under a name of its own: `${history}`) is one the
+ * scans cannot follow, so it is a site to list as a log's would be, until it is named here (review r9 of #556).
  */
-function gateSites(): string[] {
-  const words = placesOf(new RegExp(String.raw`\bEXISTS\s*\(\s*SELECT\b(?:(?!\bFROM\b|\`).){0,160}?\bFROM\s+` + LOG, 'gs'));
-  const drizzle: string[] = [];
-  for (const { file, text } of sources()) {
-    for (const use of text.matchAll(/\b(?:exists|notExists)\((\w+)\)/g)) {
-      const from = new RegExp(String.raw`\b${use[1]}\s*=[^;]*?\.from\((\w+)\)`).exec(text.slice(Math.max(0, use.index - 800), use.index))?.[1];
-      if (from !== undefined && /^(auditLog|logChanges|logUses)$/.test(from)) drizzle.push(`${file}#${within(text, use.index)}`);
-    }
-  }
+const NOT_LOGS: Record<string, string> = {
+  ...Object.fromEntries(['pg_locks', 'pg_roles', 'pg_shdepend', 'pg_auth_members', 'pg_db_role_setting', 'pg_depend', 'pg_inherits'].map((name) => [name, "Postgres's catalog"])),
+  ...Object.fromEntries(['json_each', 'jsonb_each', 'jsonb_array_elements'].map((name) => [name, 'a list of values the statement gives'])),
+  audit_chain_head: "the audit log's head, one row",
+  checkpoint_fence: "the uses' fence, one row",
+  log_checkpoints: "0.15's checkpoints, one row each",
+  log_read_days: 'the days a member read on, a row each',
+  '${reads}': 'the reads of members by their days (reads.ts), no log of these',
+  principals: 'the members', passkeys: 'the passkeys', environments: 'the environments',
+  secret_versions: "the secrets' versions", secret_references: "the secrets' references",
+  '${projects}': 'the projects', '${credentials}': 'the credentials', '${mcpConnections}': 'the MCP connections',
+  '${serviceBindings}': 'the service bindings', '${secrets}': 'the secrets',
+  '${m}': "the members, `memberAccess`'s name for `principals` (queries.ts)",
+  sealing: "the checkpoint a use's number falls under, one row of `log_checkpoints` (log-store.ts)",
+  spent: 'the ID token spent by a sign-in, its one row (queries.ts)',
+};
+
+/** Whether a statement's `from` reads no log, by what `NOT_LOGS` says it is; a log, or a name it cannot follow, is to list. */
+const unlisted = (from: string) => !(from in NOT_LOGS);
+
+/**
+ * Each `EXISTS` (or `NOT EXISTS`) whose subquery's first table is a log, or one the scan cannot follow, in SQL's words;
+ * and Drizzle's `exists(q)` or `notExists(q)` of a query `q` from a log's table, or one not built in sight.
+ */
+function gateSites(files: Source[] = sources()): string[] {
+  const words = placesOf(/\bEXISTS\s*\(\s*SELECT\b(?:(?!\bFROM\b|`).){0,160}?\bFROM\s+(\$\{[\w.]+\}|\w+)/gs, files, (match) => unlisted(match[1]!));
+  const drizzle = placesOf(/\b(?:exists|notExists)\((\w+)\)/g, files, (match, text) => {
+    const from = new RegExp(String.raw`\b${match[1]}\s*=[^;]*?\.from\((\w+)\)`).exec(text.slice(Math.max(0, match.index! - 800), match.index))?.[1];
+    return from === undefined || /^(auditLog|logChanges|logUses)$/.test(from);
+  });
   return [...words, ...drizzle];
 }
 
-/** Each `min(…)` or `max(…)` straight from 0.15's uses (`FROM log_uses`, or Drizzle's `${logUses}`). */
-function useSites(): string[] {
-  return placesOf(/\b(?:max|min)\((?:\$\{\w+\.\w+\}|[\w.]+)\)(?:::\w+)?(?:\s+AS\s+\w+)?\s+FROM\s+(?:log_uses|\$\{logUses\})(?!\w)/g);
+/**
+ * Each `min(…)` or `max(…)` of a statement whose first table after it is 0.15's uses (`FROM log_uses`, or Drizzle's
+ * `${logUses}`), or one the scan cannot follow, whatever else it selects beside.
+ */
+function useSites(files: Source[] = sources()): string[] {
+  return placesOf(/\b(?:max|min)\((?:\$\{[\w.]+\}|[\w.]+)\)(?:(?!\bFROM\b|`|\(SELECT\b).){0,200}?\bFROM\s+(\$\{[\w.]+\}|\w+)/gs, files, (match) =>
+    LOG_USES.test(match[1]!) || (!LOG.test(match[1]!) && unlisted(match[1]!)));
 }
 
 test('every read of the newest entries of a kind in the sources is listed, with the test that holds it to a flat cost, or why none needs one (T245, R48)', () => {
@@ -304,4 +338,18 @@ test("every least or greatest of 0.15's uses in the sources is listed, with the 
   for (const [site, held] of Object.entries(USES)) {
     if ('as' in held) assert.match(readFileSync(`${ROOT}${held.by}`, 'utf8'), new RegExp(`\\b${held.as}\\b`), `${site}: ${held.by} asks ${held.as}`);
   }
+});
+
+test('the scans list a gate or an aggregate whose table they cannot follow: a CTE, a log under a name of its own, a query built elsewhere (review r9 of #556)', () => {
+  const one = (name: string, body: string): Source[] => [{ file: 'x.ts', text: `export function ${name}(db) {\n${body}\n}\n` }];
+  // A gate over a CTE of the log's entries, over the log under a name of its own, and Drizzle's of a query built elsewhere.
+  assert.deepEqual(gateSites(one('cte', 'return sql`WITH recent AS (SELECT seq FROM audit_log) SELECT 1 WHERE EXISTS (SELECT 1 FROM recent r WHERE r.seq > 1)`;')), ['x.ts#cte']);
+  assert.deepEqual(gateSites(one('named', "const { auditLog: history } = tablesOf(db);\nreturn sql`SELECT EXISTS (SELECT 1 FROM ${history} h WHERE h.key_id = 'k')`;")), ['x.ts#named']);
+  assert.deepEqual(gateSites(one('elsewhere', 'return db.select().from(grants).where(notExists(given));')), ['x.ts#elsewhere']);
+  // The uses' least under a name of their own, and their greatest beside another column.
+  assert.deepEqual(useSites(one('named', 'const { logUses: uses } = tablesOf(db);\nreturn sql`SELECT min(${uses.at}) FROM ${uses} WHERE ${uses.number} > 1`;')), ['x.ts#named']);
+  assert.deepEqual(useSites(one('beside', 'return sql`SELECT max(u.at), count(*) AS n FROM log_uses u`;')), ['x.ts#beside']);
+  // What reads no log, by what `NOT_LOGS` says it is, is no site.
+  const none = one('none', 'return sql`SELECT EXISTS (SELECT 1 FROM principals p) AS any, (SELECT max(v.created_at) FROM secret_versions v) AS at`;');
+  assert.deepEqual([...gateSites(none), ...useSites(none)], []);
 });
