@@ -112,10 +112,12 @@ CREATE ROLE migration_member LOGIN INHERIT IN ROLE migration_owner PASSWORD 'loc
 SQL
 psql_owner -d postgres -c "CREATE DATABASE member"
 # migrate_through <database> <login> <password> <last tag>: drizzle's migrator over the journal up to that tag, as coffre
-# migrated before T193. Never past `$before_t193`, the newest migration then: every later one only coffre's own migrator
+# migrated before T193. Never past `$before_t193`, the newest migration then (0074, merged just before it): every later one only coffre's own migrator
 # has applied (`db:migrate`), and only it can, since it builds 0082's indexes CONCURRENTLY after its transaction commits
 # (`online-indexes.ts`), where drizzle's runs every statement inside it.
-before_t193=0073_passkeys_in_vault
+before_t193=0074_bulk_phase
+# The fixtures stop at 0073 (T216's `p_passkeys`), whose owners they check; a checkpoint at 0074 would be as valid.
+fixture_at=0073_passkeys_in_vault
 migrate_through() {
     node -e 'const j = require("./packages/db/src/migrations/postgres/meta/_journal.json"), [last, bound] = process.argv.slice(1), idx = (t) => j.entries.find((e) => e.tag === t)?.idx;
 if (idx(last) === undefined || idx(last) > idx(bound)) { console.error(`drizzle migrates only through ${bound}, not ${last}: the rest is for coffre\u2019s own migrator (db:migrate)`); process.exit(1); }' "${4:-}" "$before_t193"
@@ -200,7 +202,7 @@ migrate_through member migration_member local-member-only 0072_passkeys_principa
 use_grants member 8
 # 0073 makes `use_credential` and `use_named_batch` again, with `p_passkeys` (T216): both the member's now, while
 # 0048's `use_batch` stays the owner's and must be granted the new `use_credential`, which the drop took from it.
-migrate_through member migration_member local-member-only "$before_t193"
+migrate_through member migration_member local-member-only "$fixture_at"
 expected="${expected/use_named_batch=migration_owner/use_named_batch=migration_member}"
 [[ "$(owners)" == "$expected" ]] || { echo "after 0073, the use functions' owners: $(owners)" >&2; exit 1; }
 use_grants member 8
@@ -221,7 +223,7 @@ answer="$(docker exec -i -e PGPASSWORD=local-vault-only "$container" \
 # they run, as their owner: each must be granted it, or every key write and member add fails with a permission error.
 psql_owner -d postgres -c "CREATE DATABASE split"
 migrate_through split migration_owner local-owner-only 0062_admit_inputs
-migrate_through split migration_member local-member-only "$before_t193"
+migrate_through split migration_member local-member-only "$fixture_at"
 # split_holds <after what>: what the owner's functions read and write, the member's tables, they may.
 split_holds() {
 psql_owner -d split <<'SQL'
