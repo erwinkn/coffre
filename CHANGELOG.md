@@ -141,14 +141,17 @@
   writes with the reads, whoever writes them, its time only moved up, and
   which retention drops with each day (`formal/Reads.tla`: removing any of
   those fails a property, as does the full verify not holding each listed
-  read to its entry, which `coffre verify log` now names). Where it
-  probed each day the member read on, 47 pages over 4 days, 447 over 40, it
-  reads 4 and 7. And a value they saw is still current when the key's
+  read to its entry, which `coffre verify log` now names). Where it read
+  every read of the member, a day at a time, it reads a row for each key
+  and version: 4 pages over 4 days of reads, 7 over 40. And a value they saw is still current when the key's
   current version holds its very ciphertext, by IV and tag, which a restore
   and a key marked stricter copy and every new value draws afresh: one probe
   of each version they saw, where it walked each restore of a restore. A
   key marked sensitive after they read it is no longer called rotated, and
-  a restore's metadata no longer decides it. Migration 0084 (SQLite 0043)
+  a restore's metadata no longer decides it. The IV and tag are trusted as
+  `secrets.current_version` is: a table owner or superuser who turns
+  `secret_versions_erase_only` off can edit them, and no seal covers them
+  yet. Migration 0084 (SQLite 0043)
   adds the table, its triggers, and its one-time fill from the reads
   already listed.
 - **The credential proxy ends its upstream request when the app's request

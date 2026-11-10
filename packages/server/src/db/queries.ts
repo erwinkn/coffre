@@ -1387,6 +1387,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  * the vault's rewrap), and a version is never rewritten but erased, which empties its ciphertext and keeps both
  * (`secret_versions_erase_only`). So a value carried forward is found however many restores it passed, and one only
  * re-marked too (T252), in a probe of each version and of its key's current one: never a walk of its restores.
+ * It trusts the versions' IV and tag as the report trusts `secrets.current_version`, read unchecked: a table owner or
+ * a superuser, who can turn `secret_versions_erase_only` off, can copy one version's IV and tag onto another and have
+ * a rotated key called current, or the reverse (D190). No seal covers them yet; sealing them is a follow-up.
  */
 async function sameValue(db: Queryable, numbered: readonly { secret: string; version: number }[], ids: readonly string[]): Promise<Set<string>> {
   // Ids and numbers anything planted may have written: looked up only as such.

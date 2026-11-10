@@ -20,7 +20,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { derivedSigningKey } from '@coffre/vault';
 import { replayStored, runCheckpointer, type RunningCheckpointer } from '@coffre/vault/node';
 import { laterChanges, lockLogHead, logObject } from '@coffre/db/log';
-import { eq, sql, type SQL } from 'drizzle-orm';
+import { eq, inArray, sql, type SQL } from 'drizzle-orm';
 
 import { sessionCookieName } from '../src/auth.ts';
 import { resolveConfig } from '../src/config.ts';
@@ -189,6 +189,21 @@ test('a key write the vault decided on its read commits in one of the app\'s rou
   // No 0.14 entry: neither the vault's `key.wrap` nor the app's `secret.write`. The changes are the write's record.
   const entries = await run(db.owner, sql`SELECT author, action FROM audit_log WHERE seq > ${seq} AND action IN ('key.wrap', 'secret.write')`) as { author: string; action: string }[];
   assert.deepEqual(entries, []);
+});
+
+test('a held write of the value a key holds already seals it anew: a ciphertext of its own, which an offboarding report tells from the one it replaced (T252)', { skip: POSTGRES }, async () => {
+  const w = await world();
+  const before = (await keyRow('API_KEY'))!;
+  const wrote = await w.write({ API_KEY: 'fake-old' });
+  assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
+  assert.deepEqual(served(w.answers), ['served']);
+  const after = (await keyRow('API_KEY'))!;
+  assert.equal(after.currentVersion, before.currentVersion + 1);
+  const sealed = await db.owner.select({ id: secretVersions.id, iv: secretVersions.iv, tag: secretVersions.authTag }).from(secretVersions)
+    .where(inArray(secretVersions.id, [before.currentVersionId!, after.currentVersionId!]));
+  assert.equal(sealed.length, 2);
+  const [one, two] = sealed.map(({ iv, tag }) => `${Buffer.from(iv).toString('hex')}:${Buffer.from(tag).toString('hex')}`);
+  assert.notEqual(one, two);
 });
 
 test("numbers past 2^53 (Ada's newest access entry, every object's newest change): her write is served and commits, each read exactly, none through a JS number (Fable's review of #474)", async () => {

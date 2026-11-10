@@ -100,10 +100,22 @@ drop out of sight once they can no longer sign in.
 
 From the audit log: every allowed `secret.read` (the vault's), each secret
 of a read of several, or `secret.write` in their name, which records the
-exact version, following each
-`secret.restore` back to the version it copied. That covers the web UI's
-Reveal, `coffre get`, `run` and `export`, and imports (which compare with the
-current value, a read).
+exact version. That covers the web UI's Reveal, `coffre get`, `run` and
+`export`, and imports (which compare with the current value, a read).
+
+A version they saw is still current when the secret's current version holds
+the same ciphertext (its IV and tag). Every value written gets a fresh IV,
+even one typed in again unchanged, so writing it again counts as a rotation.
+A rollback and a `coffre mark` copy the old ciphertext, so the value they saw
+stays listed after either. For example: they read v3, an Owner marks the key
+sensitive (v4, v3's ciphertext), and v4 is listed; the Owner then sets the
+same text again (v5, a new IV), and the key counts as rotated.
+
+The report trusts the database rows here, as it does for which version is
+current. A table owner or superuser who turns off the trigger that keeps
+versions unchanged can copy one version's IV and tag onto another, and make
+a rotated secret look current, or the reverse. Nothing seals the IV and tag
+yet.
 
 It lists what they *did* see, not what they *could* have. Someone with read
 access to `market/prod` who never opened it has nothing listed there. That is

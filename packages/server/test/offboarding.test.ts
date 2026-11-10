@@ -264,6 +264,25 @@ test('a value set again as it was is a new value: a fresh IV and tag, and the re
   assert.deepEqual([report.exposed, report.rotated], [[], 1]);
 });
 
+test('every new value draws a ciphertext of its own, the same text however it is written: one key, several at once (an import), plain, generated, sensitive, a fork\'s copy (T252)', async () => {
+  // What `sameValue` stands on: two versions share an IV and tag only when one is the other's copy (a restore, a mark).
+  await root.secrets.set('market/prod', { API_KEY: 'api-1' });
+  await dev.secrets.reveal('market/prod/API_KEY');
+  await root.secrets.set('market/prod', { API_KEY: 'api-1', OTHER: 'api-1' });
+  await root.secrets.set('market/prod', { API_KEY: { value: 'api-1', sensitivity: 'plain' } });
+  await root.secrets.set('market/prod', { API_KEY: { value: 'api-1', generated: { recipe: 'bytes:32' } } });
+  await root.secrets.set('market/prod', { API_KEY: { value: 'api-1', sensitivity: 'sensitive' } });
+  await root.environments.create('market/copy', { from: 'prod' });
+  const all = await db.owner.select({ secret: secretVersions.secretId, version: secretVersions.version, iv: secretVersions.iv, tag: secretVersions.authTag }).from(secretVersions);
+  const keyed = await db.owner.select({ id: secrets.id, key: secrets.key, environment: secrets.environmentId }).from(secrets);
+  assert.equal(keyed.length, 4, 'API_KEY and OTHER, in prod and in the copy');
+  assert.equal(all.length, 5 + 1 + 2);
+  const identities = all.map(({ iv, tag }) => `${Buffer.from(iv).toString('hex')}:${Buffer.from(tag).toString('hex')}`);
+  assert.equal(new Set(identities).size, all.length, 'no two versions share an IV and tag');
+  const report = await root.members.get(`user:${DEV}`);
+  assert.deepEqual([report.exposed, report.rotated], [[], 1]);
+});
+
 test('a value put back again and again, each restore of the last restore, is the one they saw however long the chain (T252, review r2 of #559)', async () => {
   await root.secrets.set('market/prod', { API_KEY: 'api-1' });
   await dev.secrets.reveal('market/prod/API_KEY');
