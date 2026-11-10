@@ -2292,6 +2292,7 @@ rise with its number: isolates' clocks are apart.
 | an entry's time only moved up, the greater kept (GreatestAt) | `ReportNamesListed`: use 3, c1's second read of k1, sets the entry to its own time, 1, and c1's read at 3 is left unnamed |
 | the full verify holds each listed read to an entry of its account, key and version at its time or later (NewestChecked) | `UnnamedDetected`: the attacker deletes the entry of c1's read of k1 and nothing says so |
 | retention drops the entries at or below the time of the newest read it drops (NewestRetired) | `RetiredUnnamed`: the report names a read retention dropped |
+| retention's sweep below the oldest day of reads left reads its floor and sweeps under the projector's lock, as one step between its calls (PruneLocked) | `ReportNamesListed`: the sweep reads its floor with no reads left, p1 writes use 1's row and entry, and the sweep drops the entry (review r2 of #560: a day the projector's call makes below the floor, its read listed and the report naming none) |
 
 `EXPECTED`, with every protection on:
 - `Reads ListedComplete`: the page does not see a row deleted below its
@@ -2347,10 +2348,15 @@ reads' first, is `retention.test.ts`'s); and who sees which rows
   its updates, as T175's `log_read_place_days` are written (postgres
   `0084_reads_newest`, sqlite `0043_reads_newest`); GreatestAt its upsert's
   `GREATEST`. NewestChecked is `checkReads`' `newest`, beside `dayed`.
-  NewestRetired is, on Postgres, `drop_reads_day`, which drops every
-  entry older than the oldest day of reads left (each read lies in its
-  day's partition), and on SQLite a trigger on the reads' deletes, which
-  drops a deleted read's entry unless a later read keeps it newer.
+  NewestRetired is, on Postgres, `drop_reads_day`, which drops the entries
+  of the day it drops, and on SQLite a trigger on the reads' deletes, which
+  drops a deleted read's entry unless a later read keeps it newer. On
+  Postgres each call also sweeps every entry older than the oldest day of
+  reads left (each read lies in its day's partition), the model's `Prune`,
+  after taking `project_reads`' advisory lock (PruneLocked): a projector's
+  call can make a day below the floor for a use older than the days made
+  ahead, and a sweep that read its floor before that call committed would
+  drop the entry it wrote.
   Retention drops a day at a time, oldest first, so either is the model's
   cut at the time of the newest read it drops: a newer read of the same
   key and version is in a later day, which stays. Both hold whoever drops
@@ -2358,10 +2364,11 @@ reads' first, is `retention.test.ts`'s); and who sees which rows
   new schema until the deploy: on SQLite its deletes fire the trigger; on
   Postgres the function is the new one, but for a call of the old body
   already waiting on the migration's lock, whose day's entries the next
-  call drops (the model has no previous release). The writers
-  (`/use`) write none of it; the projector writes it under the lock it
-  already holds, and `drop_reads_day`'s `lock_timeout` makes retention
-  give way to it.
+  call's sweep drops (the model has no previous release). The writers
+  (`/use`) write none of it and take neither lock; the projector writes it
+  under the lock it already holds, and `drop_reads_day`'s `lock_timeout`
+  (on that lock too) makes retention give way to it, trying again on its
+  next run.
 - The entries carry no MAC, as the days do not: the full verify, not the
   report, holds them to the rows. An entry made up or set later makes the
   report name more, never less.

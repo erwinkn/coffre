@@ -643,6 +643,7 @@ REMOVALS=(
   "ReadsNewest NewestChecked UnnamedDetected"
   "ReadsRetain NewestRetired RetiredUnnamed"
   "ReadsRetain FromChecked RetiredUnnamed"
+  "ReadsRetain PruneLocked ReportNamesListed"
   # 0.15's log across a rotation of the vault's signing key (Rotation.tla; T168, W277). An isolate under the old key,
   # serving on after the deploy, is refused at its write, under the lock, ordered against the rotation's entry.
   "RotationDeploy RetiredRefused OldWritesBelowBoundary"

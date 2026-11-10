@@ -98,6 +98,13 @@
 (*   NewestRetired     retention drops the entries of the reads it drops,  *)
 (*                     those whose time is at or below the cut's: the      *)
 (*                     report names no read retention dropped.             *)
+(*   PruneLocked       each call of `drop_reads_day` also sweeps the       *)
+(*                     entries older than the oldest day of reads left (a  *)
+(*                     day an earlier call dropped and left entries of),   *)
+(*                     under the projector's lock, so as one step between  *)
+(*                     its calls: apart, it reads the floor, a projector's *)
+(*                     call writes a read below it (its day made then, or  *)
+(*                     no day left at all), and the sweep drops its entry. *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, Sequences
 
@@ -117,7 +124,7 @@ CONSTANTS
     At,          \* each number's time: a use's own clock, which retention's days are of
     DeriveFromSealed, InputsInUseMac, ProjectSealedOnly, WindowChecked, NumberInMac, IdempotentByNumber, CursorAfterRows,
     ReplaceOnConflict, CursorMac, CountChecked, ProjectorApart, FromChecked,
-    NewestWithRows, GreatestAt, NewestChecked, NewestRetired
+    NewestWithRows, GreatestAt, NewestChecked, NewestRetired, PruneLocked
 
 Objs == Creds \cup Keys \cup {Ref}
 N == Len(Script)
@@ -167,9 +174,10 @@ VARIABLES
     gone,      \* ghost: the numbers whose projector-written row the attacker deleted
     cut,       \* retention's cut: the uses and rows at or below it dropped
     newest,    \* `log_read_newest`: [of, at], one an account, key and version, its newest read's time
-    touched    \* ghost: what the attacker deleted or set an entry of `log_read_newest` of
+    touched,   \* ghost: what the attacker deleted or set an entry of `log_read_newest` of
+    fl         \* retention's sweep below the oldest day of reads: the floor it read, not yet swept by (0: none)
 
-vars == <<seq, done, usesT, changesT, st, live, sealed, tu, tc, reads, cur, curOk, maced, pr, attacks, crashes, gone, cut, newest, touched>>
+vars == <<seq, done, usesT, changesT, st, live, sealed, tu, tc, reads, cur, curOk, maced, pr, attacks, crashes, gone, cut, newest, touched, fl>>
 writes == <<seq, done, usesT, changesT, st, live>>
 seals == <<sealed, tu, tc>>
 proj == <<reads, cur, curOk, maced, pr, newest>>
@@ -180,7 +188,7 @@ Init ==
     /\ reads = {} /\ cur = 0 /\ curOk = TRUE /\ maced = {0}
     /\ pr = [p \in Projectors |-> [pc |-> "idle", from |-> 0, to |-> 0, rows |-> {}]]
     /\ attacks = 0 /\ crashes = 0 /\ gone = {} /\ cut = 0
-    /\ newest = {} /\ touched = {}
+    /\ newest = {} /\ touched = {} /\ fl = 0
 
 -----------------------------------------------------------------------------
 (* The writers: the next append of the script, numbered, then committed (Seal.tla checks the numbering, gaps and
@@ -189,7 +197,7 @@ Init ==
 Number ==
     /\ seq = done /\ seq < N
     /\ seq' = seq + 1
-    /\ UNCHANGED <<done, usesT, changesT, st, live>> /\ UNCHANGED seals /\ UNCHANGED proj /\ UNCHANGED <<attacks, crashes, gone, cut, touched>>
+    /\ UNCHANGED <<done, usesT, changesT, st, live>> /\ UNCHANGED seals /\ UNCHANGED proj /\ UNCHANGED <<attacks, crashes, gone, cut, touched, fl>>
 
 Commit ==
     /\ done < seq
@@ -203,7 +211,7 @@ Commit ==
           ELSE /\ usesT' = usesT \cup {[n |-> n, cred |-> e.cred, key |-> e.key, dec |-> Proj(st, e.cred, e.key)]}
                /\ UNCHANGED <<changesT, st, live>>
     /\ done' = seq
-    /\ UNCHANGED seq /\ UNCHANGED seals /\ UNCHANGED proj /\ UNCHANGED <<attacks, crashes, gone, cut, touched>>
+    /\ UNCHANGED seq /\ UNCHANGED seals /\ UNCHANGED proj /\ UNCHANGED <<attacks, crashes, gone, cut, touched, fl>>
 
 -----------------------------------------------------------------------------
 (* The signer: seals what the tables hold up to any number below which every append has committed (Seal.tla's
@@ -216,7 +224,7 @@ SignTo(k) ==
     /\ sealed' = k
     /\ tu' = tu \cup {u \in usesT : sealed < u.n /\ u.n <= k}
     /\ tc' = tc \cup {c \in changesT : sealed < c.n /\ c.n <= k}
-    /\ UNCHANGED writes /\ UNCHANGED proj /\ UNCHANGED <<attacks, crashes, gone, cut, touched>>
+    /\ UNCHANGED writes /\ UNCHANGED proj /\ UNCHANGED <<attacks, crashes, gone, cut, touched, fl>>
 
 Sign == \E k \in Nums : SignTo(k)
 
@@ -251,7 +259,7 @@ PRead(p) ==
           /\ InputsInUseMac => \A u \in w : Derive(u) = u.dec
           /\ pr' = [pr EXCEPT ![p] = [pc |-> IF CursorAfterRows THEN "rows" ELSE "cursor", from |-> from, to |-> to,
                                       rows |-> {[n |-> u.n, p |-> Derive(u), at |-> At[u.n], ok |-> TRUE, by |-> p] : u \in w}]]
-    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, attacks, crashes, gone, cut, newest, touched>>
+    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, attacks, crashes, gone, cut, newest, touched, fl>>
 
 \* The chunk's rows, one statement: each replacing the rows at its number (ReplaceOnConflict) or skipped where it has
 \* one (IdempotentByNumber alone), or inserted as is.
@@ -276,7 +284,7 @@ PRows(p) ==
                   \* Written apart, the run keeps what it wrote for its entries.
                   /\ LET kept == IF NewestWithRows THEN rows ELSE written
                      IN pr' = [pr EXCEPT ![p] = IF CursorAfterRows THEN [pr[p] EXCEPT !.pc = "cursor", !.rows = kept] ELSE [Ended(p) EXCEPT !.rows = kept]]
-    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<cur, curOk, maced, attacks, crashes, gone, cut, touched>>
+    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<cur, curOk, maced, attacks, crashes, gone, cut, touched, fl>>
 
 \* The cursor moved to the chunk's end, with its MAC: only forward (IdempotentByNumber), or wherever this run read.
 PCursor(p) ==
@@ -287,14 +295,14 @@ PCursor(p) ==
        ELSE cur' = to /\ curOk' = TRUE
     /\ maced' = maced \cup {pr[p].to}
     /\ pr' = [pr EXCEPT ![p] = IF CursorAfterRows THEN Ended(p) ELSE [pr[p] EXCEPT !.pc = "rows"]]
-    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, attacks, crashes, gone, cut, newest, touched>>
+    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, attacks, crashes, gone, cut, newest, touched, fl>>
 
 \* NewestWithRows off: the entries of the rows the run wrote, once it has moved the cursor.
 PNewest(p) ==
     /\ pr[p].pc = "newest"
     /\ newest' = Upsert(newest, pr[p].rows)
     /\ pr' = [pr EXCEPT ![p] = [pc |-> "idle", from |-> 0, to |-> 0, rows |-> {}]]
-    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, attacks, crashes, gone, cut, touched>>
+    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, attacks, crashes, gone, cut, touched, fl>>
 
 \* A projector dies mid-run and loses what it derived; the next run starts from the cursor.
 PCrash(p) ==
@@ -302,7 +310,7 @@ PCrash(p) ==
     /\ crashes < MaxCrashes
     /\ crashes' = crashes + 1
     /\ pr' = [pr EXCEPT ![p] = [pc |-> "idle", from |-> 0, to |-> 0, rows |-> {}]]
-    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, attacks, gone, cut, newest, touched>>
+    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, attacks, gone, cut, newest, touched, fl>>
 
 PStep(p) == PRead(p) \/ PRows(p) \/ PCursor(p) \/ PNewest(p)
 
@@ -318,9 +326,31 @@ RetainTo(k) ==
     /\ usesT' = {u \in usesT : u.n > k}
     /\ reads' = {r \in reads : r.n > k}
     /\ newest' = IF NewestRetired THEN {e \in newest : e.at > CutAt(k)} ELSE newest
-    /\ UNCHANGED <<seq, done, changesT, st, live>> /\ UNCHANGED seals /\ UNCHANGED <<cur, curOk, maced, pr, attacks, crashes, gone, touched>>
+    /\ UNCHANGED <<seq, done, changesT, st, live>> /\ UNCHANGED seals /\ UNCHANGED <<cur, curOk, maced, pr, attacks, crashes, gone, touched, fl>>
 
 Retain == \E k \in Nums : RetainTo(k)
+
+\* The sweep's floor: the oldest time of a read left (each read lies in its day's partition, which is at or below it),
+\* or, none left, past every time: all go.
+Floor == IF reads = {} THEN (CHOOSE t \in Times : \A x \in Times : x <= t) + 1
+         ELSE CHOOSE t \in {r.at : r \in reads} : \A r \in reads : t <= r.at
+\* Each call's sweep (retention's calls, `kept` included): under the projector's lock (PruneLocked), the floor read and
+\* the entries below it dropped at once, never inside a projector's call (its rows written, its cursor not yet moved);
+\* apart, the floor read now and swept by later.
+Prune ==
+    /\ Retention /\ fl = 0
+    /\ IF PruneLocked
+       THEN /\ \A p \in Projectors : pr[p].pc # "cursor"
+            /\ newest' = {e \in newest : e.at >= Floor}
+            /\ UNCHANGED fl
+       ELSE /\ fl' = Floor
+            /\ UNCHANGED newest
+    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, pr, attacks, crashes, gone, cut, touched>>
+Swept ==
+    /\ fl # 0
+    /\ newest' = {e \in newest : e.at >= fl}
+    /\ fl' = 0
+    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, pr, attacks, crashes, gone, cut, touched>>
 
 -----------------------------------------------------------------------------
 (* The attacker: write access to the database, no key. *)
@@ -329,39 +359,39 @@ Attack(kind) ==
     /\ kind \in Attacks
     /\ attacks < MaxAttacks
     /\ attacks' = attacks + 1
-    /\ UNCHANGED seals /\ UNCHANGED <<seq, done, st, pr, crashes, cut>>
+    /\ UNCHANGED seals /\ UNCHANGED <<seq, done, st, pr, crashes, cut, fl>>
 
 \* A use deleted, or two uses' numbers swapped (both MACs hold: they do not cover the number), sealed or not.
 DeleteUse == Attack("uses") /\ \E u \in usesT : usesT' = usesT \ {u}
-               /\ UNCHANGED <<changesT, live, reads, cur, curOk, maced, gone, cut, newest, touched>>
+               /\ UNCHANGED <<changesT, live, reads, cur, curOk, maced, gone, cut, newest, touched, fl>>
 SwapUses == Attack("uses") /\ \E u1, u2 \in usesT : u1.n < u2.n
                /\ usesT' = (usesT \ {u1, u2}) \cup {[u1 EXCEPT !.n = u2.n], [u2 EXCEPT !.n = u1.n]}
-               /\ UNCHANGED <<changesT, live, reads, cur, curOk, maced, gone, cut, newest, touched>>
+               /\ UNCHANGED <<changesT, live, reads, cur, curOk, maced, gone, cut, newest, touched, fl>>
 \* A change's row deleted, sealed or not.
 DeleteChange == Attack("changes") /\ \E c \in changesT : changesT' = changesT \ {c}
-               /\ UNCHANGED <<usesT, live, reads, cur, curOk, maced, gone, cut, newest, touched>>
+               /\ UNCHANGED <<usesT, live, reads, cur, curOk, maced, gone, cut, newest, touched, fl>>
 \* A live row edited: a credential's account, a key's place, the reference's source.
 Flip(o, s) ==
     IF o \in Creds THEN [s EXCEPT !.acct = Other(s.acct, Accounts)]
     ELSE IF o \in Keys THEN [s EXCEPT !.pl = Other(s.pl, Places)]
     ELSE [s EXCEPT !.src = Other(s.src, Keys)]
 EditLive == Attack("live") /\ \E o \in Objs : live' = [live EXCEPT ![o] = Flip(o, live[o])]
-               /\ UNCHANGED <<usesT, changesT, reads, cur, curOk, maced, gone, cut, newest, touched>>
+               /\ UNCHANGED <<usesT, changesT, reads, cur, curOk, maced, gone, cut, newest, touched, fl>>
 \* A projection row deleted; copied under another number (its MAC holds unless it covers the number); or made up.
 DeleteRead == Attack("reads") /\ \E r \in reads :
                /\ reads' = reads \ {r}
                /\ gone' = IF r.by \in Projectors THEN gone \cup {r.n} ELSE gone
-               /\ UNCHANGED <<usesT, changesT, live, cur, curOk, maced, newest, touched>>
+               /\ UNCHANGED <<usesT, changesT, live, cur, curOk, maced, newest, touched, fl>>
 CopyRead == Attack("reads") /\ \E r \in reads, n \in Nums : n # r.n
                /\ reads' = reads \cup {[r EXCEPT !.n = n, !.ok = r.ok /\ ~NumberInMac, !.by = "attacker"]}
-               /\ UNCHANGED <<usesT, changesT, live, cur, curOk, maced, gone, cut, newest, touched>>
+               /\ UNCHANGED <<usesT, changesT, live, cur, curOk, maced, gone, cut, newest, touched, fl>>
 ForgeRead == Attack("reads") /\ \E n \in Nums :
                /\ reads' = reads \cup {[n |-> n, p |-> Junk, at |-> At[n], ok |-> FALSE, by |-> "attacker"]}
-               /\ UNCHANGED <<usesT, changesT, live, cur, curOk, maced, gone, cut, newest, touched>>
+               /\ UNCHANGED <<usesT, changesT, live, cur, curOk, maced, gone, cut, newest, touched, fl>>
 \* The cursor set to any number: its MAC holds only for one the vault wrote.
 SetCursor == Attack("cursor") /\ \E v \in 0..N : v # cur
                /\ cur' = v /\ curOk' = (v \in maced)
-               /\ UNCHANGED <<usesT, changesT, live, reads, maced, gone, cut, newest, touched>>
+               /\ UNCHANGED <<usesT, changesT, live, reads, maced, gone, cut, newest, touched, fl>>
 
 \* An entry of `log_read_newest` deleted, or its time set to another (it carries no MAC: what the full verify holds it to
 \* is the rows').
@@ -375,7 +405,7 @@ SetNewest == Attack("newest") /\ \E e \in newest, t \in Times : t # e.at
 -----------------------------------------------------------------------------
 
 Next ==
-    \/ Number \/ Commit \/ Sign \/ Retain
+    \/ Number \/ Commit \/ Sign \/ Retain \/ Prune \/ Swept
     \/ \E p \in Projectors : PStep(p) \/ PCrash(p)
     \/ DeleteUse \/ SwapUses \/ DeleteChange \/ EditLive \/ DeleteRead \/ CopyRead \/ ForgeRead \/ SetCursor
     \/ DeleteNewest \/ SetNewest

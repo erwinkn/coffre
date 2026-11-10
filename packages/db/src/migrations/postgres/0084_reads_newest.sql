@@ -36,12 +36,16 @@ SELECT r.principal, coalesce(r.source, r.secret), r.version, max(r.at) FROM "log
  WHERE r.version IS NOT NULL
  GROUP BY r.principal, coalesce(r.source, r.secret), r.version
 ON CONFLICT (principal, secret, version) DO UPDATE SET at = excluded.at WHERE log_read_newest.at < excluded.at;--> statement-breakpoint
--- A day of reads dropped (0050), and with it every entry older than the oldest day of reads left (NewestRetired): each
--- read lies in a day's partition (no default one), so no entry below the first holds a read the log still lists. That
--- holds whoever dropped the days, in whatever order. A call of 0.15's body, started before this migration and waiting on
--- the lock it holds on `log_reads`, drops its day after the commit and leaves its entries: the next call goes past them,
--- 'kept' included, which retention makes each run a day is due. Until then the report names reads the log has retired, a
--- day's at most, read all the same.
+-- A day of reads dropped (0050), with its entries of `log_read_newest` (NewestRetired), and on every call the entries
+-- older than the oldest day of reads left: each read lies in a day's partition (no default one), so no entry below the
+-- first holds a read the log still lists. That sweep is for what a call of 0.15's body left: one started before this
+-- migration and waiting on the lock it holds on `log_reads` drops its day after the commit and leaves its entries, until
+-- the next call, 'kept' included, which retention makes each run a day is due. Until then the report names reads the log
+-- has retired, a day's at most, read all the same.
+-- Under the projector's lock, taken first (PruneLocked): a `project_reads` in flight may make a day below the floor and
+-- write a read in it (a use older than the days made ahead), which this call's snapshot does not see; read the floor
+-- before it commits, and the sweep drops the entry it wrote (review r2). The lock waits within this function's
+-- `lock_timeout`, as its partition's drop does, and a retention run that gives up tries again on the next (55P03).
 CREATE OR REPLACE FUNCTION drop_reads_day(p_day date) RETURNS text
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET lock_timeout = '100ms' AS $$
 DECLARE
@@ -50,6 +54,7 @@ DECLARE
     kept boolean;
     oldest date;
 BEGIN
+    PERFORM pg_advisory_xact_lock(1668244070, 166);
     kept := EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhparent = to_regclass('public.log_uses')
                        AND i.inhrelid = to_regclass('public.' || quote_ident('log_uses_' || to_char(p_day, 'YYYYMMDD'))));
     IF NOT kept THEN
@@ -64,6 +69,8 @@ BEGIN
         END LOOP;
         DELETE FROM public.log_read_days WHERE day = p_day - date '1970-01-01';
         DELETE FROM public.log_read_place_days WHERE day = p_day - date '1970-01-01';
+        DELETE FROM public.log_read_newest WHERE at >= (p_day - date '1970-01-01')::bigint * 86400000
+                                             AND at < (p_day - date '1970-01-01' + 1)::bigint * 86400000;
     END IF;
     SELECT min(to_date(right(c.relname, 8), 'YYYYMMDD')) INTO oldest FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
      WHERE i.inhparent = 'public.log_reads'::regclass AND c.relname ~ '^log_reads_[0-9]{8}$';

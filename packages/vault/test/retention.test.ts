@@ -24,7 +24,7 @@ import { checkReads, cursorMac, projectReads } from '../src/reads.ts';
 import { DAY_MS, dayOf, retain } from '../src/retention.ts';
 import { variableMemory } from './audit-tree.ts';
 import { logWriter } from './log-entries.ts';
-import { ENGINE, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, OWNER_URL, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 
 let db: TestDatabase;
 let seed: Buffer;
@@ -471,6 +471,76 @@ test("T252, review r1 of #560: the previous release's retention, which runs on t
   }
   // v1's entry gone with its only read; v2's stays, its newest read still listed on D9.
   assert.deepEqual(await entries(), [[v2, start(D9) + 1000]]);
+});
+
+/** A read of Alice's of `version`, at `at`, as the projector writes it (its trigger writes the entry), as Postgres's owner. */
+async function plantRead(number: number, at: number, secret: string, version: string): Promise<void> {
+  await run(db.owner, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, version, mac)
+    VALUES (${number}, ${at}, CAST(${randomUUID()} AS uuid), 1, 'user:alice@acme.example', CAST(${secret} AS uuid), CAST(${randomUUID()} AS uuid),
+            CAST(${randomUUID()} AS uuid), CAST(${version} AS uuid), ${Buffer.alloc(16)})`);
+}
+
+const newestOf = async (version: string) =>
+  (await rows<{ at: string | number }>(db.owner, sql`SELECT at FROM log_read_newest WHERE version = ${version}`)).map((row) => Number(row.at));
+
+test("T252, review r2 of #560: a day dropped goes with its entries, though an older day of reads, empty, is left below it", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its partitions' }, async () => {
+  // Days with no uses' partition, so that their reads' drop is no 'kept': D12's reads' day, empty, below D11's.
+  const [d12, d11] = [dayOf(clock - 12 * DAY_MS), dayOf(clock - 11 * DAY_MS)];
+  await run(db.owner, sql`SELECT make_reads_day(${d12}::date), make_reads_day(${d11}::date)`);
+  const [secret, version] = [randomUUID(), randomUUID()];
+  await plantRead(1, Date.parse(`${d11}T00:00:00Z`) + 1000, secret, version);
+  assert.equal((await newestOf(version)).length, 1);
+  // D11's drop takes its entry, whatever the floor: D12's day, older, is still there.
+  assert.equal((await rows<{ state: string }>(db.vault, sql`SELECT drop_reads_day(${d11}::date) AS state`))[0]!.state, 'dropped');
+  assert.deepEqual(await newestOf(version), []);
+});
+
+test("T252, review r2 of #560: retention's sweep below the oldest day of reads waits for the projector's call, which may make a day below it and write a read there", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its locks' }, async () => {
+  await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date)`);
+  const d11 = dayOf(clock - 11 * DAY_MS);
+  // D10's the oldest day of reads (another case's may be left below it): the floor is past D11.
+  const days = sql`SELECT c.relname AS name FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'log_reads'::regclass ORDER BY c.relname`;
+  for (const { name } of await rows<{ name: string }>(db.owner, days)) if (name < `log_reads_${D10.replaceAll('-', '')}`) await run(db.owner, sql.raw(`DROP TABLE ${name}`));
+  assert.equal((await rows<{ name: string }>(db.owner, days))[0]!.name, `log_reads_${D10.replaceAll('-', '')}`);
+  const [secret, version] = [randomUUID(), randomUUID()];
+  // An entry a call of 0.15's body left, its day's reads dropped: older than every day of reads left.
+  await run(db.owner, sql`INSERT INTO log_read_newest (principal, secret, version, at)
+    VALUES ('user:alice@acme.example', CAST(${secret} AS uuid), CAST(${version} AS uuid), ${Date.parse(`${d11}T00:00:00Z`) - DAY_MS})`);
+  // The projector's call, open: D11's day made, below the floor, and a read of the same version written there, which
+  // moves the entry up to D11 (as `project_reads` does, under its lock).
+  const projector = postgresSession(OWNER_URL);
+  const sweeper = postgresSession(VAULT_URL);
+  try {
+    await projector.unsafe('BEGIN');
+    await projector.unsafe('SELECT pg_advisory_xact_lock(1668244070, 166)');
+    await projector.unsafe(`SELECT make_reads_day('${d11}'::date)`);
+    const at = Date.parse(`${d11}T00:00:00Z`) + 1000;
+    await projector.unsafe(`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, version, mac)
+      VALUES (1, ${at}, '${randomUUID()}', 1, 'user:alice@acme.example', '${secret}', '${randomUUID()}', '${randomUUID()}', '${version}', '\\x${'00'.repeat(16)}')`);
+    const [{ pid }] = (await sweeper.unsafe('SELECT pg_backend_pid() AS pid')) as unknown as [{ pid: number }];
+    // A retention call meanwhile (TODAY's uses are the log's: 'kept', the sweep alone), waiting on a lock until the
+    // projector commits; given up past its timeout, the next run's call.
+    const call = sweeper.unsafe(`SELECT drop_reads_day('${TODAY}'::date) AS state`);
+    const settled = call.then(() => null, (e: { code?: string }) => e);
+    let waited = false;
+    for (let i = 0; i < 500 && !waited; i += 1) {
+      const [{ waiting }] = (await projector.unsafe(`SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = ${pid} AND NOT granted) AS waiting`)) as unknown as [{ waiting: boolean }];
+      waited = waiting;
+      if (!waited) await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    await projector.unsafe('COMMIT');
+    assert.ok(waited, 'the sweep waits on the projector');
+    const failed = await settled;
+    if (failed) {
+      assert.equal(failed.code, '55P03', String(failed));
+      await sweeper.unsafe(`SELECT drop_reads_day('${TODAY}'::date)`);
+    }
+    // The read is listed, and the report names it.
+    assert.deepEqual(await newestOf(version), [at]);
+  } finally {
+    await projector.end();
+    await sweeper.end();
+  }
 });
 
 /**
