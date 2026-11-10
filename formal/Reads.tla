@@ -76,6 +76,28 @@
 (*                     passed; without it, the overtaken projector writes  *)
 (*                     retired rows back, below the cut, where nothing     *)
 (*                     looks for them again (review r11 of #434).          *)
+(*                                                                         *)
+(* T252: an offboarding report names, for a member, each key and version   *)
+(* they read and when last. It reads `log_read_newest`, one entry for each *)
+(* (account, key, version) with the time of the newest read of it, never   *)
+(* each day the member read (R48). A use's time is its own (`At`), which   *)
+(* need not rise with its number: clocks of isolates apart. The attacker   *)
+(* may delete an entry or set its time ("newest"). Its protections:        *)
+(*   NewestWithRows    the entries are written with the rows (a trigger on *)
+(*                     `log_reads`), so before the cursor passes them;     *)
+(*                     written after the cursor moved (a pass of its own), *)
+(*                     a crash between leaves a read the page lists and    *)
+(*                     the report never names;                             *)
+(*   GreatestAt        an entry's time moves only up (the upsert keeps the *)
+(*                     greater): set to the time of the chunk's own read,  *)
+(*                     a read of a later number from a clock behind leaves *)
+(*                     the newest uncovered;                               *)
+(*   NewestChecked     the full verify holds each listed read to an entry  *)
+(*                     of its account, key and version at its time or      *)
+(*                     later, as it holds it to its member's day;          *)
+(*   NewestRetired     retention drops the entries of the reads it drops,  *)
+(*                     those whose time is at or below the cut's: the      *)
+(*                     report names no read retention dropped.             *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, Sequences
 
@@ -92,8 +114,10 @@ CONSTANTS
     MaxAttacks,  \* attacker steps in a behaviour
     Attacks,     \* the attacker's steps in play: "uses", "changes", "live", "reads", "cursor"
     Retention,   \* whether retention drops what is below a cut
+    At,          \* each number's time: a use's own clock, which retention's days are of
     DeriveFromSealed, InputsInUseMac, ProjectSealedOnly, WindowChecked, NumberInMac, IdempotentByNumber, CursorAfterRows,
-    ReplaceOnConflict, CursorMac, CountChecked, ProjectorApart, FromChecked
+    ReplaceOnConflict, CursorMac, CountChecked, ProjectorApart, FromChecked,
+    NewestWithRows, GreatestAt, NewestChecked, NewestRetired
 
 Objs == Creds \cup Keys \cup {Ref}
 N == Len(Script)
@@ -103,12 +127,21 @@ Max(x, y) == IF x >= y THEN x ELSE y
 Min(x, y) == IF x <= y THEN x ELSE y
 
 \* A use's projection under the objects' states S: the account, the key's place, the reference's source, the version read.
+\* The key read is the source through the reference (`coalesce(source, secret)`), the key itself otherwise.
 Proj(S, cred, key) ==
     [a   |-> S[cred].acct,
      pl  |-> S[key].pl,
      src |-> IF key = Ref THEN S[Ref].src ELSE "-",
+     k   |-> IF key = Ref THEN S[Ref].src ELSE key,
      v   |-> IF key = Ref THEN S[S[Ref].src].v ELSE S[key].v]
-Junk == [a |-> "-", pl |-> "-", src |-> "-", v |-> 0]
+Junk == [a |-> "-", pl |-> "-", src |-> "-", k |-> "-", v |-> 0]
+
+\* What an entry of `log_read_newest` is of: a row's account, key and version.
+Of(r) == <<r.p.a, r.p.k, r.p.v>>
+Times == {At[n] : n \in Nums}
+\* The time at or below which retention's cut at k drops: the newest of the numbers it drops (its days, as built).
+\* Every time is past 0, which no cut drops.
+CutAt(k) == IF k = 0 THEN 0 ELSE CHOOSE t \in {At[n] : n \in 1..k} : \A n \in 1..k : At[n] <= t
 
 \* The objects' states below number n, from the changes cs: each object's newest change numbered below n (R50).
 Newest(cs, o, n) ==
@@ -132,12 +165,14 @@ VARIABLES
     pr,        \* each projector: pc, the chunk (from, to], the rows it derived
     attacks, crashes,
     gone,      \* ghost: the numbers whose projector-written row the attacker deleted
-    cut        \* retention's cut: the uses and rows at or below it dropped
+    cut,       \* retention's cut: the uses and rows at or below it dropped
+    newest,    \* `log_read_newest`: [of, at], one an account, key and version, its newest read's time
+    touched    \* ghost: what the attacker deleted or set an entry of `log_read_newest` of
 
-vars == <<seq, done, usesT, changesT, st, live, sealed, tu, tc, reads, cur, curOk, maced, pr, attacks, crashes, gone, cut>>
+vars == <<seq, done, usesT, changesT, st, live, sealed, tu, tc, reads, cur, curOk, maced, pr, attacks, crashes, gone, cut, newest, touched>>
 writes == <<seq, done, usesT, changesT, st, live>>
 seals == <<sealed, tu, tc>>
-proj == <<reads, cur, curOk, maced, pr>>
+proj == <<reads, cur, curOk, maced, pr, newest>>
 
 Init ==
     /\ seq = 0 /\ done = 0 /\ usesT = {} /\ changesT = {} /\ st = Start /\ live = Start
@@ -145,6 +180,7 @@ Init ==
     /\ reads = {} /\ cur = 0 /\ curOk = TRUE /\ maced = {0}
     /\ pr = [p \in Projectors |-> [pc |-> "idle", from |-> 0, to |-> 0, rows |-> {}]]
     /\ attacks = 0 /\ crashes = 0 /\ gone = {} /\ cut = 0
+    /\ newest = {} /\ touched = {}
 
 -----------------------------------------------------------------------------
 (* The writers: the next append of the script, numbered, then committed (Seal.tla checks the numbering, gaps and
@@ -153,7 +189,7 @@ Init ==
 Number ==
     /\ seq = done /\ seq < N
     /\ seq' = seq + 1
-    /\ UNCHANGED <<done, usesT, changesT, st, live>> /\ UNCHANGED seals /\ UNCHANGED proj /\ UNCHANGED <<attacks, crashes, gone, cut>>
+    /\ UNCHANGED <<done, usesT, changesT, st, live>> /\ UNCHANGED seals /\ UNCHANGED proj /\ UNCHANGED <<attacks, crashes, gone, cut, touched>>
 
 Commit ==
     /\ done < seq
@@ -167,7 +203,7 @@ Commit ==
           ELSE /\ usesT' = usesT \cup {[n |-> n, cred |-> e.cred, key |-> e.key, dec |-> Proj(st, e.cred, e.key)]}
                /\ UNCHANGED <<changesT, st, live>>
     /\ done' = seq
-    /\ UNCHANGED seq /\ UNCHANGED seals /\ UNCHANGED proj /\ UNCHANGED <<attacks, crashes, gone, cut>>
+    /\ UNCHANGED seq /\ UNCHANGED seals /\ UNCHANGED proj /\ UNCHANGED <<attacks, crashes, gone, cut, touched>>
 
 -----------------------------------------------------------------------------
 (* The signer: seals what the tables hold up to any number below which every append has committed (Seal.tla's
@@ -180,7 +216,7 @@ SignTo(k) ==
     /\ sealed' = k
     /\ tu' = tu \cup {u \in usesT : sealed < u.n /\ u.n <= k}
     /\ tc' = tc \cup {c \in changesT : sealed < c.n /\ c.n <= k}
-    /\ UNCHANGED writes /\ UNCHANGED proj /\ UNCHANGED <<attacks, crashes, gone, cut>>
+    /\ UNCHANGED writes /\ UNCHANGED proj /\ UNCHANGED <<attacks, crashes, gone, cut, touched>>
 
 Sign == \E k \in Nums : SignTo(k)
 
@@ -192,6 +228,15 @@ Derive(u) ==
     IF DeriveFromSealed
     THEN Proj(StateAt(changesT \cap tc, u.n), u.cred, u.key)
     ELSE Proj(live, u.cred, u.key)
+
+\* `log_read_newest` once the rows `rows` are written: each of what they are of at their newest time, or the time it
+\* had if greater (GreatestAt).
+Upsert(ns, rows) ==
+    LET ofs == {Of(r) : r \in rows}
+        top(o) == CHOOSE t \in {r.at : r \in {x \in rows : Of(x) = o}} : \A x \in rows : Of(x) = o => x.at <= t
+        had(o) == {e \in ns : e.of = o}
+        at(o) == IF GreatestAt /\ had(o) # {} THEN Max(top(o), (CHOOSE e \in had(o) : TRUE).at) ELSE top(o)
+    IN {e \in ns : e.of \notin ofs} \cup {[of |-> o, at |-> at(o)] : o \in ofs}
 
 \* Reads the cursor and its chunk, and derives the chunk's rows: only if its window's rows are the sealed uses
 \* (WindowChecked) and each derivation is what the use's MAC covers (InputsInUseMac); otherwise it cannot go on.
@@ -205,24 +250,33 @@ PRead(p) ==
           /\ WindowChecked => w = {u \in tu : from < u.n /\ u.n <= to}
           /\ InputsInUseMac => \A u \in w : Derive(u) = u.dec
           /\ pr' = [pr EXCEPT ![p] = [pc |-> IF CursorAfterRows THEN "rows" ELSE "cursor", from |-> from, to |-> to,
-                                      rows |-> {[n |-> u.n, p |-> Derive(u), ok |-> TRUE, by |-> p] : u \in w}]]
-    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, attacks, crashes, gone, cut>>
+                                      rows |-> {[n |-> u.n, p |-> Derive(u), at |-> At[u.n], ok |-> TRUE, by |-> p] : u \in w}]]
+    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, attacks, crashes, gone, cut, newest, touched>>
 
 \* The chunk's rows, one statement: each replacing the rows at its number (ReplaceOnConflict) or skipped where it has
 \* one (IdempotentByNumber alone), or inserted as is.
 \* Overtaken (FromChecked): the cursor no longer where the chunk started, nothing is written and the run ends.
+\* The rows written, inserted or replacing, write their entries of `log_read_newest` in the same statement
+\* (NewestWithRows: the trigger), or the run writes them once its cursor has moved.
+\* The run's end: idle, or, the entries written apart, those.
+Ended(p) == IF NewestWithRows THEN [pr[p] EXCEPT !.pc = "idle"] ELSE [pr[p] EXCEPT !.pc = "newest"]
 PRows(p) ==
     /\ pr[p].pc = "rows"
     /\ IF FromChecked /\ cur # (IF CursorAfterRows THEN pr[p].from ELSE pr[p].to)
        THEN /\ pr' = [pr EXCEPT ![p] = [pc |-> "idle", from |-> 0, to |-> 0, rows |-> {}]]
-            /\ UNCHANGED reads
+            /\ UNCHANGED <<reads, newest>>
        ELSE /\ LET rows == pr[p].rows
                    nums == {r.n : r \in rows}
-               IN reads' = CASE IdempotentByNumber /\ ReplaceOnConflict -> {x \in reads : x.n \notin nums} \cup rows
-                             [] IdempotentByNumber -> reads \cup {r \in rows : ~\E x \in reads : x.n = r.n}
-                             [] OTHER -> reads \cup rows
-            /\ pr' = [pr EXCEPT ![p].pc = IF CursorAfterRows THEN "cursor" ELSE "idle"]
-    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<cur, curOk, maced, attacks, crashes, gone, cut>>
+                   written == CASE IdempotentByNumber /\ ReplaceOnConflict -> rows
+                                [] IdempotentByNumber -> {r \in rows : ~\E x \in reads : x.n = r.n}
+                                [] OTHER -> rows
+               IN /\ reads' = CASE IdempotentByNumber /\ ReplaceOnConflict -> {x \in reads : x.n \notin nums} \cup rows
+                                [] OTHER -> reads \cup written
+                  /\ newest' = IF NewestWithRows THEN Upsert(newest, written) ELSE newest
+                  \* Written apart, the run keeps what it wrote for its entries.
+                  /\ LET kept == IF NewestWithRows THEN rows ELSE written
+                     IN pr' = [pr EXCEPT ![p] = IF CursorAfterRows THEN [pr[p] EXCEPT !.pc = "cursor", !.rows = kept] ELSE [Ended(p) EXCEPT !.rows = kept]]
+    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<cur, curOk, maced, attacks, crashes, gone, cut, touched>>
 
 \* The cursor moved to the chunk's end, with its MAC: only forward (IdempotentByNumber), or wherever this run read.
 PCursor(p) ==
@@ -232,8 +286,15 @@ PCursor(p) ==
        THEN UNCHANGED <<cur, curOk>>
        ELSE cur' = to /\ curOk' = TRUE
     /\ maced' = maced \cup {pr[p].to}
-    /\ pr' = [pr EXCEPT ![p].pc = IF CursorAfterRows THEN "idle" ELSE "rows"]
-    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, attacks, crashes, gone, cut>>
+    /\ pr' = [pr EXCEPT ![p] = IF CursorAfterRows THEN Ended(p) ELSE [pr[p] EXCEPT !.pc = "rows"]]
+    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, attacks, crashes, gone, cut, newest, touched>>
+
+\* NewestWithRows off: the entries of the rows the run wrote, once it has moved the cursor.
+PNewest(p) ==
+    /\ pr[p].pc = "newest"
+    /\ newest' = Upsert(newest, pr[p].rows)
+    /\ pr' = [pr EXCEPT ![p] = [pc |-> "idle", from |-> 0, to |-> 0, rows |-> {}]]
+    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, attacks, crashes, gone, cut, touched>>
 
 \* A projector dies mid-run and loses what it derived; the next run starts from the cursor.
 PCrash(p) ==
@@ -241,13 +302,14 @@ PCrash(p) ==
     /\ crashes < MaxCrashes
     /\ crashes' = crashes + 1
     /\ pr' = [pr EXCEPT ![p] = [pc |-> "idle", from |-> 0, to |-> 0, rows |-> {}]]
-    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, attacks, gone, cut>>
+    /\ UNCHANGED writes /\ UNCHANGED seals /\ UNCHANGED <<reads, cur, curOk, maced, attacks, gone, cut, newest, touched>>
 
-PStep(p) == PRead(p) \/ PRows(p) \/ PCursor(p)
+PStep(p) == PRead(p) \/ PRows(p) \/ PCursor(p) \/ PNewest(p)
 
 -----------------------------------------------------------------------------
 (* Retention: a cut at or below the newest pair and the cursor it holds (retention.ts, behindReads), the uses and the
-   rows at or below it dropped with their days. *)
+   rows at or below it dropped with their days, and (NewestRetired) the entries of `log_read_newest` at or below the
+   time of the newest it drops: a day's go with it, `drop_reads_day`. *)
 
 RetainTo(k) ==
     /\ Retention /\ cut < k /\ k <= sealed /\ k <= cur
@@ -255,7 +317,8 @@ RetainTo(k) ==
     /\ cut' = k
     /\ usesT' = {u \in usesT : u.n > k}
     /\ reads' = {r \in reads : r.n > k}
-    /\ UNCHANGED <<seq, done, changesT, st, live>> /\ UNCHANGED seals /\ UNCHANGED <<cur, curOk, maced, pr, attacks, crashes, gone>>
+    /\ newest' = IF NewestRetired THEN {e \in newest : e.at > CutAt(k)} ELSE newest
+    /\ UNCHANGED <<seq, done, changesT, st, live>> /\ UNCHANGED seals /\ UNCHANGED <<cur, curOk, maced, pr, attacks, crashes, gone, touched>>
 
 Retain == \E k \in Nums : RetainTo(k)
 
@@ -270,35 +333,44 @@ Attack(kind) ==
 
 \* A use deleted, or two uses' numbers swapped (both MACs hold: they do not cover the number), sealed or not.
 DeleteUse == Attack("uses") /\ \E u \in usesT : usesT' = usesT \ {u}
-               /\ UNCHANGED <<changesT, live, reads, cur, curOk, maced, gone, cut>>
+               /\ UNCHANGED <<changesT, live, reads, cur, curOk, maced, gone, cut, newest, touched>>
 SwapUses == Attack("uses") /\ \E u1, u2 \in usesT : u1.n < u2.n
                /\ usesT' = (usesT \ {u1, u2}) \cup {[u1 EXCEPT !.n = u2.n], [u2 EXCEPT !.n = u1.n]}
-               /\ UNCHANGED <<changesT, live, reads, cur, curOk, maced, gone, cut>>
+               /\ UNCHANGED <<changesT, live, reads, cur, curOk, maced, gone, cut, newest, touched>>
 \* A change's row deleted, sealed or not.
 DeleteChange == Attack("changes") /\ \E c \in changesT : changesT' = changesT \ {c}
-               /\ UNCHANGED <<usesT, live, reads, cur, curOk, maced, gone, cut>>
+               /\ UNCHANGED <<usesT, live, reads, cur, curOk, maced, gone, cut, newest, touched>>
 \* A live row edited: a credential's account, a key's place, the reference's source.
 Flip(o, s) ==
     IF o \in Creds THEN [s EXCEPT !.acct = Other(s.acct, Accounts)]
     ELSE IF o \in Keys THEN [s EXCEPT !.pl = Other(s.pl, Places)]
     ELSE [s EXCEPT !.src = Other(s.src, Keys)]
 EditLive == Attack("live") /\ \E o \in Objs : live' = [live EXCEPT ![o] = Flip(o, live[o])]
-               /\ UNCHANGED <<usesT, changesT, reads, cur, curOk, maced, gone, cut>>
+               /\ UNCHANGED <<usesT, changesT, reads, cur, curOk, maced, gone, cut, newest, touched>>
 \* A projection row deleted; copied under another number (its MAC holds unless it covers the number); or made up.
 DeleteRead == Attack("reads") /\ \E r \in reads :
                /\ reads' = reads \ {r}
                /\ gone' = IF r.by \in Projectors THEN gone \cup {r.n} ELSE gone
-               /\ UNCHANGED <<usesT, changesT, live, cur, curOk, maced>>
+               /\ UNCHANGED <<usesT, changesT, live, cur, curOk, maced, newest, touched>>
 CopyRead == Attack("reads") /\ \E r \in reads, n \in Nums : n # r.n
                /\ reads' = reads \cup {[r EXCEPT !.n = n, !.ok = r.ok /\ ~NumberInMac, !.by = "attacker"]}
-               /\ UNCHANGED <<usesT, changesT, live, cur, curOk, maced, gone, cut>>
+               /\ UNCHANGED <<usesT, changesT, live, cur, curOk, maced, gone, cut, newest, touched>>
 ForgeRead == Attack("reads") /\ \E n \in Nums :
-               /\ reads' = reads \cup {[n |-> n, p |-> Junk, ok |-> FALSE, by |-> "attacker"]}
-               /\ UNCHANGED <<usesT, changesT, live, cur, curOk, maced, gone, cut>>
+               /\ reads' = reads \cup {[n |-> n, p |-> Junk, at |-> At[n], ok |-> FALSE, by |-> "attacker"]}
+               /\ UNCHANGED <<usesT, changesT, live, cur, curOk, maced, gone, cut, newest, touched>>
 \* The cursor set to any number: its MAC holds only for one the vault wrote.
 SetCursor == Attack("cursor") /\ \E v \in 0..N : v # cur
                /\ cur' = v /\ curOk' = (v \in maced)
-               /\ UNCHANGED <<usesT, changesT, live, reads, maced, gone, cut>>
+               /\ UNCHANGED <<usesT, changesT, live, reads, maced, gone, cut, newest, touched>>
+
+\* An entry of `log_read_newest` deleted, or its time set to another (it carries no MAC: what the full verify holds it to
+\* is the rows').
+DeleteNewest == Attack("newest") /\ \E e \in newest :
+               /\ newest' = newest \ {e} /\ touched' = touched \cup {e.of}
+               /\ UNCHANGED <<usesT, changesT, live, reads, cur, curOk, maced, gone>>
+SetNewest == Attack("newest") /\ \E e \in newest, t \in Times : t # e.at
+               /\ newest' = (newest \ {e}) \cup {[e EXCEPT !.at = t]} /\ touched' = touched \cup {e.of}
+               /\ UNCHANGED <<usesT, changesT, live, reads, cur, curOk, maced, gone>>
 
 -----------------------------------------------------------------------------
 
@@ -306,6 +378,7 @@ Next ==
     \/ Number \/ Commit \/ Sign \/ Retain
     \/ \E p \in Projectors : PStep(p) \/ PCrash(p)
     \/ DeleteUse \/ SwapUses \/ DeleteChange \/ EditLive \/ DeleteRead \/ CopyRead \/ ForgeRead \/ SetCursor
+    \/ DeleteNewest \/ SetNewest
 
 Spec == Init /\ [][Next]_vars
 \* The signer alone is fair: the projector may stop for good.
@@ -326,12 +399,18 @@ Listed == {r \in reads : r.ok /\ r.n <= cur}
 \* What it claims: every sealed use at or below the cursor, above retention's cut, has its row.
 Missing == {n \in SealedUses : cut < n /\ n <= cur /\ ~\E r \in Listed : r.n = n}
 
+\* A row an entry of `log_read_newest` names, at its time or later: what the report says of it.
+Covered(r) == \E e \in newest : e.of = Of(r) /\ e.at >= r.at
+\* The sealed uses' rows the page lists, above the cut, that the report would not name.
+Unnamed == {r \in Listed : r.n \in SealedUses /\ cut < r.n /\ ~Covered(r)}
+
 \* The full verify: a listed row that is no sealed use's, or (CountChecked) a sealed use with no row, or a cursor
-\* whose MAC fails.
+\* whose MAC fails; or (NewestChecked) a sealed use's row no entry of `log_read_newest` covers.
 FullFlags ==
     \/ CursorMac /\ ~curOk
     \/ \E r \in Listed : r.n \notin SealedUses
     \/ CountChecked /\ Missing # {}
+    \/ NewestChecked /\ Unnamed # {}
 
 \* Seal's verifier (Seal.tla's SealedDeletionDetected): a sealed entry gone from its table, or moved.
 SealFlags == (\E c \in tc : c \notin changesT) \/ (\E u \in tu : u \notin usesT)
@@ -367,6 +446,20 @@ DeletionDetected ==
 \* Nothing retention dropped is written back: no projector's row at or below the cut.
 RetiredStayGone ==
     \A r \in reads : r.by \in Projectors => r.n > cut
+
+\* The offboarding report names every read the page lists of a projector's: its account, key and version, at its
+\* time or later; but for what the attacker deleted or set an entry of.
+ReportNamesListed ==
+    PageShown => \A r \in Listed : r.by \in Projectors /\ Of(r) \notin touched => Covered(r)
+
+\* A listed read the report would not name is flagged by the full verify, whoever made it so.
+UnnamedDetected ==
+    PageShown => (Unnamed # {} => FullFlags)
+
+\* The report names nothing retention dropped: no entry of `log_read_newest` at or below the cut's time, but one the
+\* attacker set.
+RetiredUnnamed ==
+    \A e \in newest : e.of \notin touched => e.at > CutAt(cut)
 
 \* The signer can always seal what is committed, whatever the projector does.
 SealNeverWaitsOnProjection ==

@@ -28,4 +28,15 @@ ReadsScript ==
        Use("c1", "r"),
        Use("c2", "k1") >>
 
+\* Each use's time its number: one clock (retention's cut drops what is at or below its time).
+ReadsAt == [n \in 1..5 |-> n]
+
+(* T252: c1 reads k1, c2 reads k2, c1 reads k1 again from a clock two behind the first: the newest read of k1 is the
+   first by time, the last by number. *)
+ReadsNewestScript ==
+    << Use("c1", "k1"),
+       Use("c2", "k2"),
+       Use("c1", "k1") >>
+ReadsNewestAt == <<3, 2, 1>>
+
 =============================================================================

@@ -636,6 +636,13 @@ REMOVALS=(
   "ReadsSeal ProjectorApart ChangeAnswered"
   "ReadsLive CursorAfterRows EveryUseProjected"
   "ReadsLive DeriveFromSealed EveryUseProjected"
+  # The offboarding report's newest read of each account, key and version (T252): written with the rows, never after
+  # the cursor; its time only moved up; held by the full verify; dropped with retention's days.
+  "ReadsNewest NewestWithRows ReportNamesListed"
+  "ReadsNewest GreatestAt ReportNamesListed"
+  "ReadsNewest NewestChecked UnnamedDetected"
+  "ReadsRetain NewestRetired RetiredUnnamed"
+  "ReadsRetain FromChecked RetiredUnnamed"
   # 0.15's log across a rotation of the vault's signing key (Rotation.tla; T168, W277). An isolate under the old key,
   # serving on after the deploy, is refused at its write, under the lock, ordered against the rotation's entry.
   "RotationDeploy RetiredRefused OldWritesBelowBoundary"

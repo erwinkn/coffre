@@ -2249,7 +2249,8 @@ through <cursor>" while the cursor is below the signed pair.
 - **An attacker** with write access to the database and no key can delete
   or swap uses, delete changes, edit live rows (a credential's account, a
   key's place, the reference's source), delete, copy or make up projection
-  rows, and set the cursor.
+  rows, set the cursor, and delete an entry of `log_read_newest` or set
+  its time.
 
 MCReads.tla's log: c1 reads through a reference r to k1; r is repointed to
 k2; c1 moves to account B; c1 reads through r again; c2 reads k1. Each
@@ -2260,7 +2261,18 @@ use's projection differs from every other's. The scenarios:
   at or below a cut the cursor has passed;
 - `ReadsProbe`: as `Reads`, with a use's MAC that covers only its own columns;
 - `ReadsSeal`: only the signer is fair;
-- `ReadsLive`: the signer and the projector are both fair, with one crash.
+- `ReadsLive`: the signer and the projector are both fair, with one crash;
+- `ReadsNewest` (T252): c1 reads k1, c2 reads k2, then c1 reads k1 again,
+  from a clock two behind its first read, so the newest read of k1 is the
+  first by time and the last by number. One projector, one crash, one
+  attacker step on `log_read_newest`.
+
+An offboarding report names each key and version a member read, and when
+last (T252). It reads `log_read_newest`, one entry for each account, key
+and version, holding the time of the newest read of it. It never reads
+each day the member read, which retention keeps by default and which grew
+with their history (R48). A use's time is its own (`At`), which need not
+rise with its number: isolates' clocks are apart.
 
 | protection | turned off, TLC finds |
 |---|---|
@@ -2275,7 +2287,11 @@ use's projection differs from every other's. The scenarios:
 | the cursor carries the vault's MAC, which the projector and the page check (CursorMac) | `LagShown`: a writer sets the cursor ahead, and the page claims reads it never had |
 | the full verify flags a sealed use with no row, not just a row with no use (CountChecked) | `DeletionDetected` |
 | the projector runs apart from the signer's tick (ProjectorApart) | `SealNeverWaitsOnProjection`, `ChangeAnswered`: a stopped projector stops sealing, and the next change never answers |
-| a chunk's rows written only while the cursor stands where the chunk started (FromChecked) | `RetiredStayGone`: p2 reads use 1's chunk, p1 projects it and moves the cursor, retention drops use 1 and its row, and p2 writes the row back below the cut (review r11 of #434: 600 retired reads came back) |
+| a chunk's rows written only while the cursor stands where the chunk started (FromChecked) | `RetiredStayGone`: p2 reads use 1's chunk, p1 projects it and moves the cursor, retention drops use 1 and its row, and p2 writes the row back below the cut (review r11 of #434: 600 retired reads came back); `RetiredUnnamed`: its entry of `log_read_newest` with it |
+| the entries of `log_read_newest` written with the rows, before the cursor passes them (NewestWithRows) | `ReportNamesListed`: written once the cursor has moved, the page lists use 1 and the report does not name it, for good if the projector crashes first |
+| an entry's time only moved up, the greater kept (GreatestAt) | `ReportNamesListed`: use 3, c1's second read of k1, sets the entry to its own time, 1, and c1's read at 3 is left unnamed |
+| the full verify holds each listed read to an entry of its account, key and version at its time or later (NewestChecked) | `UnnamedDetected`: the attacker deletes the entry of c1's read of k1 and nothing says so |
+| retention drops the entries at or below the time of the newest read it drops (NewestRetired) | `RetiredUnnamed`: the report names a read retention dropped |
 
 `EXPECTED`, with every protection on:
 - `Reads ListedComplete`: the page does not see a row deleted below its
@@ -2327,6 +2343,21 @@ reads' first, is `retention.test.ts`'s); and who sees which rows
   transaction, FromChecked its `p_from` (SQLite's write the same, in its
   transaction), the days the reads need made in the same call. ProjectorApart is the `reads` object on Workers and an
   unawaited kick on Node.
+- NewestWithRows is a statement trigger on `log_reads`, for its inserts and
+  its updates, as T175's `log_read_place_days` are written (postgres
+  `0084_reads_newest`, sqlite `0043_reads_newest`); GreatestAt its upsert's
+  `GREATEST`. NewestChecked is `checkReads`' `newest`, beside `dayed`.
+  NewestRetired is `drop_reads_day` (SQLite's `dropDay`). Retention drops
+  a day at a time, oldest first, and both the rows and the entries go by
+  the day of their time, which the model's cut by number stands for: an
+  entry whose time is in the day goes with the day, and a newer read of
+  the same key and version is in a later day, which stays. The writers
+  (`/use`) write none of it; the projector writes it under the lock it
+  already holds, and `drop_reads_day`'s `lock_timeout` makes retention
+  give way to it.
+- The entries carry no MAC, as the days do not: the full verify, not the
+  report, holds them to the rows. An entry made up or set later makes the
+  report name more, never less.
 
 ### Rotation.tla
 
