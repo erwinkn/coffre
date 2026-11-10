@@ -518,18 +518,20 @@ test("T252, review r2 of #560: retention's sweep below the oldest day of reads w
     await projector.unsafe(`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, version, mac)
       VALUES (1, ${at}, '${randomUUID()}', 1, 'user:alice@acme.example', '${secret}', '${randomUUID()}', '${randomUUID()}', '${version}', '\\x${'00'.repeat(16)}')`);
     const [{ pid }] = (await sweeper.unsafe('SELECT pg_backend_pid() AS pid')) as unknown as [{ pid: number }];
-    // A retention call meanwhile (TODAY's uses are the log's: 'kept', the sweep alone), waiting on a lock until the
-    // projector commits; given up past its timeout, the next run's call.
+    // A retention call meanwhile (TODAY's uses are the log's: 'kept', the sweep alone), waiting on the projector's
+    // advisory lock until it commits; given up past its timeout, the next run's call. The wait it must be seen in is
+    // that lock's: without it, the sweep would wait on the entry's row instead, and a retry would hide the loss
+    // (review r3 of #560).
     const call = sweeper.unsafe(`SELECT drop_reads_day('${TODAY}'::date) AS state`);
     const settled = call.then(() => null, (e: { code?: string }) => e);
     let waited = false;
     for (let i = 0; i < 500 && !waited; i += 1) {
-      const [{ waiting }] = (await projector.unsafe(`SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = ${pid} AND NOT granted) AS waiting`)) as unknown as [{ waiting: boolean }];
+      const [{ waiting }] = (await projector.unsafe(`SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = ${pid} AND NOT granted AND locktype = 'advisory' AND classid = 1668244070 AND objid = 166 AND objsubid = 2) AS waiting`)) as unknown as [{ waiting: boolean }];
       waited = waiting;
       if (!waited) await new Promise((resolve) => setTimeout(resolve, 2));
     }
     await projector.unsafe('COMMIT');
-    assert.ok(waited, 'the sweep waits on the projector');
+    assert.ok(waited, "the sweep waits on the projector's advisory lock");
     const failed = await settled;
     if (failed) {
       assert.equal(failed.code, '55P03', String(failed));
