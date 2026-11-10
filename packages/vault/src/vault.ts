@@ -1645,8 +1645,11 @@ class VaultService implements Vault {
       // The start asks its reads together, each in a snapshot of its own (T206): a rotation that lands between
       // them can show as the newest entry, under this very key, beside no first entry under it, which would
       // rotate the key to itself and move its predecessor's bound (review r9 of #556). Each settles alone only
-      // what it proves alone, above; a rotation or a verdict is read again, in order.
-      if (asked !== undefined) continue;
+      // what it proves alone, above; a rotation or a verdict is read again, in order. Read so, each in a snapshot of
+      // its own still, a first entry above the newest says one landed between them, as another instance's rotation to
+      // this key would, which would read as the log moved on from it (review r10 of #556): read again then too. The
+      // log only grows and its first entry under a key never moves, so that is once.
+      if (asked !== undefined || (first !== undefined && first > newest.seq)) continue;
       if (first === undefined && prepared.logKeys.some((key) => key.keyId === newest.keyId)) {
         try {
           prepared.since = await this.#rotate(newest.keyId);

@@ -58,7 +58,11 @@
   write, or a verdict that the vault is superseded, is read again in order.
   Another instance's rotation, landing between them, had looked like a log
   under the new key with no first entry under it, and made a second
-  rotation, from the new key to itself. A check of a member no row names read the log past every refusal
+  rotation, from the new key to itself. Read in order, still a snapshot
+  each, a first entry under the key above the newest entry read is that
+  rotation landing between them, and is read again too, rather than taken
+  for the log moving on to another key, which left the vault refusing every
+  change with `wrong_kek` until it restarted. A check of a member no row names read the log past every refusal
   about them (1,604 pages behind 20,000), and now takes their newest access
   entry and change by their indexes. The same test lists every `EXISTS`
   over a log and every least or greatest of a column of the uses, and one
