@@ -14,6 +14,9 @@ sensitivity (section 2). 0.11 (W146) runs the tunnel on Workers, in a
 Durable Object, and through a VPC Network binding to a private database
 (section 5). After 0.14.3, W190 puts a key in one field of a small form or JSON
 body, `form()` and `json()` (section 5, "A field of the body").
+0.17 adds `passthrough`, a credential that carries a browser's cookies
+and redirects in an envelope, for Clerk's Frontend API on brand domains
+(section 10, designed, not built).
 
 ## 1. What it is for
 
@@ -2243,3 +2246,663 @@ Taken in 0.10 (W128), each for Erwin to review, each reversible:
 | 0.9 D | Signers, `privateKey(…)`, and `credential(name).sign(message)`: DFNS's user-action key stays in coffre. Built |
 | Egress | A credential's `egress`: its requests leave through a VPC Service binding, for an upstream that allowlists addresses (Schuman). Built; untested against a real VPC Service |
 | After 0.14.3 | `form()` and `json()`: a key in one field of a small body (section 5). Built |
+| 0.17 | `passthrough`: a credential that carries a browser's cookies and redirects in an envelope, so that coffre can be Clerk's Frontend API proxy on brand domains (section 10). Designed, not built |
+
+## 10. Passthrough: a browser's session through the proxy (0.17)
+
+A design for 0.17, written on 2026-11-10 (W368) from Fred's proposal
+(Equisafe, "Proxy Clerk via Coffre", v4) and the shape Erwin approved.
+Nothing in it is built. 0.16 is unchanged by it.
+
+### The problem, by example
+
+Each Equisafe brand domain, `invest.marque.com` say, is a Clerk satellite.
+Today its owner must create a CNAME, `clerk.invest.marque.com`, and many
+never do: the domain stays `awaiting_owner`. Clerk's other option is a
+Frontend API (FAPI) proxy
+([Clerk's guide](https://clerk.com/docs/guides/dashboard/dns-domains/proxy-fapi)).
+clerk-js calls `https://invest.marque.com/__auth_proxy/v1/…`, and a
+server forwards each call to `https://frontend-api.clerk.dev/v1/…`,
+"with the body and all headers intact", plus three of its own:
+
+```http
+Clerk-Proxy-Url: https://invest.marque.com/__auth_proxy
+Clerk-Secret-Key: sk_live_…
+X-Forwarded-For: 203.0.113.7
+```
+
+`X-Forwarded-For` must be the end user's IP, read from a header the
+server's own CDN sets (Cloudflare's `CF-Connecting-IP`), never the one the
+browser sent. Clerk's own proxy, `clerkFrontendApiProxy` in
+`@clerk/backend/proxy`, also sets `X-Forwarded-Host` and
+`X-Forwarded-Proto`, passes cookies both ways, and rewrites a `Location`
+on the FAPI host onto the proxy URL.
+
+The secret key is the instance's master key. Coffre should put it in, so
+that neither the brand's Worker nor Equisafe's backend holds it. Today
+coffre refuses every part of this, on purpose:
+
+| What the FAPI proxy needs | What coffre does today | Where |
+|---|---|---|
+| The browser's `Cookie` to Clerk | dropped, with every header about the hop or the caller | `DROPPED`, `credential-proxy.ts:417`; `sent()`, `:2675` |
+| The user's IP in `X-Forwarded-For` | dropped (`x-forwarded-*`, `forwarded`, `x-real-ip`, `true-client-ip`, `cf-*`) | `sent()`, `:2675` |
+| Clerk's `Set-Cookie` back | dropped | `DROPPED_ANSWER`, `:421` |
+| A redirect to Google, or to the brand | 502 off the upstream; on it, rewritten to coffre's `/use/…` | `send()`, `:3175`–`:3216` |
+| Clerk's own `Content-Type`, `Cache-Control`, CORS headers | kept, but every answer also gets `cache-control: no-store`, `content-security-policy: sandbox; …`, `nosniff` | `redacted()`, `:3914`–`:3925` |
+
+The reason is one rule: an answer of the proxy is served on coffre's own
+origin, so **nothing a browser acts on may cross coffre's origin, in
+either direction.** A `Set-Cookie` passed through could set a cookie on
+`secrets.acme.example`, beside `__Host-coffre-session`. A `Cookie`
+forwarded would send coffre's own session upstream. A `Location` passed
+through would make coffre an open redirect.
+
+Passthrough keeps the rule. Nothing a browser acts on crosses coffre's
+origin live: it crosses renamed, in an envelope that only coffre's own
+client side opens, off coffre's origin.
+
+### The design in one example
+
+A sign-in through Equisafe's client Worker (topology 1, below). The
+browser sends the Worker:
+
+```http
+POST https://invest.marque.com/__auth_proxy/v1/client/sign_ins?_clerk_js_version=5.103.0
+Content-Type: application/x-www-form-urlencoded
+Origin: https://invest.marque.com
+Cookie: __client_uat=1793000000; __client=eyJhbGc…; _ga=GA1.2.1; app_theme=dark
+CF-Connecting-IP: 203.0.113.7
+X-Forwarded-For: 198.51.100.9, 203.0.113.7
+```
+
+The Worker keeps Clerk's cookies alone, takes the IP from
+`CF-Connecting-IP` (the first `X-Forwarded-For` value is the browser's
+own), and sends coffre, through its service binding:
+
+```http
+POST https://coffre/use/clerk/prod/clerk-fapi/v1/client/sign_ins?_clerk_js_version=5.103.0
+Content-Type: application/x-www-form-urlencoded
+Origin: https://invest.marque.com
+Clerk-Proxy-Url: https://invest.marque.com/__auth_proxy
+coffre-pass-cookie: __client_uat=1793000000; __client=eyJhbGc…
+coffre-pass-x-forwarded-for: 203.0.113.7
+coffre-pass-x-forwarded-host: invest.marque.com
+coffre-pass-x-forwarded-proto: https
+```
+
+coffre unwraps each `coffre-pass-<name>` into `<name>`, puts the key in
+last, and sends Clerk:
+
+```http
+POST https://frontend-api.clerk.dev/v1/client/sign_ins?_clerk_js_version=5.103.0
+Content-Type: application/x-www-form-urlencoded
+Origin: https://invest.marque.com
+Clerk-Proxy-Url: https://invest.marque.com/__auth_proxy
+Cookie: __client_uat=1793000000; __client=eyJhbGc…
+X-Forwarded-For: 203.0.113.7
+X-Forwarded-Host: invest.marque.com
+X-Forwarded-Proto: https
+Clerk-Secret-Key: sk_live_…
+```
+
+Clerk answers:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Cache-Control: no-cache
+X-Clerk-Trace-Id: 3f9a…
+Set-Cookie: __client=eyJhbGc…; Path=/; Expires=Thu, 11 Nov 2027 12:16:00 GMT; HttpOnly; Secure; SameSite=Lax
+Set-Cookie: __client_uat=1793004000; Path=/; Domain=marque.com; Expires=Thu, 11 Nov 2027 12:16:00 GMT; Secure; SameSite=Strict
+
+{"response":{"object":"sign_in_attempt",…},"client":{…}}
+```
+
+coffre answers the Worker with every one of Clerk's headers renamed, and
+its own plain:
+
+```http
+HTTP/1.1 200 OK
+coffre-proxy: passthrough
+Content-Type: application/octet-stream
+Cache-Control: no-store
+Content-Security-Policy: sandbox; default-src 'none'; frame-ancestors 'none'
+X-Content-Type-Options: nosniff
+coffre-upstream-content-type: application/json
+coffre-upstream-cache-control: no-cache
+coffre-upstream-x-clerk-trace-id: 3f9a…
+coffre-set-cookie-0: __client=eyJhbGc…; Path=/; Expires=Thu, 11 Nov 2027 12:16:00 GMT; HttpOnly; Secure; SameSite=Lax
+coffre-set-cookie-1: __client_uat=1793004000; Path=/; Domain=marque.com; Expires=Thu, 11 Nov 2027 12:16:00 GMT; Secure; SameSite=Strict
+
+{"response":{"object":"sign_in_attempt",…},"client":{…}}
+```
+
+A browser that loaded this from coffre's origin would download an opaque
+file: no cookie set, no redirect followed, no CORS grant read, no script
+run. The Worker unwraps it (`unwrap` from `@coffre/client`, below) into
+Clerk's answer as Clerk sent it, checks the cookies' `Domain`, and answers
+the browser on `invest.marque.com`.
+
+### 10.1 The mark
+
+One mark per credential, `passthrough: true` (the name is open). It is
+part of the credential's definition, never a row of its own, so a
+database writer cannot turn it on:
+
+```ts
+credentialProxy({
+  credentials: {
+    'clerk-fapi': {
+      upstream: 'https://frontend-api.clerk.dev',
+      inject: header('clerk-secret-key', '{CLERK_SECRET_KEY}'),
+      paths: ['/v1/'],
+      passthrough: true,
+    },
+  },
+});
+```
+
+- **In code,** it is a field of `Credential` (`credential-proxy.ts:191`),
+  deployed with the code like `upstream`.
+- **In the Proxy tab,** it is a field of a route, `passthrough: boolean`
+  in `ProxyRoute` (`packages/core/src/proxy.ts:39`), which
+  `canonicalDefinition` (`proxy.ts:135`) writes only when true. Every item
+  saved before 0.17 then keeps its canonical bytes and its digest. The
+  item's digest is in the vault's sealed index (proxy-ui.md, section 2,
+  "Sealed by the vault, not the app"), so a writer who adds
+  `"passthrough": true` to a stored item makes it `tampered`, as a writer
+  who edits its `upstream` does. The app reads it into the credential
+  (`credentialOf`, `credential-proxy.ts:1104`). Saving it takes
+  `proxy.edit`, like any other field, and the save's review says it:
+  "`clerk-fapi` will pass cookies, the caller's address and redirects, in
+  coffre's envelope". The mark sends no key anywhere new: the key still
+  goes only to the route's upstream.
+- **A plan says it.** `GET /use/<place>` (`plan`, `credential-proxy.ts:1154`)
+  gains `passthrough: ["clerk-fapi"]` beside `credentials`, for the
+  sidecar (section 10.4). A client of 0.16 ignores the field.
+
+A passthrough route still has its upstream, its allow list, its
+`limit`, its redaction and its log entries, exactly as any other. The
+mark changes the headers in and out, and the redirect rule, nothing else.
+
+Mixed versions, during a deploy or with a CLI newer than its server:
+
+| Who is older | What happens | Safe? |
+|---|---|---|
+| A 0.16 vault, a 0.17 app | the save is refused, `no field "passthrough"` (`only()`, `proxy.ts:143`) | yes: nothing saved |
+| A 0.16 app isolate reads a 0.17 item | it ignores the field and serves an ordinary route: `Set-Cookie` dropped, off-upstream redirects 502 | yes, closed: Clerk fails for the minutes of the deploy |
+| A 0.17 sidecar, a 0.16 server | the plan names no passthrough credential, so the sidecar wraps and unwraps nothing (section 10.4) | yes: as 0.16 |
+
+### 10.2 Requests: `coffre-pass-<name>`
+
+On a passthrough credential:
+
+1. Plain headers go on as today, through `sent()`. A plain `Cookie`,
+   `X-Forwarded-For` or `CF-Connecting-IP` is still dropped. That is the
+   point of the prefix: on Workers, the request coffre receives carries
+   `CF-Connecting-IP`, written by Cloudflare's edge for whoever called
+   coffre (the backend's pod, on the sidecar path), and whatever
+   `X-Forwarded-For` the hops before it wrote; a browser that reaches
+   coffre carries coffre's own cookie. Only a
+   header the caller wrote on purpose, under a name no browser or CDN
+   writes, may stand in for the end user.
+2. Each `coffre-pass-<name>: <value>` goes on as `<name>: <value>`,
+   replacing a plain header of the same name. No list says which names
+   may pass: ordinary headers (`Clerk-Proxy-Url`, `Origin`,
+   `User-Agent`) already pass plain, so the prefix is needed only for the
+   few `sent()` drops as naming the caller. The exception is a short list
+   of names that would break or forge the hop itself: `host`, `connection`,
+   `keep-alive`, `proxy-connection`, `proxy-authorization`, `te`,
+   `trailer`, `transfer-encoding`, `upgrade`, `content-length`, `expect`,
+   `cdn-loop` (Cloudflare's loop detection), `x-coffre-handle`, `cf-*` and
+   `coffre-*`. Wrapped, any of them is a 400 naming it: an app that wraps
+   `Host` has a bug it should see.
+3. The credential's rules then set what they set (`send()`,
+   `credential-proxy.ts:3074`), replacing whatever the caller sent under
+   that name, plain or wrapped. `coffre-pass-clerk-secret-key: x` reaches
+   Clerk as the real key, once.
+4. Every check that reads what goes upstream reads the unwrapped headers:
+   the unwrap is in `outbound()` (`credential-proxy.ts:2462`), so the
+   method override check (`overridden()`, `:2429`: a wrapped
+   `X-HTTP-Method-Override: DELETE` is refused as a plain one is) and the
+   leak check (`:3134`: a handle or session token in a wrapped cookie is a
+   400) see `Cookie`, not `coffre-pass-cookie`.
+5. Through a key-bound session, only the headers the proof signs go on
+   (`hdr`, `outbound(request, signed)`), by the name the proof signed, the
+   wrapped one. A `coffre-pass-*` header added on the way, unsigned, is
+   dropped. A binding's call has no `hdr`, so every one it sends counts.
+
+On every other credential, `coffre-pass-*` is dropped, never sent under
+either name (today it would go on as an ordinary header, `sent()`). An app
+or a sidecar that wraps by mistake leaks nothing.
+
+coffre does not check what a wrapped header says: whether
+`X-Forwarded-For` is one valid address (Fred's spec had a 400 for two),
+or whether `Clerk-Proxy-Url` names a brand. The caller could already send
+any ordinary header, and whatever it says, Clerk is the only one who
+reads it. What it may say is the app's to check (section 10.5).
+
+### 10.3 Answers: `coffre-upstream-<name>` and `coffre-set-cookie-<n>`
+
+On a passthrough credential, the answer is built from the upstream's like
+this, in `redacted()` (`credential-proxy.ts:3914`):
+
+- **`coffre-proxy: passthrough`.** coffre's refusals already carry
+  `coffre-proxy: refused` (`failure()`, `:4314`) "so the app can tell them
+  from the upstream's" (section 4). Today an upstream can send that header
+  itself, since nothing drops it; from 0.17, an upstream's own
+  `coffre-proxy` is dropped on every answer, passthrough or not. Then
+  `passthrough` means "the upstream's answer, in the envelope", and its
+  absence means coffre's own: a proxy refusal, or a workload's
+  (`refusedWith`, `plugins.ts:356`, which carries no `coffre-proxy` at all).
+- **Every upstream header, renamed** `coffre-upstream-<name>`, its value
+  redacted as every header is today (`whole()`). No list of dangerous
+  headers to keep: `Location`, `Set-Cookie`, `Content-Security-Policy`,
+  `Access-Control-Allow-Origin`, `Refresh`, `Link`, and whatever browsers
+  act on next year all cross dead. The only headers not passed are those
+  about the hop or the bytes as fetch decoded them, dropped as today:
+  `connection`, `keep-alive`, `transfer-encoding`, `upgrade`, `trailer`,
+  `content-length`, `content-encoding`.
+- **Each `Set-Cookie` apart,** as `coffre-set-cookie-0`,
+  `coffre-set-cookie-1`, … in the upstream's order, read with
+  `getSetCookie()`.
+- **coffre's own headers, plain:** `cache-control: no-store`, the sandbox
+  CSP, `nosniff`, as today, and `content-type: application/octet-stream`,
+  since the upstream's type is renamed. The body is the upstream's,
+  redacted by the upstream's type, as today.
+- **A redirect keeps its status** and goes back as
+  `coffre-upstream-location`, neither followed, rewritten nor refused.
+  The check that a `Location` quotes no value in a form coffre does not
+  mask (`:3213`) stays, and is a 502 as today: the value would leave in it
+  otherwise. FAPI has no reason to quote the secret key.
+
+**Why every `Set-Cookie` needs its own header.** A `Headers` object
+joins repeated headers with `", "`, which is lossless for every field but
+`Set-Cookie` (RFC 9110, section 5.3), and the only one Fetch keeps apart
+is `Set-Cookie` itself. A renamed copy is an ordinary header, so two of
+them would arrive as one:
+
+```http
+coffre-upstream-set-cookie: __client=eyJhbGc…; Expires=Thu, 11 Nov 2027 12:16:00 GMT; HttpOnly, __client_uat=1793004000; Domain=marque.com
+```
+
+and no split can tell the comma in `Thu, 11 Nov` from the one between the
+cookies. Numbered headers keep each cookie whole, byte for byte.
+
+**Why `coffre-set-cookie-<n>` and not `coffre-upstream-set-cookie-<n>`.**
+An upstream may send a header literally named `set-cookie-0`. Under the
+`coffre-upstream-` prefix it would be `coffre-upstream-set-cookie-0`, the
+same name as the first cookie. A prefix of its own, which no renamed
+header can take, has no such case and needs no rule against it.
+
+The unwrap, in `@coffre/client` and in the sidecar alike, is then:
+
+1. No `coffre-proxy: passthrough`: coffre's own answer. Leave it alone.
+2. Otherwise, status, reason and body as they are; for each
+   `coffre-upstream-<name>`, a `<name>`; for each `coffre-set-cookie-<n>`,
+   in increasing `n`, one `set-cookie`, appended; nothing else (coffre's
+   CSP, `no-store`, `octet-stream`, `dpop-nonce`, the marker).
+
+**One wire format on every path.** On the binding path no browser ever
+sees coffre's answer: the Worker does. The envelope stays there all the
+same, for three reasons, and none was found against it:
+
+- **The proxy has one answer.** It does not know how its caller came in,
+  and should not: "the proxy's code is the same; only the authentication
+  differs" (workload-access.md, section 9.2). A plain answer for bindings
+  would be a second shape, tested twice, and coffre's own `no-store` and
+  sandbox CSP would have to come off on that path alone, a rule about
+  what protects coffre's origin that depends on the way in.
+- **A mistake fails closed.** A Worker that writes `return
+  env.COFFRE.fetch(request)` on its `/__auth_proxy` route would, without
+  the envelope, serve Clerk's cookies and redirects live on the brand,
+  unchecked. With it, the browser gets an opaque file and the first test
+  fails.
+- **It costs one rename per header.** No body is copied, and the CPU is
+  a few string operations per answer.
+
+### 10.4 Coffre's client side unwraps, so apps see plain HTTP
+
+**`@coffre/client`** gains two helpers, which work over any fetch (a
+binding's, a session's, a handle's):
+
+```ts
+import { wrap, unwrap } from '@coffre/client/passthrough';
+
+// wrap: drops every `coffre-*` header the request carries (a browser's included),
+// then renames cookie, forwarded, x-forwarded-*, x-real-ip and true-client-ip to coffre-pass-<name>.
+const answer = await env.COFFRE.fetch(wrap(request));
+// unwrap: the upstream's answer as it sent it, every Set-Cookie apart; null for coffre's own.
+const clerk = unwrap(answer);
+if (clerk === null) return failed(answer);        // a 403, 429 or 503 of coffre's: log it, never show it
+```
+
+`wrap` drops every `coffre-*` header first because a Worker that copies
+the browser's headers would otherwise forward a browser's
+`coffre-pass-x-forwarded-for: 1.2.3.4`, which coffre would believe. An
+app that wants to pass another header (`coffre-pass-authorization`, say)
+sets it after `wrap`.
+
+**`coffre serve`**, the sidecar on `127.0.0.1` (`forwarder`,
+`packages/cli/src/workload.ts:159`), does the same without the app
+knowing, for the credentials the plan marks (`passthrough`, section
+10.1), and only those:
+
+- It reads the plan of each place it serves at start, and again every R
+  (`proxy.revokedWithinSeconds`, 60 s).
+- A request to a marked credential is wrapped before the sidecar's own
+  filter. Today that filter drops `Cookie` (`UNSIGNED_HEADERS`,
+  `packages/client/src/dpop.ts:47`, which the sidecar's `DROPPED`
+  includes, `workload.ts:148`); wrapped, the cookie goes as
+  `coffre-pass-cookie`, which the proof signs like any header the app set.
+- An answer with `coffre-proxy: passthrough` on a marked credential is
+  unwrapped into plain headers, `Set-Cookie` each apart, as today's
+  forwarder already writes them (`getSetCookie()`, `workload.ts:240`). The
+  sidecar then sets `coffre-proxy: passthrough` on it, last, so that the
+  app can tell Clerk's 403 from coffre's: coffre's own answers reach the
+  app as they are, with `coffre-proxy: refused` or none. Set last, the
+  marker replaces any upstream header of that name, which never reaches
+  the app.
+- On any other credential, it does what it does today.
+
+Why only marked credentials. A sidecar is often newer than its server. A
+0.17 sidecar that wrapped every request for a 0.16 server would turn the
+app's cookies into `coffre-pass-cookie`, which 0.16 forwards to every
+upstream as an ordinary header. And one that unwrapped every answer would
+let any upstream behind a 0.16 server, which drops no `coffre-proxy`, forge
+the envelope and set the app's cookies. With the plan, a 0.16 server names
+no passthrough credential, and a stale plan fails closed both ways: a
+credential newly marked gets no cookie for up to a minute; one newly
+unmarked gets `coffre-pass-*`, which coffre drops, and an answer with no
+marker, which the sidecar leaves alone.
+
+**The checks that need the brands stay with the app.** Only the app
+knows which hosts are its brands and which origins its sign-ins may
+redirect to. Section 10.5 lists what it must check.
+
+### 10.5 Two topologies
+
+Both are settled (Erwin). The credential is the same in both: `clerk-fapi`,
+above, in an environment holding the Clerk key.
+
+**1. Equisafe's own workspaces: the brand Worker binds coffre.**
+
+```
+browser ──▶ client Worker (invest.marque.com/__auth_proxy/*) ══ service binding ══▶ coffre (CoffreWorkload) ──▶ frontend-api.clerk.dev
+```
+
+Everything is on Cloudflare, and the Worker holds no secret: its
+`wrangler.jsonc` binds coffre's `CoffreWorkload` entrypoint with `props`
+naming its service (workload-access.md, section 9.2):
+
+```jsonc
+"services": [{ "binding": "COFFRE", "service": "coffre", "entrypoint": "CoffreWorkload", "props": { "service": "client-worker-prod" } }]
+```
+
+**This path does not serve the proxy today.** On `main`,
+`CoffreWorkload.fetch` answers 501, "coffre's workload entrypoint is not
+built yet" (`packages/server/src/cloudflare-workload.ts:10`–`:14`). What
+it would call is built and tested in process: `bindingRoute`
+(`packages/server/src/plugins.ts:453`), which runs the plugin with
+`workloadFromBinding` (`:467`) as its caller, and the proxy takes that
+caller as any workload (`workloadForward`, `credential-proxy.ts:2730`;
+`credential-proxy-ui-workload.test.ts` and `ways-in-cost.test.ts` call
+`bindingRoute` directly). The entrypoint that reads `this.ctx.props` and
+calls it is workload-access.md's PR 6, draft #300 (W164), last updated
+2026-10-24 and waiting on PR 1d. So topology 1 needs #300 merged first.
+Passthrough itself needs nothing more on that path: a binding's request
+reaches `send()` like any other, with no `hdr`, so every wrapped header
+it sends counts; #300 sends its answers through `respond`, whose security
+headers are coffre's own and plain.
+
+What §9.2 asks of a binding, for this Worker:
+
+- **The same Cloudflare account as coffre.** Service bindings do not
+  cross accounts; a Worker elsewhere uses `enrollment` and a session,
+  which works the same through `@coffre/client`.
+- **Whoever deploys Workers to the account can set any `props`**, and so
+  act as `client-worker-prod`. The account's deployers are this path's
+  trust root.
+- **Preview builds keep their bindings.** With Workers Builds, a branch's
+  preview runs with production's `props`, so whoever pushes a branch could
+  call Clerk FAPI with production's key. The Worker turns off
+  non-production branch builds, or gives previews a wrangler environment
+  of their own, bound to a service with its own binding, on a Clerk
+  development instance.
+- **`props` need wrangler deploys**: as of 2026-10, Cloudflare's API and
+  Terraform may not carry them.
+- **A binding reaches whole environments** (its service's grants; the
+  binding's policy, `BindingPolicy` in
+  `packages/core/src/identity/workloads.ts:677`, names no credential).
+  A Worker whose service reaches `backend/prod` could use every credential
+  there, Stripe's included. So the Clerk key moves to an environment of
+  its own, `clerk/prod` in the example, which the Worker's service and
+  the backend's both reach, and nothing else of the backend's does.
+
+The Worker's route, in about twenty lines:
+
+```ts
+// apps/client/worker/index.ts (Equisafe's)
+import { wrap, unwrap } from '@coffre/client/passthrough';
+
+const PROXY = '/__auth_proxy';
+const FAPI = 'frontend-api.clerk.dev';
+
+async function authProxy(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  if (!(await isActiveBrand(env, url.host))) return new Response(null, { status: 404 });   // no open proxy
+  const headers = new Headers(request.headers);
+  headers.set('cookie', clerkCookies(request.headers.get('cookie')));   // Clerk's alone, never the app's
+  headers.set('x-forwarded-for', request.headers.get('cf-connecting-ip')!);  // never the browser's X-Forwarded-For
+  headers.set('x-forwarded-host', url.host);
+  headers.set('x-forwarded-proto', 'https');
+  headers.set('clerk-proxy-url', `https://${url.host}${PROXY}`);       // from the checked host, never the browser
+  const target = `https://coffre/use/clerk/prod/clerk-fapi${url.pathname.slice(PROXY.length)}${url.search}`;
+  const answer = await env.COFFRE.fetch(wrap(new Request(target, { method: request.method, headers, body: request.body })));
+  const clerk = unwrap(answer);
+  if (clerk === null) return new Response(null, { status: 502 });      // coffre refused: logged, never shown
+  return checked(clerk, url.host);                                      // Location and Domain, below
+}
+```
+
+**2. SDK customers building their own frontend: through Equisafe's backend.**
+
+```
+browser ──▶ customer's edge (/__auth_proxy/*) ──▶ Equisafe backend /__auth_proxy ──▶ coffre serve (127.0.0.1) ──▶ coffre ──▶ frontend-api.clerk.dev
+```
+
+The backend's route does what the Worker does, against its sidecar,
+`http://127.0.0.1:7300/use/clerk/prod/clerk-fapi/…`, with plain `Cookie`
+and `X-Forwarded-For`: the sidecar wraps and unwraps (section 10.4). Two
+things differ. The backend is not behind Cloudflare's edge itself, so the
+user's IP comes from a header its own load balancer sets and that the
+backend trusts only from it, never the leftmost `X-Forwarded-For`. And the
+brand host comes from the customer's edge, so the backend accepts the
+route only from that edge (a shared header, or mTLS), and checks the host
+against its active brand domains.
+
+**What the app checks, on either path.** coffre forwards what it is
+given and gives back what Clerk said; these are the app's, because only
+it knows its brands:
+
+| Check | Rule | Example refused |
+|---|---|---|
+| The host | an active brand domain of a workspace, else 404 | `evil.example/__auth_proxy/v1/client` |
+| Cookies sent | Clerk's alone, by name (`__client`, `__session`, `__clerk_*`, with their instance suffixes); the list is Clerk's to change, so it lives in one place, tested against Clerk's development instance | the app's `app_theme`, Google Analytics' `_ga` |
+| The user's IP | `CF-Connecting-IP` (Worker) or the backend's own load balancer's header, one address | the browser's `X-Forwarded-For: 198.51.100.9` |
+| `Clerk-Proxy-Url`, `X-Forwarded-Host` | written from the checked host, never copied from the browser | a browser's `Clerk-Proxy-Url: https://other-brand.example/__auth_proxy` |
+| A `coffre-*` header from the browser | dropped (`wrap` does it) | `coffre-pass-x-forwarded-for: 1.2.3.4` |
+| `Location` | on the FAPI host (or relative, resolved against it): rewritten onto `https://<brand><PROXY>`, as `clerkFrontendApiProxy` does; on the brand host: kept; on a listed origin (`accounts.google.com`, the primary `client.equisafe.io` for satellite sync): kept; else 502 | `Location: https://evil.example/` |
+| `Set-Cookie`'s `Domain` | absent, or one the brand host domain-matches (RFC 6265, section 5.1.3), else the cookie is dropped | `Domain=equisafe.io` on `invest.marque.com` |
+| coffre's own answer | logged and answered 502, its message never shown: it names environments and credentials | `{"error":"credential_proxy","message":"…clerk/prod…"}` |
+| The sidecar's marker | `coffre-proxy: passthrough` dropped before the browser | – |
+
+clerk-js, given a `proxyUrl`, also loads its own script and `@clerk/ui`
+from it, `https://invest.marque.com/__auth_proxy/npm/@clerk/clerk-js@5/dist/clerk.browser.js`
+(`loadClerkJsScript.ts` in `@clerk/shared`). That takes no key, is a few
+hundred kilobytes a page load, and is cacheable; through coffre it would
+be scanned for the key and answered `no-store`. So `clerk-fapi` allows
+`/v1/` alone, and the Worker serves `/npm/` itself (from Clerk's CDN, or
+`clerkJSUrl` pointing there).
+
+### 10.6 Open points, with numbers
+
+**(a) The audit volume.** Fred's estimate counts one `/use` and one log
+entry per FAPI call: clerk-js refreshes its session token about once a
+minute per tab, so 1,000 open tabs make about 17 calls a second, 20 with
+the rest, 1.5 million a day. Logged one each, at today's 800 bytes a
+logged use (config.md, section 2.9: the use's row, its share of the
+audit tree, the reads' projection and its indexes), that is 1.2 GB a day,
+440 GB a year, every day kept by default (config.md, Q6); the
+use's own row alone, 141 bytes, is 211 MB a day.
+
+That is not what happens: two caches stand between a call and an entry.
+
+- **The proxy keeps the values** for `cacheMs`, R, 60 s, per app isolate
+  and caller (`valuesFor`, `credential-proxy.ts:3403`; the key is the
+  binding or session, the place and the credential, `cacheKey`, `:3385`),
+  and asks the vault again from 45 s on (`refreshWindow`, min(R ÷ 4,
+  15 s)). A steady stream of calls through one binding makes at most one
+  vault use every 45 s per isolate: 1,920 a day, whatever the number of
+  tabs.
+- **The vault covers repeats**: a use of the same credential, key, place,
+  purpose and route within 60 s, in the same vault isolate, writes no
+  entry (`audit.repeatsWithinSeconds`, config.md, section 2.3).
+
+So entries a day are at most 1,920 × I, I the app isolates serving the
+Worker's calls at once, and fewer with covers. At I = 10, 19,200 entries,
+15 MB a day, 5.6 GB a year; at I = 100, 154 MB a day, 56 GB a year. I is
+not measured: it is Cloudflare's to pick, and grows with colos and load,
+not with tabs one for one. It is the one number to read in the first week
+(the log's entries for `clerk-fapi`, a day).
+
+What does grow with tabs is per-call work, not storage: each call checks
+its caller live, one Postgres statement for a binding (`callBindings`,
+`plugins.ts:484`, in `workloadFromBinding`; a session's statement and its
+gate, workload-access.md, section 5.3), and redacts Clerk's JSON. At 20
+calls a second that is 1.7 million statements a day, each an indexed
+lookup that stays flat as the log grows (R48), and far under R44's 1,000
+uses a second.
+
+The options, for if I turns out large:
+
+| Option | Storage | Evidence | R48 |
+|---|---|---|---|
+| **Keep, as built (recommended)** | 15 to 154 MB a day, above | every value use stays in the log | flat (0057's day-bound cover check, `use-days.alone.ts`) |
+| Retention, `audit.keepUsesDays` (config.md, Q6) | a deployment's choice, for every key alike | the oldest days go | flat |
+| A longer cover, `audit.repeatsWithinSeconds` up to 3,600 | little: a cover also ends at each refresh of the bulk cap's row, 60 s at the default window (config.md, section 2.3) | coarser | flat |
+| Sampling | arbitrary | a log that misses uses breaks R53's replay, which decides as live did | – |
+
+Recommendation: keep. No mechanism of its own: the cache and the covers
+already make the log grow with isolates, not with calls.
+
+**(b) Does Clerk check `Clerk-Proxy-Url`?** Clerk's guide does not say.
+It says the proxy URL is validated when it is set on a domain (the
+Backend API's `PATCH /v1/domains/{id}`), and Clerk's own proxy writes the
+header from each request's forwarded host, which suggests FAPI finds the
+domain by it. One community report, unverified, has FAPI answering
+`host_invalid` when the host did not match the instance's domain.
+Recommendation: a ten-minute check on Clerk's development instance before
+building, `GET /v1/environment` with a `Clerk-Proxy-Url` of a host no
+domain registered, and the doc updated with what it answers. The design
+does not depend on it: the app writes the header from a host it checked.
+If Clerk does not check it, whoever holds the binding can act as any of
+the instance's proxies, which is what the binding grants anyway.
+
+**(c) Bodies and streaming.** FAPI's requests are small forms (a sign-in,
+a sign-up, a token refresh: under 4 KB); the one large one is a profile
+image, `POST /v1/me/profile_image`, multipart, a few MB. The proxy's
+bounds today (section 4, step 4):
+
+| Path | A body up to 1 MiB | Larger |
+|---|---|---|
+| Binding (no proof) | read whole (`BODY_READ_WHOLE_BYTES`, `packages/core/src/memory.ts:76`) | streams up to 5 GiB when it says its `Content-Length`, which a header rule signs nothing of (`carriedAs`, `credential-proxy.ts:2496`); without one, 413 |
+| Sidecar (a session's proof signs it) | read whole by the sidecar, its digest declared | the same, up to 95 MiB (`MAX_DIGESTED_BODY`, `packages/client/src/dpop.ts:184`) |
+
+So a Worker that forwards a profile image keeps its `Content-Length`;
+the binding test sends 2 MiB to check it. Answers stream, with no bound
+of coffre's, redacted as they pass (a JSON body is scanned for the key).
+No time bound either (config.md, Q7): the upstream request ends with the
+caller's. Nothing here needs a new limit.
+
+### 10.7 What the implementation tests
+
+- A plain `Cookie` never reaches the upstream, on a passthrough credential
+  or any other; `coffre-pass-cookie` does, as `Cookie`, on a passthrough
+  one only.
+- A plain `X-Forwarded-For` (and `CF-Connecting-IP`, `Forwarded`) never
+  reaches the upstream; the wrapped one does, replacing nothing else.
+- No live `Set-Cookie`, `Location`, `Content-Security-Policy` of the
+  upstream's, or `Access-Control-*` ever leaves coffre: an upstream that
+  sends all of them, with a 302 to a foreign host, gets an answer with
+  status 302, `coffre-proxy: passthrough`, each one renamed, coffre's
+  sandbox CSP, `no-store`, `nosniff` and `octet-stream`, and no 502.
+- A credential without `passthrough` behaves as today: the existing suite
+  passes unchanged, plus `coffre-pass-*` dropped and an upstream's own
+  `coffre-proxy` header dropped.
+- Two cookies survive the round trip, one carrying `Expires=Thu, 11 Nov
+  2027 12:16:00 GMT`: the app sees exactly two `Set-Cookie`, byte for
+  byte, through `unwrap` and through the sidecar.
+- An upstream header named `set-cookie-0` comes back as
+  `coffre-upstream-set-cookie-0` and does not become a cookie.
+- Injected headers beat the caller's: `coffre-pass-clerk-secret-key` and
+  a plain `clerk-secret-key` both reach the upstream as the real key, once.
+- A wrapped hop header (`coffre-pass-host`, `-content-length`,
+  `-transfer-encoding`, `-x-coffre-handle`, `-cf-connecting-ip`) is a 400
+  naming it.
+- A handle or session token inside a wrapped header is refused, as in a
+  plain one; a wrapped `X-HTTP-Method-Override` the allow list does not
+  take is refused, as a plain one is.
+- Through a session, a `coffre-pass-*` the proof does not sign is
+  dropped.
+- A key echoed in an upstream header is redacted in its renamed copy.
+- coffre's own refusals on a passthrough credential (403, 429, 503) carry
+  no `coffre-proxy: passthrough`; `unwrap` returns null; the sidecar
+  passes them as they are.
+- A forged `"passthrough": true` written into a stored UI item is
+  `tampered`; a 0.16 vault refuses saving it.
+- The sidecar wraps nothing for a credential its plan does not mark, and
+  against a server whose plan has no `passthrough`.
+- The binding path, end to end: two Workers in workerd (as #300's
+  `workload-caller-worker.ts` and `workload-coffre-worker.ts`), the
+  caller's `authProxy` against a fake FAPI: cookies both ways, a 302 onto
+  the FAPI host rewritten by the app, a 2 MiB body with its length.
+- The sidecar path, end to end: `coffre serve` against the Node example
+  and the same fake, the app sending plain `Cookie` and `X-Forwarded-For`
+  and reading plain `Set-Cookie` and `Location`.
+- Conformance (`@coffre/conformance`) holds a deployment to it: through a
+  passthrough credential, no answer carries a live `Set-Cookie` or
+  `Location`.
+
+**The formal models.** Passthrough takes no lock, opens no transaction and
+changes no use, so the locking model (`formal/Coffre.tla`) is untouched.
+Two models read nearby, and both hold as they are. `formal/Routing.tla`
+asks where a key may go, with the definition's body sealed by its
+version: the mark is part of that body, so a forged mark is a forged body,
+refused like a forged host, and the mark sends the key nowhere new.
+`formal/Workload.tla`'s `OnlySignedHeadersForwarded` holds because the
+unwrap runs on the headers the proof signed, by their wrapped names. The
+Lean proofs (`formal/lean`) cover access rules, the vault's decision, the
+AAD and the chain verifier, none of which changes.
+
+### 10.8 The build
+
+| PR | What |
+|---|---|
+| A | `passthrough` on `Credential` and `ProxyRoute` (canonical only when true), the request unwrap in `outbound()`, the envelope in `redacted()`, `coffre-pass-*` and an upstream's `coffre-proxy` dropped everywhere else, the plan's `passthrough` list, the tests above but the sidecar's, conformance |
+| B | `@coffre/client/passthrough`: `wrap`, `unwrap` |
+| C | `coffre serve` wraps and unwraps by the plan |
+| D | The Proxy tab's toggle and its line in the save's review |
+| — | Topology 1 also needs #300 (the `CoffreWorkload` entrypoint), merged before A's binding test can run in workerd |
+
+**What changed from Fred's proposal.** His `relay: { cookies, clientIp,
+headers, redirects }` becomes one mark: four switches would be four
+combinations to test and explain, and each half-open one (cookies but no
+redirects) breaks Clerk anyway. His `x-coffre-*` names become
+`coffre-pass-*` and `coffre-upstream-*` (RFC 6648 retires `X-`), and his
+`x-coffre-set-cookie`, one per cookie, becomes numbered headers, which a
+`Headers` object cannot join. His list of headers that pass
+(`relay.headers`) is not needed: ordinary headers already pass. His
+single-IP check and `callers` list are not coffre's: what a caller may
+say to Clerk is the app's to check, and who may use the credential is
+already its environment's grants.
