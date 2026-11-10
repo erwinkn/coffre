@@ -2474,20 +2474,27 @@ On a passthrough credential:
    `Host` or `Content-Type` has a bug it should see.
 3. The credential's rules then set what they set (`send()`,
    `credential-proxy.ts:3074`), replacing whatever the caller sent under
-   that name, plain or wrapped. `coffre-pass-clerk-secret-key: x` reaches
-   Clerk as the real key, once.
-4. Every check reads the request as it does today, because no name a
-   check reads can be wrapped (step 2). Those names are:
+   that name, plain or wrapped. On a credential whose rule sets
+   `Authorization`, `coffre-pass-authorization: Bearer x` reaches the
+   upstream as the rule's value, once. (`coffre-pass-clerk-secret-key` is
+   off the list, so it never gets that far: step 2's 400.)
+4. Every check reads the request as it does today. The checks that
+   decide how coffre reads the request read no name that can be wrapped
+   (step 2). Those names are:
    - `Content-Type` and `Content-Encoding`, by which `bodyKind()`
      (`credential-proxy.ts:3607`) decodes a body for the field rules
      (`fieldsIn()`) and for the UI routes' handle scan (`uiHandle()`,
      `:841`);
    - `Content-Length`, `Content-Digest` and `x-amz-content-sha256`, which
      decide whether a body streams and hold its bytes to its digest
-     (`carriedAs()`, `:2496`), choose the body's line in the proof (`bodyLine`,
-     which `@coffre/client/workload` computes from the same headers,
-     `packages/client/src/workload.ts:429`), and must be signed under their
-     own names (`hdr`, `:2767` and `:2846`);
+     (`carriedAs()`, `:2496`). The two digest headers also choose the
+     body's line in the proof (`bodyLine`, which `@coffre/client/workload`
+     computes from the same headers, `packages/client/src/workload.ts:429`),
+     and the one chosen must be signed under its own name (`hdr`, `:2767`
+     and `:2846`). `Content-Length` is transport and never in `hdr`: the
+     client leaves it out (`UNSIGNED_HEADERS`, `packages/client/src/dpop.ts:51`)
+     and the parser refuses a proof that signs it
+     (`packages/core/src/identity/dpop.ts:139`);
    - `x-coffre-handle`, and `X-HTTP-Method-Override` (`overridden()`,
      `:2429`).
 
@@ -2507,6 +2514,26 @@ On a passthrough credential:
    list. (One gap today's code has, apart from passthrough: through a
    session, `fieldsIn()` reads a plain `Content-Type` the proof does not
    sign, which `outbound()` then drops. It deserves its own fix.)
+
+   The scans for a handle or a secret are another matter: they read
+   values, not names, and `Authorization` is the one name they decode.
+   The UI routes' discovery (`handlesOutside()`, `:863`) Basic-decodes
+   each comma-joined pair of a plain `Authorization`, and the leak check's
+   `carries()` (`:3366`) one whole Basic value. A wrapped one would hide
+   from both: `coffre-pass-authorization: Basic base64(u:H1), Basic
+   base64(v:H2)` beside `x-coffre-handle: H1` finds H1 alone, the item is
+   H1's, and both handles reach the upstream, where the plain equivalent
+   is a 400 for two handles (review round 4). So, from 0.17:
+   - `handlesOutside()` reads `coffre-pass-authorization` as it reads
+     `authorization`, each Basic pair decoded. That is discovery only: the
+     wrapped value never authenticates the caller (`bearer()`,
+     `sessionToken()` and `handleIn()`'s Basic slots read the plain
+     header, `:3504`, `:3567`, `:2679`);
+   - `carries()` decodes each comma-joined Basic pair, as `slotsOf()`
+     (`:3520`) already does, on every credential. The leak check runs on
+     the headers that go out, after `outbound()` unwraps, so it is the
+     last line for every caller, code routes included, whose discovery
+     (`handleIn()`) reads only the rules' own slots.
 
    The leak check (`:3133`) sees `Cookie`, not
    `coffre-pass-cookie`, but it checks only for what authenticated the
@@ -2991,9 +3018,12 @@ fire it. Nothing here needs a new limit.
   byte, through `unwrap` and through the sidecar.
 - An upstream header named `set-cookie-0` comes back as
   `coffre-upstream-set-cookie-0` and does not become a cookie.
-- Injected headers beat the caller's: `coffre-pass-clerk-secret-key` and
-  a plain `clerk-secret-key` both reach the upstream as the real key, once.
-- A wrapped name off the list (`coffre-pass-host`, `-content-length`,
+- Injected headers beat the caller's: on a credential whose rule sets
+  `Authorization`, `coffre-pass-authorization` and a plain
+  `authorization` both reach the upstream as the rule's value, once; a
+  plain `clerk-secret-key` reaches Clerk as the real key, once.
+- A wrapped name off the list (`coffre-pass-clerk-secret-key`,
+  `coffre-pass-host`, `-content-length`,
   `-content-type`, `-content-encoding`, `-content-digest`,
   `-x-amz-content-sha256`, `-x-coffre-handle`,
   `-x-http-method-override`, `-cf-connecting-ip`) is a 400 naming it,
@@ -3004,8 +3034,17 @@ fire it. Nothing here needs a new limit.
 - The leak check, per caller, as section 10.2 states it: a handle's
   shape inside a wrapped header is a 400 for a handle caller; the
   session's own token inside one is a 400 for a session; a binding's
-  wrapped headers are not scanned. A wrapped `X-HTTP-Method-Override`
-  the allow list does not take is refused, as a plain one is.
+  wrapped headers are not scanned. A plain `X-HTTP-Method-Override` is
+  held to the allow list as today; a wrapped one is the door's 400
+  whatever it says.
+- Handles in a wrapped `Authorization` (review round 4): on a UI
+  passthrough route, `x-coffre-handle: H1` with
+  `coffre-pass-authorization: Basic base64(u:H1), Basic base64(v:H2)` is
+  a 400 for two handles, as its plain equivalent is, and the vault is not
+  asked; `coffre-pass-authorization: Basic base64(u:H1)` alone finds H1
+  but does not authenticate the request as H1 where only the plain header
+  would. On a code route, the same two pairs wrapped are a 400 from the
+  leak check (`carries()` decoding each pair), before anything is sent.
 - Through a session, a `coffre-pass-*` the proof does not sign is
   dropped, and so is every `coffre-pass-*`, signed or not, under a proof
   without `"pass": true` (a 0.16 sidecar's).
