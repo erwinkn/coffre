@@ -2421,9 +2421,9 @@ credentialProxy({
   gains `passthrough: ["clerk-fapi"]` beside `credentials`, for the
   sidecar (section 10.4). A client of 0.16 ignores the field (the CLI
   casts the plan, `packages/cli/src/main.ts:1450`). The sidecar's
-  refresh reads that list alone, `GET /use?passthrough=<place>`, which
-  opens no value and writes no log entry, on 0.17 and on the releases
-  before it (section 10.4).
+  refresh reads that list alone, `GET /use/?passthrough=<place>`, which
+  opens no value and writes no `expose` or `use_credential` entry, on
+  0.17 and on the releases before it (section 10.4).
 
 A passthrough route still has its upstream, its allow list, its
 `limit`, its redaction and its log entries, exactly as any other, and
@@ -2742,17 +2742,30 @@ section 10.1), and unwraps only answers it can tell are coffre's:
   so polling it would open every value each minute to learn one list of
   names, and add up to 1,440 log entries a day per pod and place, which
   section 10.6(a)'s figures do not count. The poll is a read of its own,
-  `GET /use?passthrough=<place>`, answering the marked names alone: the
+  `GET /use/?passthrough=<place>`, answering the marked names alone: the
   code's credentials' marks and the UI items' (the `proxyItem` call the
-  plan makes), with no `coffre.use`, so no value opened and no entry
-  written. It lists every marked credential that serves the place, held or
-  not; wrapping a request coffre then refuses costs nothing. Not
-  `GET /use/<place>?passthrough`: a server before 0.17 ignores the query
-  and serves that URL the plan (`credential-proxy.ts:821`), the logged
-  `expose` read the poll exists to avoid. `GET /use` is the root every
-  release answers without a session or a vault call, `{ proxy, credentials }`
-  (`:697`, what `coffre run` asks first; 0.15.0 has it too), and ignores
-  the query. So the poll reads three answers three ways:
+  plan makes), with no `coffre.use`, so no value opened and no `expose`
+  or `use_credential` entry written. It lists every marked credential
+  that serves the place, held or not; wrapping a request coffre then
+  refuses costs nothing. On 0.17 it is authenticated as the plan is: the
+  sidecar's session and its proof over the empty body, checked as every
+  request's are, then the list. The trailing slash matters. The workload
+  client signs only paths under `/use/` (`packages/client/src/workload.ts:411`)
+  and sends any other URL as given, with no `Authorization` and no proof
+  (`:423`), so `GET /use?passthrough=…` would reach a 0.17 server
+  anonymous, be refused with a 401 every tick, and keep a stale list
+  against a healthy server. Not `GET /use/<place>?passthrough` either: a
+  server before 0.17 ignores the query and serves that URL the plan
+  (`credential-proxy.ts:821`), the logged `expose` read the poll exists
+  to avoid. `/use/` is the root every release answers, `{ proxy, credentials }`
+  (`:696-697`, the same branch as `/use`, what `coffre run` asks first;
+  0.15.0 has it too), with no session check and no `coffre.use`, ignoring
+  the query and the signature's headers. Like any request to the proxy,
+  it first passes the gate (`plugins.ts:422`): a cold isolate's first
+  request reserves the code's names (`proxy-gate.ts:46`), which can write
+  a `proxy.code` entry (`packages/vault/src/vault.ts:5137`) once per
+  isolate, as any first request does. So the poll reads three answers
+  three ways:
   - a 200 with a `passthrough` list: the marks, which replace the last;
   - a 200 without one, or a 404 or 405: a server that has no passthrough.
     The marks are cleared at once, so a rollback stops the wrapping within
@@ -3140,9 +3153,13 @@ fire it. Nothing here needs a new limit.
 - The sidecar wraps nothing for a credential its plan does not mark, and
   against a server whose plan has no `passthrough`. Its mark poll is no
   logged use and opens no value, against 0.17 and against the last release
-  before it: the poll, run against that release, answers its
-  `{ proxy, credentials }` root, writes no log entry (no `expose`, no
-  `use_credential`) and returns no `values`. Against that release the
+  before it, both through the real workload client (`surface`'s `fetch`),
+  so the poll is signed: against 0.17 it carries the session and a proof
+  and gets the list (and a poll with no session, or its proof stripped,
+  gets a 401); against that release it answers its `{ proxy, credentials }`
+  root, writes no `expose` and no `use_credential` entry (a warm isolate,
+  so the gate's once-per-isolate `proxy.code` entry is not the poll's) and
+  returns no `values`. Against that release the
   sidecar, whose list marked a credential, clears it at the next tick and
   wraps the next request to it no longer; a poll that fails (unreachable,
   401, 5xx, 503) keeps the last list.
@@ -3216,7 +3233,7 @@ AAD and the chain verifier, none of which changes.
 
 | PR | What |
 |---|---|
-| A | `passthrough` on `Credential` and `ProxyRoute` (canonical only when true; refused beside `sigv4`), the request unwrap in `outbound()` (the list's names only, a session's only under `"pass": true`), the door's 400 for a name off the list, the envelope in `redacted()` (the marker's `jti` on a session's answer), `coffre-pass-*` and an upstream's `coffre-proxy` dropped everywhere else, the plan's `passthrough` list and its value-free read, `GET /use?passthrough=<place>`, the tests above but the sidecar's, conformance |
+| A | `passthrough` on `Credential` and `ProxyRoute` (canonical only when true; refused beside `sigv4`), the request unwrap in `outbound()` (the list's names only, a session's only under `"pass": true`), the door's 400 for a name off the list, the envelope in `redacted()` (the marker's `jti` on a session's answer), `coffre-pass-*` and an upstream's `coffre-proxy` dropped everywhere else, the plan's `passthrough` list and its value-free read, `GET /use/?passthrough=<place>` (authenticated as the plan), the tests above but the sidecar's, conformance |
 | B | `@coffre/client/passthrough`: `wrap`, `unwrap`, and the session fetch's `pass` claim for a request `wrap` made |
 | C | `coffre serve`: drops the app's `coffre-*` always, polls the marks every R, joins repeated `Cookie` with `"; "`, wraps by the marks with `pass`, unwraps by the `jti`, building the answer from the envelope alone |
 | D | The Proxy tab's toggle and its line in the save's review |
