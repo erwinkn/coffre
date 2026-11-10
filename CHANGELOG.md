@@ -98,7 +98,7 @@
   `pnpm sweep:history` (`docs/history-sweep.md`) runs every request path on
   an instance whose history is 2,000 entries long in each shape that hid a
   walk before, then 20,000, with auto_explain on the runtime logins, and
-  lists each statement that read more at the larger. Its first run found,
+  lists each statement of each path that read more at the larger. Its first run found,
   beside the five T245 left: the default audit page walked back past every
   heartbeat since (82 pages to 696); a member's page read 0.14's whole log
   for their activity, every entry for an `OR` with every restore (265 to
@@ -116,7 +116,11 @@
   reads and writes, then the restores its current values come from, each
   key's walked back from its current version a restore a step (where every
   restore of a key the member saw was read, and an owner putting version 1
-  back again and again made them many); the
+  back again and again made them many), a restore's numbers read as whole
+  numbers however spelt (`5.0` is 5, which Postgres's jsonb and SQLite each
+  read otherwise); two of the report's still grow with what one member did,
+  T252's: a probe of each day they read on, and a step of each restore in a
+  chain of restores of restores; the
   checkpointer's lowest `at` above a part of its window a walk from one
   `at` to the next, past each run of uses sealed at one in a step (7,069
   pages past 390,000 uses sharing an `at`), the floor it signs the same

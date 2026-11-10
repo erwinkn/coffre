@@ -132,3 +132,18 @@ test("a page's count of what it hides, with nothing older to show (`auditActionC
   },
   indexes: ['audit_log_detail_idx'],
 }));
+
+// The guard itself: a `LIMIT` in a statement does not make its scan of a log a bounded walk (review r2 of #559). Each
+// read here counts or filters the whole log.
+for (const [name, statement] of [
+  // On SQLite through the table, `SCAN audit_log`, rather than a covering index: the plan r1's guard let pass.
+  ['a count of the whole log, under a `LIMIT 1`', sql`SELECT count(*) AS n FROM audit_log ${sql.raw(TEST_ENGINE === 'postgres' ? '' : 'NOT INDEXED ')}LIMIT 1`],
+  ['a filter no index serves, beside a `LIMIT` of a subquery its own', sql`SELECT seq FROM audit_log WHERE metadata LIKE '%needle%' AND 1 = (SELECT 1 LIMIT 1)`],
+] as const) {
+  test(`the guard refuses ${name}`, { timeout: 600_000 }, async () => {
+    await assert.rejects(holdsFlat(db.owner, {
+      grow: async (owner, size) => append(owner, { author: 'app', action: 'audit.heartbeat', count: size }),
+      ask: async (app) => void await rowsOf(app, statement),
+    }), TEST_ENGINE === 'postgres' ? /reads as many pages/ : /scans no log whole/);
+  });
+}

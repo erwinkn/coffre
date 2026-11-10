@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "279372a6-c082-4f04-85f3-d5129d1c7c4c",
+  "id": "05243dfa-fc8f-42e3-ad77-0e0f8d45dacc",
   "prevId": "858d471a-7ad7-4b44-a70f-d9be1ebdfc0f",
   "tables": {
     "audit_chain_head": {
@@ -454,7 +454,7 @@
           "name": "audit_log_restore_idx",
           "columns": [
             "secret_id",
-            "(CASE WHEN json_type(\"metadata\", '$.version') = 'integer' THEN json_extract(\"metadata\", '$.version') END)",
+            "(CASE WHEN json_type(\"metadata\", '$.version') IN ('integer', 'real') THEN (CASE WHEN json_extract(\"metadata\", '$.version') = CAST(json_extract(\"metadata\", '$.version') AS INTEGER) THEN CAST(json_extract(\"metadata\", '$.version') AS INTEGER) END) END)",
             "seq"
           ],
           "isUnique": false,
@@ -4813,7 +4813,7 @@
     "indexes": {
       "audit_log_restore_idx": {
         "columns": {
-          "(CASE WHEN json_type(\"metadata\", '$.version') = 'integer' THEN json_extract(\"metadata\", '$.version') END)": {
+          "(CASE WHEN json_type(\"metadata\", '$.version') IN ('integer', 'real') THEN (CASE WHEN json_extract(\"metadata\", '$.version') = CAST(json_extract(\"metadata\", '$.version') AS INTEGER) THEN CAST(json_extract(\"metadata\", '$.version') AS INTEGER) END) END)": {
             "isExpression": true
           }
         }

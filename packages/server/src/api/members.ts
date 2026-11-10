@@ -27,6 +27,7 @@ import type { Admitted } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { credentials, identities, mcpConnections } from '@coffre/db/schema';
 import { SNAPSHOT } from '@coffre/db/dialect';
+import { wholeNumber } from '@coffre/db/log';
 
 import { actorParts } from '../db/audit.ts';
 import { readsByStanding, readsStanding } from '../db/reads.ts';
@@ -458,17 +459,17 @@ function exposure(
   for (const row of activity) {
     if (row.secretId === null) continue;
     const metadata = JSON.parse(row.metadata) as { version?: unknown; from?: unknown };
+    // Whole numbers alone, as the report's query follows restores back (`wholeNumberAt`, `restoresBack`).
     if (row.action === 'secret.restore') {
-      if (typeof metadata.version === 'number' && typeof metadata.from === 'number') {
-        restoredFrom.set(`${row.secretId}:${metadata.version}`, metadata.from);
-      }
+      const [made, from] = [wholeNumber(metadata.version), wholeNumber(metadata.from)];
+      if (made !== undefined && from !== undefined) restoredFrom.set(`${row.secretId}:${made}`, from);
       continue;
     }
     const { actorType, actorId } = actorParts(row.actor);
     const key = formatMember({ type: actorType as 'user' | 'service', id: actorId });
     if (!result.has(key)) continue;
-    const version = metadata.version;
-    if (typeof version !== 'number') continue;
+    const version = wholeNumber(metadata.version);
+    if (version === undefined) continue;
     if (row.key !== null && !row.archived && row.currentVersion! > 0) current.set(row.secretId, row);
     const bySecret = seen.get(key) ?? new Map<string, Map<number, Seen>>();
     seen.set(key, bySecret);

@@ -248,6 +248,30 @@ test('the report lists the current values someone saw, until each is rotated', a
   assert.ok(Date.parse(report.exposed[0].at) <= Date.now());
 });
 
+test('a restore whose numbers are whole but spelt as decimals (`1.0`) carries a value forward as one spelt `1` does', async () => {
+  // Postgres's jsonb keeps `1.0` as written and SQLite calls it a real: the report's lookup, the index under it and the
+  // walk read them all as whole numbers (`wholeNumberAt`, `wholeNumber`; review r2 of #559). A database writer's
+  // restores, under the app's key, each side of one spelt so in turn.
+  await root.secrets.set('market/prod', { API_KEY: 'api-1' });
+  await dev.secrets.reveal('market/prod/API_KEY');
+  const [secret] = await db.owner.select({ id: secrets.id, projectId: secrets.projectId, environmentId: secrets.environmentId }).from(secrets).where(eq(secrets.key, 'API_KEY'));
+  const restored = (metadata: string) => db.owner.transaction((tx) => appendEntries(tx, deriveLogKey('app', deps.chainKey), [{
+    actor: `user:${ROOT}`, action: 'secret.restore', decision: 'allow', secretId: secret!.id, projectId: secret!.projectId, environmentId: secret!.environmentId, metadata,
+  }], undefined, undefined, [], true));
+  const exposed = async () => (await root.members.get(`user:${DEV}`)).exposed.map(({ key, version, how }) => `${key} v${version} ${how}`);
+
+  await root.secrets.set('market/prod', { API_KEY: 'api-2' });
+  await restored('{"key":"API_KEY","version":2,"from":1.0}');
+  assert.deepEqual(await exposed(), ['API_KEY v2 read']);
+  await root.secrets.set('market/prod', { API_KEY: 'api-3' });
+  await restored('{"key":"API_KEY","version":3.0,"from":2}');
+  assert.deepEqual(await exposed(), ['API_KEY v3 read']);
+  // A number that is not whole names no version, on either side.
+  await root.secrets.set('market/prod', { API_KEY: 'api-4' });
+  await restored('{"key":"API_KEY","version":4,"from":3.5}');
+  assert.deepEqual(await exposed(), []);
+});
+
 test('the report reads any number of secrets a member\'s reads listed, past every engine\'s bound on a query\'s parameters', async () => {
   await root.secrets.set('market/prod', { API_KEY: 'api-1' });
   const [secret] = await db.owner.select({ id: secrets.id }).from(secrets).where(eq(secrets.key, 'API_KEY'));

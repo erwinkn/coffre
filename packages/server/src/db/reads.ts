@@ -245,7 +245,10 @@ export async function readsPageStanding(db: Queryable, filter: ReadFilter): Prom
  * read of each first: a step for each they read that day, however many
  * times (T248, R48). Grouped, every read of theirs was read, 797 pages at
  * 30,000 (Sol r6 of #556). SQLite, which no deployment runs on, groups them
- * by the same index.
+ * by the same index. Still a probe of each day the member read on, which a
+ * member who reads every day makes grow, a day at a time (review r1 of #559):
+ * T252's, a summary of each member's newest read of each key and version that
+ * the projector keeps as it writes.
  */
 function readsBySql(db: Queryable, members: readonly string[]): SQL {
   const engine = dialect.engineOf(db);

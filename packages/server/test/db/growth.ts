@@ -128,10 +128,10 @@ export type Growth = {
 
 /**
  * Holds `read` flat: the same statements at both sizes, each reading no more at the larger by the sweep's rule; and
- * on SQLite, none scanning a log whole (a `SCAN` of one, by an index or not, which `SEARCH` is not), but for a walk
- * under the statement's `LIMIT`, of one of the read's own indexes or of the log in its key's order, which SQLite says
- * as a `SCAN` too: a page back from the newest by `audit_log_shown_idx` stops at the page. Whether such a walk passes
- * entries it does not keep, Postgres's pages say: SQLite's plans hold the shape alone.
+ * on SQLite, none scanning a log at all (a `SCAN` of one, by an index or not, which `SEARCH` is not). A `LIMIT`
+ * excuses none: a count of the whole log (`count(*) … LIMIT 1`) or a subquery of its own has one as well, and SQLite's
+ * plans hold the shape alone (review r2 of #559). A page back from the newest is a `SEARCH` of its index from the
+ * newest `seq` (`entriesOf`'s `seq >= 0`).
  */
 export async function holdsFlat(owner: Database, read: Growth): Promise<void> {
   const measured: { text: string; values: unknown[]; pages: number; indexes: string[]; plan: string[] }[][] = [];
@@ -150,9 +150,7 @@ export async function holdsFlat(owner: Database, read: Growth): Promise<void> {
     const text = at.text.replace(/\s+/g, ' ');
     const said = JSON.stringify({ statement: text.length > 600 ? `${text.slice(0, 300)} … ${text.slice(-300)}` : text, values: small[i]!.values, pages: [small[i]!.pages, at.pages], plan: at.plan }, (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value));
     if (TEST_ENGINE !== 'postgres') {
-      const limited = /\blimit\b/i.test(at.text);
-      const walk = (line: string) => limited && (new RegExp(`^SCAN (${LOGS.join('|')})$`).test(line) || (read.indexes ?? []).some((index) => new RegExp(`USING (COVERING )?INDEX ${index}\\b`).test(line)));
-      assert.deepEqual(at.plan.filter((line) => new RegExp(`^SCAN (${LOGS.join('|')})\\b`).test(line) && !walk(line)), [], `scans no log whole: ${said}`);
+      assert.deepEqual(at.plan.filter((line) => new RegExp(`^SCAN (${LOGS.join('|')})\\b`).test(line)), [], `scans no log whole: ${said}`);
       continue;
     }
     assert.ok(!(at.pages >= 2 * small[i]!.pages && at.pages - small[i]!.pages >= 8), `reads as many pages ${LARGE.toLocaleString('en')} entries in as ${SMALL.toLocaleString('en')}: ${said}`);

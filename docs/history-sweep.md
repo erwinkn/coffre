@@ -53,10 +53,13 @@ on a fresh clone of the migrated template:
    `/* sweep:<path> */` the file logs, is measured.
 
 [`scripts/history-sweep.mjs`](../scripts/history-sweep.mjs) then reads both
-logs. A statement is its text with its literals left out (each run's database
-is another, and Postgres's query identifier hashes its tables' OIDs). Its cost
-is the most pages (shared buffers hit or read) one run of it read, and how
-many times it ran. It **grows** when the larger run read at least twice the
+logs. A statement is its path and its text with its literals left out (each
+run's database is another, and Postgres's query identifier hashes its tables'
+OIDs): by path, so that a statement many paths run, a member's access say, is
+measured in each, and one path's walk is not hidden under another's larger,
+flat run of it (review r2 of #559). Its cost is the most pages (shared
+buffers hit or read) one run of it read in its path, and how many times it
+ran there. It **grows** when the larger run read at least twice the
 pages and eight more, or ran it at least twice as often. A flat statement gains
 an index level at most, a page for each index it steps down, and its rows; the
 rule is growth, not a budget of pages (R70). The cost tests use the same rule
@@ -89,9 +92,19 @@ The first sweep, 2,000 and 20,000 entries of each shape, on #556's head:
 | Every member's findings (`tamperedMembers`), the members list's | 151 | 1,454 | A skip of `audit_log_tamper_idx` from one member reported to the next, then a probe each |
 | An ordinary audit page, past the heartbeats since | 82 | 696 | `audit_log_shown_idx`, the entries a page shows |
 | An audit page's count of what it hides (`auditActionCounts`) | 99 | 336 | The newest `HIDDEN_COUNTED` of its stretch at most, and `hiddenMore` |
-| A member's reads by key and version (`readsBy`), an offboarding report's | 66 | 494 | A skip of `log_reads_seen_idx` from one key and version to the next, a day at a time: still a probe of each day the member read on (open, review r1 of #559) |
+| A member's reads by key and version (`readsBy`), an offboarding report's | 66 | 494 | A skip of `log_reads_seen_idx` from one key and version to the next, a day at a time: still a probe of each day the member read on (open: T252) |
 | The keyring's rotations (`rotations`, `keyringRows`) | 56 | 452 | No more than `ROTATIONS_HELD` (246) rotations in a log's life |
 | The window a proof or the projector reads (`entries`), past uses sharing an `at` | 70 | 396 | Its first entries by number, `log_uses_by_number_idx` (T245), its bounds read first and given as values, so that it plans its own days alone |
+
+Two of an offboarding report's reads still grow, with what one member did
+rather than with the instance, and are T252's: `readsBy` probes each day the
+member read on (a member who read every day for a year is 365 probes, and a
+read projected keeps every day unless `retainDays` says otherwise), and the
+restores its activity follows back are one step each of a chain an owner made
+(restore version 6 back, then the version that made, and on: 7 from 6, 8 from
+7, …). Each needs a summary the write path keeps (a member's newest read of
+each key and version; the version each value came from), which is a change to
+what the reads' projector and a restore write, modelled first.
 
 And the checkpointer's `lowestAbove`, which a forged backlog does not reach,
 by its own test (7,069 pages past 390,000 uses sharing one `at`): a walk of

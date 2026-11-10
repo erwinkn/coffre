@@ -5,7 +5,7 @@ import { MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, ty
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { accessAllowed, changesOf, DETAIL_ACTIONS, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, restoreMade, withinBytes, type ChangeRecord } from '@coffre/db/log';
+import { accessAllowed, changesOf, DETAIL_ACTIONS, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, restoreMade, wholeNumberAt, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -1369,22 +1369,23 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  * made. A step of `audit_log_restore_idx` each, by key and the version a restore made (`restoreMade`): the lineage of
  * the key's value, never its other restores, which an owner putting one old version back again and again makes many
  * (T248, R48; review r1 of #559). Each step to a lower version, so that a cycle a database writer planted ends.
+ * Still a step for each restore of the chain, which an owner putting back the version a restore made, again and again,
+ * makes as long (review r2 of #559): T252's, the version each value came from, which a restore writes as it makes it.
  */
 function restoresBack(db: Queryable, keys: readonly string[]): SQL {
   const engine = dialect.engineOf(db);
+  // Both as `exposure` reads them, whole numbers however spelt (`wholeNumberAt`): as numbers of any size, so that no
+  // metadata a writer planted fails the statement.
   const made = restoreMade(engine, sql`a.metadata`);
+  const from = wholeNumberAt(engine, sql`a.metadata`, 'from');
   const postgres = engine === 'postgres';
-  // As numbers of any size, so that no metadata a writer planted fails the statement.
-  const from = postgres
-    ? sql`(CASE WHEN jsonb_typeof(a.metadata::jsonb -> 'from') = 'number' THEN (a.metadata::jsonb ->> 'from')::numeric END)`
-    : sql`(CASE WHEN json_type(a.metadata, '$.from') = 'integer' THEN json_extract(a.metadata, '$.from') END)`;
   // The keys as one value, however many: a report's keys may be past an engine's bound on a statement's parameters.
   const these = postgres ? sql`s.id = ANY(${sql.param(keys)}::uuid[])` : sql`s.id IN (SELECT value FROM json_each(${JSON.stringify(keys)}))`;
   return sql`SELECT r.seq FROM (WITH RECURSIVE back (secret, version, seq) AS (
       SELECT s.id, ${postgres ? sql`CAST(s.current_version AS numeric)` : sql`s.current_version`}, ${postgres ? sql`CAST(NULL AS bigint)` : sql`NULL`} FROM secrets s WHERE ${these}
       UNION ALL
       SELECT b.secret, ${from}, a.seq FROM back b JOIN audit_log a
-          ON a.secret_id = b.secret AND ${made} = ${postgres ? sql`CAST(b.version AS text)` : sql`b.version`} AND ${entriesOf('restore')}
+          ON a.secret_id = b.secret AND ${made} = b.version AND ${entriesOf('restore')}
        WHERE ${from} < b.version)
     SELECT seq FROM back) r WHERE r.seq IS NOT NULL`;
 }

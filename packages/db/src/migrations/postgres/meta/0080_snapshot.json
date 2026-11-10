@@ -1,5 +1,5 @@
 {
-  "id": "e8ef597f-4c00-4faa-9ee7-d99e71defcab",
+  "id": "deebc6f4-57be-40fd-9526-05737642eef5",
   "prevId": "ef3f7cdc-4479-4834-89bb-860ef6e45424",
   "version": "7",
   "dialect": "postgresql",
@@ -699,7 +699,7 @@
               "nulls": "last"
             },
             {
-              "expression": "(CASE WHEN jsonb_typeof(\"metadata\"::jsonb -> 'version') = 'number' THEN \"metadata\"::jsonb ->> 'version' END)",
+              "expression": "(CASE WHEN jsonb_typeof(\"metadata\"::jsonb -> 'version') = 'number' THEN (CASE WHEN (\"metadata\"::jsonb ->> 'version')::numeric = trunc((\"metadata\"::jsonb ->> 'version')::numeric) THEN trunc((\"metadata\"::jsonb ->> 'version')::numeric) END) END)",
               "asc": true,
               "isExpression": true,
               "nulls": "last"

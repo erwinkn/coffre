@@ -1,9 +1,9 @@
 // The history sweep's comparison (R48; docs/history-sweep.md): two Postgres logs of the sweep's run, at a size and at
 // ten times it, each holding auto_explain's plan of every statement the runtime logins ran, and the sweep's marks
-// between its request paths. Each statement, by its text (each run's database is another, and a query identifier
-// hashes its tables' OIDs), with its literals left out, read so many pages (shared buffers hit or
-// read) at most per run of a measured path, so many times: one that reads more at the larger size, or runs more
-// often, is one whose cost grows with history. Prints each that grows, and exits 1 when one does.
+// between its request paths. Each statement of each measured path, by the path and the statement's text (each run's
+// database is another, and a query identifier hashes its tables' OIDs), with its literals left out, read so many
+// pages (shared buffers hit or read) at most per run, so many times: one that reads more at the larger size, or runs
+// more often, is one whose cost grows with history. Prints each that grows, and exits 1 when one does.
 //
 //   node scripts/history-sweep.mjs <small.log> <large.log>
 import { readFileSync } from 'node:fs';
@@ -41,8 +41,10 @@ export function shapeOf(text) {
 }
 
 /**
- * The statements of the measured paths, by their shape (`shapeOf`): the most pages one run of it read, how many times
- * it ran, the paths it ran in and its text. A statement ran between the mark of its path and the next. The pages of
+ * The statements of each measured path, by the path and the statement's shape (`shapeOf`): the most pages one run of
+ * it read there, how many times it ran there, and its text. A statement ran between the mark of its path and the next.
+ * By path, not by shape alone: a statement many paths share (a member's access, read by every route) is as many
+ * statements, so that one path's walk is not hidden under another's larger, flat run of it (review r2 of #559). The pages of
  * a statement's first run on a backend are its own only when it never ran there again: a function's statements are
  * planned in its call's execution, and a backend's first plan of one reads the catalog (`prune_bulk`'s first call on
  * a session, 1,295 pages on an empty database as on a grown one, 18 after).
@@ -62,13 +64,13 @@ export function statementsOf(plans) {
     const first = !ran.has(`${plan.backend} ${shape}`);
     ran.add(`${plan.backend} ${shape}`);
     if (path === null) continue;
-    const seen = statements.get(shape) ?? { pages: 0, cold: 0, warm: false, runs: 0, paths: new Set(), text: plan.text.replace(/\s+/g, ' ').trim() };
+    const id = `${path}\u0000${shape}`;
+    const seen = statements.get(id) ?? { path, pages: 0, cold: 0, warm: false, runs: 0, text: plan.text.replace(/\s+/g, ' ').trim() };
     if (first) seen.cold = Math.max(seen.cold, plan.pages);
     else seen.pages = seen.warm ? Math.max(seen.pages, plan.pages) : plan.pages;
     seen.warm ||= !first;
     seen.runs += 1;
-    seen.paths.add(path);
-    statements.set(shape, seen);
+    statements.set(id, seen);
   }
   for (const seen of statements.values()) if (!seen.warm) seen.pages = seen.cold;
   return statements;
@@ -122,7 +124,7 @@ function report(grown) {
     const was = before === null ? 'not run' : `${before.pages} pages, ${before.runs} runs`;
     console.log(`${why === 'new' ? 'NEW ' : 'GROWS'} ${was} -> ${after.pages} pages, ${after.runs} runs`);
     console.log(`      ${after.text.slice(0, 240)}`);
-    console.log(`      in: ${[...after.paths].slice(0, 4).join('; ')}${after.paths.size > 4 ? `; and ${after.paths.size - 4} more` : ''}`);
+    console.log(`      in: ${after.path}`);
   }
 }
 
@@ -140,12 +142,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   }
   const grown = growing(small, large);
   const flagged = grown.filter(({ why }) => why !== 'new');
-  console.log(`${large.size} statements measured; ${flagged.length} grow with history, ${grown.length - flagged.length} ran at the larger size alone`);
+  console.log(`${large.size} statements of paths measured; ${flagged.length} grow with history, ${grown.length - flagged.length} ran at the larger size alone`);
   report(grown);
   // A sweep is clean only if both runs went the same way to the end: a statement too slow at the larger size, cut by a
   // timeout, leaves no plan behind, and would otherwise read as none that grew (review r1 of #559).
   const problems = [];
-  for (const { at } of vanished(small, large)) problems.push(`GONE  ran at the smaller size alone: ${at.text.slice(0, 200)} (in: ${[...at.paths].slice(0, 2).join('; ')})`);
+  for (const { at } of vanished(small, large)) problems.push(`GONE  ran at the smaller size alone: ${at.text.slice(0, 200)} (in: ${at.path})`);
   for (const [file, text] of [[smallLog, smallText], [largeLog, largeText]]) {
     for (const line of cancelled(text)) problems.push(`CANCELLED in ${file}: ${line.slice(0, 200)}`);
   }
