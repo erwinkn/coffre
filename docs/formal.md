@@ -2347,7 +2347,7 @@ reads' first, is `retention.test.ts`'s); and who sees which rows
 - NewestWithRows is a statement trigger on `log_reads`, for its inserts and
   its updates, as T175's `log_read_place_days` are written (postgres
   `0084_reads_newest`, sqlite `0043_reads_newest`); GreatestAt its upsert's
-  `GREATEST`. NewestChecked is `checkReads`' `newest`, beside `dayed`.
+  `DO UPDATE … WHERE log_read_newest.at < excluded.at`. NewestChecked is `checkReads`' `newest`, beside `dayed`.
   NewestRetired is, on Postgres, `drop_reads_day`, which drops the entries
   of the day it drops, and on SQLite a trigger on the reads' deletes, which
   drops a deleted read's entry unless a later read keeps it newer. On
@@ -2366,9 +2366,10 @@ reads' first, is `retention.test.ts`'s); and who sees which rows
   already waiting on the migration's lock, whose day's entries the next
   call's sweep drops (the model has no previous release). The writers
   (`/use`) write none of it and take neither lock; the projector writes it
-  under the lock it already holds, and `drop_reads_day`'s `lock_timeout`
-  (on that lock too) makes retention give way to it, trying again on its
-  next run.
+  under the lock it already holds. Retention waits up to 1 s for that
+  lock, a catching-up projector's chunk, and 100 ms for its partition's
+  drop, which readers queue behind; past either it gives way, trying
+  again on its next run (review r5 of #560).
 - The entries carry no MAC, as the days do not: the full verify, not the
   report, holds them to the rows. An entry made up or set later makes the
   report name more, never less.

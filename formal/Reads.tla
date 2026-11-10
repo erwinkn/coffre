@@ -317,7 +317,9 @@ PStep(p) == PRead(p) \/ PRows(p) \/ PCursor(p) \/ PNewest(p)
 -----------------------------------------------------------------------------
 (* Retention: a cut at or below the newest pair and the cursor it holds (retention.ts, behindReads), the uses and the
    rows at or below it dropped with their days, and (NewestRetired) the entries of `log_read_newest` at or below the
-   time of the newest it drops: a day's go with it, `drop_reads_day`. *)
+   time of the newest it drops: a day's go with it, `drop_reads_day`. The uses and rows go by number here and the
+   entries by time, where the code drops all three by day: the same cut only while clocks run in number order, as
+   `ReadsAt` does, so a scenario that turns `Retention` on keeps it (ReadsRetain.cfg; review r5 of #560). *)
 
 RetainTo(k) ==
     /\ Retention /\ cut < k /\ k <= sealed /\ k <= cur

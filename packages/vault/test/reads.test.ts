@@ -97,6 +97,25 @@ test("two projectors at once write each read once, and the whole log's check fin
   assert.deepEqual(await checked(), []);
 });
 
+test("a read the projector writes over a row a database writer planted at its number has its entry in the offboarding report's (NewestWithRows, the update's trigger; T252, review r5 of #560)", async () => {
+  const tick = await signer();
+  await reads(1);
+  await tick();
+  const [use] = await rows<{ number: string | number; at: string | number }>(db.owner, sql`SELECT number, at FROM log_uses`);
+  const planted = { principal: 'user:mallory@acme.example', secret: randomUUID(), version: randomUUID() };
+  const uuid = (value: string) => (ENGINE === 'postgres' ? sql`CAST(${value} AS uuid)` : sql`${value}`);
+  await run(db.owner, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, version, mac)
+    VALUES (${Number(use!.number)}, ${Number(use!.at)}, ${uuid(randomUUID())}, 1, ${planted.principal}, ${uuid(planted.secret)}, ${uuid(randomUUID())}, ${uuid(randomUUID())}, ${uuid(planted.version)}, ${Buffer.alloc(16)})`);
+  await projectReads(logStore(db.vault), await keys());
+  const [read] = await rows<{ principal: string; secret: string; version: string }>(db.owner, sql`SELECT principal, coalesce(source, secret) AS secret, version FROM log_reads`);
+  assert.notEqual(read!.principal, planted.principal, 'the projector wrote the read over the planted row');
+  const entries = await rows<{ principal: string; secret: string; version: string }>(db.owner, sql`SELECT principal, secret, version FROM log_read_newest`);
+  assert.ok(entries.some((e) => e.principal === read!.principal && e.secret === read!.secret && e.version === read!.version), JSON.stringify(entries));
+  // The planted row's own entry stays: entries carry no MAC, and the report trusts a writer of the log's rows no less
+  // than `secrets.current_version` (docs/offboarding.md).
+  assert.ok(entries.some((e) => e.principal === planted.principal), JSON.stringify(entries));
+});
+
 test("a projector another overtook writes nothing: never the reads retention has since dropped with their day, nor their day again (FromChecked, review r11)", async () => {
   const tick = await signer();
   await reads(4);

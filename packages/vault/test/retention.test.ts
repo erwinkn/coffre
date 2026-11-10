@@ -545,6 +545,32 @@ test("T252, review r2 of #560: retention's sweep below the oldest day of reads w
   }
 });
 
+test("T252, review r5 of #560: retention waits a projector's chunk out, past the partition's 100 ms, and gives up past 1 s", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its locks' }, async () => {
+  const projector = postgresSession(OWNER_URL);
+  const sweeper = postgresSession(VAULT_URL);
+  try {
+    // A chunk held 300 ms: the call waits it out and answers (TODAY's uses are the log's: 'kept').
+    await projector.unsafe('BEGIN');
+    await projector.unsafe('SELECT pg_advisory_xact_lock(1668244070, 166)');
+    const waited = sweeper.unsafe(`SELECT drop_reads_day('${TODAY}'::date) AS state`);
+    await sleep(300);
+    await projector.unsafe('COMMIT');
+    assert.deepEqual([...(await waited)].map((r) => r.state), ['kept']);
+    // A lock held past 1 s: the call gives up, as a lock wait (55P03), which the next run tries again.
+    await projector.unsafe('BEGIN');
+    await projector.unsafe('SELECT pg_advisory_xact_lock(1668244070, 166)');
+    const started = Date.now();
+    const failed = await sweeper.unsafe(`SELECT drop_reads_day('${TODAY}'::date)`).then(() => null, (e: { code?: string }) => e);
+    const took = Date.now() - started;
+    await projector.unsafe('COMMIT');
+    assert.equal(failed?.code, '55P03', String(failed));
+    assert.ok(took >= 900 && took < 3000, `gave up after ${took} ms`);
+  } finally {
+    await projector.end();
+    await sweeper.end();
+  }
+});
+
 /**
  * The store with the first barriers' floors given, as days past would have left them: the signer signs them as it
  * signs any floor, and reads each window from them. After the last, the database's own floor again.

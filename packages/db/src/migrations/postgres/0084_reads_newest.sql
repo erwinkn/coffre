@@ -44,8 +44,11 @@ ON CONFLICT (principal, secret, version) DO UPDATE SET at = excluded.at WHERE lo
 -- has retired, a day's at most, read all the same.
 -- Under the projector's lock, taken first (PruneLocked): a `project_reads` in flight may make a day below the floor and
 -- write a read in it (a use older than the days made ahead), which this call's snapshot does not see; read the floor
--- before it commits, and the sweep drops the entry it wrote (review r2). The lock waits within this function's
--- `lock_timeout`, as its partition's drop does, and a retention run that gives up tries again on the next (55P03).
+-- before it commits, and the sweep drops the entry it wrote (review r2). The lock waits up to 1 s: a projector's call
+-- holds it through its chunk of a thousand reads, and chunks run back to back while it catches up, so the partition's
+-- 100 ms would give up on each and no day would drop (review r5). That wait blocks no reader, only the next chunk; the
+-- partition's drop, which readers queue behind, waits 100 ms again. A retention run that gives up tries again on the
+-- next (55P03).
 CREATE OR REPLACE FUNCTION drop_reads_day(p_day date) RETURNS text
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET lock_timeout = '100ms' AS $$
 DECLARE
@@ -54,7 +57,9 @@ DECLARE
     kept boolean;
     oldest date;
 BEGIN
+    PERFORM set_config('lock_timeout', '1s', true);
     PERFORM pg_advisory_xact_lock(1668244070, 166);
+    PERFORM set_config('lock_timeout', '100ms', true);
     kept := EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhparent = to_regclass('public.log_uses')
                        AND i.inhrelid = to_regclass('public.' || quote_ident('log_uses_' || to_char(p_day, 'YYYYMMDD'))));
     IF NOT kept THEN

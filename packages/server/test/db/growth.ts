@@ -156,6 +156,8 @@ export async function holdsFlat(owner: Database, read: Growth): Promise<void> {
     const text = at.text.replace(/\s+/g, ' ');
     const said = JSON.stringify({ statement: text.length > 600 ? `${text.slice(0, 300)} … ${text.slice(-300)}` : text, values: small[i]!.values, pages: [small[i]!.pages, at.pages], plan: at.plan }, (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value));
     if (TEST_ENGINE !== 'postgres') {
+      // Only a whole scan fails here: a walk of index searches, one a day (0.15's `readsBy`), passes on SQLite. The
+      // page bound below is the guard, on Postgres, the engine deployments run (review r5 of #560).
       // SQLite's plan names a table by the statement's name for it (`SCAN r` for `log_reads r`): each such name too.
       const names = [...held, ...held.flatMap((table) => [...at.text.matchAll(new RegExp(`\\b${table}\\s+(?:AS\\s+)?(\\w+)`, 'gi'))].map((match) => match[1]!))]
         .filter((name) => !/^(?:WHERE|JOIN|LEFT|INNER|CROSS|ON|USING|GROUP|ORDER|LIMIT|UNION|SET|VALUES|WITH|AS|SELECT|FROM|INDEXED|NOT)$/i.test(name));
