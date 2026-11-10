@@ -3759,17 +3759,23 @@ function holdingClient(held: RegExp, nth: number, seen: RegExp[]) {
     release: () => release(),
     /** Until the held read is asked. */
     reached: () => within(at, () => 'no held read'),
-    /** Until one read of each of `seen` has settled. */
-    settled: () =>
-      within(
-        (async () => {
-          for (let i = 0; i < seen.length; i++) {
-            while (done[i]!.length === 0) await sleep(10);
-            await Promise.all(done[i]!);
-          }
-        })(),
-        () => `missing one of ${seen.map(String).join(', ')}`,
-      ),
+    /** Until one read of each of `seen` has settled. The polling stops with the wait, so a missing read fails the test without keeping it alive. */
+    settled: async () => {
+      let over = false;
+      try {
+        await within(
+          (async () => {
+            for (let i = 0; i < seen.length && !over; i++) {
+              while (done[i]!.length === 0 && !over) await sleep(10);
+              await Promise.all(done[i]!);
+            }
+          })(),
+          () => `missing one of ${seen.map(String).join(', ')}`,
+        );
+      } finally {
+        over = true;
+      }
+    },
   };
 }
 
@@ -3786,6 +3792,8 @@ test("a start whose newest-entry read lands after another's rotation, its other 
     const a = await openLocalVault(createDatabase(held.client), keys);
     held.arm();
     const call = a.access(ADA);
+    // Handled here so that a failed wait reports itself, not this call cut off when the client ends; `await call` still throws.
+    call.catch(() => {});
     await held.reached();
     // Its rotation and first-entry reads answered, before the rotation: none, and none under the new key.
     await held.settled();
@@ -3815,6 +3823,8 @@ test("a start whose reads, read again in order, find the first entry under its k
     const a = await openLocalVault(createDatabase(held.client), keys);
     held.arm();
     const call = a.access(ADA);
+    // Handled here so that a failed wait reports itself, not this call cut off when the client ends; `await call` still throws.
+    call.catch(() => {});
     await held.reached();
     await held.settled();
     // B rotates; then A's first-entry read finds B's rotation, above the newest entry A read, under the old key.
