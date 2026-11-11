@@ -135,8 +135,15 @@ the project's, the environment's) past each of them: the scheduler's page past
 its heartbeats, 199 pages 4,000 in and 1,955 at 40,000; a member's past their
 sign-ins, 165 and 1,628; a project's past its MCP reads, 132 and 1,303. An
 actor's page is now a step of `audit_log_shown_actor_idx`, `(actor, seq)`
-over what pages show, and flat, under a place too (a member's page under
-`market`, behind their sign-ins: 3 pages then 4 at 4,000 and 40,000). A place's
+over what pages show, and flat past the entries of theirs it hides, under a
+place too (a member's page under `market`, behind their sign-ins: 3 pages then
+4 at 4,000 and 40,000). Under a place it still walks the entries of theirs it
+shows at other places, as main does, T254's: review r3 (Fable) measured a
+market auditor's `?actor=<member>` page, its member's 5 market entries behind
+their `project.update`s in `shop`, at 5 pages then 1,626 at 4,000 and 40,000
+(main 5 then 1,628); with a busy place, 167 then 1,628 (main the same); and
+where nine in ten of the member's entries are sign-ins, 32 then 177 (main 173
+then 1,700). A place's
 still walks, past the entries of its own it hides or past everyone else's it
 shows, and is in the sweep as `?path=shop`: T254's. A place is matched by its
 columns and by the references and lists in an entry's metadata, which no index
@@ -165,7 +172,7 @@ log, where the plain condition searches `audit_log_shown_idx` back from the
 newest, the better plan there.
 
 `?path=shop` (a place behind its own MCP reads) reads 522 pages at 2,000 and
-5,022 at 20,000, a walk back of the primary key past every entry since the
+5,023 at 20,000, a walk back of the primary key past every entry since the
 place's newest shown one. That is main's plan: the same shape rebuilt on a
 scratch database plans the same walk under main's condition and indexes, 403
 pages and 4,010 at 12,000 and 120,000 entries. With `shown`'s own condition it
@@ -178,8 +185,15 @@ auditor of `market`, and two walk back the primary key past everyone's entries
 since market's newest, as on main, T254's: a small limit makes the walk look
 cheap (`?limit=5`: 517 pages at 2,000, 5,016 at 20,000), and a page with no
 action condition takes it once the log is long enough (`?detail=1`: market's
-own indexes at 2,000, 8 pages, then the walk at 20,000, 5,023). Both send
-main's SQL. The auditor's other pages, its actors' among them, are flat.
+own indexes at 2,000, 8 pages, then the walk at 20,000, 5,023). Both plan as
+on main: `?detail=1` sends main's SQL, and `?limit=5` main's but for the hidden
+actions, which it writes as literals where main sent them as parameters. The
+auditor's other pages are flat, its actors' among them. One of those,
+`?actor=user:admin@acme.example`, asks for an actor with shown entries outside
+market (the owner's grants, which have no place): 8 pages then 9 for the
+auditor, 12 then 13 for the owner. The auditor's page is flat only because each
+round's own market writes by the owner fill its five rows before the walk
+reaches the grants. Review r3's numbers above are the residual.
 
 And the checkpointer's `lowestAbove`: a walk of `log_uses_at_number_idx` from
 one `at` to the next. The sweep measures it on the first window only (once

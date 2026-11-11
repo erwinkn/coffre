@@ -296,25 +296,32 @@ async function get(as: string, path: string): Promise<number> {
  */
 type Path = { name: string; run: (round: number) => Promise<unknown>; last?: boolean };
 
+/** The audit pages each of the owner, the viewer and the auditor of market asks. */
+const PAGES = ['', '?detail=1', '?sealed=1', '?sealed=1&hidden=1', '?limit=5', `?actor=${encodeURIComponent(`user:${READER}`)}`, `?actor=${encodeURIComponent(`user:${TAMPERED}`)}`,
+  '?path=market', '?path=market%2Fdev', '?path=market%2Fdev%2FAPI_KEY', '?decision=deny', '?sealed=1&path=market%2Fdev', `?sealed=1&actor=${encodeURIComponent(`user:${LEAVER}`)}`,
+  // Each behind entries of its own it leaves out: flat for an actor (`audit_log_shown_actor_idx`) past the entries of
+  // theirs it hides, a system actor by its name alone, as its links name it; a place's a walk back of the log past its
+  // own MCP reads, as on main, a known growth until T254.
+  `?actor=${SCHEDULER.slice('system:'.length)}`, `?actor=${encodeURIComponent(SIGNER)}`, '?path=shop',
+  // An actor with shown entries outside market (the owner's grants, with no place): flat for the owner (12 → 13 pages
+  // at 2,000 and 20,000). For the auditor of market, a walk of their shown entries elsewhere, as on main, T254's (Fable
+  // r3 of #559), once the page's rows are behind them: here the owner's market writes of each round fill it first (8 → 9).
+  `?actor=${encodeURIComponent(`user:${ROOT}`)}`];
+
 function paths(): Path[] {
   const root = clientFor(deps, ROOT);
   const reader = throughAccess(READER);
-  const pages = ['', '?detail=1', '?sealed=1', '?sealed=1&hidden=1', '?limit=5', `?actor=${encodeURIComponent(`user:${READER}`)}`, `?actor=${encodeURIComponent(`user:${TAMPERED}`)}`,
-    '?path=market', '?path=market%2Fdev', '?path=market%2Fdev%2FAPI_KEY', '?decision=deny', '?sealed=1&path=market%2Fdev', `?sealed=1&actor=${encodeURIComponent(`user:${LEAVER}`)}`,
-    // Each behind entries of its own it leaves out: flat for an actor (`audit_log_shown_actor_idx`), a system actor by
-    // its name alone, as its links name it; a place's a walk back of the log past its own MCP reads, as on main, a known growth until T254.
-    `?actor=${SCHEDULER.slice('system:'.length)}`, `?actor=${encodeURIComponent(SIGNER)}`, '?path=shop'];
   const members = [ROOT, READER, TAMPERED, LEAVER].map((member) => `user:${member}`).concat(SERVICE);
   return [
     ...getRoutes().map((path) => ({ name: `GET ${path} (owner)`, run: () => get(ROOT, path) })),
     ...getRoutes().map((path) => ({ name: `GET ${path} (viewer)`, run: () => get(READER, path) })),
-    ...pages.map((query) => ({ name: `GET /audit${query} (owner)`, run: () => get(ROOT, `/audit${query}`) })),
-    ...pages.map((query) => ({ name: `GET /audit${query} (viewer)`, run: () => get(READER, `/audit${query}`) })),
+    ...PAGES.map((query) => ({ name: `GET /audit${query} (owner)`, run: () => get(ROOT, `/audit${query}`) })),
+    ...PAGES.map((query) => ({ name: `GET /audit${query} (viewer)`, run: () => get(READER, `/audit${query}`) })),
     // Every page of a reader of one place is a place's page (`within`). Two walk back the log's primary key past
     // everyone's entries since market's newest, as on main, a known growth until T254: `?limit=5`, whose small limit
     // makes the walk look cheap (517 → 5,016 pages at 2,000 and 20,000), and `?detail=1`, with no action condition,
     // which reads market's own indexes at 2,000 and flips to the walk at 20,000 (8 → 5,023).
-    ...pages.map((query) => ({ name: `GET /audit${query} (auditor of market)`, run: () => get(AUDITOR, `/audit${query}`) })),
+    ...PAGES.map((query) => ({ name: `GET /audit${query} (auditor of market)`, run: () => get(AUDITOR, `/audit${query}`) })),
     ...members.flatMap((member) => [`/members/${encodeURIComponent(member)}`, `/members/${encodeURIComponent(member)}/access`, `/members/${encodeURIComponent(member)}/tokens`]
       .map((path) => ({ name: `GET ${path} (owner)`, run: () => get(ROOT, path) }))),
     { name: 'a sign-in (members, findings)', run: () => signinService.completeSignin({ provider: 'github', subject: 'tampered', emails: [TAMPERED], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox' }) },
@@ -381,5 +388,6 @@ test(`the request paths, warm, then measured twice, at ${SIZE.toLocaleString('en
   for (const name of ['a reveal (viewer)', 'a reveal of one key (viewer)']) assert.equal(outcomes[name], 'ok', `${name}: ${outcomes[name]}`);
   // A scoped reader's pages measured: answered 403, they would read nothing past their caller's.
   const scoped = Object.entries(outcomes).filter(([name]) => name.startsWith('GET /audit') && name.endsWith('(auditor of market)'));
+  assert.equal(scoped.length, PAGES.length, 'every page of the auditor of market measured');
   assert.deepEqual(scoped.filter(([, outcome]) => outcome !== '200'), [], 'every page of the auditor of market answers');
 });

@@ -119,7 +119,8 @@ test("a member's audit page who only ever signed in (`auditPage`, `?actor=`): a 
 }));
 
 // A member's page under a place (`?path=…&actor=`, or any page of theirs a project's reader asks, `within`): a step
-// of what an actor's pages show, whatever the place, as their page on the whole log (`audit_log_shown_actor_idx`).
+// of what an actor's pages show, whatever the place (`audit_log_shown_actor_idx`), so flat past the entries of theirs
+// it hides. It still walks those it shows at other places, as main does: T254's (Fable r3 of #559).
 // Fenced as a place's page, it walked back their sign-ins: 158 pages 4,000 in, 1,538 at 40,000 (Fable r2 of #559).
 test("a member's audit page under a place, behind their sign-ins (`auditPage`, `within` and `?actor=`): a step of what it shows", { timeout: 600_000 }, () => holdsFlat(db.owner, {
   grow: async (owner, size) => {

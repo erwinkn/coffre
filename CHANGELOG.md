@@ -112,9 +112,11 @@
   entries (`HIDDEN_COUNTED`) and says `hiddenMore` when there were more,
   where it counted every heartbeat a page with nothing older held, or
   walked past every one its filter did not match; an actor's page
-  (`?actor=`), under a place too, a step of the entries it shows, where it
-  walked past all of theirs it hides (the scheduler's, past its heartbeats:
-  199 pages to 1,955 at 4,000 to 40,000); a place's page with no actor
+  (`?actor=`), under a place too, a step of the entries it shows, so flat
+  past the entries of theirs it hides, where it walked past all of them (the
+  scheduler's, past its heartbeats: 199 pages to 1,955 at 4,000 to 40,000),
+  though under a place it still walks those it shows at other places, as on
+  main, T254's; a place's page with no actor
   (`?path=`, and every page of a reader of one place) asks main's
   condition, so its place's own indexes, where `audit_log_shown_idx`
   walked back past every other place's entries (8 pages to 2,267 at 2,000
