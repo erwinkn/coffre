@@ -416,3 +416,18 @@ test("a token with no exp is not kept: its run's session ends with it, as any ot
   assert.deepEqual(coffre.log, ['POST /api/auth/workload 200', 'GET /use/market/prod 200', 'POST /api/auth/logout 200']);
   assert.throws(() => readdirSync(join(home, '.coffre', 'sessions')), /ENOENT/);
 });
+
+test('a token whose exp has a fraction of a second is kept as any other: two runs, one exchange (review r2 of #561)', async (t) => {
+  const coffre = await fakeCoffre({ plan: { environment: 'market/prod', values: {}, credentials: [] } });
+  t.after(() => coffre.close());
+  const home = homeFor(t);
+  const file = join(home, 'oidc.jwt');
+  // The instance takes any finite `exp`, fractional too.
+  writeFileSync(file, idToken(Math.floor(Date.now() / 1000) + 3600.25, 'ENG-144'));
+  for (let i = 0; i < 2; i++) {
+    const run = cli(t, ['--url', coffre.url, '--service', 'capy-agent', 'run', '--proof', `oidc:${file}`, '--', process.execPath, '-e', ''], '', home);
+    const [code] = await once(run.child, 'exit');
+    assert.equal(code, 0, run.stderr());
+  }
+  assert.deepEqual(coffre.log, ['POST /api/auth/workload 200', 'GET /use/market/prod 200', 'GET /use/market/prod use_dpop_nonce', 'GET /use/market/prod 200']);
+});

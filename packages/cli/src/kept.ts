@@ -16,7 +16,7 @@
  *   ~/.coffre/sessions/3f9c…e1.json   { "v": 1, "until": 1794358800000, "iv": "…", "data": "…" }
  */
 import { createCipheriv, createDecipheriv, createHmac, hkdfSync, randomBytes } from 'node:crypto';
-import { chmodSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, fstatSync, futimesSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -53,7 +53,8 @@ export function tokenExpiry(token: string): number | null {
   if (payload === undefined) return null;
   try {
     const exp = (JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { exp?: unknown }).exp;
-    return typeof exp === 'number' && Number.isSafeInteger(exp) && exp > 0 ? exp * 1000 : null;
+    // Seconds, fractional or not, as the instance takes them: down to the ms, so that the session is never kept past it.
+    return typeof exp === 'number' && Number.isFinite(exp) && exp > 0 ? Math.floor(exp * 1000) : null;
   } catch {
     return null;
   }
@@ -119,55 +120,107 @@ export function keptFor(directory: string, origin: string, service: string, toke
       // stale is a run that died holding it, taken over. A live one is waited for, however long its exchange takes.
       const held = lockOf(lock);
       if (held === null) continue;
-      if (Date.now() - held.at > LOCK_MS) {
-        takeOver(lock, held.owner);
-        continue;
-      }
+      if (Date.now() - held.at > LOCK_MS && takeOver(lock, held)) continue;
       await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
     }
     const fresh = setInterval(() => {
-      if (lockOf(lock)?.owner !== owner) return;
-      const now = new Date();
-      utimesSync(lock, now, now);
+      withLock(lock, (now, fd) => {
+        if (now.owner !== owner) return;
+        const at = new Date();
+        futimesSync(fd, at, at);
+      });
     }, LOCK_FRESH_MS);
     fresh.unref();
     return () => {
       clearInterval(fresh);
-      if (lockOf(lock)?.owner === owner) rmSync(lock, { force: true });
+      // Under the same mutex as a takeover, so that a run that took it over after this one stalled keeps its own. The
+      // mutex is held for as long as removing a file takes, so it is waited for here, the run being about to exit.
+      for (let tries = 0; tries < 500 && breaking(lock, () => removeIf(lock, (now) => now.owner === owner)) === null; tries++) Atomics.wait(PAUSE, 0, 0, 2);
     };
   };
 
   return { open, save, hold };
 }
 
-/** The run a lock names, and when it last kept it fresh; null for none. */
-function lockOf(lock: string): { owner: string; at: number } | null {
+/** For a release's pauses: a run exits right after it, so it cannot wait on a timer. */
+const PAUSE = new Int32Array(new SharedArrayBuffer(4));
+
+/** A lock as one file says it: who holds it, when they last kept it fresh, and which file it is. */
+export type Lock = { owner: string; at: number; ino: number };
+
+/**
+ * `use` the lock file now at `lock`, read through one descriptor, so that its
+ * holder, its freshness and its identity are all the same file's, however
+ * the name moves meanwhile. Undefined for none.
+ */
+function withLock<T>(lock: string, use: (held: Lock, fd: number) => T): T | undefined {
+  let fd: number;
   try {
-    const at = statSync(lock).mtimeMs;
-    return { owner: readFileSync(lock, 'utf8'), at };
+    fd = openSync(lock, 'r');
   } catch {
-    return null;
+    return undefined;
+  }
+  try {
+    const { mtimeMs, ino } = fstatSync(fd);
+    const buffer = Buffer.alloc(64);
+    const owner = buffer.subarray(0, readSync(fd, buffer, 0, buffer.length, 0)).toString('utf8');
+    return use({ owner, at: mtimeMs, ino }, fd);
+  } finally {
+    closeSync(fd);
   }
 }
 
+/** The run a lock names, when it last kept it fresh, and which file it is; null for none. */
+export function lockOf(lock: string): Lock | null {
+  return withLock(lock, (held) => held) ?? null;
+}
+
 /**
- * A stale lock removed, if it is still the one found stale: moved aside
- * first, in one step, then read. Another run that took it over meanwhile
- * made a fresh one, which is put back where it was.
+ * Remove the stale lock `found` at `lock`, if it is still that file and
+ * still stale; whether it did. Another run's lock made since, fresh or not
+ * yet found stale, stays.
  */
-function takeOver(lock: string, stale: string): void {
-  const aside = `${lock}.${randomBytes(8).toString('hex')}`;
+export function takeOver(lock: string, found: Lock): boolean {
+  return breaking(lock, () => removeIf(lock, (now) => now.ino === found.ino && Date.now() - now.at > LOCK_MS)) === true;
+}
+
+/** Remove the lock file at `lock` if `still` holds of it, read again now; whether it did. */
+function removeIf(lock: string, still: (now: Lock) => boolean): boolean {
+  const now = lockOf(lock);
+  if (now === null || !still(now)) return false;
+  rmSync(lock, { force: true });
+  return true;
+}
+
+/**
+ * Run `act` holding the lock's mutex (`<lock>.break`), which every removal
+ * of the lock takes: a takeover, after it reads the lock again and finds it
+ * the same stale file, and a release, after it finds it its own. With no
+ * other run able to remove it meanwhile, and none to make one while it is
+ * there, the file a removal checked is the one it removes. `act`'s answer,
+ * or null without the mutex, held by another run (for the moment it takes
+ * to remove a file); one left by a run that died holding it is removed once
+ * stale. (Two runs finding that one stale at once could each remove the
+ * other's: the one place left where two removals may race, after a run died
+ * within those microseconds.)
+ */
+function breaking(lock: string, act: () => boolean): boolean | null {
+  const mutex = `${lock}.break`;
   try {
-    renameSync(lock, aside);
-  } catch {
-    return;
+    writeFileSync(mutex, '', { flag: 'wx', mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    try {
+      if (Date.now() - statSync(mutex).mtimeMs > LOCK_MS) rmSync(mutex, { force: true });
+    } catch {
+      // Gone already.
+    }
+    return null;
   }
   try {
-    if (readFileSync(aside, 'utf8') !== stale) linkSync(aside, lock);
-  } catch {
-    // Put back only where no lock is now: a run that made one since holds it.
+    return act();
   } finally {
-    rmSync(aside, { force: true });
+    rmSync(mutex, { force: true });
   }
 }
 

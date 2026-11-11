@@ -677,7 +677,8 @@ logging out, in `~/.coffre/sessions/`:
   session instead.
 - **It ends with the token.** A file is used only until the earlier of the
   session's `notAfter` and the token's own `exp`, read from its payload. A
-  token with no `exp` is never kept. For a binding whose token does not
+  token with no `exp` is never kept; a fractional one, which the instance
+  accepts, is read down to the millisecond. For a binding whose token does not
   name the key, which is every Capy binding, the session's `notAfter` is
   the token's `exp` already (workload-access.md, section 5.4).
 - **Two runs at once** take a lock file beside it around the exchange, so
@@ -685,7 +686,11 @@ logging out, in `~/.coffre/sessions/`:
   holding it, which keeps it fresh while it waits on the instance (an
   approval can take minutes) and removes it only if it is still its own.
   A lock nobody kept fresh for 30 seconds is a dead run's, and is taken
-  over. The instance still spends the token once, so a lock defeated
+  over. A run reads a lock's holder, freshness and identity (its inode)
+  through one descriptor, and removes one, to take it over or release it,
+  only under a second lock file held for that one step (`<lock>.break`),
+  after reading it again: the stale file it found and no other, its own and
+  no other. The instance still spends the token once, so a lock defeated
   anyway costs a `replayed` run, never a second session.
 - **A session refused** (revoked, frozen, its binding removed) deletes its
   file. The token is spent, so the run says so and waits for none: the
