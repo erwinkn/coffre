@@ -104,8 +104,15 @@ export function fetchTransport(fetchImpl: typeof fetch = fetch): WorkloadTranspo
         await response.body?.cancel().catch(() => {});
         throw FetchRefused.answered(url, response.status);
       }
+      try {
+        // Before the body: a 200 that is not JSON is a definite answer, whatever its body does next.
+        claimsJSON(url, response.headers.get('content-type'));
+      } catch (error) {
+        await response.body?.cancel().catch(() => {});
+        throw error;
+      }
       cacheControl?.(response.headers.get('cache-control'));
-      return parsed(url, response.headers.get('content-type'), await capped(url, response.body));
+      return parsed(url, await capped(url, response.body));
     },
   };
 }
@@ -134,11 +141,15 @@ export async function capped(url: URL, body: ReadableStream<Uint8Array> | null):
   return Buffer.concat(chunks);
 }
 
-/** A body as JSON, from a response that says it is. */
-export function parsed(url: URL, contentType: string | null, body: Uint8Array): unknown {
+/** `FetchRefused` unless a response's `Content-Type` says JSON: checked before its body is read. */
+export function claimsJSON(url: URL, contentType: string | null): void {
   if (contentType === null || !/^application\/([a-z.+-]+\+)?json\b/i.test(contentType)) {
     throw new FetchRefused(url, 'is not JSON');
   }
+}
+
+/** A body as JSON, from a response that said it is (`claimsJSON`). */
+export function parsed(url: URL, body: Uint8Array): unknown {
   try {
     return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
   } catch {

@@ -275,7 +275,9 @@ key import or failure. Two first exchanges each fetch.
 - After an unknown `kid`, or an answer that is not keys (a 404, a page that
   is not JSON, a set with none), that isolate waits a minute before
   fetching that URL again, cold cache included. Until then such tokens get
-  a 503 with `Retry-After: 60`.
+  a 503 with `Retry-After: 60`. A 200's `Content-Type` is checked before
+  its body is read: a page that says HTML is that answer even if the
+  connection then breaks.
 - Each cold isolate has its own cache and cooldowns. Admission, approximate
   as section 2 says, is what bounds them together.
 
@@ -304,7 +306,8 @@ hosts in 0.4 s.
   (https://token.actions.githubusercontent.com/.well-known/jwks: timed out
   after 5 s): its own request to the issuer failed, not the token or the
   job that sent it; try again in 10 s`. Each failed fetch logs
-  `workload_keys_unfetched`.
+  `workload_keys_unfetched`, the one a retry then answers included
+  (`retrying: true`).
 - An answer that is not keys ends the stand-in: an issuer that publishes a
   set with no keys, or moved them, is not one whose old keys outlive their
   ten minutes.

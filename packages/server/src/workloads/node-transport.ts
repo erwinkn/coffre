@@ -6,7 +6,7 @@ import { isIP, type LookupFunction } from 'node:net';
 import { Agent, fetch as undiciFetch } from 'undici';
 
 import { isPublicAddress } from './addresses.ts';
-import { FETCH_DEADLINE_MS, FetchRefused, MAX_BODY_BYTES, parsed, USER_AGENT, type WorkloadTransport } from './transport.ts';
+import { claimsJSON, FETCH_DEADLINE_MS, FetchRefused, MAX_BODY_BYTES, parsed, USER_AGENT, type WorkloadTransport } from './transport.ts';
 
 /**
  * The transport on Node, where a fetch could reach the server's own network.
@@ -124,6 +124,14 @@ function read(url: URL, response: IncomingMessage): Promise<unknown> {
       reject(new FetchRefused(url, `came ${encoding}-encoded, though asked for none`));
       return;
     }
+    try {
+      // Before the body: a 200 that is not JSON is a definite answer, whatever its body does next.
+      claimsJSON(url, response.headers['content-type'] ?? null);
+    } catch (error) {
+      response.destroy();
+      reject(error);
+      return;
+    }
     const chunks: Buffer[] = [];
     let size = 0;
     response.on('data', (chunk: Buffer) => {
@@ -138,7 +146,7 @@ function read(url: URL, response: IncomingMessage): Promise<unknown> {
     response.on('error', (error) => reject(FetchRefused.unreached(url, error, 'could not be read')));
     response.on('end', () => {
       try {
-        resolve(parsed(url, response.headers['content-type'] ?? null, Buffer.concat(chunks)));
+        resolve(parsed(url, Buffer.concat(chunks)));
       } catch (error) {
         reject(error);
       }

@@ -151,13 +151,14 @@ async function fetchKeys(
       return set;
     } catch (error) {
       const transient = error instanceof FetchRefused && error.transient;
-      if (transient && retry && attempt === 1) continue;
+      const retrying = transient && retry && attempt === 1;
+      // One line a failed fetch, the one a retry then answers included; the quiet after the last spaces them out.
+      console.error({ event: 'workload_keys_unfetched', url, attempt, transient, retrying, error: (error as Error).message }, "coffre could not fetch an issuer's signing keys");
+      if (retrying) continue;
       const at = clock();
       const why =
         `coffre could not fetch the signing keys of the issuer ${issuer} (${(error as Error).message}): ` +
         'its own request to the issuer failed, not the token or the job that sent it';
-      // One line a failed fetch, which the quiet after it spaces out.
-      console.error({ event: 'workload_keys_unfetched', url, attempts: attempt, transient, error: (error as Error).message }, "coffre could not fetch an issuer's signing keys");
       const entry = entries.get(url);
       const own: Quiet = { until: at + (transient ? KEYS_UNREACHED_MS : KEYS_COOLDOWN_MS), why, standIn: transient };
       const other = entry?.quiet != null && entry.quiet !== replaces && at < entry.quiet.until ? entry.quiet : null;

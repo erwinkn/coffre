@@ -257,6 +257,20 @@ test('cold, a fetch that times out is asked again once, at once; failing twice, 
   assert.deepEqual(await verify(known, KEYS_UNREACHED_MS + 1000), { outcome: VERIFIED, fetches: 1 });
 });
 
+test('each failed fetch logs, the one a retry then answers included (review r2 of #565)', async (t) => {
+  const logged: unknown[] = [];
+  t.mock.method(console, 'error', (line: { event?: string }) => logged.push(line));
+  timeouts = 1;
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 2 });
+  assert.deepEqual(
+    logged.map((line) => {
+      const { event, attempt, transient, retrying } = line as Record<string, unknown>;
+      return { event, attempt, transient, retrying };
+    }),
+    [{ event: 'workload_keys_unfetched', attempt: 1, transient: true, retrying: true }],
+  );
+});
+
 test('a key the fresh set lacks is fetched for with a retry, and a timeout leaves the set as it was', async () => {
   assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
   published = [known, rotated];

@@ -64,6 +64,12 @@ for (const [name, transport] of [
     answers.set('/broken', json('{"keys":'));
     answers.set('/huge', json(JSON.stringify({ pad: 'x'.repeat(MAX_BODY_BYTES) })));
     answers.set('/gone', (res) => res.writeHead(500).end());
+    // A 200 that says HTML, then breaks off: the answer was given before the body broke (review r2 of #565).
+    answers.set('/html-reset', (res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.write('<html>'.padEnd(64 * 1024, ' '));
+      setTimeout(() => res.destroy(), 20);
+    });
 
     answers.set('/cached', (res) => res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'public, max-age=3600, must-revalidate' }).end('{"keys":[]}'));
 
@@ -76,6 +82,7 @@ for (const [name, transport] of [
     for (const [path, why] of [
       ['/moved', /answered 302/],
       ['/html', /is not JSON/],
+      ['/html-reset', /is not JSON/],
       ['/broken', /is not valid JSON/],
       ['/huge', new RegExp(`is larger than ${MAX_BODY_BYTES} bytes`)],
       ['/gone', /answered 500/],
@@ -134,6 +141,13 @@ test('a status that says the host cannot answer now stays transient when its bod
     const transport = fetchTransport(async () => new Response(errored(), { status }));
     await assert.rejects(transport.json(url), (error: unknown) => error instanceof FetchRefused && error.status === status && error.transient === transient);
   }
+});
+
+test('a 200 that is not JSON is refused as such, never as transient, when its body then breaks (review r2 of #565)', async () => {
+  const url = new URL('https://token.actions.githubusercontent.com/.well-known/jwks');
+  const errored = () => new ReadableStream({ start: (controller) => controller.error(new Error('reset')) });
+  const transport = fetchTransport(async () => new Response(errored(), { status: 200, headers: { 'content-type': 'text/html' } }));
+  await assert.rejects(transport.json(url), (error: unknown) => error instanceof FetchRefused && /is not JSON/.test(error.message) && !error.transient);
 });
 
 test("the public fetch, a UI route's upstream's on Node, dials no address that is not public, checked as it connects (review r2 of #467)", async () => {
