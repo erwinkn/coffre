@@ -233,7 +233,9 @@ export function planCutover(facts: CutoverFacts): CutoverPlan {
     if (read.logged || read.seal !== null || facts.logged.has(objectKey(ref))) continue;
     // The instance it was made on: the deployment's public URL, as the app vouched for it (T160), which its genesis writes
     // beside its seal. 0.14 writes none, and its MAC covers none: a row with one is not 0.14's.
-    const { origin: _, ...columns } = vouched;
+    // An app before 0.17 vouches with no `record`: it makes no binding that records any.
+    const { origin: _, ...given } = vouched;
+    const columns = { ...given, record: given.record ?? null };
     if (read.origin !== null) {
       plan.skipped.push({ ref, why: 'it names an instance, which no binding of 0.14 does', fault: 'tampered' });
       continue;

@@ -582,6 +582,30 @@ test("a binding made on 0.14, vouched for, is sealed with the instance it was ma
   }
 });
 
+test("a binding this release made before the cutover, recording claims, is sealed with them; an app before 0.17, vouching for one with none and naming no record, cuts over as before (review r1 of #561)", async () => {
+  const w = await instance014();
+  assert.ok((await w.old.admit({ actor: ROOT, principal: CI })).ok);
+  const { serviceBindings } = tablesOf(db.owner);
+  const ISSUER = 'https://api.capy.ai/oidc/orgs/o_1';
+  const ORIGIN = 'https://secrets.acme.example';
+  const binding = async (record: string | null) => {
+    const id = randomUUID();
+    const row = { id, principal: CI, generation: 0, profile: 'custom', issuer: ISSUER, jwksUri: `${ISSUER}/.well-known/jwks`, claims: '{"project":"p_7"}', scope: null, policy: null, record };
+    await db.owner.insert(serviceBindings).values({ ...row, authMac: randomBytes(32), label: null, createdBy: ROOT, createdAt: new Date() });
+    return { ...row, origin: ORIGIN, revoked: false };
+  };
+  const recorded = await binding('["thread","user"]');
+  const { record: _, ...older } = await binding(null);
+  const vault = await vault015(w.config);
+  assert.deepEqual(await cutOver(vault, { ...NONE, bindings: [recorded, older as typeof recorded] }), { ok: true, done: true });
+  assert.deepEqual(await opsOf({ kind: 'binding', id: recorded.id }), ['genesis']);
+  assert.deepEqual(await opsOf({ kind: 'binding', id: older.id }), ['genesis']);
+  const seals = Object.fromEntries((await db.owner.select({ id: serviceBindings.id, seal: serviceBindings.seal }).from(serviceBindings)).map((row) => [row.id, row.seal]));
+  const key = sealKey(w.config.signingKeys[0]!);
+  assert.deepEqual(seals[recorded.id], sealOf(key, { kind: 'binding', id: recorded.id }, { kind: 'binding', ...recorded, record: '["thread","user"]', scope: null }));
+  assert.deepEqual(seals[older.id], sealOf(key, { kind: 'binding', id: older.id }, { kind: 'binding', ...older, scope: null }));
+});
+
 test("0.14's chain broken since its newest checkpoint refuses the cutover: a vault entry edited past its MAC (VerifyChain)", async () => {
   const w = await instance014();
   assert.ok((await w.old.admit({ actor: ROOT, principal: ADA })).ok);

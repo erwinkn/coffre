@@ -103,7 +103,7 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
   const plan = await as(LEAD).bindings.preview(MEMBER, { profile: 'github', claims: { ...DEPLOY } });
   // What its runs reach, left out: all the account holds.
   const scope = { [`${SERVICE}-reads`]: 'viewer' as const };
-  assert.deepEqual(plan, { profile: 'github', issuer: GITHUB, jwksUri: KEYS, keys: null, claims: Object.fromEntries(Object.entries(DEPLOY).sort()), scope, policy: null, withheld: [], replaces: [] });
+  assert.deepEqual(plan, { profile: 'github', issuer: GITHUB, jwksUri: KEYS, keys: null, claims: Object.fromEntries(Object.entries(DEPLOY).sort()), scope, policy: null, record: null, withheld: [], replaces: [] });
   assert.deepEqual(await live(), [], 'a preview writes nothing');
   assert.deepEqual(await entries(), [], 'and logs nothing');
 
@@ -111,7 +111,7 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
   assert.deepEqual(replaced, []);
   assert.deepEqual(
     { ...binding, id: undefined, createdAt: undefined },
-    { id: undefined, createdAt: undefined, profile: 'github', issuer: GITHUB, jwksUri: KEYS, keys: null, claims: plan.claims, scope, policy: null, label: 'deploys to prod', createdBy: LEAD, lastUsedAt: null, removing: null },
+    { id: undefined, createdAt: undefined, profile: 'github', issuer: GITHUB, jwksUri: KEYS, keys: null, claims: plan.claims, scope, policy: null, record: null, label: 'deploys to prod', createdBy: LEAD, lastUsedAt: null, removing: null },
   );
   assert.deepEqual(await live(), [binding]);
   // The service itself may see its bindings; another member may not.
@@ -165,7 +165,8 @@ test('the server holds every binding to its profile, from the API as from anywhe
   await assert.rejects(create({ profile: 'github-reusable', claims: { ...DEPLOY } }), /requires job_workflow_ref, job_workflow_sha/);
   await assert.rejects(create({ profile: 'gitlab', claims: { project_id: '345', ref_type: 'branch', ref: 'main', pipeline_source: 'push' } }), /requires namespace_id/);
   await assert.rejects(create({ profile: 'gitlab', issuer: GITHUB, claims: {} }), /signs only for the github profiles/);
-  await assert.rejects(create({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { email: 'x' } }), /requires sub/);
+  await assert.rejects(create({ profile: 'custom', issuer: 'https://idp.acme.example', claims: {} }), /names one or more claims/);
+  await assert.rejects(create({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { email_verified: 'true' } }), /not to whom/);
   await assert.rejects(create({ profile: 'custom', issuer: 'http://idp.acme.example', claims: { sub: 'x' } }), /must use https/);
   await assert.rejects(create({ profile: 'github', claims: { ...DEPLOY, environment: 'production ' } }), /environment is a GitHub environment's name/);
   assert.deepEqual(await live(), []);

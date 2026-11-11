@@ -363,6 +363,9 @@ test('a binding records claims by name: sorted, each once, at most eight, only w
   assert.throws(() => checkRecord('custom', [7]), /record lists claim names/);
   assert.throws(() => checkRecord('custom', ['a b']), /"a b" is not a claim name a binding can record/);
   assert.throws(() => checkRecord('custom', ['__proto__']), /not a claim name/);
+  // As long as a sign-in's run takes a claim's name, and no longer (the vault's `isRun`; review r1 of #561).
+  assert.deepEqual(checkRecord('custom', ['x'.repeat(64)]), ['x'.repeat(64)]);
+  assert.throws(() => checkRecord('custom', [`https://claims.acme.example/${'x'.repeat(48)}`]), /at most 64 characters/);
   assert.throws(() => checkRecord('custom', Array.from({ length: 9 }, (_, i) => `c${i}`)), /at most 8 claims/);
   for (const profile of ['aws', 'enrollment', 'cloudflare'] as const) assert.throws(() => checkRecord(profile, ['user']), /records no claims: its proof carries none/);
   // One spelling, stored and read back.

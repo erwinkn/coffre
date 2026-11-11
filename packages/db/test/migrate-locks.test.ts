@@ -3,7 +3,7 @@
 // refused loudly, rather than queue every use of that table behind it for minutes.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,6 +20,7 @@ import {
   MIGRATION_LOCK_WAIT_MS,
   migrationsFolder,
 } from '../src/migrate.ts';
+import { onlineIndex } from '../src/online-indexes.ts';
 import { postgresClient, postgresSession, quoteIdentifier, type PostgresClient } from '../src/postgres.ts';
 
 const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only' : false;
@@ -56,6 +57,18 @@ before(async () => {
   writeFileSync(join(folder, 'meta/_journal.json'), JSON.stringify({ ...JOURNAL, entries: JOURNAL.entries.slice(0, AT) }));
   for (const { tag } of JOURNAL.entries.slice(AT)) rmSync(join(folder, `${tag}.sql`));
   assert.equal(readdirSync(folder).filter((file) => file.endsWith('.sql')).length, AT);
+  // drizzle-orm applies a tree in one transaction, where no CONCURRENTLY build runs: the tree before TAG without them, its
+  // ledger then given each migration's own hash, so that migrateDatabase takes it for the tree it is and builds them after.
+  const hashes = new Map<string, string>();
+  for (const { tag } of JOURNAL.entries.slice(0, AT)) {
+    const file = join(folder, `${tag}.sql`);
+    const text = readFileSync(file, 'utf8');
+    const statements = text.split('--> statement-breakpoint');
+    if (statements.every((statement) => onlineIndex(statement) === null)) continue;
+    const kept = statements.filter((statement) => onlineIndex(statement) === null).join('--> statement-breakpoint');
+    hashes.set(createHash('sha256').update(kept).digest('hex'), createHash('sha256').update(text).digest('hex'));
+    writeFileSync(file, kept);
+  }
 
   const admin = postgresClient(BASE, { max: 1 });
   try {
@@ -66,6 +79,7 @@ before(async () => {
   const session = postgresSession(url);
   try {
     await migrate(createDatabase(session) as unknown as Parameters<typeof migrate>[0], { migrationsFolder: folder });
+    for (const [kept, own] of hashes) await session.unsafe('UPDATE drizzle.__drizzle_migrations SET hash = $1 WHERE hash = $2', [own, kept]);
     const [found] = await session.unsafe<{ relation: string | null }[]>(`SELECT to_regclass('public.${TABLE}')::text AS relation`);
     assert.equal(found?.relation, TABLE, `${TABLE} is there before ${TAG}`);
   } finally {

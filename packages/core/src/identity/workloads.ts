@@ -361,6 +361,8 @@ function checkIssuerName(issuer: string): void {
 
 /** At most this many claims a binding records. */
 export const MAX_RECORDED = 8;
+/** A recorded claim's name, at most this long: the vault takes a sign-in's run claims under names no longer (`isRun`). */
+export const MAX_RECORDED_NAME = 64;
 
 /**
  * The claims a binding records (docs/design/oidc.md, section 9.3): copied
@@ -380,6 +382,7 @@ export function checkRecord(profile: WorkloadProfile, input: unknown): string[] 
   if (!OIDC_PROFILES.includes(profile)) throw new BindingInvalid(`a ${profile} binding records no claims: its proof carries none`);
   for (const name of input as string[]) {
     if (!CLAIM_NAME.test(name) || name === '__proto__') throw new BindingInvalid(`"${name}" is not a claim name a binding can record`);
+    if (name.length > MAX_RECORDED_NAME) throw new BindingInvalid(`a recorded claim's name is at most ${MAX_RECORDED_NAME} characters: "${name}" is longer`);
   }
   const names = sortedUnique(input as string[]);
   if (names.length > MAX_RECORDED) throw new BindingInvalid(`a binding records at most ${MAX_RECORDED} claims`);

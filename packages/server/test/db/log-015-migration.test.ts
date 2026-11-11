@@ -183,11 +183,13 @@ test(`${TAGS[TEST_ENGINE]} keeps 0.14.5's rows and leaves 0.14.5 serving: its re
     assert.equal(await migrated(opened.owner), true);
     for (const [table, before] of Object.entries(kept)) {
       // What 0.16 adds to the sign-in rows: the passkey that confirmed one, null on every row before it (0063_passkeys);
-      // and to a binding's, whether a removal in batches closed it (0079), null on every one before.
+      // and to a binding's, whether a removal in batches closed it (0079), null on every one before; and what 0.17 adds
+      // to a binding's, the claims its sign-ins record (0083), null on every one before.
       const read016 = await read(opened.owner, RENAMED[table] ?? table);
       assert.ok(read016.every((row) => (row.passkey_id ?? null) === null && (row.confirmed_at ?? null) === null), `${table} names no passkey`);
       assert.ok(read016.every((row) => (row.closed_at ?? null) === null && (row.closed_by ?? null) === null), `${table} closes nothing`);
-      const after = read016.map(({ passkey_id: _, confirmed_at: __, closed_at: ___, closed_by: ____, ...row }) => row);
+      assert.ok(read016.every((row) => (row.record ?? null) === null), `${table} records no claim`);
+      const after = read016.map(({ passkey_id: _, confirmed_at: __, closed_at: ___, closed_by: ____, record: _____, ...row }) => row);
       if (SEALED.includes(table)) {
         // What 0.15 adds to its rows: the seal, an environment's protection, and a binding's origin.
         assert.deepEqual(after.map(({ seal, protected: _, origin: __, ...row }) => row), before, `${table} keeps its rows`);

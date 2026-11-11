@@ -2,14 +2,15 @@
 import { createRequire } from "node:module";
 import { inspect, parseArgs, promisify } from "node:util";
 import { execFile, spawn } from "node:child_process";
-import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { EOL, homedir, hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as setTimeout$1 } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { createCipheriv, createDecipheriv, createHash, createSecretKey, hkdfSync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, createSecretKey, hkdfSync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { emitKeypressEvents } from "node:readline";
 import tty from "node:tty";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -5913,6 +5914,19 @@ var BindingInvalid = class extends Error {
 };
 /** Google's, for every `gcp` binding. */
 const GOOGLE_ISSUER = "https://accounts.google.com";
+/**
+* Who a custom binding lets sign in, in words, as the CLI's plan, the Trust
+* dialog and the MCP approval page say it (docs/design/oidc.md, section
+* 9.1): coffre cannot know what a custom issuer's claims mean, so it says
+* what they are, and who vouches for them.
+*
+*   Anyone holding a token from https://api.capy.ai/oidc/orgs/o_123 that says project=p_7 signs in as this
+*   service account. Coffre cannot tell whether …
+*/
+function customExposure(issuer, claims) {
+	const says = Object.entries(claims).map(([name, value]) => `${name}=${claimValues(value).join(" or ")}`);
+	return `Anyone holding a token from ${issuer} that says ${says.length < 2 ? says.join("") : `${says.slice(0, -1).join(", ")} and ${says.at(-1)}`} signs in as this service account. Coffre cannot tell whether these claims name one workload: you vouch that this issuer gives such a token to nobody else.`;
+}
 /** A claim's values, one or several. */
 function claimValues(value) {
 	return value === void 0 ? [] : typeof value === "string" ? [value] : value;
@@ -6338,6 +6352,10 @@ const TRUST_OPTIONS = {
 	"session-days": { type: "string" },
 	"overlap-minutes": { type: "string" },
 	"on-contention": { type: "string" },
+	record: {
+		type: "string",
+		multiple: true
+	},
 	scope: {
 		type: "string",
 		multiple: true
@@ -6363,8 +6381,8 @@ const TRUST_USAGE = `usage: coffre trust <service>                       its tru
        coffre trust <service> --github <owner> --reusable … --any-repository
        coffre trust <service> --gitlab <group>/<project> (--branch <b> | --tag <t>)
                     [--source push,web,schedule] [--gitlab-url <url>]
-       coffre trust <service> --issuer <url> --claim sub=<subject> [--claim <name>=<value> …]
-       coffre trust <service> --issuer <iss> --jwks-file <path> --claim sub=<subject> [--claim …]
+       coffre trust <service> --issuer <url> --claim <name>=<value> [--claim <name>=<value> …]
+       coffre trust <service> --issuer <iss> --jwks-file <path> --claim <name>=<value> [--claim …]
        coffre trust <service> --issuer <iss> --replace-keys --jwks-file <path>
          IDs, when the lookup cannot see a private repository, owner or project:
                     [--repository-id <n> --owner-id <n>] [--project-id <n> --namespace-id <n>]
@@ -6375,7 +6393,10 @@ const TRUST_USAGE = `usage: coffre trust <service>                       its tru
          by the branch it merges into
          --github-environment takes only the jobs that run in that GitHub environment, under its
          protection rules
-         --claim names a nested claim by its path: kubernetes.io.serviceaccount.uid=<uid>
+         --claim names a nested claim by its path: kubernetes.io.serviceaccount.uid=<uid>; a custom
+         issuer's binding pins one or more claims, each exact, that say who: sub, or project=p_7
+         --record <claim>,… copies those claims of each sign-in's token into its audit entry, as
+         --record thread,user: identifiers, never names or emails (the log keeps them)
          --jwks-file uploads the issuer's public keys, a JWKS, for an issuer coffre cannot fetch them
          from, such as a private Kubernetes cluster's (kubectl get --raw /openid/v1/jwks): then
          --issuer is any string its tokens name, and coffre asks it nothing
@@ -6458,6 +6479,14 @@ function describeEvents(binding) {
 	for (const event of chosen) if (EVENT_EXPOSURE[event] !== void 0) lines.push(`${event}: ${EVENT_EXPOSURE[event]}`);
 	return lines.join("\n");
 }
+/**
+* What trusting the binding exposes, as the plan says it below its lines:
+* the events that run unreviewed code (`describeEvents`), or who a custom
+* issuer's claims let in (`customExposure`). Null when neither applies.
+*/
+function describeExposure(binding) {
+	return binding.profile === "custom" && binding.issuer !== null ? customExposure(binding.issuer, binding.claims) : describeEvents(binding);
+}
 function listing(items, last = "and") {
 	return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} ${last} ${items.at(-1)}`;
 }
@@ -6516,9 +6545,18 @@ const POLICY_FLAGS = {
 * The binding the flags describe, its IDs looked up where they were not
 * given: one, whatever the events (GitHub) or pipeline sources (GitLab) it
 * names; `push` unless told. A workload's platform, or `--workload`, makes
-* one with a policy, for a key-bound session. Throws a sentence.
+* one with a policy, for a key-bound session. `--record` adds the claims
+* its sign-ins record, which the server checks. Throws a sentence.
 */
 async function bindingFrom(flags, lookup, options = {}) {
+	const binding = await describedBinding(flags, lookup, options);
+	const record = listOf$2(flags.record);
+	return record === void 0 ? binding : {
+		...binding,
+		record
+	};
+}
+async function describedBinding(flags, lookup, options) {
 	const platforms = PLATFORMS.filter((name) => flags[name] !== void 0 && flags[name] !== false);
 	const named = [...platforms, ...["github", "gitlab"].filter((name) => flags[name] !== void 0)];
 	if (named.length === 0 && flags.issuer === void 0) throw new Error(`name one of --github, --gitlab or --issuer, or a workload's platform: ${PLATFORMS.map((name) => `--${name}`).join(", ")}`);
@@ -7002,10 +7040,12 @@ function describeBinding(binding) {
 	const width = Math.max(0, ...Object.keys(binding.claims).map((name) => name.length));
 	const claims = Object.entries(binding.claims).map(([name, value], i) => `  ${i === 0 ? "claims " : "       "}  ${name.padEnd(width)}  ${claimValues(value).join(", ")}`);
 	const signer = Object.values(PROFILE_URNS).includes(binding.issuer) ? [] : [`  issuer   ${binding.issuer}`, `  keys     ${keysLine(binding)}`];
+	const records = binding.record == null ? [] : [`  records  ${binding.record.join(", ")}, from each sign-in's token into its audit entry`];
 	return [
 		`  profile  ${binding.profile}`,
 		...signer,
 		...claims,
+		...records,
 		`  reaches  ${reaches(binding.scope)}`,
 		...policyLines(binding.profile, binding.policy ?? null)
 	];
@@ -7228,6 +7268,52 @@ async function generateProofKey() {
 		jwk: {
 			kty,
 			crv,
+			x,
+			y
+		}
+	};
+}
+/**
+* A new key whose private half can be written down, as a JWK: only for a
+* session one process hands the next (`workload`'s `keep`, docs/design/oidc.md,
+* section 9.4), which seals it before it touches a disk.
+*/
+async function exportableProofKey() {
+	const pair = await crypto.subtle.generateKey({
+		name: "ECDSA",
+		namedCurve: "P-256"
+	}, true, ["sign", "verify"]);
+	const exported = await crypto.subtle.exportKey("jwk", pair.privateKey);
+	const { kty, crv, x, y } = exported;
+	return {
+		privateKey: pair.privateKey,
+		jwk: {
+			kty,
+			crv,
+			x,
+			y
+		},
+		exported
+	};
+}
+/** A key `exportableProofKey` wrote down, taken up again, its private half not exportable from here on. Throws on anything else than a P-256 private key. */
+async function importProofKey(exported) {
+	const { kty, crv, x, y, d } = exported;
+	if (kty !== "EC" || crv !== "P-256" || typeof x !== "string" || typeof y !== "string" || typeof d !== "string") throw new TypeError("a kept session's key is a P-256 private key, as a JWK");
+	return {
+		privateKey: await crypto.subtle.importKey("jwk", {
+			kty,
+			crv,
+			x,
+			y,
+			d
+		}, {
+			name: "ECDSA",
+			namedCurve: "P-256"
+		}, false, ["sign"]),
+		jwk: {
+			kty: "EC",
+			crv: "P-256",
 			x,
 			y
 		}
@@ -7464,7 +7550,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload--1E6YeFC.js
+//#region ../client/dist/workload-Dlcd1Xpe.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;
@@ -7828,7 +7914,8 @@ const sleep$1 = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 *
 *   - a P-256 key made here, non-extractable; the key, the session's token
 *     and the gate's nonce live in this closure only, never on disk or in
-*     the environment;
+*     the environment, unless the caller keeps the session for the next
+*     process (`keep`), which then holds what it is handed;
 *   - the exchange, retried while an enrollment code is `full` (5 minutes)
 *     or its session awaits approval (10), and after a spent projected token,
 *     once the kubelet writes the next;
@@ -7851,6 +7938,8 @@ const FRESH_NONCE_MS = 1e5;
 /** How long the exchange waits out a full enrollment code, and a session awaiting approval. */
 const FULL_MS = 3e5;
 const PENDING_MS = 6e5;
+/** A kept session is renewed when taken up with less than this left: half the hour a renewal gives (workload-access.md, section 5.4). */
+const KEPT_RENEW_MS = 18e5;
 /** An enrollment session renews every 30 seconds: its expiry, 90 seconds past its last renewal, is its liveness. */
 const ENROLLMENT_RENEW_MS = 3e4;
 /** Refusals no new proof can change: the code was superseded by a newer deploy's. */
@@ -7880,7 +7969,19 @@ async function workload(options) {
 	const origin = url.origin;
 	const base = options.fetch ?? ((input, init) => fetch(input, init));
 	const log = options.log ?? ((line) => console.error(line));
-	const key = await generateProofKey();
+	const kept = options.keep;
+	const resumed = kept?.session != null && Date.now() < Math.min(kept.session.expiresAt, kept.session.notAfter) - 5e3 ? kept.session : null;
+	const made = kept === void 0 ? null : resumed === null ? await exportableProofKey() : null;
+	const key = kept === void 0 ? await generateProofKey() : made ?? await importProofKey(resumed.key);
+	const written = made?.exported ?? resumed?.key ?? null;
+	/** What `keep` is told: the session held now, with its key; null once lost. */
+	const hand = (held) => kept?.save(held === null ? null : {
+		key: written,
+		token: held.token,
+		expiresAt: held.expiresAt,
+		notAfter: held.notAfter,
+		places: held.places
+	});
 	/** Aborted by `close()`: an exchange, its waits and its proof's stop with it. */
 	const lifetime = new AbortController();
 	const proofFetch = (input, init = {}) => base(input, {
@@ -7966,7 +8067,14 @@ async function workload(options) {
 			throw refusal(response.status, body, `${origin} would not sign ${options.service} in with its ${options.proof.name} proof`);
 		}
 	};
-	let session = await exchange();
+	let session = resumed === null ? await exchange() : {
+		token: resumed.token,
+		expiresAt: resumed.expiresAt,
+		notAfter: resumed.notAfter,
+		places: resumed.places,
+		issuedAt: Date.now()
+	};
+	if (resumed === null) hand(session);
 	if (options.place !== void 0 && !session.places.includes(options.place)) throw new Error(`${options.service} reaches ${session.places.join(", ") || "no environment"}, not ${options.place}`);
 	/** The environments of the newest session, kept while a lost one is proved again. */
 	let places = session.places;
@@ -7982,8 +8090,8 @@ async function workload(options) {
 	/** The exchange in flight, which requests without a session wait for; and why the last one failed, while none holds. */
 	let attempt = null;
 	let failure = null;
-	/** A refusal no new proof can change (a superseded code, a proof given once and spent), once seen. */
-	let final = null;
+	/** A refusal no new proof can change (a superseded code, a proof given once and spent), once seen; a kept session's, from the start. */
+	let final = kept === void 0 ? null : /* @__PURE__ */ new Error(`${options.service}'s session was kept for the proof that bought it: the next proof is the next run's`);
 	let tries = 0;
 	/** The renewal in flight for each session: one each, so that an old session's renewal answered late takes no new session's turn. */
 	const renewals = /* @__PURE__ */ new WeakMap();
@@ -8007,7 +8115,7 @@ async function workload(options) {
 	/** Renew as `planRenewal` says; prove again at 90% of the way to `notAfter`. */
 	const plan = (held) => {
 		planRenewal(held);
-		if (!enrolled) at("prove", held.notAfter - (held.notAfter - held.issuedAt) / 10, () => prove().catch(() => void 0));
+		if (!enrolled && kept === void 0) at("prove", held.notAfter - (held.notAfter - held.issuedAt) / 10, () => prove().catch(() => void 0));
 	};
 	/** A new session, with a fresh proof and the same key: requests in flight finish on the old one. Retried with backoff while it fails, unless it cannot change. */
 	const prove = () => {
@@ -8045,7 +8153,10 @@ async function workload(options) {
 				const { response, body } = await api("/api/auth/workload/renew", held.token);
 				if (response.ok && typeof body?.expiresAt === "string") {
 					held.expiresAt = Date.parse(body.expiresAt);
-					if (session === held) planRenewal(held);
+					if (session === held) {
+						planRenewal(held);
+						hand(held);
+					}
 					return;
 				}
 				if (response.status !== 401 && response.status !== 403 || askedNonce(response)) throw new Error(`renewal answered ${response.status}`);
@@ -8062,6 +8173,7 @@ async function workload(options) {
 	const lose = () => {
 		if (closed) return;
 		session = null;
+		hand(null);
 		clearTimeout(timers.renew);
 		clearTimeout(timers.prove);
 		prove().catch(() => void 0);
@@ -8075,6 +8187,7 @@ async function workload(options) {
 		return prove();
 	};
 	plan(session);
+	if (resumed !== null && session.expiresAt < session.notAfter && session.expiresAt - Date.now() < KEPT_RENEW_MS) await renew();
 	const signals = globalThis.process;
 	let closing = null;
 	const close = () => closing ??= (async () => {
@@ -8083,7 +8196,8 @@ async function workload(options) {
 		for (const timer of Object.values(timers)) clearTimeout(timer);
 		session = null;
 		try {
-			const failed = (await Promise.allSettled(roots.filter((root) => root.notAfter > Date.now()).map((root) => logout$1(api, root.token)))).find((each) => each.status === "rejected");
+			const live = kept === void 0 ? roots.filter((root) => root.notAfter > Date.now()) : [];
+			const failed = (await Promise.allSettled(live.map((root) => logout$1(api, root.token)))).find((each) => each.status === "rejected");
 			if (failed !== void 0) throw failed.reason;
 		} finally {
 			signals?.off?.("SIGTERM", onTerm);
@@ -9582,6 +9696,213 @@ function clash(environments) {
 /** `a`, `a and b`, `a, b and c`. */
 function listOf(items) {
 	return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+}
+//#endregion
+//#region src/kept.ts
+/**
+* The sessions `coffre --service <name> run --proof oidc[:<file>]` keeps for
+* the next run (docs/design/oidc.md, section 9.4). An ID token is spent once,
+* and a platform such as Capy writes one an hour, so a second run on the same
+* token would be refused (`replayed`). The first run keeps the key-bound
+* session the token bought, and each later run with the same token goes on
+* with it, until the earlier of the session's hard end and the token's `exp`.
+*
+* Each session is sealed by the token that bought it: its file's name is an
+* HMAC of the instance and the service under the token, and its contents are
+* encrypted with AES-256-GCM under a key HKDF derives from the token, the
+* name as associated data. A copy of the file without the token opens
+* nothing, and with the token it is what the token was worth unspent. In
+* clear, only when it ends, so that ended ones are deleted unread:
+*
+*   ~/.coffre/sessions/3f9c…e1.json   { "v": 1, "until": 1794358800000, "iv": "…", "data": "…" }
+*/
+/** Where kept sessions live: beside the CLI's credentials, in a directory only you can enter. */
+function keptDirectory() {
+	return join(homedir(), ".coffre", "sessions");
+}
+/** When a lock its run has not kept fresh is a dead run's. */
+const LOCK_MS = 3e4;
+const LOCK_POLL_MS = 100;
+/** How often a run holding a lock keeps it fresh: well within `LOCK_MS`. */
+const LOCK_FRESH_MS = 5e3;
+/**
+* A token's own `exp`, in ms, from its payload: unverified, and only ever
+* an upper bound on how long its session is kept. Null for a token with
+* none, or that is no JWT: such a token's session is not kept.
+*/
+function tokenExpiry(token) {
+	const payload = token.split(".")[1];
+	if (payload === void 0) return null;
+	try {
+		const exp = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")).exp;
+		return typeof exp === "number" && Number.isSafeInteger(exp) && exp > 0 ? exp * 1e3 : null;
+	} catch {
+		return null;
+	}
+}
+/** The session `token` bought as `service` at `origin`, kept in `directory`; null for a token whose session is not kept (no `exp`). */
+function keptFor(directory, origin, service, token) {
+	const expires = tokenExpiry(token);
+	if (expires === null) return null;
+	const context = `${origin}\0${service}`;
+	const name = createHmac("sha256", token).update(`coffre.session.v1 name\0${context}`).digest("hex");
+	const key = Buffer.from(hkdfSync("sha256", token, Buffer.alloc(0), `coffre.session.v1 key\0${context}`, 32));
+	const path = join(directory, `${name}.json`);
+	const lock = join(directory, `${name}.lock`);
+	const open = () => {
+		prune(directory);
+		let file;
+		try {
+			if (lstatSync(path).isSymbolicLink()) return null;
+			file = JSON.parse(readFileSync(path, "utf8"));
+		} catch {
+			return null;
+		}
+		try {
+			if (file.v !== 1 || typeof file.until !== "number" || file.until <= Date.now() || typeof file.iv !== "string" || typeof file.data !== "string") throw new Error("ended");
+			const sealed = Buffer.from(file.data, "base64");
+			const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(file.iv, "base64"));
+			decipher.setAAD(Buffer.from(name));
+			decipher.setAuthTag(sealed.subarray(sealed.length - 16));
+			const session = JSON.parse(Buffer.concat([decipher.update(sealed.subarray(0, sealed.length - 16)), decipher.final()]).toString("utf8"));
+			return {
+				...session,
+				notAfter: Math.min(session.notAfter, file.until)
+			};
+		} catch {
+			rmSync(path, { force: true });
+			return null;
+		}
+	};
+	const save = (session) => {
+		if (session === null) return void rmSync(path, { force: true });
+		const until = Math.min(session.notAfter, expires);
+		if (until <= Date.now()) return void rmSync(path, { force: true });
+		const iv = randomBytes(12);
+		const cipher = createCipheriv("aes-256-gcm", key, iv);
+		cipher.setAAD(Buffer.from(name));
+		const sealed = Buffer.concat([
+			cipher.update(JSON.stringify(session), "utf8"),
+			cipher.final(),
+			cipher.getAuthTag()
+		]);
+		writePrivate$1(path, JSON.stringify({
+			v: 1,
+			until,
+			iv: iv.toString("base64"),
+			data: sealed.toString("base64")
+		}));
+	};
+	const hold = async () => {
+		privateDirectory(directory);
+		const owner = randomBytes(16).toString("hex");
+		for (;;) {
+			try {
+				writeFileSync(lock, owner, {
+					flag: "wx",
+					mode: 384
+				});
+				break;
+			} catch (error) {
+				if (error.code !== "EEXIST") throw error;
+			}
+			const held = lockOf(lock);
+			if (held === null) continue;
+			if (Date.now() - held.at > LOCK_MS) {
+				takeOver(lock, held.owner);
+				continue;
+			}
+			await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
+		}
+		const fresh = setInterval(() => {
+			if (lockOf(lock)?.owner !== owner) return;
+			const now = /* @__PURE__ */ new Date();
+			utimesSync(lock, now, now);
+		}, LOCK_FRESH_MS);
+		fresh.unref();
+		return () => {
+			clearInterval(fresh);
+			if (lockOf(lock)?.owner === owner) rmSync(lock, { force: true });
+		};
+	};
+	return {
+		open,
+		save,
+		hold
+	};
+}
+/** The run a lock names, and when it last kept it fresh; null for none. */
+function lockOf(lock) {
+	try {
+		const at = statSync(lock).mtimeMs;
+		return {
+			owner: readFileSync(lock, "utf8"),
+			at
+		};
+	} catch {
+		return null;
+	}
+}
+/**
+* A stale lock removed, if it is still the one found stale: moved aside
+* first, in one step, then read. Another run that took it over meanwhile
+* made a fresh one, which is put back where it was.
+*/
+function takeOver(lock, stale) {
+	const aside = `${lock}.${randomBytes(8).toString("hex")}`;
+	try {
+		renameSync(lock, aside);
+	} catch {
+		return;
+	}
+	try {
+		if (readFileSync(aside, "utf8") !== stale) linkSync(aside, lock);
+	} catch {} finally {
+		rmSync(aside, { force: true });
+	}
+}
+/** Delete the sessions that have ended, by the end each says in clear. */
+function prune(directory) {
+	let names;
+	try {
+		names = readdirSync(directory).filter((name) => name.endsWith(".json"));
+	} catch {
+		return;
+	}
+	for (const name of names) {
+		const path = join(directory, name);
+		try {
+			const { until } = JSON.parse(readFileSync(path, "utf8"));
+			if (typeof until !== "number" || until <= Date.now()) rmSync(path, { force: true });
+		} catch {
+			rmSync(path, { force: true });
+		}
+	}
+}
+/** A directory only you can enter, and no symbolic link, its parent (`~/.coffre`) too. */
+function privateDirectory(directory) {
+	for (const each of [dirname(directory), directory]) {
+		mkdirSync(each, {
+			recursive: true,
+			mode: 448
+		});
+		if (lstatSync(each).isSymbolicLink()) throw new Error(`${each} is a symbolic link, which a kept session never goes through`);
+		chmodSync(each, 448);
+	}
+}
+/** Write a file readable by you alone: a fresh one, renamed over the old, so a shared inode never receives a session. */
+function writePrivate$1(path, text) {
+	privateDirectory(dirname(path));
+	const temporary = join(dirname(path), `.write-${randomBytes(8).toString("hex")}`);
+	try {
+		writeFileSync(temporary, `${text}\n`, {
+			mode: 384,
+			flag: "wx"
+		});
+		renameSync(temporary, path);
+	} finally {
+		rmSync(temporary, { force: true });
+	}
 }
 //#endregion
 //#region src/secret.ts
@@ -13429,8 +13750,25 @@ async function exchange(origin, service, token, fetchImpl) {
 * credentials through a local listener, which forwards what it sends,
 * signed, and its databases through tunnels that sign their upgrades.
 */
-/** The proofs `--proof` names. Each secret one (an enrollment code, an ID token) is read from stdin, never an argument. */
-const PROOFS = "kubernetes[:<file>], aws, gcp, azure:<audience>, fly, vercel, github, enrollment or oidc";
+/** The proofs `--proof` names. Each secret one (an enrollment code, an ID token) is read from stdin or a file, never an argument. */
+const PROOFS = "kubernetes[:<file>], aws, gcp, azure:<audience>, fly, vercel, github, enrollment or oidc[:<file>]";
+/** An ID token in a file, as a platform writes one (`/etc/capy/cloud-access/…`): read whole, its whitespace trimmed. */
+async function tokenIn(path) {
+	const token = (await readFile(path, "utf8").catch((error) => {
+		throw new Error(`no ID token at ${path} (${error.code ?? error.message})`);
+	})).trim();
+	if (token === "") throw new Error(`the file ${path} holds no ID token`);
+	return token;
+}
+/** The ID token `--proof oidc` (stdin) or `--proof oidc:<file>` gives, read once; null for any other proof. */
+async function givenToken(spec) {
+	if (spec === "oidc") return readSecret({
+		label: "ID token",
+		hint: "the platform's ID token for this instance: GitLab's id_tokens entry, or a custom issuer's"
+	});
+	if (spec?.startsWith("oidc:") === true && spec.length > 5) return tokenIn(spec.slice(5));
+	return null;
+}
 /** A `--proof`, as `@coffre/client/workload` proves it; none, in a GitHub Actions job, is the job's ID token. */
 async function proofOf(spec, runner) {
 	if (spec === void 0) {
@@ -13452,10 +13790,12 @@ async function proofOf(spec, runner) {
 			label: "Enrollment code",
 			hint: "coffre_enr_…, from `coffre enroll <service>`; piped in, as printf %s \"$COFFRE_ENROLL\" | coffre …"
 		}));
-		case "oidc": return oidc(await readSecret({
-			label: "ID token",
-			hint: "the platform's ID token for this instance: GitLab's id_tokens entry, or a custom issuer's"
-		}));
+		case "oidc":
+			if (rest) return oidc(() => tokenIn(rest));
+			return oidc(await readSecret({
+				label: "ID token",
+				hint: "the platform's ID token for this instance: GitLab's id_tokens entry, or a custom issuer's"
+			}));
 	}
 	throw new UsageError(`--proof ${spec}: a proof is one of ${PROOFS}`);
 }
@@ -13604,16 +13944,33 @@ async function forwarder(coffre, origin, address) {
 * lists in `reads`), `COFFRE_CREDENTIALS` naming each credential at a local
 * listener, and a tunnel listener for each database. Null where the
 * instance has no key-bound sessions yet, which the bearer exchange serves.
+*
+* `--proof oidc` and `oidc:<file>` give an ID token, spent once and given
+* again unchanged for its life: the session it buys is kept for the runs
+* after, sealed by the token (`kept.ts`; docs/design/oidc.md, section 9.4).
+* Every other proof's session ends with the command.
 */
-async function keyBound(origin, service, proof, positionals, log, fetchImpl) {
-	const coffre = await workload({
-		url: origin,
-		service,
-		proof,
-		log,
-		sigterm: false,
-		fetch: fetchImpl
-	}).catch((error) => {
+async function keyBound(origin, service, spec, runner, positionals, log, fetchImpl) {
+	const token = await givenToken(spec);
+	const proof = token === null ? await proofOf(spec, runner) : oidc(token);
+	const kept = token === null ? null : keptFor(keptDirectory(), origin, service, token);
+	const release = kept === null ? null : await kept.hold();
+	const coffre = await (async () => {
+		const keep = kept === null ? void 0 : {
+			session: kept.open(),
+			save: kept.save
+		};
+		if (keep?.session != null) log(`coffre: ${service}, on the session this token bought before, until ${new Date(keep.session.notAfter).toISOString()}`);
+		return workload({
+			url: origin,
+			service,
+			proof,
+			log,
+			sigterm: false,
+			fetch: fetchImpl,
+			...keep === void 0 ? {} : { keep }
+		});
+	})().finally(() => release?.()).catch((error) => {
 		if (error instanceof CoffreError && (error.status === 404 || error.status === 501)) return null;
 		throw error;
 	});
@@ -13645,6 +14002,10 @@ async function keyBound(origin, service, proof, positionals, log, fetchImpl) {
 		const plans = [];
 		for (const place of places) {
 			const response = await coffre.fetch(`${origin}/use/${place.split("/").map(encodeURIComponent).join("/")}`, { headers: { accept: "application/json" } });
+			if (response.status === 401 && kept !== null) {
+				kept.save(null);
+				throw new Error(`${origin} no longer knows the session this ID token bought, and the token is spent: run again once your platform gives a fresh one`);
+			}
 			const plan = await response.json().catch(() => null);
 			if (!response.ok || plan === null) throw new Error(`${origin} gave ${service} no plan for ${place} (${response.status})${typeof plan?.message === "string" ? `: ${plan.message}` : ""}`);
 			plans.push([place, plan]);
@@ -14406,7 +14767,9 @@ const SECTIONS = [
 					"made once, in your personal config; as a --service, key-bound",
 					"where the instance has it: --proof says how it proves itself (none:",
 					"a GitHub Actions job's ID token), the environments are the session's",
-					"unless named, and credentials go through a local listener"
+					"unless named, and credentials go through a local listener;",
+					"--proof oidc:<file> reads an ID token from a file, and the session it",
+					"buys serves the runs after it until the token expires"
 				]
 			},
 			{
@@ -18245,7 +18608,7 @@ async function run(args) {
 	const command = args.slice(separator + 1);
 	const to = target();
 	if (flags.proof !== void 0 && to.credential.kind !== "workload") fail("--proof is how a service proves itself: coffre --service <name> run --proof …");
-	const bound = to.credential.kind === "workload" ? await keyBound(to.origin, to.credential.service, await proofOf(flags.proof, process.env), positionals, (line) => process.stderr.write(`${line}\n`), fetching(to.origin)).catch((error) => fail(error instanceof Error ? error.message : String(error))) : null;
+	const bound = to.credential.kind === "workload" ? await keyBound(to.origin, to.credential.service, flags.proof, process.env, positionals, (line) => process.stderr.write(`${line}\n`), fetching(to.origin)).catch((error) => fail(error instanceof Error ? error.message : String(error))) : null;
 	const paths = bound?.places ?? environmentPaths(positionals);
 	const placed = bound === null ? await placeholders(paths) : null;
 	if (placed !== null) sayPlaceholders(placed, paths, to);
@@ -18605,7 +18968,7 @@ async function trust(args) {
 		replaces: replace ?? []
 	};
 	const plan = await coffre.bindings.preview(member, input);
-	const events = describeEvents(plan);
+	const events = describeExposure(plan);
 	if (!apply) {
 		process.stdout.write(describePlan(member, plan, null));
 		if (events !== null) process.stdout.write(`${events}\n`);

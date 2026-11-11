@@ -16,7 +16,7 @@
  *   ~/.coffre/sessions/3f9c…e1.json   { "v": 1, "until": 1794358800000, "iv": "…", "data": "…" }
  */
 import { createCipheriv, createDecipheriv, createHmac, hkdfSync, randomBytes } from 'node:crypto';
-import { chmodSync, lstatSync, mkdirSync, openSync, closeSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -27,9 +27,11 @@ export function keptDirectory(): string {
   return join(homedir(), '.coffre', 'sessions');
 }
 
-/** How long a run waits for another that is exchanging the same token, and when a lock is a dead run's. */
+/** When a lock its run has not kept fresh is a dead run's. */
 const LOCK_MS = 30_000;
 const LOCK_POLL_MS = 100;
+/** How often a run holding a lock keeps it fresh: well within `LOCK_MS`. */
+const LOCK_FRESH_MS = 5_000;
 
 /** What one token's kept session is, to a run that holds the token. */
 export type Kept = {
@@ -104,25 +106,69 @@ export function keptFor(directory: string, origin: string, service: string, toke
 
   const hold = async (): Promise<() => void> => {
     privateDirectory(directory);
-    for (const end = Date.now() + LOCK_MS; ; ) {
+    // Each hold's own: a lock is released, kept fresh or taken over only as the one its file names.
+    const owner = randomBytes(16).toString('hex');
+    for (;;) {
       try {
-        closeSync(openSync(lock, 'wx', 0o600));
-        return () => rmSync(lock, { force: true });
+        writeFileSync(lock, owner, { flag: 'wx', mode: 0o600 });
+        break;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
-      // A lock this old is a run that died holding it: taken over, as is one that outlasts the wait.
-      const held = statSync(lock, { throwIfNoEntry: false });
-      if (held === undefined) continue;
-      if (Date.now() - held.mtimeMs > LOCK_MS || Date.now() > end) {
-        rmSync(lock, { force: true });
+      // A run holding the lock keeps it fresh while it waits on the instance (an approval may take minutes): one left
+      // stale is a run that died holding it, taken over. A live one is waited for, however long its exchange takes.
+      const held = lockOf(lock);
+      if (held === null) continue;
+      if (Date.now() - held.at > LOCK_MS) {
+        takeOver(lock, held.owner);
         continue;
       }
       await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
     }
+    const fresh = setInterval(() => {
+      if (lockOf(lock)?.owner !== owner) return;
+      const now = new Date();
+      utimesSync(lock, now, now);
+    }, LOCK_FRESH_MS);
+    fresh.unref();
+    return () => {
+      clearInterval(fresh);
+      if (lockOf(lock)?.owner === owner) rmSync(lock, { force: true });
+    };
   };
 
   return { open, save, hold };
+}
+
+/** The run a lock names, and when it last kept it fresh; null for none. */
+function lockOf(lock: string): { owner: string; at: number } | null {
+  try {
+    const at = statSync(lock).mtimeMs;
+    return { owner: readFileSync(lock, 'utf8'), at };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A stale lock removed, if it is still the one found stale: moved aside
+ * first, in one step, then read. Another run that took it over meanwhile
+ * made a fresh one, which is put back where it was.
+ */
+function takeOver(lock: string, stale: string): void {
+  const aside = `${lock}.${randomBytes(8).toString('hex')}`;
+  try {
+    renameSync(lock, aside);
+  } catch {
+    return;
+  }
+  try {
+    if (readFileSync(aside, 'utf8') !== stale) linkSync(aside, lock);
+  } catch {
+    // Put back only where no lock is now: a run that made one since holds it.
+  } finally {
+    rmSync(aside, { force: true });
+  }
 }
 
 /** Delete the sessions that have ended, by the end each says in clear. */

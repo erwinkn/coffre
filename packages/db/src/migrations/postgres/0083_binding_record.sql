@@ -1,5 +1,5 @@
 -- 0.17, T253 (docs/design/oidc.md, section 9.3): a binding records claims of its sign-ins' tokens beyond the run's, by name, `service_bindings.record`: canonical JSON, the names sorted, null for none. It is part of the binding, immutable, under the app's MAC (its tuple kind `recorded_…`) and the vault's seal (its object's `record`, present only when set, so every binding sealed before seals as it did).
--- Additive (AGENTS.md, "expand, then contract"): a nullable column the previous release never reads, and `change_bindings` an overload one argument longer, `p_record`, which writes it. 0.16's signature, which the previous release's vault calls, becomes the same change with none, one body, as 0079 made 0.15's; 0.15's still calls 0.16's.
+-- Additive (AGENTS.md, "expand, then contract"): a nullable column the previous release never reads, and `change_bindings` an overload one argument longer, `p_record`, which writes it. 0.16's signature, which the previous release's vault calls, becomes the same change with none, one body, as 0079 made 0.15's; 0.15's still calls 0.16's. And `cutover_bindings_recorded`, 0041's `cutover_bindings` with the column, which this release's vault reads a 0.14 instance's bindings through when it cuts its log over; 0041's stays for the previous release's.
 -- `sign_in` is untouched: it holds a binding's row to the columns its sealed object decides a sign-in on, and `record` decides nothing; the vault takes the names from the sealed object, never the row. Nor is the use statement: it reads a binding's row only for a Cloudflare call, whose binding never records (refused by the app and the vault), so its object is the same without the column.
 ALTER TABLE "service_bindings" ADD COLUMN "record" text;
 --> statement-breakpoint
@@ -192,3 +192,17 @@ BEGIN
     RETURN public.change_bindings(p_at, p_actor, p_make, p_principal, p_generation, p_principal_seq, p_actor_generation, p_actor_seq, p_via, p_via_seal, p_via_end, p_connection, p_connection_generation, p_policy_seq, p_protected, p_slugs, p_app_key, p_max, p_live, p_read_keys, p_read_names, p_id, p_auth_mac, p_profile, p_issuer, p_jwks_uri, p_jwks, p_claims, p_scope, p_policy, p_origin, p_label, p_created_by, p_created_at, p_seal, p_ends, p_end_mac_from, p_end_seal_from, p_end_auth_mac, p_end_seal, p_creds, p_cred_binding, p_cred_mac_from, p_cred_seal_from, p_cred_auth_mac, p_cred_seal, p_revoked_at, p_revoked_by, p_change_request, p_change_object, p_change_payload, p_change_seal, p_change_mac, p_sweep, NULL::text);
 END
 $function$;
+--> statement-breakpoint
+-- `cutover_bindings` as 0041 made it, and the binding's `record`: a binding this release makes before the cutover, under 0.14's log, carries it under the app's MAC, so the vault seals it with the rest. 0041's stays for the previous release's vault.
+CREATE FUNCTION cutover_bindings_recorded(p_ids uuid[]) RETURNS TABLE (
+    id uuid, principal text, generation integer, profile text, issuer text, origin text, jwks_uri text, claims text, scope text, policy text, record text, revoked boolean, seal bytea, logged boolean
+)
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    SELECT b.id, b.principal, b.generation, b.profile, b.issuer, b.origin, b.jwks_uri, b.claims, b.scope, b.policy, b.record, b.revoked_at IS NOT NULL, b.seal,
+           EXISTS (SELECT 1 FROM public.log_changes l WHERE l.object = public.log_object('binding', b.id::text))
+      FROM public.service_bindings b WHERE b.id = ANY (p_ids)
+$$;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION cutover_bindings_recorded(uuid[]) FROM PUBLIC;
+--> statement-breakpoint
+GRANT EXECUTE ON FUNCTION cutover_bindings_recorded(uuid[]) TO coffre_vault;

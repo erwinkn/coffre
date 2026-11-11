@@ -613,7 +613,8 @@ claims from the verified token into the same record, beside the others:
   itself, with uploaded keys, it reads the names from the sealed binding,
   never from the app.
 - **The entry's size stays bounded.** `runClaims` keeps at most 23 claims,
-  and a sign-in's record takes at most 32. Eight more fit.
+  and a sign-in's record takes at most 32. Eight more fit. A recorded
+  name is at most 64 characters, as a sign-in's record takes them.
 - **Personal data.** A recorded claim lives as long as the log, which
   nothing rewrites. Record identifiers (`user: "u_4"`), not names or
   emails.
@@ -625,6 +626,11 @@ JSON, the names sorted, null when none (never `[]`). Expand-only:
 - `change_bindings`, the vault's statement that makes a binding, gets an
   overload one argument longer, `p_record`. The old signature, which the
   previous release's vault calls, becomes a wrapper that passes null;
+- `cutover_bindings`, which the vault reads a 0.14 instance's bindings
+  through when it cuts its log over, gets a twin that reads `record` too,
+  `cutover_bindings_recorded`: this release can make a recording binding
+  before that cutover, under the app's MAC, and the cutover seals it
+  whole. The old one stays for the previous release's vault;
 - on SQLite, the column alone, since the vault's statement is TypeScript.
 
 A rollback to 0.16 with recorded bindings fails closed: 0.16 checks their
@@ -675,8 +681,12 @@ logging out, in `~/.coffre/sessions/`:
   name the key, which is every Capy binding, the session's `notAfter` is
   the token's `exp` already (workload-access.md, section 5.4).
 - **Two runs at once** take a lock file beside it around the exchange, so
-  one exchanges and the other waits for its file. A lock older than 30
-  seconds is a dead run's, and is taken over.
+  one exchanges and the other waits for its file. The lock names the run
+  holding it, which keeps it fresh while it waits on the instance (an
+  approval can take minutes) and removes it only if it is still its own.
+  A lock nobody kept fresh for 30 seconds is a dead run's, and is taken
+  over. The instance still spends the token once, so a lock defeated
+  anyway costs a `replayed` run, never a second session.
 - **A session refused** (revoked, frozen, its binding removed) deletes its
   file. The token is spent, so the run says so and waits for none: the
   next token signs in again.

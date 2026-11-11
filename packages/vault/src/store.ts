@@ -1955,16 +1955,16 @@ export async function connectionsAt(db: Queryable, ids: readonly string[]): Prom
 
 export async function bindingsAt(db: Queryable, ids: readonly string[]): Promise<Map<string, BindingRead>> {
   if (ids.length === 0) return new Map();
-  type Read = { id: string; principal: string; generation: number; profile: string; issuer: string; origin: string | null; jwks_uri: string; claims: string; scope: string | null; policy: string | null; revoked: boolean | number; seal: Buffer | Uint8Array | null; logged: boolean | number };
+  type Read = { id: string; principal: string; generation: number; profile: string; issuer: string; origin: string | null; jwks_uri: string; claims: string; scope: string | null; policy: string | null; record: string | null; revoked: boolean | number; seal: Buffer | Uint8Array | null; logged: boolean | number };
   const rows = engineOf(db) === 'postgres'
-    ? await rowsOf<Read>(db, sql`SELECT * FROM cutover_bindings(${sql.param([...ids])}::uuid[])`)
-    : await rowsOf<Read>(db, sql`SELECT b.id, b.principal, b.generation, b.profile, b.issuer, b.origin, b.jwks_uri, b.claims, b.scope, b.policy, b.revoked_at IS NOT NULL AS revoked, b.seal,
+    ? await rowsOf<Read>(db, sql`SELECT * FROM cutover_bindings_recorded(${sql.param([...ids])}::uuid[])`)
+    : await rowsOf<Read>(db, sql`SELECT b.id, b.principal, b.generation, b.profile, b.issuer, b.origin, b.jwks_uri, b.claims, b.scope, b.policy, b.record, b.revoked_at IS NOT NULL AS revoked, b.seal,
         0 AS logged FROM service_bindings b WHERE b.id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})`);
   return new Map(rows.map((row) => {
     const columns: Omit<BindingColumns, 'origin'> = {
       id: row.id, principal: row.principal, generation: Number(row.generation), profile: row.profile, issuer: row.issuer, jwksUri: row.jwks_uri,
-      // A binding the cutover seals is one 0.14 made, before any recorded claims.
-      claims: row.claims, scope: row.scope, policy: row.policy, record: null, revoked: Boolean(row.revoked),
+      // Its recorded claims too: this release makes a binding that records some under 0.14's log, under the app's MAC.
+      claims: row.claims, scope: row.scope, policy: row.policy, record: row.record ?? null, revoked: Boolean(row.revoked),
     };
     return [row.id, { columns, origin: row.origin, seal: bytes(row.seal), logged: Boolean(row.logged) }];
   }));
