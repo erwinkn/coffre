@@ -84,7 +84,6 @@ const CHANGES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> 
   'packages/vault/src/store.ts#memberLogsPostgres': { by: VAULT, as: 'memberLogs' },
   'packages/vault/src/snapshot.postgres.ts#MEMBER_CHANGE': { by: VAULT, as: 'snapshot' },
   // Held by the shape alone, each of a value, `log_object(…)` or a column beside (the vault's `changesOf` case).
-  'packages/vault/src/store.ts#newestSeal': { by: VAULT, as: 'changesOf' },
   'packages/vault/src/store.ts#newestChangeJson': { by: VAULT, as: 'changesOf' },
   'packages/vault/src/store.ts#loggedEnvironments': { by: VAULT, as: 'changesOf' },
   'packages/vault/src/store.ts#roleRows': { by: VAULT, as: 'changesOf' },
@@ -153,7 +152,7 @@ function sites(): string[] {
   const found: string[] = [];
   for (const { file, text } of sources()) {
     const seen = new Map<string, number>();
-    const orders = /orderBy\((?:[^()]|\([^()]*\))*\b(?:asc|desc)\(\w+\.seq\)|keyedBy\(db\b|orderBy\(\w+\.order\)|ORDER BY \$\{\w+\.order\}|ORDER BY (?:(?:\$\{\w+\}|[\w.]+)(?: DESC| ASC)?, )?(?:\w+\.|\$\{\w+\.)?seq\}?(?: DESC| ASC)?(?=\s+LIMIT|`)|\b(?:max|min)\((?:\$\{\w+\.seq\}|(?:\w+\.)?seq)\)/g;
+    const orders = /orderBy\((?:[^()]|\([^()]*\))*\b(?:asc|desc)\(\w+\.seq\)|(?<!function )keyedBy\(|orderBy\(\w+\.order\)|ORDER BY \$\{\w+\.order\}|ORDER BY (?:(?:\$\{\w+\}|[\w.]+)(?: DESC| ASC)?, )?(?:\w+\.|\$\{\w+\.)?seq\}?(?: DESC| ASC)?(?=\s+LIMIT|`)|\b(?:max|min)\((?:\$\{\w+\.seq\}|(?:\w+\.)?seq)\)/g;
     for (const order of text.matchAll(orders)) {
       if (tableAt(text, order.index + (/^(max|min)/.test(order[0]) ? 200 : 0)) !== 'audit') continue;
       if (/^(?:ORDER|orderBy)/.test(order[0]) && !/limit/i.test(text.slice(order.index, order.index + order[0].length + 120))) continue;
