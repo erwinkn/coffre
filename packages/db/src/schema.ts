@@ -478,9 +478,12 @@ export const auditLog = pgTable(
     index(indexOf('tamper')).on(table.subjectPrincipal, changeNamed('postgres', table.metadata), table.seq).where(entriesOf('tamper')).concurrently(),
     index(indexOf('moves')).on(table.seq).where(entriesOf('moves')).concurrently(),
     // What an audit page shows unless asked for detail (`shown`): a page back from the newest in one step, however many
-    // heartbeats and checkpoints since (T248, R48). A member's reads and writes in 0.14's log (`seen`), by actor, which
-    // an offboarding report weighs, past none of their other entries nor anyone else's.
+    // heartbeats and checkpoints since (T248, R48), and an actor's, however many of their own (the scheduler's
+    // heartbeats, a member's sign-ins), which `audit_log_actor_idx` walked (199 pages 4,000 heartbeats in, 1,955 at
+    // 40,000; Fable r1 of #559). A member's reads and writes in 0.14's log (`seen`), by actor, which an offboarding
+    // report weighs, past none of their other entries nor anyone else's.
     index(indexOf('shown')).on(table.seq).where(entriesOf('shown')).concurrently(),
+    index('audit_log_shown_actor_idx').on(table.actor, table.seq).where(entriesOf('shown')).concurrently(),
     index(indexOf('detail')).on(table.seq).where(entriesOf('detail')).concurrently(),
     index(indexOf('seen')).on(table.actor, table.seq).where(entriesOf('seen')).concurrently(),
     // The allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step

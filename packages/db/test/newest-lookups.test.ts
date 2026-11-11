@@ -161,7 +161,7 @@ const USES: Record<string, { by: typeof LOG_STORE; as: string } | { none: string
   // The lowest `at` of the uses a part of a capped window left above it (T169): a walk of `log_uses_at_number_idx`, past
   // each run of uses sealed at one `at` in a step (T248), which the test holds as a backlog drains, its uses stamped one
   // after another or sharing one `at`.
-  'packages/vault/src/log-store.ts#postgresStore': { by: LOG_STORE, as: 'lowestAbove' },
+  'packages/vault/src/log-store.ts#postgresAbove': { by: LOG_STORE, as: 'lowestAbove' },
   // SQLite's own: its numbering (both trees one sequence, each table's greatest number, a step of its rowid) and its
   // checkpointer's reads. Kept for tests and local development, no deployment runs on it (AGENTS.md).
   'packages/db/src/log.ts#changeOnSqlite': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
@@ -187,8 +187,8 @@ const AGGREGATES: Record<string, { by: typeof VAULT | typeof AGGREGATES_TEST | t
   'packages/vault/src/log-store.ts#postgresStore#2': { by: LOG_STORE, as: 'ROTATIONS_HELD' },
   'packages/vault/src/log-store.ts#postgresStore#3': { by: LOG_STORE, as: 'ROTATIONS_HELD' },
   // The lowest `at` above a part, of the steps of its walk (T248).
-  'packages/vault/src/log-store.ts#postgresStore': { by: LOG_STORE, as: 'lowestAbove' },
-  'packages/vault/src/log-store.ts#postgresStore#4': { none: "a use's place among its window's changes: those between the pair before it and it, a window's at most (`locate`)" },
+  'packages/vault/src/log-store.ts#postgresAbove': { by: LOG_STORE, as: 'lowestAbove' },
+  'packages/vault/src/log-store.ts#postgresStore': { none: "a use's place among its window's changes: those between the pair before it and it, a window's at most (`locate`)" },
   // The newest of each kind a snapshot reads, each a step of its index (the vault's test's `snapshot`).
   'packages/vault/src/snapshot.postgres.ts#snapshotQuery': { by: VAULT, as: 'snapshot' },
   'packages/vault/src/snapshot.sqlite.ts#snapshotQuery': { by: VAULT, as: 'snapshot' },

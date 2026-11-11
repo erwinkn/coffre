@@ -111,7 +111,14 @@
   page's count of what it hides weighs its stretch's newest 1,000 detail
   entries (`HIDDEN_COUNTED`) and says `hiddenMore` when there were more,
   where it counted every heartbeat a page with nothing older held, or
-  walked past every one its filter did not match; an offboarding report's
+  walked past every one its filter did not match; an actor's page
+  (`?actor=`) a step of the entries it shows, where it walked past all
+  of theirs it hides (the scheduler's, past its heartbeats: 199 pages to
+  1,955 at 4,000 to 40,000); a place's page (`?path=`) keeps main's
+  plan, its place's own indexes (where `audit_log_shown_idx` walked back
+  past every other place's entries: 8 pages to 2,267 at 2,000 to 20,000),
+  and still walks past the entries it hides, and past others' once the log
+  is long enough that Postgres prefers the primary key, as on main, T254's; an offboarding report's
   activity in 0.14's log their own reads and writes, then only the
   restores its current values come from (where every restore of every key
   the member saw was read); two of the report's still grow, T252's: the
@@ -128,10 +135,12 @@
   log takes 246 rotations of its
   key in its life (`ROTATIONS_HELD`), the most retired keys that keep the
   fence row every use reads in one page, and refuses the next: every
-  keyring reads each one. Migration 0083 adds four indexes, built without
+  keyring reads each one. Migration 0083 adds five indexes, built without
   blocking writes: `audit_log_shown_idx` and `audit_log_detail_idx` (each
-  entry is in one), a member's 0.14 reads and writes, and
-  `log_uses (at, number)`, an index entry more for each use. The query inventory
+  entry is in one), `audit_log_shown_actor_idx`, a member's 0.14 reads and
+  writes, and `log_uses (at, number)`, an index entry more for each use:
+  31.6 B, and 76 B of WAL (405 B where it wrote 329), its Postgres CPU
+  unchanged within the runs' spread. The query inventory
   (`packages/db/test/newest-lookups.test.ts`) lists every aggregate over a
   log too, with the test that holds it, or why none needs one.
 - **The credential proxy ends its upstream request when the app's request

@@ -139,6 +139,18 @@ export function indexOf(kind: Kind): string {
   return `audit_log_${kind.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)}_idx`;
 }
 
+/**
+ * What an audit page shows (`KINDS.shown`), written so that no index's condition follows from it: `action || ''`,
+ * an expression no index of the log has. For a page of a place, which its own indexes serve
+ * (`audit_log_project_idx` and the others by place): with `shown`'s own condition, Postgres walked back through
+ * every entry shown since its oldest (`audit_log_shown_idx`; `history-aggregates.test.ts`, a project's page).
+ * Postgres's alone: on SQLite it would bring back main's SCAN of the whole log, and the SEARCH of `audit_log_shown_idx`
+ * the plain condition takes is the better plan there (`auditWhere`).
+ */
+export function shownOffIndex(): SQL {
+  return sql.raw(`action || '' NOT IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')})`);
+}
+
 /** The entries of `kind`, as the condition of its index, word for word (`KINDS`). */
 export function entriesOf(kind: Kind): SQL {
   return sql.raw(KINDS[kind]);

@@ -44,13 +44,16 @@ on a fresh clone of the migrated template:
    access grants and refusals about someone no member row names; 0.15's changes
    of other objects and rotations of the log's key; one member's reads of the
    same four keys at their versions (one through a reference), a thousand a
-   day, over a day for each thousand; uses sharing one `at`, unsealed; and,
-   newest, the heartbeats an
-   ordinary audit page hides. Then the watch and the vault catch up with it, as
+   day, over a day for each thousand; uses sharing one `at`, unsealed; someone
+   who only ever signed in, and an MCP client's reads of the `shop` project,
+   which their own pages hide; and, newest, the scheduler's heartbeats, which
+   an ordinary audit page and the scheduler's own hide. Then the watch and the vault catch up with it, as
    a deployment's do between beats, so that what a beat walks is what came since.
 4. **Every request path, three times**: every GET route of the API (from the
    client's route table, its parameters filled), as an Owner and as a viewer;
-   the audit page under each filter; each member's page; a sign-in, reveals, a
+   the audit page under each filter, and the pages of the signer, the
+   scheduler and `shop`, each behind entries of its own it leaves out; each
+   member's page; a sign-in, reveals, a
    key write, an access change, a heartbeat, readiness, the vault's checkpoint,
    the checkpointer's tick and the reads' projection, with and without a key it
    replaced; then an offboarding, and the removed member's report, of a
@@ -75,7 +78,10 @@ ran there. It **grows** when the larger run read at least twice the
 pages and eight more, or ran it at least twice as often. A flat statement gains
 an index level at most, a page for each index it steps down, and its rows; the
 rule is growth, not a budget of pages (R70). The cost tests use the same rule
-([`packages/server/test/db/growth.ts`](../packages/server/test/db/growth.ts)).
+([`packages/server/test/db/growth.ts`](../packages/server/test/db/growth.ts)),
+on Postgres: only that run holds a read to its growth. Their SQLite run reads
+plans, which name no rows, so it refuses a log read whole (a `SCAN`) and passes
+a walk of an index's range however long (a `SEARCH`).
 
 A statement too slow at the larger size leaves no plan behind if something
 cancels it, so a sweep that only compared plans would read it as one that did
@@ -121,6 +127,40 @@ so two versions hold one value exactly when their ciphertexts match: T252
 replaces the walk with a probe of each version seen, and `readsBy` with the
 newest read of each key and version, which a trigger keeps as reads are
 written.
+
+Review r1 of #559 (Fable) found two more the sweep had no history for: an
+audit page filtered to someone, or to a place, behind entries of its own the
+page leaves out. A filter's page walked its own index (`audit_log_actor_idx`,
+the project's, the environment's) past each of them: the scheduler's page past
+its heartbeats, 199 pages 4,000 in and 1,955 at 40,000; a member's past their
+sign-ins, 165 and 1,628; a project's past its MCP reads, 132 and 1,303. An
+actor's page is now a step of `audit_log_shown_actor_idx`, `(actor, seq)`
+over what pages show, and flat. A place's still walks, past the
+entries of its own it hides or past everyone else's it shows, and is in the
+sweep as `?path=shop`: T254's. A place is matched by its columns and by the references
+and lists in an entry's metadata, which no index of the same kind covers.
+
+The sweep after those fixes found one of their own: `audit_log_shown_idx` took
+a place's page too. Postgres walked it back past every place's entries shown
+since the place's newest: `?path=market` read 8 pages at 2,000 and 2,267 at
+20,000, where main reads the place's own indexes (`audit_log_project_idx` and
+`audit_log_also_project_idx`, as a bitmap) in 9. A place's page writes the
+condition so that no index's follows from it (`shownOffIndex`, `action || ''`)
+and keeps main's plan: 5 pages then 6 at 12,000 and 120,000 entries, the same
+in five runs with fresh statistics (`history-aggregates.test.ts`, "a project's
+audit page"). Past about 200,000 entries in that shape, main's plan itself is a
+walk back of the primary key (7,802 pages at 240,000), and so is the fenced one:
+T254's too. The fence is Postgres's alone: on SQLite it would bring back main's
+plan, a SCAN of the whole log, where the plain condition searches
+`audit_log_shown_idx` back from the newest, the better plan there.
+
+With the fence, the sweep's `?path=shop` (a place behind its own MCP reads)
+reads 522 pages at 2,000 and 5,022 at 20,000, a walk back of the primary key
+past every entry since the place's newest shown one. That is main's plan: the
+same shape rebuilt on a scratch database plans the same walk under main's
+condition and indexes, 403 pages and 4,010 at 12,000 and 120,000 entries.
+Without the fence it walked `audit_log_shown_idx` in half that (207 and 2,044),
+but past every other place's entries too, `?path=market`'s 2,267 above.
 
 And the checkpointer's `lowestAbove`: a walk of `log_uses_at_number_idx` from
 one `at` to the next. The sweep measures it on the first window only (once

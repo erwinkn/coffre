@@ -255,7 +255,7 @@ export async function listAudit(
 ): Promise<{ entries: AuditEntryView[]; more: boolean; next: string | null; hidden?: HiddenCount[]; hiddenMore?: true; reads?: ReadsListed; readsOmitted?: ReadsOmitted }> {
   const filter: AuditFilter = {
     decision: query.decision,
-    excludeActions: query.detail === true ? undefined : DETAIL_ACTIONS,
+    detail: query.detail === true,
     limit: query.limit,
   };
   const { caller } = ctx;

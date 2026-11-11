@@ -451,6 +451,7 @@ export const auditLog = sqliteTable(
     index(indexOf('tamper')).on(table.author, table.subjectPrincipal, table.action, table.seq).where(entriesOf('tamper')),
     index(indexOf('moves')).on(table.author, table.seq).where(entriesOf('moves')),
     index(indexOf('shown')).on(table.seq).where(entriesOf('shown')),
+    index('audit_log_shown_actor_idx').on(table.actor, table.seq).where(entriesOf('shown')),
     index(indexOf('detail')).on(table.seq).where(entriesOf('detail')),
     index(indexOf('seen')).on(table.actor, table.seq).where(entriesOf('seen')),
     // The allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "78eca4ae-5b4c-43e4-8ca5-21277ae65f67",
+  "id": "d641f316-c307-4a1d-bee8-e68a991fd8a8",
   "prevId": "858d471a-7ad7-4b44-a70f-d9be1ebdfc0f",
   "tables": {
     "audit_chain_head": {
@@ -428,6 +428,15 @@
         "audit_log_shown_idx": {
           "name": "audit_log_shown_idx",
           "columns": [
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "action NOT IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal') AND seq >= 0"
+        },
+        "audit_log_shown_actor_idx": {
+          "name": "audit_log_shown_actor_idx",
+          "columns": [
+            "actor",
             "seq"
           ],
           "isUnique": false,

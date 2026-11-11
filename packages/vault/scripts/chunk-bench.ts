@@ -2,7 +2,7 @@
 // one connection as the checkpointer's object holds it, behind a proxy
 // that adds Hyperdrive's round trip (~20 ms on Cloudflare, A396). Prints
 // each tick's wall time, its barrier and window read, its write, and the
-// plans of the window read and of the probe for the lowest `at` left above
+// plans of the window read and of the walk to the lowest `at` left above
 // a part, at the start of the backlog. On a Postgres of your own, never the
 // shared one: it empties the log's tables of the database the URLs name.
 //
@@ -17,7 +17,7 @@ import { sql } from 'drizzle-orm';
 import { WINDOW_MAX } from '../src/checkpointer.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { entryMac, logMacKey } from '../src/log-entry.ts';
-import { logStore, postgresWindow } from '../src/log-store.ts';
+import { logStore, postgresAbove, postgresWindow } from '../src/log-store.ts';
 import { stallProxy } from '../test/stall-proxy.ts';
 import { variableMemory } from '../test/audit-tree.ts';
 
@@ -59,7 +59,7 @@ for (let done = 0; done < backlog; done += 5000) {
 console.log(`backlog: ${backlog} uses in ${Date.now() - t0} ms; round trip ${rtt} ms`);
 await new Promise((resolve) => setTimeout(resolve, 3500));
 
-// The plans, at the start of the backlog: the window read by number, and the probe past its first part.
+// The plans, at the start of the backlog: the window read by number, and the walk past its first part.
 const db = createDatabase(owner);
 const after = cp.pair.pair.upto;
 const [{ upto }] = await owner.unsafe(`SELECT pg_sequence_last_value('log_number')::text AS upto`) as unknown as [{ upto: string }];
@@ -70,7 +70,8 @@ const explain = async (label: string, query: ReturnType<typeof sql>) => {
 };
 await explain('window read, first part', postgresWindow(after, BigInt(upto), sql`${floor}::bigint`, undefined, WINDOW_MAX + 1));
 const k = after + BigInt(WINDOW_MAX);
-await explain('probe past it', sql`SELECT min(u.at) FROM log_uses u WHERE u.at >= ${floor}::bigint AND u.number > ${k} AND u.number <= ${BigInt(upto)}`);
+// The walk `close` takes past the window's first part (`lowestAbove`), every use of the backlog at or under the clock.
+await explain('walk past it', postgresAbove(k, BigInt(upto), Number(floor), Date.now()));
 
 // The ticks, each timed.
 const ticks: { wall: number; close: number; write: number; entries: number }[] = [];

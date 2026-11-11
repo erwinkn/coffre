@@ -10,8 +10,6 @@ import { tamperedMembers } from '@coffre/db/grants';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
-import { DETAIL_ACTIONS } from '@coffre/db/log';
-
 import { auditActionCounts, auditPage, HIDDEN_COUNTED, memberActivity } from '../src/db/queries.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
 import { TEST_ENGINE } from './db/engine.ts';
@@ -20,10 +18,14 @@ import { append, holdsFlat } from './db/growth.ts';
 const ROOT = 'admin@acme.example';
 const MEMBER = 'user:m1@acme.example';
 const OTHER = 'user:other@acme.example';
+/** Who writes the audit watch's heartbeats (`watch.ts`). */
+const SCHEDULER = 'system:coffre-scheduler';
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 /** Three keys of market/dev, each at its version: what the reads here are of. */
 let keys: { id: string; version: string; environment: string; project: string }[];
+/** Another project, whose entries a page of market's passes by. */
+let shop: string;
 before(async () => {
   db = await openTestDatabase();
   await resetDatabase(db.owner);
@@ -31,6 +33,8 @@ before(async () => {
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/dev', { name: 'dev' });
   await root.secrets.set('market/dev', { A: 'fake-a', B: 'fake-b', C: 'fake-c' });
+  await root.projects.create('shop', { name: 'Shop' });
+  [{ id: shop }] = await rowsOf<{ id: string }>(db.owner, sql`SELECT CAST(id AS text) AS id FROM projects WHERE slug = 'shop'`) as [{ id: string }];
   keys = (await rowsOf<{ id: string; version: string; environment: string; project: string }>(db.owner, sql`
     SELECT CAST(id AS text) AS id, CAST(current_version_id AS text) AS version, CAST(environment_id AS text) AS environment, CAST(project_id AS text) AS project
       FROM secrets ORDER BY key`)).map((row) => ({ ...row }));
@@ -88,8 +92,48 @@ test('an ordinary audit page back from the newest, past every heartbeat since (`
     await append(owner, { author: 'app', action: 'project.create', count: 5, actor: `user:${ROOT}` });
     await append(owner, { author: 'app', action: 'audit.heartbeat', count: size });
   },
-  ask: async (app) => assert.equal((await auditPage(app, { excludeActions: DETAIL_ACTIONS, limit: 5 })).rows.length, 5),
+  ask: async (app) => assert.equal((await auditPage(app, { detail: false, limit: 5 })).rows.length, 5),
   indexes: ['audit_log_shown_idx'],
+}));
+
+// An actor's page (`?actor=`, which every entry's actor links to), past every entry of their own it leaves out: the
+// scheduler's findings behind its heartbeats, one every five minutes, and a member's who only ever signed in (Fable
+// r1 of #559). Then everyone else's entries shown, which a walk of what pages show (`audit_log_shown_idx`) would pass.
+test("the scheduler's audit page, past every heartbeat of its own (`auditPage`, `?actor=`): a step of what it shows", { timeout: 600_000 }, () => holdsFlat(db.owner, {
+  grow: async (owner, size) => {
+    await append(owner, { author: 'app', action: 'audit.finding', count: 5, actor: SCHEDULER });
+    await append(owner, { author: 'app', action: 'audit.heartbeat', count: size, actor: SCHEDULER });
+    await append(owner, { author: 'app', action: 'project.update', count: size, actor: `user:${ROOT}` });
+  },
+  ask: async (app) => assert.equal((await auditPage(app, { actors: [SCHEDULER], detail: false, limit: 5 })).rows.length, 5),
+  indexes: ['audit_log_shown_actor_idx'],
+}));
+
+test("a member's audit page who only ever signed in (`auditPage`, `?actor=`): a step to find it empty", { timeout: 600_000 }, () => holdsFlat(db.owner, {
+  grow: async (owner, size) => {
+    await append(owner, { author: 'app', action: 'sign_in', count: size, actor: MEMBER });
+    await append(owner, { author: 'app', action: 'project.update', count: size, actor: `user:${ROOT}` });
+  },
+  ask: async (app) => assert.deepEqual(await auditPage(app, { actors: [MEMBER], detail: false, limit: 5 }), { rows: [], more: false }),
+  indexes: ['audit_log_shown_actor_idx'],
+}));
+
+// A place's page (`?path=`), its entries the oldest: through its own indexes (`audit_log_project_idx`, a bitmap of
+// it and `audit_log_also_project_idx`), as on main, never back through everything pages show (`audit_log_shown_idx`),
+// which passes every other place's entries since. That walk read 1,952 pages 60,000 entries in, where the place's
+// own read 9 (the 2,000/20,000 sweep of #559, before the fence `shownOffIndex` names). A place behind its own detail
+// entries is T254's.
+test("a project's audit page, behind every other place's entries shown since (`auditPage`, `?path=`): its own entries' steps", { timeout: 600_000 }, () => holdsFlat(db.owner, {
+  grow: async (owner, size) => {
+    await append(owner, { author: 'app', action: 'secret.write', count: 22, actor: `user:${ROOT}`, project: keys[0]!.project });
+    // 1.5 times the size of each, 120,000 entries in all at the larger: below 100,000, Postgres prices the place's own
+    // indexes cheaper either way. Past about 200,000, it walks back the primary key instead, as main does (T254).
+    await append(owner, { author: 'vault', action: 'secret.read', count: (size * 3) / 4, actor: OTHER, project: shop });
+    await append(owner, { author: 'vault', action: 'secret.read', count: (size * 3) / 4, actor: OTHER });
+    await append(owner, { author: 'app', action: 'audit.heartbeat', count: (size * 3) / 2, actor: SCHEDULER });
+  },
+  ask: async (app) => assert.equal((await auditPage(app, { projectId: keys[0]!.project, detail: false, limit: 100 })).rows.length, 22),
+  indexes: ['audit_log_project_idx'],
 }));
 
 test("a page's count of what it hides, with nothing older to show (`auditActionCounts`): of `HIDDEN_COUNTED` at most, whatever its filter, and whether there were more", { timeout: 600_000 }, () => holdsFlat(db.owner, {
@@ -97,10 +141,10 @@ test("a page's count of what it hides, with nothing older to show (`auditActionC
   ask: async (app, size) => {
     // Past `HIDDEN_COUNTED` (SQLite's smaller size is not), the count stops there and says there were more.
     const more = size > HIDDEN_COUNTED;
-    assert.deepEqual(await auditActionCounts(app, { limit: 100 }), { counts: [{ action: 'audit.heartbeat', count: Math.min(size, HIDDEN_COUNTED) }], more });
+    assert.deepEqual(await auditActionCounts(app, { detail: false, limit: 100 }), { counts: [{ action: 'audit.heartbeat', count: Math.min(size, HIDDEN_COUNTED) }], more });
     // A project's page and a page of refusals, which none of them is: as many weighed, none counted.
-    assert.deepEqual(await auditActionCounts(app, { projectId: keys[0]!.project, limit: 100 }), { counts: [], more });
-    assert.deepEqual(await auditActionCounts(app, { decision: 'deny', limit: 100 }), { counts: [], more });
+    assert.deepEqual(await auditActionCounts(app, { projectId: keys[0]!.project, detail: false, limit: 100 }), { counts: [], more });
+    assert.deepEqual(await auditActionCounts(app, { decision: 'deny', detail: false, limit: 100 }), { counts: [], more });
   },
   indexes: ['audit_log_detail_idx'],
 }));

@@ -61,6 +61,7 @@ test('a migration CONCURRENTLY index is read whole, comments before it or not; a
     'log_uses.log_uses_by_number_idx',
     // T248's (0083).
     'audit_log.audit_log_shown_idx',
+    'audit_log.audit_log_shown_actor_idx',
     'audit_log.audit_log_detail_idx',
     'audit_log.audit_log_seen_idx',
     'log_uses.log_uses_at_number_idx',

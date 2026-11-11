@@ -132,6 +132,10 @@ export type Growth = {
  * excuses none: a count of the whole log (`count(*) … LIMIT 1`) or a subquery of its own has one as well, and SQLite's
  * plans hold the shape alone (review r2 of #559). A page back from the newest is a `SEARCH` of its index from the
  * newest `seq` (`entriesOf`'s `seq >= 0`).
+ *
+ * Only the Postgres run holds a read to its growth. SQLite's plan names no rows, so a `SEARCH` that walks a range of an
+ * index passes there however long the range: main's grouped `tamperedMembers`, a `SEARCH audit_log USING INDEX
+ * audit_log_tamper_idx (author=?)` that read every finding, would (Fable r1 of #559). Its half catches a log read whole.
  */
 export async function holdsFlat(owner: Database, read: Growth): Promise<void> {
   const measured: { text: string; values: unknown[]; pages: number; indexes: string[]; plan: string[] }[][] = [];

@@ -312,6 +312,28 @@ const rotatedTooOften = `the log has rotated its key ${ROTATIONS_HELD} times, th
 const ABOVE_BATCH = 256;
 
 /**
+ * Postgres's `lowestAbove` (`postgresStore`): the lowest `at` of the uses in (after, upto] from `from` to `ceiling`, as
+ * text, null for none. `from` and `ceiling` as values too, beside the step's `at`, so that Postgres plans only their
+ * days; and the walk inside a `select`, a plain read (`plainRead`).
+ */
+export function postgresAbove(after: bigint, upto: bigint, from: number, ceiling: number): SQL {
+  return sql`SELECT (
+      WITH RECURSIVE s (at, number, found, done) AS (
+        SELECT ${from}::bigint, ${after}::bigint, NULL::bigint, false
+        UNION ALL
+        SELECT b.last_at, CASE WHEN b.last_number <= ${after}::bigint THEN ${after}::bigint ELSE 9223372036854775807 END, b.found,
+               b.found IS NOT NULL OR b.n < ${ABOVE_BATCH}
+          FROM s CROSS JOIN LATERAL (
+            SELECT min(w.at) FILTER (WHERE w.number > ${after}::bigint AND w.number <= ${upto}::bigint) AS found, max(w.at) AS last_at,
+                   (array_agg(w.number ORDER BY w.at DESC, w.number DESC))[1] AS last_number, count(*) AS n
+              FROM (SELECT u.at, u.number FROM log_uses u
+                     WHERE u.at >= ${from}::bigint AND u.at >= s.at AND u.at <= ${ceiling}::bigint AND (u.at, u.number) > (s.at, s.number)
+                     ORDER BY u.at, u.number LIMIT ${ABOVE_BATCH}) w) b
+         WHERE NOT s.done)
+      SELECT min(found)::text FROM s) AS v`;
+}
+
+/**
  * SQLite's `lowestAbove`, as Postgres's: a statement a step, each the next `ABOVE_BATCH` entries of the index, from
  * past the last, or past the run of sealed uses at its `at`.
  */
@@ -353,22 +375,7 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
    * backlog shares: 40 pages 2,000 uses in, 366 at 20,000, 7,069 at 400,000 (T248, R48).
    */
   const lowestAbove = async (after: bigint, upto: bigint, from: number, ceiling: number) => {
-    // `from` and `ceiling` as values too, beside the step's `at`, so that Postgres plans only their days; and the walk
-    // inside a `select`, a plain read (`plainRead`).
-    const at = await one<string | null>(db, sql`SELECT (
-      WITH RECURSIVE s (at, number, found, done) AS (
-        SELECT ${from}::bigint, ${after}::bigint, NULL::bigint, false
-        UNION ALL
-        SELECT b.last_at, CASE WHEN b.last_number <= ${after}::bigint THEN ${after}::bigint ELSE 9223372036854775807 END, b.found,
-               b.found IS NOT NULL OR b.n < ${ABOVE_BATCH}
-          FROM s CROSS JOIN LATERAL (
-            SELECT min(w.at) FILTER (WHERE w.number > ${after}::bigint AND w.number <= ${upto}::bigint) AS found, max(w.at) AS last_at,
-                   (array_agg(w.number ORDER BY w.at DESC, w.number DESC))[1] AS last_number, count(*) AS n
-              FROM (SELECT u.at, u.number FROM log_uses u
-                     WHERE u.at >= ${from}::bigint AND u.at >= s.at AND u.at <= ${ceiling}::bigint AND (u.at, u.number) > (s.at, s.number)
-                     ORDER BY u.at, u.number LIMIT ${ABOVE_BATCH}) w) b
-         WHERE NOT s.done)
-      SELECT min(found)::text FROM s) AS v`);
+    const at = await one<string | null>(db, postgresAbove(after, upto, from, ceiling));
     return at === null ? null : Number(at);
   };
   const tiles: LogStore['tiles'] = async (tree, keys) => {

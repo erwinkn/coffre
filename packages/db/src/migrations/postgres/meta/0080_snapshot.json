@@ -1,5 +1,5 @@
 {
-  "id": "7883872c-c26e-4eb5-9e1a-8be9d73efe95",
+  "id": "a80b47a5-4cc7-4bb7-bb24-31e17d28bee8",
   "prevId": "ef3f7cdc-4479-4834-89bb-860ef6e45424",
   "version": "7",
   "dialect": "postgresql",
@@ -638,6 +638,28 @@
         "audit_log_shown_idx": {
           "name": "audit_log_shown_idx",
           "columns": [
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "action NOT IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal') AND seq >= 0",
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_shown_actor_idx": {
+          "name": "audit_log_shown_actor_idx",
+          "columns": [
+            {
+              "expression": "actor",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
             {
               "expression": "seq",
               "isExpression": false,

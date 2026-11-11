@@ -5,7 +5,7 @@ import { MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, ty
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { accessAllowed, changesOf, DETAIL_ACTIONS, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, restoreMade, withinBytes, type ChangeRecord } from '@coffre/db/log';
+import { accessAllowed, changesOf, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, restoreMade, shownOffIndex, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -1382,7 +1382,12 @@ function restoresBack(db: Queryable, keys: readonly string[]): SQL {
   const from = postgres
     ? sql`(CASE WHEN jsonb_typeof(a.metadata::jsonb -> 'from') = 'number' THEN (a.metadata::jsonb ->> 'from')::numeric END)`
     : sql`(CASE WHEN json_type(a.metadata, '$.from') = 'integer' THEN json_extract(a.metadata, '$.from') END)`;
-  const restore = sql`a.decision = 'allow' AND a.action = 'secret.restore'`;
+  // On Postgres `a.action || ''`, an expression no index of the log's has: it pins each step to `audit_log_secret_idx`
+  // however ANALYZE samples the log, which with few restores priced `audit_log_action_idx` cheaper and read every
+  // restore of every key at each step (30 pages 4,000 entries in, 3,118 at 40,000). T252 (#560) removes the walk.
+  const restore = postgres
+    ? sql`a.decision = 'allow' AND a.action || '' = 'secret.restore'`
+    : sql`a.decision = 'allow' AND a.action = 'secret.restore'`;
   // The keys as one value, however many: a report's keys may be past an engine's bound on a statement's parameters.
   const these = postgres ? sql`s.id = ANY(${sql.param(keys)}::uuid[])` : sql`s.id IN (SELECT value FROM json_each(${JSON.stringify(keys)}))`;
   return sql`SELECT r.seq FROM (WITH RECURSIVE back (secret, version, seq) AS (
@@ -3572,8 +3577,11 @@ export type AuditFilter = {
   /** Entries by any of these actors, as the log stores them: `user:ada@acme.example`. */
   actors?: string[];
   decision?: string;
-  /** Entries with none of these actions, filtered here so a page stays full. */
-  excludeActions?: readonly string[];
+  /**
+   * Whether the detail entries (`DETAIL_ACTIONS`: sign-ins and technical steps) are in: an ordinary page leaves
+   * them out, here so that it stays full, as the condition of `audit_log_shown_idx` (`entriesOf('shown')`).
+   */
+  detail: boolean;
   /** Entries older than this, for paging backwards. */
   beforeSeq?: bigint;
   limit: number;
@@ -3623,6 +3631,7 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
   const columns = { projectId: auditLog.projectId, environmentId: auditLog.environmentId, secretId: auditLog.secretId };
   const at = (field: keyof typeof columns, ids: readonly string[]) =>
     ids.length === 0 ? sql`false` : or(inArray(columns[field], [...ids]), also(db, field, ids));
+  const place = within !== undefined || filter.projectId !== undefined || filter.environmentId !== undefined || filter.secretId !== undefined;
   return and(
     within === undefined
       ? undefined
@@ -3636,11 +3645,14 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
     filter.secretId === undefined ? undefined : or(at('secretId', [filter.secretId]), listed(db, [filter.secretId])),
     filter.actors === undefined ? undefined : inArray(auditLog.actor, filter.actors),
     filter.decision === undefined ? undefined : eq(auditLog.decision, filter.decision),
-    filter.excludeActions === undefined || filter.excludeActions.length === 0
-      ? undefined
-      // The detail an ordinary page leaves out, as the condition of the index of what it shows, word for word
-      // (`audit_log_shown_idx`): a page back from the newest past every heartbeat since in one step (T248, R48).
-      : filter.excludeActions === DETAIL_ACTIONS ? entriesOf('shown') : notInArray(auditLog.action, [...filter.excludeActions]),
+    // The detail an ordinary page leaves out, as the condition of the indexes of what it shows, word for word: a page
+    // back from the newest past every heartbeat since in one step (`audit_log_shown_idx`), and an actor's past every
+    // one of their own (`audit_log_shown_actor_idx`; T248, R48). A place's page off both: through its place's indexes,
+    // as on main, never back through every place's entries shown since (`shownOffIndex`; history-aggregates.test.ts,
+    // "a project's audit page"). Behind its own detail entries it still walks them (T254). On Postgres only: on SQLite
+    // the fence brings back main's plan, a SCAN of the whole log, where `shown`'s own condition lets it SEARCH
+    // `audit_log_shown_idx` back from the newest, the better of the two there.
+    filter.detail ? undefined : place && dialect.engineOf(db) === 'postgres' ? shownOffIndex() : entriesOf('shown'),
     filter.beforeSeq === undefined ? undefined : lt(auditLog.seq, filter.beforeSeq),
   );
 }
@@ -3770,7 +3782,7 @@ export async function auditActionCounts(
   fromSeq?: bigint,
 ): Promise<{ counts: { action: string; count: number }[]; more: boolean }> {
   const { auditLog } = tablesOf(db);
-  const where = auditWhere(db, { ...filter, excludeActions: undefined, beforeSeq: undefined });
+  const where = auditWhere(db, { ...filter, detail: true, beforeSeq: undefined });
   const rows = await db
     .select({ action: auditLog.action, matched: where === undefined ? sql<boolean | number>`1` : truth(where) })
     .from(auditLog)

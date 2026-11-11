@@ -57,6 +57,10 @@ const LEAVERS = ['leaver-warm@acme.example', 'leaver-first@acme.example', LEAVER
 const ROUNDS = ['warm', 'measured', 'measured'] as const;
 /** Someone no member row names, whom the vault granted and refused again and again (`missingMembers`). */
 const GHOST = 'user:ghost@acme.example';
+/** Someone whose every entry an audit page leaves out: sign-ins alone. */
+const SIGNER = 'user:signer@acme.example';
+/** Who writes the audit watch's heartbeats (`watch.ts`), almost nothing else: its page is behind all of them. */
+const SCHEDULER = 'system:coffre-scheduler';
 const SERVICE = 'token:ci-web';
 /** The runtime logins, whose statements auto_explain logs. */
 const LOGINS = ['coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_hot'];
@@ -196,8 +200,8 @@ async function caughtUp(): Promise<void> {
  * The history, `SIZE` long in each shape, oldest first, behind the instance's own entries: a long tail of another
  * member's reads in 0.14's log, a thousand to an `occurred_at`; the vault's findings about one member, 0.14's and
  * 0.15's; the access entries and refusals about someone no row names; 0.15's changes of other objects, and rotations of the log's
- * key; one member's reads, a day's; uses sharing one `at`, unsealed; and, newest, the heartbeats an ordinary page
- * hides. Entries of 0.14's log are chained and MAC'd under their author's key; rows of 0.15's carry no MAC of the
+ * key; one member's reads, a day's; uses sharing one `at`, unsealed; someone's sign-ins, and an MCP client's reads of
+ * shop, which their pages hide; and, newest, the scheduler's heartbeats, which an ordinary page and its own hide. Entries of 0.14's log are chained and MAC'd under their author's key; rows of 0.15's carry no MAC of the
  * vault's, which a page marks forged and a check refuses, reading them all the same.
  */
 async function grow(): Promise<void> {
@@ -255,7 +259,12 @@ async function grow(): Promise<void> {
     INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
     SELECT nextval('log_number'), ${Date.now()}::bigint, g, ${place!.credential}::uuid, ${place!.secret}::uuid, 1, ${ZERO16}::bytea
       FROM generate_series(1, ${SIZE}) g`);
-  await appendMany(app, SIZE, () => ({ actor: 'system:coffre', action: 'audit.heartbeat', decision: 'allow', metadata: '{}' }));
+  // Entries a page leaves out unless asked for detail, all of an actor's or a place's (Fable r1 of #559): someone who
+  // only ever signed in; someone's reads of shop through MCP (its caller the actor, as `mcp/endpoint.ts` writes them), behind which its page is a walk still (T254); and the heartbeats.
+  await appendMany(app, SIZE, () => ({ actor: SIGNER, action: 'sign_in', decision: 'allow', metadata: '{}' }));
+  const [shop] = await rowsOf<{ id: string }>(db.owner, sql`SELECT id::text AS id FROM projects WHERE slug = 'shop'`);
+  await appendMany(app, SIZE, () => ({ actor: 'user:mcp@acme.example', action: 'mcp.read', decision: 'allow', projectId: shop!.id, metadata: '{}' }));
+  await appendMany(app, SIZE, () => ({ actor: SCHEDULER, action: 'audit.heartbeat', decision: 'allow', metadata: '{}' }));
 }
 
 /** The API's routes read as GET, from the client's own list of them, each with its parameters filled. */
@@ -284,7 +293,10 @@ function paths(): Path[] {
   const root = clientFor(deps, ROOT);
   const reader = throughAccess(READER);
   const pages = ['', '?detail=1', '?sealed=1', '?sealed=1&hidden=1', '?limit=5', `?actor=${encodeURIComponent(`user:${READER}`)}`, `?actor=${encodeURIComponent(`user:${TAMPERED}`)}`,
-    '?path=market', '?path=market%2Fdev', '?path=market%2Fdev%2FAPI_KEY', '?decision=deny', '?sealed=1&path=market%2Fdev', `?sealed=1&actor=${encodeURIComponent(`user:${LEAVER}`)}`];
+    '?path=market', '?path=market%2Fdev', '?path=market%2Fdev%2FAPI_KEY', '?decision=deny', '?sealed=1&path=market%2Fdev', `?sealed=1&actor=${encodeURIComponent(`user:${LEAVER}`)}`,
+    // Each behind entries of its own it leaves out: flat for an actor (`audit_log_shown_actor_idx`), a system actor by
+    // its name alone, as its links name it; a place's a walk back of the log past its own MCP reads, as on main, a known growth until T254.
+    `?actor=${SCHEDULER.slice('system:'.length)}`, `?actor=${encodeURIComponent(SIGNER)}`, '?path=shop'];
   const members = [ROOT, READER, TAMPERED, LEAVER].map((member) => `user:${member}`).concat(SERVICE);
   return [
     ...getRoutes().map((path) => ({ name: `GET ${path} (owner)`, run: () => get(ROOT, path) })),

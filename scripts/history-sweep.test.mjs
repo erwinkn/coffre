@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { growing, plansOf, shapeOf, statementsOf, unwarmed, vanished } from './history-sweep.mjs';
+import { growing, plansOf, shapeOf, statementsOf, unparsed, unwarmed, vanished } from './history-sweep.mjs';
 
 /** A server log as auto_explain writes it: each `[statement, pages, backend = 7]` a plan, after its path's mark. */
 function logOf(paths) {
@@ -63,4 +63,15 @@ test("an IN of parameters is one statement however long, so that a path's later 
   const small = { 'GET /audit': [['SELECT * FROM audit_log WHERE seq IN ($1, $2)', 5], ['SELECT * FROM audit_log WHERE seq IN ($1, $2, $3)', 5]] };
   const [before] = [small].map((paths) => statementsOf(plansOf(logOf(paths))));
   assert.deepEqual([...before.values()].map(({ warm, runs }) => [warm, runs]), [[true, 2]]);
+});
+
+test('a plan cut short is counted, not dropped unseen', () => {
+  const whole = logOf({ 'GET /a': [[ACCESS, 5], [ACCESS, 5]] });
+  // The last plan's body cut after its first line, as an interleaved or truncated log leaves it.
+  const lines = whole.split('\n');
+  const last = lines.findLastIndex((line) => line.includes('plan:'));
+  const cut = [...lines.slice(0, last + 2)].join('\n');
+  assert.equal(unparsed(whole), 0);
+  assert.equal(unparsed(cut), 1);
+  assert.equal(plansOf(cut).length, plansOf(whole).length - 1);
 });

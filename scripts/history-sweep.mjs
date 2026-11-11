@@ -13,26 +13,41 @@ const MARK = /\/\* sweep:(.*?) \*\/ SELECT 1/;
 
 /**
  * Each plan auto_explain logged in `text` (a server log on stderr, `log_format = json`), in order: the backend that
- * ran it, its query's text, and the pages it read.
+ * ran it, its query's text, and the pages it read. One whose JSON does not parse (a line cut or interleaved) is left
+ * out here, and `unparsed` counts it, which fails the sweep: left out silently, a statement of it would be in neither
+ * run's map, and read as clean (Fable r1 of #559).
  */
 export function plansOf(text) {
-  const plans = [];
+  return logged(text).flatMap(({ backend, plan }) => {
+    if (plan === null) return [];
+    const top = plan.Plan ?? {};
+    return [{ backend, text: String(plan['Query Text'] ?? ''), pages: (top['Shared Hit Blocks'] ?? 0) + (top['Shared Read Blocks'] ?? 0) }];
+  });
+}
+
+/** How many of the plans logged in `text` do not parse (`plansOf`). */
+export function unparsed(text) {
+  return logged(text).filter(({ plan }) => plan === null).length;
+}
+
+/** Each plan auto_explain logged in `text`: its backend, and its JSON parsed, or null when it does not parse. */
+function logged(text) {
+  const found = [];
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i += 1) {
-    const logged = /\[(\d+)\] LOG:\s+duration: [\d.]+ ms\s+plan:\s*$/.exec(lines[i]);
-    if (logged === null) continue;
+    const header = /\[(\d+)\] LOG:\s+duration: [\d.]+ ms\s+plan:\s*$/.exec(lines[i]);
+    if (header === null) continue;
     const body = [];
     while (i + 1 < lines.length && lines[i + 1].startsWith('\t')) body.push(lines[++i].slice(1));
-    let plan;
+    let plan = null;
     try {
       plan = JSON.parse(body.join('\n').replace(/"Query Identifier": (-?\d+)/, '"Query Identifier": "$1"'));
     } catch {
-      continue;
+      plan = null;
     }
-    const top = plan.Plan ?? {};
-    plans.push({ backend: logged[1], text: String(plan['Query Text'] ?? ''), pages: (top['Shared Hit Blocks'] ?? 0) + (top['Shared Read Blocks'] ?? 0) });
+    found.push({ backend: header[1], plan });
   }
-  return plans;
+  return found;
 }
 
 /**
@@ -163,6 +178,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // A sweep is clean only if both runs went the same way to the end: a statement too slow at the larger size, cut by a
   // timeout, leaves no plan behind, and would otherwise read as none that grew (review r1 of #559).
   const problems = [];
+  for (const [file, text] of [[smallLog, smallText], [largeLog, largeText]]) {
+    const cut = unparsed(text);
+    if (cut > 0) problems.push(`UNPARSED ${cut} plans in ${file}: their statements are measured at neither size`);
+  }
   for (const { at, small: was, large: now } of unwarmed(small, large)) {
     problems.push(`COLD  no warm run at the ${was ? 'larger size' : now ? 'smaller size' : 'two sizes'}: ${at.text.slice(0, 200)} (in: ${at.path})`);
   }

@@ -126,9 +126,9 @@ const LOOKUPS: Lookup[] = [
     // A page of 32 entries is 32 steps of the primary key, about three pages each, however long the log.
     pages: PAGES + 3 * 32,
     ask: async (app, { newest }) => {
-      const page = await auditPage(app, { actors: ['user:u1', 'token:u1'], limit: 1 });
+      const page = await auditPage(app, { actors: ['user:u1', 'token:u1'], detail: true, limit: 1 });
       assert.deepEqual([page.rows.map(({ seq }) => seq), page.more], [[newest], true]);
-      const older = await auditPage(app, { actors: ['user:u1', 'token:u1'], limit: 32, beforeSeq: newest });
+      const older = await auditPage(app, { actors: ['user:u1', 'token:u1'], detail: true, limit: 32, beforeSeq: newest });
       assert.deepEqual(older.rows.map(({ seq }) => seq), Array.from({ length: 32 }, (_, i) => newest - 1n - BigInt(i)));
     },
   },
