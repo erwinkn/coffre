@@ -40,6 +40,11 @@ const SIZE = Number(process.env.COFFRE_SWEEP_SIZE ?? 2_000);
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const READER = 'reader@acme.example';
+/**
+ * Who audits market alone (`auditor` there): every page of theirs is a place's (`within`), the reads a whole log's reader
+ * never asks; the viewer's pages answer 403 (Fable r2 of #559).
+ */
+const AUDITOR = 'auditor@acme.example';
 /** A member the vault reported, again and again: `SIZE` findings about them. */
 const TAMPERED = 'tampered@acme.example';
 /** A member who read a lot, then left: an offboarding report of `SIZE` reads. */
@@ -142,6 +147,8 @@ before(async () => {
     await root.members.add(`user:${member}`);
     await root.access.set(`user:${member}`, { 'market/dev': 'viewer' });
   }
+  await root.members.add(`user:${AUDITOR}`);
+  await root.access.set(`user:${AUDITOR}`, { market: 'auditor' });
   await root.members.add(SERVICE);
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
   await root.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 });
@@ -303,6 +310,11 @@ function paths(): Path[] {
     ...getRoutes().map((path) => ({ name: `GET ${path} (viewer)`, run: () => get(READER, path) })),
     ...pages.map((query) => ({ name: `GET /audit${query} (owner)`, run: () => get(ROOT, `/audit${query}`) })),
     ...pages.map((query) => ({ name: `GET /audit${query} (viewer)`, run: () => get(READER, `/audit${query}`) })),
+    // Every page of a reader of one place is a place's page (`within`). Two walk back the log's primary key past
+    // everyone's entries since market's newest, as on main, a known growth until T254: `?limit=5`, whose small limit
+    // makes the walk look cheap (517 → 5,016 pages at 2,000 and 20,000), and `?detail=1`, with no action condition,
+    // which reads market's own indexes at 2,000 and flips to the walk at 20,000 (8 → 5,023).
+    ...pages.map((query) => ({ name: `GET /audit${query} (auditor of market)`, run: () => get(AUDITOR, `/audit${query}`) })),
     ...members.flatMap((member) => [`/members/${encodeURIComponent(member)}`, `/members/${encodeURIComponent(member)}/access`, `/members/${encodeURIComponent(member)}/tokens`]
       .map((path) => ({ name: `GET ${path} (owner)`, run: () => get(ROOT, path) }))),
     { name: 'a sign-in (members, findings)', run: () => signinService.completeSignin({ provider: 'github', subject: 'tampered', emails: [TAMPERED], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox' }) },
@@ -367,4 +379,7 @@ test(`the request paths, warm, then measured twice, at ${SIZE.toLocaleString('en
   assert.ok(Object.keys(outcomes).length > 0);
   // The hot path's reads measured: a reveal that failed at both sizes would answer alike at both, and pass the comparison.
   for (const name of ['a reveal (viewer)', 'a reveal of one key (viewer)']) assert.equal(outcomes[name], 'ok', `${name}: ${outcomes[name]}`);
+  // A scoped reader's pages measured: answered 403, they would read nothing past their caller's.
+  const scoped = Object.entries(outcomes).filter(([name]) => name.startsWith('GET /audit') && name.endsWith('(auditor of market)'));
+  assert.deepEqual(scoped.filter(([, outcome]) => outcome !== '200'), [], 'every page of the auditor of market answers');
 });

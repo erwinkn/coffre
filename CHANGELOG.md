@@ -112,13 +112,16 @@
   entries (`HIDDEN_COUNTED`) and says `hiddenMore` when there were more,
   where it counted every heartbeat a page with nothing older held, or
   walked past every one its filter did not match; an actor's page
-  (`?actor=`) a step of the entries it shows, where it walked past all
-  of theirs it hides (the scheduler's, past its heartbeats: 199 pages to
-  1,955 at 4,000 to 40,000); a place's page (`?path=`) keeps main's
-  plan, its place's own indexes (where `audit_log_shown_idx` walked back
-  past every other place's entries: 8 pages to 2,267 at 2,000 to 20,000),
-  and still walks past the entries it hides, and past others' once the log
-  is long enough that Postgres prefers the primary key, as on main, T254's; an offboarding report's
+  (`?actor=`), under a place too, a step of the entries it shows, where it
+  walked past all of theirs it hides (the scheduler's, past its heartbeats:
+  199 pages to 1,955 at 4,000 to 40,000); a place's page with no actor
+  (`?path=`, and every page of a reader of one place) asks main's
+  condition, so its place's own indexes, where `audit_log_shown_idx`
+  walked back past every other place's entries (8 pages to 2,267 at 2,000
+  to 20,000), and still walks back the primary key past the entries it
+  hides, and past others' once the log is long enough, a small limit
+  (`?limit=5`) or no action condition (`?detail=1`) sooner, as on main,
+  T254's; an offboarding report's
   activity in 0.14's log their own reads and writes, then only the
   restores its current values come from (where every restore of every key
   the member saw was read); two of the report's still grow, T252's: the

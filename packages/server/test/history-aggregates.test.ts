@@ -118,21 +118,43 @@ test("a member's audit page who only ever signed in (`auditPage`, `?actor=`): a 
   indexes: ['audit_log_shown_actor_idx'],
 }));
 
-// A place's page (`?path=`), its entries the oldest: through its own indexes (`audit_log_project_idx`, a bitmap of
-// it and `audit_log_also_project_idx`), as on main, never back through everything pages show (`audit_log_shown_idx`),
-// which passes every other place's entries since. That walk read 1,952 pages 60,000 entries in, where the place's
-// own read 9 (the 2,000/20,000 sweep of #559, before the fence `shownOffIndex` names). A place behind its own detail
-// entries is T254's.
-test("a project's audit page, behind every other place's entries shown since (`auditPage`, `?path=`): its own entries' steps", { timeout: 600_000 }, () => holdsFlat(db.owner, {
+// A member's page under a place (`?path=…&actor=`, or any page of theirs a project's reader asks, `within`): a step
+// of what an actor's pages show, whatever the place, as their page on the whole log (`audit_log_shown_actor_idx`).
+// Fenced as a place's page, it walked back their sign-ins: 158 pages 4,000 in, 1,538 at 40,000 (Fable r2 of #559).
+test("a member's audit page under a place, behind their sign-ins (`auditPage`, `within` and `?actor=`): a step of what it shows", { timeout: 600_000 }, () => holdsFlat(db.owner, {
+  grow: async (owner, size) => {
+    await append(owner, { author: 'app', action: 'secret.write', count: 5, actor: MEMBER, project: keys[0]!.project });
+    await append(owner, { author: 'app', action: 'sign_in', count: size, actor: MEMBER });
+    await append(owner, { author: 'app', action: 'project.update', count: size, actor: `user:${ROOT}`, project: keys[0]!.project });
+  },
+  ask: async (app) => {
+    const within = { projectIds: [keys[0]!.project], environmentIds: [] };
+    assert.equal((await auditPage(app, { within, actors: [MEMBER], detail: false, limit: 5 })).rows.length, 5);
+  },
+  indexes: ['audit_log_shown_actor_idx'],
+}));
+
+// A place's page (`?path=`, and every page of a project's reader, `within`) with no actor, its entries the oldest:
+// through its own indexes (`audit_log_project_idx`, a bitmap of it and `audit_log_also_project_idx`), as on main,
+// never back through everything pages show (`audit_log_shown_idx`), which passes every other place's entries since:
+// 8 pages 2,000 entries in, 2,267 at 20,000 (`?path=market`, the sweep of #559 before `shownOffIndex`). In a log led
+// by heartbeats, one entry in ten shown: main's condition, which keeps the action's statistics, reads 6 pages; an
+// expression in its place (`action || ''`) priced the page as if most were shown and walked the primary key back,
+// 7,802 pages at 240,000 entries (Fable r2 of #559). A place behind its own detail entries is T254's.
+test("a project's audit page in a log of heartbeats, behind every other place's entries shown since (`auditPage`, `?path=`): its own entries' steps", { timeout: 600_000 }, () => holdsFlat(db.owner, {
   grow: async (owner, size) => {
     await append(owner, { author: 'app', action: 'secret.write', count: 22, actor: `user:${ROOT}`, project: keys[0]!.project });
-    // 1.5 times the size of each, 120,000 entries in all at the larger: below 100,000, Postgres prices the place's own
-    // indexes cheaper either way. Past about 200,000, it walks back the primary key instead, as main does (T254).
-    await append(owner, { author: 'vault', action: 'secret.read', count: (size * 3) / 4, actor: OTHER, project: shop });
-    await append(owner, { author: 'vault', action: 'secret.read', count: (size * 3) / 4, actor: OTHER });
-    await append(owner, { author: 'app', action: 'audit.heartbeat', count: (size * 3) / 2, actor: SCHEDULER });
+    // Six times the size, 240,000 entries in all at the larger, one in ten shown: another place's reads and reads of
+    // no place, then the scheduler's heartbeats.
+    await append(owner, { author: 'vault', action: 'secret.read', count: (size * 3) / 10, actor: OTHER, project: shop });
+    await append(owner, { author: 'vault', action: 'secret.read', count: (size * 3) / 10, actor: OTHER });
+    await append(owner, { author: 'app', action: 'audit.heartbeat', count: (size * 27) / 5, actor: SCHEDULER });
   },
-  ask: async (app) => assert.equal((await auditPage(app, { projectId: keys[0]!.project, detail: false, limit: 100 })).rows.length, 22),
+  ask: async (app) => {
+    assert.equal((await auditPage(app, { projectId: keys[0]!.project, detail: false, limit: 100 })).rows.length, 22);
+    // A project's reader's page, the same entries (`within`).
+    assert.equal((await auditPage(app, { within: { projectIds: [keys[0]!.project], environmentIds: [] }, detail: false, limit: 100 })).rows.length, 22);
+  },
   indexes: ['audit_log_project_idx'],
 }));
 

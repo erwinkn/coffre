@@ -70,6 +70,16 @@ export const DETAIL_ACTIONS = [
   'key.reseal',
 ] as const;
 
+/** `DETAIL_ACTIONS` as SQL's list, quoted: `'sign_in', 'sign_out', …`. */
+const DETAIL_LIST = DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ');
+
+/**
+ * What an audit page shows, as main asked it: the actions it leaves out (`DETAIL_ACTIONS`), and nothing more. No
+ * index's condition follows from it (`KINDS.shown` adds `seq >= 0`), so a read with it is planned as on main
+ * (`shownOffIndex`), and the shown indexes' condition is this, word for word, beside that (`KINDS.shown`).
+ */
+const SHOWN = `action NOT IN (${DETAIL_LIST})`;
+
 /**
  * Each kind of entry a runtime read asks the newest of (or the first, or a
  * page back from the newest), and the condition of the index that holds it
@@ -120,9 +130,9 @@ export const KINDS = {
    * with another, which a key's page, for its tokens' origins (`originsOf`, `token.create`), did through `detail`'s:
    * 1,231 pages with the history grown, 350 before (review r1 of #559).
    */
-  shown: `action NOT IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')}) AND seq >= 0`,
+  shown: `${SHOWN} AND seq >= 0`,
   /** And what it leaves out, which it counts back from where it started, a stretch's newest at most (`auditActionCounts`); `seq >= 0` as `shown`'s. */
-  detail: `action IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')}) AND seq >= 0`,
+  detail: `action IN (${DETAIL_LIST}) AND seq >= 0`,
   /**
    * The reads and writes 0.14's log records of a key, by whom (`memberActivity`): a member's, through their actor,
    * where the log's whole was read for every report (2,484 pages behind 80,000 entries; T248). 0.15's log records
@@ -140,15 +150,18 @@ export function indexOf(kind: Kind): string {
 }
 
 /**
- * What an audit page shows (`KINDS.shown`), written so that no index's condition follows from it: `action || ''`,
- * an expression no index of the log has. For a page of a place, which its own indexes serve
- * (`audit_log_project_idx` and the others by place): with `shown`'s own condition, Postgres walked back through
- * every entry shown since its oldest (`audit_log_shown_idx`; `history-aggregates.test.ts`, a project's page).
- * Postgres's alone: on SQLite it would bring back main's SCAN of the whole log, and the SEARCH of `audit_log_shown_idx`
- * the plain condition takes is the better plan there (`auditWhere`).
+ * What an audit page shows (`KINDS.shown`), as main's condition (`SHOWN`), which no index's condition follows from:
+ * for a page of a place with no actor, which its place's indexes serve (`audit_log_project_idx` and the others by
+ * place). With `shown`'s own condition, Postgres walked back through every entry shown since the place's oldest,
+ * every place's (`audit_log_shown_idx`: 8 pages 2,000 entries in, 2,267 at 20,000; the sweep of #559). Main's
+ * condition keeps the column's statistics too, so Postgres prices the shown share as it is: an expression in its place
+ * (`action || ''`) priced every page as if most entries were shown, and walked the primary key back where a log of
+ * heartbeats left a place's page 6 pages on main (7,802 at 240,000 entries; Fable's review r2 of #559). Postgres's
+ * alone: on SQLite it would bring back main's SCAN of the whole log, where `shown`'s own condition SEARCHes
+ * `audit_log_shown_idx` back from the newest, the better of the two there (`auditWhere`).
  */
 export function shownOffIndex(): SQL {
-  return sql.raw(`action || '' NOT IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')})`);
+  return sql.raw(SHOWN);
 }
 
 /** The entries of `kind`, as the condition of its index, word for word (`KINDS`). */

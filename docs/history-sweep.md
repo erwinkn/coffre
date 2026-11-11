@@ -135,32 +135,51 @@ the project's, the environment's) past each of them: the scheduler's page past
 its heartbeats, 199 pages 4,000 in and 1,955 at 40,000; a member's past their
 sign-ins, 165 and 1,628; a project's past its MCP reads, 132 and 1,303. An
 actor's page is now a step of `audit_log_shown_actor_idx`, `(actor, seq)`
-over what pages show, and flat. A place's still walks, past the
-entries of its own it hides or past everyone else's it shows, and is in the
-sweep as `?path=shop`: T254's. A place is matched by its columns and by the references
-and lists in an entry's metadata, which no index of the same kind covers.
+over what pages show, and flat, under a place too (a member's page under
+`market`, behind their sign-ins: 3 pages then 4 at 4,000 and 40,000). A place's
+still walks, past the entries of its own it hides or past everyone else's it
+shows, and is in the sweep as `?path=shop`: T254's. A place is matched by its
+columns and by the references and lists in an entry's metadata, which no index
+of the same kind covers.
 
 The sweep after those fixes found one of their own: `audit_log_shown_idx` took
 a place's page too. Postgres walked it back past every place's entries shown
 since the place's newest: `?path=market` read 8 pages at 2,000 and 2,267 at
 20,000, where main reads the place's own indexes (`audit_log_project_idx` and
-`audit_log_also_project_idx`, as a bitmap) in 9. A place's page writes the
-condition so that no index's follows from it (`shownOffIndex`, `action || ''`)
-and keeps main's plan: 5 pages then 6 at 12,000 and 120,000 entries, the same
-in five runs with fresh statistics (`history-aggregates.test.ts`, "a project's
-audit page"). Past about 200,000 entries in that shape, main's plan itself is a
-walk back of the primary key (7,802 pages at 240,000), and so is the fenced one:
-T254's too. The fence is Postgres's alone: on SQLite it would bring back main's
-plan, a SCAN of the whole log, where the plain condition searches
-`audit_log_shown_idx` back from the newest, the better plan there.
+`audit_log_also_project_idx`, as a bitmap) in 9. A place's page with no actor
+now writes main's own condition, `action NOT IN (…)` (`shownOffIndex`), which
+implies no index's condition, since `KINDS.shown` adds `seq >= 0` to it. Review
+r2 (Fable) found the first fence, `action || '' NOT IN (…)`, worse than main
+where few entries are shown: an expression hides the column's statistics, so
+Postgres priced the page as if most entries were shown and walked the primary
+key back. In a log led by heartbeats, one entry in ten shown, a place's page
+read 5 pages at 24,000 and 7,812 at 240,000 under it; under main's condition it
+reads 5 and 6, the same in five runs with fresh statistics
+(`history-aggregates.test.ts`, "a project's audit page in a log of
+heartbeats"). It also fenced an actor's page under a place off its index (158
+pages then 1,538); the fence is now for pages with no actor alone. Where half
+the log is shown, past about 200,000 entries, main's plan is itself a walk
+back of the primary key (7,802 pages at 240,000): T254's. The fence is
+Postgres's alone: on SQLite main's condition brings back a SCAN of the whole
+log, where the plain condition searches `audit_log_shown_idx` back from the
+newest, the better plan there.
 
-With the fence, the sweep's `?path=shop` (a place behind its own MCP reads)
-reads 522 pages at 2,000 and 5,022 at 20,000, a walk back of the primary key
-past every entry since the place's newest shown one. That is main's plan: the
-same shape rebuilt on a scratch database plans the same walk under main's
-condition and indexes, 403 pages and 4,010 at 12,000 and 120,000 entries.
-Without the fence it walked `audit_log_shown_idx` in half that (207 and 2,044),
-but past every other place's entries too, `?path=market`'s 2,267 above.
+`?path=shop` (a place behind its own MCP reads) reads 522 pages at 2,000 and
+5,022 at 20,000, a walk back of the primary key past every entry since the
+place's newest shown one. That is main's plan: the same shape rebuilt on a
+scratch database plans the same walk under main's condition and indexes, 403
+pages and 4,010 at 12,000 and 120,000 entries. With `shown`'s own condition it
+walked `audit_log_shown_idx` in half that (207 and 2,044), but past every other
+place's entries too, `?path=market`'s 2,267 above.
+
+Every page of a reader of one place (a project's auditor or admin) is a place's
+page, the place their access (`within`). The sweep asks every page as an
+auditor of `market`, and two walk back the primary key past everyone's entries
+since market's newest, as on main, T254's: a small limit makes the walk look
+cheap (`?limit=5`: 517 pages at 2,000, 5,016 at 20,000), and a page with no
+action condition takes it once the log is long enough (`?detail=1`: market's
+own indexes at 2,000, 8 pages, then the walk at 20,000, 5,023). Both send
+main's SQL. The auditor's other pages, its actors' among them, are flat.
 
 And the checkpointer's `lowestAbove`: a walk of `log_uses_at_number_idx` from
 one `at` to the next. The sweep measures it on the first window only (once

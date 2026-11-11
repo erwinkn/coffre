@@ -3623,9 +3623,11 @@ function listed(db: Queryable, ids: readonly string[]): SQL {
 /**
  * The conditions of `filter`, as a WHERE clause on the log. A place matches
  * the entries about it, and those about a reference into or out of it; a
- * secret, too, the reads of several that list it.
+ * secret, too, the reads of several that list it. `byActor` when the page
+ * reads its actors' entries as streams of their own, the actors' condition
+ * left out of `filter` (`auditPage`).
  */
-function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | undefined {
+function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>, byActor = filter.actors !== undefined): SQL | undefined {
   const { auditLog } = tablesOf(db);
   const { within } = filter;
   const columns = { projectId: auditLog.projectId, environmentId: auditLog.environmentId, secretId: auditLog.secretId };
@@ -3647,12 +3649,13 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
     filter.decision === undefined ? undefined : eq(auditLog.decision, filter.decision),
     // The detail an ordinary page leaves out, as the condition of the indexes of what it shows, word for word: a page
     // back from the newest past every heartbeat since in one step (`audit_log_shown_idx`), and an actor's past every
-    // one of their own (`audit_log_shown_actor_idx`; T248, R48). A place's page off both: through its place's indexes,
-    // as on main, never back through every place's entries shown since (`shownOffIndex`; history-aggregates.test.ts,
-    // "a project's audit page"). Behind its own detail entries it still walks them (T254). On Postgres only: on SQLite
-    // the fence brings back main's plan, a SCAN of the whole log, where `shown`'s own condition lets it SEARCH
-    // `audit_log_shown_idx` back from the newest, the better of the two there.
-    filter.detail ? undefined : place && dialect.engineOf(db) === 'postgres' ? shownOffIndex() : entriesOf('shown'),
+    // one of their own, whatever the place (`audit_log_shown_actor_idx`; T248, R48). A place's page with no actor, as
+    // main asked it (`shownOffIndex`): through its place's indexes, never back through every place's entries shown
+    // since (history-aggregates.test.ts, "a project's audit page"). Where its own detail entries, or a log's, lead it
+    // past the point main's plan is the primary key's walk back, it walks still (T254). On Postgres only: on SQLite
+    // main's condition brings back a SCAN of the whole log, where `shown`'s own lets it SEARCH `audit_log_shown_idx`
+    // back from the newest, the better of the two there.
+    filter.detail ? undefined : place && !byActor && dialect.engineOf(db) === 'postgres' ? shownOffIndex() : entriesOf('shown'),
     filter.beforeSeq === undefined ? undefined : lt(auditLog.seq, filter.beforeSeq),
   );
 }
@@ -3667,7 +3670,7 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
   const { auditLog, projects, environments, secrets } = tablesOf(db);
   // The members asked for, each a stream of their own entries (`withinBytes`' `by`); then the page's entries by seq,
   // never the run between its first and its last, which holds every other member's since (T245, R48).
-  const page = await withinBytes(db, auditWhere(db, { ...filter, actors: undefined }), filter.limit, 'desc',
+  const page = await withinBytes(db, auditWhere(db, { ...filter, actors: undefined }, filter.actors !== undefined), filter.limit, 'desc',
     filter.actors === undefined ? undefined : { column: auditLog.actor, values: filter.actors });
   if (page === null) return { rows: [], more: false };
   const rows = await db
