@@ -165,3 +165,35 @@ test('a lock that is a link to nothing fails the run at once rather than spin on
   assert.equal(await within(held.then(() => undefined, () => undefined), 1000), true);
   await assert.rejects(held, { code: 'ELOOP' });
 });
+
+test('a stale lock beside a mutex that is a link to nothing fails the run at once rather than wait on it (review r6 of #561)', async (t) => {
+  const { directory, each } = kept(t);
+  const release = await each().hold();
+  const lock = join(directory, readdirSync(directory).find((name) => name.endsWith('.lock'))!);
+  release();
+  // A stale lock, for a takeover to remove under its mutex; the mutex a link to nothing, which creating it finds
+  // (EEXIST) and reading through would find no file (ENOENT), as a mutex gone meanwhile.
+  writeFileSync(lock, 'dead', { mode: 0o600 });
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(lock, old, old);
+  symlinkSync(join(directory, 'nowhere'), `${lock}.break`);
+  const held = each().hold();
+  assert.equal(await within(held.then(() => undefined, () => undefined), 1000), true);
+  await assert.rejects(held, { code: 'ELOOP' });
+});
+
+test('a lock dated ahead of now, past the time a stale one is taken over, is taken over rather than waited on until then', async (t) => {
+  const { directory, each } = kept(t);
+  const release = await each().hold();
+  const lock = join(directory, readdirSync(directory).find((name) => name.endsWith('.lock'))!);
+  release();
+  writeFileSync(lock, 'ahead', { mode: 0o600 });
+  const ahead = new Date(Date.now() + 365 * 24 * 3600_000);
+  utimesSync(lock, ahead, ahead);
+  writeFileSync(`${lock}.break`, '', { mode: 0o600 });
+  utimesSync(`${lock}.break`, ahead, ahead);
+  const held = each().hold();
+  assert.equal(await within(held.then(() => undefined), 2000), true);
+  (await held)();
+  assert.deepEqual(readdirSync(directory), []);
+});

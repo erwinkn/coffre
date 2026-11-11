@@ -16,7 +16,7 @@
  *   ~/.coffre/sessions/3f9c…e1.json   { "v": 1, "until": 1794358800000, "iv": "…", "data": "…" }
  */
 import { createCipheriv, createDecipheriv, createHmac, hkdfSync, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, constants, fstatSync, futimesSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, fstatSync, futimesSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -29,6 +29,12 @@ export function keptDirectory(): string {
 
 /** When a lock its run has not kept fresh is a dead run's. */
 const LOCK_MS = 30_000;
+/**
+ * Whether a lock or its mutex, last kept fresh `at`, is a dead run's: kept
+ * fresh further from now than `LOCK_MS` either way, so that one dated
+ * ahead (a clock set back, or a file touched) is not waited on until then.
+ */
+const stale = (at: number): boolean => Math.abs(Date.now() - at) > LOCK_MS;
 const LOCK_POLL_MS = 100;
 /** How often a run holding a lock keeps it fresh: well within `LOCK_MS`. */
 const LOCK_FRESH_MS = 5_000;
@@ -124,7 +130,7 @@ export function keptFor(directory: string, origin: string, service: string, toke
         await new Promise((resolve) => setImmediate(resolve));
         continue;
       }
-      if (Date.now() - held.at > LOCK_MS && takeOver(lock, held)) continue;
+      if (stale(held.at) && takeOver(lock, held)) continue;
       await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
     }
     const fresh = setInterval(() => {
@@ -195,7 +201,7 @@ export function lockOf(lock: string): Lock | null {
  * yet found stale, stays.
  */
 export function takeOver(lock: string, found: Lock): boolean {
-  return breaking(lock, () => removeIf(lock, (now) => now.ino === found.ino && Date.now() - now.at > LOCK_MS)) === true;
+  return breaking(lock, () => removeIf(lock, (now) => now.ino === found.ino && stale(now.at))) === true;
 }
 
 /** Remove the lock file at `lock` if `still` holds of it, read again now; whether it did. */
@@ -224,11 +230,11 @@ function breaking(lock: string, act: () => boolean): boolean | null {
     writeFileSync(mutex, '', { flag: 'wx', mode: 0o600 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    try {
-      if (Date.now() - statSync(mutex).mtimeMs > LOCK_MS) rmSync(mutex, { force: true });
-    } catch {
-      // Gone already.
-    }
+    // Read as the lock is, never through a link and only gone (null) for none: a mutex that is a link, dangling or
+    // not, or cannot be read, fails the run, where it would read as held, or gone, and be waited on without end
+    // (review r6 of #561). One gone meanwhile is tried again, as one held.
+    const held = lockOf(mutex);
+    if (held !== null && stale(held.at)) rmSync(mutex, { force: true });
     return null;
   }
   try {

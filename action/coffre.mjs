@@ -9722,6 +9722,12 @@ function keptDirectory() {
 }
 /** When a lock its run has not kept fresh is a dead run's. */
 const LOCK_MS = 3e4;
+/**
+* Whether a lock or its mutex, last kept fresh `at`, is a dead run's: kept
+* fresh further from now than `LOCK_MS` either way, so that one dated
+* ahead (a clock set back, or a file touched) is not waited on until then.
+*/
+const stale = (at) => Math.abs(Date.now() - at) > LOCK_MS;
 const LOCK_POLL_MS = 100;
 /** How often a run holding a lock keeps it fresh: well within `LOCK_MS`. */
 const LOCK_FRESH_MS = 5e3;
@@ -9811,7 +9817,7 @@ function keptFor(directory, origin, service, token) {
 				await new Promise((resolve) => setImmediate(resolve));
 				continue;
 			}
-			if (Date.now() - held.at > LOCK_MS && takeOver(lock, held)) continue;
+			if (stale(held.at) && takeOver(lock, held)) continue;
 			await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
 		}
 		const fresh = setInterval(() => {
@@ -9872,7 +9878,7 @@ function lockOf(lock) {
 * yet found stale, stays.
 */
 function takeOver(lock, found) {
-	return breaking(lock, () => removeIf(lock, (now) => now.ino === found.ino && Date.now() - now.at > LOCK_MS)) === true;
+	return breaking(lock, () => removeIf(lock, (now) => now.ino === found.ino && stale(now.at))) === true;
 }
 /** Remove the lock file at `lock` if `still` holds of it, read again now; whether it did. */
 function removeIf(lock, still) {
@@ -9902,9 +9908,8 @@ function breaking(lock, act) {
 		});
 	} catch (error) {
 		if (error.code !== "EEXIST") throw error;
-		try {
-			if (Date.now() - statSync(mutex).mtimeMs > LOCK_MS) rmSync(mutex, { force: true });
-		} catch {}
+		const held = lockOf(mutex);
+		if (held !== null && stale(held.at)) rmSync(mutex, { force: true });
 		return null;
 	}
 	try {
