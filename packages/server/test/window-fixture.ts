@@ -38,7 +38,7 @@ export function pinnedGates(now: number = Date.now()): Gates {
 
 /**
  * Where `principal`'s `key` starts its refresh periods, in [0, `refresh`): the vault's `phaseOf` (`bulk.ts`), which
- * 0074's `bulk_period` and the SQLite store compute too (`sql-copies.test.ts` holds the first to it). A copy, since a
+ * 0074's `bulk_period` computes too (`sql-copies.test.ts` holds it to `phaseOf`). A copy, since a
  * package's tests import another's exports only, and the vault exports no cap internals; a copy that drifted would
  * only wait at the wrong times again, as the minute did (T204).
  */
@@ -49,7 +49,7 @@ function phaseOf(principal: string, key: string, refresh: number): number {
 /**
  * Waits until no key with a value in `place` (`project/environment`) turns its bulk-cap period within `ms` for any of
  * `principals`, so that calls taking less than `ms` share each key's period (a minute, `refreshMs` of the default
- * 15-minute window). Reads the keys from `db`, on either engine. Waits less than a minute, or throws if no time in the
+ * 15-minute window). Reads the keys from `db`. Waits less than a minute, or throws if no time in the
  * next one leaves `ms` for every key. The database's clock and this one are the machine's.
  */
 export async function inBulkPeriod(ms: number, db: Queryable, principals: readonly string[], place: string, now: () => number = Date.now): Promise<void> {

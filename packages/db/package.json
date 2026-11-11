@@ -1,7 +1,7 @@
 {
   "name": "@coffre/db",
   "version": "0.15.0",
-  "description": "coffre's database: the schema, its migrations and the connections, on Postgres or SQLite.",
+  "description": "coffre's database: the schema, its migrations and the connections, on Postgres.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -27,20 +27,10 @@
       "types": "./dist/schema.d.ts",
       "default": "./dist/schema.js"
     },
-    "./schema-sqlite": {
-      "coffre:source": "./src/schema.sqlite.ts",
-      "types": "./dist/schema-sqlite.d.ts",
-      "default": "./dist/schema-sqlite.js"
-    },
     "./dialect": {
       "coffre:source": "./src/dialect.ts",
       "types": "./dist/dialect.d.ts",
       "default": "./dist/dialect.js"
-    },
-    "./portable": {
-      "coffre:source": "./src/portable.ts",
-      "types": "./dist/portable.d.ts",
-      "default": "./dist/portable.js"
     },
     "./schema-version": {
       "coffre:source": "./src/schema-version.ts",
@@ -91,12 +81,11 @@
     "test": "node --conditions=coffre:source --test",
     "db:generate": "node --conditions=coffre:source src/baseline.ts",
     "db:migrate": "node --conditions=coffre:source src/migrate-main.ts",
-    "db:check": "cd src && for engine in postgres sqlite; do drizzle-kit check --config drizzle.$engine.config.ts || exit 1; done",
+    "db:check": "cd src && drizzle-kit check --config drizzle.postgres.config.ts",
     "db:verify:runtime": "node --conditions=coffre:source src/verify-runtime.ts"
   },
   "dependencies": {
     "@coffre/core": "workspace:*",
-    "@libsql/client": "0.18.0",
     "drizzle-orm": "0.45.2"
   },
   "devDependencies": {

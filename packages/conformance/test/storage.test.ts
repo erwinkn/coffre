@@ -1,23 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
 import { createClient } from '@coffre/client';
 
 import { Browser } from '../src/browser.ts';
 import { forgedVaultEntry } from '../src/checks/audit.ts';
 import type { People } from '../src/checks/people.ts';
-import { sqlite, using } from '../src/database.ts';
+import { using } from '../src/database.ts';
 import type { Deployment } from '../src/harness.ts';
 import { Report } from '../src/report.ts';
+import { scratch } from './scratch.ts';
 
 async function fixture(t: test.TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'coffre-storage-test-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const file = join(dir, 'app.db');
-  await using(sqlite(file), (sql) => sql.exec(`
+  const database = await scratch(t);
+  await using(database(), (sql) => sql.exec(`
     CREATE TABLE audit_log (seq INTEGER PRIMARY KEY, action TEXT, actor_id TEXT);
     INSERT INTO audit_log VALUES (0, 'secret.read', 'reader');
   `));
@@ -25,7 +21,7 @@ async function fixture(t: test.TestContext) {
   // This check needs only the verdict on an edited or deleted app row.
   const api = createClient({
     url: 'http://conformance.test',
-    transport: async () => using(sqlite(file), async (sql) => {
+    transport: async () => using(database(), async (sql) => {
       const [row] = await sql.query<{ actor_id: string }>('SELECT actor_id FROM audit_log WHERE seq = 0');
       return Response.json(row?.actor_id === 'reader'
         ? { ok: true, checkpoint: { seq: 0 } }
@@ -38,8 +34,7 @@ async function fixture(t: test.TestContext) {
     leaver: { ...person, cli: api, cliToken: 'removed' }, service: { member: 'token:removed', token: 'removed', api },
   };
   const deployment = {
-    origin: 'http://conformance.test', databaseFile: file, database: async () => sqlite(file),
-    runtime: null, vaultRuntime: null, hotRuntime: null, output: () => '',
+    origin: 'http://conformance.test', database, output: () => '',
   } as Deployment;
   return { deployment, people };
 }

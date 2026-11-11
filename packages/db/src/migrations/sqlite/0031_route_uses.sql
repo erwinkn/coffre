@@ -1,1 +1,0 @@
-ALTER TABLE `log_uses` ADD `route` text;

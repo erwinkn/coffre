@@ -70,13 +70,6 @@ export type ReadFilter = {
   limit: number;
 };
 
-/** The columns of `log_reads` that put a read at a place of each kind, each with its index (migration 0050). */
-const AT: Record<ReadPlace['kind'], readonly string[]> = {
-  secret: ['secret', 'source'],
-  environment: ['environment', 'place', 'source_environment'],
-  project: ['project', 'source_project'],
-};
-
 /** Above every read: a page's start without `before`, and, below a time alone, above every read at it. */
 const MAX = 9_223_372_036_854_775_807n;
 
@@ -94,32 +87,25 @@ const bigint = (value: number | bigint) => sql`CAST(${String(value)} AS bigint)`
  * streams.
  */
 export async function readsPage(db: Queryable, filter: ReadFilter): Promise<{ rows: ListedRead[]; more: boolean }> {
-  const engine = dialect.engineOf(db);
   const take = filter.limit + 1;
-  const found = pageSql(engine, filter, take);
+  const found = pageSql(filter, take);
   if (found === null) return { rows: [], more: false };
-  const rows = await dialect.rowsOf<Row>(db, listed(engine, found));
+  const rows = await dialect.rowsOf<Row>(db, listed(found));
   return { rows: rows.slice(0, filter.limit).map(read), more: rows.length > filter.limit };
 }
 
 /** The `(at, number)` of the page's reads, newest first, `take` at most; null for a filter of no member. */
-function pageSql(engine: dialect.Engine, filter: ReadFilter, take: number): SQL | null {
+function pageSql(filter: ReadFilter, take: number): SQL | null {
   const actors = filter.actors?.filter((actor) => actor.startsWith('user:') || actor.startsWith('token:'));
   if (actors?.length === 0) return null;
   const [at, number] = [bigint(filter.before?.at ?? MAX), bigint(filter.before?.number ?? MAX)];
-  // A place's: on Postgres its days alone, each day's streams in turn (`log_reads_at`); SQLite has no partitions, and
-  // reads each stream's index.
+  // A place's: its days alone, each day's streams in turn (`log_reads_at`).
   const place = filter.at;
   const streams = place !== undefined
-    ? (engine === 'postgres'
-      ? [sql`SELECT * FROM log_reads_at(CAST(${place.id} AS uuid), ${place.kind}, ${at}, ${number}, ${take})`]
-      : AT[place.kind].map((column) => sql`SELECT at, number FROM log_reads WHERE ${sql.raw(column)} = ${place.id} AND (at, number) < (${at}, ${number})
-          ORDER BY at DESC, number DESC LIMIT ${take}`))
+    ? [sql`SELECT * FROM log_reads_at(CAST(${place.id} AS uuid), ${place.kind}, ${at}, ${number}, ${take})`]
     : actors === undefined
       ? [sql`SELECT r.at, r.number FROM log_reads r WHERE (r.at, r.number) < (${at}, ${number}) ORDER BY r.at DESC, r.number DESC LIMIT ${take}`]
-      : actors.map((actor) => (engine === 'postgres'
-        ? sql`SELECT * FROM log_reads_by(${actor}, ${at}, ${number}, ${take})`
-        : sql`SELECT at, number FROM log_reads WHERE principal = ${actor} AND (at, number) < (${at}, ${number}) ORDER BY at DESC, number DESC LIMIT ${take}`));
+      : actors.map((actor) => sql`SELECT * FROM log_reads_by(${actor}, ${at}, ${number}, ${take})`);
   return sql`SELECT DISTINCT f.at, f.number FROM (${sql.join(streams.map((each) => sql`SELECT * FROM (${each}) s`), sql` UNION ALL `)}) f ORDER BY f.at DESC, f.number DESC LIMIT ${take}`;
 }
 
@@ -131,39 +117,24 @@ type Row = {
 };
 
 /** The reads `found` names, newest first, each with the names of what it names: lookups by primary key, a probe each. */
-function listed(engine: dialect.Engine, found: SQL): SQL {
-  const text = (column: string) => sql.raw(engine === 'postgres' ? `CAST(${column} AS text)` : column);
+function listed(found: SQL): SQL {
+  const text = (column: string) => sql.raw(`CAST(${column} AS text)`);
   // Each a probe of its row's key, `LIMIT 1` so that Postgres keeps it one: pulled up into a join, the planner may read a
   // table whole once its estimates grow (review r3: secrets read whole, 911 pages a page, then 2,139).
-  const join = (alias: string, select: SQL) => (engine === 'postgres' ? sql`LEFT JOIN LATERAL (${select} LIMIT 1) ${sql.raw(alias)} ON TRUE` : sql`LEFT JOIN (${select}) ${sql.raw(alias)}`);
-  if (engine === 'postgres') {
-    return sql`
-      SELECT c.number, c.at, ${text('c.credential')} AS credential, c.purpose, c.principal, ${text('c.secret')} AS secret, ${text('c.environment')} AS environment,
-        ${text('c.project')} AS project, ${text('c.place')} AS place, ${text('c.source')} AS source, ${text('c.source_environment')} AS source_environment,
-        ${text('c.source_project')} AS source_project, ${text('c.version')} AS version, c.mac,
-        k.key, k.project_slug, k.environment_slug, s.key AS source_key, s.project_slug AS source_project_slug, s.environment_slug AS source_environment_slug,
-        f.slug AS fork_slug, v.version AS version_number, m.client_id, m.client_name
-      FROM (${found}) t
-      CROSS JOIN LATERAL (SELECT * FROM log_reads x WHERE x.at = t.at AND x.number = t.number LIMIT 1) c
-      ${join('k', sql`SELECT s.key, p.slug AS project_slug, e.slug AS environment_slug FROM secrets s JOIN projects p ON p.id = s.project_id JOIN environments e ON e.id = s.environment_id WHERE s.id = c.secret`)}
-      ${join('s', sql`SELECT s.key, p.slug AS project_slug, e.slug AS environment_slug FROM secrets s JOIN projects p ON p.id = s.project_id JOIN environments e ON e.id = s.environment_id WHERE s.id = c.source`)}
-      ${join('f', sql`SELECT slug FROM environments WHERE id = c.place`)}
-      ${join('v', sql`SELECT version FROM secret_versions WHERE id = c.version`)}
-      ${join('m', sql`SELECT client_id, client_name FROM mcp_connections WHERE id = c.credential AND c.purpose >= 512 AND c.purpose < 1024`)}
-      ORDER BY c.at DESC, c.number DESC`;
-  }
-  void join;
+  const join = (alias: string, select: SQL) => sql`LEFT JOIN LATERAL (${select} LIMIT 1) ${sql.raw(alias)} ON TRUE`;
   return sql`
-    SELECT c.number, c.at, c.credential, c.purpose, c.principal, c.secret, c.environment, c.project, c.place, c.source, c.source_environment, c.source_project, c.version, c.mac,
-      ks.key, kp.slug AS project_slug, ke.slug AS environment_slug, ss.key AS source_key, sp.slug AS source_project_slug, se.slug AS source_environment_slug,
+    SELECT c.number, c.at, ${text('c.credential')} AS credential, c.purpose, c.principal, ${text('c.secret')} AS secret, ${text('c.environment')} AS environment,
+      ${text('c.project')} AS project, ${text('c.place')} AS place, ${text('c.source')} AS source, ${text('c.source_environment')} AS source_environment,
+      ${text('c.source_project')} AS source_project, ${text('c.version')} AS version, c.mac,
+      k.key, k.project_slug, k.environment_slug, s.key AS source_key, s.project_slug AS source_project_slug, s.environment_slug AS source_environment_slug,
       f.slug AS fork_slug, v.version AS version_number, m.client_id, m.client_name
     FROM (${found}) t
-    JOIN log_reads c ON c.at = t.at AND c.number = t.number
-    LEFT JOIN secrets ks ON ks.id = c.secret LEFT JOIN projects kp ON kp.id = ks.project_id LEFT JOIN environments ke ON ke.id = ks.environment_id
-    LEFT JOIN secrets ss ON ss.id = c.source LEFT JOIN projects sp ON sp.id = ss.project_id LEFT JOIN environments se ON se.id = ss.environment_id
-    LEFT JOIN environments f ON f.id = c.place
-    LEFT JOIN secret_versions v ON v.id = c.version
-    LEFT JOIN mcp_connections m ON m.id = c.credential AND c.purpose >= 512 AND c.purpose < 1024
+    CROSS JOIN LATERAL (SELECT * FROM log_reads x WHERE x.at = t.at AND x.number = t.number LIMIT 1) c
+    ${join('k', sql`SELECT s.key, p.slug AS project_slug, e.slug AS environment_slug FROM secrets s JOIN projects p ON p.id = s.project_id JOIN environments e ON e.id = s.environment_id WHERE s.id = c.secret`)}
+    ${join('s', sql`SELECT s.key, p.slug AS project_slug, e.slug AS environment_slug FROM secrets s JOIN projects p ON p.id = s.project_id JOIN environments e ON e.id = s.environment_id WHERE s.id = c.source`)}
+    ${join('f', sql`SELECT slug FROM environments WHERE id = c.place`)}
+    ${join('v', sql`SELECT version FROM secret_versions WHERE id = c.version`)}
+    ${join('m', sql`SELECT client_id, client_name FROM mcp_connections WHERE id = c.credential AND c.purpose >= 512 AND c.purpose < 1024`)}
     ORDER BY c.at DESC, c.number DESC`;
 }
 
@@ -225,12 +196,11 @@ export async function readsStanding(db: Queryable): Promise<ReadsStanding> {
  * r6).
  */
 export async function readsPageStanding(db: Queryable, filter: ReadFilter): Promise<{ rows: ListedRead[]; more: boolean; standing: ReadsStanding }> {
-  const engine = dialect.engineOf(db);
   const take = filter.limit + 1;
-  const found = pageSql(engine, filter, take);
+  const found = pageSql(filter, take);
   const rows = await dialect.rowsOf<Row & StandingRow>(db, found === null
     ? standingSql()
-    : sql`SELECT st.*, p.* FROM (${standingSql()}) st LEFT JOIN (${listed(engine, found)}) p ON TRUE ORDER BY p.at DESC, p.number DESC`);
+    : sql`SELECT st.*, p.* FROM (${standingSql()}) st LEFT JOIN (${listed(found)}) p ON TRUE ORDER BY p.at DESC, p.number DESC`);
   const listedRows = rows.filter((row) => row.number !== null && row.number !== undefined);
   return { rows: listedRows.slice(0, filter.limit).map(read), more: listedRows.length > filter.limit, standing: standingOf(rows[0]) };
 }
@@ -242,19 +212,15 @@ export async function readsPageStanding(db: Queryable, filter: ReadFilter): Prom
  * a probe of each day the log holds. What an offboarding report weighs
  * (`memberActivity`). Like 0.14's report, it reads every read of theirs.
  */
-function readsBySql(db: Queryable, members: readonly string[]): SQL {
-  const engine = dialect.engineOf(db);
-  const text = (column: string) => sql.raw(engine === 'postgres' ? `CAST(${column} AS text)` : column);
+function readsBySql(members: readonly string[]): SQL {
+  const text = (column: string) => sql.raw(`CAST(${column} AS text)`);
   const named = sql.join(members.map((member) => sql`${member}`), sql`, `);
-  // On Postgres each of the member's days reads its own partition, a day at a time: `OFFSET 0` keeps the lateral a loop
+  // Each of the member's days reads its own partition, a day at a time: `OFFSET 0` keeps the lateral a loop
   // over the days, whose bounds prune the partitions as it runs; flattened into a join, the planner may read every
-  // day's partition first (review r8: 80 buffers, then 322 with 100 newer days of others' reads). SQLite has no
-  // partitions to read.
-  const reads = engine === 'postgres'
-    ? sql`log_read_days d CROSS JOIN LATERAL (
+  // day's partition first (review r8: 80 buffers, then 322 with 100 newer days of others' reads).
+  const reads = sql`log_read_days d CROSS JOIN LATERAL (
         SELECT r.principal, r.source, r.secret, r.version, r.at FROM log_reads r
-         WHERE r.principal = d.principal AND r.at >= CAST(d.day AS bigint) * 86400000 AND r.at < (CAST(d.day AS bigint) + 1) * 86400000 OFFSET 0) r`
-    : sql`log_read_days d JOIN log_reads r ON r.principal = d.principal AND r.at >= d.day * 86400000 AND r.at < (d.day + 1) * 86400000`;
+         WHERE r.principal = d.principal AND r.at >= CAST(d.day AS bigint) * 86400000 AND r.at < (CAST(d.day AS bigint) + 1) * 86400000 OFFSET 0) r`;
   return sql`
     SELECT r.principal AS actor, ${text('coalesce(r.source, r.secret)')} AS secret, v.version, max(r.at) AS read_at
       FROM ${reads}
@@ -270,7 +236,7 @@ const byRows = (rows: readonly ByRow[]) => rows.filter((row) => row.actor !== nu
 export async function readsBy(db: Queryable, actors: readonly string[]): Promise<{ actor: string; secret: string; version: number; at: number }[]> {
   const members = membersOf(actors);
   if (members.length === 0) return [];
-  return byRows(await dialect.rowsOf<ByRow>(db, readsBySql(db, members)));
+  return byRows(await dialect.rowsOf<ByRow>(db, readsBySql(members)));
 }
 
 /**
@@ -283,6 +249,6 @@ export async function readsByStanding(db: Queryable, actors: readonly string[]):
   const members = membersOf(actors);
   const rows = await dialect.rowsOf<StandingRow & ByRow>(db, members.length === 0
     ? standingSql()
-    : sql`SELECT st.*, g.* FROM (${standingSql()}) st LEFT JOIN (${readsBySql(db, members)}) g ON TRUE`);
+    : sql`SELECT st.*, g.* FROM (${standingSql()}) st LEFT JOIN (${readsBySql(members)}) g ON TRUE`);
   return { reads: byRows(rows.map((row) => ({ actor: row.actor ?? null, secret: row.secret ?? null, version: row.version ?? null, read_at: row.read_at ?? null }))), standing: standingOf(rows[0]) };
 }

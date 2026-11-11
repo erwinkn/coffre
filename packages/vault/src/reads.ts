@@ -60,7 +60,7 @@ export class CursorGone extends Error {
 /** A way in's or key's object as the log holds it, for a projection: a change of it, whole, for its MAC; null for none. */
 export type Sealed = LogEntry | null;
 
-/** What the projector needs of the database (log-store.ts, on both engines). */
+/** What the projector needs of the database (log-store.ts). */
 export type ReadsStore = Pick<LogReader, 'tiles'> & {
   readsCursor(): Promise<ReadsCursor>;
   /** The log's rotations of the vault's signing key (T168) and its newest pair, in one statement: each key it replaced bounded by them (keyring.ts). */

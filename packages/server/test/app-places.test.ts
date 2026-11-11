@@ -18,7 +18,6 @@ import { SigninService } from '../src/api/signin.ts';
 import { resolvePath } from '../src/db/queries.ts';
 import { auditLog, environments, logChanges, checkpointFence, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
-import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
 import { clientFor, contextFor, credentialsLogged, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
@@ -36,10 +35,9 @@ after(async () => {
   await db.close();
 });
 
-/** 0.15's log on, and its use path, over the hot login (the same file on SQLite). */
+/** 0.15's log on, and its use path, over the hot login. */
 function vault015() {
-  const hotDatabase = TEST_ENGINE === 'postgres' ? TEST_HOT_DATABASE_URL : process.env.COFFRE_TEST_DATABASE_URL!;
-  return testVault([ROOT], { hotDatabase }, undefined, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
+  return testVault([ROOT], { hotDatabase: TEST_HOT_DATABASE_URL }, undefined, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
 }
 
 /** The instance, with `log`'s vault, and a sign-in, which issues tokens. */
@@ -47,10 +45,8 @@ async function instance(vault: ReturnType<typeof testVault>): Promise<void> {
   await resetDatabase(db.owner);
   // Uses go in today's partition, at or past the floor of `at` (schema 0022), as a deployment's checkpointer keeps them.
   await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
-  if (TEST_ENGINE === 'postgres') {
-    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-    await db.owner.execute(sql`SELECT make_day(${day(Date.now() - 86_400_000)}::date), make_day(${day(Date.now())}::date), make_day(${day(Date.now() + 86_400_000)}::date)`);
-  }
+  const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  await db.owner.execute(sql`SELECT make_day(${day(Date.now() - 86_400_000)}::date), make_day(${day(Date.now())}::date), make_day(${day(Date.now() + 86_400_000)}::date)`);
   deps = testDeps(db.runtime, [ROOT], { vault });
   deps.signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: SIGNIN });
   root = clientFor(deps, ROOT);
@@ -571,12 +567,11 @@ async function archivedAndBack(archive: () => Promise<unknown>): Promise<void> {
   await inputsLogged();
 }
 
-const ORDERED = postgresOnly('the order of two writes is held on the log head\'s row lock');
 
-test('a key archived and unarchived by others while `secrets.update` archives it: the transaction finds it live, and reads again', ORDERED, () =>
+test('a key archived and unarchived by others while `secrets.update` archives it: the transaction finds it live, and reads again', () =>
   archivedAndBack(() => root.secrets.update('market/dev/A', { archived: true })));
 
-test('a key archived and unarchived by others while `secrets.set` archives it: the transaction finds it live, and reads again', ORDERED, () =>
+test('a key archived and unarchived by others while `secrets.set` archives it: the transaction finds it live, and reads again', () =>
   archivedAndBack(() => root.secrets.set('market/dev', { A: null })));
 
 async function until(condition: () => Promise<boolean>, what: string): Promise<void> {

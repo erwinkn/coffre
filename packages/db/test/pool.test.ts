@@ -17,10 +17,9 @@ import { HyperdrivePool } from '../src/hyperdrive.ts';
 import postgres, { type TransactionSql } from '../src/postgres-js/index.ts';
 import { postgresClient, postgresOptions, postgresSession, SessionLost } from '../src/postgres.ts';
 
-const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only' : false;
 const DATABASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 
-test('a statement takes the connection idle the shortest: one after another, they keep to one backend', { skip }, async () => {
+test('a statement takes the connection idle the shortest: one after another, they keep to one backend', async () => {
   const client = postgresClient(DATABASE, { max: 4 });
   try {
     // Four connections open at once, then idle.
@@ -34,7 +33,7 @@ test('a statement takes the connection idle the shortest: one after another, the
   }
 });
 
-test('a Node process done with its queries exits at once: its idle connections hold it open no longer, its statements until they answer', { skip }, async () => {
+test('a Node process done with its queries exits at once: its idle connections hold it open no longer, its statements until they answer', async () => {
   // As openDatabase opens a pool: closed after 10 s idle, which held a process open as long, a stopped server's too.
   const script = `
     const { postgresClient } = await import(${JSON.stringify(new URL('../src/postgres.ts', import.meta.url).href)});
@@ -72,7 +71,7 @@ test('a Node process done with its queries exits at once: its idle connections h
   assert.ok(seconds < 5, `the process exited ${seconds.toFixed(1)} s after it started, its two connections idle`);
 });
 
-test("a transaction's BEGIN queued behind as many statements as a connection pipelines still learns its connection, and ends its transaction", { skip }, async () => {
+test("a transaction's BEGIN queued behind as many statements as a connection pipelines still learns its connection, and ends its transaction", async () => {
   // Two at most in flight on the connection: the BEGIN goes behind two.
   const client = postgres({ ...postgresOptions(DATABASE), max: 1, max_pipeline: 2, onnotice: () => {} });
   try {
@@ -91,7 +90,7 @@ test("a transaction's BEGIN queued behind as many statements as a connection pip
   }
 });
 
-test('a session lost between statements refuses the next, rather than dial a connection that holds none of what it set', { skip }, async () => {
+test('a session lost between statements refuses the next, rather than dial a connection that holds none of what it set', async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   const session = postgresSession(DATABASE, { application_name: 'coffre-session-test' });
   try {
@@ -117,7 +116,7 @@ test('a session lost between statements refuses the next, rather than dial a con
   }
 });
 
-test('a connection lost under a query: the query fails, and the client closes without another query to open it again', { skip, timeout: 10_000 }, async () => {
+test('a connection lost under a query: the query fails, and the client closes without another query to open it again', { timeout: 10_000 }, async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   try {
     for (const client of [postgresClient(DATABASE, { max: 2, application_name: 'coffre-lost-test' }), new HyperdrivePool(DATABASE)]) {
@@ -186,7 +185,7 @@ test('a client closed while its connection opens, then hung up on, closes', { ti
   }
 });
 
-test("a URL's bounds reach the server as the connection starts, as node-postgres sent them", { skip }, async () => {
+test("a URL's bounds reach the server as the connection starts, as node-postgres sent them", async () => {
   const client = postgresClient(`${DATABASE}?statement_timeout=1234&lock_timeout=567&idle_in_transaction_session_timeout=89000`, { max: 1 });
   try {
     const [row] = await client.unsafe("select current_setting('statement_timeout') as statement, current_setting('lock_timeout') as lock, current_setting('idle_in_transaction_session_timeout') as idle");
@@ -196,7 +195,7 @@ test("a URL's bounds reach the server as the connection starts, as node-postgres
   }
 });
 
-test('a client ending when its connection is cut opens no other for what waited: those fail, and the client closes', { skip, timeout: 10_000 }, async () => {
+test('a client ending when its connection is cut opens no other for what waited: those fail, and the client closes', { timeout: 10_000 }, async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   // One connection, one statement on it at a time: the second waits on the connection, the third for one.
   const client = postgres({ ...postgresOptions(DATABASE), max: 1, max_pipeline: 1, onnotice: () => {}, connection: { application_name: 'coffre-ending-test' } });
@@ -224,7 +223,7 @@ test('a client ending when its connection is cut opens no other for what waited:
   }
 });
 
-test('an ending client reserves no connection; one reserved before, released after, ends with it', { skip, timeout: 10_000 }, async () => {
+test('an ending client reserves no connection; one reserved before, released after, ends with it', { timeout: 10_000 }, async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   const backends = async () => ((await owner.unsafe("select count(*)::int as n from pg_stat_activity where application_name = 'coffre-reserve-test'")) as unknown as [{ n: number }])[0].n;
   try {
@@ -252,7 +251,7 @@ test('an ending client reserves no connection; one reserved before, released aft
   }
 });
 
-test("a connection cut while it answers leaves nothing of that answer to the next query: its error, its rows", { skip, timeout: 15_000 }, async () => {
+test("a connection cut while it answers leaves nothing of that answer to the next query: its error, its rows", { timeout: 15_000 }, async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   const client = postgresClient(DATABASE, { max: 1, application_name: 'coffre-cut-test' });
   try {
@@ -351,7 +350,7 @@ test('an opening the client cannot finish fails its query and closes, with nothi
   }
 });
 
-test('a COPY reaching the client fails, and leaves the connection to the next statement', { skip }, async () => {
+test('a COPY reaching the client fails, and leaves the connection to the next statement', async () => {
   const client = postgresClient(DATABASE, { max: 1 });
   try {
     await assert.rejects(client.unsafe('copy (select 1) to stdout'), { code: 'COPY_NOT_SUPPORTED' });
@@ -363,7 +362,7 @@ test('a COPY reaching the client fails, and leaves the connection to the next st
   }
 });
 
-test('a BEGIN that fails runs none of its transaction outside it: not the statements sent with it, nor any after', { skip }, async () => {
+test('a BEGIN that fails runs none of its transaction outside it: not the statements sent with it, nor any after', async () => {
   const sent: string[] = [];
   const client = postgres({ ...postgresOptions(DATABASE), max: 1, onnotice: () => {}, debug: (_: number, text: string, values: unknown[]) => void sent.push([text, ...values].join(' ')) });
   try {
@@ -394,7 +393,7 @@ test('a BEGIN that fails runs none of its transaction outside it: not the statem
   }
 });
 
-test('a transaction that asks nothing sends nothing, and one that asks sends BEGIN with its first statement', { skip }, async () => {
+test('a transaction that asks nothing sends nothing, and one that asks sends BEGIN with its first statement', async () => {
   const sent: string[] = [];
   const client = postgres({ ...postgresOptions(DATABASE), max: 1, onnotice: () => {}, debug: (_: number, text: string) => void sent.push(text) });
   try {
@@ -443,7 +442,7 @@ async function cutWhileAsleep(owner: ReturnType<typeof postgresClient>, name: st
   await owner.unsafe('select pg_terminate_backend(pid) from pg_stat_activity where application_name = $1 and datname = current_database()', [name]);
 }
 
-test('a first statement that cannot be written takes its BEGIN with it, and what was asked beside it is not sent', { skip }, async () => {
+test('a first statement that cannot be written takes its BEGIN with it, and what was asked beside it is not sent', async () => {
   const { client, sent } = sending('coffre-unwritten');
   try {
     await client.unsafe('create temporary table kept (n int)');
@@ -456,7 +455,7 @@ test('a first statement that cannot be written takes its BEGIN with it, and what
   }
 });
 
-test('a statement asked of a transaction once it has ended is not sent, so it opens no transaction on the pool\'s connection', { skip }, async () => {
+test('a statement asked of a transaction once it has ended is not sent, so it opens no transaction on the pool\'s connection', async () => {
   const { client, sent } = sending('coffre-late');
   const other = postgresClient(DATABASE, { max: 1 });
   try {
@@ -478,7 +477,7 @@ test('a statement asked of a transaction once it has ended is not sent, so it op
   }
 });
 
-test('a connection cut under a transaction, in a statement or its COMMIT: nothing more of it is sent, and the next transaction is whole', { skip, timeout: 30_000 }, async () => {
+test('a connection cut under a transaction, in a statement or its COMMIT: nothing more of it is sent, and the next transaction is whole', { timeout: 30_000 }, async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   const { client, sent } = sending('coffre-tx-cut');
   try {
@@ -522,7 +521,7 @@ test('a connection cut under a transaction, in a statement or its COMMIT: nothin
   }
 });
 
-test('a transaction under way when its client is asked to end commits whole, and the client ends after it', { skip }, async () => {
+test('a transaction under way when its client is asked to end commits whole, and the client ends after it', async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   const { client } = sending('coffre-tx-ending');
   try {
@@ -543,7 +542,7 @@ test('a transaction under way when its client is asked to end commits whole, and
   }
 });
 
-test('a transaction begins as asked: its mode, a savepoint first, a statement described first', { skip }, async () => {
+test('a transaction begins as asked: its mode, a savepoint first, a statement described first', async () => {
   const { client, sent } = sending('coffre-tx-forms');
   try {
     await client.unsafe('create temporary table forms (n int)');
@@ -562,7 +561,7 @@ test('a transaction begins as asked: its mode, a savepoint first, a statement de
   }
 });
 
-test('a held connection whose lifetime ends meanwhile closes once given back, and the client ends', { skip, timeout: 10_000 }, async () => {
+test('a held connection whose lifetime ends meanwhile closes once given back, and the client ends', { timeout: 10_000 }, async () => {
   for (const hold of ['transaction', 'reserve'] as const) {
     const client = postgres({ ...postgresOptions(DATABASE), max: 1, max_lifetime: 0.2, onnotice: () => {} });
     if (hold === 'transaction') {
@@ -576,7 +575,7 @@ test('a held connection whose lifetime ends meanwhile closes once given back, an
   }
 });
 
-test('a transaction fails as its statements did, waited for or not, and keeps none of them', { skip }, async () => {
+test('a transaction fails as its statements did, waited for or not, and keeps none of them', async () => {
   const { client } = sending('coffre-tx-failed');
   try {
     await client.unsafe('create temporary table failed (n int)');
@@ -603,7 +602,7 @@ test('a transaction fails as its statements did, waited for or not, and keeps no
   }
 });
 
-test('one connection: the pool\'s statements around a transaction stay out of it, and what waits behind its BEGIN is all of it', { skip }, async () => {
+test('one connection: the pool\'s statements around a transaction stay out of it, and what waits behind its BEGIN is all of it', async () => {
   const client = postgres({ ...postgresOptions(DATABASE), max: 1, max_pipeline: 2, onnotice: () => {} });
   try {
     await client.unsafe('create temporary table around (n int)');
@@ -623,7 +622,7 @@ test('one connection: the pool\'s statements around a transaction stay out of it
   }
 });
 
-test('what a transaction\'s work asks once its end is decided is not sent: not behind its COMMIT, not behind its ROLLBACK', { skip }, async () => {
+test('what a transaction\'s work asks once its end is decided is not sent: not behind its COMMIT, not behind its ROLLBACK', async () => {
   const { client, sent } = sending('coffre-tx-decided');
   try {
     await client.unsafe('drop table if exists decided');
@@ -668,7 +667,7 @@ test('what a transaction\'s work asks once its end is decided is not sent: not b
   }
 });
 
-test('a statement the client cannot write, left unwaited behind the first, rolls the transaction back', { skip }, async () => {
+test('a statement the client cannot write, left unwaited behind the first, rolls the transaction back', async () => {
   const { client } = sending('coffre-tx-unwritable');
   try {
     await client.unsafe('create temporary table unwritable (n int)');
@@ -683,7 +682,7 @@ test('a statement the client cannot write, left unwaited behind the first, rolls
   }
 });
 
-test('a transaction Postgres did not commit whole does not resolve: a savepoint\'s failure left behind, its work cut short', { skip }, async () => {
+test('a transaction Postgres did not commit whole does not resolve: a savepoint\'s failure left behind, its work cut short', async () => {
   const { client } = sending('coffre-tx-whole');
   try {
     await client.unsafe('create temporary table whole (n int)');
@@ -715,7 +714,7 @@ test('a transaction Postgres did not commit whole does not resolve: a savepoint\
   }
 });
 
-test('a connection cut as a transaction\'s BEGIN goes: nothing of it runs, and the pool\'s next statement runs on the next connection', { skip, timeout: 30_000 }, async () => {
+test('a connection cut as a transaction\'s BEGIN goes: nothing of it runs, and the pool\'s next statement runs on the next connection', { timeout: 30_000 }, async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   const { client, sent } = sending('coffre-tx-cut-begin');
   try {
@@ -737,7 +736,7 @@ test('a connection cut as a transaction\'s BEGIN goes: nothing of it runs, and t
   }
 });
 
-test('a transaction\'s error says what failed: a first statement\'s syntax, the failure that aborted it after a savepoint', { skip }, async () => {
+test('a transaction\'s error says what failed: a first statement\'s syntax, the failure that aborted it after a savepoint', async () => {
   const { client } = sending('coffre-tx-blame');
   try {
     // Parsed with its BEGIN, in one Query message: the statement's, where in it.
@@ -766,7 +765,7 @@ function laterOn(tx: TransactionSql, text: string, values: unknown[] = []): void
   query.execute();
 }
 
-test("a COMMIT goes with the writes left to `later` only if each can go in their group: one the client cannot send fails the transaction, which keeps nothing (review r1 of #452)", { skip, timeout: 15_000 }, async () => {
+test("a COMMIT goes with the writes left to `later` only if each can go in their group: one the client cannot send fails the transaction, which keeps nothing (review r1 of #452)", { timeout: 15_000 }, async () => {
   const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
   try {
     await client.unsafe('create temporary table alone (n int)');
@@ -783,7 +782,7 @@ test("a COMMIT goes with the writes left to `later` only if each can go in their
   }
 });
 
-test("a group the client cannot write, its COMMIT in it, rolls the transaction back: the connection goes back to the pool idle (review r1 of #452)", { skip, timeout: 15_000 }, async () => {
+test("a group the client cannot write, its COMMIT in it, rolls the transaction back: the connection goes back to the pool idle (review r1 of #452)", { timeout: 15_000 }, async () => {
   const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
   const other = postgres({ ...postgresOptions(DATABASE), max: 1 });
   try {
@@ -804,7 +803,7 @@ test("a group the client cannot write, its COMMIT in it, rolls the transaction b
   }
 });
 
-test("no COMMIT goes with the writes left to `later` while a statement something awaits is unanswered: what it asks after is refused, and the transaction rolls back (review r1 of #452)", { skip, timeout: 15_000 }, async () => {
+test("no COMMIT goes with the writes left to `later` while a statement something awaits is unanswered: what it asks after is refused, and the transaction rolls back (review r1 of #452)", { timeout: 15_000 }, async () => {
   const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
   try {
     await client.unsafe('create temporary table pending (n int)');
@@ -826,7 +825,7 @@ test("no COMMIT goes with the writes left to `later` while a statement something
   }
 });
 
-test("a statement left to `later` whose answer the client cannot read, once Postgres ran it, fails alone: the COMMIT behind it stands, and the transaction says it committed (reviews r5, r6 of #452)", { skip, timeout: 15_000 }, async () => {
+test("a statement left to `later` whose answer the client cannot read, once Postgres ran it, fails alone: the COMMIT behind it stands, and the transaction says it committed (reviews r5, r6 of #452)", { timeout: 15_000 }, async () => {
   const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
   try {
     await client.unsafe('create temporary table unread (n int)');
@@ -859,7 +858,7 @@ test("a statement left to `later` whose answer the client cannot read, once Post
   }
 });
 
-test("an empty statement in a group answers in its place: each result and error stays its own statement's (review r5 of #452)", { skip, timeout: 15_000 }, async () => {
+test("an empty statement in a group answers in its place: each result and error stays its own statement's (review r5 of #452)", { timeout: 15_000 }, async () => {
   const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
   try {
     const answers = await client.begin((tx) => Promise.all([tx.unsafe('-- nothing', [], { simple: false }), tx.unsafe('select 7 as n', [], { simple: false })]));
@@ -874,7 +873,7 @@ test("an empty statement in a group answers in its place: each result and error 
   }
 });
 
-test("a COMMIT folded with `later` writes is settled by Postgres's command: one the client failed to read with it (a notice's callback) still committed (review r7 of #452)", { skip, timeout: 15_000 }, async () => {
+test("a COMMIT folded with `later` writes is settled by Postgres's command: one the client failed to read with it (a notice's callback) still committed (review r7 of #452)", { timeout: 15_000 }, async () => {
   const client = postgres({ ...postgresOptions(DATABASE), max: 1, onnotice: () => {
     throw new Error('notice callback failed');
   } });
@@ -893,7 +892,7 @@ test("a COMMIT folded with `later` writes is settled by Postgres's command: one 
   }
 });
 
-test("a pool's group of reads fails whole when the client cannot read one of their answers, never answering part of it (review r7 of #452)", { skip, timeout: 15_000 }, async () => {
+test("a pool's group of reads fails whole when the client cannot read one of their answers, never answering part of it (review r7 of #452)", { timeout: 15_000 }, async () => {
   const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
   const integers = client.options.parsers[23]!;
   client.options.parsers[23] = (x: string) => {
@@ -908,7 +907,7 @@ test("a pool's group of reads fails whole when the client cannot read one of the
   }
 });
 
-test("a transaction's statements go in the order they were started, whatever order they were built in (review r7 of #452)", { skip, timeout: 15_000 }, async () => {
+test("a transaction's statements go in the order they were started, whatever order they were built in (review r7 of #452)", { timeout: 15_000 }, async () => {
   const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
   try {
     await client.unsafe('create temporary table started (n int)');

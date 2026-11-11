@@ -8,7 +8,7 @@ import { and, desc, eq, gte, lte, min, or } from 'drizzle-orm';
 
 import { appendAudit, CHAIN_WALK, type AuditEntry } from '../src/db/audit.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
-import { postgresOnly, withLogUnlocked } from './db/engine.ts';
+import { withLogUnlocked } from './db/engine.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
 import { acceptAuditLoss } from '../src/api/audit.ts';
 import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault } from './api-fixture.ts';
@@ -97,7 +97,7 @@ test('an entry in the vault\'s name that the vault did not write fails verificat
   });
 });
 
-test('the app\'s login cannot write an entry in the vault\'s name at all', postgresOnly('logins are Postgres\'s'), async () => {
+test('the app\'s login cannot write an entry in the vault\'s name at all', async () => {
   await write(1);
   await assert.rejects(forgeVaultEntry(db.runtime), (error) => /row-level security/.test(`${error} ${(error as { cause?: unknown }).cause}`));
 });

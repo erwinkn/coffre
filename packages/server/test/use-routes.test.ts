@@ -4,7 +4,7 @@
 // a whole environment (a reference, a plain value, a fork's inherited keys), the credential proxy's use, sign and verify
 // on a person's handle, and a CI run's sign-in then its read. Each runs with the switch off too, which logs 0.14's
 // entries and no use. With it on, every live answer is the replay's (R53), and a checkpointer on the vault's seed seals
-// every use (T128). On both engines.
+// every use (T128).
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac, generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';

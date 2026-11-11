@@ -1,6 +1,6 @@
 // The vault makes and ends credentials itself (T149; credentials.ts; migration 0034): a sign-in through a trust binding
 // (`sign_in`) and a revoke (`revoke_credential`), each one statement. Each case names the part of formal/Lifecycle.tla
-// it holds, and runs on both engines unless it says otherwise: SQLite runs each function's twin, under its one writer.
+// it holds.
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,7 +21,7 @@ import { objectKey, sealKey, sealOf } from '../src/inputs.ts';
 import { authentic, changeEntry, entryMac, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
 import { credentialObject } from '../src/objects.ts';
-import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, nothingHeld, withLogUnlocked, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, sealed, nothingHeld, withLogUnlocked, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const CI = 'token:ci';
@@ -222,7 +222,7 @@ test("nothing counts a binding's credentials: with 60 made this minute, the 61st
   assert.ok((await w.vault.signIn!(asked(w))).ok);
 });
 
-test("a sign-in shares its binding's row (FOR KEY SHARE), and skips stamping its last use while another stamps it (SKIP LOCKED): it waits for neither (W331)", postgresOnly('row locks'), async () => {
+test("a sign-in shares its binding's row (FOR KEY SHARE), and skips stamping its last use while another stamps it (SKIP LOCKED): it waits for neither (W331)", async () => {
   const w = await world();
   const { serviceBindings } = tablesOf(db.owner);
   const old = new Date(Date.now() - 120_000);
@@ -269,7 +269,7 @@ test('what the vault decides is the binding\'s: a scope the app names otherwise,
   assert.deepEqual((await written()).credentials, 0);
 });
 
-test('a sign-in takes the issue lock, never the fence: it commits while a change holds the fence exclusive (IssueOffFence, R58)', postgresOnly('the fence is an advisory lock'), async () => {
+test('a sign-in takes the issue lock, never the fence: it commits while a change holds the fence exclusive (IssueOffFence, R58)', async () => {
   const w = await world();
   const holder = postgresSession(OWNER_URL);
   try {
@@ -283,7 +283,7 @@ test('a sign-in takes the issue lock, never the fence: it commits while a change
   }
 });
 
-test("a sign-in that waits on its account's row while a change to it commits goes ahead on the change: the newest change is compared once the lock is had, `moved`, and read again (T192)", postgresOnly('row locks'), async () => {
+test("a sign-in that waits on its account's row while a change to it commits goes ahead on the change: the newest change is compared once the lock is had, `moved`, and read again (T192)", async () => {
   const w = await world();
   const holder = postgresSession(OWNER_URL);
   try {
@@ -308,7 +308,7 @@ test("a sign-in that waits on its account's row while a change to it commits goe
   }
 });
 
-test("a sign-in that waits over a second for its binding's row is refused busy at once, nothing written (R44)", postgresOnly('lock_timeout'), async () => {
+test("a sign-in that waits over a second for its binding's row is refused busy at once, nothing written (R44)", async () => {
   const w = await world();
   const holder = postgresSession(OWNER_URL);
   try {
@@ -365,7 +365,7 @@ test("a revoke is one change of the log, from the row's seal, the app's MAC writ
   assert.deepEqual(await w.vault.revokeCredential!(input), { ok: false, refused: 'moved' });
 });
 
-test("a revoke takes 0.14's head first, which 0.14's use of the credential holds from its check to its commit: it writes no 0.14 entry, so no use of 0.14's goes on past it (EntryLessHead, PR 9b)", postgresOnly("0.14's head is a row lock of Postgres"), async () => {
+test("a revoke takes 0.14's head first, which 0.14's use of the credential holds from its check to its commit: it writes no 0.14 entry, so no use of 0.14's goes on past it (EntryLessHead, PR 9b)", async () => {
   const w = await world();
   const made = await signedIn(w);
   const holder = postgresSession(OWNER_URL);
@@ -384,7 +384,7 @@ test("a revoke takes 0.14's head first, which 0.14's use of the credential holds
   }
 });
 
-test("a revoke waits for the fence LOCK_WAIT_MS at most, then is busy, nothing written: the uses that ask after it are not held back a use's whole wait (R75, migration 0078)", postgresOnly('lock_timeout'), async () => {
+test("a revoke waits for the fence LOCK_WAIT_MS at most, then is busy, nothing written: the uses that ask after it are not held back a use's whole wait (R75, migration 0078)", async () => {
   const w = await world();
   const made = await signedIn(w);
   const holder = postgresSession(OWNER_URL);
@@ -502,7 +502,7 @@ test("a sign-in refuses an account's row put back with a seal its log has moved 
   assert.deepEqual(await written(), none);
 });
 
-test('a revoke takes the fence exclusive, for its own work alone: it waits for a use holding it shared, then commits (RevokeTakesFence)', postgresOnly('the fence is an advisory lock'), async () => {
+test('a revoke takes the fence exclusive, for its own work alone: it waits for a use holding it shared, then commits (RevokeTakesFence)', async () => {
   const w = await world();
   const made = await signedIn(w);
   const holder = postgresSession(OWNER_URL);

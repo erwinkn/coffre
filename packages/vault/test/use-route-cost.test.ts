@@ -15,7 +15,7 @@ import { GATE_ROLES } from '../src/decide.ts';
 import { purposeCode } from '../src/log-replay.ts';
 import { newRequestId } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
+import { HOT_URL, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
 import { CONFIG, emptyLog, LOG_015, useDatabases } from './use-world.ts';
 import { inBulkPeriod } from './window-fixture.ts';
@@ -76,7 +76,7 @@ async function grow(total: number): Promise<void> {
   await run(db.owner, sql`VACUUM ANALYZE`);
 }
 
-test('R48: a route use is one statement on a warm map, its buffers the same at 10k and at 1M entries and at 1k and 10k environments, the route\'s named call\'s too (T205); its rows the same at 1 definition and at 256', { ...postgresOnly('the hot path'), timeout: 900_000 }, async () => {
+test('R48: a route use is one statement on a warm map, its buffers the same at 10k and at 1M entries and at 1k and 10k environments, the route\'s named call\'s too (T205); its rows the same at 1 definition and at 256', { timeout: 900_000 }, async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');
   const name = await w.nameOf(key);

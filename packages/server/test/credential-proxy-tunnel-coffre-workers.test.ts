@@ -4,7 +4,7 @@
 // with its queries, the migration door, the vault over its service binding,
 // and the plugin's admission, log entries and rechecks. The data is the
 // suite's, seeded from Node with the vault's and the log's keys, which the
-// Worker is given too. Postgres only.
+// Worker is given too.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -19,15 +19,12 @@ import { WebSocket } from 'ws';
 
 import { clientFor, LOG, usesLogged } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 import { db, deps, DEV, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 import { appClient, tunnelListener } from './tunnel-listener.ts';
 
-const skip = TEST_ENGINE !== 'postgres'
-  ? 'the tunnel reaches a Postgres database, over Hyperdrive'
-  : LOG === '0.14'
-    ? "the Worker's vault keeps 0.15's log, and the suite's instance, on 0.14's, is not cut over: its door would hold the tunnel"
-    : false;
+const skip = LOG === '0.14'
+  ? "the Worker's vault keeps 0.15's log, and the suite's instance, on 0.14's, is not cut over: its door would hold the tunnel"
+  : false;
 const NAME = 'coffre-tunnel-coffre-workers-test';
 
 let dir: string;

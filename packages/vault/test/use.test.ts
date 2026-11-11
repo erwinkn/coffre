@@ -1,5 +1,5 @@
-// 0.15's use path (docs/design/0.15-plan.md, PR 5), on both engines: fence-one's
-// cases (hot-path-one.md) against the real schema, each named for the part of
+// 0.15's use path (docs/design/0.15-plan.md, PR 5): fence-one's cases
+// (hot-path-one.md) against the real schema, each named for the part of
 // formal/HotPathOne.tla it holds. The change path is PR 4's, not built yet: the
 // owner plays it (use-world.ts). Every run's live answers are held to the
 // replay of the log (R53).
@@ -30,7 +30,7 @@ import { logStore } from '../src/log-store.ts';
 import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, useMany, type UsePath } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
-import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, postgresOnly, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
+import { HOT_URL, openTestDatabase, OWNER_URL, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, DAY, emptyLog, failing, FENCE, genesis, heldKeks, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, timingOut, until, useDatabases, world } from './use-world.ts';
 import { resolveVaultConfig } from '../src/config.ts';
 
@@ -137,7 +137,7 @@ test("a use the rules refuse is logged as its request all the same, and refused 
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 2);
 });
 
-test('StatementSnapshot: a use that waits behind a change reads what the change wrote, where a bare CTE reads what was before', postgresOnly('the fence'), async () => {
+test('StatementSnapshot: a use that waits behind a change reads what the change wrote, where a bare CTE reads what was before', async () => {
   const w = await world();
   const id = await w.key();
   const { use } = await isolate();
@@ -211,7 +211,7 @@ test('DeadlineChecked: a call past its deadline, or with one longer than 3 s, do
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 0);
 });
 
-test('DeadlineChecked, in Postgres: a use held past its deadline by its principal\'s lock writes nothing', postgresOnly('advisory locks'), async () => {
+test('DeadlineChecked, in Postgres: a use held past its deadline by its principal\'s lock writes nothing', async () => {
   const w = await world();
   const id = await w.key();
   const { use } = await isolate();
@@ -290,7 +290,7 @@ test('Unsealed = {}: each input put back from before its change is refused stale
   // The credential revoked, then put back as it was, with its old, valid seal.
   const revoked = { ...(w.objects.credential as Extract<Input, { kind: 'credential' }>), revoked: true };
   await change(credentialRef, { op: 'credential.revoke' }, revoked, async (tx, value) => {
-    await run(tx, sql`UPDATE credentials SET revoked_at = ${ENGINE === 'postgres' ? sql`now()` : sql`${Date.now()}`}, seal = ${value} WHERE id = ${w.credentialId}`);
+    await run(tx, sql`UPDATE credentials SET revoked_at = now(), seal = ${value} WHERE id = ${w.credentialId}`);
   });
   await run(db.owner, sql`UPDATE credentials SET revoked_at = NULL, seal = ${credentialBefore} WHERE id = ${w.credentialId}`);
   assert.equal(code(heard(await use(ask(w, id)))), 'stale');
@@ -351,12 +351,10 @@ test('the roles and the policy: a row put back is stale; the cap is the policy\'
   assert.equal(code(heard(await use(ask(w, first)))), 'tampered', 'its seal is not over the row any more');
   assert.equal((await rows(db.owner, sql`SELECT last FROM bulk_cap`)).length, 0);
   // A call made as decided, a row put back between its two calls: the cap is still the newest change's, one key in.
-  if (ENGINE === 'postgres') {
-    assert.equal((await call(db.owner, w, first, Date.now())).state, null);
-    assert.equal((await rows(db.owner, sql`SELECT last FROM bulk_cap`)).length, 1, 'the cap moved as the newest change says: one key in');
-    await call(db.owner, w, second, Date.now());
-    assert.equal((await rows(db.owner, sql`SELECT last FROM bulk_cap`)).length, 1, 'and the second was not let in');
-  }
+  assert.equal((await call(db.owner, w, first, Date.now())).state, null);
+  assert.equal((await rows(db.owner, sql`SELECT last FROM bulk_cap`)).length, 1, 'the cap moved as the newest change says: one key in');
+  await call(db.owner, w, second, Date.now());
+  assert.equal((await rows(db.owner, sql`SELECT last FROM bulk_cap`)).length, 1, 'and the second was not let in');
   assert.equal(code(heard(await use(ask(w, second)))), 'tampered');
   await replayAgrees();
 });
@@ -438,7 +436,7 @@ function held(connection: Awaited<ReturnType<TestDatabase['connect']>>, body: (t
 
 const within = (answer: Promise<unknown>, ms = 1000) => Promise.race([answer.then(() => 'answered'), sleep(ms).then(() => 'waiting')]);
 
-test('RefreshShared: uses moving one principal\'s keys on wait for none of one another; one entering a key waits for them all (T127)', postgresOnly('advisory locks'), async () => {
+test('RefreshShared: uses moving one principal\'s keys on wait for none of one another; one entering a key waits for them all (T127)', async () => {
   const w = await world();
   const [k1, k2, k3] = [await w.key(), await w.key(), await w.key()];
   const { use } = await isolate();
@@ -485,7 +483,7 @@ test('RefreshShared: uses moving one principal\'s keys on wait for none of one a
   assert.ok(await replayAgrees() >= 5);
 });
 
-test('RefreshShared after a rollback: the uses that waited elect one to move the key, and the rest wait for it alone (T127)', postgresOnly('advisory locks'), async () => {
+test('RefreshShared after a rollback: the uses that waited elect one to move the key, and the rest wait for it alone (T127)', async () => {
   const w = await world();
   const k1 = await w.key();
   assert.ok(heard(await (await isolate()).use(ask(w, k1))).ok);
@@ -523,7 +521,7 @@ test('RefreshShared after a rollback: the uses that waited elect one to move the
   assert.ok(await replayAgrees() >= 2);
 });
 
-test('every function plans and runs at the server\'s planner settings (T207): none sets jit, plan_cache_mode or an enable_*', postgresOnly('the planner'), async () => {
+test('every function plans and runs at the server\'s planner settings (T207): none sets jit, plan_cache_mode or an enable_*', async () => {
   // 0029 to 0062 turned JIT off on every function run as its owner, and held a few to a plan mode or away from a scan:
   // each statement is now one whose plan stands at the defaults, its estimate far below jit_above_cost
   // (docs/design/planner-defaults.md). A function that sets one of them again hides a plan that does not.
@@ -534,7 +532,7 @@ test('every function plans and runs at the server\'s planner settings (T207): no
   assert.deepEqual(set, []);
 });
 
-test('a use on a server whose bytes are written `escape` is decided as on any: the functions that answer text write them hex (T207)', postgresOnly('bytea_output'), async () => {
+test('a use on a server whose bytes are written `escape` is decided as on any: the functions that answer text write them hex (T207)', async () => {
   // The vault reads every seal and MAC in the functions' JSON as hex (`bytes`, write.ts). Postgres writes a bytea in
   // JSON as the session's `bytea_output` says, which a server, database or login may set to `escape`: "\\000\\377A"
   // where hex is "\\x00ff41". The functions set it for themselves; without, this use is refused as tampered.
@@ -555,7 +553,7 @@ test('a use on a server whose bytes are written `escape` is decided as on any: t
   }
 });
 
-test('a session\'s first call does its planning\'s cold work before it takes the fence (T131)', postgresOnly('the fence'), async () => {
+test('a session\'s first call does its planning\'s cold work before it takes the fence (T131)', async () => {
   const w = await world();
   const id = await w.key();
   // The indexes the four statements' plans choose among, which a session opens when it first plans them: its cold work,
@@ -848,7 +846,7 @@ test('a call whose timer has not fired by its deadline, as under a blocked loop,
   assert.equal(path.cache.inFlight, 0);
 });
 
-test("a place lapses no sooner than Postgres has ended what its call sent: the hot login's statement_timeout (T170)", postgresOnly('the hot login'), async () => {
+test("a place lapses no sooner than Postgres has ended what its call sent: the hot login's statement_timeout (T170)", async () => {
   const [setting] = await rows<{ statement_timeout: string }>(hot, sql`SHOW statement_timeout`);
   assert.equal(setting?.statement_timeout, `${HELD_PAST_DEADLINE_MS / 1000}s`);
 });
@@ -1175,8 +1173,7 @@ test('whole numbers past 2^53 come back exact, entry numbers included', async ()
   const w = await world();
   const id = await w.key();
   const big = 2n ** 53n + 100n;
-  if (ENGINE === 'postgres') await run(db.owner, sql`SELECT setval('log_number', ${big.toString()}::bigint)`);
-  else await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (${big}, ${Date.now()}, ${randomUUID()}, ${randomUUID()}, ${ROOT}, '{"op":"x"}', NULL, ${randomBytes(16)})`);
+  await run(db.owner, sql`SELECT setval('log_number', ${big.toString()}::bigint)`);
   const { use } = await isolate();
   const outcome = await use(ask(w, id));
   assert.ok(outcome.ok, JSON.stringify(outcome));
@@ -1206,7 +1203,7 @@ test('CacheSameChange: a newest change of the same number but another MAC (a log
     const row = { at: Date.now(), requestId: randomUUID(), object: objectKey(credentialRef), actor: ROOT, payload: JSON.stringify({ op: 'credential.revoke' }), seal: revokedSeal };
     await run(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
       VALUES (${newest!.number}, ${row.at}, ${row.requestId}, ${row.object}, ${row.actor}, ${row.payload}, ${row.seal}, ${entryMac(MAC, { tree: 'changes', row })})`);
-    await run(tx, sql`UPDATE credentials SET revoked_at = ${ENGINE === 'postgres' ? sql`now()` : sql`${Date.now()}`}, seal = ${revokedSeal} WHERE id = ${w.credentialId}`);
+    await run(tx, sql`UPDATE credentials SET revoked_at = now(), seal = ${revokedSeal} WHERE id = ${w.credentialId}`);
   });
   // Trusting the cache by number alone would hold the row to the credential's old seal (`stale`); read again, it is revoked.
   assert.equal(code(await use(ask(w, id, { purpose: 'reveal' }))), 'credential');

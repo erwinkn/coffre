@@ -1,20 +1,15 @@
 import { ACCESS_ACTIONS } from '@coffre/core/vault';
-import { asc, desc, eq, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
-
-import type { Queryable } from './database.ts';
-import { engineOf, type Engine } from './dialect.ts';
+import { asc, desc, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
  * The vault's allowed access entries in 0.14's log: an add, restore, role
  * change or removal of a member, a grant or a revoke, as `ACCESS_ACTIONS`
- * names them. `audit_log_access_idx` holds them alone, by principal (on
- * SQLite after `author`, as the subject index): a principal's allowed
+ * names them. `audit_log_access_idx` holds them alone, by principal: a principal's allowed
  * access entries, or the principals that have any, read in as many steps
  * however many other entries the log holds about them, refusals included
  * (T239, R48). A read that is to use the index repeats this condition word
  * for word, with no parameter, as `recorded` does for `log_changes`:
- * Postgres proves a partial index's condition only from constants, and
- * SQLite only from the same terms.
+ * Postgres proves a partial index's condition only from constants.
  */
 export function accessAllowed(alias?: string): SQL {
   const actions = ACCESS_ACTIONS.map((action) => `'${action}'`).join(', ');
@@ -108,12 +103,10 @@ export function entriesOf(kind: Kind): SQL {
  * Postgres drops it from the order; `= ANY` of the one value does not, so
  * only an index keyed by the value yields the order, and no walk is
  * priced against it. `values` is that one value as an array (`[value]`,
- * or a placeholder bound to one); SQLite, which takes the index keyed by
- * the value, asks it plainly, by `value`.
+ * or a placeholder bound to one).
  */
-export function keyedBy(db: Queryable, column: SQLWrapper, seq: SQLWrapper, order: 'asc' | 'desc', value: unknown, values: unknown): { where: SQL; orderBy: SQL[] } {
+export function keyedBy(column: SQLWrapper, seq: SQLWrapper, order: 'asc' | 'desc', values: unknown): { where: SQL; orderBy: SQL[] } {
   const by = order === 'asc' ? asc : desc;
-  if (engineOf(db) !== 'postgres') return { where: eq(column as never, value), orderBy: [by(seq as never)] };
   return { where: sql`${column} = ANY(${values}::text[])`, orderBy: [by(column as never), by(seq as never)] };
 }
 
@@ -131,13 +124,11 @@ export function keyedBy(db: Queryable, column: SQLWrapper, seq: SQLWrapper, orde
  * any (Postgres 16; 4 by the index). `= ANY` of the one object does not
  * fix it, so only the object's index yields the order (`keyedBy`).
  * `object` is SQL that names a uuid: a column, `log_object(…)`, or a
- * value, which the cast types; `db` the database, or its engine. SQLite,
- * which takes the object's index, asks it plainly.
+ * value, which the cast types.
  */
-export function changesOf(db: Queryable | Engine, alias: string, object: SQLWrapper | string, order: 'asc' | 'desc' = 'desc'): { where: SQL; order: SQL } {
+export function changesOf(alias: string, object: SQLWrapper | string, order: 'asc' | 'desc' = 'desc'): { where: SQL; order: SQL } {
   const as = sql.raw(alias);
   const by = sql.raw(order === 'asc' ? 'ASC' : 'DESC');
-  if ((typeof db === 'string' ? db : engineOf(db)) !== 'postgres') return { where: sql`${as}.object = ${object}`, order: sql`${as}.number ${by}` };
   return { where: sql`${as}.object = ANY(ARRAY[CAST(${object} AS uuid)])`, order: sql`${as}.object ${by}, ${as}.number ${by}` };
 }
 
@@ -149,8 +140,6 @@ export function changesOf(db: Queryable | Engine, alias: string, object: SQLWrap
  * `findingsOf`) reads its member's reports of that kind alone, never the
  * other's (T245, R48).
  */
-export function changeNamed(engine: Engine, metadata: SQLWrapper): SQL<string | null> {
-  return engine === 'postgres'
-    ? sql`(CASE WHEN jsonb_typeof(${metadata}::jsonb -> 'change') = 'string' THEN ${metadata}::jsonb ->> 'change' END)`
-    : sql`(CASE WHEN json_type(${metadata}, '$.change') = 'text' THEN json_extract(${metadata}, '$.change') END)`;
+export function changeNamed(metadata: SQLWrapper): SQL<string | null> {
+  return sql`(CASE WHEN jsonb_typeof(${metadata}::jsonb -> 'change') = 'string' THEN ${metadata}::jsonb ->> 'change' END)`;
 }

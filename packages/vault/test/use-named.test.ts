@@ -17,7 +17,7 @@ import { sql } from 'drizzle-orm';
 import type { Input } from '../src/inputs.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { newRequestId, UseCache, useLimits, type Resolved } from '../src/use.ts';
-import { ENGINE, openTestDatabase, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { holding as holdingIn, namedWorld, principalLock, slowed as slowedVault } from './named-world.ts';
 import { change, emptyLog, isolate, onePeriod, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
@@ -49,7 +49,7 @@ const codeOf = (outcome: NamedUseOutcome) => {
   return used.ok ? 'ok' : 'busy' in used ? `busy:${used.busy}` : used.code;
 };
 
-test("a named use opens the key it names, by the ids it reads once, and answers the caller as the use read them, and, on Postgres, the app's rows", async () => {
+test("a named use opens the key it names, by the ids it reads once, and answers the caller as the use read them, and the app's rows", async () => {
   const w = await named();
   const id = await w.key('sk_live_1');
   const { vault } = await isolate();
@@ -58,14 +58,10 @@ test("a named use opens the key it names, by the ids it reads once, and answers 
   assert.equal(await uses(), 1, 'one entry: the use');
   assert.equal(first.standing?.status, 'active');
   assert.deepEqual(first.standing?.grants.map((grant) => grant.environmentId), [w.dev]);
-  if (ENGINE === 'postgres') {
-    const app = JSON.parse(first.app!) as { credential: { id: string }; environment: { id: string }; secrets: { secret: { id: string } }[] };
-    assert.equal(app.credential.id, w.credentialId);
-    assert.equal(app.environment.id, w.dev);
-    assert.deepEqual(app.secrets.map((row) => row.secret.id), [id]);
-  } else {
-    assert.equal(first.app, null, "SQLite's app reads its own rows");
-  }
+  const app = JSON.parse(first.app!) as { credential: { id: string }; environment: { id: string }; secrets: { secret: { id: string } }[] };
+  assert.equal(app.credential.id, w.credentialId);
+  assert.equal(app.environment.id, w.dev);
+  assert.deepEqual(app.secrets.map((row) => row.secret.id), [id]);
   // Its map kept: the use again, by the same ids, in its one call.
   assert.equal(codeOf(await vault.useNamed!(w.ask(await w.nameOf(id)))), 'ok');
 });
@@ -129,7 +125,7 @@ async function mapped(cost: (key: string, purpose?: NamedUseInput['purpose']) =>
   await run(db.owner, sql`DELETE FROM bulk_cap`);
 }
 
-test("a credential revoked around the log (0.14's code, mid-upgrade) leaves no standing kept: a key held and one never made are refused alike, in one statement, before any lock (T158, DecideEachLock; review d1 of #416)", { ...postgresOnly('advisory locks'), timeout: 60_000 }, async () => {
+test("a credential revoked around the log (0.14's code, mid-upgrade) leaves no standing kept: a key held and one never made are refused alike, in one statement, before any lock (T158, DecideEachLock; review d1 of #416)", { timeout: 60_000 }, async () => {
   const w = await named();
   const held = await w.nameOf(await w.key());
   const { cost, end } = await costed(w);
@@ -146,7 +142,7 @@ test("a credential revoked around the log (0.14's code, mid-upgrade) leaves no s
   }
 });
 
-test("a use allowed is no standing for reading: a Contributor, who may use and not read, is refused a reveal alike for a key held and one never made, before any lock (T158; review d1 of #416)", { ...postgresOnly('advisory locks'), timeout: 60_000 }, async () => {
+test("a use allowed is no standing for reading: a Contributor, who may use and not read, is refused a reveal alike for a key held and one never made, before any lock (T158; review d1 of #416)", { timeout: 60_000 }, async () => {
   const w = await named({ role: 'contributor' });
   const held = await w.nameOf(await w.key());
   const { cost, end } = await costed(w);
@@ -161,7 +157,7 @@ test("a use allowed is no standing for reading: a Contributor, who may use and n
   }
 });
 
-test("a use refused on its cover is answered in its one statement, as a key never made is: past a grant's end, which no change records (T158, CoveredRefusalAnswered; review d1 of #416)", { ...postgresOnly('statements counted'), timeout: 60_000 }, async () => {
+test("a use refused on its cover is answered in its one statement, as a key never made is: past a grant's end, which no change records (T158, CoveredRefusalAnswered; review d1 of #416)", { timeout: 60_000 }, async () => {
   const w = await named();
   const held = await w.nameOf(await w.key());
   const ends = Date.now() + 1500;
@@ -187,7 +183,7 @@ test("a use refused on its cover is answered in its one statement, as a key neve
   }
 });
 
-test("revoked, someone whose isolate holds a name as none, or a key's id, is refused in one statement once a key is made under it, or deleted, as for a key never made: the standing decides before the names are read again (T158, MovedByStanding; review d2 of #416)", { ...postgresOnly('statements counted'), timeout: 60_000 }, async () => {
+test("revoked, someone whose isolate holds a name as none, or a key's id, is refused in one statement once a key is made under it, or deleted, as for a key never made: the standing decides before the names are read again (T158, MovedByStanding; review d2 of #416)", { timeout: 60_000 }, async () => {
   const w = await named();
   const goneId = await w.key();
   const gone = await w.nameOf(goneId);
@@ -213,7 +209,7 @@ test("revoked, someone whose isolate holds a name as none, or a key's id, is ref
   }
 });
 
-test("a seal a writer replaced, its row's content the same, leaves no standing kept: a key held and one never made are refused alike, in one statement, before any lock (T158, DecideEachLock; review d2 of #416)", { ...postgresOnly('advisory locks'), timeout: 60_000 }, async () => {
+test("a seal a writer replaced, its row's content the same, leaves no standing kept: a key held and one never made are refused alike, in one statement, before any lock (T158, DecideEachLock; review d2 of #416)", { timeout: 60_000 }, async () => {
   const w = await named();
   const held = await w.nameOf(await w.key());
   const { cost, end } = await costed(w);
@@ -228,7 +224,7 @@ test("a seal a writer replaced, its row's content the same, leaves no standing k
   }
 });
 
-test('a refusal is one statement, whatever the map holds; a use the map has no ids for is made in a second, and the map keeps them (T158, D153)', { ...postgresOnly('statements counted'), timeout: 60_000 }, async () => {
+test('a refusal is one statement, whatever the map holds; a use the map has no ids for is made in a second, and the map keeps them (T158, D153)', { timeout: 60_000 }, async () => {
   const w = await named();
   const held = await w.nameOf(await w.key());
   const { cost, end } = await costed(w);
@@ -361,7 +357,7 @@ test("a handle's stable URL is held to the handle's own place by its id, whateve
   assert.equal(used.outcome.ok && 'value' in used.outcome, true);
 });
 
-test("revoked, their principal's lock held and every statement 1.1 s slow (review r4 of #412): a key made since, one used before, one deleted since and one never made are refused alike, at once, nothing locked or written (T158)", { ...postgresOnly('advisory locks'), timeout: 120_000 }, async () => {
+test("revoked, their principal's lock held and every statement 1.1 s slow (review r4 of #412): a key made since, one used before, one deleted since and one never made are refused alike, at once, nothing locked or written (T158)", { timeout: 120_000 }, async () => {
   const w = await named();
   const used = await w.nameOf(await w.key());
   const deletedId = await w.key();
@@ -429,7 +425,7 @@ test("a credential the app's config does not accept is answered as a token no cr
     };
     const [entries, rowsOfCap] = [await uses(), await bulk()];
     for (const accepts of [{ signin: false, issuers: ['github:f00d'], passkeys: 'off' as const }, { signin: true, issuers: ['google:beef'], passkeys: 'off' as const }]) {
-      const answers = ENGINE === 'postgres' ? await holding(principalLock(w.principal), () => asked(accepts)) : await asked(accepts);
+      const answers = await holding(principalLock(w.principal), () => asked(accepts));
       // Each the credential's own check's (401), in one statement, none waiting for the lock it holds.
       assert.deepEqual(answers.map(({ route, statements: n }) => [route, n]), [['credential', 1], ['credential', 1]], JSON.stringify({ accepts, answers }));
       for (const { key, ms } of answers) assert.ok(ms < 900, `${key}: ${Math.round(ms)} ms`);
@@ -465,7 +461,7 @@ test("a person's credential no live passkey stands behind, as the app's policy s
     };
     const refused = [['credential', 1], ['credential', 1]];
     const refusedBy = async (policy: NamedUseInput['accepts']['passkeys']) => {
-      const answers = ENGINE === 'postgres' ? await holding(principalLock(w.principal), () => route(policy)) : await route(policy);
+      const answers = await holding(principalLock(w.principal), () => route(policy));
       assert.notEqual(answers, 'name', policy);
       assert.deepEqual((answers as { route: string; statements: number }[]).map(({ route: r, statements: n }) => [r, n]), refused, policy);
     };
@@ -487,11 +483,9 @@ test("a person's credential no live passkey stands behind, as the app's policy s
     await names(passkey);
     assert.equal(await route('optional'), 'name');
     assert.equal(await route('required'), 'name');
-    if (ENGINE === 'postgres') {
-      // What it read of her passkeys, with her credential's rows: the app checks them, reading nothing itself.
-      const app = JSON.parse(byName(await vault.useNamed!(w.ask(held, { accepts: { signin: true, issuers: [], passkeys: 'optional' } }))).app!) as { passkey: { id: string } | null; passkey_held: number | null };
-      assert.deepEqual([app.passkey?.id, app.passkey_held], [passkey, 2]);
-    }
+    // What it read of her passkeys, with her credential's rows: the app checks them, reading nothing itself.
+    const app = JSON.parse(byName(await vault.useNamed!(w.ask(held, { accepts: { signin: true, issuers: [], passkeys: 'optional' } }))).app!) as { passkey: { id: string } | null; passkey_held: number | null };
+    assert.deepEqual([app.passkey?.id, app.passkey_held], [passkey, 2]);
     // Removed, or of another generation: it stands behind nothing.
     await run(db.owner, sql`UPDATE passkeys SET removed_at = ${new Date()}, removed_by = ${w.principal} WHERE id = ${passkey}`);
     await refusedBy('optional');
@@ -542,7 +536,7 @@ for (const lost of ['revoked', 'its grant lapsed'] as const) {
       for (let round = 0; round < 3; round += 1) {
         for (const key of [held, 'NEVER_MADE']) {
           assert.equal(codeOf(await vault.useNamed!(w.ask(key))), lost === 'revoked' ? 'no_grant' : 'expired', `${key}, round ${round}`);
-          if (ENGINE === 'postgres') assert.equal(last()!.args[11], null, `${key}, round ${round}: the probe's form, no seals passed`);
+          assert.equal(last()!.args[11], null, `${key}, round ${round}: the probe's form, no seals passed`);
           assert.equal(cache.seals.size, 0, `${key}, round ${round}: no seals kept`);
         }
       }
@@ -567,7 +561,7 @@ async function costed(w: Awaited<ReturnType<typeof named>>) {
   return { cost, end: slow.end };
 }
 
-test("no use is kept for a later one to take the principal's lock on: each that would take it is decided first, a second statement, whatever happened since (T158, D153; DecideEachLock)", { ...postgresOnly('advisory locks'), timeout: 60_000 }, async () => {
+test("no use is kept for a later one to take the principal's lock on: each that would take it is decided first, a second statement, whatever happened since (T158, D153; DecideEachLock)", { timeout: 60_000 }, async () => {
   const w = await named();
   const a = await w.nameOf(await w.key());
   const { cost, end } = await costed(w);
@@ -591,7 +585,7 @@ test("no use is kept for a later one to take the principal's lock on: each that 
   }
 });
 
-test("past a grant's end, which no change records, the use is decided first, before any lock (T158; DecideEachLock)", { ...postgresOnly('advisory locks'), timeout: 60_000 }, async () => {
+test("past a grant's end, which no change records, the use is decided first, before any lock (T158; DecideEachLock)", { timeout: 60_000 }, async () => {
   const w = await named();
   const a = await w.nameOf(await w.key());
   // Its grant ends in 1.5 s: a change of its own, sealed, before any use.
@@ -615,7 +609,7 @@ test("past a grant's end, which no change records, the use is decided first, bef
   }
 });
 
-test('a read of ids left behind at its deadline keeps its place in admission until it settles (review r1 of #412)', postgresOnly('a table lock'), async () => {
+test('a read of ids left behind at its deadline keeps its place in admission until it settles (review r1 of #412)', async () => {
   const w = await named();
   const name = await w.nameOf(await w.key());
   // Its throttle off: its first use is `late` on purpose, which would have it refuse a later one (config.md, Q1, step 2).

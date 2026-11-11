@@ -239,7 +239,7 @@ export async function references(deployment: Deployment, { admin, reader, leaver
       // names the key, and the log keeps every entry.
       await using(deployment.database(), async (sql) => {
         await query(sql, 'DELETE FROM secret_references WHERE secret_id = $1', [forged]);
-        await query(sql, sql.engine === 'postgres' ? 'UPDATE secrets SET archived_at = now() WHERE id = $1' : 'UPDATE secrets SET archived_at = CAST(unixepoch(\'subsec\') * 1000 AS INTEGER) WHERE id = $1', [forged]);
+        await query(sql, 'UPDATE secrets SET archived_at = now() WHERE id = $1', [forged]);
       });
     }
 

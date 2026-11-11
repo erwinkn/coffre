@@ -20,7 +20,6 @@ import { later } from '../src/later.ts';
 import { postgresClient } from '../src/postgres.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 
-const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only: Hyperdrive' : false;
 const DATABASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 
 /** The proxy in front of the suite's Postgres (`postgresProxy`), closed once the file's tests are done. */
@@ -33,7 +32,7 @@ async function counted() {
 
 const n = (rows: Record<string, unknown>[]) => Number(rows[0]!.n);
 
-test('a call opens one connection, and its queries and transactions take turns on it', { skip }, async () => {
+test('a call opens one connection, and its queries and transactions take turns on it', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -53,7 +52,7 @@ test('a call opens one connection, and its queries and transactions take turns o
   }
 });
 
-test('with groupReads, the reads asked together go under one Sync, each answered with its own rows', { skip }, async () => {
+test('with groupReads, the reads asked together go under one Sync, each answered with its own rows', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url, { groupReads: true });
   const db = createDatabase(pool);
@@ -76,7 +75,7 @@ test('with groupReads, the reads asked together go under one Sync, each answered
   await pool.end();
 });
 
-test('with groupReads, a write or a transaction asked among reads goes alone, and every statement in the order asked', { skip }, async () => {
+test('with groupReads, a write or a transaction asked among reads goes alone, and every statement in the order asked', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url, { groupReads: true });
   const db = createDatabase(pool);
@@ -98,7 +97,7 @@ test('with groupReads, a write or a transaction asked among reads goes alone, an
   await pool.end();
 });
 
-test('with groupReads, a read that fails fails its group, each read with its error, once; the connection goes on', { skip }, async () => {
+test('with groupReads, a read that fails fails its group, each read with its error, once; the connection goes on', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url, { groupReads: true });
   const db = createDatabase(pool);
@@ -120,7 +119,7 @@ test('with groupReads, a read that fails fails its group, each read with its err
   await pool.end();
 });
 
-test('with groupReads, a select marked as a write goes alone, and a group with a value only the server can type goes each alone', { skip }, async () => {
+test('with groupReads, a select marked as a write goes alone, and a group with a value only the server can type goes each alone', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url, { groupReads: true });
   const db = createDatabase(pool);
@@ -138,7 +137,7 @@ test('with groupReads, a select marked as a write goes alone, and a group with a
   await pool.end();
 });
 
-test('with groupReads, a connection cut while a group is out fails each of its reads once, and the next read connects again', { skip }, async () => {
+test('with groupReads, a connection cut while a group is out fails each of its reads once, and the next read connects again', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url, { groupReads: true });
   const db = createDatabase(pool);
@@ -161,7 +160,7 @@ test('with groupReads, a connection cut while a group is out fails each of its r
   await pool.end();
 });
 
-test('without groupReads, reads asked together each take a turn, as before', { skip }, async () => {
+test('without groupReads, reads asked together each take a turn, as before', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -172,7 +171,7 @@ test('without groupReads, reads asked together each take a turn, as before', { s
   await pool.end();
 });
 
-test("postgres.js's group holds plain reads alone, and never none", { skip }, async () => {
+test("postgres.js's group holds plain reads alone, and never none", async () => {
   const client = postgresClient(DATABASE, { max: 1 });
   try {
     assert.throws(() => client.group([{ query: 'select 1' }, { query: 'insert into nowhere values (1)' }]), { code: 'GROUP_NOT_READ' });
@@ -185,7 +184,7 @@ test("postgres.js's group holds plain reads alone, and never none", { skip }, as
   }
 });
 
-test('a query asked while a transaction holds the connection waits for it, and is not part of it', { skip }, async () => {
+test('a query asked while a transaction holds the connection waits for it, and is not part of it', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -219,7 +218,7 @@ test('a query asked while a transaction holds the connection waits for it, and i
   await pool.end();
 });
 
-test("a transaction's statements asked together go under one Sync, its BEGIN with the first, and what it left to `later` with its COMMIT", { skip }, async () => {
+test("a transaction's statements asked together go under one Sync, its BEGIN with the first, and what it left to `later` with its COMMIT", async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -246,7 +245,7 @@ test("a transaction's statements asked together go under one Sync, its BEGIN wit
   await pool.end();
 });
 
-test("a write left to `later` as a work's first statement goes behind what was asked before it: the head's lock first (Fable's review of #452)", { skip }, async () => {
+test("a write left to `later` as a work's first statement goes behind what was asked before it: the head's lock first (Fable's review of #452)", async () => {
   const sent: string[] = [];
   const client = postgresClient(DATABASE, { max: 1, debug: (_: number, text: string) => void sent.push(text) });
   try {
@@ -266,7 +265,7 @@ test("a write left to `later` as a work's first statement goes behind what was a
   }
 });
 
-test("a write left to `later` with a value it cannot send throws to the work, and the transaction keeps nothing (review r3 of #452)", { skip }, async () => {
+test("a write left to `later` with a value it cannot send throws to the work, and the transaction keeps nothing (review r3 of #452)", async () => {
   const client = postgresClient(DATABASE, { max: 1 });
   try {
     const db = createDatabase(client);
@@ -281,7 +280,7 @@ test("a write left to `later` with a value it cannot send throws to the work, an
   }
 });
 
-test("a write left to `later` goes ahead of a statement asked after it, however that one is started (review r3 of #452)", { skip }, async () => {
+test("a write left to `later` goes ahead of a statement asked after it, however that one is started (review r3 of #452)", async () => {
   const client = postgresClient(DATABASE, { max: 1 });
   try {
     const db = createDatabase(client);
@@ -302,7 +301,7 @@ test("a write left to `later` goes ahead of a statement asked after it, however 
   }
 });
 
-test('a statement of a group that fails: those before it answer, it fails with its error, those after as an aborted transaction, and the transaction rolls back with its error', { skip }, async () => {
+test('a statement of a group that fails: those before it answer, it fails with its error, those after as an aborted transaction, and the transaction rolls back with its error', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -326,7 +325,7 @@ test('a statement of a group that fails: those before it answer, it fails with i
   await pool.end();
 });
 
-test('a write left to `later` that fails has Postgres skip the COMMIT: nothing is kept, and the transaction fails with its error', { skip }, async () => {
+test('a write left to `later` that fails has Postgres skip the COMMIT: nothing is kept, and the transaction fails with its error', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -340,7 +339,7 @@ test('a write left to `later` that fails has Postgres skip the COMMIT: nothing i
   await pool.end();
 });
 
-test('a COMMIT that Postgres runs and refuses ends the transaction: it fails with why, and no ROLLBACK follows', { skip }, async () => {
+test('a COMMIT that Postgres runs and refuses ends the transaction: it fails with why, and no ROLLBACK follows', async () => {
   const proxy = await counted();
   const sent: string[] = [];
   const client = postgresClient(proxy.url, { max: 1, debug: (_: number, text: string) => void sent.push(text) });
@@ -360,7 +359,7 @@ test('a COMMIT that Postgres runs and refuses ends the transaction: it fails wit
   }
 });
 
-test('closing waits for what is under way; a connection lost or closed is opened again for the next query', { skip }, async () => {
+test('closing waits for what is under way; a connection lost or closed is opened again for the next query', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -382,7 +381,7 @@ test('closing waits for what is under way; a connection lost or closed is opened
   await pool.end();
 });
 
-test("closing by a time: what is under way then fails, what waits for its turn is never sent, and nothing opens the connection again (T170)", { skip }, async () => {
+test("closing by a time: what is under way then fails, what waits for its turn is never sent, and nothing opens the connection again (T170)", async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -409,7 +408,7 @@ test("closing by a time: what is under way then fails, what waits for its turn i
   assert.equal(await answered, 4);
 });
 
-test('a query on the database from inside its own transaction is refused at once, not left to wait for itself', { skip, timeout: 10_000 }, async () => {
+test('a query on the database from inside its own transaction is refused at once, not left to wait for itself', { timeout: 10_000 }, async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -452,7 +451,7 @@ test('a query on the database from inside its own transaction is refused at once
   await pool.end();
 });
 
-test("Node's pool refuses the same query, so that the suites catch it before a Worker would hang on it", { skip, timeout: 10_000 }, async () => {
+test("Node's pool refuses the same query, so that the suites catch it before a Worker would hang on it", { timeout: 10_000 }, async () => {
   const { db, close } = await openDatabase(DATABASE);
   try {
     await assert.rejects(db.transaction(async () => db.execute(sql`select 1`)), QueryOutsideTransaction);
@@ -462,7 +461,7 @@ test("Node's pool refuses the same query, so that the suites catch it before a W
   }
 });
 
-test("with closeIdleMs, what outlives a call closes its connection once idle, and the next query connects again", { skip }, async () => {
+test("with closeIdleMs, what outlives a call closes its connection once idle, and the next query connects again", async () => {
   const proxy = await counted();
   // As a Durable Object's coffre does: a check now and then, none of them a call that ends the pool.
   const pool = new HyperdrivePool(proxy.url, { closeIdleMs: 50 });
@@ -524,7 +523,7 @@ async function eachKindIn(db: ReturnType<typeof createDatabase>, proxy: { readon
   assert.deepEqual(seen, Object.fromEntries(KINDS.map(({ kind, back, trips }) => [kind, { back, trips: trips ?? 1 }])));
 }
 
-test('on Workers, each kind of value comes back as it was sent, each statement in one round trip', { skip }, async () => {
+test('on Workers, each kind of value comes back as it was sent, each statement in one round trip', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   try {
@@ -545,7 +544,7 @@ test('on Workers, each kind of value comes back as it was sent, each statement i
   }
 });
 
-test("on Node's pool too", { skip }, async () => {
+test("on Node's pool too", async () => {
   const proxy = await counted();
   const { db, close } = await openDatabase(proxy.url);
   try {
@@ -555,7 +554,7 @@ test("on Node's pool too", { skip }, async () => {
   }
 });
 
-test('an array or a date sent as a parameter goes as node-postgres sends one: as text the server types, in one round trip', { skip }, async () => {
+test('an array or a date sent as a parameter goes as node-postgres sends one: as text the server types, in one round trip', async () => {
   const proxy = await counted();
   const client = postgresClient(proxy.url, { max: 1 });
   try {
@@ -608,7 +607,7 @@ test('an array or a date sent as a parameter goes as node-postgres sends one: as
   }
 });
 
-test("a statement asked of the pool is a statement as postgres.js's is: started by execute(), and a promise", { skip }, async () => {
+test("a statement asked of the pool is a statement as postgres.js's is: started by execute(), and a promise", async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   try {

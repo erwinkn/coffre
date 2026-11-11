@@ -21,7 +21,7 @@ import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
 import { newRequestId, UseCache, useLimits, type UsePath } from '../src/use.ts';
-import { emptyReads, ENGINE, projectSlug, rows, run, type TestDatabase } from './database.ts';
+import { emptyReads, projectSlug, rows, run, type TestDatabase } from './database.ts';
 import { freshKeyId } from './window-fixture.ts';
 
 export const SIGNING_KEY = randomBytes(32);
@@ -43,10 +43,10 @@ export const FENCE = sql`SELECT pg_advisory_xact_lock(1668244070, 0)`;
 let db: TestDatabase;
 let hot: Database;
 
-/** The fixture's databases: the suite's, and the hot path's login on Postgres. */
+/** The fixture's databases: the suite's, and the hot path's login. */
 export async function useDatabases(opened: TestDatabase): Promise<Database> {
   db = opened;
-  hot = ENGINE === 'postgres' ? await db.hot() : db.vault;
+  hot = await db.hot();
   return hot;
 }
 
@@ -55,12 +55,10 @@ export async function emptyLog(): Promise<void> {
   for (const table of ['log_uses', 'bulk_cap', 'log_changes', 'log_config', 'policy', 'roles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
   await emptyReads(db.owner);
   await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
-  if (ENGINE === 'postgres') {
-    // Numbers from the start again: a test may have moved them past 2^53.
-    await run(db.owner, sql`SELECT setval('log_number', 1, false)`);
-    const today = new Date(Date.now()).toISOString().slice(0, 10);
-    await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
-  }
+  // Numbers from the start again: a test may have moved them past 2^53.
+  await run(db.owner, sql`SELECT setval('log_number', 1, false)`);
+  const today = new Date(Date.now()).toISOString().slice(0, 10);
+  await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
 }
 
 /**
@@ -137,11 +135,8 @@ export async function isolate(options: VaultOptions = {}, config: ResolvedVaultC
 
 // --- the change path, as the owner plays it ---------------------------------------------------------
 
-let number = 0;
 export async function nextNumber(tx: Queryable): Promise<number> {
-  if (ENGINE === 'postgres') return Number((await rows<{ n: string }>(tx, sql`SELECT nextval('log_number') AS n`))[0]!.n);
-  const [row] = await rows<{ n: number }>(tx, sql`SELECT max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) + 1 AS n`);
-  return Math.max(row!.n, ++number);
+  return Number((await rows<{ n: string }>(tx, sql`SELECT nextval('log_number') AS n`))[0]!.n);
 }
 
 /**
@@ -152,7 +147,7 @@ export async function nextNumber(tx: Queryable): Promise<number> {
 export async function change(ref: Ref, op: Op, after: Input | null, write: (tx: Queryable, seal: Buffer | null) => Promise<void>, old?: bigint): Promise<number> {
   const seal = after === null ? null : sealOf(SEAL, ref, after);
   return db.owner.transaction(async (tx) => {
-    if (ENGINE === 'postgres') await run(tx, FENCE);
+    await run(tx, FENCE);
     await write(tx, seal);
     const n = await nextNumber(tx);
     const row = { at: Date.now(), requestId: randomUUID(), object: objectKey(ref), actor: ROOT, payload: JSON.stringify({ ...op, ...(old === undefined ? {} : { old: old.toString() }) }), seal };
@@ -260,7 +255,7 @@ export async function world(options: {
  */
 export async function cutOverStandIn(): Promise<void> {
   await db.owner.transaction(async (tx) => {
-    if (ENGINE === 'postgres') await run(tx, FENCE);
+    await run(tx, FENCE);
     const [head] = await rows<{ next_seq: string | number; head_hash: Buffer | Uint8Array }>(tx, sql`SELECT next_seq, head_hash FROM audit_chain_head`);
     const anchor = { seq: (BigInt(head!.next_seq) - 1n).toString(), hash: Buffer.from(head!.head_hash).toString('hex') };
     const n = await nextNumber(tx);

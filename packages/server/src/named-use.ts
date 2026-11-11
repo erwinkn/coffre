@@ -34,7 +34,7 @@ export function acceptance(runtime: Pick<CoffreRuntime, 'auth' | 'signin'>): Cre
  *   the same at market/dev@me                      one vault call   at her personal config of dev, or dev without one
  *
  * Null where the vault serves none so (a token of another kind, a personal config by its own slug, a handle of several
- * environments, a vault older than this app, which serves no fork, SQLite's or 0.14's vault) or the token is none it
+ * environments, a vault older than this app, which serves no fork, 0.14's vault) or the token is none it
  * knows: the request goes as ever, and is answered as ever, or the vault's seals bear out no standing of the caller's.
  * Busy, it throws as a use refused.
  *

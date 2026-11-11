@@ -5,7 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { PairNotes } from '@coffre/core/merkle';
 import type { ObjectChange, SecretRef, Through, Vault, WrappedKey } from '@coffre/core/vault';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
-import { openDatabase, postgresClient } from '@coffre/db/connect';
+import { postgresClient } from '@coffre/db/connect';
 import { appChanges, forgetLogHeads } from '@coffre/db/log';
 import { and, eq, sql, type SQL } from 'drizzle-orm';
 
@@ -18,13 +18,10 @@ import { cutOver as cutOverYet } from '../src/store.ts';
 
 /**
  * The suite's database, as the vault's tests use it: the one the server's
- * tests use, on the engine `COFFRE_TEST_ENGINE` names, which
- * scripts/test-suite.sh prepares. Opened twice: as its owner, to set up
- * places and play someone who edits rows, and as the vault, which on
- * Postgres is the vault's own login.
+ * tests use, which scripts/test-suite.sh prepares. Opened twice: as its
+ * owner, to set up places and play someone who edits rows, and as the
+ * vault, which is the vault's own login.
  */
-export const ENGINE = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'sqlite' : 'postgres';
-
 const name = process.env.COFFRE_TEST_DATABASE ?? 'coffre_test';
 const url = (login: string) => `postgresql://${login}@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${name}`;
 export const OWNER_URL = url('coffre_owner:local-dev-only');
@@ -157,16 +154,9 @@ export async function openTestDatabase({ connections: pools }: { connections?: n
   const opened: (() => Promise<void>)[] = [];
   let extra: (() => Promise<void>)[] = [];
   const open = async (login: string, connections?: number, into = extra): Promise<Database> => {
-    if (ENGINE === 'postgres') {
-      const client = postgresClient(login, { max: connections ?? pools ?? 10 });
-      into.push(() => client.end());
-      return createDatabase(client);
-    }
-    const file = process.env.COFFRE_TEST_DATABASE_URL;
-    if (!file) throw new Error('COFFRE_TEST_DATABASE_URL is required on sqlite; see scripts/test-suite.sh');
-    const { db, close } = await openDatabase(file);
-    into.push(close);
-    return db;
+    const client = postgresClient(login, { max: connections ?? pools ?? 10 });
+    into.push(() => client.end());
+    return createDatabase(client);
   };
   const release = async () => {
     const closing = extra;
@@ -183,7 +173,7 @@ export async function openTestDatabase({ connections: pools }: { connections?: n
     close: async () => {
       // A connection whose transaction a test left open is one no client's end lets go of (`endLeftOpen`).
       try {
-        if (ENGINE === 'postgres') await endLeftOpen(owner);
+        await endLeftOpen(owner);
       } finally {
         await Promise.all([release(), ...opened.map((close) => close())]);
       }
@@ -205,15 +195,9 @@ export const CONVERSION = "a grant on every project of 0.4 is converted on rows 
 /** A tampered member started over: 0.15's log refuses a change on top of a row it does not hold, and a reseal makes it the log's again (plan PR 9). */
 export const START_OVER = "0.15's log changes no tampered member until a reseal makes its row the log's again (plan PR 9), never 0.14's start over";
 
-/** Options that run a test on Postgres only, saying why. */
-export function postgresOnly(reason: string): { skip: string | false } {
-  return { skip: ENGINE === 'postgres' ? false : `Postgres only: ${reason}` };
-}
-
 /**
  * `work`, as the owner, with the audit log's append-only triggers lifted,
- * as someone who rewrites it would. Postgres disables them for one
- * transaction; SQLite has no such switch, so they are dropped and made again.
+ * as someone who rewrites it would: disabled for one transaction.
  */
 export async function withLogUnlocked<T>(owner: Database, work: (db: Queryable) => Promise<T>): Promise<T> {
   return withTriggersLifted(owner, 'audit_log', work);
@@ -221,24 +205,12 @@ export async function withLogUnlocked<T>(owner: Database, work: (db: Queryable) 
 
 /** `work`, as the owner, with `table`'s triggers lifted (`withLogUnlocked`): a secret version's erase-only, say. */
 export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' | 'secret_versions' | 'log_changes', work: (db: Queryable) => Promise<T>): Promise<T> {
-  if (ENGINE === 'postgres') {
-    return owner.transaction(async (tx) => {
-      await tx.execute(sql.raw(`ALTER TABLE ${table} DISABLE TRIGGER USER`));
-      const result = await work(tx);
-      await tx.execute(sql.raw(`ALTER TABLE ${table} ENABLE TRIGGER USER`));
-      return result;
-    });
-  }
-  const triggers = await rows<{ name: string; sql: string }>(
-    owner,
-    sql`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ${table}`,
-  );
-  for (const trigger of triggers) await run(owner, sql.raw(`DROP TRIGGER ${trigger.name}`));
-  try {
-    return await work(owner);
-  } finally {
-    for (const trigger of triggers) await run(owner, sql.raw(trigger.sql));
-  }
+  return owner.transaction(async (tx) => {
+    await tx.execute(sql.raw(`ALTER TABLE ${table} DISABLE TRIGGER USER`));
+    const result = await work(tx);
+    await tx.execute(sql.raw(`ALTER TABLE ${table} ENABLE TRIGGER USER`));
+    return result;
+  });
 }
 
 /**
@@ -247,50 +219,22 @@ export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' 
  * connection until `work` ends.
  */
 export async function withOldWrites<T>(owner: Database, work: () => Promise<T>): Promise<T> {
-  if (ENGINE === 'postgres') {
-    await run(owner, sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_refuse_old`);
-    try {
-      return await work();
-    } finally {
-      await run(owner, sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_refuse_old`);
-    }
-  }
-  const [trigger] = await rows<{ sql: string }>(owner, sql`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'audit_log_refuse_old'`);
-  await run(owner, sql`DROP TRIGGER audit_log_refuse_old`);
+  await run(owner, sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_refuse_old`);
   try {
     return await work();
   } finally {
-    await run(owner, sql.raw(trigger!.sql));
+    await run(owner, sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_refuse_old`);
   }
 }
 
-/** Rows of a raw query, on either engine. */
+/** Rows of a raw query. */
 export async function rows<Row>(db: Queryable, query: SQL): Promise<Row[]> {
-  if (ENGINE === 'postgres') return [...await db.execute(query)] as Row[];
-  return (db as unknown as { all<R>(query: SQL): Promise<R[]> }).all<Row>(query);
+  return [...await db.execute(query)] as Row[];
 }
 
-/**
- * SQLite's plan for `query`, one line per step, read on a connection of its own that is closed after.
- *
- * libsql never resets an `EXPLAIN`'s statement (`all`, `run`): it stays active on its connection, so every read
- * that connection makes after it keeps its snapshot open. The next write from another connection then ends that
- * connection's `BEGIN IMMEDIATE` in SQLITE_BUSY_SNAPSHOT, and every one after, until the statement is collected.
- * Run on a pooled connection, an EXPLAIN made a later test fail now and then (T146).
- */
-export async function sqlitePlan(query: SQL): Promise<string[]> {
-  const { db, close } = await openDatabase(process.env.COFFRE_TEST_DATABASE_URL!);
-  try {
-    return (await rows<{ detail: string }>(db, sql`EXPLAIN QUERY PLAN ${query}`)).map(({ detail }) => detail);
-  } finally {
-    await close();
-  }
-}
-
-/** A raw statement, on either engine. */
+/** A raw statement. */
 export async function run(db: Queryable, query: SQL): Promise<void> {
-  if (ENGINE === 'postgres') await db.execute(query);
-  else await (db as unknown as { run(query: SQL): Promise<unknown> }).run(query);
+  await db.execute(query);
 }
 
 /**
@@ -311,7 +255,7 @@ export async function locksHere(owner: Database, where: SQL): Promise<number> {
 const LEFT_OPEN_MS = 10_000;
 
 /**
- * On Postgres, every other transaction in the test's database ended, before
+ * Every other transaction in the test's database ended, before
  * a reset and before the file closes its connections. One a test left open,
  * as a holder of the log's head it never let go of, having failed first,
  * would keep its locks and its connection for good: the reset would wait on
@@ -340,11 +284,9 @@ export async function emptyReads(owner: Database): Promise<void> {
 
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
-  if (ENGINE === 'postgres') await endLeftOpen(owner);
+  await endLeftOpen(owner);
   const { auditLog, auditChainHead, grants, principals, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys, logChanges, logConfig, policy, roles, proxyDefinitions, proxyReserved, credentials, passkeys, serviceBindings, spentIdTokens } = tablesOf(owner);
   await owner.delete(secretReferences);
-  // SQLite checks a RESTRICT foreign key row by row, so entries that point
-  // at others let go of them first.
   await withLogUnlocked(owner, async (db) => {
     await db.update(auditLog).set({ relatedSeq: null });
     await db.delete(auditLog);
@@ -384,7 +326,7 @@ export async function emptyDatabase(owner: Database): Promise<void> {
  */
 export async function changePlace(owner: Database, id: string, set: { slug?: string; archived?: boolean }): Promise<void> {
   const write = (db: Queryable) => run(db, sql`UPDATE environments SET slug = coalesce(${set.slug ?? null}, slug),
-    archived_at = ${set.archived === undefined ? sql`archived_at` : set.archived ? sql`${ENGINE === 'postgres' ? new Date() : Date.now()}` : sql`NULL`} WHERE id = ${id}`);
+    archived_at = ${set.archived === undefined ? sql`archived_at` : set.archived ? sql`${new Date()}` : sql`NULL`} WHERE id = ${id}`);
   if (placeKeys === null || !(await cutOverYet(owner))) return write(owner);
   const [row] = await rows<{ project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: boolean | number | null; archived: boolean | number; project_archived: boolean | number; seal: Buffer | Uint8Array | null }>(owner,
     sql`SELECT e.project_id, e.slug, e.owner, e.parent_id, e.protected, e.archived_at IS NOT NULL AS archived, p.archived_at IS NOT NULL AS project_archived, e.seal

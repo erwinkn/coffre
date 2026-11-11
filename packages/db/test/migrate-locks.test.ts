@@ -22,7 +22,6 @@ import {
 } from '../src/migrate.ts';
 import { postgresClient, postgresSession, quoteIdentifier, type PostgresClient } from '../src/postgres.ts';
 
-const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only' : false;
 const BASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 const NAME = `${new URL(BASE).pathname.slice(1)}_locks_${randomBytes(4).toString('hex')}`;
 const url = Object.assign(new URL(BASE), { pathname: `/${NAME}` }).toString();
@@ -33,7 +32,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * takes ACCESS EXCLUSIVE, which waits for any session holding the table, a reader's ACCESS SHARE included.
  */
 function pendingAlter(): { tag: string; table: string; journal: { entries: { tag: string }[] } } {
-  const folder = migrationsFolder('postgres');
+  const folder = migrationsFolder();
   const journal = JSON.parse(readFileSync(join(folder, 'meta/_journal.json'), 'utf8')) as { entries: { tag: string }[] };
   for (const { tag } of [...journal.entries].reverse()) {
     const table = /ALTER TABLE "(\w+)" ADD COLUMN/.exec(readFileSync(join(folder, `${tag}.sql`), 'utf8'))?.[1];
@@ -47,12 +46,11 @@ const AT = JOURNAL.entries.findIndex((entry) => entry.tag === TAG);
 const dirs: string[] = [];
 
 before(async () => {
-  if (skip) return;
   // The tree before TAG: it and every migration after it are left to migrateDatabase.
   const dir = mkdtempSync(join(tmpdir(), 'coffre-locks-'));
   dirs.push(dir);
   const folder = join(dir, 'migrations');
-  cpSync(migrationsFolder('postgres'), folder, { recursive: true });
+  cpSync(migrationsFolder(), folder, { recursive: true });
   writeFileSync(join(folder, 'meta/_journal.json'), JSON.stringify({ ...JOURNAL, entries: JOURNAL.entries.slice(0, AT) }));
   for (const { tag } of JOURNAL.entries.slice(AT)) rmSync(join(folder, `${tag}.sql`));
   assert.equal(readdirSync(folder).filter((file) => file.endsWith('.sql')).length, AT);
@@ -75,7 +73,6 @@ before(async () => {
 
 after(async () => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-  if (skip) return;
   const admin = postgresClient(BASE, { max: 1 });
   try {
     await admin.unsafe(`DROP DATABASE IF EXISTS ${quoteIdentifier(NAME)} WITH (FORCE)`);
@@ -133,13 +130,13 @@ async function ledger(observer: PostgresClient): Promise<number> {
   return row!.n;
 }
 
-test('the waits are what their comments say: a statement waits half what a use may, tried a handful of times', { skip }, () => {
+test('the waits are what their comments say: a statement waits half what a use may, tried a handful of times', () => {
   assert.ok(MIGRATION_LOCK_WAIT_MS < HOT_LOCK_TIMEOUT_MS, 'a migration statement leaves the queue before a use behind it is refused');
   assert.equal(MIGRATION_LOCK_WAIT_MS, HOT_LOCK_TIMEOUT_MS / 2);
   assert.ok(MIGRATION_LOCK_ATTEMPTS > 1);
 });
 
-test(`a table held past every try fails the migration loudly within seconds, naming who held it, and a use of the table behind it waits less than its own lock_timeout (${TAG}, ${TABLE})`, { skip }, async () => {
+test(`a table held past every try fails the migration loudly within seconds, naming who held it, and a use of the table behind it waits less than its own lock_timeout (${TAG}, ${TABLE})`, async () => {
   const observer = postgresClient(url, { max: 1 });
   const holder = await holdTable();
   // A use's session: the hot login's lock_timeout, reading TABLE again and again while the migration waits.
@@ -190,7 +187,7 @@ test(`a table held past every try fails the migration loudly within seconds, nam
   }
 });
 
-test('a table released between tries lets the next try apply the migrations, while a second migrator waits for the first on the advisory lock past a use\'s wait', { skip }, async () => {
+test('a table released between tries lets the next try apply the migrations, while a second migrator waits for the first on the advisory lock past a use\'s wait', async () => {
   const observer = postgresClient(url, { max: 1 });
   const holder = await holdTable();
   let released = false;
@@ -224,7 +221,7 @@ test('a table released between tries lets the next try apply the migrations, whi
   }
 });
 
-test("reasserting the privileges waits for another database's migrator changing the same role, as for the migration lock, rather than fail in a use's wait", { skip }, async () => {
+test("reasserting the privileges waits for another database's migrator changing the same role, as for the migration lock, rather than fail in a use's wait", async () => {
   // The roles are the server's: another database's run granting coffre_backup holds the role's lock to its commit.
   const other = postgresSession(BASE, { application_name: 'coffre-locks-other-database' });
   const observer = postgresClient(url, { max: 1 });

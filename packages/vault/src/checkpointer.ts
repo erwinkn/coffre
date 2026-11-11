@@ -77,7 +77,7 @@ import { chainOf, UNBOUNDED } from './rotations.ts';
  * under a replaced key only below that key's rotation (BoundaryChecked).
  */
 
-/** What the checkpointer needs of the database. Postgres and SQLite implement it; so do the tests. */
+/** What the checkpointer needs of the database. Postgres implements it; so do the tests. */
 export type CheckpointStore = LogReader & {
   /**
    * The barrier, then the window: `upto`, such that every number at or below

@@ -48,10 +48,6 @@ test('ESLint keeps opening a database from a URL in the vault\'s Node entry, out
     assert.equal((await lintImport(source, filePath))[0]?.ruleId, 'no-restricted-imports', filePath);
   }
   assert.deepEqual(await lintImport(source, 'packages/vault/src/node.ts'), []);
-  const sqlite = "import { DatabaseSync } from 'node:sqlite';";
-  for (const filePath of ['packages/vault/src/node.ts', 'packages/vault/src/cloudflare.ts']) {
-    assert.equal((await lintImport(sqlite, filePath))[0]?.ruleId, 'no-restricted-imports', filePath);
-  }
 });
 
 test('ESLint has a package import another by name, never by path', async () => {

@@ -6,8 +6,8 @@ import type { Asked } from './snapshot.ts';
 import { newestChangeJson } from './store.ts';
 
 /** An asked member's newest change, and a place's, each by its object's index (`changesOf`). */
-const MEMBER_CHANGE = changesOf('postgres', 'x', sql`log_object('principal', asked.principal)`);
-const PLACE_CHANGE = changesOf('postgres', 'l', sql`log_object('environment', g.id::text)`);
+const MEMBER_CHANGE = changesOf('x', sql`log_object('principal', asked.principal)`);
+const PLACE_CHANGE = changesOf('l', sql`log_object('environment', g.id::text)`);
 
 /** An entry of `audit_log` aliased `e`, as JSON (`RawEntry`): whole numbers past 2^53 as text, bytes as hex. */
 const ENTRY = sql.raw(`json_build_object(

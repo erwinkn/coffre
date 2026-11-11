@@ -11,7 +11,7 @@ import {
   secrets,
   secretVersions,
 } from './db/tables.ts';
-import { postgresOnly, withLogUnlocked, withTriggersLifted } from './db/engine.ts';
+import { withLogUnlocked, withTriggersLifted } from './db/engine.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps, outcomes } from './api-fixture.ts';
 import { actorParts } from '../src/db/audit.ts';
 
@@ -87,7 +87,7 @@ async function versionCount(): Promise<number> {
   return row.n;
 }
 
-test('the API runs on the restricted runtime login', postgresOnly('the restricted runtime role exists only on Postgres'), async () => {
+test('the API runs on the restricted runtime login', async () => {
   const identity = await db.runtime.execute<{ current_user: string }>(sql`SELECT current_user`);
   assert.equal(identity[0]!.current_user, 'coffre_runtime');
   assert.deepEqual(outcomes((await root.secrets.set('market/dev', { RUNTIME_PROOF: 'works' })).keys), {
@@ -423,7 +423,7 @@ test('truncating the tail is detected even when surviving rows are consistent', 
   assert.equal((await root.audit.verify()).ok, true);
   const kept = (await nextSeq()) - 2n;
   await withLogUnlocked(db.owner, async (owner) => {
-    // SQLite checks the link from a write to its key.wrap row by row: unlink the tail first.
+    // Unlink the tail first: a write links to its key.wrap.
     await owner.update(auditLog).set({ relatedSeq: null }).where(gte(auditLog.seq, kept));
     await owner.delete(auditLog).where(gte(auditLog.seq, kept));
   });

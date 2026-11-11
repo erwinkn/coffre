@@ -20,7 +20,7 @@ import { Agent, createServer, request as httpRequest, type IncomingMessage } fro
 
 import type { Vault, VaultAnswer, VaultEntry, VaultMethod } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
-import { engineOfUrl, openDatabase } from '@coffre/db/connect';
+import { openDatabase } from '@coffre/db/connect';
 
 import { keepCheckpointer } from './checkpointer-node.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
@@ -43,14 +43,14 @@ export { replayStored } from './log-replay.ts';
 export type NodeVaultConfig = VaultConfig & {
   /**
    * The database the server uses, as the vault's own login:
-   * `postgres://coffre_vault_runtime:…@…/coffre`, or a `file:` URL for local
-   * development. Or one already open, which the vault leaves open.
+   * `postgres://coffre_vault_runtime:…@…/coffre`. Or one already open, which
+   * the vault leaves open.
    */
   database: string | Database;
   /**
    * 0.15's uses (docs/design/0.15-plan.md, PR 5): the same database as
    * `coffre_vault_hot`, whose lock and statement timeouts bound a use, or
-   * one already open; on SQLite, the same `file:` URL. Required.
+   * one already open. Required.
    */
   hotDatabase?: string | Database;
   /**
@@ -96,14 +96,12 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
   };
   try {
     const db = await open(config.database);
-    // The same URL is the same connection: on SQLite, where it is the same file, two would wait on each other's
-    // writes, a use's and the checkpointer's, past the busy timeout.
+    // The same URL is the same connection.
     const hot = config.hotDatabase === undefined ? undefined : config.hotDatabase === config.database ? db : await open(config.hotDatabase);
     const uses = { ...options.uses, coverMs: resolved.deployment.audit.repeatsWithinSeconds * 1000 };
     if (own) {
-      // On Postgres, a connection of its own, which it cuts once it stalls (T169): what a stalled tick awaits holds none of
-      // the vault's. On SQLite, the vault's one: two to one file wait on each other's writes.
-      const url = typeof config.database === 'string' && engineOfUrl(config.database) === 'postgres' ? config.database : null;
+      // A connection of its own, which it cuts once it stalls (T169): what a stalled tick awaits holds none of the vault's.
+      const url = typeof config.database === 'string' ? config.database : null;
       const where = url === null ? { database: db } : { connect: () => openDatabase(url, { max: 2 }) };
       // Days of uses kept: the deployment's `audit.keepUsesDays`, every day when null (retention.ts).
       const kept = (checkpointer = await keepCheckpointer({ ...where, signingKeys: resolved.signingKeys, memory: config.checkpointer!.memory, retainDays: resolved.deployment.audit.keepUsesDays }));

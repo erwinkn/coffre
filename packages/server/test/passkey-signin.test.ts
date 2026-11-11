@@ -1,5 +1,5 @@
 // Signing in with a passkey (docs/design/passkeys.md, sections 3.1, 3.2, 6.1,
-// 6.2 and 7), on both engines, through the deployment's own routes, as a
+// 6.2 and 7), through the deployment's own routes, as a
 // browser goes: to the provider and back, to the passkey page's question,
 // and its answer, made by a software authenticator. The callback writes
 // nothing; a touch issues a session its passkey confirmed, once; a first

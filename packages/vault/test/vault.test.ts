@@ -41,7 +41,6 @@ import {
   CONVERSION,
   cutOver,
   emptyDatabase,
-  ENGINE,
   locksHere,
   LOG,
   log014Only,
@@ -52,7 +51,6 @@ import {
   places,
   sealPlaces,
   storedVersions,
-  postgresOnly,
   rows,
   run,
   nothingHeld,
@@ -230,7 +228,7 @@ test("a read on an answer of access the app kept opens only while it is still th
   assert.equal(!removed.ok && removed.refusal.code, 'access_changed');
 });
 
-test('through a key service, a read on a kept answer the policy changed under while the key service answered accounts for its intent', postgresOnly('a policy change commits while a read holds its row, not the head: SQLite runs one writer at a time'), async () => {
+test('through a key service, a read on a kept answer the policy changed under while the key service answered accounts for its intent', async () => {
   const { keks, seen } = service();
   const w = await world({ keks });
   await member(w, ADA, [[w.dev, 'viewer']]);
@@ -383,7 +381,7 @@ test("a key's current sensitive value is made a secret in place by an Owner of i
   assert.ok((await w.vault.rewrap({ principal: ROOT, items: [{ secret: { ...base, version: 3, sensitive: true }, ...v1! }] })).ok);
 });
 
-test('a rewrap is held to its secret\'s newest version as the decision commits: one written sensitive meanwhile refuses it', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('a rewrap is held to its secret\'s newest version as the decision commits: one written sensitive meanwhile refuses it', async () => {
   const remote = service();
   const w = await world({ keks: remote.keks });
   const base = await w.secret(w.dev);
@@ -400,7 +398,7 @@ test('a rewrap is held to its secret\'s newest version as the decision commits: 
   assert.equal(!refused.ok && refused.refusal.code, 'invalid', JSON.stringify(refused));
 });
 
-test("a loosening is held to its key's current version as the decision commits: one written meanwhile refuses it", postgresOnly('SQLite runs one writer at a time'), async () => {
+test("a loosening is held to its key's current version as the decision commits: one written meanwhile refuses it", async () => {
   const remote = service();
   const w = await world({ keks: remote.keks });
   const { secrets } = tablesOf(db.owner);
@@ -626,18 +624,13 @@ function service(options: { delayMs?: number } = {}) {
 /** Make every append of these vault actions fail, as a database that refuses the write would. */
 async function failAppends(owner: Database, actions: string[]): Promise<() => Promise<void>> {
   const list = actions.map((action) => `'${action}'`).join(', ');
-  if (ENGINE === 'postgres') {
-    await run(owner, sql.raw(`CREATE FUNCTION test_refuse_append() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN IF NEW.author = 'vault' AND NEW.action IN (${list}) THEN RAISE EXCEPTION 'test log failure'; END IF; RETURN NEW; END $$`));
-    await run(owner, sql`CREATE TRIGGER test_refuse_append BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION test_refuse_append()`);
-    return async () => {
-      await run(owner, sql`DROP TRIGGER test_refuse_append ON audit_log`);
-      await run(owner, sql`DROP FUNCTION test_refuse_append()`);
-    };
-  }
-  await run(owner, sql.raw(`CREATE TRIGGER test_refuse_append BEFORE INSERT ON audit_log
-    WHEN NEW.author = 'vault' AND NEW.action IN (${list}) BEGIN SELECT RAISE(ABORT, 'test log failure'); END`));
-  return () => run(owner, sql`DROP TRIGGER test_refuse_append`);
+  await run(owner, sql.raw(`CREATE FUNCTION test_refuse_append() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN IF NEW.author = 'vault' AND NEW.action IN (${list}) THEN RAISE EXCEPTION 'test log failure'; END IF; RETURN NEW; END $$`));
+  await run(owner, sql`CREATE TRIGGER test_refuse_append BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION test_refuse_append()`);
+  return async () => {
+    await run(owner, sql`DROP TRIGGER test_refuse_append ON audit_log`);
+    await run(owner, sql`DROP FUNCTION test_refuse_append()`);
+  };
 }
 
 for (const [operation, failure] of [
@@ -860,7 +853,7 @@ test('an expired grant refuses with its own code', async () => {
   assert.deepEqual((await w.vault.access(ADA)).grants, []);
 });
 
-test('a read that waits for the log\'s head is decided as of when it holds it: a grant that lapsed meanwhile refuses', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('a read that waits for the log\'s head is decided as of when it holds it: a grant that lapsed meanwhile refuses', async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer', Date.now() + 1_500]]);
   const secret = await w.secret(w.dev);
@@ -959,7 +952,7 @@ test('the bulk limit counts a key once across reads of one key and reads of seve
   assert.ok(entries.some((entry) => entry.secretId === null) && entries.some((entry) => entry.secretId !== null), 'both shapes of entry are counted');
 });
 
-test('a forged read that names no key counts against the bulk limit as one key, on either engine', async () => {
+test('a forged read that names no key counts against the bulk limit as one key', async () => {
   const w = await world({ bulkLimit: { count: 5, windowMs: 60_000 } });
   await member(w, ADA, [[w.dev, 'viewer']]);
   const [a, b, c] = await keys(w, 3);
@@ -1012,38 +1005,6 @@ test('two instances share one log, one bulk limit and one set of generations', a
   assert.equal((await w.vault.verifyLog({})).ok, true);
 });
 
-test('two processes on one SQLite file share the bulk limit exactly', { skip: ENGINE !== 'sqlite' && 'two processes on one file is SQLite\'s case' }, async () => {
-  // Postgres serialises a member's reads on their row; SQLite on its file's
-  // write lock, which other processes wait for, as a second server would.
-  const kek = randomBytes(32);
-  const bulkLimit = { count: 6, windowMs: 60_000 };
-  const w = await world({ keks: new KekRegistry(new LocalKekProvider(kek, 'test-kek-1')), bulkLimit });
-  await member(w, ADA, [[w.dev, 'viewer']]);
-  // Twelve keys, one a read: the same key again would count once.
-  const inputs = await Promise.all((await keys(w, 12)).map(async (item) => ({ principal: ADA, purpose: 'run' as const, items: await versionItems([item]) })));
-
-  const reader = spawn(
-    process.execPath,
-    [
-      '--conditions=coffre:source',
-      fileURLToPath(new URL('reader.ts', import.meta.url)),
-      JSON.stringify({ url: process.env.COFFRE_TEST_DATABASE_URL, kek: kek.toString('base64'), signingKey: SIGNING_KEY.toString('base64'), bulkLimit, inputs: inputs.slice(6) }),
-    ],
-    { stdio: ['ignore', 'pipe', 'inherit'] },
-  );
-  const theirs = new Promise<string[]>((resolve, reject) => {
-    let out = '';
-    reader.stdout.on('data', (chunk: Buffer) => (out += chunk));
-    reader.once('exit', (code) => (code === 0 ? resolve(JSON.parse(out) as string[]) : reject(new Error(`the reader exited ${code}`))));
-  });
-  const ours = Promise.all(inputs.slice(0, 6).map((input) => w.vault.unwrap(input))).then((outcomes) =>
-    outcomes.map((outcome) => (outcome.ok ? 'ok' : outcome.refusal.code)),
-  );
-  const all = [...(await theirs), ...(await ours)];
-  assert.equal(all.filter((outcome) => outcome === 'ok').length, 6, JSON.stringify(all));
-  assert.equal(all.filter((outcome) => outcome === 'bulk_limit').length, 6);
-});
-
 test('a removal lands while a read is at the key service, waiting for nothing: the read is withheld, and the next refused before it (R75)', async () => {
   const { keks, seen } = service();
   const w = await world({ keks });
@@ -1079,7 +1040,7 @@ test('a removal lands while a read is at the key service, waiting for nothing: t
   assert.ok((await w.vault.verifyLog({})).ok);
 });
 
-test('a read at a key service whose outcome is decided again hands back the key it opened, wiped only once it is answered (review r1)', postgresOnly('a unique violation injected by a Postgres trigger'), async () => {
+test('a read at a key service whose outcome is decided again hands back the key it opened, wiped only once it is answered (review r1)', async () => {
   const { keks, seen } = service();
   const w = await world({ keks });
   await member(w, ADA, [[w.dev, 'viewer']]);
@@ -1195,7 +1156,7 @@ test('a rotation closing more open intents\' keys than one statement binds logs 
   const { keks, seen } = service();
   const w = await world({ keks });
   // Three wraps of 1,100 keys each, paused at the key service: 3,300 outcomes for the rotation to log, past Postgres's
-  // 3,000 entries a statement and SQLite's 1,560.
+  // 3,000 entries a statement.
   // The vault's first key operation is its key's check (`#kekMismatch`), before any intent: made first.
   await wrapped(w, await w.secret(w.dev));
   const calls: Promise<unknown>[] = [];
@@ -1220,7 +1181,7 @@ test('a rotation closing more open intents\' keys than one statement binds logs 
   assert.ok(verified.ok, JSON.stringify(verified));
 });
 
-test('one member\'s reads at the key service run side by side, not one behind the other', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('one member\'s reads at the key service run side by side, not one behind the other', async () => {
   const { keks, seen } = service();
   const w = await world({ keks });
   await member(w, ADA, [[w.dev, 'viewer']]);
@@ -1241,7 +1202,7 @@ test('one member\'s reads at the key service run side by side, not one behind th
 });
 
 for (const [change, action, code] of [['removal', 'member.remove', 'removed'], ['revocation', 'access.revoke', 'no_grant']] as const) {
-  test(`a ${change} amid a steady stream of one member's reads is not starved: it lands in turn, and no read is released after it`, postgresOnly('SQLite runs one writer at a time'), async () => {
+  test(`a ${change} amid a steady stream of one member's reads is not starved: it lands in turn, and no read is released after it`, async () => {
     // Postgres lets a share lock join those held even while a writer waits: without a queue, a change waits until
     // the reads stop, here for good (`lockMembers`). A revocation locks two rows, its actor's and hers, in order.
     const { keks } = service({ delayMs: 150 });
@@ -1299,7 +1260,7 @@ async function holdHead(database: Database): Promise<() => Promise<void>> {
   };
 }
 
-test('a change waits for the head half a use\'s wait at a time, and tries again: it lands once the head is let go (R75)', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('a change waits for the head half a use\'s wait at a time, and tries again: it lands once the head is let go (R75)', async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const owner = await db.connect();
@@ -1326,7 +1287,7 @@ test('a change waits for the head half a use\'s wait at a time, and tries again:
   assert.ok(took >= 1_500 && took < 30_000, `it landed after ${took} ms`);
 });
 
-test('a change that cannot have the head within its call\'s time fails as unavailable, having written nothing', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('a change that cannot have the head within its call\'s time fails as unavailable, having written nothing', async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const before = (await vaultLog(w)).length;
@@ -1346,7 +1307,7 @@ test('a change that cannot have the head within its call\'s time fails as unavai
   assert.equal((await vaultLog(w)).length, before, 'nothing written');
 });
 
-test('a use asking for the fence while a change waits for it is let in within its own wait: the change leaves the queue first (R75)', postgresOnly('SQLite has no fence'), async () => {
+test('a use asking for the fence while a change waits for it is let in within its own wait: the change leaves the queue first (R75)', async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   // A long use statement holds the fence shared, as a batch does; the change then waits for it exclusive, its grant's
@@ -1387,7 +1348,7 @@ test('a use asking for the fence while a change waits for it is let in within it
   assert.equal((await changing!).ok, true);
 });
 
-test('a read gives up a lock it waits seconds for, and fails as unavailable, its connection let go', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('a read gives up a lock it waits seconds for, and fails as unavailable, its connection let go', async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
@@ -1405,7 +1366,7 @@ test('a read gives up a lock it waits seconds for, and fails as unavailable, its
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true, 'and the next one, the head free, reads');
 });
 
-test("a burst of reads at a held head: those past its places in line are refused at once, and none waits past its deadline", postgresOnly('SQLite runs one writer at a time'), async () => {
+test("a burst of reads at a held head: those past its places in line are refused at once, and none waits past its deadline", async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
@@ -1513,7 +1474,7 @@ test('a checkpoint forgets the releases a day and an hour old, longer than any w
   assert.equal(counted.released, 1);
 });
 
-test('a checkpoint whose prune fails signs all the same, and says so', postgresOnly('the function is Postgres\'s'), async () => {
+test('a checkpoint whose prune fails signs all the same, and says so', async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
@@ -2327,7 +2288,7 @@ test('the log is chained, append-only, and shows a rewritten entry', async () =>
   assert.equal(!after.ok && after.reason, 'hash does not match the entry');
 });
 
-test('the vault appends only as itself, and writes none of the app\'s rows', postgresOnly('logins are Postgres\'s'), async () => {
+test('the vault appends only as itself, and writes none of the app\'s rows', async () => {
   const { auditLog, projects } = tablesOf(db.vault);
   const w = await world();
   await member(w, ADA, []);
@@ -2712,7 +2673,7 @@ async function whileHeadHeld<T>(decision: () => Promise<T>, during: () => Promis
   return pending;
 }
 
-test('a grant written around the vault while it decides about its member is refused, not sealed in (review R2)', postgresOnly('SQLite lets no write in beside a decision'), async () => {
+test('a grant written around the vault while it decides about its member is refused, not sealed in (review R2)', async () => {
   const w = await world();
   const { grants } = tablesOf(db.owner);
   // Mallory manages access on a sandbox project, holds nothing on market, and has the owner's login.
@@ -2743,7 +2704,7 @@ test('a grant written around the vault while it decides about its member is refu
   assert.ok(!(await w.vault.access(ADA)).grants.some((grant) => grant.environmentId === w.prod));
 });
 
-test('a grant written around the vault while it removes a member goes with the removal', log014Only(START_OVER, postgresOnly('SQLite lets no write in beside a decision')), async () => {
+test('a grant written around the vault while it removes a member goes with the removal', log014Only(START_OVER), async () => {
   const w = await world();
   const { grants } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
@@ -2944,7 +2905,7 @@ test("a tally whose members and grants are kept nowhere is refused wherever a wa
   assert.deepEqual(!resumed.ok && [resumed.failedAtSeq, resumed.reason], [second.checkpoint.seq + 1, 'its tally keeps its members and grants in entry 0, which holds none']);
 });
 
-test('two checkpoints at once, catching up from the same tally, sign one prefix each, never the same nor a shorter one', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('two checkpoints at once, catching up from the same tally, sign one prefix each, never the same nor a shorter one', async () => {
   const w = await world({}, { walks: { checkpoint: 40 } });
   await reads(200);
   const other = await w.twin();
@@ -3466,7 +3427,7 @@ test('under 0.15\'s log, a finding names no change for good: one naming a number
   await appendFinding(ADA, '999999999999', { forged: true });
   await appendFinding(ADA, 'ff'.repeat(16), { forged: true });
   assert.deepEqual(await standing(ADA), [false, false]);
-  // One whose `change` is a JSON number names no change: 0.14's rule, on both engines alike, until her next change's
+  // One whose `change` is a JSON number names no change: 0.14's rule, until her next change's
   // access entry (Postgres' `->>` would read it as the text "999999999999").
   await appendFinding(ADA, '', { forged: true, metadata: '{"change":999999999999}' });
   assert.deepEqual(await standing(ADA), [true, false]);
@@ -3779,7 +3740,7 @@ function holdingClient(held: RegExp, nth: number, seen: RegExp[]) {
   };
 }
 
-test("a start whose newest-entry read lands after another's rotation, its other reads before it, writes no second rotation (review r9 of #556)", postgresOnly('the start\'s reads side by side, a connection each: SQLite asks them one after another'), async () => {
+test("a start whose newest-entry read lands after another's rotation, its other reads before it, writes no second rotation (review r9 of #556)", async () => {
   const placed = await places(db.owner);
   const [old, next] = [localKek('kek-1'), localKek('kek-2')];
   const before = await configured(placed, { kek: old });
@@ -3809,7 +3770,7 @@ test("a start whose newest-entry read lands after another's rotation, its other 
   }
 });
 
-test("a start whose reads, read again in order, find the first entry under its key only after the newest, takes it for another's rotation, not for the log moving on (review r10 of #556)", postgresOnly('the start\'s reads side by side, a connection each: SQLite asks them one after another'), async () => {
+test("a start whose reads, read again in order, find the first entry under its key only after the newest, takes it for another's rotation, not for the log moving on (review r10 of #556)", async () => {
   const placed = await places(db.owner);
   const [old, next] = [localKek('kek-1'), localKek('kek-2')];
   const before = await configured(placed, { kek: old });
@@ -4304,7 +4265,7 @@ test('on a new instance, the first person its deployment names to sign in become
   assert.equal((await again.verifyLog({})).ok, true);
 });
 
-test('two people the list names, signing in at once on a new instance, both become Owners', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('two people the list names, signing in at once on a new instance, both become Owners', async () => {
   await places(db.owner);
   const first = await namingOwners('root@acme.example', 'sam@acme.example');
   const second = await openLocalVault(await db.connect(), configure({ owners: ['root@acme.example', 'sam@acme.example'] }));
@@ -4443,7 +4404,7 @@ async function headHeldWhile<T>(both: () => Promise<T>[]): Promise<T[]> {
 }
 
 for (const how of ['each leaving', 'each stepping down'] as const) {
-  test(`two Owners, ${how}, at once, leave one`, postgresOnly('SQLite runs one writer at a time'), async () => {
+  test(`two Owners, ${how}, at once, leave one`, async () => {
     const w = await world(UNNAMED);
     const other = await w.twin();
     assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB, role: 'owner' })).ok);
@@ -4478,7 +4439,7 @@ async function inTurn<A, B>(first: () => Promise<A>, second: () => Promise<B>): 
   return [await one, await two];
 }
 
-test('an Owner demoted while they make another sees it: the promotion decides under their row\'s lock', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('an Owner demoted while they make another sees it: the promotion decides under their row\'s lock', async () => {
   const w = await world();
   const other = await w.twin();
   assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB, role: 'owner' })).ok);
@@ -4493,7 +4454,7 @@ test('an Owner demoted while they make another sees it: the promotion decides un
   assert.deepEqual((await store.instanceOwners(db.owner)).map((row) => row.principal), [ROOT]);
 });
 
-test('an Admin removing someone just made an Owner sees it: the removal decides under their row\'s lock', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('an Admin removing someone just made an Owner sees it: the removal decides under their row\'s lock', async () => {
   const w = await world();
   const other = await w.twin();
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'admin' })).ok);
@@ -4688,7 +4649,7 @@ function pausedReadAbout(database: Database, principal: string, table = 'audit_l
   let skips = 0;
   /** Whether the read just answered is the one to pause after. */
   const due = (text: string, values: readonly unknown[]): boolean => {
-    // `snapshot`'s principals: an array on Postgres, a JSON array on SQLite.
+    // `snapshot`'s principals: an array.
     const names = (value: unknown): unknown[] => (Array.isArray(value) ? value : typeof value === 'string' && value.startsWith('[') ? JSON.parse(value) as unknown[] : [value]);
     if (!armed || !text.includes(table) || !values.flatMap(names).includes(principal)) return false;
     if (skips > 0) {
@@ -4747,8 +4708,8 @@ function pausedReadAbout(database: Database, principal: string, table = 'audit_l
     get(target, property) {
       if (property === 'select') return (...args: Parameters<Database['select']>) => wrap(target.select(...args));
       if (property === 'session') return session(Reflect.get(target, property, target) as never);
-      // A statement of its own, Postgres's `execute` or SQLite's `all` (`rowsOf`): `snapshot`'s, one for several principals.
-      if (property === 'execute' || property === 'all') {
+      // A statement of its own, `execute` (`rowsOf`): `snapshot`'s, one for several principals.
+      if (property === 'execute') {
         const run = Reflect.get(target, property, target) as (query: SQL) => Promise<unknown>;
         const { dialect } = target as unknown as { dialect: { sqlToQuery(query: SQL): { sql: string; params: unknown[] } } };
         return async (query: SQL) => {

@@ -1,5 +1,5 @@
 // SQL around coffre, as the database's owner: what the checks read, change
-// and put back behind its back, on Postgres or SQLite alike.
+// and put back behind its back.
 import type { Sql } from '../database.ts';
 import { expect } from '../report.ts';
 
@@ -10,9 +10,8 @@ export const TABLES = [
 
 /** Inspect every table, including any a deployment added. Missing shared tables fail. */
 export async function tables(sql: Sql): Promise<string[]> {
-  const rows = await sql.query<{ name: string }>(sql.engine === 'postgres'
-    ? `SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`
-    : `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`);
+  const rows = await sql.query<{ name: string }>(
+    `SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`);
   const names = rows.map((row) => row.name);
   const missing = TABLES.filter((name) => !names.includes(name));
   expect(missing.length === 0, 'shared tables could not be inspected', missing);
@@ -36,7 +35,7 @@ export async function scanTables(sql: Sql, names: string[], look: (where: string
 
 /** Parameters use one spelling in the checks, whatever the database. */
 export function query<Row = Record<string, unknown>>(sql: Sql, statement: string, params: unknown[] = []): Promise<Row[]> {
-  return sql.query<Row>(sql.engine === 'sqlite' ? statement.replace(/\$\d+/g, '?') : statement, params);
+  return sql.query<Row>(statement, params);
 }
 
 /** Insert a saved or forged row as it is, but for its generated columns. */
@@ -68,26 +67,14 @@ export async function transaction<T>(sql: Sql, work: () => Promise<T>): Promise<
 
 /**
  * `work` with the audit log's append-only triggers lifted, as only its owner
- * can: Postgres disables them for the session, SQLite drops them and makes
- * them again after.
+ * can: disabled for the session.
  */
 export async function appendOnlyLifted<T>(sql: Sql, work: () => Promise<T>): Promise<T> {
-  if (sql.engine === 'postgres') {
-    await sql.exec('ALTER TABLE audit_log DISABLE TRIGGER USER');
-    try {
-      return await work();
-    } finally {
-      await sql.exec('ALTER TABLE audit_log ENABLE TRIGGER USER');
-    }
-  }
-  const triggers = await sql.query<{ name: string; sql: string }>(
-    `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'audit_log'`,
-  );
-  for (const trigger of triggers) await sql.exec(`DROP TRIGGER ${trigger.name}`);
+  await sql.exec('ALTER TABLE audit_log DISABLE TRIGGER USER');
   try {
     return await work();
   } finally {
-    for (const trigger of triggers) await sql.exec(trigger.sql);
+    await sql.exec('ALTER TABLE audit_log ENABLE TRIGGER USER');
   }
 }
 
@@ -99,7 +86,7 @@ export const LOG_REFUSAL = 'coffre-conformance: the log refuses writes';
  * 0.14's, `audit_log`, of one action or all; or 0.15's uses, `log_uses`, or its changes, `log_changes`. Each table's
  * trigger and function are named for it, so that two logs may refuse at once.
  *
- * On Postgres, each statement first locks the table itself, as every reader
+ * Each statement first locks the table itself, as every reader
  * does: `log_uses` is partitioned by day, and a trigger on it is one on each
  * day, which `DROP TRIGGER` locks newest first, while a query reading several
  * days locks them oldest first. A use, or the reads' projector, holding one
@@ -110,20 +97,14 @@ export const LOG_REFUSAL = 'coffre-conformance: the log refuses writes';
 export async function logRefuses<T>(sql: Sql, work: () => Promise<T>, action?: string, table: 'audit_log' | 'log_uses' | 'log_changes' = 'audit_log'): Promise<T> {
   const when = action === undefined ? '' : ` WHEN (NEW.action = '${action}')`;
   const name = `conformance_refuse_${table}`;
-  const create = sql.engine === 'postgres'
-    ? `LOCK TABLE ${table} IN SHARE ROW EXCLUSIVE MODE;
-       CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$
-       BEGIN RAISE EXCEPTION '${LOG_REFUSAL}'; END $$;
-       CREATE TRIGGER ${name} BEFORE INSERT ON ${table} FOR EACH ROW${when} EXECUTE FUNCTION ${name}();`
-    : `CREATE TRIGGER ${name} BEFORE INSERT ON ${table}${when}
-       BEGIN SELECT RAISE(ABORT, '${LOG_REFUSAL}'); END;`;
-  await sql.exec(create);
+  await sql.exec(`LOCK TABLE ${table} IN SHARE ROW EXCLUSIVE MODE;
+    CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION '${LOG_REFUSAL}'; END $$;
+    CREATE TRIGGER ${name} BEFORE INSERT ON ${table} FOR EACH ROW${when} EXECUTE FUNCTION ${name}();`);
   try {
     return await work();
   } finally {
-    await sql.exec(sql.engine === 'postgres'
-      ? `LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE; DROP TRIGGER ${name} ON ${table}; DROP FUNCTION ${name}();`
-      : `DROP TRIGGER ${name};`);
+    await sql.exec(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE; DROP TRIGGER ${name} ON ${table}; DROP FUNCTION ${name}();`);
   }
 }
 

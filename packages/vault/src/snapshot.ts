@@ -1,13 +1,11 @@
 import type { StoredEntry } from '@coffre/core/audit';
 import type { Queryable, Transaction } from '@coffre/db';
 import { LogHeadMismatch, lockLogHead, lockLogHeadQueued, type HeadLine } from '@coffre/db/log';
-import { engineOf, rowsOf } from '@coffre/db/dialect';
+import { rowsOf } from '@coffre/db/dialect';
 import type { GrantRow } from '@coffre/db/grants';
 
-import { snapshotQuery as postgres } from './snapshot.postgres.ts';
-import { snapshotQuery as sqlite } from './snapshot.sqlite.ts';
+import { snapshotQuery } from './snapshot.postgres.ts';
 import { exactly } from './exact.ts';
-import { objectKey } from './inputs.ts';
 import * as store from './store.ts';
 import type { EnvironmentRow, Member, MemberLog, NewestColumns } from './store.ts';
 
@@ -135,36 +133,19 @@ export function current(head: LockedHead): boolean {
 }
 
 async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
-  const engine = engineOf(db);
-  const query = (engine === 'postgres' ? postgres : sqlite)(asked);
-  const statement = async (on: Queryable) => {
-    const [row] = await rowsOf<{ snapshot: string | Raw }>(on, query);
-    return typeof row!.snapshot === 'string' ? (exactly(row!.snapshot) as Raw) : row!.snapshot;
-  };
-  if (engine === 'postgres' || asked.seals !== true) return snapshotOf(asked, await statement(db), null, null);
-  // SQLite has no `log_object`: the environments' newest changes in a statement of their own, by the keys the vault
-  // computes, the places asked with no row among them (`gone`, which Postgres's statement answers itself). Both in one
-  // transaction, one snapshot of the file, so that a change committed between them is never a row's seal against a
-  // newer one (review r6); inside a decision's, a savepoint of it.
-  return store.oneSnapshot(db, async (on) => {
-    const raw = await statement(on);
-    const rowless = (raw.placeIds ?? []).filter((id) => !raw.environments.some((row) => row.id === id));
-    const newest = await store.newestChanges(on, [...raw.environments.map(({ id }) => id), ...rowless].map((id) => ({ kind: 'environment' as const, id })));
-    return snapshotOf(asked, raw, newest, await store.memberLogs(on, asked.principals), rowless);
-  });
+  const [row] = await rowsOf<{ snapshot: string | Raw }>(db, snapshotQuery(asked));
+  return snapshotOf(asked, typeof row!.snapshot === 'string' ? (exactly(row!.snapshot) as Raw) : row!.snapshot);
 }
 
-/** A snapshot from its statement's row; on SQLite, with the newest seals and the rowless places read beside it. */
-function snapshotOf(asked: Asked, raw: Raw, newest: Map<string, NewestColumns> | null, members: Map<string, MemberLog> | null, rowless: readonly string[] = []): Snapshot {
-  const gone = newest === null
-    ? (raw.gone ?? []).map(({ id, newest: last }) => [id, hex(last)] as const)
-    : rowless.flatMap((id) => (newest.has(objectKey({ kind: 'environment', id })) ? [[id, store.newestRowOf(newest.get(objectKey({ kind: 'environment', id })))?.seal ?? null] as const] : []));
+/** A snapshot from its statement's row. */
+function snapshotOf(asked: Asked, raw: Raw): Snapshot {
+  const gone = (raw.gone ?? []).map(({ id, newest: last }) => [id, hex(last)] as const);
   return {
     at: Number(raw.at),
     members: new Map(raw.members.map((member) => [member.principal, memberOf(member)])),
     grants: new Map(asked.principals.map((principal) => [principal, raw.grants.filter((grant) => grant.principal === principal).map(grantOf)])),
     newestAccess: new Map(raw.access.map((entry) => [entry.subjectPrincipal!, entryOf(entry)])),
-    memberLogs: members ?? new Map((raw.memberLogs ?? []).map(({ principal, seal, number, at, requestId, object, actor, payload, newest: last, mac }) => [principal, store.memberLogOf({
+    memberLogs: new Map((raw.memberLogs ?? []).map(({ principal, seal, number, at, requestId, object, actor, payload, newest: last, mac }) => [principal, store.memberLogOf({
       seal: hex(seal), number, at, request_id: requestId, object, actor, payload, newest: hex(last), mac: hex(mac),
     })])),
     newestPolicy: raw.policy === null ? null : entryOf(raw.policy),
@@ -177,7 +158,7 @@ function snapshotOf(asked: Asked, raw: Raw, newest: Map<string, NewestColumns> |
         sealed: store.environmentSeal(
           { id, projectId, slug, owner, parentId, protected: sealed.protected == null ? null : Boolean(sealed.protected), archived: Boolean(sealed.ownArchived), projectArchived: Boolean(sealed.projectArchived) },
           hex(sealed.seal),
-          newest === null ? sealed.newest ?? null : newest.get(objectKey({ kind: 'environment', id })) ?? null,
+          sealed.newest ?? null,
         ),
       } : {}),
     }] as const)]),
@@ -192,10 +173,10 @@ function snapshotOf(asked: Asked, raw: Raw, newest: Map<string, NewestColumns> |
   };
 }
 
-/** Whole numbers come as JSON numbers or text, bytes as hex, as each dialect's query writes them. */
+/** Whole numbers come as JSON numbers or text, bytes as hex, as the query writes them. */
 type Int = number | string;
 
-/** An entry's columns, as both dialects' queries write them (`entryJson`). */
+/** An entry's columns, as the query writes them (`entryJson`). */
 export type RawEntry = {
   seq: Int; author: string; keyId: string; occurredAt: Int; actor: string; action: string; decision: string; code: string | null;
   subjectPrincipal: string | null; projectId: string | null; environmentId: string | null; secretId: string | null;
@@ -218,18 +199,16 @@ type Raw = {
   settings?: RawEntry | null;
   environments: {
     id: string; projectId: string; slug: string; owner: string | null; parentId: string | null; deleted: boolean | number; archived: boolean | number;
-    /** With `asked.seals`: the object's own columns, the row's seal, as hex, and, on Postgres, its newest change, whole (`newestChangeJson`). */
+    /** With `asked.seals`: the object's own columns, the row's seal, as hex, and its newest change, whole (`newestChangeJson`). */
     protected?: boolean | number | null; ownArchived?: boolean | number; projectArchived?: boolean | number; seal?: string | null; newest?: NewestColumns | null;
   }[];
-  /** With `asked.seals`, on Postgres: each asked principal's row's seal and its newest change (`MemberLog`). */
+  /** With `asked.seals`: each asked principal's row's seal and its newest change (`MemberLog`). */
   memberLogs?: {
     principal: string; seal: string | null; number: string | null; at: string | null; requestId: string | null; object: string | null; actor: string | null;
     payload: string | null; newest: string | null; mac: string | null;
   }[];
-  /** With `asked.seals`, on Postgres: the places asked that the log holds a change of and no row answers to. */
+  /** With `asked.seals`: the places asked that the log holds a change of and no row answers to. */
   gone?: { id: string; newest: string | null }[];
-  /** With `asked.seals`, on SQLite: every place id asked, row or none. */
-  placeIds?: string[];
   ended: Int[];
   released: Int | null;
 };

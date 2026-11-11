@@ -11,7 +11,7 @@ import { sql } from 'drizzle-orm';
 import type { Reader } from '../src/decide.ts';
 import { applyOp, indexBytes, type Input, type Op, type ProxyInput, type ProxyItem, type Ref } from '../src/inputs.ts';
 import { frozenHoldings } from '../src/proxy.ts';
-import { ENGINE, rows, run, type TestDatabase } from './database.ts';
+import { rows, run, type TestDatabase } from './database.ts';
 import { namedWorld } from './named-world.ts';
 import { change, genesis, onePeriod, ROOT, seal } from './use-world.ts';
 
@@ -93,13 +93,8 @@ export async function routeWorld(db: TestDatabase) {
     await change(ref, named(ref, { op: 'proxy.save', items: changed, replace: false, loaded: null }), after, async (tx, value) => {
       const json = JSON.stringify(next);
       const digests = indexBytes(next);
-      if (ENGINE === 'postgres') {
-        await run(tx, sql`INSERT INTO proxy_definitions (environment_id, items, digests, seal) VALUES (${environment}, ${json}::jsonb, ${digests}, ${value})
-          ON CONFLICT (environment_id) DO UPDATE SET items = excluded.items, digests = excluded.digests, seal = excluded.seal`);
-      } else {
-        await run(tx, sql`INSERT INTO proxy_definitions (environment_id, items, digests, seal) VALUES (${environment}, ${json}, ${digests}, ${value})
-          ON CONFLICT (environment_id) DO UPDATE SET items = excluded.items, digests = excluded.digests, seal = excluded.seal`);
-      }
+      await run(tx, sql`INSERT INTO proxy_definitions (environment_id, items, digests, seal) VALUES (${environment}, ${json}::jsonb, ${digests}, ${value})
+        ON CONFLICT (environment_id) DO UPDATE SET items = excluded.items, digests = excluded.digests, seal = excluded.seal`);
     });
     return next;
   };
@@ -109,7 +104,7 @@ export async function routeWorld(db: TestDatabase) {
     const was = made.object as Extract<Input, { kind: 'secret' }>;
     const version = randomUUID();
     await run(db.owner, sql`INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by, sensitive)
-      SELECT ${version}, secret_id, 2, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by, ${ENGINE === 'postgres' ? sql`true` : sql`1`}
+      SELECT ${version}, secret_id, 2, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by, true
         FROM secret_versions WHERE id = ${was.version}`);
     const object = { ...was, version, nature: 'sensitive' as const };
     const { projectId, environmentId, key, digest, source, reference } = object;

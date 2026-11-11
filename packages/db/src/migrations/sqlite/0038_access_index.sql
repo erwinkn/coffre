@@ -1,2 +1,0 @@
--- 0.16.0, T239: postgres/0077_access_index.sql's index, keyed as the subject index (`author` first: SQLite weighs an index by the equalities it matches, and would pick the subject index over one by principal alone), of the vault's allowed access entries alone.
-CREATE INDEX `audit_log_access_idx` ON `audit_log` (`author`,`subject_principal`,`seq`) WHERE author = 'vault' AND decision = 'allow' AND action IN ('member.add', 'member.restore', 'member.owner', 'member.role', 'member.remove', 'access.grant', 'access.revoke');

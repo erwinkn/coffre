@@ -9,30 +9,18 @@ for argument in "$@"; do
         exit 2
     fi
 done
-export COFFRE_TEST_ENGINE="${COFFRE_TEST_ENGINE:-postgres}"
 trap 'exit 130' INT
 trap 'exit 143' TERM
-case "$COFFRE_TEST_ENGINE" in
-    postgres)
-        export COFFRE_TEST_DATABASE="$(node --input-type=module -e '
-            import { randomBytes } from "node:crypto";
-            const base = (process.env.COFFRE_TEST_DATABASE || "coffre_properties").replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 32);
-            console.log(`${base}_${randomBytes(8).toString("hex")}`);
-        ')"
-        trap 'node --conditions=coffre:source scripts/test-databases.mjs cleanup "$COFFRE_TEST_DATABASE"' EXIT
-        ./scripts/setup-test-database.sh
-        ;;
-    sqlite)
-        scratch="$(mktemp -d "${TMPDIR:-/tmp}/coffre-properties.XXXXXX")"
-        trap 'rm -rf "$scratch"' EXIT
-        export COFFRE_TEST_DATABASE_URL="file:$scratch/coffre_test.db"
-        node --conditions=coffre:source packages/server/test/db/create-database.ts "$COFFRE_TEST_DATABASE_URL"
-        ;;
-    *) echo 'COFFRE_TEST_ENGINE must be postgres or sqlite' >&2; exit 2 ;;
-esac
+export COFFRE_TEST_DATABASE="$(node --input-type=module -e '
+    import { randomBytes } from "node:crypto";
+    const base = (process.env.COFFRE_TEST_DATABASE || "coffre_properties").replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 32);
+    console.log(`${base}_${randomBytes(8).toString("hex")}`);
+')"
+trap 'node --conditions=coffre:source scripts/test-databases.mjs cleanup "$COFFRE_TEST_DATABASE"' EXIT
+./scripts/setup-test-database.sh
 node --conditions=coffre:source packages/server/test/operations-properties.test.ts "$@"
 node --conditions=coffre:source packages/server/test/forks-properties.test.ts "$@"
 node --conditions=coffre:source packages/server/test/audit-visibility-properties.test.ts "$@"
 node --conditions=coffre:source packages/server/test/natures-properties.test.ts "$@"
-# Its growth property, and its fixed budgets beside it; Postgres only.
+# Its growth property, and its fixed budgets beside it.
 node --conditions=coffre:source packages/server/test/request-cost.alone.ts "$@"

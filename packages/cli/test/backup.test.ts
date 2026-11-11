@@ -38,11 +38,9 @@ async function serverMajor(url: string): Promise<string> {
 // PostgreSQL's own tools, which the commands run: of the server's major version, as a deployment's pipeline has them.
 const tools = spawnSync('pg_restore', ['--version'], { encoding: 'utf8' });
 const toolsMajor = /(\d+)\.\d+/.exec(tools.stdout ?? '')?.[1] ?? null;
-const sqlite = process.env.COFFRE_TEST_ENGINE === 'sqlite';
-const major = sqlite || tools.status !== 0 ? null : await serverMajor(owner('postgres'));
+const major = tools.status !== 0 ? null : await serverMajor(owner('postgres'));
 const postgres = {
-  skip: sqlite ? 'Postgres only: coffre backup runs pg_dump'
-    : tools.status !== 0 ? 'needs pg_dump and pg_restore on PATH'
+  skip: tools.status !== 0 ? 'needs pg_dump and pg_restore on PATH'
     : toolsMajor !== major ? `needs PostgreSQL ${major} pg_dump and pg_restore on PATH, the server's major version, not ${toolsMajor}` : false,
 };
 

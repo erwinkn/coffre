@@ -36,12 +36,9 @@ export const RECORDS = {
 
 export type ChangeRecord = keyof typeof RECORDS;
 
-/** Whether `payload` holds one of `records`, on Postgres or SQLite: an index's condition, and the reads' that use it. */
-export function recorded(engine: 'postgres' | 'sqlite', payload: SQLWrapper, ...records: ChangeRecord[]): SQL {
-  const at = (text: string) => {
-    const marker = sql.raw(`'${text}'`);
-    return engine === 'postgres' ? sql`strpos(${payload}, ${marker})` : sql`instr(${payload}, ${marker})`;
-  };
+/** Whether `payload` holds one of `records`: an index's condition, and the reads' that use it. */
+export function recorded(payload: SQLWrapper, ...records: ChangeRecord[]): SQL {
+  const at = (text: string) => sql`strpos(${payload}, ${sql.raw(`'${text}'`)})`;
   const each = records.map((record) => {
     const { starts, holds }: { starts?: string; holds: string } = RECORDS[record];
     return starts === undefined ? sql`${at(holds)} > 0` : sql`(${at(starts)} = 1 AND ${at(holds)} > 0)`;
@@ -53,6 +50,6 @@ export function recorded(engine: 'postgres' | 'sqlite', payload: SQLWrapper, ...
  * A field of a change's payload, as the indexes of `log_changes` that hold one (`log_changes_written_environment_idx`)
  * repeat it, word for word: the payload as JSON, the field's text.
  */
-export function recordField(engine: 'postgres' | 'sqlite', payload: SQLWrapper, field: 'environmentId'): SQL {
-  return engine === 'postgres' ? sql`(${payload}::jsonb ->> ${sql.raw(`'${field}'`)})` : sql`json_extract(${payload}, ${sql.raw(`'$.${field}'`)})`;
+export function recordField(payload: SQLWrapper, field: 'environmentId'): SQL {
+  return sql`(${payload}::jsonb ->> ${sql.raw(`'${field}'`)})`;
 }

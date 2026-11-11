@@ -71,7 +71,6 @@ async function noWrites(sql: Sql, names: readonly string[]): Promise<void> {
 }
 
 export async function appLogin(deployment: Deployment): Promise<string> {
-  expect(deployment.runtime !== null, 'the app runtime login is missing');
   // The vault's own: its principals, their grants, and `vault_releases` (and any `vault_` table a deployment adds).
   const protectedTables = (await using(deployment.database(), tables)).filter((name) => name === 'principals' || name === 'grants' || name.startsWith('vault_'));
   return using(deployment.runtime(), async (sql) => {
@@ -87,7 +86,6 @@ export async function appLogin(deployment: Deployment): Promise<string> {
 }
 
 export async function vaultLogin(deployment: Deployment): Promise<string> {
-  expect(deployment.vaultRuntime !== null, 'the vault runtime login is missing');
   const appTables = await vaultReadOnly(deployment);
   return using(deployment.vaultRuntime(), (sql) => vaultRefuses(sql, appTables));
 }
@@ -99,7 +97,6 @@ export async function vaultLogin(deployment: Deployment): Promise<string> {
  * login holds, no more.
  */
 export async function hotLogin(deployment: Deployment): Promise<string> {
-  expect(deployment.hotRuntime !== null, 'the hot path login is missing');
   const appTables = await vaultReadOnly(deployment);
   return using(deployment.hotRuntime(), async (sql) => {
     const [login] = await sql.query<{ name: string; lock: string; statement: string; members: boolean }>(`SELECT current_user AS name,

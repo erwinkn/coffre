@@ -5,7 +5,7 @@
 // served, and new changes sealed on top. The signer's memory of a pair the backup predates refuses the restored log
 // (the database lost entries it signed), as a writer's rollback would be refused, until it is given a new memory.
 // The wrong vault key verifies nothing. A backup from before a rotation of the vault key comes back under the new
-// key, the log moving on from the old one again (T168). Postgres only, with PostgreSQL 16's pg_dump and pg_restore on PATH, as the
+// key, the log moving on from the old one again (T168). With PostgreSQL 16's pg_dump and pg_restore on PATH, as the
 // CLI's backup tests (packages/cli/test/backup.test.ts) need them.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,7 +29,7 @@ import { eq } from 'drizzle-orm';
 import { SigninService } from '../src/api/signin.ts';
 import { clientFor, resetDatabase, testDeps, testVault, type TestVault } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_OWNER_DATABASE_URL } from './db/connections.ts';
-import { openTestDatabase, openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
+import { openTestDatabase, openVaultDatabase } from './db/engine.ts';
 import { environments, bulkCap, logChanges, logCheckpoints, checkpointFence, logTiles, logUses, projects, secrets } from './db/tables.ts';
 
 const ROOT = 'admin@acme.example';
@@ -55,10 +55,9 @@ const urlOf = (database: string, login = 'coffre_owner:local-dev-only') => {
 
 const tools = spawnSync('pg_restore', ['--version'], { encoding: 'utf8' });
 const toolsMajor = /(\d+)\.\d+/.exec(tools.stdout ?? '')?.[1] ?? null;
-const major = TEST_ENGINE !== 'postgres' || tools.status !== 0 ? null : await serverMajor(urlOf('postgres'));
+const major = tools.status !== 0 ? null : await serverMajor(urlOf('postgres'));
 const postgres = {
-  skip: TEST_ENGINE !== 'postgres' ? 'Postgres only: coffre backup runs pg_dump'
-    : tools.status !== 0 ? 'needs pg_dump and pg_restore on PATH'
+  skip: tools.status !== 0 ? 'needs pg_dump and pg_restore on PATH'
     : toolsMajor !== major ? `needs PostgreSQL ${major} pg_dump and pg_restore on PATH, the server's major version, not ${toolsMajor}` : false,
 };
 

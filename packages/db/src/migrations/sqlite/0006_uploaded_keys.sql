@@ -1,1 +1,0 @@
-ALTER TABLE `service_bindings` ADD `jwks` text;

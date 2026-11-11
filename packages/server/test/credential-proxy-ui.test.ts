@@ -25,7 +25,6 @@ import { Deploying, USE_DEADLINE_MS, type ProxyDefinition, type Vault } from '@c
 import { sql, type SQL } from 'drizzle-orm';
 
 import { clientFor, LOG } from './api-fixture.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 import { db, deps, DEV, entries, NO, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { bindingRoute, checkPlugins } from '../src/plugins.ts';
@@ -114,10 +113,9 @@ async function handle(path = 'market/dev', who = DEV): Promise<string> {
   return (await api.handles.create({ label: 'coffre run market/dev', paths: [path] })).token;
 }
 
-/** Raw SQL as the owner, on either engine: a row changed around the vault. */
+/** Raw SQL as the owner: a row changed around the vault. */
 async function run(query: SQL): Promise<void> {
-  if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
-  else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
+  await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
 }
 
 const as = (token: string, init: RequestInit = {}): RequestInit => ({ ...init, headers: { authorization: `Bearer ${token}`, ...(init.headers as Record<string, string> | undefined) } });
@@ -259,7 +257,7 @@ test("the plan gives a UI route's key as the handle, never its value, and names 
   assert.equal(plain.credentials.openai, undefined);
   // One item forged around the vault: no plan, rather than one shaped from code alone, which would hand the app its values.
   deploy(proxyOf());
-  await run(TEST_ENGINE === 'postgres' ? sql`UPDATE proxy_definitions SET items = jsonb_set(items, '{openai,savedAt}', '1')` : sql`UPDATE proxy_definitions SET items = json_set(items, '$.openai.savedAt', 1)`);
+  await run(sql`UPDATE proxy_definitions SET items = jsonb_set(items, '{openai,savedAt}', '1')`);
   const forged = await route('/use/market/dev', as(token));
   assert.equal(forged.status, 503);
   assert.ok(!(await forged.text()).includes(OPENAI));
@@ -1381,14 +1379,14 @@ test("an item naming a key the environment does not hold, or one gone before the
   let sent = reached.length;
   assert.equal((await route('/use/market/dev/openai/models/x', as(token))).status, 409);
   assert.equal(reached.length, sent, 'nothing sent with the prototype\'s value');
-  // Each gone once the vault decided on it, before the app reads it, a key of its own a round: refused (SQLite's read,
-  // 404), or made with the value decided on (Postgres's, by ID), never with the prototype's.
+  // Each gone once the vault decided on it, before the app reads it, a key of its own a round: made with the value
+  // decided on (by ID), never with the prototype's.
   const vault = runtime.vault as unknown as { useRoute: Vault['useRoute'] };
   const real = vault.useRoute;
   let gone: string | null = null;
   vault.useRoute = (async (...args: Parameters<Vault['useRoute']>) => {
     const answered = await real.apply(runtime.vault, args);
-    // Gone from under its name by a write around the app (R64): what fails closed on both engines.
+    // Gone from under its name by a write around the app (R64): what fails closed.
     if (gone !== null) await run(sql`UPDATE secrets SET key = ${`gone_${gone}`} WHERE key = ${gone}`);
     return answered;
   }) as Vault['useRoute'];

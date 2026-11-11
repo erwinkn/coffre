@@ -1,5 +1,5 @@
-// T169: a checkpointer whose database stalls under a tick, on Node, Postgres
-// and SQLite. Its tick stalls within its bound and another opens; meanwhile
+// T169: a checkpointer whose database stalls under a tick, on Node and
+// Postgres. Its tick stalls within its bound and another opens; meanwhile
 // a use answers as ever, a change committed answers unsealed within its
 // bound (the app's 503), `sealing()` (readiness) says it does not seal;
 // once the database answers, it seals again by itself, the change too.
@@ -19,7 +19,7 @@ import { openDatabase } from '@coffre/db/connect';
 import { SEAL_WAIT_MS } from '../src/checkpointer.ts';
 import { fileMemory, keepCheckpointer, type KeptCheckpointer } from '../src/checkpointer-node.ts';
 import { CUTOVER_OBJECT } from '../src/cutover.ts';
-import { ENGINE, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { stallProxy } from './stall-proxy.ts';
 import { ask, change, emptyLog, isolate, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
@@ -105,7 +105,7 @@ test('T169, Node: statements the checkpointer sends go unanswered: its tick stal
   const w = await world();
   const id = await w.key('postgres://prod');
   const stall = stallable(db.vault);
-  const { kept, vault, use } = await opened(stall.db, join(dir, `memory-${ENGINE}-1`));
+  const { kept, vault, use } = await opened(stall.db, join(dir, 'memory-postgres-1'));
   try {
     await until(() => kept.sealing().ok, 5000, 'sealing at first');
     assert.ok((await vault.sealing()).ok);
@@ -147,7 +147,7 @@ test('T169, Node: statements the checkpointer sends go unanswered: its tick stal
   }
 });
 
-test('T169, Node, Postgres: a barrier that waits in the database past its bound stalls the tick; let go, it lands late, and the checkpointer opened meanwhile takes the floor it raised', { skip: ENGINE === 'postgres' ? false : 'Postgres only: a lock the barrier waits for', timeout: 60_000 }, async () => {
+test('T169, Node, Postgres: a barrier that waits in the database past its bound stalls the tick; let go, it lands late, and the checkpointer opened meanwhile takes the floor it raised', { timeout: 60_000 }, async () => {
   const w = await world();
   const id = await w.key('postgres://prod');
   const { kept, vault, use } = await opened(db.vault, join(dir, 'memory-postgres-2'));
@@ -190,7 +190,7 @@ test('T169, Node, Postgres: a barrier that waits in the database past its bound 
   }
 });
 
-test("T169, review r8 of #437, Node, Postgres: a reads' projection hung in the database holds back no runner opened after a stall: let the barrier go and it seals again, the projection still waiting", { skip: ENGINE === 'postgres' ? false : 'Postgres only: a lock the projection waits for', timeout: 60_000 }, async () => {
+test("T169, review r8 of #437, Node, Postgres: a reads' projection hung in the database holds back no runner opened after a stall: let the barrier go and it seals again, the projection still waiting", { timeout: 60_000 }, async () => {
   const w = await world();
   const { kept, vault } = await opened(db.vault, join(dir, 'memory-postgres-projection'));
   const releases: (() => void)[] = [];
@@ -231,7 +231,7 @@ test("T169, review r8 of #437, Node, Postgres: a reads' projection hung in the d
   }
 });
 
-test('T169, review r1, Postgres: a cutover change a writer moved into a gap a signed pair covers is no shortcut: a fresh isolate asks for its seal, which proves it', { skip: ENGINE === 'postgres' ? false : 'Postgres only: a gap in the sequence', timeout: 60_000 }, async () => {
+test('T169, review r1, Postgres: a cutover change a writer moved into a gap a signed pair covers is no shortcut: a fresh isolate asks for its seal, which proves it', { timeout: 60_000 }, async () => {
   const w = await world();
   const id = await w.key('postgres://prod');
   const { kept, vault } = await opened(db.vault, join(dir, 'memory-postgres-3'));
@@ -258,7 +258,7 @@ test('T169, review r1, Postgres: a cutover change a writer moved into a gap a si
   }
 });
 
-test('T169, review r1, Node, Postgres: stall after stall, each on a connection of its own, which it cuts: none is left holding one; answered again, it seals', { skip: ENGINE === 'postgres' ? false : 'Postgres only: a connection to cut', timeout: 60_000 }, async () => {
+test('T169, review r1, Node, Postgres: stall after stall, each on a connection of its own, which it cuts: none is left holding one; answered again, it seals', { timeout: 60_000 }, async () => {
   const w = await world();
   const proxy = await stallProxy(VAULT_URL);
   const kept = await keepCheckpointer({
@@ -290,7 +290,7 @@ test('T169, review r1, Node, Postgres: stall after stall, each on a connection o
 
 test('T169, review r3, Node: a tick that stalls in its memory write: the keeper\'s stop returns only once that write has landed, so nothing opened after it over the same file has its pair overwritten', { timeout: 60_000 }, async () => {
   const w = await world();
-  const path = join(dir, `memory-${ENGINE}-5`);
+  const path = join(dir, 'memory-postgres-5');
   let hold: Promise<void> | null = null;
   let release = () => {};
   let landed = 0;
@@ -336,7 +336,7 @@ test('T169, review r5, Node: an upkeep past its bound retires its runner, as a s
   // Only the upkeep's pruning of the bulk cap's rows goes unanswered; the ticks are answered as ever.
   const stall = stallable(db.vault, (text) => /prune_bulk|DELETE FROM bulk_cap/i.test(text));
   stall.hold();
-  const kept = await keepCheckpointer({ database: stall.db, signingKeys: [SIGNING_KEY], memory: join(dir, `memory-${ENGINE}-6`), intervalMs: 20, retryMs: 50, tickBoundMs: 300, upkeepBoundMs: 300 });
+  const kept = await keepCheckpointer({ database: stall.db, signingKeys: [SIGNING_KEY], memory: join(dir, 'memory-postgres-6'), intervalMs: 20, retryMs: 50, tickBoundMs: 300, upkeepBoundMs: 300 });
   try {
     await until(async () => (await kept.alarms()).some((a) => /the log's upkeep did not end within 300 ms/.test(a.message)), 10_000, 'the upkeep given up on');
     stall.release();

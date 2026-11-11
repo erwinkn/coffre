@@ -9,7 +9,6 @@ import { issuedGrant } from '@coffre/core/access';
 import { sealEntry, type LogFields } from '@coffre/core/audit';
 import { UNSEALED, type Through, type UseInput, type UseOutcome, type Vault, type VaultEntry } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
-import { openDatabase } from '@coffre/db/connect';
 import { rowsOf } from '@coffre/db/dialect';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { derivedSigningKey } from '@coffre/vault';
@@ -26,7 +25,7 @@ import { serveApi } from '../src/api/router.ts';
 import type { SigninService } from '../src/api/signin.ts';
 import type { WorkloadService } from '../src/api/workloads.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
-import { emptyLog, openVaultDatabase, TEST_ENGINE, withLogUnlocked } from './db/engine.ts';
+import { emptyLog, openVaultDatabase, withLogUnlocked } from './db/engine.ts';
 import { assertOutsideTransaction } from './transaction-guard.ts';
 import { drainBackgroundTasks, trackBackgroundTask } from './background-tasks.ts';
 
@@ -293,9 +292,9 @@ export async function keyIds(owner: Database, key: string): Promise<string[]> {
   return (await owner.select({ id: secrets.id }).from(secrets).where(eq(secrets.key, key))).map((row) => row.id);
 }
 
-/** 0.15's hot path's database, as a vault's `hotDatabase` takes it: its own login on Postgres, the same file on SQLite. */
+/** 0.15's hot path's database, as a vault's `hotDatabase` takes it: its own login. */
 export function hotDatabaseUrl(): string {
-  return TEST_ENGINE === 'postgres' ? TEST_HOT_DATABASE_URL : process.env.COFFRE_TEST_DATABASE_URL!;
+  return TEST_HOT_DATABASE_URL;
 }
 
 /** A checkpointer that seals everything at once: what a change waits on, in a test with no tree. */
@@ -355,7 +354,7 @@ export function testVault(
         database,
         kek: { id: 'test-kek-1', key: kek.toString('base64') },
         owners: owners.length > 0 ? owners.slice(0, 1) : ['nobody@coffre.test'],
-        // With 0.15's log, its uses too, over the hot path's login (the same file on SQLite): the app opens values through them.
+        // With 0.15's log, its uses too, over the hot path's login: the app opens values through them.
         ...(log.log === '0.15' ? { hotDatabase: hotDatabaseUrl() } : {}),
         ...config,
       },
@@ -439,15 +438,12 @@ export function testVault(
     async listReads() {
       if (log.log !== '0.15') return;
       const memory = mkdtempSync(join(tmpdir(), 'coffre-reads-'));
-      // On a connection of its own, closed after: on SQLite, a connection the vault reads on meanwhile is another.
-      const own = TEST_ENGINE === 'postgres' ? null : await openDatabase(process.env.COFFRE_TEST_DATABASE_URL!);
-      const signer = await runCheckpointer({ database: own?.db ?? await openVaultDatabase(), signingKeys: [config.signingKey === undefined ? signingKey : Buffer.from(config.signingKey, 'base64')], memory: join(memory, 'memory'), intervalMs: 3_600_000 });
+      const signer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [config.signingKey === undefined ? signingKey : Buffer.from(config.signingKey, 'base64')], memory: join(memory, 'memory'), intervalMs: 3_600_000 });
       try {
         await signer.checkpointer.tick();
         await signer.projected();
       } finally {
         await signer.stop();
-        await own?.close();
         rmSync(memory, { recursive: true, force: true });
       }
     },
@@ -660,11 +656,11 @@ export async function resetDatabase(owner: Database): Promise<void> {
 
 /**
  * The log's next entry numbered `from`, the app's, signed with `chainKey` and chained to the head (the entries between
- * never written, as a log grown so far would hold them), and 0.15's next change numbered past it: on Postgres its
- * sequence moved on (never back, onto a change numbered already), on SQLite a change of an object nothing reads, as the newest. Past 2^53, no JS number holds them.
+ * never written, as a log grown so far would hold them), and 0.15's next change numbered past it: its
+ * sequence moved on (never back, onto a change numbered already). Past 2^53, no JS number holds them.
  */
 export async function numbersFrom(owner: Database, from: bigint, chainKey: Buffer): Promise<void> {
-  const { auditChainHead, auditLog, logChanges } = tablesOf(owner);
+  const { auditChainHead, auditLog } = tablesOf(owner);
   const key = appLogKey(chainKey);
   const [head] = await owner.select({ headHash: auditChainHead.headHash }).from(auditChainHead);
   const fields: LogFields = {
@@ -678,8 +674,7 @@ export async function numbersFrom(owner: Database, from: bigint, chainKey: Buffe
     await owned.insert(auditLog).values(entry);
   });
   await owner.update(auditChainHead).set({ nextSeq: from + 1n, headHash: entry.hash });
-  if (TEST_ENGINE === 'postgres') await rowsOf(owner, sql`SELECT setval('log_number', greatest(${from.toString()}::bigint, (SELECT coalesce(max(number), 0) FROM log_changes)))`);
-  else await owner.insert(logChanges).values({ number: from, at: Date.now(), requestId: randomUUID(), object: randomUUID(), actor: 'system:test', payload: '{"op":"test"}', seal: null, mac: randomBytes(16) });
+  await rowsOf(owner, sql`SELECT setval('log_number', greatest(${from.toString()}::bigint, (SELECT coalesce(max(number), 0) FROM log_changes)))`);
 }
 
 /**

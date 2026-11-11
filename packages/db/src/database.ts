@@ -18,10 +18,7 @@ export interface QueryResult extends PgQueryResultHKT {
   type: RowList<Assume<this['row'], Row>[]>;
 }
 
-/**
- * A database, typed as Postgres whichever it is; see portable.ts for why
- * that holds. connect.ts opens one of each from a URL.
- */
+/** A database: connect.ts opens one from a URL, hyperdrive.ts one from a Worker's binding. */
 export type Database = PgDatabase<QueryResult, typeof schema, NoRelations>;
 export type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 /** Anything a read can run on: the database, or an open transaction. */
@@ -157,10 +154,7 @@ export function createDatabase(client: Client, { lockWaitMs }: { lockWaitMs?: nu
   return trackCommits(db);
 }
 
-/**
- * The tables of the database's own dialect: the Postgres ones on Postgres,
- * the SQLite ones on SQLite. Every query builds on these.
- */
+/** The database's tables. Every query builds on these. */
 export function tablesOf(db: Queryable): typeof schema {
   return db._.fullSchema;
 }
@@ -168,9 +162,8 @@ export function tablesOf(db: Queryable): typeof schema {
 const byName = new WeakMap<object, Map<string, Table>>();
 
 /**
- * The database's own twin of `table`, which may be another dialect's: the
- * server names tables by importing schema.ts, and the database decides
- * which one that means.
+ * The database's own `table`: the server names tables by importing
+ * schema.ts, and the database decides which one that means.
  */
 export function own<T extends Table>(db: Queryable, table: T): T {
   const tables = tablesOf(db);

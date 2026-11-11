@@ -5,7 +5,7 @@
 // that uses another person's handle after it. And `use`'s answer lists every key the environment holds unless the
 // plugin asks for its keys `only`; a plain value used long after the check, on access as it is then. Someone removed
 // and admitted again before the sweep is refused their earlier membership's handle, on the answer the app kept: by the
-// use itself on 0.15's log (T145), by `credentialStill` on 0.14's. The same on 0.14's log and on SQLite, which hand
+// use itself on 0.15's log (T145), by `credentialStill` on 0.14's. The same on 0.14's log, which hands
 // nothing on. Someone whose grant was revoked since their answer was kept learns nothing of the keys made since,
 // even when the vault is too busy to use them (review r2): their read asks the vault again before it answers.
 import test, { after, before } from 'node:test';

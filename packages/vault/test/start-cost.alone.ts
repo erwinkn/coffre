@@ -16,7 +16,7 @@ import { sql } from 'drizzle-orm';
 import { resolveVaultConfig } from '../src/config.ts';
 import { firstVaultEntryUnder } from '../src/store.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { openTestDatabase, postgresOnly, rows, sealed, VAULT_URL, withLogUnlocked, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, sealed, VAULT_URL, withLogUnlocked, type TestDatabase } from './database.ts';
 import { DAY, emptyLog, KEK, LOG_015, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -59,7 +59,7 @@ async function older(count: number, author: 'app' | 'vault' = 'app', key = 'app:
   await db.owner.execute(sql`VACUUM (ANALYZE, PARALLEL 0) audit_log`);
 }
 
-test("a fresh isolate's start reads as many pages at a handful of days and entries as at a hundred days and 100,000 entries more", { ...postgresOnly('the log by day'), timeout: 600_000 }, async (t) => {
+test("a fresh isolate's start reads as many pages at a handful of days and entries as at a hundred days and 100,000 entries more", { timeout: 600_000 }, async (t) => {
   const w = await world();
   const config = resolveVaultConfig({ kek: KEK, signingKey: SIGNING_KEY.toString('base64'), owners: ['root@acme.example'] });
   // The decision that makes root the Owner the configuration names waits for its seal, which no checkpointer here makes.
@@ -103,7 +103,7 @@ test("a fresh isolate's start reads as many pages at a handful of days and entri
   }
 });
 
-test("the vault's first entry under a key is one step of the index, whether the key wrote, wrote after 100,000 entries, or never wrote", postgresOnly('the plans'), async () => {
+test("the vault's first entry under a key is one step of the index, whether the key wrote, wrote after 100,000 entries, or never wrote", async () => {
   const to = `vault:${randomBytes(4).toString('hex')}`;
   const pagesOf = async (key: string) => {
     const [row] = await rows<{ 'QUERY PLAN': [{ Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }] }>(db.owner, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)

@@ -6,9 +6,7 @@ import assert from 'node:assert/strict';
 import { postgresClient } from '@coffre/db/connect';
 
 import { deletesSettled, horizonHeld, removeDeleted } from '../../../scripts/matrix-weigh.ts';
-import { ENGINE, OWNER_URL } from './database.ts';
-
-const skip = ENGINE !== 'postgres' ? 'Postgres horizons' : false;
+import { OWNER_URL } from './database.ts';
 
 /** A transaction left open, its snapshot taken (and its id, if `withId`), until `end`. */
 const opened = async (client: ReturnType<typeof postgresClient>, withId: boolean) => {
@@ -62,7 +60,7 @@ const deletedBeside = async (t: { signal: AbortSignal }, run: (world: { owner: R
   }
 };
 
-test("a transaction of another database ending while calls are weighed moves no deleted row from maybe seen to dead (horizonHeld, T238 r2: a call 146 buffers beside its twin's 111)", { skip }, async (t) => {
+test("a transaction of another database ending while calls are weighed moves no deleted row from maybe seen to dead (horizonHeld, T238 r2: a call 146 buffers beside its twin's 111)", async (t) => {
   await deletedBeside(t, async ({ owner, foreign, weighed }) => {
     const [before, after] = await horizonHeld(owner, t.signal, async () => {
       const before = await weighed();
@@ -74,7 +72,7 @@ test("a transaction of another database ending while calls are weighed moves no 
   });
 });
 
-test("a session of this database that took its snapshot while such a transaction ran, ending while calls are weighed, moves no deleted row either (horizonHeld waits for it, T238 r3: 40 and 42 buffers above a twin)", { skip }, async (t) => {
+test("a session of this database that took its snapshot while such a transaction ran, ending while calls are weighed, moves no deleted row either (horizonHeld waits for it, T238 r3: 40 and 42 buffers above a twin)", async (t) => {
   await deletedBeside(t, async ({ owner, elsewhere, foreign, weighed }) => {
     // Its snapshot reaches back to the other database's transaction, which then ends: the hold's, taken after, does not.
     // It has an id, as an autovacuum's ANALYZE has (it writes `pg_statistic`): a session reconsiders the horizon only
@@ -110,7 +108,7 @@ test("a session of this database that took its snapshot while such a transaction
   });
 });
 
-test("rows taken out once settled are read alike by every session, however other databases' transactions come and go (removeDeleted, T240: bulk_cap 9 and 11 blocks beside 8)", { skip }, async (t) => {
+test("rows taken out once settled are read alike by every session, however other databases' transactions come and go (removeDeleted, T240: bulk_cap 9 and 11 blocks beside 8)", async (t) => {
   await deletedBeside(t, async ({ owner, foreign, weighed }) => {
     // A row left, on a page the VACUUM would make all-visible. No hold: what a session takes the deleted rows for,
     // maybe seen or dead, no longer matters once they are gone.
@@ -126,7 +124,7 @@ test("rows taken out once settled are read alike by every session, however other
   });
 });
 
-test("a session of this database that takes its snapshot once deletesSettled has returned, while such a transaction runs, leaves no deleted row in (removeDeleted waits for it, Sol's review r1 of T240: all five left)", { skip }, async (t) => {
+test("a session of this database that takes its snapshot once deletesSettled has returned, while such a transaction runs, leaves no deleted row in (removeDeleted waits for it, Sol's review r1 of T240: all five left)", async (t) => {
   await deletedBeside(t, async ({ owner, foreign, weighed }) => {
     // Its snapshot, taken after `deletesSettled` looked, reaches back to the other database's transaction, which still
     // runs: a VACUUM while it is open leaves every deleted row, as an autovacuum's ANALYZE of the catalogs, or a session

@@ -7,7 +7,7 @@ import { sql } from 'drizzle-orm';
 
 import { daysAround } from '../src/log-checkpointer.ts';
 import { logStore } from '../src/log-store.ts';
-import { ENGINE, openTestDatabase, rows, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, type TestDatabase } from './database.ts';
 import { ask, isolate, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -17,7 +17,7 @@ before(async () => {
 });
 after(() => db.close());
 
-test('a new database holds the days the checkpointer would make around now', { skip: ENGINE === 'postgres' ? false : 'SQLite does not partition' }, async () => {
+test('a new database holds the days the checkpointer would make around now', async () => {
   const made = await logStore(db.vault).days();
   // The template was migrated some time ago, perhaps before a midnight: of daysAround's five, the middle three are the
   // days it holds whenever in the last day it was.

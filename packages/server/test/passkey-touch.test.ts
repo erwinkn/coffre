@@ -1,5 +1,5 @@
 // A touch of its own for each act a window does not cover (docs/design/passkeys.md, sections 3.5 and 4.4; T176 PR 5):
-// approving a terminal, connecting an MCP client and approving an MCP client's change, on both engines. A session a
+// approving a terminal, connecting an MCP client and approving an MCP client's change. A session a
 // passkey confirmed a moment ago approves none of them alone; the act refused without one answers `403
 // touch_required`, which asks a touch for that act alone, decides nothing and writes no entry; the touch is checked
 // against the person's live passkeys, and its replay mark moved once, in the act's transaction.

@@ -25,7 +25,6 @@ import { finishRotation, keyState, keyStateNow, rotateStep, SIGNED_TABLES } from
 import { newestAppEntry, newestMove } from '../src/db/rotation.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
-import { postgresOnly } from './db/engine.ts';
 import { auditWatch, walkOn } from '../src/plugins/audit-watch.ts';
 import { watchContext } from '../src/watch.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
@@ -470,7 +469,7 @@ test('a CLI login approved but not yet taken is used up: everyone signs in again
 });
 
 // Its step runs inside a transaction of the test's own, standing in for another start: with 0.15's log, a step's prepare is a vault call, which no transaction may be open around (AGENTS.md).
-test('the door reads where the key stands in one snapshot: a step committed between its reads changes nothing it decides', { skip: postgresOnly('SQLite runs one transaction at a time').skip || (LOG === '0.15' && "its step's prepare is a vault call, made here inside the test's own transaction") }, async () => {
+test('the door reads where the key stands in one snapshot: a step committed between its reads changes nothing it decides', { skip: LOG === '0.15' && "its step's prepare is a vault call, made here inside the test's own transaction" }, async () => {
   const keys = startUnder(B, [A]);
   // Its first read sees no step yet; another start's first step commits before the next.
   const seen = await deps.db.transaction(async (tx) => {
@@ -484,7 +483,7 @@ test('the door reads where the key stands in one snapshot: a step committed betw
   assert.equal((await keyStateNow(deps.db, keys)).kind, 'rotating');
 });
 
-test('a step the door takes while another start holds the head leaves it to that one, and answers rotating at once', postgresOnly('SQLite runs one transaction at a time'), async () => {
+test('a step the door takes while another start holds the head leaves it to that one, and answers rotating at once', async () => {
   const next = startUnder(B, [A]);
   let release = () => {};
   const released = new Promise<void>((resolve) => (release = resolve));
@@ -571,7 +570,7 @@ test('an instance the log moved on from leaves the anchor as it is, whatever its
   assert.deepEqual(await anchor.read(), backlog);
 });
 
-test("the app's newest entry is one step of the log however many of the vault's came after it (T245, R48)", postgresOnly('it reads Postgres query plans'), async () => {
+test("the app's newest entry is one step of the log however many of the vault's came after it (T245, R48)", async () => {
   // The app's entries, then the vault's, as an app idle while the vault's beats go on: heartbeats, which no fence follows.
   // Enough of the app's that an index keyed by author alone, then by action, key or subject, would sort them all.
   const append = (author: 'app' | 'vault', count: number) => db.owner.execute(sql`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)

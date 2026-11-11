@@ -3,7 +3,7 @@
 // under 0.14's log alone (the vault's decisions, and the app's rows as the owner, as 0.14's app writes them), then
 // cuts it over, as the app asks for it, and holds what was sealed to what 0.14 accepted. What only the app's key
 // says (a credential's or a binding's MAC, a deletion's entry) the app vouches for: here, the case does
-// (packages/server/test/cutover.test.ts holds the app's half). Both engines, but what says otherwise.
+// (packages/server/test/cutover.test.ts holds the app's half).
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,7 +29,7 @@ import { replay } from '../src/log-replay.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { bindingObject } from '../src/objects.ts';
 import * as store from '../src/store.ts';
-import { emptyDatabase, ENGINE, openLocalVault, openTestDatabase, OWNER_URL, places, postgresOnly, rows, run, sealed, nothingHeld, storedVersions, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
+import { emptyDatabase, openLocalVault, openTestDatabase, OWNER_URL, places, rows, run, sealed, nothingHeld, storedVersions, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
 const openRaw = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
@@ -206,7 +206,7 @@ test('cut over once: a start that finds the marker reads it with no lock and doe
   assert.equal((await marker()).length, 1);
 });
 
-test('two vaults cutting over at once make one cutover: the second finds the marker under the locks', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('two vaults cutting over at once make one cutover: the second finds the marker under the locks', async () => {
   const w = await instance014();
   const [one, two] = [await vault015(w.config), await vault015(w.config, await db.connect())];
   const [a, b] = [await one.cutover!(), await two.cutover!()];
@@ -267,7 +267,7 @@ test("a cutover committed and not yet sealed serves no use: a use by ids and one
   await waitFor(async () => (await marker()).length === 1);
   // Another vault, as a deploy starts one, on the hot path's login: it finds the marker, and its seal not yet written.
   // Its throttle off: its first uses are `late` on purpose, which would have it refuse the next (config.md, Q1, step 2).
-  const second = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough, heldOutside: nothingHeld, throttled: false }, async () => {}, ENGINE === 'postgres' ? await db.hot() : db.vault);
+  const second = await openRaw(db.vault as never, w.config, { log: '0.15', sealThrough, heldOutside: nothingHeld, throttled: false }, async () => {}, await db.hot());
   const [named] = await rows<{ project: string; environment: string; key: string }>(db.owner, sql`SELECT p.slug AS project, e.slug AS environment, s.key
     FROM secrets s JOIN environments e ON e.id = s.environment_id JOIN projects p ON p.id = e.project_id WHERE s.id = ${secret.secretId}`);
   const ask = async (deadlineMs: number) => {
@@ -594,7 +594,7 @@ test("0.14's chain broken since its newest checkpoint refuses the cutover: a vau
   assert.deepEqual(await changes(), []);
 });
 
-test('the cutover takes the issue lock before the fence, beside a barrier that holds the issue lock and waits for the fence: neither waits on the other in a circle (CutoverIssueFirst, T132)', postgresOnly('the locks are advisory locks of Postgres'), async () => {
+test('the cutover takes the issue lock before the fence, beside a barrier that holds the issue lock and waits for the fence: neither waits on the other in a circle (CutoverIssueFirst, T132)', async () => {
   const w = await instance014();
   const vault = await vault015(w.config);
   const asked = await vault.cutover!();
@@ -630,7 +630,6 @@ test('the log cut over, every 0.14 entry named by its vault key: the anchor hold
   const [cutover] = await marker();
   const [entry] = await rows<{ key_id: string }>(db.owner, sql`SELECT key_id FROM audit_log WHERE seq = ${BigInt(cutover!.anchor.seq)}`);
   assert.equal(entry!.key_id, vaultLogKey(w.config.signingKeys[0]!).keyId);
-  void ENGINE;
 });
 
 /** The database's refusal of a write of 0.14's after the cutover (migration 0047), however the driver wraps it. */
@@ -674,16 +673,14 @@ test("a binding's genesis is held to its scope too, as JSON: a row whose scope m
   };
   const scope = JSON.stringify([{ projectId: w.project, environmentId: null, role: 'viewer' }]);
   const [scoped, garbled] = [await binding(scope), await binding('{not json')];
-  if (ENGINE === 'postgres') {
-    // Its genesis as the cutover would call it, from the row as read, then a scope written under the cutover's locks: not sealed.
-    const keys = { seals: w.config.signingKeys.map(sealKey), mac: logMacKey(w.config.signingKeys[0]!) };
-    const [call] = genesisCalls(keys, [{ ref: { kind: 'binding', id: scoped.id }, object: bindingObject(scoped) }], Date.now());
-    assert.equal(await db.vault.transaction(async (tx) => {
-      await run(db.owner, sql`UPDATE service_bindings SET scope = '[]' WHERE id = ${scoped.id}`);
-      return store.sealBinding(tx, call!);
-    }), null);
-    await run(db.owner, sql`UPDATE service_bindings SET scope = ${scope} WHERE id = ${scoped.id}`);
-  }
+  // Its genesis as the cutover would call it, from the row as read, then a scope written under the cutover's locks: not sealed.
+  const keys = { seals: w.config.signingKeys.map(sealKey), mac: logMacKey(w.config.signingKeys[0]!) };
+  const [call] = genesisCalls(keys, [{ ref: { kind: 'binding', id: scoped.id }, object: bindingObject(scoped) }], Date.now());
+  assert.equal(await db.vault.transaction(async (tx) => {
+    await run(db.owner, sql`UPDATE service_bindings SET scope = '[]' WHERE id = ${scoped.id}`);
+    return store.sealBinding(tx, call!);
+  }), null);
+  await run(db.owner, sql`UPDATE service_bindings SET scope = ${scope} WHERE id = ${scoped.id}`);
   const vault = await vault015(w.config);
   assert.deepEqual(await cutOver(vault, { ...NONE, bindings: [scoped, garbled] }), { ok: true, done: true });
   assert.deepEqual(await opsOf({ kind: 'binding', id: scoped.id }), ['genesis']);
@@ -692,7 +689,7 @@ test("a binding's genesis is held to its scope too, as JSON: a row whose scope m
   assert.ok(report !== undefined, 'the garbled binding is reported');
 });
 
-test("an append of 3,000 entries, the most one statement takes, fits its parameters with the mark, which is a literal, and each says whether 0.15 wrote it (review r5 of PR 9b)", postgresOnly("the budget is Postgres's 65,535 parameters a statement (`ROWS_AT_ONCE`)"), async () => {
+test("an append of 3,000 entries, the most one statement takes, fits its parameters with the mark, which is a literal, and each says whether 0.15 wrote it (review r5 of PR 9b)", async () => {
   const key = deriveLogKey('vault', randomBytes(32));
   const entries = Array.from({ length: 3000 }, () => ({ actor: ROOT, action: 'secret.read', decision: 'allow' as const, metadata: '{}' }));
   await db.owner.transaction((tx) => appendEntries(tx, key, entries, undefined, undefined, [], true));
@@ -703,7 +700,7 @@ test("an append of 3,000 entries, the most one statement takes, fits its paramet
 
 test('an append of more entries than one statement binds goes in several, in the one transaction, its chain whole: a rotation closing thousands of open intents (review r3 of #538)', async () => {
   const key = deriveLogKey('vault', randomBytes(32));
-  // Past Postgres's 3,000 a statement and SQLite's 1,560, more than twice.
+  // Past 3,000 a statement, more than twice.
   const entries = Array.from({ length: 6_500 }, (_, i) => ({ actor: ROOT, action: 'secret.read', decision: 'deny' as const, code: 'wrong_kek', metadata: JSON.stringify({ item: i }) }));
   const appended = await db.owner.transaction((tx) => appendEntries(tx, key, entries));
   assert.equal(appended.nextSeq - appended.seqStart, 6_500n);

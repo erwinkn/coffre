@@ -134,28 +134,25 @@ jobs:
 
   # The generated matrices of 0.15's use by name (T158, D153): every key a caller may not have answered alike, whatever
   # the vault's map holds, each statement slowed. Three quarters of an hour in one run, so shards, like the Formal
-  # model's: each runs a slice of every matrix's cases on one engine (`scripts/matrix-shard.ts`), from its own
+  # model's: each runs a slice of every matrix's cases (`scripts/matrix-shard.ts`), from its own
   # database, set up and analysed as the whole run's is, and reports which cases it ran; `Use matrices` is the one job
   # Validate asks about, which holds them to running every case exactly once (`scripts/matrix-coverage.mjs`).
   matrices-shard:
-    name: Use matrices shard (${{ matrix.engine }} ${{ matrix.shard }})
+    name: Use matrices shard (${{ matrix.shard }})
     strategy:
       # Every shard's failures in one run, rather than the first's.
       fail-fast: false
       matrix:
-        # On 2026-10-30 (#431), in one run: Postgres 46 minutes (the vault's matrix 45, the server's 41, side by side),
-        # SQLite 16 (the vault's; the server's 3). A quarter or a half each, about 12 minutes and 8, setup included.
+        # On 2026-10-30 (#431), in one run: 46 minutes (the vault's matrix 45, the server's 41, side by side).
         # T165's PR 2 (2026-11-02, a host at load 50, not CI's): the server's twice as long with its pairs and whole
-        # places (SQLite 3 to 6.5 minutes, Postgres past an hour), the batches' own 21 on Postgres; Postgres in sixths.
+        # places (past an hour), the batches' own 21; so sixths.
         include:
-          - { engine: postgres, shard: 1/6 }
-          - { engine: postgres, shard: 2/6 }
-          - { engine: postgres, shard: 3/6 }
-          - { engine: postgres, shard: 4/6 }
-          - { engine: postgres, shard: 5/6 }
-          - { engine: postgres, shard: 6/6 }
-          - { engine: sqlite, shard: 1/2 }
-          - { engine: sqlite, shard: 2/2 }
+          - { shard: 1/6 }
+          - { shard: 2/6 }
+          - { shard: 3/6 }
+          - { shard: 4/6 }
+          - { shard: 5/6 }
+          - { shard: 6/6 }
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -166,16 +163,15 @@ jobs:
       - uses: $/.github/actions/prepare
         with:
           build: 'false'
-      - name: Use matrices, ${{ matrix.engine }} ${{ matrix.shard }}
+      - name: Use matrices, ${{ matrix.shard }}
         run: pnpm test:matrices
         env:
-          COFFRE_TEST_ENGINE: ${{ matrix.engine }}
           COFFRE_TEST_SHARD: ${{ matrix.shard }}
           COFFRE_TEST_SHARD_REPORT: ${{ runner.temp }}/matrix-shard
       - name: Keep the cases it ran
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: use-matrices-${{ matrix.engine }}-${{ strategy.job-index }}
+          name: use-matrices-${{ strategy.job-index }}
           path: ${{ runner.temp }}/matrix-shard
           if-no-files-found: error
           retention-days: 7
@@ -207,8 +203,8 @@ jobs:
         with:
           pattern: use-matrices-*
           path: ${{ runner.temp }}/matrix-shards
-      - name: Require every case of every matrix run exactly once, on each engine
-        run: node scripts/matrix-coverage.mjs "$RUNNER_TEMP/matrix-shards" postgres sqlite
+      - name: Require every case of every matrix run exactly once
+        run: node scripts/matrix-coverage.mjs "$RUNNER_TEMP/matrix-shards"
 
   schema:
     name: Database schema
@@ -490,7 +486,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kind: [workers, node]
+        # Not node until the newest release runs Node on Postgres: 0.15.0's runs on SQLite (scripts/compat-check.sh).
+        kind: [workers]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

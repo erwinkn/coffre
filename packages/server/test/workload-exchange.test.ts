@@ -31,7 +31,6 @@ import { auditWatch } from '../src/plugins/audit-watch.ts';
 import { clientFor, contextFor, entryOf, decisionInputs, holdSomething, LOG, openTestDatabase, resetDatabase, revokesLogged, signInsLogged, speaking, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { keeps015 } from '../src/api/changes.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
-import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -363,7 +362,7 @@ test('the scheduled beat forgets a token two hours after it was spent, never soo
   assert.equal((await trade(jwt)).body.reason, 'replayed', 'the token just spent stays spent');
 });
 
-test("the beat forgets spent tokens by their place, a stretch of the table at a time, never through the primary key (0080, 0082)", postgresOnly('it reads Postgres scan counts'), async () => {
+test("the beat forgets spent tokens by their place, a stretch of the table at a time, never through the primary key (0080, 0082)", async () => {
   // 50,000 spent within the two hours, three before.
   await run(sql`INSERT INTO spent_id_tokens (hash, consumed_at) SELECT sha256(int8send(i)), now() - interval '1 hour' FROM generate_series(1, 50000) i`);
   await run(sql`INSERT INTO spent_id_tokens (hash, consumed_at) SELECT sha256(int8send(-i)), now() - interval '3 hours' FROM generate_series(1, 3) i`);
@@ -430,7 +429,7 @@ function counted(pool: PostgresClient, seen: Statement[]): Client {
   return watched(pool, ({ text, values, count }) => void seen.push({ text, values, rows: count }));
 }
 
-test('a token no binding can take costs its admission and one indexed read: no other query, no transaction, no vault call, no fetch', postgresOnly('it counts the statements that reach the server'), async () => {
+test('a token no binding can take costs its admission and one indexed read: no other query, no transaction, no vault call, no fetch', async () => {
   const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
   const seen: Statement[] = [];
   try {
@@ -519,7 +518,7 @@ function hyperdriveCached(pool: PostgresClient): Client {
   });
 }
 
-test("Hyperdrive's cache revives nothing: rows put back after a removal stay dead, and a replay never reaches the vault", postgresOnly('it models Hyperdrive, which caches Postgres reads'), async () => {
+test("Hyperdrive's cache revives nothing: rows put back after a removal stay dead, and a replay never reaches the vault", async () => {
   const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
   try {
     const cached = createRuntime(config, createDatabase(hyperdriveCached(pool)), deps.vault, transport);
@@ -579,7 +578,7 @@ async function planOf(pool: PostgresClient, statement: Statement, table: string)
   };
 }
 
-test("an exchange's first read visits the live bindings only, whatever the retired and earlier history", postgresOnly('it reads Postgres query plans'), async () => {
+test("an exchange's first read visits the live bindings only, whatever the retired and earlier history", async () => {
   const [live] = await db.owner.select().from(serviceBindings);
   // 50,000 replaced over the years, and 5,000 left from before the service was removed and admitted again.
   for (const [count, generation, revoked] of [[50_000, live!.generation, true], [5_000, live!.generation - 1, false]] as const) {
@@ -602,7 +601,7 @@ test("an exchange's first read visits the live bindings only, whatever the retir
   }
 });
 
-test('removing a binding revokes only what is live: its expired history costs nothing there, nor on the members page', postgresOnly('it counts the statements and rows that reach the server'), async () => {
+test('removing a binding revokes only what is live: its expired history costs nothing there, nor on the members page', async () => {
   const [binding] = await db.owner.select().from(serviceBindings);
   // A thousand runs long over, and one under way.
   const over = new Date(Date.now() - 3_600_000);
@@ -986,10 +985,9 @@ test('a binding issues as many credentials as its runs ask: 61 in a minute, each
   assert.deepEqual(outcomes, Array.from({ length: 61 }, () => 200));
 });
 
-/** Raw SQL as the owner, on either engine. */
+/** Raw SQL as the owner. */
 async function run(query: SQL): Promise<void> {
-  if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
-  else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
+  await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
 }
 
 test('every entry a run\'s credential causes names it, the vault\'s too; the audit page reads its run, after the credential row is gone', async () => {
@@ -1492,7 +1490,7 @@ test('no limit counts every address together: 301 exchanges in a minute, from 30
 });
 
 test("one binding's sign-ins share its row: one goes through while another holds it, and waits only for an unbind's lock (W331)", {
-  skip: TEST_ENGINE === 'sqlite' ? 'SQLite runs one writer at a time, its locks implicit' : LOG === '0.15' ? false : "0.14's sign-ins take its head, one at a time",
+  skip: LOG === '0.15' ? false : "0.14's sign-ins take its head, one at a time",
 }, async () => {
   /** The binding's row held in a transaction of the owner's, `mode`, until `release`; the hold once it has the row. */
   const hold = async (mode: 'KEY SHARE' | 'UPDATE') => {
@@ -1873,7 +1871,7 @@ test("a removal the scheduled run cannot read again after a move is its failure 
   assert.deepEqual(await bindingState(other), { live: 0, closed: true, ended: true });
 });
 
-test("a removal reads what is live on the database's clock, which the end names on: an app clock ahead of it ends the binding all the same (Fable on #520)", postgresOnly('the app and the vault share the clock on SQLite'), async (t) => {
+test("a removal reads what is live on the database's clock, which the end names on: an app clock ahead of it ends the binding all the same (Fable on #520)", async (t) => {
   limits = processLimits();
   // Credentials ending within the two minutes the app's clock is ahead: live on the database's, expired on the app's.
   await run(sql`INSERT INTO credentials (kind, auth_mac, token_hash, token_hint, generation, principal, created_by, created_at, expires_at)
@@ -2017,7 +2015,7 @@ test('a removal cuts its batches by bytes too: credentials reaching a hundred pl
   assert.equal(calls.reduce((sum, { credentials }) => sum + credentials, 0), 800);
 });
 
-test("what a removal under way says is left costs the same however long the binding's history (T245)", postgresOnly('it reads Postgres query plans'), async () => {
+test("what a removal under way says is left costs the same however long the binding's history (T245)", async () => {
   // 3,000 live of the binding, 20,000 live of another binding of the service; then history, as it grows: credentials
   // that ended long ago, a third revoked before they ended.
   const insert = (count: number, by: string, ends: SQL, revoked: SQL = sql`NULL`) => run(sql`INSERT INTO credentials (kind, auth_mac, token_hash, token_hint, generation, principal, created_by, created_at, expires_at, revoked_at)
@@ -2033,7 +2031,7 @@ test("what a removal under way says is left costs the same however long the bind
     }
     await run(sql`ANALYZE credentials`);
     const seen: Statement[] = [];
-    assert.equal(await liveIssued(createDatabase(counted(pool, seen)), MEMBER, [bound], new Date()), 3_000);
+    assert.equal(await liveIssued(createDatabase(counted(pool, seen)), MEMBER, [bound]), 3_000);
     return planOf(pool, seen[0]!, 'credentials');
   };
   try {
@@ -2052,7 +2050,7 @@ test("what a removal under way says is left costs the same however long the bind
   }
 });
 
-test("a removal's batch read walks live credentials only, soonest to end, past the last batch: never the binding's history, and another binding's that end sooner once a removal (reviews r5, r6)", postgresOnly('it reads Postgres query plans'), async () => {
+test("a removal's batch read walks live credentials only, soonest to end, past the last batch: never the binding's history, and another binding's that end sooner once a removal (reviews r5, r6)", async () => {
   // 50,000 long expired; 3,000 live; and 20,000 live of another binding of the service, each ending before any of these.
   const insert = (count: number, by: string, ends: SQL) => run(sql`INSERT INTO credentials (kind, auth_mac, token_hash, token_hint, generation, principal, created_by, created_at, expires_at)
     SELECT 'service', decode(repeat('00', 32), 'hex'), sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'coffre_svc_…', 0, ${MEMBER}, ${by}, now(), ${ends}
@@ -2064,7 +2062,7 @@ test("a removal's batch read walks live credentials only, soonest to end, past t
   const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
   const read = async (after: Date | null) => {
     const seen: Statement[] = [];
-    const soonest = await issuedSoonest(createDatabase(counted(pool, seen)), MEMBER, [bound], new Date(), UNBIND_BATCH + 1, after);
+    const soonest = await issuedSoonest(createDatabase(counted(pool, seen)), MEMBER, [bound], UNBIND_BATCH + 1, after);
     return { soonest, plan: await planOf(pool, seen[0]!, 'credentials') };
   };
   try {

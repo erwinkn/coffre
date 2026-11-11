@@ -1,8 +1,7 @@
 // 0.15's change path for the app's own rows (docs/design/0.15-plan.md, "As built: PR 4b"): the vault seals a change
 // from the row's columns as the app read them and as it will write them (`prepare`), and the app's transaction commits
 // it beside its row (`app_change`, migration 0025). Each case names the part of formal/HotPathOne.tla or
-// formal/Migration015.tla it holds, and runs on both engines unless it says otherwise: SQLite runs `app_change`'s twin
-// (@coffre/db/log), under its one writer. The app's transaction is the owner's here: the grants are test:schema's.
+// formal/Migration015.tla it holds. The app's transaction is the owner's here: the grants are test:schema's.
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,7 +28,7 @@ import { credentialObject, environmentObject } from '../src/objects.ts';
 import * as store from '../src/store.ts';
 import type { VaultOptions } from '../src/vault.ts';
 import { sealThroughDouble } from './audit-tree.ts';
-import { emptyDatabase, locksHere, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, sealed, nothingHeld, type TestDatabase } from './database.ts';
+import { emptyDatabase, locksHere, newProject, openLocalVault, openTestDatabase, OWNER_URL, rows, sealed, nothingHeld, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -324,7 +323,7 @@ test('a deleted environment\'s object holds its slug before the tombstone: the c
   assert.deepEqual(row.seal ?? null, (await store.newestChange(db.owner, ref, [w.keys.mac]))?.seal ?? null);
 });
 
-test('a change of the app\'s waits for every use in flight, and the uses after it for its commit (ChangeLocks, LockToCommit)', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
+test('a change of the app\'s waits for every use in flight, and the uses after it for its commit (ChangeLocks, LockToCommit)', async () => {
   const w = await world();
   const row = token();
   await write(row, await prepare(w, row), false);
@@ -346,7 +345,7 @@ test('a change of the app\'s waits for every use in flight, and the uses after i
   }
 });
 
-test('an issue never waits for a use, nor a use for an issue; the barrier waits for the issue on the issue lock, not on the fence (IssueOwnLock, BarrierWaitsIssues, BarrierIssueFirst; T123, R58)', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
+test('an issue never waits for a use, nor a use for an issue; the barrier waits for the issue on the issue lock, not on the fence (IssueOwnLock, BarrierWaitsIssues, BarrierIssueFirst; T123, R58)', async () => {
   const w = await world();
   const [use, issuing, barrier] = [0, 1, 2].map(() => postgresSession(OWNER_URL));
   try {
@@ -392,7 +391,7 @@ test('an issue never waits for a use, nor a use for an issue; the barrier waits 
   }
 });
 
-test('an issue of a row its transaction did not write takes the fence, as any change does: a use may name it', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
+test('an issue of a row its transaction did not write takes the fence, as any change does: a use may name it', async () => {
   const w = await world();
   const row = token();
   const calls = await prepare(w, row);
@@ -412,7 +411,7 @@ test('an issue of a row its transaction did not write takes the fence, as any ch
   }
 });
 
-test('an issue of a row a savepoint inserted takes the fence: its xmin is the savepoint\'s, not the transaction\'s', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
+test('an issue of a row a savepoint inserted takes the fence: its xmin is the savepoint\'s, not the transaction\'s', async () => {
   const w = await world();
   const row = token();
   const [c] = await prepare(w, row);
@@ -433,7 +432,7 @@ test('an issue of a row a savepoint inserted takes the fence: its xmin is the sa
   }
 });
 
-test('a 0.14 row\'s call (no request, no op) takes the fence, even on a row its transaction wrote', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
+test('a 0.14 row\'s call (no request, no op) takes the fence, even on a row its transaction wrote', async () => {
   await world();
   const row = token();
   const { credentials } = tablesOf(db.owner);
@@ -452,7 +451,7 @@ test('a 0.14 row\'s call (no request, no op) takes the fence, even on a row its 
   }
 });
 
-test('0.14\'s trigger: an entry that changes access takes the issue lock, then the fence; a token.exchange, neither (IssueBeforeFence, ExchangeOnlyIssues)', postgresOnly('SQLite has no trigger'), async () => {
+test('0.14\'s trigger: an entry that changes access takes the issue lock, then the fence; a token.exchange, neither (IssueBeforeFence, ExchangeOnlyIssues)', async () => {
   const key = deriveLogKey('app', randomBytes(32));
   const held = (action: string) => db.owner.transaction(async (tx: Transaction) => {
     await appendEntries(tx, key, [{ actor: ROOT, action, decision: 'allow' }]);
@@ -464,7 +463,7 @@ test('0.14\'s trigger: an entry that changes access takes the issue lock, then t
   assert.deepEqual(await held('sign_in'), []);
 });
 
-test('an app\'s change beside a 0.14 decision on its principal: head, row, fence, and neither waits on the other in a circle (AppHeadFirst)', postgresOnly('SQLite has one writer'), async () => {
+test('an app\'s change beside a 0.14 decision on its principal: head, row, fence, and neither waits on the other in a circle (AppHeadFirst)', async () => {
   const w = await world();
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);
   const row = { ...token(), principal: ADA, kind: 'browser', scope: null };

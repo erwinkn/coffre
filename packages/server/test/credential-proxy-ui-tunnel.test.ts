@@ -2,7 +2,7 @@
 // formal/Tunnel.tla): `coffre run`'s listener, a handle as its password, coffre's own vault deciding the item by name,
 // and the suite's Postgres as the database. The open dials the decided item's hosts; each recheck is the same use,
 // passing only on the item dialled, by its own digest (DigestRecheck), so an Owner who narrows `hosts` mid-session ends
-// it within a recheck, and another item's edit ends nothing (ItemDigest). Postgres only, 0.15's log.
+// it within a recheck, and another item's edit ends nothing (ItemDigest). 0.15's log only.
 import test, { after, afterEach, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer as createHttp, type Server } from 'node:http';
@@ -19,7 +19,6 @@ import type { ProxyDefinition } from '@coffre/core/vault';
 import { clientFor, LOG } from './api-fixture.ts';
 import { trackBackgroundTask } from './background-tasks.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 import { deps, DEV, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { createCoffre as nodeCoffre } from '../src/node.ts';
 import { publicConnect, upgrade } from '../src/node-sockets.ts';
@@ -30,7 +29,7 @@ import { publicLookup } from '../src/workloads/node-transport.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { appClient, type AppClient } from './tunnel-listener.ts';
 
-const ON = { skip: TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database' : LOG === '0.14' ? "proxy definitions are 0.15's log's objects" : false };
+const ON = { skip: LOG === '0.14' ? "proxy definitions are 0.15's log's objects" : false };
 const REAL = `${TEST_RUNTIME_DATABASE_URL}?sslmode=disable`;
 const OPENAI = 'sk-openai-dev-0123456789abcdef';
 
@@ -162,7 +161,7 @@ useMcp(async () => {
   await root.environments.create('market/dev');
   await root.secrets.set('market/dev', { DATABASE_URL: { value: REAL, sensitivity: 'sensitive' }, OPENAI_API_KEY: OPENAI });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
-  if (TEST_ENGINE === 'postgres' && LOG !== '0.14') await save({ db: database() });
+  if (LOG !== '0.14') await save({ db: database() });
   handle = await handleFor('market/dev');
 });
 
@@ -425,7 +424,7 @@ test("an isolate whose copy of the item's definition turned over claims no diges
   assert.equal(holding, null, 'the admission was held');
 });
 
-test("Node's coffre hands its plugins the connect that dials only public addresses, which a UI tunnel needs (review r2 of #485)", { skip: TEST_ENGINE !== 'postgres' ? 'the deployment opens the suite\'s Postgres' : false }, async () => {
+test("Node's coffre hands its plugins the connect that dials only public addresses, which a UI tunnel needs (review r2 of #485)", async () => {
   // A plugin of its own, under `createCoffre` as a deployment calls it: what its context's `publicConnect` does with
   // loopback. Without one installed (node.ts), every UI tunnel on Node would answer 503, these cases all passing.
   const probe: CoffrePlugin = {

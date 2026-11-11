@@ -178,7 +178,7 @@ import {
   LOCK_WAIT_MS,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
-import { engineOf, isUnavailable, isUniqueViolation, lockNotAvailable, SNAPSHOT } from '@coffre/db/dialect';
+import { isUnavailable, isUniqueViolation, lockNotAvailable, SNAPSHOT } from '@coffre/db/dialect';
 import { changeName, everyProjectConversion, findingMetadata, newestAccess, newestChangeNames, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
 import { appendEntries, COUNTED_AT_ONCE, countWindow, HeadBusy, holdFence, holdIssues, isMovedChange, laterHead, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestWindow, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
@@ -4385,14 +4385,14 @@ class VaultService implements Vault {
     return { recorded: true, number: number.toString() };
   }
 
-  /** Whether this vault serves `admitRead` and `admitWrite`: 0.15's log, on Postgres. */
+  /** Whether this vault serves `admitRead` and `admitWrite`: 0.15's log. */
   #serveAdmits(): boolean {
-    return this.#prepared.log015 !== null && engineOf(this.#db) === 'postgres';
+    return this.#prepared.log015 !== null;
   }
 
-  /** Whether this vault serves `writeKeys`: 0.15's log, on Postgres, its key-encryption key in memory (a key service's intent and outcome are records of their own, PR 7). */
+  /** Whether this vault serves `writeKeys`: 0.15's log, its key-encryption key in memory (a key service's intent and outcome are records of their own, PR 7). */
   #serveWrites(): boolean {
-    return this.#prepared.log015 !== null && engineOf(this.#db) === 'postgres' && !this.#remote(this.#config.keks.primary);
+    return this.#prepared.log015 !== null && !this.#remote(this.#config.keks.primary);
   }
 
   /**
@@ -5082,22 +5082,15 @@ class VaultService implements Vault {
     // at 1,000 a second, and every use behind them; each reading in one turn of a Node deployment's pool (8) and
     // deciding in another, the first call's decision waited behind 780 calls' reads, and the last answered after 15 s.
     // So the read and the decision take one turn, and only one call waits for the head, in the code's one place in line;
-    // the others, refused that place at once (`HeadBusy`), try again after a pause, and read the names it wrote. On
-    // SQLite, whose every transaction queues for the file's one writer (`WriteQueue`) and a plain read not, the read
-    // comes before the transaction, as its own statement (review r15 of #467).
+    // the others, refused that place at once (`HeadBusy`), try again after a pause, and read the names it wrote.
     const reads = (await this.#settled()) === null && (await this.#cutOverNow());
-    const sqlite = engineOf(this.#db) === 'sqlite';
-    const first = reads && !sqlite ? (tx: Transaction) => this.#reservedAlready(tx, keys, wanted) : undefined;
+    const first = reads ? (tx: Transaction) => this.#reservedAlready(tx, keys, wanted) : undefined;
     // One bound for the call: each attempt's lock waits within what is left of it (review r14 of #467), a call that
     // took the place late never waiting the whole bound again. A no-op attempt, every call of a deploy's herd but one,
     // waits for nothing else; the one that writes waits, after the head, for the issue lock and the fence, each within
     // what was left when its attempt began, as every change waits for each lock it takes.
     const deadline = Date.now() + this.#prepared.options.codeWaitMs;
     for (let pause = LOCK_PAUSE_MS; ; pause = Math.min(2 * pause, LOCK_PAUSE_MAX_MS)) {
-      if (reads && sqlite) {
-        const found = await this.#reservedAlready(this.#db, keys, wanted);
-        if (found !== null) return { ok: true, ...found };
-      }
       try {
         return await this.#decide([], (d) => this.#reserve(d, wanted, input), { queue: CODE_QUEUE, deadline, ...(first === undefined ? {} : { first }) });
       } catch (error) {

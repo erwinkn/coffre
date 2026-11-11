@@ -12,7 +12,7 @@
 //
 // Without standing at the place, or with its chain cut, every cell of a row answers the same: the place's refusal, in
 // one statement, nothing written, and the same blocks of the key's relations read, none of any key's (GateBeforeKeys,
-// CutByPlace, NoKeyBeforeStanding): on Postgres with every cell's principal's lock held and every statement slow, so
+// CutByPlace, NoKeyBeforeStanding): with every cell's principal's lock held and every statement slow, so
 // that a lock waited for, or a statement more, shows. Standing there, a batch with a key they may not have is refused
 // before any lock (in its first statement, or a sealed key not mapped, its batch by ids' first round), entering nothing
 // in the cap's set and waiting for no lock (DecideAllFirst); one whose every
@@ -26,7 +26,7 @@ import { sql } from 'drizzle-orm';
 
 import { BESIDE_CELLS, FREE_CONNECTIONS, POOL, withinShare } from '../../../scripts/matrix-connections.ts';
 import { shardOf } from '../../../scripts/matrix-shard.ts';
-import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { each, endSlowed, holding, namedWorld, principalLocks, slowed, weighed, weighingSession, type HotCall } from './named-world.ts';
 import { emptyLog, useDatabases } from './use-world.ts';
 
@@ -36,15 +36,13 @@ before(async () => {
   db = await openTestDatabase({ connections: POOL });
   await useDatabases(db);
   await emptyLog();
-  if (ENGINE === 'postgres') {
-    await run(db.owner, sql.raw(`DO $$ DECLARE t record; BEGIN
-      FOR t IN SELECT c.oid::regclass AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' LOOP
-        EXECUTE format('ALTER TABLE %s SET (autovacuum_enabled = off)', t.name);
-      END LOOP; END $$`));
-    // A row's cells at once, a connection each, beside what the file holds whatever its cells: within its share.
-    const [{ free }] = (await rows<{ free: number }>(db.owner, sql.raw(FREE_CONNECTIONS))) as [{ free: number }];
-    withinShare(import.meta.url, BESIDE_CELLS + CELLS.length, free);
-  }
+  await run(db.owner, sql.raw(`DO $$ DECLARE t record; BEGIN
+    FOR t IN SELECT c.oid::regclass AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' LOOP
+      EXECUTE format('ALTER TABLE %s SET (autovacuum_enabled = off)', t.name);
+    END LOOP; END $$`));
+  // A row's cells at once, a connection each, beside what the file holds whatever its cells: within its share.
+  const [{ free }] = (await rows<{ free: number }>(db.owner, sql.raw(FREE_CONNECTIONS))) as [{ free: number }];
+  withinShare(import.meta.url, BESIDE_CELLS + CELLS.length, free);
 });
 after(() => db.close());
 
@@ -96,12 +94,12 @@ const usable = (row: Row, state: State) => {
 };
 const labelOf = (row: Row) => `${row.where} / ${row.lost} / ${row.map} / ${row.ask} / window ${row.window}`;
 const count = async (query: ReturnType<typeof sql>) => Number((await rows<{ n: number | string }>(db.owner, query))[0]!.n);
-// Each statement held back 1 s on Postgres, the use's deadline 3 s: a refusal decided on the first statement's rows, or
+// Each statement held back 1 s, the use's deadline 3 s: a refusal decided on the first statement's rows, or
 // a sealed key not mapped on the batch by ids' first round, the second, answers in time, with a second for the rest of
 // its work (a cold isolate's first, on a loaded runner: at 1.2 s, CI's ran past it); a third statement's delays alone
 // reach the deadline (`late`). forks.matrix.ts's one key holds its refusal to one statement, at 1.6 s.
-const delayOf = () => (ENGINE !== 'postgres' ? 0 : 1000);
-const LAPSES_MS = ENGINE === 'postgres' ? 2500 : 300;
+const delayOf = () => 1000;
+const LAPSES_MS = 2500;
 
 
 /** An answer as the matrix compares it: whether they stood, and its outcome. */
@@ -224,7 +222,7 @@ test(`several keys by name, mixed: no batch tells what a caller may not have, in
       // Each cell's keys are made as their periods start (T204, `freshKeyId`): made and asked within a minute, each within one.
       const made = await each(CELLS, (states) => cell(row, states));
       const measureAll = () => each(made, async (c) => ({ states: c.states, ...(await c.measure()) }));
-      const results = ENGINE === 'postgres' ? await holding(db, principalLocks(made.map((c) => c.principal)), measureAll) : await measureAll();
+      const results = await holding(db, principalLocks(made.map((c) => c.principal)), measureAll);
       const label = labelOf(row);
       const said = (r: (typeof results)[number]) => `[${r.states.join(' + ')}] ${r.code}${r.keys.length > 0 ? ` ${r.keys.join(',')}` : ''} in ${r.calls}`;
       if (!stands(row)) {
@@ -233,17 +231,15 @@ test(`several keys by name, mixed: no batch tells what a caller may not have, in
         if (results.some((r) => r.stands !== false || r.code !== first!.code || r.calls !== first!.calls)) differing.push(`${label}: ${results.map(said).join('; ')}`);
         if (first!.calls !== 1) differing.push(`${label}: ${first!.calls} statements, not one`);
         for (const r of results) if (r.entries !== 0 || r.capRows !== 0) differing.push(`${label}: [${r.states.join(' + ')}] wrote ${r.entries} entries, ${r.capRows} rows of the cap's`);
-        if (ENGINE === 'postgres') {
-          await run(db.owner, sql`ANALYZE`);
-          const session = weighingSession();
-          try {
-            for (const r of results) r.keyBlocks = (await weighed(r.sent, session))?.keyBlocks ?? null;
-          } finally {
-            await session.end();
-          }
-          const blocks = new Set(results.map((r) => r.keyBlocks));
-          if (blocks.size > 1) differing.push(`${label}: blocks of the key's tables ${results.map((r) => `[${r.states.join(' + ')}] ${r.keyBlocks}`).join(', ')}`);
+        await run(db.owner, sql`ANALYZE`);
+        const session = weighingSession();
+        try {
+          for (const r of results) r.keyBlocks = (await weighed(r.sent, session))?.keyBlocks ?? null;
+        } finally {
+          await session.end();
         }
+        const blocks = new Set(results.map((r) => r.keyBlocks));
+        if (blocks.size > 1) differing.push(`${label}: blocks of the key's tables ${results.map((r) => `[${r.states.join(' + ')}] ${r.keyBlocks}`).join(', ')}`);
         continue;
       }
       for (const r of results) {

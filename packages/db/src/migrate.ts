@@ -4,23 +4,20 @@ import { fileURLToPath } from 'node:url';
 
 import { HOT_LOCK_TIMEOUT_MS, HOT_STATEMENT_TIMEOUT_MS, LOCK_WAIT_MS } from '@coffre/core/vault';
 
-import { engineOfUrl } from './connect.ts';
-import { lockNotAvailable, type Engine } from './dialect.ts';
+import { checkDatabaseUrl } from './connect.ts';
+import { lockNotAvailable } from './dialect.ts';
 import { buildOnline, onlineIndex, onlineIndexes, unbuiltReason, valid, type OnlineIndex, type UnbuiltIndex } from './online-indexes.ts';
 export { unbuiltNote, type UnbuiltIndex } from './online-indexes.ts';
 import { postgresSession, quoteIdentifier, type PostgresClient } from './postgres.ts';
 
 /**
- * Bring a database up to date with its engine's migration tree:
- * migrations/postgres or migrations/sqlite. Both trees
- * describe one schema; see schema-parity.test.ts.
+ * Bring a database up to date with the migration tree, migrations/postgres.
  *
  * Applied history must be a prefix of the local journal, byte for byte,
- * before and after. Only one migrator runs at a time: Postgres takes an
- * advisory lock, and SQLite's own write lock covers the
- * whole run. Restricted runtime roles are Postgres-only (baseline/postgres.sql).
+ * before and after. Only one migrator runs at a time: it takes an
+ * advisory lock. The restricted runtime roles are made in baseline/postgres.sql.
  *
- * On Postgres, coffre's objects have one owner: the role that owns the
+ * coffre's objects have one owner: the role that owns the
  * `drizzle` schema, which the first migration made. The login applies the
  * migrations as itself, with its own attributes, which 0019's and 0022's
  * roles need (CREATEROLE), and with the privileges of the owners of
@@ -360,13 +357,13 @@ interface AppliedMigration {
   hash: string;
 }
 
-/** A connection that applies one engine's tree. */
+/** A connection that applies the tree. */
 interface Migrator {
   /** The applied history, oldest first, or null before the first migration. */
   applied(): Promise<AppliedMigration[] | null>;
   lock(): Promise<void>;
   unlock(): Promise<void>;
-  /** Apply `pending`, in one transaction, which on Postgres hands `managed` to the ledger's owner before it commits. */
+  /** Apply `pending`, in one transaction, which hands `managed` to the ledger's owner before it commits. */
   migrate(pending: ExpectedMigration[], managed: Managed): Promise<void>;
   /** Reassert privileges a one-database backup does not carry, and grant `backupLogin` the backup group (0019_backup_role.sql). */
   restrict(backupLogin: string | undefined): Promise<void>;
@@ -586,12 +583,12 @@ const HANDED_OVER = `
  * Beside this module: src/migrations in the workspace, and dist/migrations
  * in the built package, where the build copies them.
  */
-export function migrationsFolder(engine: Engine): string {
-  return fileURLToPath(new URL(`./migrations/${engine}`, import.meta.url));
+export function migrationsFolder(): string {
+  return fileURLToPath(new URL('./migrations/postgres', import.meta.url));
 }
 
-async function expectedMigrations(engine: Engine): Promise<ExpectedMigration[]> {
-  const folder = migrationsFolder(engine);
+async function expectedMigrations(): Promise<ExpectedMigration[]> {
+  const folder = migrationsFolder();
   const journal = JSON.parse(await readFile(`${folder}/meta/_journal.json`, 'utf8')) as { entries?: JournalEntry[] };
   if (!Array.isArray(journal.entries)) {
     throw new Error('invalid Drizzle migration journal');
@@ -819,36 +816,6 @@ async function waitingBriefly<T>(client: Pick<PostgresClient, 'unsafe'>, run: ()
   }
 }
 
-async function sqliteMigrator(url: string): Promise<Migrator> {
-  const [{ openDatabase }, { migrate }] = await Promise.all([
-    import('./connect.ts'),
-    import('drizzle-orm/libsql/migrator'),
-  ]);
-  const { db, close } = await openDatabase(url);
-  const sqlite = db as unknown as Parameters<typeof migrate>[0];
-  return {
-    async applied() {
-      const tables = await sqlite.all(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '__drizzle_migrations'",
-      );
-      if (tables.length === 0) return null;
-      return sqlite.all<AppliedMigration>(
-        'SELECT hash, CAST(created_at AS TEXT) AS created_at FROM __drizzle_migrations ORDER BY created_at, id',
-      );
-    },
-    // The migration runs as one transaction, in the database's write queue.
-    async lock() {},
-    async unlock() {},
-    // drizzle-orm's own, which applies the tree in one transaction. One file, which whoever opens it may change: no owner.
-    migrate: () => migrate(sqlite, { migrationsFolder: migrationsFolder('sqlite') }),
-    async restrict() {},
-    // SQLite's migrations build their indexes as any other statement.
-    online: async () => [],
-    notOwner: async () => null,
-    close,
-  };
-}
-
 /**
  * A migration run's plan: `applied` of the `total` migrations there before
  * it, and the tags of the rest, which it applies.
@@ -863,9 +830,9 @@ export type MigrationPlan = { applied: number; total: number; pending: string[] 
  * prefix of this version's is refused, as `migrateDatabase` refuses it.
  */
 export async function migrationStatus(url: string): Promise<{ applied: string[]; pending: string[]; notOwner: NotOwner | null }> {
-  const engine = engineOfUrl(url);
-  const expected = await expectedMigrations(engine);
-  const migrator = await { postgres: postgresMigrator, sqlite: sqliteMigrator }[engine](url);
+  checkDatabaseUrl(url);
+  const expected = await expectedMigrations();
+  const migrator = await postgresMigrator(url);
   try {
     const notOwner = await migrator.notOwner(managedObjects(expected.map((entry) => entry.sql)));
     // A login that may not even read the ledger is told why.
@@ -893,19 +860,18 @@ export async function migrationStatus(url: string): Promise<{ applied: string[];
  * by throwing: all of it then goes in one transaction, with no word of each,
  * and with it the hand-over, which a run with nothing to apply makes too.
  * `backupLogin` names an existing role to
- * grant the backup group, `coffre_backup`, on Postgres; it is never made, and
+ * grant the backup group, `coffre_backup`; it is never made, and
  * never revoked when a later run names none.
  */
 export async function migrateDatabase(
   url: string,
   { onPlan, backupLogin }: { onPlan?: (plan: MigrationPlan) => void | Promise<void>; backupLogin?: string } = {},
 ): Promise<{ unbuilt: UnbuiltIndex[] }> {
-  const engine = engineOfUrl(url);
+  checkDatabaseUrl(url);
   const problem = backupLogin === undefined ? null : backupLoginProblem(backupLogin);
   if (problem !== null) throw new Error(problem);
-  if (engine === 'sqlite' && backupLogin !== undefined) throw new Error('SQLite has no roles, so no backup login');
-  const expected = await expectedMigrations(engine);
-  const migrator = await { postgres: postgresMigrator, sqlite: sqliteMigrator }[engine](url);
+  const expected = await expectedMigrations();
+  const migrator = await postgresMigrator(url);
   let locked = false;
 
   try {

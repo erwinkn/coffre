@@ -15,7 +15,7 @@ import { vaultLogKey } from '../src/log.ts';
 import { newRequestId } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { absentOf, twinOf, weigh, weighInTurn, weighingSession as weighingSessionAt, type HotCall, type Weighed, type WeighingSession } from '../../../scripts/matrix-weigh.ts';
-import { ENGINE, HOT_URL, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { HOT_URL, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { change, CONFIG, genesis, LOG_015, ROOT, seal, SIGNING_KEY, world } from './use-world.ts';
 import { freshKeyId } from './window-fixture.ts';
 
@@ -117,7 +117,7 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
   /** `key` removed in `environment`, a fork's (a dismissal, which no seal covers): what it inherits of that name, gone there. */
   const dismiss = (environment: string, key: string) => db.owner.insert(tablesOf(db.owner).dismissedKeys).values({ environmentId: environment, key, dismissedBy: ROOT });
   /** An environment renamed `slug`, as the app renames one: a change to its object. */
-  /** `during`, if given, runs in the rename's transaction once it holds the fence (Postgres), before it writes. */
+  /** `during`, if given, runs in the rename's transaction once it holds the fence, before it writes. */
   const rename = async (id: string, slug: string, during?: (tx: Queryable) => Promise<void>) => {
     const object = { ...environments.get(id)!, slug };
     await change({ kind: 'environment', id }, { op: 'environment.rename', slug }, object, async (tx, value) => {
@@ -222,16 +222,10 @@ export async function holding<T>(db: TestDatabase, lock: ReturnType<typeof sql>,
 }
 
 /**
- * `work` over `items`, side by side on Postgres; on SQLite, which writes one at a time, in turn. One failing fails them
- * all, but once every other has settled: one still running past it would open a pool after its file's last `endSlowed`,
+ * `work` over `items`, side by side. One failing fails them all, but once every other has settled: one still running past it would open a pool after its file's last `endSlowed`,
  * and the file would never exit (T246: a cell refused a connection, 53300, left 18 of its row's open for four hours).
  */
 export async function each<T, R>(items: readonly T[], work: (item: T) => Promise<R>): Promise<R[]> {
-  if (ENGINE !== 'postgres') {
-    const done: R[] = [];
-    for (const item of items) done.push(await work(item));
-    return done;
-  }
   const settled = await Promise.allSettled(items.map(work));
   const failed = settled.find((result) => result.status === 'rejected');
   if (failed !== undefined) throw failed.reason;
@@ -247,31 +241,14 @@ export async function endSlowed(): Promise<void> {
 }
 
 /**
- * A vault over a hot path of its own, each of its calls counted as it is sent, and, on Postgres, sent `delay` ms late
- * when set: a database slow alike for every statement, as review r4 of #412 ran its probes on. On Postgres, a call is
- * a statement; on SQLite, which runs a use as a transaction of its own and the read of names as statements outside
- * one, a call is either (review d3 of #416: its statements differ by a key's shape, its calls must not).
+ * A vault over a hot path of its own, each of its calls counted as it is sent, and sent `delay` ms late when set: a
+ * database slow alike for every statement, as review r4 of #412 ran its probes on. A call is a statement.
  */
 export async function slowed(db: TestDatabase, options: { connections?: number } = {}) {
   let statements = 0;
   let delay = 0;
-  /** The last `use_credential` call sent, or `use_named_batch`, as postgres.js sends it: its text and arguments (Postgres only). */
+  /** The last `use_credential` call sent, or `use_named_batch`, as postgres.js sends it: its text and arguments. */
   let last: HotCall | null = null;
-  if (ENGINE === 'sqlite') {
-    const hot = new Proxy(db.vault, {
-      get(target, key) {
-        const value: unknown = Reflect.get(target, key, target);
-        if (key !== 'transaction' && key !== 'all') return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
-        return (...args: unknown[]) => {
-          statements += 1;
-          return (value as (...a: unknown[]) => unknown).apply(target, args);
-        };
-      },
-    });
-    const prepared = await prepareVault(CONFIG, LOG_015);
-    const vault = openVault(db.vault, prepared, hot);
-    return { vault, cache: prepared.uses, statements: () => statements, last: (): HotCall | null => null, slow: (_ms: number) => {}, connect: async () => {}, end: async () => {} };
-  }
   const client = postgresClient(HOT_URL, { max: options.connections ?? 4 });
   const pool = new Proxy(client, {
     get(target, key) {
@@ -327,17 +304,17 @@ export { absentOf, keyBlocksOf, turnsApart, twinOf, type HotCall, type Weighed }
 /**
  * The shared buffers `call` reads, the least of a few runs, each of `EXPLAIN (ANALYZE, BUFFERS)` in a transaction rolled
  * back, on the hot login: what the statement's own work costs inside, which its calls and the statements counted do not
- * show (Fable's review and review r12 of D153: a form of the statement an isolate's history chose). Null on SQLite, or
- * for no call. `on`: a session to weigh it in, whose plans, made once, weigh every call it is given alike (a session of
+ * show (Fable's review and review r12 of D153: a form of the statement an isolate's history chose). Null for no
+ * call. `on`: a session to weigh it in, whose plans, made once, weigh every call it is given alike (a session of
  * its own makes them anew, on the statistics of the moment: W268 saw one call of a row read hundreds of buffers more).
  */
 export async function bufferedBy(call: HotCall | null, on?: WeighingSession): Promise<number | null> {
   return (await weighed(call, on))?.buffers ?? null;
 }
 
-/** `weigh`'s buffers, of them the key's relations' blocks, and each relation's (`scripts/matrix-weigh.ts`); null on SQLite, or for no call. */
+/** `weigh`'s buffers, of them the key's relations' blocks, and each relation's (`scripts/matrix-weigh.ts`); null for no call. */
 export async function weighed(call: HotCall | null, on?: WeighingSession): Promise<Weighed | null> {
-  if (ENGINE !== 'postgres' || call === null) return null;
+  if (call === null) return null;
   const session = on ?? weighingSession();
   try {
     return await weigh(session, call);
@@ -349,7 +326,7 @@ export async function weighed(call: HotCall | null, on?: WeighingSession): Promi
 /**
  * What `call` reads at each of a new session's first calls, at the server's planner settings (`weighInTurn`), and what
  * its controls read at each, each in a new session of its own: its twin, of a key its world never made (`twinOf`), and
- * that twin with nothing the isolate kept of the key (`absentOf`); null on SQLite, or for no call. Each of the three is
+ * that twin with nothing the isolate kept of the key (`absentOf`); null for no call. Each of the three is
  * first called once unweighed, in a session of its own: after a batch's rolled-back writes (its standing cells',
  * weighed), a request's first scan of `bulk_cap` read 1 or 2 more blocks than any after it, the same request again
  * included, and settling the last control alone left the key's own first call to differ (docs/design/planner-defaults.md,
@@ -358,7 +335,7 @@ export async function weighed(call: HotCall | null, on?: WeighingSession): Promi
  * `secrets` by `p_secret` fails the matrices).
  */
 export async function weighedInTurn(call: HotCall | null): Promise<{ asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null> {
-  if (ENGINE !== 'postgres' || call === null) return null;
+  if (call === null) return null;
   const controls = { twin: twinOf(call), absent: absentOf(call) };
   for (const request of [call, controls.twin, controls.absent]) await weighInTurn(HOT_URL, request, 1);
   return { asked: await weighInTurn(HOT_URL, call), twin: await weighInTurn(HOT_URL, controls.twin), absent: await weighInTurn(HOT_URL, controls.absent) };

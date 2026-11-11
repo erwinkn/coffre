@@ -475,7 +475,7 @@ export const auditLog = pgTable(
     index(indexOf('rotation')).on(table.seq).where(entriesOf('rotation')).concurrently(),
     index(indexOf('intent')).on(table.seq).where(entriesOf('intent')).concurrently(),
     index(indexOf('keyCheck')).on(table.seq).where(entriesOf('keyCheck')).concurrently(),
-    index(indexOf('tamper')).on(table.subjectPrincipal, changeNamed('postgres', table.metadata), table.seq).where(entriesOf('tamper')).concurrently(),
+    index(indexOf('tamper')).on(table.subjectPrincipal, changeNamed(table.metadata), table.seq).where(entriesOf('tamper')).concurrently(),
     index(indexOf('moves')).on(table.seq).where(entriesOf('moves')).concurrently(),
     // The allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
     // however many refusals the log holds about them (T239, R48). No `author` in its key, which the condition fixes:
@@ -1289,36 +1289,36 @@ export const logChanges = pgTable(
     // The sign-ins through trust bindings, newest first by when the vault asked (`at`; its number comes later, after
     // any wait), every service's and one's: what the audit pages list where 0.14's `token.exchange` stood (T156). Only
     // a sign-in's payload holds a `signIn` object (change-records.ts, which the reads repeat).
-    index('log_changes_sign_in_idx').on(table.at, table.number).where(recorded('postgres', table.payload, 'signIn')),
-    index('log_changes_sign_in_actor_idx').on(table.actor, table.at, table.number).where(recorded('postgres', table.payload, 'signIn')),
+    index('log_changes_sign_in_idx').on(table.at, table.number).where(recorded(table.payload, 'signIn')),
+    index('log_changes_sign_in_actor_idx').on(table.actor, table.at, table.number).where(recorded(table.payload, 'signIn')),
     // The vault's token issues, revokes and sign-outs, ordered as the sign-ins, every member's and one's: what the audit
     // pages list where 0.14's `token.create`, `token.revoke` and `sign_out` stood, and count while they hide them (T164).
     // Only an issue's payload, by how it starts, holds an `issue` record, and only a revoke's these reasons
     // (change-records.ts). A binding's end revokes its credentials with the reason `unbound`, of which 0.14 logged
     // none: left out.
-    index('log_changes_issue_revoke_idx').on(table.at, table.number).where(recorded('postgres', table.payload, 'issue', 'revoke', 'signOut')),
-    index('log_changes_issue_revoke_actor_idx').on(table.actor, table.at, table.number).where(recorded('postgres', table.payload, 'issue', 'revoke', 'signOut')),
+    index('log_changes_issue_revoke_idx').on(table.at, table.number).where(recorded(table.payload, 'issue', 'revoke', 'signOut')),
+    index('log_changes_issue_revoke_actor_idx').on(table.actor, table.at, table.number).where(recorded(table.payload, 'issue', 'revoke', 'signOut')),
     // The key writes and the first adds down the two-trip path, recorded here alone since 0.16.0 (T179; change-records.ts),
     // ordered as the sign-ins: what the audit pages list where 0.14's `secret.write` and `member.add` stood, every one,
     // one member's, one environment's (by the payload's, `recordField`) and one key's; and an offboarding report's writes.
-    index('log_changes_written_idx').on(table.at, table.number).where(recorded('postgres', table.payload, 'written')),
-    index('log_changes_written_actor_idx').on(table.actor, table.at, table.number).where(recorded('postgres', table.payload, 'written')),
-    index('log_changes_written_environment_idx').on(recordField('postgres', table.payload, 'environmentId'), table.at, table.number).where(recorded('postgres', table.payload, 'written')),
-    index('log_changes_written_object_idx').on(table.object, table.at, table.number).where(recorded('postgres', table.payload, 'written')),
+    index('log_changes_written_idx').on(table.at, table.number).where(recorded(table.payload, 'written')),
+    index('log_changes_written_actor_idx').on(table.actor, table.at, table.number).where(recorded(table.payload, 'written')),
+    index('log_changes_written_environment_idx').on(recordField(table.payload, 'environmentId'), table.at, table.number).where(recorded(table.payload, 'written')),
+    index('log_changes_written_object_idx').on(table.object, table.at, table.number).where(recorded(table.payload, 'written')),
     // One member's at one place, each read bounded by its page however many others' writes the place holds (review r1 of #490).
-    index('log_changes_written_actor_environment_idx').on(table.actor, recordField('postgres', table.payload, 'environmentId'), table.at, table.number).where(recorded('postgres', table.payload, 'written')),
-    index('log_changes_written_actor_object_idx').on(table.actor, table.object, table.at, table.number).where(recorded('postgres', table.payload, 'written')),
-    index('log_changes_admitted_idx').on(table.at, table.number).where(recorded('postgres', table.payload, 'admitted')),
-    index('log_changes_admitted_actor_idx').on(table.actor, table.at, table.number).where(recorded('postgres', table.payload, 'admitted')),
+    index('log_changes_written_actor_environment_idx').on(table.actor, recordField(table.payload, 'environmentId'), table.at, table.number).where(recorded(table.payload, 'written')),
+    index('log_changes_written_actor_object_idx').on(table.actor, table.object, table.at, table.number).where(recorded(table.payload, 'written')),
+    index('log_changes_admitted_idx').on(table.at, table.number).where(recorded(table.payload, 'admitted')),
+    index('log_changes_admitted_actor_idx').on(table.actor, table.at, table.number).where(recorded(table.payload, 'admitted')),
     // The refusals of those two routes, recorded here in place of 0.14's deny entries since PR 6 (T179; refusal.ts): a key
     // write's every one, one member's, one environment's and one member's there, as its writes; an add's, every one and
     // one member's, as its adds.
-    index('log_changes_refused_write_idx').on(table.at, table.number).where(recorded('postgres', table.payload, 'refusedWrite')),
-    index('log_changes_refused_write_actor_idx').on(table.actor, table.at, table.number).where(recorded('postgres', table.payload, 'refusedWrite')),
-    index('log_changes_refused_write_environment_idx').on(recordField('postgres', table.payload, 'environmentId'), table.at, table.number).where(recorded('postgres', table.payload, 'refusedWrite')),
-    index('log_changes_refused_write_actor_environment_idx').on(table.actor, recordField('postgres', table.payload, 'environmentId'), table.at, table.number).where(recorded('postgres', table.payload, 'refusedWrite')),
-    index('log_changes_refused_add_idx').on(table.at, table.number).where(recorded('postgres', table.payload, 'refusedAdd')),
-    index('log_changes_refused_add_actor_idx').on(table.actor, table.at, table.number).where(recorded('postgres', table.payload, 'refusedAdd')),
+    index('log_changes_refused_write_idx').on(table.at, table.number).where(recorded(table.payload, 'refusedWrite')),
+    index('log_changes_refused_write_actor_idx').on(table.actor, table.at, table.number).where(recorded(table.payload, 'refusedWrite')),
+    index('log_changes_refused_write_environment_idx').on(recordField(table.payload, 'environmentId'), table.at, table.number).where(recorded(table.payload, 'refusedWrite')),
+    index('log_changes_refused_write_actor_environment_idx').on(table.actor, recordField(table.payload, 'environmentId'), table.at, table.number).where(recorded(table.payload, 'refusedWrite')),
+    index('log_changes_refused_add_idx').on(table.at, table.number).where(recorded(table.payload, 'refusedAdd')),
+    index('log_changes_refused_add_actor_idx').on(table.actor, table.at, table.number).where(recorded(table.payload, 'refusedAdd')),
   ],
 );
 

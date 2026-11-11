@@ -26,7 +26,7 @@ coffre's server routes, `createFileRoute('/api/$')({ ...api })`, from
 `coffre.request(request)`, in the app srvx runs. A deployment brings
 the shared Postgres database up to date with its own CLI, `pnpm exec coffre
 migrate`, as its owner, before it deploys; `coffre-server migrate` does the
-same for local SQLite and tests. The server connects as `coffre_runtime`;
+same for tests. The server connects as `coffre_runtime`;
 the vault connects to the same database as `coffre_vault_runtime`, and its
 hot path as `coffre_vault_hot`, each with a Hyperdrive config of its own on
 Workers. `npx @coffre/cli init --workers`

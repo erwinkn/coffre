@@ -2753,7 +2753,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
       const found = await routed(path);
       if (found instanceof Response) return found;
       route = found;
-      // Not by name (a SQLite vault's, or an environment `unless` names): the environment, found, is held to the scope all the same.
+      // Not by name (an environment `unless` names): the environment, found, is held to the scope all the same.
       if (!serves(credential, route)) return notServed(credential.name, route);
       opened = await valuesFor(coffre, proxy, handle, route, credential, through);
     } else {

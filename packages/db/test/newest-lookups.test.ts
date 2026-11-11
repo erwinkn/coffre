@@ -6,9 +6,8 @@
 // others. Postgres prices a walk back by `seq` with the rest as a filter as the one row it expects to meet first,
 // whenever its statistics hold the kind common, and that walk read every entry since: 641 pages for the newest
 // rotation behind 20,000 checkpoints. A new read of the kind fails here until it is listed, with the test that holds
-// it, or why it needs none. A read of an object's changes goes through `changesOf` (access-entries.ts) on Postgres, or
-// is SQLite's alone: asked plainly, Postgres walked the primary key back past every other object's changes, 441 pages
-// behind 20,000 of another's. The database's functions' own are the vault's test's to list and hold.
+// it, or why it needs none. A read of an object's changes goes through `changesOf` (access-entries.ts): asked plainly,
+// Postgres walked the primary key back past every other object's changes, 441 pages behind 20,000 of another's. The database's functions' own are the vault's test's to list and hold.
 // Two shapes more walk a log as far (Sol r8 of #556): an `EXISTS` gate over a log, which the vault's start asked of
 // every rotation (4,741 pages past 40,000), and the least or greatest of a column of 0.15's uses, which the
 // checkpointer's `lowestAbove` asks past every use sealed at the `at` a backlog shares (7,069 pages past 390,000). Each
@@ -43,11 +42,6 @@ const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   'packages/vault/src/snapshot.postgres.ts#snapshotQuery#3': { by: VAULT, as: 'snapshot' },
   'packages/vault/src/snapshot.postgres.ts#snapshotQuery#4': { by: VAULT, as: 'snapshot' },
   'packages/vault/src/snapshot.postgres.ts#snapshotQuery#5': { by: VAULT, as: 'snapshot' },
-  'packages/vault/src/snapshot.sqlite.ts#snapshotQuery': { by: VAULT, as: 'snapshot' },
-  'packages/vault/src/snapshot.sqlite.ts#snapshotQuery#2': { by: VAULT, as: 'snapshot' },
-  'packages/vault/src/snapshot.sqlite.ts#snapshotQuery#3': { by: VAULT, as: 'snapshot' },
-  'packages/vault/src/snapshot.sqlite.ts#snapshotQuery#4': { by: VAULT, as: 'snapshot' },
-  'packages/vault/src/snapshot.sqlite.ts#snapshotQuery#5': { by: VAULT, as: 'snapshot' },
   'packages/server/src/db/answers.ts#newest': { by: SERVER, as: 'policySeqAndSettings' },
   'packages/server/src/db/queries.ts#newestSigned': { by: SERVER, as: 'latestCheckpoint' },
   'packages/server/src/db/queries.ts#talliedAfter': { by: SERVER, as: 'talliedAfter' },
@@ -57,7 +51,6 @@ const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   // A workload's session's freezes: the statement `sign_in` reads (`audit_log_frozen_idx`), a column its target, which
   // the vault's test holds as the functions' `freeze`.
   'packages/server/src/db/workloads.ts#frozen': { by: SERVER, as: 'frozenTargets' },
-  'packages/server/src/db/workloads.ts#frozen#2': { by: SERVER, as: 'frozenTargets' },
   'packages/server/src/db/queries.ts#memberAccess': { by: SERVER, as: 'memberAccess' },
   // Whether a member no row names has an access entry: as an `EXISTS`, a scan past every refusal about them (review r8).
   'packages/server/src/db/queries.ts#missingMembers': { by: SERVER, as: 'missingMembers' },
@@ -78,14 +71,6 @@ const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   // The audit page: by actor a stream of each one's through `audit_log_actor_idx` (`withinBytes`' `by`), held by the
   // server's test; its other filters a search, a page at a time, which T248 bounds with its counts.
   'packages/server/src/db/queries.ts#auditPage': { by: SERVER, as: 'auditPage' },
-  // SQLite's own credential reads: kept for tests and local development, no deployment runs on it (AGENTS.md). Each
-  // reads the policy by the same condition and index as Postgres's functions (`entriesOf('policy')`), or a binding's freeze.
-  'packages/vault/src/credentials.sqlite.ts#signInOnSqlite': { none: "SQLite's sign-in: a binding's newest freeze, no deployment's engine" },
-  'packages/vault/src/credentials.sqlite.ts#revokeOnSqlite': { none: "SQLite's revoke: the newest policy (`entriesOf('policy')`), no deployment's engine" },
-  'packages/vault/src/credentials.sqlite.ts#issueOnSqlite': { none: "SQLite's issue: the newest policy (`entriesOf('policy')`), no deployment's engine" },
-  'packages/vault/src/credentials.sqlite.ts#bindingsOnSqlite': { none: "SQLite's bindings: the newest policy (`entriesOf('policy')`), no deployment's engine" },
-  'packages/vault/src/use.sqlite.ts#readRoute': { none: "SQLite's use: a member's newest access entry (`accessAllowed`), no deployment's engine" },
-  'packages/vault/src/use.sqlite.ts#useOnce': { none: "SQLite's use: a member's newest access entry (`accessAllowed`), no deployment's engine" },
 };
 
 /**
@@ -114,26 +99,6 @@ const CHANGES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> 
   'packages/server/src/db/queries.ts#missingMembers': { by: SERVER, as: 'missingMembers' },
 };
 
-/**
- * Each read of an object's newest change asked plainly, by the function it is in: SQLite's alone, whose planner takes
- * the object's index (none deploys on it, AGENTS.md). Postgres's go through `changesOf`.
- */
-const SQLITE_CHANGES = new Set([
-  'packages/db/src/log.ts#changeOnSqlite',
-  'packages/server/src/db/queries.ts#newestChanges',
-  'packages/vault/src/credentials.sqlite.ts#signInOnSqlite',
-  'packages/vault/src/credentials.sqlite.ts#revokeOnSqlite',
-  'packages/vault/src/credentials.sqlite.ts#issueOnSqlite',
-  'packages/vault/src/credentials.sqlite.ts#bindingsOnSqlite',
-  'packages/vault/src/log-store.ts#sqliteStore',
-  'packages/vault/src/store.ts#newestChangesQuery',
-  'packages/vault/src/store.ts#newestSealsQuery',
-  'packages/vault/src/store.ts#memberLogsSqlite',
-  'packages/vault/src/use.sqlite.ts#readRoute',
-  'packages/vault/src/use.sqlite.ts#CHUNK',
-  'packages/vault/src/use.sqlite.ts#useOnce',
-]);
-
 const LOG_STORE = 'packages/vault/test/log-store.test.ts';
 
 /**
@@ -158,14 +123,6 @@ const USES: Record<string, { by: typeof LOG_STORE; as: string } | { none: string
   // it: T248, its floor from the skew bound changes what HotPathOne.tla's ChunkFloor signs, the model first (R45). The
   // test's case for it is a todo until then.
   'packages/vault/src/log-store.ts#postgresStore': { by: LOG_STORE, as: 'lowestAbove' },
-  // SQLite's own: its numbering (both trees one sequence, each table's greatest number, a step of its rowid) and its
-  // checkpointer's reads. Kept for tests and local development, no deployment runs on it (AGENTS.md).
-  'packages/db/src/log.ts#changeOnSqlite': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
-  'packages/vault/src/store.ts#changeOnSqlite': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
-  'packages/vault/src/store.ts#nextNumber': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
-  'packages/vault/src/credentials.sqlite.ts#nextNumber': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
-  'packages/vault/src/use.sqlite.ts#NEXT': { none: "SQLite's numbering: each tree's greatest number, no deployment's engine" },
-  ...Object.fromEntries(['', '#2', '#3', '#4', '#5'].map((nth) => [`packages/vault/src/log-store.ts#sqliteStore${nth}`, { none: "SQLite's checkpointer: its numbering, and the lowest `at` above a part as Postgres's, no deployment's engine" }])),
 };
 
 /** The sources of the packages that run (core, db, vault, server), each with its text. */
@@ -314,10 +271,9 @@ test('every read of the newest entries of a kind in the sources is listed, with 
   }
 });
 
-test("every read of an object's newest changes in the sources goes through `changesOf`, held by a test, or is SQLite's (T245, R48)", () => {
+test("every read of an object's newest changes in the sources goes through `changesOf`, held by a test (T245, R48)", () => {
   const { keyed, plain } = changeSites();
-  assert.deepEqual(plain.filter((site) => !SQLITE_CHANGES.has(site)), [], 'a read of an object\'s changes asked plainly on Postgres: ask it through `changesOf`');
-  assert.deepEqual([...SQLITE_CHANGES].filter((site) => !plain.includes(site)), [], 'a SQLite read listed that no longer reads so');
+  assert.deepEqual(plain, [], 'a read of an object\'s changes asked plainly: ask it through `changesOf`');
   assert.deepEqual(keyed.filter((site) => !(site in CHANGES)), [], 'a read through `changesOf` the list does not name: list it with its test');
   assert.deepEqual(Object.keys(CHANGES).filter((site) => !keyed.includes(site)), [], 'a site listed that no longer reads so');
   const vault = readFileSync(`${ROOT}${VAULT}`, 'utf8');

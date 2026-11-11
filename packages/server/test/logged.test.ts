@@ -1,5 +1,5 @@
-// What an unhandled error leaves in the log: its message, and on Postgres
-// the fields that say what went wrong, but never the query's parameters,
+// What an unhandled error leaves in the log: its message, and the fields
+// that say what went wrong, but never the query's parameters,
 // which may hold a value. Logged as it was, an error showed only its stack
 // on Workers.
 import { after, test } from 'node:test';
@@ -12,7 +12,6 @@ import { sql } from 'drizzle-orm';
 import { ApiError, toErrorBody, UNSEALED_MESSAGE } from '../src/api/errors.ts';
 import { errorResponse } from '../src/http.ts';
 import { openTestDatabase } from './api-fixture.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 
 const db = await openTestDatabase();
 after(() => db.close());
@@ -34,10 +33,8 @@ test('an unhandled database error is logged with its message and what Postgres s
   assert.ok(typeof line.stack === 'string' && line.stack.includes('logged.test.ts'), 'no stack');
   const cause = line.cause as Record<string, unknown>;
   assert.ok(typeof cause.message === 'string' && cause.message.length > 0, 'no cause');
-  if (TEST_ENGINE === 'postgres') {
-    assert.deepEqual([cause.code, cause.severity, cause.routine !== undefined], ['42P01', 'ERROR', true]);
-    assert.match(String(cause.message), /relation "no_such_table" does not exist/);
-  }
+  assert.deepEqual([cause.code, cause.severity, cause.routine !== undefined], ['42P01', 'ERROR', true]);
+  assert.match(String(cause.message), /relation "no_such_table" does not exist/);
 });
 
 test("a database that does not answer is 503 unavailable, the request's to ask again, and logged as such", (t) => {

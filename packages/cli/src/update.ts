@@ -478,7 +478,7 @@ export async function update(args: string[]): Promise<void> {
     (error) => (error instanceof Error ? error.message : String(error)),
   );
   // What the database had to know of before, and of after: this CLI's migrations, or the deployment's.
-  let before: readonly string[] = (deployment === null ? null : deploymentMigrations(deployment)) ?? KNOWN_MIGRATIONS.postgres;
+  let before: readonly string[] = (deployment === null ? null : deploymentMigrations(deployment)) ?? KNOWN_MIGRATIONS;
   // The version those are: the deployment's, or this CLI's.
   const from = deployment !== null && pinned.length === 1 ? pinned[0]! : current;
   let after: readonly string[] | null = null;

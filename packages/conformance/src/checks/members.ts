@@ -5,7 +5,7 @@ import { CoffreError } from '@coffre/client';
 import { Browser } from '../browser.ts';
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect, Skip, until } from '../report.ts';
+import { expect, until } from '../report.ts';
 import { DEV, PROD, signIn, type People, type Person } from './people.ts';
 import { insertRow, logRefuses, query, restoreRow } from './storage.ts';
 
@@ -130,7 +130,6 @@ export async function noAuditNoAccess(deployment: Deployment, people: People): P
 
 /** Hold the head after the vault checked a member, then forge a grant before it seals them. */
 export async function sealingRace(deployment: Deployment, people: People): Promise<string> {
-  if (deployment.vaultRuntime === null) throw new Skip('SQLite prevents a write beside a decision; the vault suite covers review R2 on Postgres');
   const [login] = await using(deployment.vaultRuntime(), (sql) => sql.query<{ name: string }>('SELECT current_user AS name'));
   const person = await member(deployment, people, 'seal-race');
   const { admin } = people;

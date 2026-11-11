@@ -10,7 +10,6 @@ import { asc, sql, type SQL } from 'drizzle-orm';
 import { coffreRoute, respond, runScheduled } from '../src/app.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { admitSocket } from '../src/socket-admission.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 import { LOG, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { appendAudit } from '../src/db/audit.ts';
 import { auditLog } from './db/tables.ts';
@@ -63,9 +62,7 @@ async function ask(runtime: CoffreRuntime, path: string, accept = 'application/j
 
 /** No ledger at all while `work` runs, as on a database never migrated: the table moved aside, its grants with it. */
 async function neverMigrated(work: () => Promise<void>): Promise<void> {
-  const [away, back] = TEST_ENGINE === 'sqlite'
-    ? [sql`ALTER TABLE __drizzle_migrations RENAME TO __drizzle_migrations_away`, sql`ALTER TABLE __drizzle_migrations_away RENAME TO __drizzle_migrations`]
-    : [sql`ALTER TABLE drizzle.__drizzle_migrations RENAME TO __drizzle_migrations_away`, sql`ALTER TABLE drizzle.__drizzle_migrations_away RENAME TO __drizzle_migrations`];
+  const [away, back] = [sql`ALTER TABLE drizzle.__drizzle_migrations RENAME TO __drizzle_migrations_away`, sql`ALTER TABLE drizzle.__drizzle_migrations_away RENAME TO __drizzle_migrations`];
   await run(away);
   try {
     await work();
@@ -121,15 +118,13 @@ test('below its migrations, the app serves nothing but its health: the API and t
   });
 });
 
-/** Raw SQL as the owner, on either engine. */
+/** Raw SQL as the owner. */
 async function rows(query: SQL): Promise<Record<string, unknown>[]> {
-  if (TEST_ENGINE === 'sqlite') return (db.owner as unknown as { all: (q: SQL) => Promise<Record<string, unknown>[]> }).all(query);
   return [...await (db.owner as unknown as { execute: (q: SQL) => Promise<Record<string, unknown>[]> }).execute(query)];
 }
 
 async function run(query: SQL): Promise<void> {
-  if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
-  else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
+  await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
 }
 
 test("below its migrations, a plugin's WebSocket is refused at the same door, on Node and in a Durable Object alike, and its plugin never asked", async () => {

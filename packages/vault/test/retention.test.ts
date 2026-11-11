@@ -24,7 +24,7 @@ import { checkReads, cursorMac, projectReads } from '../src/reads.ts';
 import { DAY_MS, dayOf, retain } from '../src/retention.ts';
 import { variableMemory } from './audit-tree.ts';
 import { logWriter } from './log-entries.ts';
-import { ENGINE, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 
 let db: TestDatabase;
 let seed: Buffer;
@@ -63,7 +63,7 @@ before(async () => {
   const key = await logKey(seed);
   ({ signers, verifiers, mac: macKey } = key);
   keys = { current: { origin: key.origin, verifiers, mac: macKey }, previous: [] };
-  log = logWriter(ENGINE === 'sqlite' ? db.vault : db.owner, macKey);
+  log = logWriter(db.owner, macKey);
 });
 after(() => db?.close());
 beforeEach(async () => {
@@ -79,13 +79,11 @@ beforeEach(async () => {
   D9 = dayOf(clock - 9 * DAY_MS);
   MIDNIGHT = Date.parse(`${D9}T00:00:00Z`);
   await log.empty();
-  if (ENGINE === 'postgres') {
-    // The days the template was migrated with (its own today, a day behind when the run is past midnight) and any a test
-    // left (detached, or dropped by a run it did not make) go, empty as the log is; the days this test relies on are made.
-    const left = await rows<{ name: string }>(db.owner, sql`SELECT c.relname AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' AND c.relname ~ '^log_uses_[0-9]{8}$'`);
-    for (const { name } of left) await run(db.owner, sql.raw(`DROP TABLE ${name}`));
-    await run(db.owner, sql`SELECT make_day(${D10}::date), make_day(${D9}::date), make_day(${TODAY}::date), make_day(${dayOf(clock + DAY_MS)}::date)`);
-  }
+  // The days the template was migrated with (its own today, a day behind when the run is past midnight) and any a test
+  // left (detached, or dropped by a run it did not make) go, empty as the log is; the days this test relies on are made.
+  const left = await rows<{ name: string }>(db.owner, sql`SELECT c.relname AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' AND c.relname ~ '^log_uses_[0-9]{8}$'`);
+  for (const { name } of left) await run(db.owner, sql.raw(`DROP TABLE ${name}`));
+  await run(db.owner, sql`SELECT make_day(${D10}::date), make_day(${D9}::date), make_day(${TODAY}::date), make_day(${dayOf(clock + DAY_MS)}::date)`);
 });
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -153,7 +151,7 @@ test('T168, review r3 of #444: a day whose cut is under the key the log moved on
   const [rotation] = await raw.rotations();
   const until = rotation!.number;
   assert.ok(cut < until);
-  const underNew = logWriter(ENGINE === 'sqlite' ? db.vault : db.owner, (await logKey(fresh)).mac);
+  const underNew = logWriter(db.owner, (await logKey(fresh)).mac);
   const laterUnderNew = async () => {
     await sleep(2 * FRESH + 50);
     clock += 2 * FRESH + 50;
@@ -204,18 +202,14 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   assert.deepEqual(r.dropped.map((d) => d.day), [D10]);
   for (const n of d10) assert.equal(await store.locate(n), null, `${n} dropped`);
   for (const n of d9) assert.ok(await store.locate(n), `${n}, a straggler below the cut, kept`);
-  // On Postgres the day is detached, and dropped by the next run, seconds or an hour later: never right after.
-  assert.deepEqual(r.detached, ENGINE === 'postgres' ? [D10] : []);
-  if (ENGINE === 'postgres') {
-    assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), true);
-    assert.deepEqual((await retain(cp, store, { keepDays: 9, keys, now })).detached, []);
-    assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), false);
-  }
+  // The day is detached, and dropped by the next run, seconds or an hour later: never right after.
+  assert.deepEqual(r.detached, [D10]);
+  assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), true);
+  assert.deepEqual((await retain(cp, store, { keepDays: 9, keys, now })).detached, []);
+  assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), false);
   // The uses tree's leaf tiles below the cut: the range [0, 512) gone, the tile holding the cut kept, at each level.
-  if (ENGINE === 'postgres') {
-    assert.equal(await exists('log_tiles_uses_0'), false);
-    assert.equal(await exists('log_tiles_uses_512'), true);
-  }
+  assert.equal(await exists('log_tiles_uses_0'), false);
+  assert.equal(await exists('log_tiles_uses_512'), true);
   const [low] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_tiles WHERE tree = 'uses' AND level = 0 AND leaf + 256 <= 640`);
   assert.equal(Number(low!.n), 0);
 
@@ -234,7 +228,7 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   assert.deepEqual(next.dropped, [{ day: D9, change: null }]);
   for (const n of d9) assert.equal(await store.locate(n), null);
   await retain(cp, store, { keepDays: 1, keys, now });
-  assert.deepEqual(await store.days(), [TODAY, dayOf(clock + DAY_MS)].slice(0, ENGINE === 'postgres' ? 2 : 1));
+  assert.deepEqual(await store.days(), [TODAY, dayOf(clock + DAY_MS)]);
   const again = await verify(store);
   assert.ok(again.ok, again.problems.join('\n'));
   // Incrementally, from a head the walk verified: the uses tree from there on.
@@ -252,7 +246,7 @@ test('a day dropped below its sealed retention change, across midnight: straggle
 test("the reads' projection goes on across retention's cuts, and the whole log's check of it starts at the cut: nothing found, and no use dropped looked for (T166, review r3)", async () => {
   const { cp, store } = await open({ projected: false });
   // The reads' days beside the uses', as the store's upkeep makes them.
-  if (ENGINE === 'postgres') await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
+  await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
   await midnight(cp);
   const projectedAll = async () => {
     for (let run = 0; run < 100; run += 1) {
@@ -277,12 +271,11 @@ test("the reads' projection goes on across retention's cuts, and the whole log's
   assert.deepEqual(waiting.dropped, []);
   assert.match(waiting.waiting?.reason ?? '', /the reads' projection \(through 0\) has not reached the cut/);
   // Nor once a database writer moves the cursor past the cut around the projector: by its MAC, not its number (review r7).
-  const owner = ENGINE === 'sqlite' ? db.vault : db.owner;
-  await run(owner, sql`UPDATE log_reads_cursor SET through = 1000000000`);
+  await run(db.owner, sql`UPDATE log_reads_cursor SET through = 1000000000`);
   const moved = await retain(cp, store, { keepDays: 9, keys, now });
   assert.deepEqual(moved.dropped, []);
   assert.match(moved.waiting?.reason ?? '', /the reads' cursor, at 1000000000, is not the vault's/);
-  await run(owner, sql`UPDATE log_reads_cursor SET through = 0`);
+  await run(db.owner, sql`UPDATE log_reads_cursor SET through = 0`);
   await projectedAll();
   assert.deepEqual(await checked(), []);
   // D10 cut, and dropped with its reads; then D9, its stragglers with it; then the log goes on past both.
@@ -305,12 +298,12 @@ test('a dropped use put back is never sealed again', async () => {
   await later(cp);
   assert.deepEqual((await retain(cp, store, { keepDays: 9, keys, now })).waiting, null);
   await retain(cp, store, { keepDays: 9, keys, now });
-  // A writer who read it before puts it back (its day made again, on Postgres), at a fresh number: its MAC holds, and no
+  // A writer who read it before puts it back (its day made again), at a fresh number: its MAC holds, and no
   // original is left for a request-ID check to find. (Beside its original, the replay's key, (at, request_id), refuses
   // it.) Stamped weeks before the floor of `at`, no tick's window reads it (BarrierChecksFloor); one that did would find
   // it older than the signer's pair (FRESH_MS). The walk from genesis reads it, under a pair that does not hold it.
-  if (ENGINE === 'postgres') await run(db.owner, sql`SELECT make_day(${D10}::date)`);
-  const [n] = await rows<{ n: string }>(db.owner, ENGINE === 'postgres' ? sql`SELECT nextval('log_number')::text AS n` : sql`SELECT CAST(max(number) + 1 AS TEXT) AS n FROM log_changes`);
+  await run(db.owner, sql`SELECT make_day(${D10}::date)`);
+  const [n] = await rows<{ n: string }>(db.owner, sql`SELECT nextval('log_number')::text AS n`);
   const uses = cp.pair.pair.uses.size;
   await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
     VALUES (${BigInt(n!.n)}, ${copy!.at as number}, ${copy!.request_id as bigint}, ${copy!.credential as string}, ${copy!.secret as string}, ${copy!.purpose as number}, ${copy!.mac as Buffer}, NULL)`);
@@ -375,8 +368,8 @@ test('a crash between the retention change and the drop: the next run finishes, 
   assert.ok((await verify(store)).ok);
   await later(cp);
   const r = await retain(cp, crashing, { keepDays: 1, keys, now });
-  // A day a run on Postgres (one DETACH a run); SQLite deletes both at once.
-  assert.deepEqual(r.dropped.map((d) => [d.day, d.change]), ENGINE === 'postgres' ? [[D10, null]] : [[D10, null], [D9, null]]);
+  // A day a run (one DETACH a run).
+  assert.deepEqual(r.dropped.map((d) => [d.day, d.change]), [[D10, null]]);
   for (let i = 0; i < 3; i += 1) await retain(cp, crashing, { keepDays: 1, keys, now });
   for (const day of [D10, D9]) assert.ok(!(await store.days()).includes(day), `${day} dropped`);
   const [count] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_changes WHERE request_id LIKE 'retention:%'`);
@@ -384,7 +377,7 @@ test('a crash between the retention change and the drop: the next run finishes, 
   assert.ok((await verify(store)).ok);
 });
 
-test('a reader holding the uses past drop_day\'s lock timeout makes the run wait, no alarm; the next run detaches', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its locks' }, async () => {
+test('a reader holding the uses past drop_day\'s lock timeout makes the run wait, no alarm; the next run detaches', async () => {
   const { cp, store } = await open();
   await midnight(cp);
   await later(cp);
@@ -409,7 +402,7 @@ test('a reader holding the uses past drop_day\'s lock timeout makes the run wait
   assert.deepEqual((await retain(cp, store, { keepDays: 1, keys, now })).detached, [D9]);
 });
 
-test("a reader holding a day's reads past drop_reads_day's lock timeout makes the run wait; the next drops them before the uses' partition, so the day is never forgotten with its reads listed (T166, review r10)", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its locks' }, async () => {
+test("a reader holding a day's reads past drop_reads_day's lock timeout makes the run wait; the next drops them before the uses' partition, so the day is never forgotten with its reads listed (T166, review r10)", async () => {
   const { cp, store } = await open({ projected: false });
   await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
   await midnight(cp);
@@ -480,7 +473,7 @@ test('review r2: two days due at once, each cut its own: a catch-up drops both, 
   const runs = [];
   for (let i = 0; i < 4; i += 1) runs.push(await retain(cp, store, { keepDays: 1, keys, now }));
   assert.ok(runs.every((r) => r.waiting === null), JSON.stringify(runs.map((r) => r.waiting)));
-  assert.deepEqual(runs.map((r) => r.detached), ENGINE === 'postgres' ? [[D10], [D9], [], []] : [[], [], [], []]);
+  assert.deepEqual(runs.map((r) => r.detached), [[D10], [D9], [], []]);
   const changed = runs.flatMap((r) => r.dropped).filter((d) => d.change !== null).map((d) => d.day);
   assert.deepEqual(changed, [D10, D9], 'a change each');
   assert.ok(runs.some((r) => r.tiles > 0));
@@ -502,7 +495,7 @@ test('review r2: rows deleted to push the cut later are refused: the cut is the 
   assert.equal((await store.retention()), null, 'no retention change');
 });
 
-test('review r2: a day that waits on the same lock for a day is an alarm', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its locks' }, async () => {
+test('review r2: a day that waits on the same lock for a day is an alarm', async () => {
   const { cp, store } = await open();
   await midnight(cp);
   await later(cp);
@@ -520,7 +513,7 @@ test('review r2: a day that waits on the same lock for a day is an alarm', { ski
   assert.match(alerts[0]!, new RegExp(`retention has waited on ${D10} since .*a reader holds the table past the lock timeout`));
 });
 
-test('review r3: a quiet log, whose pairs have not passed a day\'s end, waits with no alarm, however long', { skip: ENGINE === 'postgres' ? false : 'Postgres only: a day with no use' }, async () => {
+test('review r3: a quiet log, whose pairs have not passed a day\'s end, waits with no alarm, however long', async () => {
   const { cp, store } = await open();
   // Every day before today gone: only today's and the days made ahead are left.
   for (const day of (await store.days()).filter((d) => d < TODAY)) await run(db.owner, sql.raw(`DROP TABLE log_uses_${day.replaceAll('-', '')}`));
@@ -539,7 +532,7 @@ test('review r3: a quiet log, whose pairs have not passed a day\'s end, waits wi
   assert.deepEqual(alerts, []);
 });
 
-test('T119, item 2: the store forgets each leaf range it drops, and makes it again if a write needs it', { skip: ENGINE === 'postgres' ? false : 'Postgres only: ranges' }, async () => {
+test('T119, item 2: the store forgets each leaf range it drops, and makes it again if a write needs it', async () => {
   const { cp, store } = await open();
   await midnight(cp);
   await later(cp);
@@ -566,12 +559,10 @@ test('the upkeep makes the next days ahead and prunes the bulk cap\'s rows its w
   assert.deepEqual(alerts, []);
   const [bulk] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM bulk_cap`);
   assert.equal(Number(bulk!.n), 1, 'the old row pruned, the fresh one kept');
-  if (ENGINE === 'postgres') {
-    for (let d = -1; d <= DAYS_AHEAD; d += 1) assert.ok(await exists(`log_uses_${dayOf(clock + d * DAY_MS).replaceAll('-', '')}`), `day ${d}`);
-  }
+  for (let d = -1; d <= DAYS_AHEAD; d += 1) assert.ok(await exists(`log_uses_${dayOf(clock + d * DAY_MS).replaceAll('-', '')}`), `day ${d}`);
 });
 
-test('the database drops nothing a sealed retention change does not cut, and never yesterday\'s uses', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its functions' }, async () => {
+test('the database drops nothing a sealed retention change does not cut, and never yesterday\'s uses', async () => {
   const { cp, store } = await open();
   await midnight(cp);
   const vault = db.vault;
@@ -597,7 +588,7 @@ test('the database drops nothing a sealed retention change does not cut, and nev
 });
 
 
-test('R48: retention\'s reads cost the same at 10k and at 1M entries: a day\'s cut, the newest sealed cut, the newest retention change', { skip: ENGINE === 'postgres' ? false : 'Postgres only: buffers', timeout: 600_000 }, async () => {
+test('R48: retention\'s reads cost the same at 10k and at 1M entries: a day\'s cut, the newest sealed cut, the newest retention change', { timeout: 600_000 }, async () => {
   const { cp, store } = await open();
   await midnight(cp);
   await later(cp);

@@ -2,7 +2,6 @@
 // Hyperdrive connection per request, the vault's one per call, each behind a proxy that counts the Syncs, which
 // Hyperdrive sends on one at a time, so a round trip each. The seal (R51) is the checkpointer's, apart: here a change
 // is sealed at once (`sealedNow`). Each route is asked once to warm the isolate, then measured.
-// Postgres only: the counts are its Syncs.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -21,12 +20,10 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, entryOf, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
-import { postgresOnly } from './db/engine.ts';
 import { addPasskey, removePasskey, steppedUp } from './passkey-rows.ts';
 import { inBulkPeriod } from './window-fixture.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 
-const POSTGRES = postgresOnly("counts the app's and the vault's Postgres round trips");
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const SERVICE = 'token:ci-web';
@@ -74,7 +71,6 @@ let statements: string[] = [];
 const background: Promise<unknown>[] = [];
 
 before(async () => {
-  if (POSTGRES.skip) return;
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
@@ -160,7 +156,6 @@ before(async () => {
 });
 
 after(async () => {
-  if (POSTGRES.skip) return;
   await vault.close();
   await vaultPool.end();
   await Promise.all(Object.values(relays).map((relay) => relay.close()));
@@ -397,7 +392,7 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'proxy definitions, an item added': { app: 2, vault: 5 },
 };
 
-test('each change route answers in exactly its budget of round trips (T179)', POSTGRES, async () => {
+test('each change route answers in exactly its budget of round trips (T179)', async () => {
   const table: Record<string, { app: number; vault: number; hot: number; total: number; calls: number; ms: number }> = {};
   const failures: string[] = [];
   for (const [n, { name, setup, run }] of CASES.entries()) {

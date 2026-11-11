@@ -1,4 +1,4 @@
-// 0.15's uses through a way in with no credentials row (T147; formal/WaysIn.tla), on both engines: an MCP connection,
+// 0.15's uses through a way in with no credentials row (T147; formal/WaysIn.tla): an MCP connection,
 // a Cloudflare service binding, and a browser behind Cloudflare Access. Each is one `use_credential` call, its entry
 // naming its way in (the purpose's bits above 512), decided on that way in's sealed object, read as the credential it
 // stands for, or behind Access on the account alone. Every live answer is held to the replay of the log (R53).

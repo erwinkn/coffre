@@ -1,6 +1,6 @@
 import { personalOf } from '@coffre/core/schemas';
 import { tablesOf, type Queryable } from '@coffre/db';
-import { clock, engineOf, rowsOf, type Table } from '@coffre/db/dialect';
+import { clock, rowsOf, type Table } from '@coffre/db/dialect';
 import { getTableColumns, sql } from 'drizzle-orm';
 
 import { resolvedPlace, secretRowOf, type CredentialRead, type ResolvedPath, type SecretRow } from './queries.ts';
@@ -14,7 +14,7 @@ import { resolvedPlace, secretRowOf, type CredentialRead, type ResolvedPath, typ
  * is planned anew for every request, which was most of a `/use`'s
  * Postgres CPU: a function's statement is planned once per backend.
  *
- * Postgres only (null on SQLite), and only where what it reads is what
+ * Only where what it reads is what
  * those read: no personal config (`dev@me`), whose resolution reads by its
  * owner. Each part is undefined when not read, and the caller reads it as
  * it would; `place` null for no such project, as `resolvePath` answers;
@@ -36,7 +36,6 @@ export type ReadAhead = {
 export type ReadAsked = { tokenHash?: Buffer; path?: { project: string; environment: string }; keys?: readonly string[] | null };
 
 export async function readAhead(db: Queryable, asked: ReadAsked): Promise<ReadAhead | null> {
-  if (engineOf(db) !== 'postgres') return null;
   // A personal config is read by its owner: the caller's own statements resolve it.
   const path = asked.path !== undefined && personalOf(asked.path.environment) === null ? asked.path : undefined;
   if (asked.tokenHash === undefined && path === undefined) return null;
@@ -51,7 +50,7 @@ export async function readAhead(db: Queryable, asked: ReadAsked): Promise<ReadAh
 /**
  * The rows the vault's named use answers (T145, PR B; `Vault.useNamed`, migration 0044's `app`): what `app_read`
  * answers, for the request's credential, place and key, read in the use's own statement, so that the app reads nothing
- * itself. Null for SQLite's vault, which answers none: the app reads its own rows there, as ever. `personal`: the
+ * itself. Null when the vault answers none: the app reads its own rows then, as ever. `personal`: the
  * request named `dev@me` (T165), and the place is its caller's personal config of dev, or dev while they have none, as
  * `resolveRead` resolves it.
  */
@@ -83,7 +82,7 @@ export function namedAhead(db: Queryable, app: string | null, { personal = false
 /**
  * The rows a named batch answers (T165, B2's PR 2; `Vault.useNamedMany`): the credential and the place, as its gate's
  * named call read them (`namedAhead`), and every key's rows, as each key's named call read them, in the order asked,
- * none for a key the place does not hold. Null for SQLite's vault, which answers none, or a caller who does not stand
+ * none for a key the place does not hold. Null when the vault answers none, or for a caller who does not stand
  * at the place, of whom the vault read no key: the app reads its own rows then, as ever.
  */
 export function namedManyAhead(db: Queryable, app: string | null, keys: readonly { app: string | null }[] | null, { personal = false }: { personal?: boolean } = {}): ReadAhead | null {

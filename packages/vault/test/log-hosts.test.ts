@@ -18,7 +18,7 @@ import { checkpointerAlarms, checkpointerObject, checkpointerStatus, durableSeal
 import { KEY_OBJECT, logMacKey } from '../src/log-entry.ts';
 import { durableWitness, r2Archive, witnessObject } from '../src/witness-workers.ts';
 import { authentic, keys, MemoryStore, sealThroughDouble, variableMemory } from './audit-tree.ts';
-import { ENGINE, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { sql } from 'drizzle-orm';
 import { logWriter } from './log-entries.ts';
 import { stallProxy } from './stall-proxy.ts';
@@ -32,8 +32,7 @@ let dir: string;
 before(async () => {
   db = await openTestDatabase();
   seed = randomBytes(32);
-  // One connection on SQLite, as a deployment has: two to one file would wait on each other's writes.
-  log = logWriter(ENGINE === 'sqlite' ? db.vault : db.owner, logMacKey(seed));
+  log = logWriter(db.owner, logMacKey(seed));
   await log.days();
   dir = mkdtempSync(join(tmpdir(), 'coffre-checkpointer-'));
 });
@@ -105,7 +104,7 @@ test('on Node: ticks every interval, a change sealed through it, its memory a sy
     await running.stop();
   }
   // Started again over the same file and database, the forged entry gone: the memory and the rows agree, and it seals on.
-  await run(ENGINE === 'sqlite' ? db.vault : db.owner, sql`DELETE FROM log_uses WHERE number = ${forged}`);
+  await run(db.owner, sql`DELETE FROM log_uses WHERE number = ${forged}`);
   const again = await runCheckpointer({ database: db.vault, signingKeys: [seed], memory, intervalMs: 20 });
   try {
     const n = await log.change();
@@ -152,12 +151,12 @@ const signedUnder = (notes: PairNotes) => splitNote(notes.changes).signatures[0]
 /** Whether an error, or the database's error under it, says `pattern`. */
 const says = (pattern: RegExp) => (error: Error & { cause?: Error }) => pattern.test(`${error.message} ${error.cause?.message}`);
 
-const rotationsLogged = async () => (await rows<{ n: string | number }>(ENGINE === 'sqlite' ? db.vault : db.owner, sql`SELECT count(*) AS n FROM log_changes WHERE object = ${KEY_OBJECT}`))[0]!.n;
+const rotationsLogged = async () => (await rows<{ n: string | number }>(db.owner, sql`SELECT count(*) AS n FROM log_changes WHERE object = ${KEY_OBJECT}`))[0]!.n;
 
 test('on Node: started under a new signing key (T168), the runner carries its file across, rotates once, and seals under the new key; the old key writes nothing past it', async () => {
   const memory = join(dir, `memory-${randomBytes(4).toString('hex')}`);
   const [oldSeed, newSeed] = [randomBytes(32), randomBytes(32)];
-  const owner = ENGINE === 'sqlite' ? db.vault : db.owner;
+  const owner = db.owner;
   const [oldLog, newLog] = [logWriter(owner, logMacKey(oldSeed)), logWriter(owner, logMacKey(newSeed))];
   const before = await runCheckpointer({ database: db.vault, signingKeys: [oldSeed], memory, intervalMs: 20 });
   try {
@@ -187,7 +186,7 @@ test('on Node: started under a new signing key (T168), the runner carries its fi
   }
 });
 
-test('on Workers: the checkpointer\'s object, deployed under a new signing key (T168), carries its storage\'s memory across, rotates once and seals under the new key', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive' }, async () => {
+test('on Workers: the checkpointer\'s object, deployed under a new signing key (T168), carries its storage\'s memory across, rotates once and seals under the new key', async () => {
   const state = objectState();
   const [oldSeed, newSeed] = [randomBytes(32), randomBytes(32)];
   const [oldLog, newLog] = [logWriter(db.owner, logMacKey(oldSeed)), logWriter(db.owner, logMacKey(newSeed))];
@@ -209,7 +208,7 @@ test('on Workers: the checkpointer\'s object, deployed under a new signing key (
   await assert.rejects(oldLog.change(), says(/the log moved on from the signing key this entry is under/));
 });
 
-test('on Workers: the checkpointer\'s object ticks on its alarm, keeps its memory and alarms in its storage, and seals a change asked of it', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive' }, async () => {
+test('on Workers: the checkpointer\'s object ticks on its alarm, keeps its memory and alarms in its storage, and seals a change asked of it', async () => {
   const state = objectState();
   const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: VAULT_URL }, signingKeys: [seed], closeIdleMs: 50 }));
   const object = new Checkpointer_(state, {});
@@ -320,7 +319,7 @@ test('the change path\'s seam has a stand-in for its tests: the numbers asked, e
   assert.deepEqual(double.asked, [1n, 2n]);
 });
 
-test('Fable review: the object remembers durably, keeps a refused open and a failed tick as alarms, once each', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive' }, async () => {
+test('Fable review: the object remembers durably, keeps a refused open and a failed tick as alarms, once each', async () => {
   const state = objectState();
   const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: VAULT_URL }, signingKeys: [seed], closeIdleMs: 50 }));
   const first = new Checkpointer_(state, {});
@@ -374,7 +373,7 @@ test('Fable review: a witness whose held pair no longer opens refuses, rather th
   assert.match(((await damaged.json()) as { reason: string }).reason, /name a new witness/);
 });
 
-test('T119, item 3: a reset over a seal in flight: the seal fails rather than sign beside the next checkpointer, and the next seal opens one', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive' }, async () => {
+test('T119, item 3: a reset over a seal in flight: the seal fails rather than sign beside the next checkpointer, and the next seal opens one', async () => {
   const state = objectState();
   const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: VAULT_URL }, signingKeys: [seed], closeIdleMs: 50 }));
   const object = new Checkpointer_(state, {});
@@ -417,7 +416,7 @@ test('review r3: with the database unreachable, the object keeps one alarm for e
   assert.equal(alarms.length, 2, JSON.stringify(alarms));
 });
 
-test('T169, Workers: the object\'s connection stops answering under a tick: its alarm ends within its bound, the checkpointer replaced, a change answers unsealed, readiness red; answered again, its next alarm seals', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive', timeout: 60_000 }, async () => {
+test('T169, Workers: the object\'s connection stops answering under a tick: its alarm ends within its bound, the checkpointer replaced, a change answers unsealed, readiness red; answered again, its next alarm seals', { timeout: 60_000 }, async () => {
   const proxy = await stallProxy(VAULT_URL);
   const state = objectState();
   const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: proxy.url }, signingKeys: [seed], closeIdleMs: 60_000, tickBoundMs: 300 }));
@@ -459,7 +458,7 @@ test('T169, Workers: the object\'s connection stops answering under a tick: its 
   }
 });
 
-test('T169, review r5, Workers: a seal\'s tick that stalls between alarms turns readiness red at once, whatever the last alarm\'s tick said', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive', timeout: 60_000 }, async () => {
+test('T169, review r5, Workers: a seal\'s tick that stalls between alarms turns readiness red at once, whatever the last alarm\'s tick said', { timeout: 60_000 }, async () => {
   const proxy = await stallProxy(VAULT_URL);
   const state = objectState();
   const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: proxy.url }, signingKeys: [seed], closeIdleMs: 60_000, tickBoundMs: 300 }));

@@ -16,7 +16,7 @@ import { openVault, prepareVault } from '../src/vault.ts';
 import type { Input } from '../src/inputs.ts';
 import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { newRequestId } from '../src/use.ts';
-import { HOT_URL, openTestDatabase, postgresOnly, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { HOT_URL, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { namedWorld } from './named-world.ts';
 import { ask, change, CONFIG, emptyLog, LOG_015, ROOT, seal, useDatabases, world } from './use-world.ts';
 import { inBulkPeriod } from './window-fixture.ts';
@@ -75,7 +75,7 @@ async function grow(total: number): Promise<void> {
   await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0)`);
 }
 
-test('R48: a use is one statement, its buffers the same at 10k and at 1M entries, probing and from the cache', { ...postgresOnly('the hot path'), timeout: 600_000 }, async () => {
+test('R48: a use is one statement, its buffers the same at 10k and at 1M entries, probing and from the cache', { timeout: 600_000 }, async () => {
   const w = await world();
   const id = await w.key();
   const { pool, statements } = counting();
@@ -145,7 +145,7 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
   }
 });
 
-test("D153: a named use reads what it names by index, its buffers the same at 1k places and at 10k, its ids mapped or not", { ...postgresOnly('the hot path'), timeout: 600_000 }, async () => {
+test("D153: a named use reads what it names by index, its buffers the same at 1k places and at 10k, its ids mapped or not", { timeout: 600_000 }, async () => {
   const w = await world();
   const id = await w.key();
   const [names] = await rows<{ token_hash: Buffer; project: string; key: string }>(db.owner, sql`SELECT c.token_hash, p.slug AS project, s.key
@@ -207,7 +207,7 @@ test("D153: a named use reads what it names by index, its buffers the same at 1k
   }
 });
 
-test("T165: a named use at a fork, and at `dev@me`, walks the place's chain and its dismissals by index: its buffers the same at 1k forks and at 10k", { ...postgresOnly('the hot path'), timeout: 600_000 }, async () => {
+test("T165: a named use at a fork, and at `dev@me`, walks the place's chain and its dismissals by index: its buffers the same at 1k forks and at 10k", { timeout: 600_000 }, async () => {
   const w = await namedWorld(db, { caller: 'person' });
   const fork = await w.fork('feature');
   await w.grantAt(fork, 'viewer');
@@ -276,7 +276,7 @@ test("T165: a named use at a fork, and at `dev@me`, walks the place's chain and 
   }
 });
 
-test("T165 (PR 2): a named batch's first statement reads no key without standing, the same buffers whatever the place holds; and, standing, its gate's and each key's lone use's, its own the same at 1k forks and at 10k", { ...postgresOnly('the hot path'), timeout: 600_000 }, async (t) => {
+test("T165 (PR 2): a named batch's first statement reads no key without standing, the same buffers whatever the place holds; and, standing, its gate's and each key's lone use's, its own the same at 1k forks and at 10k", { timeout: 600_000 }, async (t) => {
   const w = await namedWorld(db);
   const fork = await w.fork('feature');
   await w.grantAt(fork, 'viewer');
@@ -395,7 +395,7 @@ test("T165 (PR 2): a named batch's first statement reads no key without standing
  * reading each newer row of another key's before the key's own: here 5,000 of them, a key repointed over and over.
  * Another key's 5,000 older rows are there from the start, so that both measures read indexes of the same depth.
  */
-test("T220: a reference's use reads its newest reference by its holder, its buffers the same however many references another key made since", { ...postgresOnly('the hot path'), timeout: 600_000 }, async () => {
+test("T220: a reference's use reads its newest reference by its holder, its buffers the same however many references another key made since", { timeout: 600_000 }, async () => {
   const w = await world();
   const source = await w.key('the source');
   /**

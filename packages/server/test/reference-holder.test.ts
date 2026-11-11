@@ -3,7 +3,7 @@
 // person with a grant on landing/prod alone, none on backend, uses and reads
 // landing/prod/CLERK_SECRET_KEY, a reference to backend/prod's, as they do
 // landing's own keys. Its source is checked when it is made (R24), never at a
-// read. Both engines.
+// read.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';

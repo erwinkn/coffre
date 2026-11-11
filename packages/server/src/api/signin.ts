@@ -497,7 +497,7 @@ export class SigninService {
 
   #issuerHash(providerId: string): string | null {
     const provider = this.config.providers.find((candidate) => candidate.id === providerId);
-    // Fixed width keeps the identity index exact on every database engine.
+    // Fixed width keeps the identity index exact.
     return provider === undefined ? null : hashToken(provider.issuer).toString('hex');
   }
 

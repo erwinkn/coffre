@@ -1,5 +1,5 @@
 // What stands behind a person's credential (docs/design/passkeys.md, sections
-// 6.1 and 6.2; formal/Factor.tla, FactorApp), on both engines: every request
+// 6.1 and 6.2; formal/Factor.tla, FactorApp): every request
 // of a person's holds its credential to a live passkey, or to none while they
 // hold none, as the policy says; every issue holds what it would issue to the
 // same under the log's head; and what a request issues names its passkey. No
@@ -263,7 +263,7 @@ test('a reveal by a credential whose passkey fails its MAC gets the 401 any requ
 test('a key write or a member\'s add by a credential the check refuses is refused before it writes, by the fast path and today\'s alike', async () => {
   const root = clientFor(deps, ROOT);
   await root.members.add(`user:${BOB}`, { role: 'admin' });
-  // The vault's fast-path calls, counted: Postgres's 0.15 vault serves them, SQLite's never (today's path alone). And
+  // The vault's fast-path calls, counted: 0.15's vault serves them. And
   // the refusals it records in place of 0.14's deny entry (T179 PR 6).
   const served = { writes: 0, adds: 0 };
   let recorded = 0;
@@ -292,9 +292,9 @@ test('a key write or a member\'s add by a credential the check refuses is refuse
   // Ada, a Developer, may not add a member, which the handler decides; but first the router asks her for a passkey she
   // does not hold (section 4.5): a prompt, which writes nothing and records no refusal of the vault's.
   assert.equal(await answer(ada!.members.add('user:erin@acme.example', { role: 'developer' })), 'fresh_check_required');
-  // The fast paths are Postgres's, under 0.15's log (`admit-held.test.ts`); elsewhere both go today's way.
-  const fast = process.env.COFFRE_TEST_ENGINE !== 'sqlite' && LOG === '0.15' ? { writes: 1, adds: 1 } : { writes: 0, adds: 0 };
-  assert.deepEqual(served, fast, "the fast path served each on Postgres, under 0.15's log");
+  // The fast paths are 0.15's log's (`admit-held.test.ts`); under 0.14's both go today's way.
+  const fast = LOG === '0.15' ? { writes: 1, adds: 1 } : { writes: 0, adds: 0 };
+  assert.deepEqual(served, fast, "the fast path served each, under 0.15's log");
   assert.equal(recorded, 0, 'a prompt records no refusal');
   const keyNow = async () => {
     const { values, version } = await root.secrets.reveal('market/dev', ['API_KEY']);

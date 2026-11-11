@@ -1,7 +1,6 @@
 // 0.15's change path (docs/design/0.15-plan.md, PR 4a): every change a vault decision makes to an input of 0.15's log is
 // one call of `change_input` (migration 0023), in the decision's transaction, after 0.14's writes. Each case names the
-// part of formal/HotPathOne.tla or formal/Migration015.tla it holds, and runs on both engines unless it says otherwise:
-// SQLite runs `change_input`'s twin (store.ts), under its one writer.
+// part of formal/HotPathOne.tla or formal/Migration015.tla it holds.
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -27,7 +26,7 @@ import { readUse, replay, type LoggedChange, type Replayed } from '../src/log-re
 import * as store from '../src/store.ts';
 import type { VaultOptions } from '../src/vault.ts';
 import { sealThroughDouble } from './audit-tree.ts';
-import { emptyDatabase, locksHere, OWNER_URL, VAULT_URL, newProject, openTestDatabase, places, postgresOnly, rows, sealed, nothingHeld, withLogUnlocked, type TestDatabase, openLocalVault } from './database.ts';
+import { emptyDatabase, locksHere, OWNER_URL, VAULT_URL, newProject, openTestDatabase, places, rows, sealed, nothingHeld, withLogUnlocked, type TestDatabase, openLocalVault } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -650,7 +649,7 @@ test('a change answers only once its entry is sealed (R51, CommitBeforeAnswer)',
   await assert.rejects(failing.vault.admit({ actor: ROOT, principal: BO }), /signed tree/);
 });
 
-test('a change waits for every use in flight, and every use asked meanwhile waits for its commit (ChangeLocks, LockToCommit)', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {
+test('a change waits for every use in flight, and every use asked meanwhile waits for its commit (ChangeLocks, LockToCommit)', async () => {
   const w = await world({}, configure(), { sealed: false });
   await genesis(w.keys, { kind: 'environment', id: w.prod }, environment(w.project, w.prod, 'prod'));
   const from = (await store.readObject(db.owner, { kind: 'environment', id: w.prod })).seal;
@@ -687,7 +686,7 @@ test('a change waits for every use in flight, and every use asked meanwhile wait
   }
 });
 
-test('a 0.15 change beside a 0.14 decision holding its member\'s row: row, head, fence, and neither waits on the other in a circle (RowFirst, ChangeHeadFirst)', postgresOnly('SQLite has one writer'), async () => {
+test('a 0.15 change beside a 0.14 decision holding its member\'s row: row, head, fence, and neither waits on the other in a circle (RowFirst, ChangeHeadFirst)', async () => {
   const w = await world();
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);
   const old = postgresSession(OWNER_URL);
@@ -711,7 +710,7 @@ test('a 0.15 change beside a 0.14 decision holding its member\'s row: row, head,
   }
 });
 
-test('changes and reads at once, on the same members, all answer, and the log replays to the rows', postgresOnly('SQLite runs one call at a time'), async () => {
+test('changes and reads at once, on the same members, all answer, and the log replays to the rows', async () => {
   const w = await world();
   const vaults = await Promise.all([1, 2, 3].map(async () => openLocalVault(await db.connect(4), w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld })));
   const people = [ADA, BO, 'user:cy@acme.example'];

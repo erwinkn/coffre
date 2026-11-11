@@ -89,6 +89,7 @@
   still waits a minute, `Retry-After: 60`, and lets no set stand in
   meanwhile, nor does a fetch that ends after another exchange heard such
   an answer, or after its set's hour.
+- **Postgres is coffre's only database.** SQLite, which no deployment ran (tests, local development and Node's conformance did), is gone: a `file:` or `libsql:` database URL is refused, `@coffre/db/schema-sqlite` and `@coffre/db/portable` are no longer exported, and a Node deployment needs Postgres and its logins, as a Workers one does (`examples/node`).
 - **A use whose key AWS KMS throttled counts as overload to the `/use`
   throttle, however fast it failed (T250).** KMS answers
   `ThrottlingException` at once, so a use whose three tries were all

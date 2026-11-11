@@ -1,5 +1,5 @@
 // A request's several keys as it names them (T165, B2's PR 2; migration 0055, `use_named_batch`;
-// formal/ProbingMany.tla), on both engines: the vault's one call decides the caller's standing at the place first, from
+// formal/ProbingMany.tla): the vault's one call decides the caller's standing at the place first, from
 // rows no key decides, and reads nothing of any key without it; for one who stands, it resolves each key's name, the
 // request's names or every key the place holds, decides them all (a sealed key not mapped on the batch by ids' first
 // round), and only then makes the rest by ids, as a batch does (Batching.tla). Each case is named for what the model holds of it.
@@ -14,7 +14,7 @@ import { sql } from 'drizzle-orm';
 
 import { useNamedMany } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { ENGINE, HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
+import { HOT_URL, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { namedWorld } from './named-world.ts';
 import { CONFIG, emptyLog, heldKeks, isolate, LOG_015, onePeriod, timingOut, until, useDatabases, world } from './use-world.ts';
 
@@ -62,7 +62,7 @@ function refused(outcome: NamedManyOutcome): { key: string | null; code: string 
   return { key: answer.outcome.index === null ? null : answer.keys[answer.outcome.index]!.key, code: answer.outcome.code };
 }
 
-/** An isolate whose hot pool counts the statements it sends (Postgres). */
+/** An isolate whose hot pool counts the statements it sends. */
 async function counted() {
   let statements = 0;
   const client = postgresClient(HOT_URL, { max: 2 });
@@ -96,10 +96,8 @@ test('a list of keys is one call: each value in the order asked, each use its en
   // The map keeps every key's ids, the one never made as none.
   assert.deepEqual(cache.keyed(w.dev, nameA), { id: a, through: false });
   assert.equal(cache.keyed(w.dev, 'NEVER_MADE'), null);
-  if (ENGINE === 'postgres') {
-    const app = JSON.parse(byName(answer).keys[0]!.app!) as { secrets: { secret: { id: string } }[] };
-    assert.deepEqual(app.secrets.map((row) => row.secret.id), [b], "each key's rows, as `app_read` answers them");
-  }
+  const app = JSON.parse(byName(answer).keys[0]!.app!) as { secrets: { secret: { id: string } }[] };
+  assert.deepEqual(app.secrets.map((row) => row.secret.id), [b], "each key's rows, as `app_read` answers them");
 });
 
 test("a key mapped is used by its ids only while they are its name's now, its value sealed: else by its name, a plain value logged by none", async () => {
@@ -312,7 +310,7 @@ test('CountsOwnBatch: past the cap, the batch is refused at the first key over i
   assert.deepEqual(Object.keys(values(await vault.useNamedMany!(many(w, names.slice(0, 2))))), names.slice(0, 2));
 });
 
-test('one call: a cold list two statements (three, its keys entering the set); mapped and in the set, one', postgresOnly('the hot pool counted'), async () => {
+test('one call: a cold list two statements (three, its keys entering the set); mapped and in the set, one', async () => {
   const w = await named();
   const names: string[] = [];
   for (let i = 0; i < 5; i += 1) names.push(await w.nameOf(await w.key(`v${i}`)));
@@ -345,7 +343,7 @@ test('a place of more keys than a statement reads is read in statements of that 
   const made: string[] = [];
   for (let i = 0; i < 5; i += 1) made.push(await w.key(`v${i}`));
   const prepared = await prepareVault(CONFIG, { ...LOG_015, uses: { batch: 2 } });
-  const vault = openVault(db.vault, prepared, ENGINE === 'postgres' ? await db.hot() : db.vault);
+  const vault = openVault(db.vault, prepared, await db.hot());
   assert.equal(Object.keys(values(await vault.useNamedMany!(many(w, null)))).length, 5);
   assert.equal(Object.keys(values(await vault.useNamedMany!(many(w, await Promise.all(made.map((id) => w.nameOf(id))))))).length, 5);
 });
@@ -391,7 +389,7 @@ async function cutAfterGate(cut: number, options: { batch?: number } = {}) {
   return { vault, arm: () => { calls = 0; }, close: () => client.end() };
 }
 
-test('CutByPlace, the chain cut after the gate read it (around the log): refused `stale`, never an empty place read', postgresOnly('a function\'s commands, each its snapshot'), async () => {
+test('CutByPlace, the chain cut after the gate read it (around the log): refused `stale`, never an empty place read', async () => {
   const w = await named();
   const names: string[] = [];
   for (let i = 0; i < 3; i += 1) names.push(await w.nameOf(await w.key(`v${i}`)));

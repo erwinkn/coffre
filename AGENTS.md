@@ -4,7 +4,7 @@
 and configures in code: `packages/server` (`@coffre/server`: `/api`, sign-in,
 its queries in `src/db`; `/cloudflare` and `/node` entry
 points; the optional plugins a deployment adds, in `src/plugins`,
-`docs/design/plugins.md`), `packages/db` (`@coffre/db`: the Drizzle schemas for Postgres and SQLite, their
+`docs/design/plugins.md`), `packages/db` (`@coffre/db`: the Drizzle schema for Postgres, its
 migrations and migrator, the dialect helpers, and the connections, Hyperdrive's
 included), `packages/ui` (`@coffre/ui`: the TanStack
 Start pages as a library, route options a deployment's own Start app mounts as file
@@ -156,7 +156,7 @@ terminal (`packages/cli/src/secret.ts`); a CI run signs in with `coffre login <u
 --token` and the like, which save its session. The env vars left are `DATABASE_URL` for `coffre-server
 migrate`, the platforms' own the CLI uses (GitHub's `ACTIONS_ID_TOKEN_REQUEST_*`,
 `GITHUB_ENV`), and the dev and test tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`,
-`COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`, `COFFRE_TEST_SHARD`, `COFFRE_TEST_SHARD_REPORT`, `COFFRE_POSTGRES_PORT`, `COFFRE_CLIENT_NODES`). Don't add another to a package or the
+`COFFRE_TEST_DATABASE`, `COFFRE_TEST_SHARD`, `COFFRE_TEST_SHARD_REPORT`, `COFFRE_POSTGRES_PORT`, `COFFRE_CLIENT_NODES`). Don't add another to a package or the
 CLI.
 
 **Migrations: expand, then contract.** A deployment runs `coffre migrate` in
@@ -172,8 +172,8 @@ or have a default, indexes, grants. A migration that makes a table grants
 `pnpm test:schema` fails on a table the backup cannot read. What removes or tightens (dropping or
 renaming a table or a column, NOT NULL on an existing column, a narrower
 check or type, a unique or foreign key the old code may break) ships one
-release after the code stops using it. 0.4.0 is a clean break: one baseline
-per engine, for new databases only, and no code for earlier releases'
+release after the code stops using it. 0.4.0 is a clean break: one baseline,
+for new databases only, and no code for earlier releases'
 deployments or data. `pnpm test:compat` holds the newest release to this
 checkout's schema, through that release's own conformance, in CI on every
 change; it was off for 0.4.0, which had no earlier release on its schema.
@@ -237,7 +237,7 @@ prints the commit, its tree, the base and each step's result, for the pull
 request. When `main` moves after a gate and the rebase is mechanical (clean, or
 conflicting only in a migration or `CHANGELOG.md`, with `git range-diff` showing
 the patch unchanged), rerun only install, build, typecheck, lint, `check:*`,
-`test`, `test:sqlite`, `test:schema` and `test:compat`, plus the matrices,
+`test`, `test:schema` and `test:compat`, plus the matrices,
 formal, conformance, consumer or Terraform steps when the new commits touch their
 inputs; the earlier run still counts for the rest. Any other conflict gets a
 scoped review of the changes and the full gate. The pull request's comment lists
@@ -252,7 +252,7 @@ anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
 `pnpm check:action` holds it to what the sources build.
 
 - `pnpm test` = lint + migrate a scratch template + `node --test --test-concurrency=4`.
-  Each file gets a private Postgres clone or SQLite copy; cases within a file remain
+  Each file gets a private Postgres clone; cases within a file remain
   sequential and reset per test. Templates and clones are removed after the run.
   `COFFRE_TEST_DATABASE` sets the scratch name prefix; a random suffix isolates
   simultaneous runs and other checkouts sharing compose Postgres. `pnpm test:schema`
@@ -262,23 +262,19 @@ anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
   the cluster (a test's migration) resets every backend's caches, and the call
   it lands in plans everything again; a run beside another checkout's on the
   same Postgres can still land one, a Postgres of your own cannot. Needs Postgres.
-- `pnpm test:sqlite` runs the same suite on SQLite (`COFFRE_TEST_ENGINE`);
-  `pnpm test:all` runs Postgres and SQLite. SQLite needs nothing and is kept
-  for tests and local development; deployed app databases use Postgres.
 - `pnpm test:matrices` runs the generated matrices of 0.15's use by name
   (every `packages/*/test/*.matrix.ts`: `packages/vault/test/use.matrix.ts`,
   `packages/vault/test/forks.matrix.ts`, `packages/vault/test/many.matrix.ts`, `packages/server/test/named.matrix.ts`): every key a caller may not have
   answered alike, whatever the vault's map holds, each statement slowed. On
   Postgres the server's alone takes 7,600 s on CI and 8,800 s on a busy host,
   past its own 7,200 s timeout, so `pnpm test` leaves them out and an unsharded
-  Postgres run never passes (`pnpm test:matrices:sqlite` runs them on SQLite, about
-  20 minutes). Needs Postgres. CI runs
-  them in shards, six on Postgres and two on SQLite, each from a database of
+  run never passes. Needs Postgres. CI runs
+  them in shards, six, each from a database of
   its own: `COFFRE_TEST_SHARD=<k>/<n>` runs the k-th of n, case i in shard
   i mod n + 1 (`scripts/matrix-shard.ts`), and `COFFRE_TEST_SHARD_REPORT=<dir>`
   writes which cases each matrix ran, which `Use matrices` holds to every case
   run exactly once (`scripts/matrix-coverage.mjs`); `pnpm validate` runs the same
-  eight shards one at a time, then that check. A new matrix passes its
+  six shards one at a time, then that check. A new matrix passes its
   generated cases through `shardOf`, or that check fails. The four files run side
   by side on one Postgres, each within a share of the connections it lets open
   (`max_connections` less its reserved slots), split among the files still
@@ -318,7 +314,9 @@ anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
   migrate with this checkout's migrations, and requires it conformant; then
   requires a synthetic destructive migration to fail it. `--schema` applies a
   published version's migrations instead, to check past releases. It needs
-  network and Postgres. CI runs it for both kinds.
+  network and Postgres. CI runs it for Workers alone, the default: 0.15.0's
+  Node deployment runs on SQLite, which this checkout cannot migrate, and
+  node rejoins once the newest release runs Node on Postgres.
 - `pnpm test:consumer [--port <n>] [<dir>]` packs the eight packages, runs the packed CLI's
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,

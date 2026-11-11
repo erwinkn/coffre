@@ -16,7 +16,7 @@ import { logStore } from '../src/log-store.ts';
 import { checkReads, cursorMac, cursorVouched, projectReads, Projector, readMac, type ReadRow, type ReadsCursor } from '../src/reads.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
-import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { ask, CONFIG, emptyLog, isolate, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -29,7 +29,7 @@ beforeEach(async () => {
   await emptyLog();
   for (const table of ['log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
   // No key retired: each test's log starts under A.
-  await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE checkpoint_fence SET retired = '{}'` : sql`UPDATE checkpoint_fence SET retired = '[]'`);
+  await run(db.owner, sql`UPDATE checkpoint_fence SET retired = '{}'`);
 });
 
 /** The key the deploy moves to; the old one, A, is the fixture's `SIGNING_KEY`. */

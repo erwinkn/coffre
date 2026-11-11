@@ -11,7 +11,6 @@ import {
   TEST_RUNTIME_DATABASE_URL,
   TEST_VAULT_DATABASE_URL,
 } from './connections.ts';
-import { postgresOnly } from './engine.ts';
 
 const EXPECTED_UPDATE_COLUMNS = [
   'audit_chain_head.head_hash',
@@ -99,7 +98,6 @@ const EXPECTED_UPDATE_COLUMNS = [
 
 test(
   'Drizzle migrations preserve the restricted runtime database identity',
-  postgresOnly('the restricted runtime role and its grants exist only on Postgres'),
   async () => {
     const owner = postgresClient(TEST_OWNER_DATABASE_URL);
     const runtime = postgresClient(TEST_RUNTIME_DATABASE_URL);
@@ -107,7 +105,7 @@ test(
       const [migrations] = await owner.unsafe<[{ count: number }]>(
         'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations',
       );
-      assert.equal(migrations.count, KNOWN_MIGRATIONS.postgres.length);
+      assert.equal(migrations.count, KNOWN_MIGRATIONS.length);
 
       const identity = await runtime.unsafe<{
         current_user: string;
@@ -186,7 +184,6 @@ test(
 
 test(
   'migrate reasserts database privileges even when no migrations are pending',
-  postgresOnly('SQLite has no database privileges'),
   async () => {
     const owner = postgresClient(TEST_OWNER_DATABASE_URL);
     const revoke = `DO $$ BEGIN
@@ -231,7 +228,6 @@ test(
 
 test(
   "the runtime logins run at the server's planner settings, none of their own",
-  postgresOnly('SQLite has no planner settings'),
   async () => {
     // T207: every statement coffre runs is one whose plan stands at the defaults (docs/design/planner-defaults.md).
     // Every run reasserts the logins; then each, as it logs in, takes no planner setting from its role.

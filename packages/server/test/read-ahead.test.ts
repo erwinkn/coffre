@@ -1,7 +1,6 @@
 // `app_read` (migration 0031, src/db/read-ahead.ts, T135): what a read of values reads before anything else, in one
 // call, is exactly what the app's own statements read, row for row, as Drizzle would have read it: the credential
-// (`findCredential`), the place (`resolvePath`) and its keys (`environmentSecrets`). Postgres only: SQLite reads them as
-// ever. A credential of each kind and none; a place missing, archived, deleted (by its slug and its tombstone's), a
+// (`findCredential`), the place (`resolvePath`) and its keys (`environmentSecrets`). A credential of each kind and none; a place missing, archived, deleted (by its slug and its tombstone's), a
 // fork, whose keys its read reads; keys of every nature, a reference, one archived, one with no version yet, the named
 // ones and all; and none read for a token that names no credential.
 import test, { after, before } from 'node:test';
@@ -14,10 +13,8 @@ import { SigninService } from '../src/api/signin.ts';
 import { environmentSecrets, findCredential, resolvePath } from '../src/db/queries.ts';
 import { readAhead } from '../src/db/read-ahead.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { postgresOnly } from './db/engine.ts';
 import { environments, projects, secrets } from './db/tables.ts';
 
-const POSTGRES = postgresOnly('app_read is a Postgres function: SQLite reads with the statements it stands for');
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
 const CONFIG = defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] });
@@ -30,7 +27,6 @@ const tokens: Record<string, string> = {};
 const tombstones = { environment: '', project: '', projectEnvironment: '' };
 
 before(async () => {
-  if (POSTGRES.skip) return;
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   deps = testDeps(db.runtime, [ROOT]);
@@ -88,12 +84,11 @@ before(async () => {
 });
 
 after(async () => {
-  if (POSTGRES.skip) return;
   await resetDatabase(db.owner);
   await db.close();
 });
 
-test("a credential read ahead is the credential's own read, of every kind and of none", POSTGRES, async () => {
+test("a credential read ahead is the credential's own read, of every kind and of none", async () => {
   for (const [kind, token] of Object.entries(tokens)) {
     const tokenHash = hashToken(token);
     const ahead = await readAhead(deps.db, { tokenHash });
@@ -110,7 +105,7 @@ test("a credential read ahead is the credential's own read, of every kind and of
   }
 });
 
-test('a place and its keys read ahead are what the read resolves and reads, every key or the named ones', POSTGRES, async () => {
+test('a place and its keys read ahead are what the read resolves and reads, every key or the named ones', async () => {
   const paths = [
     { project: 'market', environment: 'dev' },
     // A fork: its parent's slug; its keys, its read's.
@@ -157,7 +152,7 @@ test('a place and its keys read ahead are what the read resolves and reads, ever
   ]);
 });
 
-test('a token that names no credential reads no key: refused on that alone, it costs its probe', POSTGRES, async () => {
+test('a token that names no credential reads no key: refused on that alone, it costs its probe', async () => {
   const ahead = await readAhead(deps.db, { tokenHash: hashToken(tokens.unknown!), path: { project: 'market', environment: 'dev' } });
   assert.equal(ahead!.credential, null);
   assert.notEqual(ahead!.place?.environment, null);
@@ -166,7 +161,7 @@ test('a token that names no credential reads no key: refused on that alone, it c
   assert.ok((await readAhead(deps.db, { tokenHash: hashToken(tokens.handle!), path: { project: 'market', environment: 'dev' } }))!.secrets!.length > 0);
 });
 
-test('a personal config is read by its own statements, the credential still ahead', POSTGRES, async () => {
+test('a personal config is read by its own statements, the credential still ahead', async () => {
   const tokenHash = hashToken(tokens.handle!);
   const ahead = await readAhead(deps.db, { tokenHash, path: { project: 'market', environment: 'dev@me' }, keys: ['API_KEY'] });
   assert.notEqual(ahead!.credential, null);

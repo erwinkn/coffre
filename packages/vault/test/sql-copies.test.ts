@@ -4,9 +4,7 @@
 // refresh, its periods' phases and the hot login's timeouts, and a table's constraint its own copy
 // of a role id's length. Each test reads what the migrated database runs, the
 // newest definition of each function and constraint, never a migration's
-// text. The functions and logins are Postgres's: SQLite has neither, and its
-// statements take these from the constants themselves (`log-store.ts`,
-// `use.sqlite.ts`). The constraint is on both engines.
+// text.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -20,14 +18,13 @@ import { randomUUID } from 'node:crypto';
 import { periodOf, phaseOf, REFRESH_MAX_MS, REFRESH_WINDOW_SHARE, USE_AHEAD_MS } from '../src/bulk.ts';
 import { BINDING_LAST_USED_MS } from '../src/credentials.ts';
 import { HELD_PAST_DEADLINE_MS } from '../src/use.ts';
-import { ENGINE, openTestDatabase, postgresOnly, rows, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, type TestDatabase } from './database.ts';
 
 let db: TestDatabase;
-/** Every function of the public schema the migrations made, its name and source; none on SQLite. */
+/** Every function of the public schema the migrations made, its name and source. */
 let functions: { name: string; source: string }[] = [];
 before(async () => {
   db = await openTestDatabase();
-  if (ENGINE !== 'postgres') return;
   functions = await rows(db.owner, sql`
     SELECT p.proname AS name, p.prosrc AS source FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public' AND p.prokind = 'f' ORDER BY p.proname, p.oid`);
@@ -39,27 +36,25 @@ function found(pattern: RegExp): { name: string; groups: string[] }[] {
   return functions.flatMap(({ name, source }) => [...source.matchAll(pattern)].map((match) => ({ name, groups: match.slice(1) })));
 }
 
-const POSTGRES = postgresOnly('a Postgres function holds these copies');
-
-test('deadline_max() is the use deadline, USE_DEADLINE_MS', POSTGRES, async () => {
+test('deadline_max() is the use deadline, USE_DEADLINE_MS', async () => {
   const [row] = await rows<{ deadline: string }>(db.owner, sql`SELECT public.deadline_max()::text AS deadline`);
   assert.equal(Number(row!.deadline), USE_DEADLINE_MS);
 });
 
-test("every function's clock-ahead minute is USE_AHEAD_MS: a use stamped past the database's clock, and the other keys' bound past the deadline", POSTGRES, () => {
+test("every function's clock-ahead minute is USE_AHEAD_MS: a use stamped past the database's clock, and the other keys' bound past the deadline", () => {
   const ahead = found(/clock_timestamp\(\)\) \* 1000\)::bigint \+ (\d+)/g);
   const past = found(/deadline_max\(\) - (\d+)\b(?! AS before)/g);
   assert.ok(ahead.some(({ name }) => name === 'use_credential') && past.some(({ name }) => name === 'use_credential'), 'use_credential holds both, as the pattern finds them');
   for (const { name, groups } of [...ahead, ...past]) assert.equal(Number(groups[0]), USE_AHEAD_MS, name);
 });
 
-test("every function's bulk refresh is refreshMs's: least(REFRESH_MAX_MS, window / REFRESH_WINDOW_SHARE)", POSTGRES, () => {
+test("every function's bulk refresh is refreshMs's: least(REFRESH_MAX_MS, window / REFRESH_WINDOW_SHARE)", () => {
   const refresh = found(/least\((\d+), [\w.]+ \/ (\d+)\)/g);
   assert.ok(refresh.some(({ name }) => name === 'use_credential') && refresh.some(({ name }) => name === 'prune_bulk'), 'the uses and the prune hold it, as the pattern finds them');
   for (const { name, groups } of refresh) assert.deepEqual(groups.map(Number), [REFRESH_MAX_MS, REFRESH_WINDOW_SHARE], name);
 });
 
-test("bulk_period is periodOf's, from phaseOf's phase (T204): every key's period where the replay's starts", POSTGRES, async () => {
+test("bulk_period is periodOf's, from phaseOf's phase (T204): every key's period where the replay's starts", async () => {
   // Principals of every way in, a person's name beyond ASCII, uuids either case; times about now, near zero and before
   // it; refreshes of a minute, a tenth of short windows, and 1 ms.
   const principals = ['token:ci-build', 'user:5b0f7f0e-1f7e-4c55-a2a8-8d1c4b7c2e11', 'service:deploy', 'user:zoë@acme.example'];
@@ -78,14 +73,14 @@ test("bulk_period is periodOf's, from phaseOf's phase (T204): every key's period
   assert.deepEqual(row!.periods.map(Number), cases.map((c) => periodOf(c.at, c.refresh, phaseOf(c.principal, c.secret, c.refresh))));
 });
 
-test("no function works out a key's period but through bulk_period", POSTGRES, () => {
+test("no function works out a key's period but through bulk_period", () => {
   assert.ok(found(/public\.bulk_period\(/g).some(({ name }) => name === 'use_credential'), "use_credential's period is bulk_period's");
   assert.deepEqual(found(/(% (?:[\w.]*refresh)\) \+)/g), [], "a period worked out in place, its phase every key's 0: call bulk_period");
 });
 
-test('no function holds another copy of the minute or the deadline than the ones above', POSTGRES, () => {
+test('no function holds another copy of the minute or the deadline than the ones above', () => {
   // sign_in's own minute (0037): a credential's expiry may run that far past its longest by the app's clock, which is
-  // CLOCK_SKEW_MS, the app's clock against the vault's, as the TypeScript checks (credentials.ts, credentials.sqlite.ts).
+  // CLOCK_SKEW_MS, the app's clock against the vault's, as the TypeScript checks (credentials.ts).
   // Once in each overload: 0037's, which the previous release's vault calls, and 0075's (T192).
   const signIn = found(/now_ms \+ p_longest \+ (\d+)\b/g);
   const overloads = functions.filter(({ name }) => name === 'sign_in').length;
@@ -98,13 +93,13 @@ test('no function holds another copy of the minute or the deadline than the ones
   assert.deepEqual(found(/\b(3000)\b/g).map(({ name }) => name), ['deadline_max'], 'the deadline is deadline_max(), written once');
 });
 
-test("sign_in stamps a binding's last use when BINDING_LAST_USED_MS old, written once in each of its overloads", POSTGRES, () => {
+test("sign_in stamps a binding's last use when BINDING_LAST_USED_MS old, written once in each of its overloads", () => {
   const stamp = found(/last_used_at < stamped - interval '(\d+) minute'/g);
   const overloads = functions.filter(({ name }) => name === 'sign_in').length;
   assert.deepEqual(stamp.map(({ name, groups }) => [name, Number(groups[0]) * 60_000]), Array(overloads).fill(['sign_in', BINDING_LAST_USED_MS]));
 });
 
-test("the hot login's timeouts are HOT_LOCK_TIMEOUT_MS and HOT_STATEMENT_TIMEOUT_MS, the ones a place's lapse is counted from", POSTGRES, async () => {
+test("the hot login's timeouts are HOT_LOCK_TIMEOUT_MS and HOT_STATEMENT_TIMEOUT_MS, the ones a place's lapse is counted from", async () => {
   const [role] = await rows<{ settings: string[] }>(db.owner, sql`
     SELECT setconfig AS settings FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0`);
   assert.deepEqual(HOT_SETTINGS, { lock_timeout: `${HOT_LOCK_TIMEOUT_MS / 1000}s`, statement_timeout: `${HOT_STATEMENT_TIMEOUT_MS / 1000}s` });
@@ -114,15 +109,10 @@ test("the hot login's timeouts are HOT_LOCK_TIMEOUT_MS and HOT_STATEMENT_TIMEOUT
 
 test("a grant's role check and a role row's name check take a role id as ROLE_ID does: 2 to ROLE_ID_MAX characters", async () => {
   // A role row's name too (T178): a longer ROLE_ID with no migration would fail the vault's start sync on its CHECK.
-  for (const [table, check] of [['grants', 'grants_role_check'], ['roles', 'roles_name_check']] as const) {
-    if (ENGINE === 'postgres') {
-      const [row] = await rows<{ definition: string }>(db.owner, sql`
-        SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conname = ${check}`);
-      assert.ok(row!.definition.includes(`'${ROLE_ID.source}'`), row!.definition);
-    } else {
-      const [row] = await rows<{ sql: string }>(db.owner, sql`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ${table}`);
-      assert.ok(row!.sql.includes(`BETWEEN 2 AND ${ROLE_ID_MAX} AND`), row!.sql);
-    }
+  for (const [, check] of [['grants', 'grants_role_check'], ['roles', 'roles_name_check']] as const) {
+    const [row] = await rows<{ definition: string }>(db.owner, sql`
+      SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conname = ${check}`);
+    assert.ok(row!.definition.includes(`'${ROLE_ID.source}'`), row!.definition);
   }
   assert.equal(ROLE_ID.source, `^[a-z][a-z0-9-]{1,${ROLE_ID_MAX - 1}}$`);
 });
