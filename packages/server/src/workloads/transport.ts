@@ -60,7 +60,7 @@ export class FetchRefused extends Error {
 
   /** A host that answered anything but a 200. */
   static answered(url: URL, status: number): FetchRefused {
-    return new FetchRefused(url, `answered ${status}`, { status, transient: status === 408 || status === 429 || status >= 500 });
+    return new FetchRefused(url, `answered ${status}`, { status, transient: status === 408 || status === 429 || (status >= 500 && status <= 599) });
   }
 
   /**

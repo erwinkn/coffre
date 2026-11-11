@@ -64,6 +64,8 @@ for (const [name, transport] of [
     answers.set('/broken', json('{"keys":'));
     answers.set('/huge', json(JSON.stringify({ pad: 'x'.repeat(MAX_BODY_BYTES) })));
     answers.set('/gone', (res) => res.writeHead(500).end());
+    // Past 5xx is no status HTTP defines: an answer all the same, which ends a stand-in (review r4 of #565).
+    answers.set('/odd', (res) => res.writeHead(600).end());
     // A 200 that says HTML, then breaks off: the answer was given before the body broke (review r2 of #565).
     answers.set('/html-reset', (res) => {
       res.writeHead(200, { 'content-type': 'text/html' });
@@ -86,6 +88,7 @@ for (const [name, transport] of [
       ['/broken', /is not valid JSON/],
       ['/huge', new RegExp(`is larger than ${MAX_BODY_BYTES} bytes`)],
       ['/gone', /answered 500/],
+      ['/odd', /answered 600/],
     ] as const) {
       await assert.rejects(transport.json(new URL(`${origin}${path}`)), (error: Error) => error instanceof FetchRefused && why.test(error.message) && error.transient === (path === '/gone'), path);
     }

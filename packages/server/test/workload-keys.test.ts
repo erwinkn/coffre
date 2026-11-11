@@ -339,4 +339,10 @@ test('an issuer that answers, but not with keys, is not asked again at once, and
   assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
   answering = 503;
   assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1), { outcome: VERIFIED, fetches: 1 });
+  // A status past 5xx is no moment's: an answer, as a 404 (review r4 of #565).
+  forgetKeys();
+  answering = null;
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  answering = 600;
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1), { outcome: `unavailable ${KEYS_COOLDOWN_MS / 1000}`, fetches: 1 });
 });
