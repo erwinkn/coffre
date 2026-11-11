@@ -20,7 +20,7 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
-import { accessAllowed, authoredBy, besideKey, changeNamed, entriesOf, indexOf, LISTED_READS, placeKey, shownAt } from './access-entries.ts';
+import { accessAllowed, authoredBy, besideKey, changeNamed, entriesOf, indexOf, LISTED_READS, placeKey, shownAt, streamed } from './access-entries.ts';
 import { ACTIVE_SUBJECT } from './active-subject.ts';
 import { recordField, recorded } from './change-records.ts';
 
@@ -482,7 +482,7 @@ export const auditLog = pgTable(
     // A member's reads and writes in 0.14's log (`seen`), by actor, which
     // an offboarding report weighs, past none of their other entries nor anyone else's.
     index(indexOf('shown')).on(table.seq).where(entriesOf('shown')).concurrently(),
-    index(indexOf('denied')).on(table.decision, table.seq).where(entriesOf('denied')).concurrently(),
+    index(indexOf('denied')).on(table.decision, table.seq).where(streamed('postgres', 'denied')).concurrently(),
     index(indexOf('detail')).on(table.seq).where(entriesOf('detail')).concurrently(),
     index(indexOf('seen')).on(table.actor, table.seq).where(entriesOf('seen')).concurrently(),
     // The allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
@@ -536,17 +536,17 @@ export const auditLog = pgTable(
     // (`placeStreams`), so that a page back from the newest steps past nothing it hides about the place, nor anything
     // about another; and a key's environment's reads of several keys (`LISTED_READS`), by its column and by `also`. Keyed by an expression no older
     // index is (`placeKey`, a uuid's bytes; `besideKey`, text). Built without blocking writes (`online-indexes.ts`).
-    index('audit_log_project_shown_idx').on(placeKey('postgres', table.projectId), table.seq).where(shownAt('project_id')).concurrently(),
-    index('audit_log_environment_shown_idx').on(placeKey('postgres', table.environmentId), table.seq).where(shownAt('environment_id')).concurrently(),
-    index('audit_log_secret_shown_idx').on(placeKey('postgres', table.secretId), table.seq).where(shownAt('secret_id')).concurrently(),
+    index('audit_log_project_shown_idx').on(placeKey('postgres', table.projectId), table.seq).where(shownAt('postgres', 'project_id')).concurrently(),
+    index('audit_log_environment_shown_idx').on(placeKey('postgres', table.environmentId), table.seq).where(shownAt('postgres', 'environment_id')).concurrently(),
+    index('audit_log_secret_shown_idx').on(placeKey('postgres', table.secretId), table.seq).where(shownAt('postgres', 'secret_id')).concurrently(),
     index('audit_log_also_project_shown_idx').on(besideKey('postgres', table.metadata, 'projectId'), table.seq)
-      .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL AND ${entriesOf('shown')}`)
+      .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL AND ${streamed('postgres', 'shown')}`)
       .concurrently(),
     index('audit_log_also_environment_shown_idx').on(besideKey('postgres', table.metadata, 'environmentId'), table.seq)
-      .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL AND ${entriesOf('shown')}`)
+      .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL AND ${streamed('postgres', 'shown')}`)
       .concurrently(),
     index('audit_log_also_secret_shown_idx').on(besideKey('postgres', table.metadata, 'secretId'), table.seq)
-      .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL AND ${entriesOf('shown')}`)
+      .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL AND ${streamed('postgres', 'shown')}`)
       .concurrently(),
     index('audit_log_listed_idx').on(placeKey('postgres', table.environmentId), table.seq).where(sql.raw(LISTED_READS)).concurrently(),
     index('audit_log_listed_also_idx').on(besideKey('postgres', table.metadata, 'environmentId'), table.seq)

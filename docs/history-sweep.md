@@ -192,33 +192,46 @@ variant):
 | A read through a reference (`also`) | 2,256 B, 238 µs | 3,119 B (+38%), 279 µs (+17%) |
 | A detail entry (a heartbeat, `mcp.read`) | 1,328 B, 189 µs | +0 B, 202 µs (+7%) |
 
-Measured with the first eight. The ninth holds 0.14's reads through a
+Measured with the first eight, saying the list. The ninth holds 0.14's reads through a
 reference alone, which 0.16 writes none of once its vault serves 0.15's uses:
 no insert this release makes meets its condition.
 
 A use's insert (`log_uses`, `log_reads`) gains no index. But a request pays
-more than its inserts: Postgres plans every statement anew, and weighs every
-index of `audit_log` for each time a statement reads it. The vault's snapshot
-reads it several times over, twice a request, and planned in 2.7 ms each
-before T254; a workload's use at the proxy reads it once, for the newest
-policy change. Measured on one request at a time (`pg_stat_statements`,
-three rounds of 200, the index sets in turn): a write and a reveal through
-the API fixture 2,000 entries in, a use warm as `request-cost.alone.ts`
-makes it:
+more than its inserts: Postgres plans every statement anew, and checks every
+partial index of `audit_log` against each statement that reads or writes it.
+The vault's snapshot reads it several times over, twice a request, and
+planned in 2.7 ms each before T254; a workload's use at the proxy reads it
+once, for the newest policy change. Most of that check was the list of the
+19 actions a page hides, which seven of the nine conditions said: 19
+comparisons per index per statement. On Postgres they say it through
+`audit_shown(action)` instead (0085, `SHOWN_CALL` in
+`packages/db/src/access-entries.ts`), a plpgsql function Postgres cannot
+inline, one comparison; SQLite keeps the list. Measured on one request at a
+time (`pg_stat_statements`, three interleaved rounds of 200): a write and a
+reveal through the API fixture, a use warm as `request-cost.alone.ts` makes
+it; without T254's indexes, with them through the function (as shipped), and
+with them saying the list:
 
-| One request | Postgres planning: without, 8, 9 | Postgres CPU: without, 8, 9 |
+| One request | Postgres planning: without, function, list | Postgres CPU: without, function, list |
 |---|---|---|
-| A key's write (`POST /secrets`) | 9.0, 12.4, 12.9 ms | 15.2, 18.8, 19.4 ms |
-| A key's reveal | 6.6, 10.1, 10.1 ms | 10.5, 14.5, 14.3 ms |
-| A workload's use at the proxy (`/use`) | 2.3, 3.1, 3.1 ms | 3.4, 4.2, 3.8 ms |
+| A key's write (`POST /secrets`) | 7.2, 8.5, 11.4 ms | 12.2, 13.6, 16.8 ms |
+| A key's reveal | 3.7, 4.1, 5.2 ms | 6.5, 7.1, 8.0 ms |
+| A workload's use at the proxy (`/use`) | 2.4, 2.7, 3.2 ms | 3.3, 3.5, 4.3 ms |
 
-None of it is execution (1.4 ms a write, 0.8 a reveal, 0.07 a use, before
-and after). The first eight cost about 0.4 ms each, keyed by an expression
-or by a column alike (the place's three plain on their columns plan as
-long); the ninth, whose condition is short (`LISTED_READS`), costs no more
-than the rounds differ by. The
-older `audit_log_{project,environment,secret}_idx` and the three of `also`
-still key every entry about a place, detail included, beside the new ones;
+None of it is execution (1.2 ms a write, 0.6 a reveal, 0.06 a use, in each
+set: the call in an insert's index conditions costs it nothing measurable). The function hides the list from the planner's statistics on
+`action`, which a page reads by (Fable r2 of #559 saw a flip to the primary
+key that way): the pages read the same indexes and the same pages through
+it as through the list, five fresh `ANALYZE`s each, on a place's, a key's,
+a reader's, an auditor's (`?limit=5`, `?detail=1`), refusals' and a member's
+page at a place, in a log a tenth shown at 40,000 and 240,000 entries. The
+function never changes: an action newly hidden is a new function and these
+indexes made again on it (`packages/db/test/audit-shown.test.ts` fails until
+then). The list stays in 0083's `audit_log_shown_idx` and
+`audit_log_detail_idx`, measured apart once #559 lands.
+
+The older `audit_log_{project,environment,secret}_idx` and the three of
+`also` still key every entry about a place, detail included, beside the new ones;
 T256 (0.17) drops them or narrows them to the entries the new ones leave out,
 which takes back most of the WAL above and part of the planning. T257 (0.17)
 plans the snapshot's statements once, so that the planning stops growing with

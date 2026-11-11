@@ -578,4 +578,15 @@ BEGIN
 END
 $$;
 
+-- T254 (0085): every entry the app writes to the log goes through the indexes that say audit_shown, and its
+-- audit pages ask it.
+DO $$
+BEGIN
+    IF NOT has_function_privilege('audit_shown(text)', 'EXECUTE') OR audit_shown('secret.write') IS NOT TRUE OR audit_shown('sign_in') IS NOT FALSE THEN
+        RAISE EXCEPTION 'FAIL: coffre_app cannot run audit_shown';
+    END IF;
+    RAISE NOTICE 'PASS: coffre_app runs audit_shown';
+END
+$$;
+
 \echo '--- all schema guarantees held ---'

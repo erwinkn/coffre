@@ -1,5 +1,5 @@
 {
-  "id": "262177fb-b009-413f-8e89-cea6a229db92",
+  "id": "8ed67a91-be9b-45d3-83cb-cb58e8875c24",
   "prevId": "62c5a5ea-ee55-4cb7-976d-3d3bedc6347b",
   "version": "7",
   "dialect": "postgresql",
@@ -668,7 +668,7 @@
             }
           ],
           "isUnique": false,
-          "where": "decision <> 'allow' AND action NOT IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal') AND seq >= 0",
+          "where": "decision <> 'allow' AND audit_shown(action) AND seq >= 0",
           "concurrently": true,
           "method": "btree",
           "with": {}
@@ -940,7 +940,7 @@
             }
           ],
           "isUnique": false,
-          "where": "project_id IS NOT NULL AND action NOT IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal') AND seq >= 0",
+          "where": "project_id IS NOT NULL AND audit_shown(action) AND seq >= 0",
           "concurrently": true,
           "method": "btree",
           "with": {}
@@ -962,7 +962,7 @@
             }
           ],
           "isUnique": false,
-          "where": "environment_id IS NOT NULL AND action NOT IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal') AND seq >= 0",
+          "where": "environment_id IS NOT NULL AND audit_shown(action) AND seq >= 0",
           "concurrently": true,
           "method": "btree",
           "with": {}
@@ -984,7 +984,7 @@
             }
           ],
           "isUnique": false,
-          "where": "secret_id IS NOT NULL AND action NOT IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal') AND seq >= 0",
+          "where": "secret_id IS NOT NULL AND audit_shown(action) AND seq >= 0",
           "concurrently": true,
           "method": "btree",
           "with": {}
@@ -1006,7 +1006,7 @@
             }
           ],
           "isUnique": false,
-          "where": "((\"audit_log\".\"metadata\")::jsonb -> 'also') IS NOT NULL AND action NOT IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal') AND seq >= 0",
+          "where": "((\"audit_log\".\"metadata\")::jsonb -> 'also') IS NOT NULL AND audit_shown(action) AND seq >= 0",
           "concurrently": true,
           "method": "btree",
           "with": {}
@@ -1028,7 +1028,7 @@
             }
           ],
           "isUnique": false,
-          "where": "((\"audit_log\".\"metadata\")::jsonb -> 'also') IS NOT NULL AND action NOT IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal') AND seq >= 0",
+          "where": "((\"audit_log\".\"metadata\")::jsonb -> 'also') IS NOT NULL AND audit_shown(action) AND seq >= 0",
           "concurrently": true,
           "method": "btree",
           "with": {}
@@ -1050,7 +1050,7 @@
             }
           ],
           "isUnique": false,
-          "where": "((\"audit_log\".\"metadata\")::jsonb -> 'also') IS NOT NULL AND action NOT IN ('sign_in', 'sign_out', 'token.create', 'token.revoke', 'device.approve', 'device.deny', 'mcp.token', 'mcp.read', 'account.link', 'account.unlink', 'passkey.check', 'key.wrap', 'key.rewrap', 'reference.create', 'key.intent', 'key.check', 'audit.heartbeat', 'audit.checkpoint', 'key.reseal') AND seq >= 0",
+          "where": "((\"audit_log\".\"metadata\")::jsonb -> 'also') IS NOT NULL AND audit_shown(action) AND seq >= 0",
           "concurrently": true,
           "method": "btree",
           "with": {}

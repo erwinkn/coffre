@@ -277,4 +277,14 @@ $$;
 SELECT count(*) FROM secret_references;
 \echo 'PASS: coffre_vault reads secret_references, and writes none of it directly'
 
+-- T254 (0085): every entry the vault writes to the log goes through the indexes that say audit_shown.
+DO $$
+BEGIN
+    IF NOT has_function_privilege('audit_shown(text)', 'EXECUTE') OR audit_shown('secret.read') IS NOT TRUE OR audit_shown('audit.checkpoint') IS NOT FALSE THEN
+        RAISE EXCEPTION 'FAIL: coffre_vault cannot run audit_shown';
+    END IF;
+    RAISE NOTICE 'PASS: coffre_vault runs audit_shown';
+END
+$$;
+
 \echo '--- all vault guarantees held ---'

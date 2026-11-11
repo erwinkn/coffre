@@ -141,3 +141,12 @@ BEGIN
     END IF;
 END
 $$;
+
+-- T254 (0085): a restore makes the indexes that say audit_shown, which the backup login's dump names.
+DO $$
+BEGIN
+    IF NOT has_function_privilege('audit_shown(text)', 'EXECUTE') OR audit_shown('secret.write') IS NOT TRUE THEN
+        RAISE EXCEPTION 'the backup login cannot run audit_shown';
+    END IF;
+END
+$$;

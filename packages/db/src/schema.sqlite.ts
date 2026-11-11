@@ -496,9 +496,9 @@ export const auditLog = sqliteTable(
       .on(sql`json_extract(${table.metadata}, '$.also.secretId')`, table.seq)
       .where(sql`json_extract(${table.metadata}, '$.also') IS NOT NULL`),
     // A place's page (T254), as Postgres's, each keyed by its column.
-    index('audit_log_project_shown_idx').on(table.projectId, table.seq).where(shownAt('project_id')),
-    index('audit_log_environment_shown_idx').on(table.environmentId, table.seq).where(shownAt('environment_id')),
-    index('audit_log_secret_shown_idx').on(table.secretId, table.seq).where(shownAt('secret_id')),
+    index('audit_log_project_shown_idx').on(table.projectId, table.seq).where(shownAt('sqlite', 'project_id')),
+    index('audit_log_environment_shown_idx').on(table.environmentId, table.seq).where(shownAt('sqlite', 'environment_id')),
+    index('audit_log_secret_shown_idx').on(table.secretId, table.seq).where(shownAt('sqlite', 'secret_id')),
     index('audit_log_also_project_shown_idx').on(besideKey('sqlite', table.metadata, 'projectId'), table.seq)
       .where(sql`json_extract(${table.metadata}, '$.also') IS NOT NULL AND ${entriesOf('shown')}`),
     index('audit_log_also_environment_shown_idx').on(besideKey('sqlite', table.metadata, 'environmentId'), table.seq)

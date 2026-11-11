@@ -155,9 +155,44 @@ export const KINDS = {
  */
 export const PLACE_COLUMNS = { projectId: 'project_id', environmentId: 'environment_id', secretId: 'secret_id' } as const;
 
-/** The shown entries about a place in `column` (`PLACE_COLUMNS`), as the condition of its index, word for word. */
-export function shownAt(column: (typeof PLACE_COLUMNS)[keyof typeof PLACE_COLUMNS]): SQL {
-  return sql.raw(`${column} IS NOT NULL AND ${KINDS.shown}`);
+/**
+ * The function T254's indexes of shown entries say `shown`'s list through on
+ * Postgres, `audit_shown(action)`: `action NOT IN (…)`, `DETAIL_ACTIONS`
+ * word for word, behind a call, in 0085. Postgres checks every partial
+ * index's condition against every statement it plans on the log, a write's
+ * too, and a list of 19 is 19 comparisons each time: T254's nine indexes
+ * with the list added 0.8 ms to a use's planning (3.2 ms, from 2.4) and
+ * 4.2 ms to a key's write's; behind the call they add 0.3 and 1.3 ms
+ * (docs/history-sweep.md, T256). plpgsql, so
+ * that Postgres never inlines the call back into the list; IMMUTABLE, so
+ * that an index can say it; no `search_path` of its own, which would cost
+ * every call a step, as its body names no table. It answers what the list
+ * does for every action, NULL included (`audit-shown.test.ts`).
+ *
+ * It never changes: an index's condition is its body at the index's
+ * making, so a body changed under it leaves the index holding entries the
+ * condition now refuses. An action newly hidden (`DETAIL_ACTIONS`) is a
+ * new function, `audit_shown_2`, and these indexes made again on it;
+ * `audit-shown.test.ts` fails until then.
+ */
+export const SHOWN_CALL = 'audit_shown(action)';
+
+/**
+ * `shown`'s and `denied`'s conditions as T254's indexes of them say them,
+ * and the streams that read those (`placeStreams` in the server), word for
+ * word: on Postgres through `SHOWN_CALL`, which a read says alone, with no
+ * list beside it; on SQLite the list (`KINDS`), which costs its planner
+ * nothing to speak of. `audit_log_shown_idx`, `audit_log_detail_idx` and
+ * the reads by them keep the list.
+ */
+export function streamed(engine: Engine, kind: 'shown' | 'denied'): SQL {
+  if (engine !== 'postgres') return sql.raw(KINDS[kind]);
+  return sql.raw(kind === 'shown' ? `${SHOWN_CALL} AND seq >= 0` : `decision <> 'allow' AND ${SHOWN_CALL} AND seq >= 0`);
+}
+
+/** The shown entries about a place in `column` (`PLACE_COLUMNS`), as the condition of its index, word for word (`streamed`). */
+export function shownAt(engine: Engine, column: (typeof PLACE_COLUMNS)[keyof typeof PLACE_COLUMNS]): SQL {
+  return sql`${sql.raw(`${column} IS NOT NULL AND `)}${streamed(engine, 'shown')}`;
 }
 
 /**

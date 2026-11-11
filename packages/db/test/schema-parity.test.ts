@@ -39,7 +39,10 @@ import * as sqlite from '../src/schema.sqlite.ts';
  * picks `audit_log_action_idx`. A place's indexes of shown entries and of
  * the reads of several keys (T254): by the place's uuid's bytes on
  * Postgres (`placeKey`), an expression no older index is keyed by; by the column on
- * SQLite.
+ * SQLite. Their conditions, as every index's, are not compared: T254's
+ * indexes of shown entries and of refusals say the list of what a page
+ * hides through `audit_shown(action)` on Postgres (`streamed`), the list
+ * itself on SQLite; `audit-shown.test.ts` holds the function to the list.
  */
 const KEYED_APART = new Set([
   'audit_log_access_idx', 'audit_log_vault_idx', 'audit_log_app_idx', 'audit_log_vault_key_idx', 'audit_log_app_key_idx', ...(Object.keys(KINDS) as Kind[]).map(indexOf),

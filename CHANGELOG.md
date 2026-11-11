@@ -179,10 +179,13 @@
   by its uuid's 16 bytes: a shown write at a key costs 23% more WAL and 11%
   more Postgres CPU to insert, a refusal 31% and 13%, a read through a
   reference 38% and 17%, a detail entry 7% CPU, a use nothing; and
-  Postgres plans each statement that reads `audit_log` against them all,
-  3.5 to 3.9 ms more a key's write or reveal and 0.8 ms more a workload's
-  use at the proxy, a quarter to a third more of its CPU
-  (`docs/history-sweep.md`; in 0.17, T256 drops or narrows the older place
+  Postgres plans each statement on `audit_log` against them all. Their
+  conditions say the 19 actions a page hides through one function,
+  `audit_shown(action)`, made by 0085, rather than the list, which cost
+  every request's planning 19 comparisons an index: a key's write costs
+  1.4 ms more Postgres CPU, a reveal 0.6 ms, a workload's use at the proxy
+  0.2 ms, 7 to 11% (with the list, 4.6, 1.5 and 1.0 ms;
+  `docs/history-sweep.md`; in 0.17, T256 drops or narrows the older place
   indexes and T257 plans the vault's snapshot once).
 - **The credential proxy ends its upstream request when the app's request
   ends, and sets no time bound of its own (W365, config Q7).** It passes the
