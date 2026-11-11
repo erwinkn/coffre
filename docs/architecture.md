@@ -1095,7 +1095,9 @@ A refusal answers 401 with a reason a CI user can act on, 429, or 503 when
 the issuer cannot be asked, and stays out of the audit log: anyone can mint
 a genuine token. Each isolate keeps the issuers' keys it fetched, settled
 values only, for ten minutes; a key it lacks fetches them again once a
-minute at most.
+minute at most. An issuer that does not answer is asked once more, and the
+set fetched last stands in up to its `Cache-Control` max-age, an hour at
+most (`docs/design/oidc.md`, section 4).
 
 **The credential** is a service credential like any other, whose
 `created_by` names its binding, `binding:<id>`. Its MAC is of its own kind

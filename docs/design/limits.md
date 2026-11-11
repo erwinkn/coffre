@@ -976,7 +976,7 @@ patterns, and the email bounds (254 / 64 / 63: RFC 5321 and 1035).
 | S60 | Sign-in field bounds | bodies 4 / 16 KiB, token 8 KiB, labels 120, codes 128 … | `auth-routes.ts:53-432` | d | | | keep |
 | S61 | `PENDING_TTL_SECONDS`, `DEVICE_POLL_SECONDS` | 10 min, 5 s (not enforced) | `api/signin.ts:158, 311` | b | RFC 8628 | | keep; import `DEVICE_TTL_SECONDS` |
 | S62 | `DEVICE_PENDING_PER_IP`, `_TOTAL` | 5, 200 | `api/signin.ts:312-313` | d / e | unauthenticated device starts | | keep per IP; cite total |
-| S63 | `KEYS_FRESH_MS`, `KEYS_COOLDOWN_MS`, `MAX_KEY_SETS` | 10 min, 60 s, 64 | `workloads/keys.ts:15-19` | e / b / d | | | keep, cite |
+| S63 | `KEYS_FRESH_MS`, `KEYS_KEPT_MS`, `KEYS_COOLDOWN_MS`, `KEYS_UNREACHED_MS`, `MAX_KEY_SETS` | 10 min, 1 h, 60 s, 10 s, 64 | `workloads/keys.ts:22-36` | e / b / d | GitHub's JWKS `max-age=3600` | | keep, cite |
 | S64 | `FETCH_DEADLINE_MS`, `MAX_BODY_BYTES` (issuer fetch) | 5 s, 64 KiB | `workloads/transport.ts:33-35` | e / d | | | keep; UI-route fetches get the same deadline (they have none) |
 | S65 | AWS `MAX_SKEW_MS`, `MAX_HEADER_BYTES` | 5 min, 8 KiB | `workloads/aws.ts:35, 37` | b / d | STS refuses past 15 min | | keep |
 | S66 | `MAX_ANCESTORS` | 4 | `workload-sessions.ts:49` | b | design §8.4 | | keep |

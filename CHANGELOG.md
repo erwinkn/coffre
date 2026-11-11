@@ -7,6 +7,24 @@
   person's `run` and `export` write handles, which a request through
   `<coffre>/use` swaps for each value; the keys they may read come as they are.
   The help and the README said nothing of it.
+- **A CI run's sign-in survives a moment when its issuer's keys cannot be
+  fetched.** On 2026-11-11 a deploy job failed twice on `POST
+  /api/auth/oidc`, 503 `issuer_unavailable`: a cold isolate's fetch of
+  GitHub's JWKS timed out at 5 s, and the `Retry-After: 60` it answered
+  was past what the CLI waits, so the CLI did not ask again. Now a fetch
+  the issuer did not answer (the deadline, a network error, a 408, 429 or
+  5xx) is asked once more at once when nothing can stand in for it; a set
+  past its ten minutes stands in for one the issuer could not serve, as
+  long as its `Cache-Control` max-age, an hour at most (GitHub's says an
+  hour), and never for a key it lacks; the isolate waits ten seconds, not
+  a minute, before fetching again, and says `Retry-After: 10`, which the
+  CLI waits out and asks again. The 503 names the issuer and says the
+  failed request was coffre's, not the token's: `coffre could not fetch
+  the signing keys of the issuer https://token.actions.githubusercontent.com
+  (…/.well-known/jwks: timed out after 5 s): its own request to the issuer
+  failed, not the token or the job that sent it; try again in 10 s`. Each
+  failed fetch logs `workload_keys_unfetched`. An unknown `kid`, or an
+  answer that is not keys, still waits a minute, `Retry-After: 60`.
 - **A use whose key AWS KMS throttled counts as overload to the `/use`
   throttle, however fast it failed (T250).** KMS answers
   `ThrottlingException` at once, so a use whose three tries were all

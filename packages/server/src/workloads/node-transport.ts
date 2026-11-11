@@ -20,7 +20,7 @@ import { FETCH_DEADLINE_MS, FetchRefused, MAX_BODY_BYTES, parsed, USER_AGENT, ty
 export function nodeTransport(): WorkloadTransport {
   return {
     fetch: publicFetch(),
-    json: (url) =>
+    json: (url, cacheControl) =>
       new Promise((resolve, reject) => {
         const loopback = url.protocol === 'http:';
         if (loopback && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
@@ -41,9 +41,12 @@ export function nodeTransport(): WorkloadTransport {
             signal: AbortSignal.timeout(FETCH_DEADLINE_MS),
             ...(loopback ? {} : { lookup: publicLookup }),
           },
-          (response) => read(url, response).then(resolve, reject),
+          (response) => {
+            if (response.statusCode === 200) cacheControl?.(headerValue(response.headers['cache-control']));
+            read(url, response).then(resolve, reject);
+          },
         );
-        request.on('error', (error) => reject(error instanceof FetchRefused ? error : new FetchRefused(url, 'could not be fetched', { cause: error })));
+        request.on('error', (error) => reject(error instanceof FetchRefused ? error : FetchRefused.unreached(url, error)));
         request.end();
       }),
   };
@@ -102,6 +105,11 @@ export const publicLookup: LookupFunction = (hostname, options, callback) => {
   });
 };
 
+/** A header as one string, or null: Node gives a list for one it saw more than once. */
+function headerValue(value: string | string[] | undefined): string | null {
+  return value === undefined ? null : Array.isArray(value) ? value.join(', ') : value;
+}
+
 function read(url: URL, response: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     if (response.statusCode !== 200) {
@@ -127,7 +135,7 @@ function read(url: URL, response: IncomingMessage): Promise<unknown> {
       }
       chunks.push(chunk);
     });
-    response.on('error', (error) => reject(new FetchRefused(url, 'could not be read', { cause: error })));
+    response.on('error', (error) => reject(FetchRefused.unreached(url, error, 'could not be read')));
     response.on('end', () => {
       try {
         resolve(parsed(url, response.headers['content-type'] ?? null, Buffer.concat(chunks)));

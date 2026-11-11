@@ -109,7 +109,8 @@ const transport: WorkloadTransport = {
   json: async (url) => {
     issuer.fetches++;
     await issuer.hold?.();
-    if (issuer.down || !published.has(url.href)) throw new FetchRefused(url, issuer.down ? 'could not be fetched' : 'answered 404');
+    if (issuer.down) throw FetchRefused.unreached(url, new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+    if (!published.has(url.href)) throw FetchRefused.answered(url, 404);
     return published.get(url.href);
   },
 };
@@ -722,9 +723,11 @@ test('a key the issuer rotated in is fetched once; while the issuer cannot be re
   issuer.down = true;
   assert.equal((await trade(token(rsa))).status, 200);
   forgetKeys();
+  issuer.fetches = 0;
   const down = await trade(token(rsa));
-  // Its keys are not fetched again for a minute: no sooner, it says.
-  assert.deepEqual([down.status, down.body.reason, down.retryAfter], [503, 'issuer_unavailable', '60']);
+  // Asked twice, then not again for ten seconds: no sooner, it says, which the CLI waits for (`unavailableWait`).
+  assert.deepEqual([down.status, down.body.reason, down.retryAfter, issuer.fetches], [503, 'issuer_unavailable', '10', 2]);
+  assert.match(down.body.message!, /^coffre could not fetch the signing keys of the issuer https:\/\/token\.actions\.githubusercontent\.com \(.*: timed out after 5 s\): its own request to the issuer failed, not the token or the job that sent it; try again in 10 s$/);
 });
 
 test('removing a binding ends its credentials at once; a denied attempt changes nothing; rows put back stay dead', async () => {

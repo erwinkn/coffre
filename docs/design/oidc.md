@@ -158,7 +158,8 @@ service's bindings are read. In order:
    - **So a flood scales with the deployment.** It can reach the limit times
      the number of locations or processes. What bounds the work behind each
      admitted request is the rest of this list: one query of at most 16
-     rows, one signature check, at most one key fetch.
+     rows, one signature check, at most one key fetch (asked twice when
+     the issuer did not answer the first; section 4).
    - **The limiter is required.** Configuring the exchange without it is a
      configuration error, never a route without limits.
 2. **Shape** (section 3).
@@ -269,17 +270,46 @@ it before saving. An issuer that moves its keys needs a new binding.
 
 **The cache keeps settled values only,** per isolate: never a pending fetch,
 key import or failure. Two first exchanges each fetch.
-- Key sets are kept ten minutes, for at most 64 URLs.
-- After an unknown `kid` or a failed fetch, that isolate waits a minute
-  before fetching that URL again, cold cache included. Until then such
-  tokens get a 503.
+- Key sets are fresh for ten minutes, for at most 64 URLs, then fetched
+  again.
+- After an unknown `kid`, or an answer that is not keys (a 404, a page that
+  is not JSON, a set with none), that isolate waits a minute before
+  fetching that URL again, cold cache included. Until then such tokens get
+  a 503 with `Retry-After: 60`.
 - Each cold isolate has its own cache and cooldowns. Admission, approximate
   as section 2 says, is what bounds them together.
 
-**When the issuer is down,** the answer is a 503 with `Retry-After`. Fresh
-cached keys work until they expire. No copy of fetched keys is kept in the
-database: an issuer that can't serve its keys can rarely mint tokens. Keys
-uploaded with a binding are a different case, fetched never (section 8).
+**When the issuer does not answer** (the 5 s deadline, a network error, a
+408, 429 or 5xx), it is a blip more often than an outage: on 2026-11-11
+GitHub's JWKS timed out twice for one deploy job while it answered other
+hosts in 0.4 s.
+- With no set to fall back on (a cold isolate, or one past its stand-in),
+  the fetch is asked once more at once, on a new connection.
+- A set past its ten minutes stands in for the one the issuer could not
+  serve, for as long as its answer's `Cache-Control` let any cache keep it:
+  its `max-age`, at most an hour, an hour if it says none, never past
+  fresh if it says `no-store`, `no-cache` or under ten minutes. GitHub's
+  says `max-age=3600, must-revalidate`, so a set coffre fetched up to an
+  hour ago stands in, which is no longer than GitHub lets any cache serve
+  it. A key the set lacks is never taken from it: such a token gets the
+  503.
+- The isolate then waits ten seconds before fetching that URL again, and
+  the 503 says `Retry-After: 10`, which the CLI waits out and asks again,
+  twice, each time with a fresh ID token.
+- The 503's message names the issuer and says the fetch was coffre's:
+  `coffre could not fetch the signing keys of the issuer
+  https://token.actions.githubusercontent.com
+  (https://token.actions.githubusercontent.com/.well-known/jwks: timed out
+  after 5 s): its own request to the issuer failed, not the token or the
+  job that sent it; try again in 10 s`. Each failed fetch logs
+  `workload_keys_unfetched`.
+- An answer that is not keys ends the stand-in: an issuer that publishes a
+  set with no keys, or moved them, is not one whose old keys outlive their
+  ten minutes.
+
+No copy of fetched keys is kept in the database: an issuer that can't serve
+its keys for an hour can rarely mint tokens. Keys uploaded with a binding
+are a different case, fetched never (section 8).
 
 ## 5. Threats
 
