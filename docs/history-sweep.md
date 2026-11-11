@@ -125,3 +125,85 @@ Flat once a backlog is walked (each a batch of a bounded walk, which the first
 sweep measured before the watch caught up): the heartbeat's and the
 verification's walks of the log, their counts of a stretch (`COUNTED_AT_ONCE`,
 T245) and the vault's releases' prune.
+
+## The audit pages of a place, of a reader's places and of refusals (T254)
+
+Found after the first sweep, by review (#559) and by W367's 240,000-entry
+shape: a page with a place (`?path=`), a reader's page of their places, and
+`?decision=deny` walked back past everything the page hides about the place,
+or every shown entry about another place. Each now reads streams of indexes
+of its own, merged by `seq`, an entry two streams hold listed once
+(`placeStreams` in `packages/server/src/db/queries.ts`). Pages read, 4,000
+and 40,000 entries in (`holdsFlat`, `packages/server/test/history-aggregates.test.ts`):
+
+| Page | Before | After |
+|---|---|---|
+| A project's, behind its own `mcp.read` and others' writes | 157 → 1,555 | flat |
+| An environment's, or a key's | 304 → 3,023 | flat |
+| A reader of some places, on `/audit` | 148 → 1,471 | flat |
+| `?decision=deny` | 35 → 334 | flat |
+| W367's shape: 22 shown entries, then 240,000 others' reads and heartbeats | 7,802 pages at 240,000 | 7 |
+
+What a page lists is unchanged: `packages/server/test/audit-place-pages.test.ts`
+holds every place, scope, decision and detail filter to its condition over
+the whole log, a page at a time to the end, on both engines.
+
+### Still growing (T255)
+
+None of these grows in the sweep's shapes; each is a filter the API takes:
+
+- **A key's page behind 0.14's reads of several other keys** (228 → 2,219
+  pages): such a read names its keys only in its metadata, so a key's page
+  reads every one at its environment. 0.16 writes none once its vault serves
+  0.15's uses (every Workers and Node vault), so these stop growing at the
+  upgrade; `holdsFlat` holds the page flat with their number fixed.
+- **An environment left out of a reader's scope inside a project they read**
+  (`within.except`): the project's streams read past its entries.
+- **A member's page at a place** (actor and place together): one stream per
+  member, past their entries elsewhere.
+- **A place's or a reader's page of one decision**: its streams read past
+  the other decision's entries. Flat in the sweep, by the planner's choice.
+- **Detail with `?decision=deny`**, and **a reader of more than 100 places**
+  (past 200 streams, the page walks the log once, as before).
+
+### What the indexes cost a write (T256)
+
+Eight partial indexes (Postgres 0085, SQLite 0044): the shown entries about a
+project, an environment and a key, by the place's uuid as 16 bytes
+(`uuid_send`, `placeKey`); those naming each besides, by `also`'s text
+(`besideKey`: nothing holds `also` to name uuids, and a cast that failed in an
+index would fail the insert); 0.14's reads of several keys by environment;
+and refusals by decision. Each is partial, so an insert pays for those whose
+condition it meets. Measured on a copy of `audit_log` with every index, 200,000
+entries deep, single-row inserts, pgbench at 4 clients (own Postgres 16.14,
+`placeKey` as 16 bytes; T254's pull request has the method and the text-key
+variant):
+
+| One audit insert | Without | With T254's indexes |
+|---|---|---|
+| A shown write at a key | 1,658 B WAL, 221 µs | 2,037 B (+23%), 247 µs (+11%) |
+| A refusal at a key | 1,487 B, 216 µs | 1,943 B (+31%), 243 µs (+13%) |
+| A read through a reference (`also`) | 2,256 B, 238 µs | 3,119 B (+38%), 279 µs (+17%) |
+| A detail entry (a heartbeat, `mcp.read`) | 1,328 B, 189 µs | +0 B, 202 µs (+7%) |
+
+A use's insert (`log_uses`, `log_reads`) gains no index. But a request pays
+more than its inserts: Postgres plans every statement anew, and weighs every
+index of `audit_log` for each time a statement reads it. The vault's snapshot
+reads it several times over, twice a request, and planned in 2.7 ms each
+before T254. Measured on one request at a time, 2,000 entries in
+(`pg_stat_statements`):
+
+| One request | Postgres planning | Postgres CPU |
+|---|---|---|
+| A key's write (`POST /secrets`) | 9.1 → 12.4 ms (+36%) | 15.2 → 19.0 ms (+25%) |
+| A key's reveal | 6.7 → 10.0 ms (+50%) | 10.5 → 14.1 ms (+34%) |
+
+About 0.4 ms a request for each index, keyed by an expression or by a
+column alike (the place's three plain on their columns plan as long), and
+none of it execution (1.4 ms a write, 0.8 a reveal, before and after). The
+older `audit_log_{project,environment,secret}_idx` and the three of `also`
+still key every entry about a place, detail included, beside the new ones;
+T256 (0.17) drops them or narrows them to the entries the new ones leave out,
+which takes back most of the WAL above and part of the planning. T257 (0.17)
+plans the snapshot's statements once, so that the planning stops growing with
+each index `audit_log` gains.

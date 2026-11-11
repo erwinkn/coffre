@@ -10,7 +10,7 @@ import { later, laterRows } from './later.ts';
 import { prepared } from './prepared.ts';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf } from './dialect.ts';
 
-export { accessAllowed, authoredBy, changeNamed, changesOf, DETAIL_ACTIONS, entriesOf, indexOf, keyedBy, KINDS, type Kind } from './access-entries.ts';
+export { accessAllowed, authoredBy, besideKey, changeNamed, changesOf, DETAIL_ACTIONS, entriesOf, indexOf, keyedBy, KINDS, LISTED_READS, PLACE_COLUMNS, placeKey, placeKeyOf, shownAt, type Kind } from './access-entries.ts';
 export { recordField, recorded, RECORDS, type ChangeRecord } from './change-records.ts';
 
 /**
@@ -523,24 +523,24 @@ export const BATCH_BYTES = 8 * 1024 * 1024;
  * always the first: the seqs they run from and to, each of them (`seqs`),
  * and whether the bytes cut the run short of `limit`. Null when none
  * matches. A reader asks this first, then reads `where` between the two, or
- * the entries `seqs` names. `by`, the entries whose column is one of these
- * values too: a stream of each value's, through the index keyed
- * `(column, seq)` (`keyedBy`), merged; asked as one condition, Postgres
- * walked the primary key back past every other value's entries, 613 pages
- * for an actor's newest behind 20,000 of another's (T245, R48), and SQLite
- * its rowid.
+ * the entries `seqs` names. `streams`, the entries any of these streams
+ * holds too, each its own condition and the order of the index that reads
+ * it (`keyedBy`): the first `limit` of each, then the first `limit` of them
+ * all, an entry two hold once. Asked as one condition, Postgres walked the
+ * primary key back past every entry none holds, 613 pages for an actor's
+ * newest behind 20,000 of another's (T245, R48), and SQLite its rowid.
  */
 export async function withinBytes(
   db: Queryable,
   where: SQL | undefined,
   limit: number,
   order: 'asc' | 'desc' = 'asc',
-  by?: { column: AnyColumn; values: readonly string[] },
+  streams?: readonly Stream[],
 ): Promise<{ from: bigint; to: bigint; cut: boolean; count: number; seqs: bigint[] } | null> {
   const { auditLog } = tablesOf(db);
-  if (by !== undefined && by.values.length === 0) return null;
-  const sizes = by !== undefined
-    ? (await rowsOf<{ seq: string | number | bigint; bytes: number | string }>(db, streamsOf(db, where, limit, order, by))).map((row) => ({ seq: BigInt(row.seq), bytes: row.bytes }))
+  if (streams !== undefined && streams.length === 0) return null;
+  const sizes = streams !== undefined
+    ? (await rowsOf<{ seq: string | number | bigint; bytes: number | string }>(db, merged(db, where, limit, order, streams))).map((row) => ({ seq: BigInt(row.seq), bytes: row.bytes }))
     : await db
       .select({ seq: auditLog.seq, bytes: sql<number | string>`length(${auditLog.metadata})` })
       .from(auditLog)
@@ -558,17 +558,19 @@ export async function withinBytes(
   return { from: sizes[0]!.seq, to: sizes[count - 1]!.seq, cut: count < sizes.length, count, seqs: sizes.slice(0, count).map(({ seq }) => seq) };
 }
 
-/** `withinBytes`' sizes of the entries whose `by.column` is one of `by.values`: each value's first `limit` by its index, then the first `limit` of them all. */
-function streamsOf(db: Queryable, where: SQL | undefined, limit: number, order: 'asc' | 'desc', by: { column: AnyColumn; values: readonly string[] }): SQL {
+/** A stream of `withinBytes`: the entries `where` holds, in the order of the index that reads them (`keyedBy`). */
+export type Stream = { where: SQL; orderBy: SQL[] };
+
+/** `withinBytes`' sizes of the entries `streams` hold: each one's first `limit` by its index, then the first `limit` of them all, once each. */
+function merged(db: Queryable, where: SQL | undefined, limit: number, order: 'asc' | 'desc', streams: readonly Stream[]): SQL {
   const { auditLog } = tablesOf(db);
   const way = sql.raw(order === 'asc' ? 'ASC' : 'DESC');
-  const streams = [...new Set(by.values)].map((value) => {
-    const keyed = keyedBy(db, by.column, auditLog.seq, order, value, sql.param([value]));
+  const terms = streams.map((stream) =>
     // Each a table of its own, as SQLite takes a compound's terms.
-    return sql`SELECT * FROM (SELECT ${auditLog.seq} AS seq, length(${auditLog.metadata}) AS bytes FROM ${auditLog}
-      WHERE ${and(keyed.where, where)} ORDER BY ${sql.join(keyed.orderBy, sql`, `)} LIMIT ${limit}) AS ${sql.raw('v')}`;
-  });
-  return sql`SELECT s.seq, s.bytes FROM (${sql.join(streams, sql` UNION ALL `)}) s ORDER BY s.seq ${way} LIMIT ${limit}`;
+    sql`SELECT * FROM (SELECT ${auditLog.seq} AS seq, length(${auditLog.metadata}) AS bytes FROM ${auditLog}
+      WHERE ${and(stream.where, where)} ORDER BY ${sql.join(stream.orderBy, sql`, `)} LIMIT ${limit}) AS ${sql.raw('v')}`);
+  // `UNION`, not `UNION ALL`: an entry about a place on both sides of a reference is in two of its streams.
+  return sql`SELECT s.seq, s.bytes FROM (${sql.join(terms, sql` UNION `)}) s ORDER BY s.seq ${way} LIMIT ${limit}`;
 }
 
 /**

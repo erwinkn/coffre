@@ -36,9 +36,15 @@ import * as sqlite from '../src/schema.sqlite.ts';
  * `author` first on SQLite, as the author indexes. The indexes of `KINDS`
  * (T245): by `seq` alone on Postgres, after the principal for the tamper
  * reports; with the columns their conditions fix on SQLite, which otherwise
- * picks `audit_log_action_idx`.
+ * picks `audit_log_action_idx`. A place's indexes of shown entries and of
+ * the reads of several keys (T254): by the place's uuid's bytes on
+ * Postgres (`placeKey`), an expression no older index is keyed by; by the column on
+ * SQLite.
  */
-const KEYED_APART = new Set(['audit_log_access_idx', 'audit_log_vault_idx', 'audit_log_app_idx', 'audit_log_vault_key_idx', 'audit_log_app_key_idx', ...(Object.keys(KINDS) as Kind[]).map(indexOf)]);
+const KEYED_APART = new Set([
+  'audit_log_access_idx', 'audit_log_vault_idx', 'audit_log_app_idx', 'audit_log_vault_key_idx', 'audit_log_app_key_idx', ...(Object.keys(KINDS) as Kind[]).map(indexOf),
+  'audit_log_project_shown_idx', 'audit_log_environment_shown_idx', 'audit_log_secret_shown_idx', 'audit_log_listed_idx',
+]);
 
 type Config = ReturnType<typeof postgresConfig>;
 type AnyColumn = Config['columns'][number];

@@ -121,6 +121,15 @@ export const KINDS = {
    * 1,231 pages with the history grown, 350 before (review r1 of #559).
    */
   shown: `action NOT IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')}) AND seq >= 0`,
+  /**
+   * The refusals it shows (`?decision=deny`): a page of them back from the newest, past every entry allowed since,
+   * which `audit_log_shown_idx` walked (35 pages 4,000 allowed entries in, 334 at 40,000; T254). Not `decision = 'deny'`,
+   * which a read would say too and so fix the decision: Postgres would read the refusals' index, keyed by decision then
+   * `seq`, as one by `seq` alone, as every index of a kind is, and took `audit_log_shown_idx` past every entry allowed
+   * (157 pages to 1,556). A read asks for the refusals as `decision = ANY('{deny}')` beside this, which implies it and
+   * fixes nothing, so that only this index yields their order.
+   */
+  denied: `decision <> 'allow' AND action NOT IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')}) AND seq >= 0`,
   /** And what it leaves out, which it counts back from where it started, a stretch's newest at most (`auditActionCounts`); `seq >= 0` as `shown`'s. */
   detail: `action IN (${DETAIL_ACTIONS.map((action) => `'${action}'`).join(', ')}) AND seq >= 0`,
   /**
@@ -130,6 +139,76 @@ export const KINDS = {
    */
   seen: "decision = 'allow' AND action IN ('secret.read', 'secret.write')",
 } as const;
+
+/**
+ * The entries a place's audit page shows, by the place (T254, R48): its
+ * shown entries are a stream of an index that holds the shown entries
+ * alone, keyed by the place, then `seq` (`placeStreams` in the server), so
+ * that a page back from the newest steps past none of what it hides about
+ * the place, nor anything about another. Through `audit_log_shown_idx` it
+ * walked every shown entry about another place, through
+ * `audit_log_project_idx` every one it hides about its own: 157 pages to
+ * 1,555 for a project's page 4,000 and 40,000 entries in, 304 to 3,023 for
+ * an environment's or a key's. As constants, as `KINDS`' (`authoredBy`):
+ * the column's, `project_id IS NOT NULL AND …` for
+ * `audit_log_project_shown_idx`.
+ */
+export const PLACE_COLUMNS = { projectId: 'project_id', environmentId: 'environment_id', secretId: 'secret_id' } as const;
+
+/** The shown entries about a place in `column` (`PLACE_COLUMNS`), as the condition of its index, word for word. */
+export function shownAt(column: (typeof PLACE_COLUMNS)[keyof typeof PLACE_COLUMNS]): SQL {
+  return sql.raw(`${column} IS NOT NULL AND ${KINDS.shown}`);
+}
+
+/**
+ * What a place's index of shown entries is keyed by, before `seq`: on
+ * Postgres its uuid's 16 bytes (`uuid_send`), an expression no older index
+ * is keyed by, so that a read of the place through it can be answered by it
+ * alone. Asked plainly, `project_id = ANY(…)`, Postgres read the older index
+ * by the column instead, `audit_log_project_idx`, which holds every entry
+ * about the place, whenever it held few shown, from its statistics: walked
+ * back past every detail entry about the place, or read whole and sorted
+ * (1,059 pages for an environment's page past 20,000 of its own `mcp.read`,
+ * 879 for a key's; 5 through the place's own index). The bytes, not the
+ * text, as the column stores it: 16 bytes a key rather than 36, which takes
+ * 5 to 6 points off what the indexes add to an insert's WAL (T254's
+ * benchmark, docs/history-sweep.md). `uuid_send` never fails on a uuid.
+ * SQLite, which takes the index keyed by the place, keys it by the column.
+ */
+export function placeKey(engine: Engine, column: SQLWrapper): SQL {
+  return engine === 'postgres' ? sql`(uuid_send(${column}))` : sql`${column}`;
+}
+
+/** A place's id as `placeKey` keys it, to ask its index by: on Postgres the uuid's bytes, on SQLite the value. */
+export function placeKeyOf(engine: Engine, value: string): SQL {
+  return engine === 'postgres' ? sql`uuid_send(CAST(${value} AS uuid))` : sql`${value}`;
+}
+
+/**
+ * And what its index of the shown entries naming it besides (`also`) is
+ * keyed by: on Postgres `#>> '{also,projectId}'`, the value the older
+ * `audit_log_also_*_idx` are keyed by as `-> 'also' ->> 'projectId'`, as an
+ * expression none of them is (`placeKey` says why). As text, not a uuid's
+ * bytes: nothing holds `also` to name uuids (no constraint does, and
+ * metadata is the writer's), and an index expression that failed on one
+ * (`::uuid`) would fail its insert. `#>>` fails on no JSON at all: on an
+ * `also` that is no object, or a field that is no string, it answers what
+ * no read asks for.
+ */
+export function besideKey(engine: Engine, metadata: SQLWrapper, field: keyof typeof PLACE_COLUMNS): SQL {
+  return engine === 'postgres'
+    ? sql`((${metadata})::jsonb #>> ${sql.raw(`'{also,${field}}'`)})`
+    : sql`json_extract(${metadata}, ${sql.raw(`'$.also.${field}'`)})`;
+}
+
+/**
+ * A read of several keys at one place in 0.14's log (`readsByPlace` in the
+ * vault): one entry, its keys listed in its metadata's `secrets`, which no
+ * index can key. `audit_log_listed_idx` holds them alone by environment, so
+ * that a key's page reads its environment's reads of several keys, and no
+ * other entry about it (T254). As constants.
+ */
+export const LISTED_READS = "action = 'secret.read' AND secret_id IS NULL";
 
 /** A kind of entry with an index of its own (`KINDS`). */
 export type Kind = keyof typeof KINDS;

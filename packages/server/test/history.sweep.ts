@@ -38,6 +38,8 @@ const SIZE = Number(process.env.COFFRE_SWEEP_SIZE ?? 2_000);
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const READER = 'reader@acme.example';
+/** An auditor of market/dev alone, whose pages read their place's entries and no others (`within`; T254). */
+const AUDITOR = 'auditor@acme.example';
 /** A member the vault reported, again and again: `SIZE` findings about them. */
 const TAMPERED = 'tampered@acme.example';
 /** A member who read a lot, then left: an offboarding report of `SIZE` reads. */
@@ -129,6 +131,8 @@ before(async () => {
     await root.members.add(`user:${member}`);
     await root.access.set(`user:${member}`, { 'market/dev': 'viewer' });
   }
+  await root.members.add(`user:${AUDITOR}`);
+  await root.access.set(`user:${AUDITOR}`, { 'market/dev': 'auditor' });
   await root.members.add(SERVICE);
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
   await root.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 });
@@ -182,6 +186,18 @@ async function grow(): Promise<void> {
   const app = appLogKey(deps.chainKey);
   const vault = deriveLogKey('vault', deps.vault.signingKey);
   await appendMany(app, SIZE, () => ({ actor: 'user:other@acme.example', action: 'secret.read', decision: 'allow', metadata: '{}' }));
+  // A place's pages behind its own detail, MCP's reads of market/dev's API_KEY, and the shown entries about another
+  // project, shop's writes, none of them theirs; an auditor of market/dev's behind both (T254). By someone no member row
+  // names, whose entries no member's page or activity reads.
+  const [api] = await rowsOf<{ secret: string; environment: string; project: string }>(db.owner, sql`
+    SELECT s.id::text AS secret, s.environment_id::text AS environment, s.project_id::text AS project
+      FROM secrets s JOIN environments e ON e.id = s.environment_id JOIN projects p ON p.id = s.project_id
+     WHERE p.slug = 'market' AND e.slug = 'dev' AND s.key = 'API_KEY'`);
+  const [shop] = await rowsOf<{ secret: string; environment: string; project: string }>(db.owner, sql`
+    SELECT s.id::text AS secret, s.environment_id::text AS environment, s.project_id::text AS project
+      FROM secrets s JOIN projects p ON p.id = s.project_id WHERE p.slug = 'shop' AND s.key = 'SHOP_KEY'`);
+  await appendMany(app, SIZE, () => ({ actor: 'user:outsider@acme.example', action: 'mcp.read', decision: 'allow', projectId: api!.project, environmentId: api!.environment, secretId: api!.secret, metadata: '{}' }));
+  await appendMany(app, SIZE, () => ({ actor: 'user:outsider@acme.example', action: 'secret.write', decision: 'allow', projectId: shop!.project, environmentId: shop!.environment, secretId: shop!.secret, metadata: '{}' }));
   await appendMany(vault, SIZE, (i) => ({
     actor: 'system:coffre', action: 'vault.tampered', decision: 'deny', code: i % 2 === 0 ? 'mac' : 'stale', subjectPrincipal: `user:${TAMPERED}`,
     metadata: i % 2 === 0 ? '{}' : JSON.stringify({ change: randomBytes(16).toString('hex') }),
@@ -269,6 +285,7 @@ function paths(): Path[] {
     ...getRoutes().map((path) => ({ name: `GET ${path} (viewer)`, run: () => get(READER, path) })),
     ...pages.map((query) => ({ name: `GET /audit${query} (owner)`, run: () => get(ROOT, `/audit${query}`) })),
     ...pages.map((query) => ({ name: `GET /audit${query} (viewer)`, run: () => get(READER, `/audit${query}`) })),
+    ...pages.map((query) => ({ name: `GET /audit${query} (auditor of market/dev)`, run: () => get(AUDITOR, `/audit${query}`) })),
     ...members.flatMap((member) => [`/members/${encodeURIComponent(member)}`, `/members/${encodeURIComponent(member)}/access`, `/members/${encodeURIComponent(member)}/tokens`]
       .map((path) => ({ name: `GET ${path} (owner)`, run: () => get(ROOT, path) }))),
     { name: 'a sign-in (members, findings)', run: () => signinService.completeSignin({ provider: 'github', subject: 'tampered', emails: [TAMPERED], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox' }) },

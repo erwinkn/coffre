@@ -154,6 +154,34 @@
   yet. Migration 0084 (SQLite 0043)
   adds the table, its triggers, and its one-time fill from the reads
   already listed.
+- **An audit page of a place, of a reader's places, or of refusals costs
+  the same however long the log grows (T254, R48).** A place's page
+  (`?path=`) walked back past everything it hides about the place, or
+  every shown entry about another (157 pages to 1,555 for a project's, 4,000
+  and 40,000 entries in; 304 to 3,023 for an environment's or a key's); a
+  reader of some places walked every entry outside them (148 to 1,471); and
+  `?decision=deny` every entry allowed since (35 to 334). Each now reads
+  streams, merged by `seq`: of the narrowest place, its entries by its
+  column and those naming it besides (`also`), each a step of an index of
+  the shown entries about it; on a key's page, its environment's 0.14 reads
+  of several keys too; for a reader of some places, each of theirs; and a
+  page of refusals a step of their own index. What a page lists is the
+  same, an entry two streams hold listed once
+  (`packages/server/test/audit-place-pages.test.ts` holds every filter to
+  its condition over the whole log). Still growing, and listed in
+  `docs/history-sweep.md` for T255: a key's page past 0.14's reads of
+  several other keys, which this release writes none of once its vault
+  serves 0.15's uses; an environment left out of a reader's scope inside a
+  project they read; a member's page at a place; a place's page of one
+  decision; and a reader of more than 100 places. Migration 0085 (SQLite
+  0044) adds eight indexes, built without blocking writes, a place's keyed
+  by its uuid's 16 bytes: a shown write at a key costs 23% more WAL and 11%
+  more Postgres CPU to insert, a refusal 31% and 13%, a read through a
+  reference 38% and 17%, a detail entry 7% CPU, a use nothing; and
+  Postgres plans each statement that reads `audit_log` against them all,
+  3.3 ms more a key's write or reveal, about a quarter more of its CPU
+  (`docs/history-sweep.md`; in 0.17, T256 drops or narrows the older place
+  indexes and T257 plans the vault's snapshot once).
 - **The credential proxy ends its upstream request when the app's request
   ends, and sets no time bound of its own (W365, config Q7).** It passes the
   incoming request's abort signal to the upstream `fetch`: an app that

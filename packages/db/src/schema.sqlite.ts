@@ -15,7 +15,7 @@ import {
   type AnySQLiteColumn,
 } from 'drizzle-orm/sqlite-core';
 
-import { accessAllowed, authoredBy, entriesOf, indexOf } from './access-entries.ts';
+import { accessAllowed, authoredBy, besideKey, entriesOf, indexOf, LISTED_READS, shownAt } from './access-entries.ts';
 import { ACTIVE_SUBJECT } from './active-subject.ts';
 import { recordField, recorded } from './change-records.ts';
 
@@ -451,6 +451,7 @@ export const auditLog = sqliteTable(
     index(indexOf('tamper')).on(table.author, table.subjectPrincipal, table.action, table.seq).where(entriesOf('tamper')),
     index(indexOf('moves')).on(table.author, table.seq).where(entriesOf('moves')),
     index(indexOf('shown')).on(table.seq).where(entriesOf('shown')),
+    index(indexOf('denied')).on(table.decision, table.seq).where(entriesOf('denied')),
     index(indexOf('detail')).on(table.seq).where(entriesOf('detail')),
     index(indexOf('seen')).on(table.actor, table.seq).where(entriesOf('seen')),
     // The allowed access entries alone (`accessAllowed`): a principal's, and whom they name, each in one step
@@ -494,6 +495,17 @@ export const auditLog = sqliteTable(
     index('audit_log_also_secret_idx')
       .on(sql`json_extract(${table.metadata}, '$.also.secretId')`, table.seq)
       .where(sql`json_extract(${table.metadata}, '$.also') IS NOT NULL`),
+    // A place's page (T254), as Postgres's, each keyed by its column.
+    index('audit_log_project_shown_idx').on(table.projectId, table.seq).where(shownAt('project_id')),
+    index('audit_log_environment_shown_idx').on(table.environmentId, table.seq).where(shownAt('environment_id')),
+    index('audit_log_secret_shown_idx').on(table.secretId, table.seq).where(shownAt('secret_id')),
+    index('audit_log_also_project_shown_idx').on(besideKey('sqlite', table.metadata, 'projectId'), table.seq)
+      .where(sql`json_extract(${table.metadata}, '$.also') IS NOT NULL AND ${entriesOf('shown')}`),
+    index('audit_log_also_environment_shown_idx').on(besideKey('sqlite', table.metadata, 'environmentId'), table.seq)
+      .where(sql`json_extract(${table.metadata}, '$.also') IS NOT NULL AND ${entriesOf('shown')}`),
+    index('audit_log_also_secret_shown_idx').on(besideKey('sqlite', table.metadata, 'secretId'), table.seq)
+      .where(sql`json_extract(${table.metadata}, '$.also') IS NOT NULL AND ${entriesOf('shown')}`),
+    index('audit_log_listed_idx').on(table.environmentId, table.seq).where(sql.raw(LISTED_READS)),
   ],
 );
 

@@ -23,21 +23,21 @@ const LOGS = ['audit_log', 'log_changes', 'log_uses', 'log_reads'];
 /** Entries of 0.14's log, `count` alike, after its newest: no MAC or hash of anyone's, which the reads here do not check. */
 export type Rows = {
   author: 'app' | 'vault'; action: string; count: number; decision?: 'allow' | 'deny'; code?: string | null; actor?: string; subject?: string | null;
-  secret?: string | null; project?: string | null; metadata?: string;
+  secret?: string | null; project?: string | null; environment?: string | null; metadata?: string;
 };
 
 const ZERO = Buffer.alloc(32);
 
 /** Appends `rows` to the audit log, as the owner with its triggers lifted, 20,000 at a time, by a recursive count both engines have. */
 export async function append(owner: Database, rows: Rows): Promise<void> {
-  const { author, action, count, decision = 'allow', code = null, actor = 'system:coffre', subject = null, secret = null, project = null, metadata = '{}' } = rows;
+  const { author, action, count, decision = 'allow', code = null, actor = 'system:coffre', subject = null, secret = null, project = null, environment = null, metadata = '{}' } = rows;
   const uuid = (value: string | null) => (value === null || TEST_ENGINE !== 'postgres' ? sql`${value}` : sql`CAST(${value} AS uuid)`);
   for (let left = count; left > 0; left -= 20_000) {
     await withLogUnlocked(owner, (tx) => rowsOf(tx, sql`
       WITH RECURSIVE g (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM g WHERE n < ${Math.min(20_000, left)})
-      INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, code, subject_principal, secret_id, project_id, prev_hash, mac, hash, metadata)
+      INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, code, subject_principal, secret_id, project_id, environment_id, prev_hash, mac, hash, metadata)
       SELECT head.newest + g.n, ${author}, ${`${author}:k`}, CAST(${Date.now()} AS BIGINT) + g.n, ${actor}, ${action}, ${decision}, ${code}, ${subject},
-        ${uuid(secret)}, ${uuid(project)}, ${ZERO}, ${ZERO}, ${ZERO}, ${metadata}
+        ${uuid(secret)}, ${uuid(project)}, ${uuid(environment)}, ${ZERO}, ${ZERO}, ${ZERO}, ${metadata}
       FROM (SELECT coalesce(max(seq), 0) AS newest FROM audit_log) head, g`));
   }
 }

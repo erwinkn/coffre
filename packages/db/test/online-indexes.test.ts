@@ -17,7 +17,7 @@ const NAME = `${new URL(BASE).pathname.slice(1)}_online_${randomBytes(4).toStrin
 const url = Object.assign(new URL(BASE), { pathname: `/${NAME}` }).toString();
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const ALL = onlineIndexes(['0082_flat_history.sql', '0083_flat_aggregates.sql'].map((file) => readFileSync(join(migrationsFolder('postgres'), file), 'utf8')));
+const ALL = onlineIndexes(['0082_flat_history.sql', '0083_flat_aggregates.sql', '0085_place_pages.sql'].map((file) => readFileSync(join(migrationsFolder('postgres'), file), 'utf8')));
 
 before(async () => {
   if (skip) return;
@@ -64,6 +64,15 @@ test('a migration CONCURRENTLY index is read whole, comments before it or not; a
     'audit_log.audit_log_detail_idx',
     'audit_log.audit_log_seen_idx',
     'log_uses.log_uses_at_number_idx',
+    // T254's (0085).
+    'audit_log.audit_log_denied_idx',
+    'audit_log.audit_log_project_shown_idx',
+    'audit_log.audit_log_environment_shown_idx',
+    'audit_log.audit_log_secret_shown_idx',
+    'audit_log.audit_log_also_project_shown_idx',
+    'audit_log.audit_log_also_environment_shown_idx',
+    'audit_log.audit_log_also_secret_shown_idx',
+    'audit_log.audit_log_listed_idx',
   ]);
   assert.deepEqual(onlineIndex('-- why\n--\nCREATE UNIQUE INDEX CONCURRENTLY "t_x_idx" ON "t" USING btree ("x") WHERE "t"."y" = 1;'), {
     unique: true,

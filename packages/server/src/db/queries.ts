@@ -5,7 +5,7 @@ import { MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, ty
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { accessAllowed, changesOf, DETAIL_ACTIONS, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
+import { accessAllowed, besideKey, changesOf, DETAIL_ACTIONS, entriesOf, keyedBy, LISTED_READS, logObject, newestSeqQuery, newestVaultSeq, PLACE_COLUMNS, placeKey, placeKeyOf, recordField, recorded, shownAt, withinBytes, type ChangeRecord, type Stream } from '@coffre/db/log';
 import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -3604,14 +3604,24 @@ export type AuditFilter = {
  * reference's making and end. Repeats the `audit_log_also_*_idx`
  * expressions and their condition, so that each is read by its index.
  */
-function also(db: Queryable, field: 'projectId' | 'environmentId' | 'secretId', ids: readonly string[]): SQL {
+function also(db: Queryable, field: PlaceField, ids: readonly string[]): SQL {
+  return and(alsoPresent(db), inArray(alsoValue(db, field), [...ids]))!;
+}
+
+type PlaceField = 'projectId' | 'environmentId' | 'secretId';
+
+/** That an entry names a place besides its own (`also`), as the `audit_log_also_*` indexes' condition. */
+function alsoPresent(db: Queryable): SQL {
   const { auditLog } = tablesOf(db);
-  const postgres = dialect.engineOf(db) === 'postgres';
-  const present = postgres ? sql`((${auditLog.metadata})::jsonb -> 'also') IS NOT NULL` : sql`json_extract(${auditLog.metadata}, '$.also') IS NOT NULL`;
-  const value = postgres
+  return dialect.engineOf(db) === 'postgres' ? sql`((${auditLog.metadata})::jsonb -> 'also') IS NOT NULL` : sql`json_extract(${auditLog.metadata}, '$.also') IS NOT NULL`;
+}
+
+/** The place of `field` an entry names besides its own (`also`), as the `audit_log_also_*` indexes key it. */
+function alsoValue(db: Queryable, field: PlaceField): SQL {
+  const { auditLog } = tablesOf(db);
+  return dialect.engineOf(db) === 'postgres'
     ? sql`(((${auditLog.metadata})::jsonb -> 'also') ->> ${sql.raw(`'${field}'`)})`
     : sql`json_extract(${auditLog.metadata}, ${sql.raw(`'$.also.${field}'`)})`;
-  return and(present, inArray(value, [...ids]))!;
 }
 
 /**
@@ -3628,33 +3638,37 @@ function listed(db: Queryable, ids: readonly string[]): SQL {
         WHERE ${named(sql`(listed.secret ->> 'secretId')`)} OR ${named(sql`((listed.secret -> 'also') ->> 'secretId')`)})`
     : sql`EXISTS (SELECT 1 FROM json_each(${auditLog.metadata}, '$.secrets') AS listed
         WHERE ${named(sql`json_extract(listed.value, '$.secretId')`)} OR ${named(sql`json_extract(listed.value, '$.also.secretId')`)})`;
-  return and(eq(auditLog.action, 'secret.read'), isNull(auditLog.secretId), among)!;
+  return and(sql.raw(LISTED_READS), among)!;
 }
 
 /**
  * The conditions of `filter`, as a WHERE clause on the log. A place matches
  * the entries about it, and those about a reference into or out of it; a
- * secret, too, the reads of several that list it.
+ * secret, too, the reads of several that list it. `held`: the conditions a
+ * stream's own holds already (`placeStreams`), left out: said again, an `OR`
+ * of a place's two indexes, Postgres read through neither in order (1,059
+ * pages for an environment's page past its own detail, 12 without).
  */
-function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | undefined {
+function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>, held: ReadonlySet<Held> = new Set()): SQL | undefined {
   const { auditLog } = tablesOf(db);
   const { within } = filter;
   const columns = { projectId: auditLog.projectId, environmentId: auditLog.environmentId, secretId: auditLog.secretId };
   const at = (field: keyof typeof columns, ids: readonly string[]) =>
     ids.length === 0 ? sql`false` : or(inArray(columns[field], [...ids]), also(db, field, ids));
+  const asked = (clause: Held, value: unknown) => value !== undefined && !held.has(clause);
   return and(
-    within === undefined
-      ? undefined
-      : or(at('projectId', within.projectIds), at('environmentId', within.environmentIds)),
+    !asked('scope', within) ? undefined : or(at('projectId', within!.projectIds), at('environmentId', within!.environmentIds)),
     // An entry about a place left out, as its main place or one it names besides (`also`), is left out with it.
     within?.except === undefined || within.except.length === 0
       ? undefined
       : and(or(isNull(auditLog.environmentId), notInArray(auditLog.environmentId, within.except)), sql`NOT COALESCE(${also(db, 'environmentId', within.except)}, false)`),
-    filter.projectId === undefined ? undefined : at('projectId', [filter.projectId]),
-    filter.environmentId === undefined ? undefined : at('environmentId', [filter.environmentId]),
-    filter.secretId === undefined ? undefined : or(at('secretId', [filter.secretId]), listed(db, [filter.secretId])),
+    !asked('projectId', filter.projectId) ? undefined : at('projectId', [filter.projectId!]),
+    !asked('environmentId', filter.environmentId) ? undefined : at('environmentId', [filter.environmentId!]),
+    !asked('secretId', filter.secretId) ? undefined : or(at('secretId', [filter.secretId!]), listed(db, [filter.secretId!])),
     filter.actors === undefined ? undefined : inArray(auditLog.actor, filter.actors),
-    filter.decision === undefined ? undefined : eq(auditLog.decision, filter.decision),
+    // The refusals an ordinary page shows, as the condition of their index (`audit_log_denied_idx`): a page of them back
+    // from the newest past none of what was allowed since (T254, R48).
+    filter.decision === undefined ? undefined : refusalsShown(filter) ? and(entriesOf('denied'), refusals(db)) : eq(auditLog.decision, filter.decision),
     filter.excludeActions === undefined || filter.excludeActions.length === 0
       ? undefined
       // The detail an ordinary page leaves out, as the condition of the index of what it shows, word for word
@@ -3662,6 +3676,107 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
       : filter.excludeActions === DETAIL_ACTIONS ? entriesOf('shown') : notInArray(auditLog.action, [...filter.excludeActions]),
     filter.beforeSeq === undefined ? undefined : lt(auditLog.seq, filter.beforeSeq),
   );
+}
+
+/** A condition of `auditWhere` a stream can hold: a reader's scope, or a place. */
+type Held = 'scope' | PlaceField;
+
+/** The refusals, as an array of one on Postgres, which leaves the decision unfixed (`KINDS.denied`). */
+function refusals(db: Queryable): SQL {
+  const { auditLog } = tablesOf(db);
+  return dialect.engineOf(db) === 'postgres' ? sql`${auditLog.decision} = ANY(CAST(${sql.param(['deny'])} AS text[]))` : eq(auditLog.decision, 'deny');
+}
+
+/** An ordinary page of refusals: `entriesOf('denied')`, which says `shown`'s condition too. */
+function refusalsShown(filter: Omit<AuditFilter, 'limit'>): boolean {
+  return filter.decision === 'deny' && filter.excludeActions === DETAIL_ACTIONS;
+}
+
+/**
+ * The most streams a page reads (`placeStreams`), two for each place of a
+ * reader's scope: SQLite takes 500 terms in a compound at most. A reader of
+ * more places reads their page in one walk, as before T254.
+ */
+const MOST_STREAMS = 200;
+
+/**
+ * A page as streams of `withinBytes`, each its whole condition (T254, R48),
+ * or undefined for one walk of the log: the whole log's page, which
+ * `audit_log_shown_idx` serves, and a key's without its environment, which
+ * the API never asks.
+ *
+ * A place's page reads the narrowest place it names, a key, else an
+ * environment, else a project: the entries about it by its column, and
+ * those that name it besides (`also`). An entry the page shows is about
+ * that place one way or the other, so these hold every one. But a key's
+ * page shows too the reads of several keys that list it (`listed`), which
+ * name no key of their own: those at its environment, by the column or by
+ * `also`, from the index of such reads alone (`LISTED_READS`). A reader of
+ * some places (`within`), on a page of no place, reads each of theirs so,
+ * but for the environments of a project they read left out of their scope
+ * (`except`), whose entries its project's streams read past. An ordinary
+ * page of refusals reads their index. Two streams can hold one entry,
+ * which `withinBytes` lists once.
+ *
+ * Each stream of shown entries asks for its place as its index is keyed,
+ * by an expression no older index is (`placeKey`, `besideKey`), so that
+ * Postgres can read it through that index alone, by a walk back or whole:
+ * asked plainly, it read the older index by the same place instead,
+ * `audit_log_project_idx`, which holds every entry about the place, past
+ * every detail entry (1,059 pages for an environment's page past 20,000
+ * of its own `mcp.read`, 5 through its own index). No stream of the reads
+ * of several keys says `entriesOf('shown')`'s `seq >= 0`, which every one
+ * of them is: an environment's index of shown entries would serve it as
+ * well. A page with detail reads the older indexes, which hold it.
+ *
+ *   ?path=market/dev/API_KEY: API_KEY's entries, those naming it besides,
+ *   and dev's reads of several keys, by the column and by `also`: 4 streams
+ *   an auditor of market and of shop/dev, on `/audit`: 4 streams
+ *   ?decision=deny: 1 stream, of `audit_log_denied_idx`
+ */
+function placeStreams(db: Queryable, filter: Omit<AuditFilter, 'limit'>): Stream[] | undefined {
+  const { auditLog } = tablesOf(db);
+  const engine = dialect.engineOf(db);
+  const columns = { projectId: auditLog.projectId, environmentId: auditLog.environmentId, secretId: auditLog.secretId };
+  const shown = filter.excludeActions === DETAIL_ACTIONS;
+  // Keyed by one value as an array of one, ordered by the key, then `seq` (`keyedBy`): the value as text, as a uuid, or
+  // as a place's uuid's bytes (`placeKey`). SQLite, which takes the index keyed by the value, asks it plainly.
+  const keyed = (key: SQL, value: string, as: 'uuid' | 'text' | 'place', where: (SQL | undefined)[]): Stream => engine === 'postgres'
+    ? { where: and(sql`${key} = ANY(ARRAY[${as === 'place' ? placeKeyOf(engine, value) : sql`CAST(${value} AS ${sql.raw(as)})`}])`, ...where)!, orderBy: [sql`${key} DESC`, desc(auditLog.seq)] }
+    : { where: and(sql`${key} = ${value}`, ...where)!, orderBy: [desc(auditLog.seq)] };
+  // A place by its column, as its index of shown entries is keyed, and the condition that index holds, as constants.
+  const own = (place: PlaceField, value: string, where: (SQL | undefined)[]) => shown
+    ? keyed(placeKey(engine, columns[place]), value, 'place', [shownAt(PLACE_COLUMNS[place]), ...where])
+    : keyed(sql`${columns[place]}`, value, 'uuid', where);
+  // And by `also`: through its index of shown entries naming it besides (`besideKey`) when `shown`, which the query says.
+  const beside = (place: PlaceField, value: string, where: (SQL | undefined)[], asShown = shown) =>
+    keyed(asShown ? besideKey(engine, auditLog.metadata, place) : alsoValue(db, place), value, 'text', [alsoPresent(db), ...where]);
+  // A place's entries, with the rest of the filter but what the streams hold.
+  const about = (place: PlaceField, value: string, held: Held[]) => {
+    const rest = auditWhere(db, filter, new Set(held));
+    return [own(place, value, [rest]), beside(place, value, [rest])];
+  };
+  const field = filter.secretId !== undefined ? 'secretId' : filter.environmentId !== undefined ? 'environmentId' : filter.projectId !== undefined ? 'projectId' : undefined;
+  if (field === 'secretId') {
+    if (filter.environmentId === undefined) return undefined;
+    // Its environment's reads of several keys, every one of them shown: asked as such, past none of its other entries.
+    const rest = auditWhere(db, { ...filter, excludeActions: shown ? undefined : filter.excludeActions }, new Set<Held>(['secretId', 'environmentId']));
+    const lists = [listed(db, [filter.secretId!]), rest];
+    return [
+      ...about('secretId', filter.secretId!, ['secretId']),
+      keyed(placeKey(engine, auditLog.environmentId), filter.environmentId, 'place', lists),
+      beside('environmentId', filter.environmentId, [entriesOf('shown'), ...lists], true),
+    ];
+  }
+  if (field !== undefined) return about(field, filter[field]!, [field]);
+  if (filter.within !== undefined) {
+    const streams = [
+      ...[...new Set(filter.within.projectIds)].flatMap((id) => about('projectId', id, ['scope'])),
+      ...[...new Set(filter.within.environmentIds)].flatMap((id) => about('environmentId', id, ['scope'])),
+    ];
+    return streams.length <= MOST_STREAMS ? streams : undefined;
+  }
+  return refusalsShown(filter) ? [keyed(sql`${auditLog.decision}`, 'deny', 'text', [auditWhere(db, filter)])] : undefined;
 }
 
 /**
@@ -3672,10 +3787,14 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
  */
 export async function auditPage(db: Queryable, filter: AuditFilter) {
   const { auditLog, projects, environments, secrets } = tablesOf(db);
-  // The members asked for, each a stream of their own entries (`withinBytes`' `by`); then the page's entries by seq,
-  // never the run between its first and its last, which holds every other member's since (T245, R48).
-  const page = await withinBytes(db, auditWhere(db, { ...filter, actors: undefined }), filter.limit, 'desc',
-    filter.actors === undefined ? undefined : { column: auditLog.actor, values: filter.actors });
+  // The members asked for, each a stream of their own entries (`withinBytes`' `streams`), else the place's; then the
+  // page's entries by seq, never the run between its first and its last, which holds every other member's since, or
+  // every other place's (T245, T254, R48).
+  const streams = filter.actors === undefined
+    ? placeStreams(db, filter)
+    : [...new Set(filter.actors)].map((actor) => keyedBy(db, auditLog.actor, auditLog.seq, 'desc', actor, sql.param([actor])));
+  // A place's streams say their whole condition; a member's, theirs alone.
+  const page = await withinBytes(db, filter.actors === undefined && streams !== undefined ? undefined : auditWhere(db, { ...filter, actors: undefined }), filter.limit, 'desc', streams);
   if (page === null) return { rows: [], more: false };
   const rows = await db
     .select({ ...auditColumns(auditLog), project: projects.slug, environment: environments.slug, key: secrets.key })

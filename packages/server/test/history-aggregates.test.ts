@@ -25,6 +25,10 @@ const OTHER = 'user:other@acme.example';
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 /** Three keys of market/dev, each at its version: what the reads here are of. */
 let keys: { id: string; version: string; environment: string; project: string }[];
+/** Another environment of market's, and two other projects' keys: the places beside a page's own. */
+let prod: string;
+let other: { id: string; environment: string; project: string };
+let shop: { id: string; environment: string; project: string };
 before(async () => {
   db = await openTestDatabase();
   await resetDatabase(db.owner);
@@ -32,9 +36,20 @@ before(async () => {
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/dev', { name: 'dev' });
   await root.secrets.set('market/dev', { A: 'fake-a', B: 'fake-b', C: 'fake-c' });
-  keys = (await rowsOf<{ id: string; version: string; environment: string; project: string }>(db.owner, sql`
-    SELECT CAST(id AS text) AS id, CAST(current_version_id AS text) AS version, CAST(environment_id AS text) AS environment, CAST(project_id AS text) AS project
-      FROM secrets ORDER BY key`)).map((row) => ({ ...row }));
+  await root.environments.create('market/prod', { name: 'prod' });
+  await root.projects.create('other', { name: 'Other' });
+  await root.environments.create('other/dev', { name: 'dev' });
+  await root.secrets.set('other/dev', { X: 'fake-x' });
+  await root.projects.create('shop', { name: 'Shop' });
+  await root.environments.create('shop/dev', { name: 'dev' });
+  await root.secrets.set('shop/dev', { S: 'fake-s' });
+  const rows = await rowsOf<{ id: string; version: string; environment: string; project: string; key: string; slug: string }>(db.owner, sql`
+    SELECT CAST(s.id AS text) AS id, CAST(s.current_version_id AS text) AS version, CAST(s.environment_id AS text) AS environment,
+      CAST(s.project_id AS text) AS project, s.key, p.slug FROM secrets s JOIN projects p ON p.id = s.project_id ORDER BY s.key`);
+  keys = rows.filter((row) => row.slug === 'market').map(({ id, version, environment, project }) => ({ id, version, environment, project }));
+  other = rows.find((row) => row.slug === 'other')!;
+  shop = rows.find((row) => row.slug === 'shop')!;
+  [{ id: prod }] = await rowsOf<{ id: string }>(db.owner, sql`SELECT CAST(e.id AS text) AS id FROM environments e JOIN projects p ON p.id = e.project_id WHERE p.slug = 'market' AND e.slug = 'prod'`) as [{ id: string }];
 });
 after(async () => {
   await resetDatabase(db.owner);
@@ -159,6 +174,133 @@ test('an ordinary audit page back from the newest, past every heartbeat since (`
   },
   ask: async (app) => assert.equal((await auditPage(app, { excludeActions: DETAIL_ACTIONS, limit: 5 })).rows.length, 5),
   indexes: ['audit_log_shown_idx'],
+}));
+
+// A place's page (`auditPage`, `?path=`), behind what it hides of its own and the entries shown about the places beside
+// it (T254): five entries it shows, then, newer, `size` detail entries about the place itself, and `size` shown entries
+// about each place beside it (another key of its environment, another environment of its project, another project),
+// so that a walk of the place's own entries, or of every entry shown, grows with one or the other.
+type Place = Omit<Parameters<typeof append>[1], 'count' | 'author' | 'action'>;
+const PLACE_SHOWN = 5;
+/**
+ * 0.14's reads of several keys at a key's environment, none listing it (`LISTED_READS`): as many at either size, the
+ * one exemption from growth here, and for these rows alone. No index can key a list, so a key's page reads every one
+ * between its newest entries; and this release writes none once its vault serves 0.15's uses, which every request of a
+ * deployment's comes in on (docs/history-sweep.md, T255): how many there are is fixed once a deployment runs it.
+ */
+const LEGACY_READS = 2_000;
+for (const [name, filter, place, beside, indexes, legacy] of [
+  ["a project's page, behind its own `mcp.read` entries and another project's writes", () => ({ projectId: keys[0]!.project }),
+    (): Place => ({ project: keys[0]!.project }),
+    (): Place[] => [{ project: other.project, environment: other.environment, secret: other.id }],
+    ['audit_log_project_shown_idx', 'audit_log_also_project_shown_idx'], false],
+  ["an environment's page, behind its own detail and its project's other environment's writes", () => ({ projectId: keys[0]!.project, environmentId: keys[0]!.environment }),
+    (): Place => ({ project: keys[0]!.project, environment: keys[0]!.environment }),
+    (): Place[] => [{ project: keys[0]!.project, environment: prod }, { project: other.project, environment: other.environment, secret: other.id }],
+    ['audit_log_environment_shown_idx', 'audit_log_also_environment_shown_idx'], false],
+  ["a key's page, behind its own rewraps, its environment's other keys' writes and 0.14's reads of them (`LEGACY_READS`)", () => ({ projectId: keys[0]!.project, environmentId: keys[0]!.environment, secretId: keys[0]!.id }),
+    (): Place => ({ project: keys[0]!.project, environment: keys[0]!.environment, secret: keys[0]!.id }),
+    (): Place[] => [{ project: keys[1]!.project, environment: keys[1]!.environment, secret: keys[1]!.id }, { project: keys[0]!.project, environment: prod }],
+    ['audit_log_secret_shown_idx', 'audit_log_also_secret_shown_idx', 'audit_log_listed_idx', 'audit_log_also_environment_shown_idx'], true],
+] as const) {
+  test(`${name} (\`auditPage\`): a step of each of its streams`, { timeout: 600_000 }, () => holdsFlat(db.owner, {
+    grow: async (owner, size) => {
+      await append(owner, { ...place(), author: 'app', action: 'secret.write', actor: `user:${ROOT}`, count: PLACE_SHOWN });
+      if (legacy) {
+        await append(owner, { author: 'vault', action: 'secret.read', actor: `user:${ROOT}`, count: LEGACY_READS, project: keys[0]!.project, environment: keys[0]!.environment,
+          metadata: JSON.stringify({ secrets: [{ secretId: keys[1]!.id }, { secretId: keys[2]!.id }] }) });
+      }
+      await append(owner, { ...place(), author: 'app', action: 'mcp.read', actor: `user:${ROOT}`, count: size / 2 });
+      await append(owner, { ...place(), author: 'vault', action: 'key.rewrap', count: size / 2 });
+      for (const at of beside()) await append(owner, { ...at, author: 'app', action: 'secret.write', actor: `user:${ROOT}`, count: size });
+    },
+    ask: async (app) => assert.equal((await auditPage(app, { ...filter(), excludeActions: DETAIL_ACTIONS, limit: PLACE_SHOWN })).rows.length, PLACE_SHOWN),
+    indexes: [...indexes],
+  }));
+}
+
+test("a project's page behind every other place's entries shown since, and the heartbeats after (`auditPage`; W367's shape): a step of its streams", { timeout: 600_000 }, () => holdsFlat(db.owner, {
+  // Its 22 shown entries, the oldest; then reads shown about another project and about no place; then heartbeats.
+  // main walked `audit_log_pkey` back over all of it: 7,802 pages for its 22 at 240,000 entries (W367, A615).
+  grow: async (owner, size) => {
+    await append(owner, { author: 'app', action: 'secret.write', actor: `user:${ROOT}`, count: 22, project: keys[0]!.project });
+    await append(owner, { author: 'app', action: 'secret.read', actor: OTHER, count: size * 3 / 8, project: other.project });
+    await append(owner, { author: 'app', action: 'secret.read', actor: OTHER, count: size * 3 / 8 });
+    await append(owner, { author: 'app', action: 'audit.heartbeat', actor: 'system:coffre-scheduler', count: size * 3 / 4 });
+  },
+  ask: async (app) => {
+    const page = await auditPage(app, { projectId: keys[0]!.project, excludeActions: DETAIL_ACTIONS, limit: 100 });
+    assert.deepEqual([page.rows.length, page.more], [22, false]);
+  },
+  indexes: ['audit_log_project_shown_idx'],
+}));
+
+// A log as deployments' are, heartbeat-led: a tenth of it shown (Fable r2 of #559). A place's and a reader's pages, their
+// few shown entries the oldest, behind runs of a hundred others' shown entries and nine hundred heartbeats.
+for (const [name, filter, indexes] of [
+  ["a project's page", () => ({ projectId: keys[0]!.project }), ['audit_log_project_shown_idx']],
+  ["a key's page", () => ({ projectId: keys[0]!.project, environmentId: keys[0]!.environment, secretId: keys[0]!.id }), ['audit_log_secret_shown_idx']],
+  ["a reader's page of market and of other/dev", () => ({ within: { projectIds: [keys[0]!.project], environmentIds: [other.environment] } }), ['audit_log_project_shown_idx', 'audit_log_environment_shown_idx']],
+] as const) {
+  test(`${name} in a log a tenth shown, heartbeats the rest (\`auditPage\`): a step of its streams`, { timeout: 600_000 }, () => holdsFlat(db.owner, {
+    grow: async (owner, size) => {
+      await append(owner, { author: 'app', action: 'secret.write', actor: `user:${ROOT}`, count: PLACE_SHOWN, project: keys[0]!.project, environment: keys[0]!.environment, secret: keys[0]!.id });
+      for (let done = 0; done < size; done += 1_000) {
+        await append(owner, { author: 'app', action: 'secret.write', actor: OTHER, count: 100, project: shop.project, environment: shop.environment, secret: shop.id });
+        await append(owner, { author: 'app', action: 'audit.heartbeat', actor: 'system:coffre-scheduler', count: 900 });
+      }
+    },
+    ask: async (app) => {
+      const page = await auditPage(app, { ...filter(), excludeActions: DETAIL_ACTIONS, limit: 100 });
+      assert.deepEqual([page.rows.length, page.more], [PLACE_SHOWN, false]);
+    },
+    indexes: [...indexes],
+  }));
+}
+
+test("an environment's page among its own shown entries and detail, a decision asked (`auditPage`): a step of its streams, never all of its entries", { timeout: 600_000 }, () => holdsFlat(db.owner, {
+  // As many of its own writes as detail, in runs of a thousand: what it shows is near, but every one of either a read
+  // of all its entries would take, sorted.
+  grow: async (owner, size) => {
+    for (let done = 0; done < size; done += 1_000) {
+      await append(owner, { author: 'app', action: 'secret.write', actor: `user:${ROOT}`, count: 1_000, project: keys[0]!.project, environment: keys[0]!.environment, secret: keys[0]!.id });
+      await append(owner, { author: 'app', action: 'mcp.read', actor: `user:${ROOT}`, count: 1_000, project: keys[0]!.project, environment: keys[0]!.environment });
+    }
+  },
+  ask: async (app) => {
+    const at = { projectId: keys[0]!.project, environmentId: keys[0]!.environment, excludeActions: DETAIL_ACTIONS, limit: PLACE_SHOWN };
+    assert.equal((await auditPage(app, at)).rows.length, PLACE_SHOWN);
+    assert.equal((await auditPage(app, { ...at, decision: 'allow' })).rows.length, PLACE_SHOWN);
+  },
+  indexes: ['audit_log_environment_shown_idx'],
+}));
+
+test("a reader's page of their places, behind what it hides of them, the instance's entries and another project's (`auditPage`, `within`): a step of each place's streams", { timeout: 600_000 }, () => holdsFlat(db.owner, {
+  // An auditor of market and of other/dev: what they read there, then each place's detail, and shown entries about no
+  // place, the instance's, and about shop, neither of them theirs.
+  grow: async (owner, size) => {
+    await append(owner, { author: 'app', action: 'secret.write', actor: `user:${ROOT}`, count: 3, project: keys[0]!.project, environment: keys[0]!.environment, secret: keys[0]!.id });
+    await append(owner, { author: 'app', action: 'secret.write', actor: `user:${ROOT}`, count: 2, project: other.project, environment: other.environment, secret: other.id });
+    await append(owner, { author: 'app', action: 'mcp.read', actor: `user:${ROOT}`, count: size / 2, project: keys[0]!.project });
+    await append(owner, { author: 'app', action: 'mcp.read', actor: `user:${ROOT}`, count: size / 2, project: other.project, environment: other.environment });
+    await append(owner, { author: 'app', action: 'member.add', actor: `user:${ROOT}`, count: size });
+    await append(owner, { author: 'app', action: 'secret.write', actor: `user:${ROOT}`, count: size, project: shop.project, environment: shop.environment, secret: shop.id });
+  },
+  ask: async (app) => {
+    const page = await auditPage(app, { within: { projectIds: [keys[0]!.project], environmentIds: [other.environment] }, excludeActions: DETAIL_ACTIONS, limit: PLACE_SHOWN });
+    assert.equal(page.rows.length, PLACE_SHOWN);
+  },
+  indexes: ['audit_log_project_shown_idx', 'audit_log_environment_shown_idx'],
+}));
+
+test('a page of refusals, behind what was allowed since and the refusals it hides (`auditPage`, `?decision=deny`): a step of their index', { timeout: 600_000 }, () => holdsFlat(db.owner, {
+  grow: async (owner, size) => {
+    await append(owner, { author: 'app', action: 'secret.write', decision: 'deny', code: 'forbidden', actor: `user:${ROOT}`, count: PLACE_SHOWN, project: keys[0]!.project });
+    await append(owner, { author: 'app', action: 'sign_in', decision: 'deny', code: 'forbidden', actor: `user:${ROOT}`, count: size / 2 });
+    await append(owner, { author: 'app', action: 'secret.write', actor: `user:${ROOT}`, count: size, project: other.project, environment: other.environment, secret: other.id });
+  },
+  ask: async (app) => assert.equal((await auditPage(app, { decision: 'deny', excludeActions: DETAIL_ACTIONS, limit: PLACE_SHOWN })).rows.length, PLACE_SHOWN),
+  indexes: ['audit_log_denied_idx'],
 }));
 
 test("a page's count of what it hides, with nothing older to show (`auditActionCounts`): of `HIDDEN_COUNTED` at most, whatever its filter, and whether there were more", { timeout: 600_000 }, () => holdsFlat(db.owner, {
