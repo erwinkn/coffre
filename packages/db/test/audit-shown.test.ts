@@ -72,3 +72,28 @@ test('audit_shown is plpgsql, IMMUTABLE, PARALLEL SAFE, of no setting of its own
       FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang WHERE p.oid = 'audit_shown(text)'::regprocedure`);
   assert.deepEqual({ ...made }, { language: 'plpgsql', volatile: 'i', parallel: 's', settings: null, definer: false, public: true });
 });
+
+test("audit_shown stays runnable by every login where the migration's owner revoked a new function's EXECUTE from PUBLIC", { skip }, async () => {
+  // Sol r2: a deployment's owner may have narrowed its default privileges; 0085 grants by name, so the pages' reads keep it.
+  const made = MIGRATION.split('--> statement-breakpoint').filter((statement) => !statement.includes('CREATE INDEX'));
+  assert.ok(made.some((statement) => statement.includes('GRANT EXECUTE ON FUNCTION audit_shown(text) TO PUBLIC')));
+  const runnable = async (statements: string[]) => {
+    let answer: boolean | undefined;
+    await client!
+      .begin(async (tx) => {
+        await tx.unsafe('ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC');
+        await tx.unsafe('CREATE SCHEMA t254_revoked');
+        await tx.unsafe('SET LOCAL search_path = t254_revoked');
+        for (const statement of statements) await tx.unsafe(statement);
+        const [row] = await tx.unsafe<{ public: boolean }[]>(`SELECT has_function_privilege('public', 't254_revoked.audit_shown(text)'::regprocedure, 'EXECUTE') AS public`);
+        answer = row!.public;
+        throw new Error('rolled back');
+      })
+      .catch((error: unknown) => {
+        if (!(error instanceof Error) || error.message !== 'rolled back') throw error;
+      });
+    return answer;
+  };
+  assert.equal(await runnable(made.filter((statement) => !statement.includes('GRANT'))), false, 'the revoked default reaches a function made without the grant');
+  assert.equal(await runnable(made), true);
+});
