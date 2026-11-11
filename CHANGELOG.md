@@ -164,7 +164,8 @@
   streams, merged by `seq`: of the narrowest place, its entries by its
   column and those naming it besides (`also`), each a step of an index of
   the shown entries about it; on a key's page, its environment's 0.14 reads
-  of several keys too; for a reader of some places, each of theirs; and a
+  of several keys too, by its column and by `also`, from indexes of such
+  reads alone; for a reader of some places, each of theirs; and a
   page of refusals a step of their own index. What a page lists is the
   same, an entry two streams hold listed once
   (`packages/server/test/audit-place-pages.test.ts` holds every filter to
@@ -174,12 +175,13 @@
   serves 0.15's uses; an environment left out of a reader's scope inside a
   project they read; a member's page at a place; a place's page of one
   decision; and a reader of more than 100 places. Migration 0085 (SQLite
-  0044) adds eight indexes, built without blocking writes, a place's keyed
+  0044) adds nine indexes, built without blocking writes, a place's keyed
   by its uuid's 16 bytes: a shown write at a key costs 23% more WAL and 11%
   more Postgres CPU to insert, a refusal 31% and 13%, a read through a
   reference 38% and 17%, a detail entry 7% CPU, a use nothing; and
   Postgres plans each statement that reads `audit_log` against them all,
-  3.3 ms more a key's write or reveal, about a quarter more of its CPU
+  3.5 to 3.9 ms more a key's write or reveal and 0.8 ms more a workload's
+  use at the proxy, a quarter to a third more of its CPU
   (`docs/history-sweep.md`; in 0.17, T256 drops or narrows the older place
   indexes and T257 plans the vault's snapshot once).
 - **The credential proxy ends its upstream request when the app's request

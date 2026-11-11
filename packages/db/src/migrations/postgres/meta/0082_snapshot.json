@@ -1,5 +1,5 @@
 {
-  "id": "574ac62c-2c5b-4da1-bf2e-a3da6d70e21d",
+  "id": "262177fb-b009-413f-8e89-cea6a229db92",
   "prevId": "62c5a5ea-ee55-4cb7-976d-3d3bedc6347b",
   "version": "7",
   "dialect": "postgresql",
@@ -1073,6 +1073,28 @@
           ],
           "isUnique": false,
           "where": "action = 'secret.read' AND secret_id IS NULL",
+          "concurrently": true,
+          "method": "btree",
+          "with": {}
+        },
+        "audit_log_listed_also_idx": {
+          "name": "audit_log_listed_also_idx",
+          "columns": [
+            {
+              "expression": "((\"metadata\")::jsonb #>> '{also,environmentId}')",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "seq",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "((\"audit_log\".\"metadata\")::jsonb -> 'also') IS NOT NULL AND action = 'secret.read' AND secret_id IS NULL",
           "concurrently": true,
           "method": "btree",
           "with": {}

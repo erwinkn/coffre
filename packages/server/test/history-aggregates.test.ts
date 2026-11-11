@@ -201,7 +201,7 @@ for (const [name, filter, place, beside, indexes, legacy] of [
   ["a key's page, behind its own rewraps, its environment's other keys' writes and 0.14's reads of them (`LEGACY_READS`)", () => ({ projectId: keys[0]!.project, environmentId: keys[0]!.environment, secretId: keys[0]!.id }),
     (): Place => ({ project: keys[0]!.project, environment: keys[0]!.environment, secret: keys[0]!.id }),
     (): Place[] => [{ project: keys[1]!.project, environment: keys[1]!.environment, secret: keys[1]!.id }, { project: keys[0]!.project, environment: prod }],
-    ['audit_log_secret_shown_idx', 'audit_log_also_secret_shown_idx', 'audit_log_listed_idx', 'audit_log_also_environment_shown_idx'], true],
+    ['audit_log_secret_shown_idx', 'audit_log_also_secret_shown_idx', 'audit_log_listed_idx', 'audit_log_listed_also_idx'], true],
 ] as const) {
   test(`${name} (\`auditPage\`): a step of each of its streams`, { timeout: 600_000 }, () => holdsFlat(db.owner, {
     grow: async (owner, size) => {
@@ -218,6 +218,29 @@ for (const [name, filter, place, beside, indexes, legacy] of [
     indexes: [...indexes],
   }));
 }
+
+test("a key's page behind the ends of its environment's other references, which name the environment besides (`auditPage`; Sol r1 of #562): a step of its streams", { timeout: 600_000 }, () => holdsFlat(db.owner, {
+  // Its five: three writes, and two of 0.14's reads of several keys through references held in shop, which name its
+  // environment besides (`also`) and list it as a holder's; 0.14's reads of several keys elsewhere, as many at either
+  // size, and on Postgres enough that the index of all such reads is no shortcut (Sol's 100,000); then, newer, the ends of shop's references to B, its environment's other key, which name the environment
+  // besides too. The stream of the reads naming it besides read the index of every shown entry naming it so, past each
+  // end: 293 buffers to 2,781 at 4,000 and 40,000 of them.
+  grow: async (owner, size) => {
+    const [a, b] = keys;
+    await append(owner, { author: 'app', action: 'secret.write', actor: `user:${ROOT}`, count: 3, project: a!.project, environment: a!.environment, secret: a!.id });
+    await append(owner, { author: 'vault', action: 'secret.read', actor: `user:${ROOT}`, count: 2, project: shop.project, environment: shop.environment,
+      metadata: JSON.stringify({ also: { projectId: a!.project, environmentId: a!.environment }, secrets: [{ secretId: shop.id, also: { secretId: a!.id } }] }) });
+    await append(owner, { author: 'vault', action: 'secret.read', actor: `user:${ROOT}`, count: TEST_ENGINE === 'postgres' ? 100_000 : LEGACY_READS, project: other.project, environment: other.environment,
+      metadata: JSON.stringify({ secrets: [{ secretId: other.id }] }) });
+    await append(owner, { author: 'vault', action: 'reference.end', count: size, project: shop.project, environment: shop.environment, secret: shop.id,
+      metadata: JSON.stringify({ also: { projectId: b!.project, environmentId: b!.environment, secretId: b!.id } }) });
+  },
+  ask: async (app) => {
+    const page = await auditPage(app, { projectId: keys[0]!.project, environmentId: keys[0]!.environment, secretId: keys[0]!.id, excludeActions: DETAIL_ACTIONS, limit: 100 });
+    assert.deepEqual([page.rows.length, page.more], [PLACE_SHOWN, false]);
+  },
+  indexes: ['audit_log_secret_shown_idx', 'audit_log_listed_idx', 'audit_log_listed_also_idx'],
+}));
 
 test("a project's page behind every other place's entries shown since, and the heartbeats after (`auditPage`; W367's shape): a step of its streams", { timeout: 600_000 }, () => holdsFlat(db.owner, {
   // Its 22 shown entries, the oldest; then reads shown about another project and about no place; then heartbeats.
@@ -236,11 +259,18 @@ test("a project's page behind every other place's entries shown since, and the h
 }));
 
 // A log as deployments' are, heartbeat-led: a tenth of it shown (Fable r2 of #559). A place's and a reader's pages, their
-// few shown entries the oldest, behind runs of a hundred others' shown entries and nine hundred heartbeats.
+// few shown entries the oldest, behind runs of a hundred others' shown entries and nine hundred heartbeats. An auditor of
+// market alone, as `/audit` asks for them, a page of five and one with detail: main walked `audit_log_pkey` back over the
+// whole log for either, 517 pages at 2,000 entries of each shape to 5,016 at 20,000, and 8 to 5,023 for detail's, its
+// project's bitmap at the smaller size (W367's sweep12 of #559).
+const SHOWN = { excludeActions: DETAIL_ACTIONS, limit: 100 };
+const MARKET = () => ({ within: { projectIds: [keys[0]!.project], environmentIds: [] } });
 for (const [name, filter, indexes] of [
-  ["a project's page", () => ({ projectId: keys[0]!.project }), ['audit_log_project_shown_idx']],
-  ["a key's page", () => ({ projectId: keys[0]!.project, environmentId: keys[0]!.environment, secretId: keys[0]!.id }), ['audit_log_secret_shown_idx']],
-  ["a reader's page of market and of other/dev", () => ({ within: { projectIds: [keys[0]!.project], environmentIds: [other.environment] } }), ['audit_log_project_shown_idx', 'audit_log_environment_shown_idx']],
+  ["a project's page", () => ({ ...SHOWN, projectId: keys[0]!.project }), ['audit_log_project_shown_idx']],
+  ["a key's page", () => ({ ...SHOWN, projectId: keys[0]!.project, environmentId: keys[0]!.environment, secretId: keys[0]!.id }), ['audit_log_secret_shown_idx']],
+  ["a reader's page of market and of other/dev", () => ({ ...SHOWN, within: { projectIds: [keys[0]!.project], environmentIds: [other.environment] } }), ['audit_log_project_shown_idx', 'audit_log_environment_shown_idx']],
+  ["an auditor of market's page of five (`/audit?limit=5`)", () => ({ ...MARKET(), excludeActions: DETAIL_ACTIONS, limit: PLACE_SHOWN }), ['audit_log_project_shown_idx']],
+  ["an auditor of market's page with detail (`/audit?detail=1`)", () => ({ ...MARKET(), limit: 100 }), ['audit_log_project_idx']],
 ] as const) {
   test(`${name} in a log a tenth shown, heartbeats the rest (\`auditPage\`): a step of its streams`, { timeout: 600_000 }, () => holdsFlat(db.owner, {
     grow: async (owner, size) => {
@@ -251,8 +281,10 @@ for (const [name, filter, indexes] of [
       }
     },
     ask: async (app) => {
-      const page = await auditPage(app, { ...filter(), excludeActions: DETAIL_ACTIONS, limit: 100 });
-      assert.deepEqual([page.rows.length, page.more], [PLACE_SHOWN, false]);
+      const asked = filter();
+      const page = await auditPage(app, asked);
+      // A page of five is full, and may have more; one of a hundred holds all five.
+      assert.deepEqual([page.rows.length, page.more], [PLACE_SHOWN, asked.limit === PLACE_SHOWN]);
     },
     indexes: [...indexes],
   }));

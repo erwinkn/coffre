@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "ff0fc116-39d6-402f-a6cd-4fc46a8a9b7a",
+  "id": "bab88ba7-1353-4810-8e94-94bbb84f23fb",
   "prevId": "d59d4458-577f-43f8-80e0-d8cf07e42235",
   "tables": {
     "audit_chain_head": {
@@ -616,6 +616,15 @@
           ],
           "isUnique": false,
           "where": "action = 'secret.read' AND secret_id IS NULL"
+        },
+        "audit_log_listed_also_idx": {
+          "name": "audit_log_listed_also_idx",
+          "columns": [
+            "json_extract(\"metadata\", '$.also.environmentId')",
+            "seq"
+          ],
+          "isUnique": false,
+          "where": "json_extract(\"audit_log\".\"metadata\", '$.also') IS NOT NULL AND action = 'secret.read' AND secret_id IS NULL"
         }
       },
       "foreignKeys": {
@@ -4997,6 +5006,13 @@
       "audit_log_also_secret_shown_idx": {
         "columns": {
           "json_extract(\"metadata\", '$.also.secretId')": {
+            "isExpression": true
+          }
+        }
+      },
+      "audit_log_listed_also_idx": {
+        "columns": {
+          "json_extract(\"metadata\", '$.also.environmentId')": {
             "isExpression": true
           }
         }

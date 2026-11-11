@@ -160,7 +160,10 @@ None of these grows in the sweep's shapes; each is a filter the API takes:
 - **An environment left out of a reader's scope inside a project they read**
   (`within.except`): the project's streams read past its entries.
 - **A member's page at a place** (actor and place together): one stream per
-  member, past their entries elsewhere.
+  member, by `audit_log_actor_idx`, past their entries elsewhere. A market
+  auditor's page of one member, 5 entries at market behind that member's
+  writes in shop: 5 → 1,774 pages; behind nine sign-ins in ten of theirs,
+  19 → 182 (Fable r3 of #559).
 - **A place's or a reader's page of one decision**: its streams read past
   the other decision's entries. Flat in the sweep, by the planner's choice.
 - **Detail with `?decision=deny`**, and **a reader of more than 100 places**
@@ -168,12 +171,15 @@ None of these grows in the sweep's shapes; each is a filter the API takes:
 
 ### What the indexes cost a write (T256)
 
-Eight partial indexes (Postgres 0085, SQLite 0044): the shown entries about a
+Nine partial indexes (Postgres 0085, SQLite 0044): the shown entries about a
 project, an environment and a key, by the place's uuid as 16 bytes
 (`uuid_send`, `placeKey`); those naming each besides, by `also`'s text
 (`besideKey`: nothing holds `also` to name uuids, and a cast that failed in an
-index would fail the insert); 0.14's reads of several keys by environment;
-and refusals by decision. Each is partial, so an insert pays for those whose
+index would fail the insert); 0.14's reads of several keys by environment, by
+its column and by `also` (`audit_log_listed_also_idx`: the index of every
+shown entry naming the environment besides held the ends of its other keys'
+references too, which this release writes, 288 pages to 2,782 at 4,000 and
+40,000 of them; Sol r1 of #562); and refusals by decision. Each is partial, so an insert pays for those whose
 condition it meets. Measured on a copy of `audit_log` with every index, 200,000
 entries deep, single-row inserts, pgbench at 4 clients (own Postgres 16.14,
 `placeKey` as 16 bytes; T254's pull request has the method and the text-key
@@ -186,21 +192,31 @@ variant):
 | A read through a reference (`also`) | 2,256 B, 238 µs | 3,119 B (+38%), 279 µs (+17%) |
 | A detail entry (a heartbeat, `mcp.read`) | 1,328 B, 189 µs | +0 B, 202 µs (+7%) |
 
+Measured with the first eight. The ninth holds 0.14's reads through a
+reference alone, which 0.16 writes none of once its vault serves 0.15's uses:
+no insert this release makes meets its condition.
+
 A use's insert (`log_uses`, `log_reads`) gains no index. But a request pays
 more than its inserts: Postgres plans every statement anew, and weighs every
 index of `audit_log` for each time a statement reads it. The vault's snapshot
 reads it several times over, twice a request, and planned in 2.7 ms each
-before T254. Measured on one request at a time, 2,000 entries in
-(`pg_stat_statements`):
+before T254; a workload's use at the proxy reads it once, for the newest
+policy change. Measured on one request at a time (`pg_stat_statements`,
+three rounds of 200, the index sets in turn): a write and a reveal through
+the API fixture 2,000 entries in, a use warm as `request-cost.alone.ts`
+makes it:
 
-| One request | Postgres planning | Postgres CPU |
+| One request | Postgres planning: without, 8, 9 | Postgres CPU: without, 8, 9 |
 |---|---|---|
-| A key's write (`POST /secrets`) | 9.1 → 12.4 ms (+36%) | 15.2 → 19.0 ms (+25%) |
-| A key's reveal | 6.7 → 10.0 ms (+50%) | 10.5 → 14.1 ms (+34%) |
+| A key's write (`POST /secrets`) | 9.0, 12.4, 12.9 ms | 15.2, 18.8, 19.4 ms |
+| A key's reveal | 6.6, 10.1, 10.1 ms | 10.5, 14.5, 14.3 ms |
+| A workload's use at the proxy (`/use`) | 2.3, 3.1, 3.1 ms | 3.4, 4.2, 3.8 ms |
 
-About 0.4 ms a request for each index, keyed by an expression or by a
-column alike (the place's three plain on their columns plan as long), and
-none of it execution (1.4 ms a write, 0.8 a reveal, before and after). The
+None of it is execution (1.4 ms a write, 0.8 a reveal, 0.07 a use, before
+and after). The first eight cost about 0.4 ms each, keyed by an expression
+or by a column alike (the place's three plain on their columns plan as
+long); the ninth, whose condition is short (`LISTED_READS`), costs no more
+than the rounds differ by. The
 older `audit_log_{project,environment,secret}_idx` and the three of `also`
 still key every entry about a place, detail included, beside the new ones;
 T256 (0.17) drops them or narrows them to the entries the new ones leave out,

@@ -506,6 +506,8 @@ export const auditLog = sqliteTable(
     index('audit_log_also_secret_shown_idx').on(besideKey('sqlite', table.metadata, 'secretId'), table.seq)
       .where(sql`json_extract(${table.metadata}, '$.also') IS NOT NULL AND ${entriesOf('shown')}`),
     index('audit_log_listed_idx').on(table.environmentId, table.seq).where(sql.raw(LISTED_READS)),
+    index('audit_log_listed_also_idx').on(besideKey('sqlite', table.metadata, 'environmentId'), table.seq)
+      .where(sql`json_extract(${table.metadata}, '$.also') IS NOT NULL AND ${sql.raw(LISTED_READS)}`),
   ],
 );
 

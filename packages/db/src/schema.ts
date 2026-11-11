@@ -534,7 +534,7 @@ export const auditLog = pgTable(
       .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL`),
     // A place's page (T254, R48): the shown entries about a place, by its column and by `also`, each a stream of its own
     // (`placeStreams`), so that a page back from the newest steps past nothing it hides about the place, nor anything
-    // about another; and a key's environment's reads of several keys (`LISTED_READS`). Keyed by an expression no older
+    // about another; and a key's environment's reads of several keys (`LISTED_READS`), by its column and by `also`. Keyed by an expression no older
     // index is (`placeKey`, a uuid's bytes; `besideKey`, text). Built without blocking writes (`online-indexes.ts`).
     index('audit_log_project_shown_idx').on(placeKey('postgres', table.projectId), table.seq).where(shownAt('project_id')).concurrently(),
     index('audit_log_environment_shown_idx').on(placeKey('postgres', table.environmentId), table.seq).where(shownAt('environment_id')).concurrently(),
@@ -549,6 +549,9 @@ export const auditLog = pgTable(
       .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL AND ${entriesOf('shown')}`)
       .concurrently(),
     index('audit_log_listed_idx').on(placeKey('postgres', table.environmentId), table.seq).where(sql.raw(LISTED_READS)).concurrently(),
+    index('audit_log_listed_also_idx').on(besideKey('postgres', table.metadata, 'environmentId'), table.seq)
+      .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL AND ${sql.raw(LISTED_READS)}`)
+      .concurrently(),
   ],
 );
 

@@ -3727,7 +3727,10 @@ const MOST_STREAMS = 200;
  * of its own `mcp.read`, 5 through its own index). No stream of the reads
  * of several keys says `entriesOf('shown')`'s `seq >= 0`, which every one
  * of them is: an environment's index of shown entries would serve it as
- * well. A page with detail reads the older indexes, which hold it.
+ * well, and the one of those naming it besides walked every other entry
+ * shown so, the ends of its other keys' references among them (288 pages
+ * to 2,782 at 4,000 and 40,000 of them; Sol r1 of #562). A page with
+ * detail reads the older indexes, which hold it.
  *
  *   ?path=market/dev/API_KEY: API_KEY's entries, those naming it besides,
  *   and dev's reads of several keys, by the column and by `also`: 4 streams
@@ -3749,8 +3752,8 @@ function placeStreams(db: Queryable, filter: Omit<AuditFilter, 'limit'>): Stream
     ? keyed(placeKey(engine, columns[place]), value, 'place', [shownAt(PLACE_COLUMNS[place]), ...where])
     : keyed(sql`${columns[place]}`, value, 'uuid', where);
   // And by `also`: through its index of shown entries naming it besides (`besideKey`) when `shown`, which the query says.
-  const beside = (place: PlaceField, value: string, where: (SQL | undefined)[], asShown = shown) =>
-    keyed(asShown ? besideKey(engine, auditLog.metadata, place) : alsoValue(db, place), value, 'text', [alsoPresent(db), ...where]);
+  const beside = (place: PlaceField, value: string, where: (SQL | undefined)[]) =>
+    keyed(shown ? besideKey(engine, auditLog.metadata, place) : alsoValue(db, place), value, 'text', [alsoPresent(db), ...where]);
   // A place's entries, with the rest of the filter but what the streams hold.
   const about = (place: PlaceField, value: string, held: Held[]) => {
     const rest = auditWhere(db, filter, new Set(held));
@@ -3759,13 +3762,14 @@ function placeStreams(db: Queryable, filter: Omit<AuditFilter, 'limit'>): Stream
   const field = filter.secretId !== undefined ? 'secretId' : filter.environmentId !== undefined ? 'environmentId' : filter.projectId !== undefined ? 'projectId' : undefined;
   if (field === 'secretId') {
     if (filter.environmentId === undefined) return undefined;
-    // Its environment's reads of several keys, every one of them shown: asked as such, past none of its other entries.
+    // Its environment's reads of several keys, every one of them shown, by the column and by `also`: each from the index
+    // of such reads alone (`audit_log_listed_idx`, `audit_log_listed_also_idx`), past none of its other entries.
     const rest = auditWhere(db, { ...filter, excludeActions: shown ? undefined : filter.excludeActions }, new Set<Held>(['secretId', 'environmentId']));
     const lists = [listed(db, [filter.secretId!]), rest];
     return [
       ...about('secretId', filter.secretId!, ['secretId']),
       keyed(placeKey(engine, auditLog.environmentId), filter.environmentId, 'place', lists),
-      beside('environmentId', filter.environmentId, [entriesOf('shown'), ...lists], true),
+      keyed(besideKey(engine, auditLog.metadata, 'environmentId'), filter.environmentId, 'text', [alsoPresent(db), ...lists]),
     ];
   }
   if (field !== undefined) return about(field, filter[field]!, [field]);
