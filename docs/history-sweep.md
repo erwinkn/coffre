@@ -122,9 +122,11 @@ replaces the walk with a probe of each version seen, and `readsBy` with the
 newest read of each key and version, which a trigger keeps as reads are
 written.
 
-And the checkpointer's `lowestAbove`, which a forged backlog does not reach,
-by its own test (7,069 pages past 390,000 uses sharing one `at`): a walk of
-`log_uses_at_number_idx` from one `at` to the next.
+And the checkpointer's `lowestAbove`: a walk of `log_uses_at_number_idx` from
+one `at` to the next. The sweep measures it on the first window only (once
+that window is full, below), since the checkpointer refuses the forged
+backlog before draining it. Its own test drains one: 7,069 pages past 390,000
+uses sharing one `at`.
 
 Flat once a backlog is walked (each a batch of a bounded walk, which the first
 sweep measured before the watch caught up): the heartbeat's and the
