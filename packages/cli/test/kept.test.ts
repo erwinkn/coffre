@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -139,4 +139,17 @@ test('a takeover removes only the stale lock it found: one another run made sinc
   assert.equal(takeOver(lock, c), true);
   assert.equal(lockOf(lock), null);
   assert.deepEqual(readdirSync(directory), []);
+});
+
+test('a lock that cannot be read fails the run at once rather than spin on it (review r3 of #561)', async (t) => {
+  const { directory, each } = kept(t);
+  const release = await each().hold();
+  const lock = join(directory, readdirSync(directory).find((name) => name.endsWith('.lock'))!);
+  release();
+  // A link to itself: creating the lock finds it there (EEXIST), opening it fails (ELOOP), as an unreadable one would
+  // (EACCES), which root could still read.
+  symlinkSync(lock, lock);
+  const held = each().hold();
+  assert.equal(await within(held.then(() => undefined, () => undefined), 1000), true);
+  await assert.rejects(held, { code: 'ELOOP' });
 });

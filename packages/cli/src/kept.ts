@@ -124,11 +124,15 @@ export function keptFor(directory: string, origin: string, service: string, toke
       await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
     }
     const fresh = setInterval(() => {
-      withLock(lock, (now, fd) => {
-        if (now.owner !== owner) return;
-        const at = new Date();
-        futimesSync(fd, at, at);
-      });
+      try {
+        withLock(lock, (now, fd) => {
+          if (now.owner !== owner) return;
+          const at = new Date();
+          futimesSync(fd, at, at);
+        });
+      } catch {
+        // A refresh that fails leaves the lock to go stale, as a run that died would: never a crash mid-run.
+      }
     }, LOCK_FRESH_MS);
     fresh.unref();
     return () => {
@@ -157,8 +161,11 @@ function withLock<T>(lock: string, use: (held: Lock, fd: number) => T): T | unde
   let fd: number;
   try {
     fd = openSync(lock, 'r');
-  } catch {
-    return undefined;
+  } catch (error) {
+    // Only a lock gone meanwhile is none: one that cannot be read (EACCES, ELOOP) is an error to report, not a lock to
+    // wait out, which `hold` would retry without end (review r3 of #561).
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
   }
   try {
     const { mtimeMs, ino } = fstatSync(fd);

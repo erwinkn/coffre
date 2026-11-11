@@ -9812,11 +9812,13 @@ function keptFor(directory, origin, service, token) {
 			await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
 		}
 		const fresh = setInterval(() => {
-			withLock(lock, (now, fd) => {
-				if (now.owner !== owner) return;
-				const at = /* @__PURE__ */ new Date();
-				futimesSync(fd, at, at);
-			});
+			try {
+				withLock(lock, (now, fd) => {
+					if (now.owner !== owner) return;
+					const at = /* @__PURE__ */ new Date();
+					futimesSync(fd, at, at);
+				});
+			} catch {}
 		}, LOCK_FRESH_MS);
 		fresh.unref();
 		return () => {
@@ -9841,8 +9843,9 @@ function withLock(lock, use) {
 	let fd;
 	try {
 		fd = openSync(lock, "r");
-	} catch {
-		return;
+	} catch (error) {
+		if (error.code === "ENOENT") return void 0;
+		throw error;
 	}
 	try {
 		const { mtimeMs, ino } = fstatSync(fd);
