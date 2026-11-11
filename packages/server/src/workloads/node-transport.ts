@@ -105,7 +105,7 @@ export const publicLookup: LookupFunction = (hostname, options, callback) => {
   });
 };
 
-/** A header as one string, or null: Node gives a list for one it saw more than once. */
+/** A header as one string, or null. Node joins a repeated `cache-control` itself; the list is the type's. */
 function headerValue(value: string | string[] | undefined): string | null {
   return value === undefined ? null : Array.isArray(value) ? value.join(', ') : value;
 }

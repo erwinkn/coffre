@@ -275,7 +275,10 @@ key import or failure. Two first exchanges each fetch.
 - After an unknown `kid`, or an answer that is not keys (a 404, a page that
   is not JSON, a set with none), that isolate waits a minute before
   fetching that URL again, cold cache included. Until then such tokens get
-  a 503 with `Retry-After: 60`. A 200's `Content-Type` is checked before
+  a 503 with `Retry-After: 60`. When the fetch for an unknown `kid` finds
+  the issuer unreachable, its ten seconds (below) replace the minute: a
+  rotation during a blip is asked about again as soon as the blip may
+  have passed. A 200's `Content-Type` is checked before
   its body is read: a page that says HTML is that answer even if the
   connection then breaks.
 - Each cold isolate has its own cache and cooldowns. Admission, approximate
@@ -286,7 +289,8 @@ key import or failure. Two first exchanges each fetch.
 GitHub's JWKS timed out twice for one deploy job while it answered other
 hosts in 0.4 s.
 - With no set to fall back on (a cold isolate, or one past its stand-in),
-  the fetch is asked once more at once, on a new connection.
+  the fetch is asked once more at once (on Node, on a new connection;
+  Workers' `fetch` says nothing of which it uses).
 - A set past its ten minutes stands in for the one the issuer could not
   serve, for as long as its answer's `Cache-Control` let any cache keep it:
   its `max-age`, at most an hour, an hour if it says none, never past
@@ -313,14 +317,21 @@ hosts in 0.4 s.
   ten minutes.
 - Only a fetch the issuer did not answer lets a set stand in. While the
   isolate waits out the minute after an unknown `kid`, a token whose set
-  has gone stale gets the 503 too: nothing has failed, and the fetch for
-  the `kid` will bring a fresh set.
+  has gone stale gets the 503 too, saying coffre's copy is past its ten
+  minutes: nothing has failed, and the fetch for the `kid` will bring a
+  fresh set.
 - A fetch that fails is told to the cache as it is then, not as it was when
   the fetch began. Another exchange's answer that was not keys, which came
   meanwhile, still ends the stand-in, and its minute stands. A set whose
   hour ended during the fetch does not stand in. Times are the ones at which
   the fetch ended: a fetch that timed out after 5 s waits its ten seconds
   from then.
+- A fetch that fails after another exchange's fetch of the URL was
+  answered takes that set, as new as its own would have been, and asks
+  no more. Say the set is stale, exchange A's fetch hangs, B's is
+  answered, and C fetches for an unknown `kid`, setting the minute; when
+  A's fetch times out, A's token verifies under B's set rather than get
+  that minute's 503.
 
 No copy of fetched keys is kept in the database: an issuer that can't serve
 its keys for an hour can rarely mint tokens. Keys uploaded with a binding

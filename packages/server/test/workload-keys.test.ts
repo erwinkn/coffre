@@ -200,6 +200,10 @@ test("a set past fresh does not stand in during another call's fetch for a key i
   await started(2);
   // Stale now, and no fetch for the minute: the old set is not taken, though the issuer has not failed.
   assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1000), { outcome: 'unavailable 58', fetches: 0 });
+  // Told why: its key may well be in the set, which coffre will not fetch again yet (review r3 of #565).
+  await assert.rejects(attempt(known, KEYS_FRESH_MS + 1000), {
+    message: `coffre's copy of the signing keys ${ISSUER} publishes at ${KEYS} is past its ten minutes, and coffre is not fetching them again yet; try again in 58 s`,
+  });
   refetch.release();
   assert.deepEqual(await lacked, { outcome: 'unavailable 60', fetches: 1 });
   assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1500), { outcome: VERIFIED, fetches: 0 });
@@ -232,6 +236,48 @@ test("a set stands in after a timeout only as the entry is once it failed: anoth
     },
   ];
   assert.deepEqual(await verify(known, KEYS_KEPT_MS - 50), { outcome: `unavailable ${KEYS_UNREACHED_MS / 1000}`, fetches: 1 });
+});
+
+test("a fetch that fails after another call's was answered takes that call's set, whatever quiet stands, and asks no more (review r3 of #565)", async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  // Stale: A's fetch hangs; B's is answered; C, on that fresh set, fetches for a key it lacks and sets the minute.
+  const hung = held((url) => {
+    throw timedOut(url);
+  });
+  scripted = [hung.answer];
+  const a = verify(known, KEYS_FRESH_MS + 1);
+  await started(2);
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 2), { outcome: VERIFIED, fetches: 1 });
+  assert.deepEqual(await verify(unknown, KEYS_FRESH_MS + 3), { outcome: `unavailable ${KEYS_COOLDOWN_MS / 1000}`, fetches: 1 });
+  hung.release();
+  // A's timeout is not retried, and its token verifies under B's set: no 503 past the CLI's patience.
+  assert.deepEqual(await a, { outcome: VERIFIED, fetches: 3 });
+  assert.equal(fetches, 4);
+  assert.deepEqual(await verify(unknown, KEYS_FRESH_MS + 4), { outcome: `unavailable ${KEYS_COOLDOWN_MS / 1000}`, fetches: 0 });
+
+  // A kid refetch that times out after another call's fetch found the rotated key verifies under that set, and keeps its minute.
+  forgetKeys();
+  fetches = 0;
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  // Stale: A's fetch hangs, B's is answered, then C, on that fresh set, fetches for the rotated key, slowly.
+  const slow = held();
+  const refetch = held((url) => {
+    throw timedOut(url);
+  });
+  scripted = [slow.answer, async () => {}, refetch.answer];
+  const old = verify(known, KEYS_FRESH_MS + 1);
+  await started(2);
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 2), { outcome: VERIFIED, fetches: 1 });
+  const lacked = verify(rotated, KEYS_FRESH_MS + 3);
+  await started(4);
+  // The issuer rotates; A is answered with the new set, then C times out.
+  published = [known, rotated];
+  slow.release();
+  assert.deepEqual((await old).outcome, VERIFIED);
+  refetch.release();
+  assert.deepEqual((await lacked).outcome, VERIFIED);
+  assert.equal(fetches, 4);
+  assert.deepEqual(await verify(unknown, KEYS_FRESH_MS + 4), { outcome: 'unavailable 60', fetches: 0 });
 });
 
 test('cold, a fetch that times out is asked again once, at once; failing twice, a 503 that names the issuer and says coffre failed', async () => {
