@@ -16,7 +16,7 @@
  *   ~/.coffre/sessions/3f9c…e1.json   { "v": 1, "until": 1794358800000, "iv": "…", "data": "…" }
  */
 import { createCipheriv, createDecipheriv, createHmac, hkdfSync, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, fstatSync, futimesSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, fstatSync, futimesSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -119,7 +119,11 @@ export function keptFor(directory: string, origin: string, service: string, toke
       // A run holding the lock keeps it fresh while it waits on the instance (an approval may take minutes): one left
       // stale is a run that died holding it, taken over. A live one is waited for, however long its exchange takes.
       const held = lockOf(lock);
-      if (held === null) continue;
+      // Gone between the two: try again, after letting the event loop turn, so that no case of this can spin.
+      if (held === null) {
+        await new Promise((resolve) => setImmediate(resolve));
+        continue;
+      }
       if (Date.now() - held.at > LOCK_MS && takeOver(lock, held)) continue;
       await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
     }
@@ -160,7 +164,10 @@ export type Lock = { owner: string; at: number; ino: number };
 function withLock<T>(lock: string, use: (held: Lock, fd: number) => T): T | undefined {
   let fd: number;
   try {
-    fd = openSync(lock, 'r');
+    // Never through a symbolic link: creating the lock (`wx`) finds a link there whether or not it leads anywhere, so a
+    // dangling one, opened through, would read as no lock and be retried without end (review r4 of #561). Not followed,
+    // any link is ELOOP.
+    fd = openSync(lock, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
     // Only a lock gone meanwhile is none: one that cannot be read (EACCES, ELOOP) is an error to report, not a lock to
     // wait out, which `hold` would retry without end (review r3 of #561).

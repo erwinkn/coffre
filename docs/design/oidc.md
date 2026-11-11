@@ -687,7 +687,9 @@ logging out, in `~/.coffre/sessions/`:
   approval can take minutes) and removes it only if it is still its own.
   A lock nobody kept fresh for 30 seconds is a dead run's, and is taken
   over. A run reads a lock's holder, freshness and identity (its inode)
-  through one descriptor, and removes one, to take it over or release it,
+  through one descriptor, never through a symbolic link (a link there, or a
+  lock it cannot read, fails the run rather than be waited out), and
+  removes one, to take it over or release it,
   only under a second lock file held for that one step (`<lock>.break`),
   after reading it again: the stale file it found and no other, its own and
   no other. The instance still spends the token once, so a lock defeated

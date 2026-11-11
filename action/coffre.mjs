@@ -2,7 +2,7 @@
 import { createRequire } from "node:module";
 import { inspect, parseArgs, promisify } from "node:util";
 import { execFile, spawn } from "node:child_process";
-import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, futimesSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, constants, existsSync, fstatSync, futimesSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { EOL, homedir, hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as setTimeout$1 } from "node:timers/promises";
@@ -9807,7 +9807,10 @@ function keptFor(directory, origin, service, token) {
 				if (error.code !== "EEXIST") throw error;
 			}
 			const held = lockOf(lock);
-			if (held === null) continue;
+			if (held === null) {
+				await new Promise((resolve) => setImmediate(resolve));
+				continue;
+			}
 			if (Date.now() - held.at > LOCK_MS && takeOver(lock, held)) continue;
 			await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
 		}
@@ -9842,7 +9845,7 @@ const PAUSE = new Int32Array(new SharedArrayBuffer(4));
 function withLock(lock, use) {
 	let fd;
 	try {
-		fd = openSync(lock, "r");
+		fd = openSync(lock, constants.O_RDONLY | constants.O_NOFOLLOW);
 	} catch (error) {
 		if (error.code === "ENOENT") return void 0;
 		throw error;

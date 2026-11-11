@@ -153,3 +153,15 @@ test('a lock that cannot be read fails the run at once rather than spin on it (r
   assert.equal(await within(held.then(() => undefined, () => undefined), 1000), true);
   await assert.rejects(held, { code: 'ELOOP' });
 });
+
+test('a lock that is a link to nothing fails the run at once rather than spin on it (review r4 of #561)', async (t) => {
+  const { directory, each } = kept(t);
+  const release = await each().hold();
+  const lock = join(directory, readdirSync(directory).find((name) => name.endsWith('.lock'))!);
+  release();
+  // Creating the lock finds the link (EEXIST); opening through it would find no file (ENOENT), as a lock gone meanwhile.
+  symlinkSync(join(directory, 'nowhere'), lock);
+  const held = each().hold();
+  assert.equal(await within(held.then(() => undefined, () => undefined), 1000), true);
+  await assert.rejects(held, { code: 'ELOOP' });
+});
