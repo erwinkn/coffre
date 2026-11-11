@@ -56,7 +56,7 @@ export async function issueOnPostgres(db: Queryable, c: IssueCall): Promise<Answ
   return JSON.parse(row!.answer) as Answer;
 }
 
-/** `change_bindings` (migrations 0037, 0040, 0047; 0075's overload, with its sweep): one statement, its own transaction, its answer one JSON value. */
+/** `change_bindings` (migrations 0037, 0040, 0047; 0079's overload, with its sweep; 0083's, with the binding's `record`): one statement, its own transaction, its answer one JSON value. */
 export async function bindingsOnPostgres(db: Queryable, c: BindingsCall): Promise<Answer> {
   const m = c.make;
   const r = m?.read ?? null;
@@ -80,7 +80,7 @@ export async function bindingsOnPostgres(db: Queryable, c: BindingsCall): Promis
     ${String(c.revokedAt)}::bigint, ${c.revokedBy}::text,
     ${array(c.changes.map((x) => x.requestId))}::text[], ${array(c.changes.map((x) => x.object))}::uuid[], ${array(c.changes.map((x) => x.payload))}::text[],
     ${array(c.changes.map((x) => x.seal))}::bytea[], ${array(c.changes.map((x) => x.mac))}::bytea[],
-    ${c.sweep}::boolean
+    ${c.sweep}::boolean, ${b?.record ?? null}::text
   )::text AS answer`);
   return JSON.parse(row!.answer) as Answer;
 }

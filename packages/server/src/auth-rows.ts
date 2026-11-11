@@ -97,6 +97,8 @@ const WORKLOAD_FIELDS = [
  * app seals them with one (`sealScopes`); a scope cleared or changed fails
  * either way. A handle's places do the same, and a binding's policy, last:
  * a binding that carries one never checks as one `/api/auth/oidc` takes.
+ * A binding's recorded claims (0.17) wrap that again, outermost: every
+ * binding before them records none, and checks as it was sealed.
  * A workload's session is its own kind first, whatever else it carries,
  * and so is an enrollment code.
  *
@@ -113,8 +115,8 @@ function kindOf(table: AuthTable, row: object): { kind: string; fields: readonly
 }
 
 function baseKindOf(table: AuthTable, row: object): { kind: string; fields: readonly string[] } {
-  const { kind: credentialKind, createdBy, scope, jwks, places, policy } = row as {
-    kind?: unknown; createdBy?: unknown; scope?: unknown; jwks?: unknown; places?: unknown; policy?: unknown;
+  const { kind: credentialKind, createdBy, scope, jwks, places, policy, record } = row as {
+    kind?: unknown; createdBy?: unknown; scope?: unknown; jwks?: unknown; places?: unknown; policy?: unknown; record?: unknown;
   };
   if (table === 'credentials' && credentialKind === 'workload') return { kind: 'workload_credentials', fields: WORKLOAD_FIELDS };
   // An enrollment code always has a scope, in its own fields: one kind, which composes with none; a passkey too.
@@ -127,7 +129,8 @@ function baseKindOf(table: AuthTable, row: object): { kind: string; fields: read
   const scoped = scope == null ? { kind, fields } : { kind: `scoped_${kind}`, fields: [...fields, 'scope'] };
   // A handle's places, which the proxy's stable URL resolves to, make a kind of their own: a handle of 0.8 has none, and checks as it was sealed.
   if (table === 'credentials' && places != null) return { kind: `placed_${scoped.kind}`, fields: [...scoped.fields, 'places'] };
-  return table === 'service_bindings' && policy != null ? { kind: `policed_${scoped.kind}`, fields: [...scoped.fields, 'policy'] } : scoped;
+  const policed = table === 'service_bindings' && policy != null ? { kind: `policed_${scoped.kind}`, fields: [...scoped.fields, 'policy'] } : scoped;
+  return table === 'service_bindings' && record != null ? { kind: `recorded_${policed.kind}`, fields: [...policed.fields, 'record'] } : policed;
 }
 
 export type AuthRow = { [K in AuthTable]: Fields[K] & { authMac: Buffer } }[AuthTable];

@@ -1016,6 +1016,12 @@ export type BindingColumns = {
   claims: string;
   scope: string | null;
   policy: string | null;
+  /**
+   * The claims its sign-ins record (docs/design/oidc.md, section 9.3), as
+   * `recordText` writes them; null for none, as on every binding before
+   * 0.17, whose app sends none (`checkBinding` reads it so).
+   */
+  record: string | null;
   revoked: boolean;
 };
 

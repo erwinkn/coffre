@@ -541,7 +541,7 @@ test("a binding made on 0.14, vouched for, is sealed with the instance it was ma
     const id = randomUUID();
     const row = { id, principal: CI, generation: 0, profile: 'github', issuer: ISSUER, jwksUri: `${ISSUER}/.well-known/jwks`, claims: '{"repository_id":"1"}', scope: null, policy: null };
     await db.owner.insert(serviceBindings).values({ ...row, authMac: randomBytes(32), label: null, createdBy: ROOT, createdAt: new Date() });
-    return { ...row, origin: ORIGIN, revoked: false };
+    return { ...row, origin: ORIGIN, record: null, revoked: false };
   };
   const [vouched, unvouched, edited, named] = [await binding(), await binding(), await binding(), await binding()];
   // An instance written into one of 0.14's around the app, which its MAC does not cover: no row of 0.14's names one (review r2).
@@ -555,7 +555,7 @@ test("a binding made on 0.14, vouched for, is sealed with the instance it was ma
   const rows_ = await rowsOf_();
   const keys = w.config.signingKeys.map(sealKey);
   // Sealed with the instance it was made on, which its row now says too: its runs' tokens name it (PR 3b).
-  assert.deepEqual(rows_[vouched.id]!.seal, sealOf(keys[0]!, { kind: 'binding', id: vouched.id }, { kind: 'binding', ...vouched, scope: null }));
+  assert.deepEqual(rows_[vouched.id]!.seal, sealOf(keys[0]!, { kind: 'binding', id: vouched.id }, { kind: 'binding', ...vouched, record: undefined, scope: null }));
   assert.equal(rows_[vouched.id]!.origin, ORIGIN);
   assert.deepEqual([rows_[unvouched.id]!.seal, rows_[unvouched.id]!.origin], [null, null]);
   // Edited around the app after it was sealed: a claim widened.
@@ -670,7 +670,7 @@ test("a binding's genesis is held to its scope too, as JSON: a row whose scope m
     const id = randomUUID();
     const row = { id, principal: CI, generation: 0, profile: 'github', issuer: ISSUER, jwksUri: `${ISSUER}/.well-known/jwks`, claims: '{"repository_id":"1"}', scope, policy: null };
     await db.owner.insert(serviceBindings).values({ ...row, authMac: randomBytes(32), label: null, createdBy: ROOT, createdAt: new Date() });
-    return { ...row, origin: 'https://secrets.acme.example', revoked: false };
+    return { ...row, origin: 'https://secrets.acme.example', record: null, revoked: false };
   };
   const scope = JSON.stringify([{ projectId: w.project, environmentId: null, role: 'viewer' }]);
   const [scoped, garbled] = [await binding(scope), await binding('{not json')];

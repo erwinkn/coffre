@@ -734,6 +734,9 @@ export const serviceBindings = pgTable(
     scope: text(),
     // What a workload's binding says beyond its claims (`BindingPolicy`), canonical JSON: null on a binding `/api/auth/oidc` takes, never on another (docs/design/workload-access.md, section 11).
     policy: text(),
+    // The claims its sign-ins record beyond the run's (`recordText`; docs/design/oidc.md, section 9.3), JSON, the names
+    // sorted: null for none, as on every binding before 0.17 (0083_binding_record). Under its MAC and its seal when set.
+    record: text(),
     // The instance it was made on, its public URL, which its object's seal covers (0040_binding_origin; PR 3b): null on one
     // made before, which is named on the instance's public URL.
     origin: text(),

@@ -10,6 +10,7 @@
  */
 import { createHash } from 'node:crypto';
 import { chmodSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -18,6 +19,7 @@ import { contentDigest, declaredDigest, MAX_DIGESTED_BODY, UNSIGNED_HEADERS } fr
 import { askedNonce, aws, azure, CoffreError, enrollment, fly, gcp, github, kubernetes, oidc, vercel, workload, type Proof, type Workload } from '@coffre/client/workload';
 
 import { clash, environmentPaths, listOf } from './environments.ts';
+import { keptDirectory, keptFor } from './kept.ts';
 import { UsageError } from './manage.ts';
 import { readSecret } from './secret.ts';
 import { listen, type Tunnel } from './tunnels.ts';
@@ -93,8 +95,24 @@ export async function exchange(origin: string, service: string, token: string, f
  * signed, and its databases through tunnels that sign their upgrades.
  */
 
-/** The proofs `--proof` names. Each secret one (an enrollment code, an ID token) is read from stdin, never an argument. */
-export const PROOFS = 'kubernetes[:<file>], aws, gcp, azure:<audience>, fly, vercel, github, enrollment or oidc';
+/** The proofs `--proof` names. Each secret one (an enrollment code, an ID token) is read from stdin or a file, never an argument. */
+export const PROOFS = 'kubernetes[:<file>], aws, gcp, azure:<audience>, fly, vercel, github, enrollment or oidc[:<file>]';
+
+/** An ID token in a file, as a platform writes one (`/etc/capy/cloud-access/…`): read whole, its whitespace trimmed. */
+async function tokenIn(path: string): Promise<string> {
+  const token = (await readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
+    throw new Error(`no ID token at ${path} (${error.code ?? error.message})`);
+  })).trim();
+  if (token === '') throw new Error(`the file ${path} holds no ID token`);
+  return token;
+}
+
+/** The ID token `--proof oidc` (stdin) or `--proof oidc:<file>` gives, read once; null for any other proof. */
+export async function givenToken(spec: string | undefined): Promise<string | null> {
+  if (spec === 'oidc') return readSecret({ label: 'ID token', hint: "the platform's ID token for this instance: GitLab's id_tokens entry, or a custom issuer's" });
+  if (spec?.startsWith('oidc:') === true && spec.length > 5) return tokenIn(spec.slice(5));
+  return null;
+}
 
 /** A `--proof`, as `@coffre/client/workload` proves it; none, in a GitHub Actions job, is the job's ID token. */
 export async function proofOf(spec: string | undefined, runner: Runner): Promise<Proof> {
@@ -122,6 +140,8 @@ export async function proofOf(spec: string | undefined, runner: Runner): Promise
     case 'enrollment':
       return enrollment(await readSecret({ label: 'Enrollment code', hint: 'coffre_enr_…, from `coffre enroll <service>`; piped in, as printf %s "$COFFRE_ENROLL" | coffre …' }));
     case 'oidc': {
+      // A file is read again for each proof: a sidecar's next session takes the token its platform wrote since.
+      if (rest) return oidc(() => tokenIn(rest));
       const token = await readSecret({ label: 'ID token', hint: "the platform's ID token for this instance: GitLab's id_tokens entry, or a custom issuer's" });
       return oidc(token);
     }
@@ -276,10 +296,25 @@ export type KeyBound = { places: string[]; env: Record<string, string>; close: (
  * lists in `reads`), `COFFRE_CREDENTIALS` naming each credential at a local
  * listener, and a tunnel listener for each database. Null where the
  * instance has no key-bound sessions yet, which the bearer exchange serves.
+ *
+ * `--proof oidc` and `oidc:<file>` give an ID token, spent once and given
+ * again unchanged for its life: the session it buys is kept for the runs
+ * after, sealed by the token (`kept.ts`; docs/design/oidc.md, section 9.4).
+ * Every other proof's session ends with the command.
  */
-export async function keyBound(origin: string, service: string, proof: Proof, positionals: readonly string[], log: (line: string) => void, fetchImpl: typeof fetch): Promise<KeyBound | null> {
-  // The run ends its session when its command ends, a SIGTERM passed on to the command included.
-  const coffre = await workload({ url: origin, service, proof, log, sigterm: false, fetch: fetchImpl }).catch((error: unknown) => {
+export async function keyBound(origin: string, service: string, spec: string | undefined, runner: Runner, positionals: readonly string[], log: (line: string) => void, fetchImpl: typeof fetch): Promise<KeyBound | null> {
+  const token = await givenToken(spec);
+  const proof = token === null ? await proofOf(spec, runner) : oidc(token);
+  const kept = token === null ? null : keptFor(keptDirectory(), origin, service, token);
+  // One run exchanges a token at a time: another that comes meanwhile waits, and goes on with the session it kept.
+  const release = kept === null ? null : await kept.hold();
+  const signed = (async () => {
+    // The run ends its session when its command ends, a SIGTERM passed on to the command included; a kept one goes on.
+    const keep = kept === null ? undefined : { session: kept.open(), save: kept.save };
+    if (keep?.session != null) log(`coffre: ${service}, on the session this token bought before, until ${new Date(keep.session.notAfter).toISOString()}`);
+    return workload({ url: origin, service, proof, log, sigterm: false, fetch: fetchImpl, ...(keep === undefined ? {} : { keep }) });
+  })().finally(() => release?.());
+  const coffre = await signed.catch((error: unknown) => {
     if (error instanceof CoffreError && (error.status === 404 || error.status === 501)) return null;
     throw error;
   });
@@ -308,6 +343,11 @@ export async function keyBound(origin: string, service: string, proof: Proof, po
     const plans: [string, Planned][] = [];
     for (const place of places) {
       const response = await coffre.fetch(`${origin}/use/${place.split('/').map(encodeURIComponent).join('/')}`, { headers: { accept: 'application/json' } });
+      if (response.status === 401 && kept !== null) {
+        // The kept session ended at the instance (revoked, frozen, its binding removed): of no use to the next run either.
+        kept.save(null);
+        throw new Error(`${origin} no longer knows the session this ID token bought, and the token is spent: run again once your platform gives a fresh one`);
+      }
       const plan = (await response.json().catch(() => null)) as (Planned & { message?: unknown }) | null;
       if (!response.ok || plan === null) throw new Error(`${origin} gave ${service} no plan for ${place} (${response.status})${typeof plan?.message === 'string' ? `: ${plan.message}` : ''}`);
       plans.push([place, plan]);

@@ -628,6 +628,8 @@ export const routes = {
       jwks: keySet.optional(),
       // A workload's binding's policy (docs/design/workload-access.md, section 11), checked by its profile (`checkPolicy`).
       policy: z.record(z.string(), z.unknown()).optional(),
+      // Claims of its sign-ins' tokens to record beyond the run's, by name (`checkRecord`; docs/design/oidc.md, section 9.3).
+      record: z.array(z.string()).optional(),
     }).strict(),
     // `?dryRun=1` checks the binding and asks its issuer where its keys are, and writes nothing.
     query: dryRunFlag,

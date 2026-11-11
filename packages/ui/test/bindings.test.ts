@@ -144,17 +144,22 @@ test('the GitLab form names the namespace and the project, and the other issuer 
   checkBinding(gitlab);
   assert.equal(bindingOf(form({ platform: 'gitlab', gitlabUrl: 'https://gitlab.acme.example', projectId: '1', namespaceId: '2' })).issuer, 'https://gitlab.acme.example');
 
-  const other = bindingOf(form({ platform: 'other', issuer: 'https://idp.acme.example', sub: '104', extra: 'email_verified=true\n\n  hd = acme.example ' }));
+  const other = bindingOf(form({ platform: 'other', issuer: 'https://idp.acme.example', claims: 'sub=104\nemail_verified=true\n\n  hd = acme.example ' }));
   assert.deepEqual(other, { profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: '104', email_verified: 'true', hd: 'acme.example' } });
-  assert.throws(() => bindingOf(form({ platform: 'other', issuer: 'https://idp.acme.example', sub: 'x', extra: 'oops' })), /"oops" is not <claim>=<value>/);
+  assert.throws(() => bindingOf(form({ platform: 'other', issuer: 'https://idp.acme.example', claims: 'sub=x\noops' })), /"oops" is not <claim>=<value>/);
+  // Any claims, sub or none (0.17), and those its sign-ins record; at least one claim.
+  const capy = bindingOf(form({ platform: 'other', issuer: 'https://api.capy.ai/oidc/orgs/o_123', claims: 'project=p_7', record: 'thread, user' }));
+  assert.deepEqual(capy, { profile: 'custom', issuer: 'https://api.capy.ai/oidc/orgs/o_123', claims: { project: 'p_7' }, record: ['thread', 'user'] });
+  checkBinding(capy);
+  assert.throws(() => bindingOf(form({ platform: 'other', issuer: 'https://idp.acme.example', claims: ' \n' })), /Name at least one claim that says who/);
 
   // A private cluster's keys, pasted: sent with it, for the server to check.
   const cluster = 'https://kubernetes.default.svc.cluster.local';
   const keys = { keys: [{ kty: 'RSA', kid: 'k8s', n: 'AQAB', e: 'AQAB' }] };
-  const pasted = bindingOf(form({ platform: 'other', issuer: cluster, sub: 'system:serviceaccount:ci:deploy', extra: 'kubernetes.io.serviceaccount.uid=4f1c', jwks: JSON.stringify(keys) }));
+  const pasted = bindingOf(form({ platform: 'other', issuer: cluster, claims: 'sub=system:serviceaccount:ci:deploy\nkubernetes.io.serviceaccount.uid=4f1c', jwks: JSON.stringify(keys) }));
   assert.deepEqual(pasted, { profile: 'custom', issuer: cluster, claims: { sub: 'system:serviceaccount:ci:deploy', 'kubernetes.io.serviceaccount.uid': '4f1c' }, jwks: keys });
-  assert.throws(() => bindingOf(form({ platform: 'other', issuer: cluster, sub: 'x', jwks: '{ keys' })), /not JSON/);
-  assert.throws(() => bindingOf(form({ platform: 'other', issuer: cluster, sub: 'x', jwks: '{"kty":"RSA"}' })), /a key set/);
+  assert.throws(() => bindingOf(form({ platform: 'other', issuer: cluster, claims: 'sub=x', jwks: '{ keys' })), /not JSON/);
+  assert.throws(() => bindingOf(form({ platform: 'other', issuer: cluster, claims: 'sub=x', jwks: '{"kty":"RSA"}' })), /a key set/);
   assert.equal(keySetOf('  '), undefined);
 });
 
@@ -183,6 +188,7 @@ test('a binding reads in a line: what it trusts, and at which ref', () => {
   assert.deepEqual(summary({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: '104' } }), { title: 'idp.acme.example', detail: 'sub 104' });
   // A binding that carries its keys may name any issuer, a URL or not.
   assert.deepEqual(summary({ profile: 'custom', issuer: 'kapsule:fr-par', claims: { sub: 'x' } }), { title: 'kapsule:fr-par', detail: 'sub x' });
+  assert.deepEqual(summary({ profile: 'custom', issuer: 'https://api.capy.ai/oidc/orgs/o_123', claims: { org: 'o_123', project: 'p_7' } }), { title: 'api.capy.ai', detail: 'org o_123 · project p_7' });
   assert.equal(keysOf({ jwksUri: 'https://idp.acme.example/keys', keys: null }), 'https://idp.acme.example/keys');
   assert.equal(keysOf({ jwksUri: 'sha256:00', keys: [{ kid: 'k8s', alg: 'RS256', thumbprint: 't1' }, { kid: null, alg: 'ES256', thumbprint: 't2' }] }), 'Uploaded: k8s (RS256), t2 (ES256)');
 });

@@ -17,8 +17,8 @@ import { init, KINDS, type Kind } from './init.ts';
 import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks, runsCode } from './github-env.ts';
-import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_OPTIONS, TRUST_USAGE } from './trust.ts';
-import { exchange, ExchangeFailed, idToken, keyBound, proofOf } from './workload.ts';
+import { bindingFrom, describeBindings, describeExposure, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_OPTIONS, TRUST_USAGE } from './trust.ts';
+import { exchange, ExchangeFailed, idToken, keyBound } from './workload.ts';
 import { commandLine, readSession } from './flags.ts';
 import { requestLine, stderr, timed, took } from './timings.ts';
 import { readSecret } from './secret.ts';
@@ -1549,7 +1549,7 @@ async function run(args: string[]): Promise<void> {
   if (flags.proof !== undefined && to.credential.kind !== 'workload') fail('--proof is how a service proves itself: coffre --service <name> run --proof …');
   const bound =
     to.credential.kind === 'workload'
-      ? await keyBound(to.origin, to.credential.service, await proofOf(flags.proof, process.env), positionals, (line) => process.stderr.write(`${line}\n`), fetching(to.origin)).catch(
+      ? await keyBound(to.origin, to.credential.service, flags.proof, process.env, positionals, (line) => process.stderr.write(`${line}\n`), fetching(to.origin)).catch(
           (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
         )
       : null;
@@ -1936,7 +1936,7 @@ async function trust(args: string[]): Promise<void> {
   // A workload's binding, its profile and policy, is the route's from PR 1a of docs/design/workload-access.md on: until then, the server refuses it with a 400.
   const input = { ...binding, ...(scope === undefined ? {} : { scope }), ...(jwks === undefined ? {} : { jwks }), label: label ?? null, replaces: replace ?? [] } as Parameters<CoffreClient['bindings']['preview']>[1];
   const plan = await coffre.bindings.preview(member, input);
-  const events = describeEvents(plan);
+  const events = describeExposure(plan);
   if (!apply) {
     process.stdout.write(describePlan(member, plan, null));
     if (events !== null) process.stdout.write(`${events}\n`);

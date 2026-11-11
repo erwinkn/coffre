@@ -1,6 +1,6 @@
 import type { BindingPlan, BindingView, CoffreClient, KeysPlan } from '@coffre/client';
 import { credentialScopeInWords } from '@coffre/core/access';
-import { claimValues, EVENT_EXPOSURE, githubEventsAt, GITLAB_PIPELINE_SOURCES } from '@coffre/core/workloads';
+import { claimValues, customExposure, EVENT_EXPOSURE, githubEventsAt, GITLAB_PIPELINE_SOURCES } from '@coffre/core/workloads';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment, useEffect, useState } from 'react';
 import {
@@ -157,7 +157,7 @@ export function TrustedWorkloads({ serviceId, bindings, grants }: { serviceId: s
   );
 }
 
-function Claims({ binding }: { binding: Pick<BindingPlan, 'issuer' | 'jwksUri' | 'keys' | 'claims'> }) {
+function Claims({ binding }: { binding: Pick<BindingPlan, 'issuer' | 'jwksUri' | 'keys' | 'claims' | 'record'> }) {
   return (
     <table className="claims-table">
       <tbody>
@@ -171,6 +171,12 @@ function Claims({ binding }: { binding: Pick<BindingPlan, 'issuer' | 'jwksUri' |
             <td className="mono">{claimValues(value).join(', ')}</td>
           </tr>
         ))}
+        {binding.record !== null && (
+          <tr>
+            <th>records</th>
+            <td className="mono">{binding.record.join(', ')}</td>
+          </tr>
+        )}
         <tr>
           <th>keys</th>
           <td className="mono">{keysOf(binding)}</td>
@@ -655,22 +661,29 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
             {form.platform === 'other' && (
               <>
                 {field('Issuer', 'issuer', {
-                  placeholder: 'https://accounts.google.com',
+                  placeholder: 'https://idp.acme.example',
                   hint: form.jwks.trim() === '' ? undefined : 'Exactly as its tokens name it in iss: with its keys pasted below, coffre asks it nothing.',
                 })}
-                {field('Subject (sub)', 'sub', { mono: true, hint: "You vouch for what this issuer's subject means: a Google service account's unique ID, say." })}
                 <label className="field">
-                  <span className="label">Other claims, one <span className="mono">name=value</span> a line</span>
+                  <span className="label">Claims, one <span className="mono">name=value</span> a line</span>
                   <textarea
                     className="input mono"
                     rows={3}
-                    value={form.extra}
+                    value={form.claims}
                     spellCheck={false}
-                    placeholder="kubernetes.io.serviceaccount.uid=…"
-                    onChange={(event) => set({ extra: event.target.value })}
+                    placeholder={'sub=104…\nproject=p_7'}
+                    onChange={(event) => set({ claims: event.target.value })}
                   />
-                  <span className="hint">A nested claim goes by its path, its names joined by dots.</span>
+                  <span className="hint">
+                    Each matched exactly. You vouch for what they mean: name those that say who, such as a workload's{' '}
+                    <span className="mono">sub</span> or a project's ID. A nested claim goes by its path, its names joined by dots.
+                  </span>
                 </label>
+                {field('Record (optional)', 'record', {
+                  mono: true,
+                  placeholder: 'thread, user',
+                  hint: "Claims copied from each sign-in's token into its audit entry, which keeps them: identifiers, never names or emails.",
+                })}
                 <label className="field">
                   <span className="label">Keys (optional)</span>
                   <textarea
@@ -717,6 +730,7 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
             </p>
             <Claims binding={plan} />
             <Exposure events={claimValues(plan.claims.event_name)} />
+            {plan.profile === 'custom' && <Notice tone="warn">{customExposure(plan.issuer, plan.claims)}</Notice>}
             {unread !== null && <Notice tone="warn">{unread}</Notice>}
             {plan.replaces.length > 0 && (
               <Notice tone="info">

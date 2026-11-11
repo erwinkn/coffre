@@ -4528,7 +4528,7 @@ class VaultService implements Vault {
     if (idToken === null) return refuse('malformed', 'a sign-in through a binding of uploaded keys comes with its token, for the vault to verify');
     let proven: RunProof;
     try {
-      const run = { profile: binding.profile as WorkloadProfile, issuer: binding.issuer, origin: binding.origin, jwksUri: binding.jwksUri, jwks: idToken.jwks, claims: binding.claims, policy: binding.policy };
+      const run = { profile: binding.profile as WorkloadProfile, issuer: binding.issuer, origin: binding.origin, jwksUri: binding.jwksUri, jwks: idToken.jwks, claims: binding.claims, policy: binding.policy, record: binding.record };
       proven = await verifyRunToken(idToken.token, run, { now: new Date(at), workload: jkt === null ? null : { jkt } });
     } catch (error) {
       if (error instanceof RunProofRefused) return refuse(error.reason, error.message, error.kid);

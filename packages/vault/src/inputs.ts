@@ -116,6 +116,8 @@ export type BindingInput = {
   claims: string;
   scope: CredentialScope | null;
   policy: string | null;
+  /** The claims its sign-ins record (0.17), as its column holds them: absent for none, so a binding sealed before seals as it did. */
+  record?: string;
   revoked: boolean;
 };
 

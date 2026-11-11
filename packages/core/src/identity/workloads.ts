@@ -38,7 +38,8 @@ export const GITLAB_ISSUER = 'https://gitlab.com';
  * - `github-reusable-organization`: the same, called from any repository of
  *   the organization: an explicit choice, never what a missing claim means.
  * - `gitlab`: a project's pipelines, outside merge requests.
- * - `custom`: any other issuer, by its subject, which the owner vouches for.
+ * - `custom`: any other issuer, by one or more claims of any name, which the
+ *   owner vouches for (docs/design/oidc.md, section 9.1).
  *
  * Then the platforms of docs/design/workload-access.md, section 4, which
  * sign in at `/api/auth/workload` alone, for a key-bound session:
@@ -117,7 +118,7 @@ export const REQUIRED_CLAIMS: Record<WorkloadProfile, readonly string[]> = {
   'github-reusable': ['repository_owner_id', 'repository_id', 'ref', 'event_name', 'job_workflow_ref', 'job_workflow_sha'],
   'github-reusable-organization': ['repository_owner_id', 'ref', 'event_name', 'job_workflow_ref', 'job_workflow_sha'],
   gitlab: ['namespace_id', 'project_id', 'ref_type', 'ref', 'pipeline_source'],
-  custom: ['sub'],
+  custom: [],
   kubernetes: ['sub', 'kubernetes.io.serviceaccount.uid'],
   gcp: ['sub'],
   azure: ['tid', 'oid'],
@@ -183,6 +184,16 @@ const EVENT_CLAIM: Record<WorkloadProfile, { name: string; values: readonly stri
 
 /** At most this many live bindings per service. */
 export const MAX_BINDINGS = 16;
+
+/** The profiles whose proof carries no claims: their bindings name none, and record none. */
+const CLAIMLESS: readonly WorkloadProfile[] = ['enrollment', 'cloudflare'];
+
+/**
+ * Claims that say how a token was issued, not to whom (OIDC Core, sections
+ * 2 and 5.1): a custom binding may narrow by them, never pin them alone,
+ * for each is shared by every subject its issuer signs for alike.
+ */
+export const NON_IDENTIFYING = new Set(['acr', 'amr', 'at_hash', 'auth_time', 'azp', 'c_hash', 'email_verified', 'nonce', 'phone_number_verified', 'sid']);
 
 /** Claims a binding never names: the issuer is its own field, and the audience, times and ID are the exchange's. */
 const RESERVED = new Set(['iss', 'aud', 'exp', 'iat', 'nbf', 'jti']);
@@ -315,7 +326,12 @@ export function checkBinding(
     }
     claims[name] = value;
   }
-  if (REQUIRED_CLAIMS[profile].length === 0 && entries.length > 0) throw new BindingInvalid(`a ${profile} binding names no claims: its proof carries none`);
+  if (CLAIMLESS.includes(profile) && entries.length > 0) throw new BindingInvalid(`a ${profile} binding names no claims: its proof carries none`);
+  // A custom issuer's claims are the owner's to vouch for, but none would trust every token it signs, and claims shared by every subject say nobody.
+  if (profile === 'custom' && entries.length === 0) throw new BindingInvalid('a custom binding names one or more claims, each matched exactly: with none, every token its issuer signs would sign in');
+  if (profile === 'custom' && Object.keys(claims).every((name) => NON_IDENTIFYING.has(name))) {
+    throw new BindingInvalid(`${Object.keys(claims).join(', ')} say${entries.length === 1 ? 's' : ''} how a token was issued, not to whom: name a claim that says who, such as sub, beside it`);
+  }
   const missing = REQUIRED_CLAIMS[profile].filter((name) => claims[name] === undefined);
   if (missing.length > 0) throw new BindingInvalid(`the ${profile} profile requires ${missing.join(', ')}`);
   if (profile === 'github-reusable-organization' && claims.repository_id !== undefined) {
@@ -341,6 +357,65 @@ function checkIssuerName(issuer: string): void {
     throw new BindingInvalid(`${issuer} publishes its keys and rotates them: coffre fetches them, so upload none`);
   }
   if (issuer.startsWith('urn:coffre:')) throw new BindingInvalid(`${issuer} is coffre's own, for a binding that is no ID token's`);
+}
+
+/** At most this many claims a binding records. */
+export const MAX_RECORDED = 8;
+
+/**
+ * The claims a binding records (docs/design/oidc.md, section 9.3): copied
+ * from each sign-in's verified token into its record, beside the run's
+ * claims. Names as a binding's claims take them, nested ones included,
+ * each once, sorted; null for none, so that one list has one spelling.
+ * Only a profile whose proof is an ID token records any. Throws
+ * `BindingInvalid`.
+ *
+ *   checkRecord('custom', ['user', 'thread', 'user'])  → ['thread', 'user']
+ *   checkRecord('custom', [])                          → null
+ */
+export function checkRecord(profile: WorkloadProfile, input: unknown): string[] | null {
+  if (input === undefined || input === null) return null;
+  if (!Array.isArray(input) || input.some((name) => typeof name !== 'string')) throw new BindingInvalid('record lists claim names');
+  if (input.length === 0) return null;
+  if (!OIDC_PROFILES.includes(profile)) throw new BindingInvalid(`a ${profile} binding records no claims: its proof carries none`);
+  for (const name of input as string[]) {
+    if (!CLAIM_NAME.test(name) || name === '__proto__') throw new BindingInvalid(`"${name}" is not a claim name a binding can record`);
+  }
+  const names = sortedUnique(input as string[]);
+  if (names.length > MAX_RECORDED) throw new BindingInvalid(`a binding records at most ${MAX_RECORDED} claims`);
+  return names;
+}
+
+/** A binding's recorded claims as its `record` column, its MAC and its seal hold them: JSON, sorted; null for none. */
+export function recordText(record: readonly string[] | null): string | null {
+  return record === null ? null : JSON.stringify(record);
+}
+
+/** A `record` column's names, as `recordText` wrote them; none for null, or for anything else, which records nothing. */
+export function recordedNames(text: string | null | undefined): string[] {
+  if (text == null) return [];
+  try {
+    const names = JSON.parse(text) as unknown;
+    return Array.isArray(names) ? names.filter((name): name is string => typeof name === 'string').slice(0, MAX_RECORDED) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Who a custom binding lets sign in, in words, as the CLI's plan, the Trust
+ * dialog and the MCP approval page say it (docs/design/oidc.md, section
+ * 9.1): coffre cannot know what a custom issuer's claims mean, so it says
+ * what they are, and who vouches for them.
+ *
+ *   Anyone holding a token from https://api.capy.ai/oidc/orgs/o_123 that says project=p_7 signs in as this
+ *   service account. Coffre cannot tell whether …
+ */
+export function customExposure(issuer: string, claims: BindingClaims): string {
+  const says = Object.entries(claims).map(([name, value]) => `${name}=${claimValues(value).join(' or ')}`);
+  const listed = says.length < 2 ? says.join('') : `${says.slice(0, -1).join(', ')} and ${says.at(-1)}`;
+  return `Anyone holding a token from ${issuer} that says ${listed} signs in as this service account. ` +
+    'Coffre cannot tell whether these claims name one workload: you vouch that this issuer gives such a token to nobody else.';
 }
 
 /** A claim's values, one or several. */

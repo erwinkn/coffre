@@ -859,6 +859,7 @@ export type Api = {
             [key: string]: "*" | string[];
           };
         };
+        record: null | string[];
         label: string | null;
         createdAt: string;
         createdBy: string;
@@ -890,6 +891,7 @@ export type Api = {
       policy?: {
         [key: string]: unknown;
       };
+      record?: string[];
     };
     output: {
       profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
@@ -922,6 +924,7 @@ export type Api = {
           [key: string]: "*" | string[];
         };
       };
+      record: null | string[];
       withheld: string[];
       replaces: {
         id: string;
@@ -960,6 +963,7 @@ export type Api = {
             [key: string]: "*" | string[];
           };
         };
+        record: null | string[];
         label: string | null;
         createdAt: string;
         createdBy: string;
@@ -1516,6 +1520,7 @@ export type Api = {
             [key: string]: "*" | string[];
           };
         };
+        record: null | string[];
         label: string | null;
         createdAt: string;
         createdBy: string;
@@ -2576,6 +2581,7 @@ export type BindingPlan = {
       [key: string]: "*" | string[];
     };
   };
+  record: null | string[];
   withheld: string[];
   replaces: {
     id: string;
@@ -2615,6 +2621,7 @@ export type BindingView = {
       [key: string]: "*" | string[];
     };
   };
+  record: null | string[];
   label: string | null;
   createdAt: string;
   createdBy: string;

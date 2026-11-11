@@ -16,6 +16,7 @@ import { tablesOf } from '@coffre/db';
 import { eq } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
+import { changeHolds, logMacKey } from '../src/log-entry.ts';
 
 import { ISSUER, KEYS, ORIGIN, proofKey, testIssuer, type TestIssuer } from './issuer.ts';
 import { emptyDatabase, newProject, openLocalVault, openTestDatabase, sealed, nothingHeld, type TestDatabase } from './database.ts';
@@ -61,12 +62,13 @@ function configure(): ResolvedVaultConfig {
 /** A vault keeping 0.15's log, the test issuer, and a service account that views a project. */
 async function world() {
   const issuer = testIssuer();
-  const vault = await openLocalVault(db.vault, configure(), { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const config = configure();
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: CI })).ok);
   assert.ok((await vault.setAccess({ actor: ROOT, caller: 'person', principal: CI, changes: [{ projectId: project, environmentId: null, role: 'viewer', expiresAt: null }] })).ok);
-  return { vault, project, issuer, live: [] as string[] };
+  return { vault, project, issuer, config, live: [] as string[] };
 }
 
 type World = Awaited<ReturnType<typeof world>>;
@@ -75,7 +77,7 @@ type World = Awaited<ReturnType<typeof world>>;
 async function bound(w: World, as: Partial<MadeBinding> = {}): Promise<MadeBinding> {
   const made: MadeBinding = {
     id: randomUUID(), principal: CI, generation: 0, profile: 'github', issuer: ISSUER, origin: ORIGIN, jwksUri: KEYS, claims: JSON.stringify({ repository_id: '1' }),
-    scope: storedScope([{ ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }), sensitive: false }]), policy: null, revoked: false,
+    scope: storedScope([{ ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }), sensitive: false }]), policy: null, record: null, revoked: false,
     jwks: null, label: 'deploys', createdBy: 'root@acme.example', createdAt: Date.now(), authMac: randomBytes(32).toString('base64'), ...as,
   };
   const change: ChangeBindingsInput = {
@@ -101,7 +103,7 @@ async function named(made: MadeBinding): Promise<SignInInput['binding']> {
   return {
     columns: {
       id: made.id, principal: row!.principal, generation: row!.generation, profile: row!.profile, issuer: row!.issuer, origin: made.origin, jwksUri: row!.jwksUri,
-      claims: row!.claims, scope: row!.scope, policy: row!.policy, revoked: row!.revokedAt !== null,
+      claims: row!.claims, scope: row!.scope, policy: row!.policy, record: row!.record, revoked: row!.revokedAt !== null,
     },
     seal: Buffer.from(row!.seal!).toString('base64'),
   };
@@ -262,4 +264,74 @@ test("a proof that is no ID token is the app's to verify, its DPoP proof the vau
   assert.equal(said(await signIn(w, aws, { token: w.issuer.token(), jwks: '{"keys":[]}' }, await dpop())), 'proof:malformed');
   assert.equal(said(await signIn(w, aws, null, { jkt: session.jkt })), 'proof:dpop', 'the session bound to a key its proof shows');
   assert.equal(said(await signIn(w, aws, null, await dpop())), 'ok', 'the app verified the signed request (0.15; the vault does in 0.16)');
+});
+
+/** Capy's issuer, one an organization's (docs/design/oidc.md, section 9): its keys uploaded here, as the vault fetches none. */
+const CAPY = 'https://api.capy.ai/oidc/orgs/o_123';
+
+test("a custom binding records the claims its seal names, from the token the vault verified: never a list or a run the app swaps (0.17)", async () => {
+  const w = await world();
+  const capy = await uploaded(w, { profile: 'custom', issuer: CAPY, claims: JSON.stringify({ project: 'p_7' }), record: JSON.stringify(['thread', 'user']) });
+  const thread = (code: string, more: Record<string, unknown> = {}) => token(w.issuer, capy, { iss: CAPY, sub: `org/o_123/project/p_7/thread/${code}`, project: 'p_7', thread: code, user: 'u_4', machine: 'm_9', ...more });
+  assert.equal(said(await signIn(w, capy, thread('ENG-142'))), 'ok');
+  const run = await recordedRun();
+  // The run's own claims, and the two it records; not the machine, nor what the app said.
+  assert.equal(run.sub, 'org/o_123/project/p_7/thread/ENG-142');
+  assert.deepEqual([run.thread, run.user, run.machine, run.run_id], ['ENG-142', 'u_4', undefined, '7001']);
+  // Another thread of the project signs in too: the binding pins the project, not the thread.
+  assert.equal(said(await signIn(w, capy, thread('ENG-143'))), 'ok');
+  assert.equal((await recordedRun()).thread, 'ENG-143');
+  // Another project, the project missing, or the project as a number: no match.
+  assert.equal(said(await signIn(w, capy, thread('ENG-144', { project: 'p_8' }))), 'proof:no_match');
+  assert.equal(said(await signIn(w, capy, thread('ENG-144', { project: undefined }))), 'proof:no_match');
+  assert.equal(said(await signIn(w, capy, thread('ENG-144', { project: 7 }))), 'proof:no_match');
+
+  // The names as the app hands them are held to the seal: one fewer, or none, is no binding the vault sealed.
+  const binding = await named(capy);
+  for (const record of [JSON.stringify(['user']), null]) {
+    assert.equal(said(await signIn(w, capy, thread('ENG-145'), { binding: { ...binding, columns: { ...binding.columns, record } } })), 'unsealed');
+  }
+  assert.equal(await credentials(), 2, 'the refused wrote nothing');
+});
+
+test("recorded claims are the change's like the rest of it: under its MAC, so a writer who edits one breaks it", async () => {
+  const w = await world();
+  const capy = await uploaded(w, { profile: 'custom', issuer: CAPY, claims: JSON.stringify({ project: 'p_7' }), record: JSON.stringify(['user']) });
+  assert.equal(said(await signIn(w, capy, token(w.issuer, capy, { iss: CAPY, project: 'p_7', user: 'u_4' }))), 'ok');
+  const { logChanges } = tablesOf(db.owner);
+  const rows = await db.owner.select().from(logChanges);
+  const row = rows.find((each) => (JSON.parse(each.payload) as { signIn?: unknown }).signIn !== undefined)!;
+  assert.equal((JSON.parse(row.payload) as { signIn: { run: { user: string } } }).signIn.run.user, 'u_4');
+  const keys = w.config.signingKeys.map((seed) => logMacKey(seed));
+  const read = { ...row, mac: Buffer.from(row.mac), seal: row.seal === null ? null : Buffer.from(row.seal) };
+  assert.equal(changeHolds(keys, read), true);
+  assert.equal(changeHolds(keys, { ...read, payload: row.payload.replace('"user":"u_4"', '"user":"u_5"') }), false);
+});
+
+test('a binding records names in their one spelling, and only where its proof is an ID token: the vault makes no other', async () => {
+  const w = await world();
+  for (const [record, as] of [
+    [JSON.stringify(['user', 'thread']), {}],
+    [JSON.stringify(['user', 'user']), {}],
+    [JSON.stringify([]), {}],
+    ['user', {}],
+    [JSON.stringify(['user']), { profile: 'cloudflare', issuer: 'urn:coffre:cloudflare', jwksUri: 'urn:coffre:cloudflare', claims: '{}', policy: '{}' }],
+  ] as const) {
+    const made: MadeBinding = {
+      id: randomUUID(), principal: CI, generation: 0, profile: 'custom', issuer: CAPY, origin: ORIGIN, jwksUri: KEYS, claims: JSON.stringify({ project: 'p_7' }),
+      scope: storedScope([{ ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }), sensitive: false }]), policy: null, record, revoked: false,
+      jwks: null, label: null, createdBy: 'root@acme.example', createdAt: Date.now(), authMac: randomBytes(32).toString('base64'), ...as,
+    };
+    await assert.rejects(
+      w.vault.changeBindings!({
+        actor: ROOT, via: null, actorAccess: null, connection: null, make: made, live: [], reads: [], ends: [], reason: 'replaced', revokedAt: Date.now(),
+        revokedBy: 'root@acme.example', policy: { seq: null, protected: [] }, appKey: APP_KEY,
+      }),
+      /a binding is named by its columns/,
+      `${record} on ${made.profile}`,
+    );
+  }
+  // An app before 0.17 names none, which is none.
+  const old = await bound(w, { record: undefined as unknown as null });
+  assert.equal(said(await signIn(w, old, null)), 'ok');
 });

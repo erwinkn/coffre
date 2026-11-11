@@ -8,6 +8,7 @@ import {
   bindingFrom,
   describeBindings,
   describeEvents,
+  describeExposure,
   describeKeys,
   describePlan,
   keySetFrom,
@@ -123,6 +124,30 @@ test('any other issuer, by its claims', async () => {
   await assert.rejects(bindingFrom({ issuer: 'https://idp.acme.example', claim: ['sub'] }, lookup), /--claim takes <name>=<value>/);
 });
 
+test("a custom issuer's binding by any claims, the claims it records, and who it lets in, in words (docs/design/oidc.md, section 9)", async () => {
+  const capy = await bindingFrom(
+    { issuer: 'https://api.capy.ai/oidc/orgs/o_123', claim: ['project=p_7'], record: ['thread,user', 'machine'], workload: true },
+    lookup,
+    { service: 'token:capy-agent' },
+  );
+  assert.deepEqual(capy, { profile: 'custom', issuer: 'https://api.capy.ai/oidc/orgs/o_123', claims: { project: 'p_7' }, policy: {}, record: ['thread', 'user', 'machine'] });
+  assert.equal(
+    describeExposure(capy),
+    'Anyone holding a token from https://api.capy.ai/oidc/orgs/o_123 that says project=p_7 signs in as this service account. ' +
+      'Coffre cannot tell whether these claims name one workload: you vouch that this issuer gives such a token to nobody else.',
+  );
+  // Without --record, none; a GitHub binding's exposure is its events'.
+  assert.equal((await bindingFrom({ issuer: 'https://idp.acme.example', claim: ['sub=1'] }, lookup)).record, undefined);
+  const ci = await built({ github: 'acme/api', workflow: 'ci.yml', branch: 'main' });
+  assert.equal(describeExposure(ci), describeEvents(ci));
+  // The plan says what it records, below its claims.
+  const plan = {
+    profile: 'custom' as const, issuer: capy.issuer!, jwksUri: 'https://api.capy.ai/oidc/jwks.json', keys: null, claims: capy.claims, policy: null,
+    record: ['machine', 'thread', 'user'], scope: { 'market/dev': 'viewer' as const }, withheld: [] as string[], replaces: [],
+  };
+  assert.match(describePlan('token:capy-agent', plan, null), /\n  claims   project  p_7\n  records  machine, thread, user, from each sign-in's token into its audit entry\n  reaches  /);
+});
+
 test('the flags name one platform, and one of a branch or a tag', async () => {
   await assert.rejects(bindingFrom({}, lookup), /name one of --github, --gitlab or --issuer, or a workload's platform: --aws, --kubernetes/);
   await assert.rejects(bindingFrom({ github: 'acme/api', gitlab: 'acme/api' }, lookup), /name one platform, not --github and --gitlab/);
@@ -146,6 +171,7 @@ test('a plan and a list show every claim in full', () => {
     policy: null,
     scope: { 'market/dev': 'developer' as const, 'market/prod': 'viewer' as const, 'api/dev': 'developer' as const },
     withheld: [] as string[],
+    record: null,
     replaces: [{ id: 'old', why: 'keys_moved' as const }],
   };
   assert.equal(
@@ -498,6 +524,7 @@ test("a workload's plan says what it trusts, how its sessions live, and what eac
     keys: null,
     scope: { 'market/prod': 'viewer' as const },
     withheld: [] as string[],
+    record: null,
     replaces: [],
     policy: { reads: { 'market/prod': ['STRIPE_WEBHOOK_SECRET'] }, sources: ['10.0.0.0/8'], sessionHours: 4 },
   };

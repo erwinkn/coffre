@@ -52,7 +52,7 @@ profile. A GitHub Enterprise Server or a self-managed GitLab picks its own.
 | `github`, a workflow of the repository | `repository_owner_id`, `repository_id`, `workflow_ref`, `ref`, `event_name` |
 | `github`, a reusable workflow | `repository_owner_id`, `ref` (the caller's), `event_name`, `job_workflow_ref`, `job_workflow_sha`, and `repository_id` unless "any repository of the organization" is chosen explicitly |
 | `gitlab` | `namespace_id`, `project_id`, `ref_type`, `ref`, `pipeline_source` |
-| `custom`, any other issuer | `sub`, and the UI says the owner vouches for what it means: a Google Cloud service account's unique ID, say |
+| `custom`, any other issuer | one or more claims of any name, each exact (`sub` until 0.17; section 9.1), and the UI says the owner vouches for what they mean: a Google Cloud service account's unique `sub`, say, or a Capy project's `project` |
 
 Some rules within the profiles:
 - **GitHub events.** `event_name` is one or more of `push`,
@@ -468,6 +468,274 @@ binding names; there is still no TokenReview, which the recipe says; and a
 projected token signs in once, which the recipe answers with a short
 projection, wrapping the work in one `coffre run`, and the kubelet's
 refresh.
+
+## 9. Any claims, recorded claims, one token for many runs (0.17)
+
+Until 0.17 a `custom` binding pinned `sub`. That fits an issuer whose `sub`
+names one workload. It does not fit one whose `sub` names one run. Capy
+(capy.ai) signs a token for each machine of an agent's thread, an hour
+long, written to a file and replaced about 15 minutes before it expires
+([docs.capy.ai/cloud-credentials](https://docs.capy.ai/cloud-credentials)):
+
+```json
+{ "iss": "https://api.capy.ai/oidc/orgs/o_123", "aud": "https://secrets.acme.example",
+  "sub": "org/o_123/project/p_7/thread/ENG-142",
+  "org": "o_123", "project": "p_7", "thread": "ENG-142", "machine": "m_9", "user": "u_4",
+  "jti": "…", "iat": 1794355200, "nbf": 1794355140, "exp": 1794358800 }
+```
+
+`sub` changes with every thread, so no binding could name it. Nothing here
+is Capy's: it is the general case of an issuer whose identity is spread over
+claims of its own names. Three changes serve it.
+
+### 9.1 A custom binding pins any claims
+
+- **One or more claims, of any name.** A `custom` binding no longer
+  requires `sub`. It names at least one claim, and each is matched as
+  every claim is (section 1): the token's value at that name (top level, or
+  nested, section 8) must be a string equal to the binding's. No pattern,
+  no prefix: `org/o_123/project/p_7/thread/*` stays impossible, and
+  `project` is pinned instead.
+- **Strings only, and typed.** A binding's values are nonempty strings, as
+  before. A token whose claim is the number `7` or the boolean `true`
+  matches no binding, not even one that says `"7"` or `"true"`. An issuer
+  that sends an identifier as a number cannot be bound by it, which is the
+  limit the old rule had too.
+- **Refused:**
+  - a binding that names no claim at all: it would trust every token its
+    issuer signs;
+  - the reserved names, as before (`iss`, `aud`, `exp`, `iat`, `nbf`,
+    `jti`);
+  - a binding whose every claim says how the token was issued, not to
+    whom: OIDC Core's `acr`, `amr`, `auth_time`, `azp`, `nonce`,
+    `at_hash`, `c_hash`, `sid`, `email_verified` and
+    `phone_number_verified`. Each may narrow a binding beside a claim that
+    says who, never alone. This catches the obvious mistakes only. Whether
+    a claim names one workload is the issuer's to say, and the next point
+    puts it in front of the Owner.
+- **The exposure, in words.** The CLI's plan, the Trust dialog and the MCP
+  approval page say who a custom binding lets in, as they say what
+  `pull_request` exposes:
+
+  > Anyone holding a token from https://api.capy.ai/oidc/orgs/o_123 that
+  > says project=p_7 signs in as capy-agent. Coffre cannot tell whether
+  > these claims name one workload: you vouch that this issuer gives such
+  > a token to nobody else.
+
+- **Nothing migrates.** Every custom binding made before pins `sub`, which
+  is still allowed, and reads as it did.
+
+**Capy, worked.** The org's issuer is its own, so the issuer already pins
+the organization; `project` pins the project. A thread's agent runs
+commands that use credentials, so the binding is a workload's, key-bound,
+and reads nothing (section 9.4):
+
+```sh
+coffre trust capy-agent --issuer https://api.capy.ai/oidc/orgs/o_123 \
+  --claim project=p_7 --record thread,user,machine --workload --apply
+```
+
+In the Capy project's cloud setup, the token's audience is the instance's
+URL, `https://secrets.acme.example`. The agent then runs, as often as it
+likes within the token's hour:
+
+```sh
+coffre --url https://secrets.acme.example --service capy-agent \
+  run --proof oidc:"$CAPY_OIDC_TOKEN_FILE" market/dev -- pnpm test
+```
+
+Capy's keys, `https://api.capy.ai/oidc/jwks.json`, sign every
+organization's tokens. What keeps another organization's token out is the
+issuer, `…/orgs/o_123`, matched exactly against `iss`: it relies on Capy
+naming the right organization there, as GitHub's binding relies on GitHub
+naming the right repository.
+
+**GitHub and Fly, for contrast.** Their issuers force their profiles
+(section 1), so a `custom` binding on them is still refused. A GitHub
+workflow is bound by its profile's five claims, never by `sub`:
+
+```sh
+coffre trust api-deploy --github acme/api --workflow deploy.yml --branch main --apply
+```
+
+A Fly app is bound by its `fly` profile, whose tokens name the session's
+key in their audience:
+
+```sh
+coffre trust api-prod --fly acme --org-id 29873298 --app-id 3671581 --apply
+```
+
+### 9.2 Fly and Vercel stay profiles
+
+They could almost be `custom` bindings now: `{ org_id, app_id }` on
+`https://oidc.fly.io/acme`. Collapsing them was weighed and left out, for
+four reasons:
+
+- **The profile is what knows which claims identify.** `fly` requires both
+  `org_id` and `app_id`, and `vercel` requires `environment`, which keeps
+  previews out. A custom binding would let an Owner pin `org_id` alone, so
+  every app of the organization would sign in. Section 9.1 can only warn
+  about that; the profile refuses it.
+- **The audience must name the key.** Their callers choose the audience,
+  so their bindings always set `keyAudience` (workload-access.md, section
+  4.2), and `forcedProfiles` keeps a custom binding from dropping it on
+  their issuers. A custom binding on Fly's issuer would need that rule
+  anyway, under another name.
+- **Stored bindings name their profile under the vault's seal.** Removing
+  the profiles would need a contraction: either a migration that rewrites
+  sealed objects, or code that still reads `fly` and `vercel` forever.
+- **Little would go.** The profiles are about 25 lines of rules. The
+  client's `fly()` and `vercel()` proofs, which fetch a token for the key,
+  stay either way.
+
+### 9.3 Recorded claims
+
+Every sign-in records the run's claims that `runClaims` knows by name
+(`sub`, `jti`, GitHub's `run_id`, `sha` and the rest; section 2, "Audit and
+provenance"), in its entry under the entry's MAC. A custom issuer's own
+names are not among them. So a binding may name up to 8 more,
+`record: ["machine", "thread", "user"]`. A sign-in through it copies those
+claims from the verified token into the same record, beside the others:
+`signIn.run.user = "u_4"`.
+
+- **Any ID token's profile** takes `record`: every profile but `aws`,
+  `enrollment` and `cloudflare`, whose proof carries no claims. Each name
+  is a claim name as section 1 takes it, nested ones included, each at
+  most once. They are stored sorted.
+- **What is recorded** is what `runClaims` records: a string, cut to 256
+  characters, or a finite number. A boolean, an array, an object or a
+  missing claim is left out, never an error: recording never refuses a
+  sign-in.
+- **It is part of the binding**, immutable like the rest of it: under the
+  app's MAC (a tuple kind of its own, `recorded_…`, section 6) and the
+  vault's seal (its object's `record`, present only when set, so every
+  binding sealed before seals as it did). Where the vault checks the token
+  itself, with uploaded keys, it reads the names from the sealed binding,
+  never from the app.
+- **The entry's size stays bounded.** `runClaims` keeps at most 23 claims,
+  and a sign-in's record takes at most 32. Eight more fit.
+- **Personal data.** A recorded claim lives as long as the log, which
+  nothing rewrites. Record identifiers (`user: "u_4"`), not names or
+  emails.
+
+**Where it is stored.** A nullable `service_bindings.record`: canonical
+JSON, the names sorted, null when none (never `[]`). Expand-only:
+
+- the column is new and nullable, so the previous release never sees it;
+- `change_bindings`, the vault's statement that makes a binding, gets an
+  overload one argument longer, `p_record`. The old signature, which the
+  previous release's vault calls, becomes a wrapper that passes null;
+- on SQLite, the column alone, since the vault's statement is TypeScript.
+
+A rollback to 0.16 with recorded bindings fails closed: 0.16 checks their
+MAC under the tuple kind without `record`, finds it wrong, and treats them
+as no bindings, so they sign nobody in until 0.17 is back. A binding
+without `record` is untouched either way.
+
+**Why `/use` is untouched.** The use statement reads a binding's row only
+for a Cloudflare service binding's call (`way = 'binding'`), to check its
+seal. A `cloudflare` binding never has `record`, refused by the app and by
+the vault, so its sealed object is the same without reading the column.
+
+### 9.4 One token for many runs
+
+A token is spent once (section 3). Capy writes one token per hour and its
+agent runs `coffre run` many times in that hour. The second run's exchange
+gets `replayed`, and nothing it can do gets it a fresh token sooner.
+
+What existed did not cover it:
+
+- `coffre login <url> --service <name> --id-token` exchanges once and
+  saves the bearer credential, which lasts five minutes. Runs after those
+  five minutes need a fresh token.
+- `coffre login <url> --token` saves a bearer token a person issued: a
+  stored secret, which is what OIDC removes.
+- `coffre serve` holds a key-bound session and renews it for as long as it
+  runs, but it is a process that must keep running. An agent's machine
+  sleeps, and its commands are not served through a listener.
+
+**The CLI keeps the session the token bought, sealed by the token.** For
+`--proof oidc` (stdin) and `--proof oidc:<file>`, `coffre --service <name>
+run` signs in key-bound as before, then keeps the session instead of
+logging out, in `~/.coffre/sessions/`:
+
+- **Its file** is named by `HMAC-SHA-256(token, "coffre.session.v1 name" ‖
+  origin ‖ service)`. It holds the session's key, the private half as a
+  JWK, its token, its places and times, encrypted with AES-256-GCM under a
+  key derived from the token by HKDF-SHA-256, the name as associated data.
+  In clear, only its end, so stale files can be pruned unread.
+- **A later run** with the same token finds the file, opens it, and goes
+  on with that session: it renews it by its key (`POST
+  /api/auth/workload/renew`) once past half its life, as `coffre serve`
+  does. A run with a new token, Capy's next, exchanges it and keeps that
+  session instead.
+- **It ends with the token.** A file is used only until the earlier of the
+  session's `notAfter` and the token's own `exp`, read from its payload. A
+  token with no `exp` is never kept. For a binding whose token does not
+  name the key, which is every Capy binding, the session's `notAfter` is
+  the token's `exp` already (workload-access.md, section 5.4).
+- **Two runs at once** take a lock file beside it around the exchange, so
+  one exchanges and the other waits for its file. A lock older than 30
+  seconds is a dead run's, and is taken over.
+- **A session refused** (revoked, frozen, its binding removed) deletes its
+  file. The token is spent, so the run says so and waits for none: the
+  next token signs in again.
+- **No other proof is kept.** GitHub's, Google's, Fly's and Vercel's
+  name the key and are fetched fresh for each run. Kubernetes' projected
+  token is a long-running pod's, where `coffre serve` belongs.
+
+**What it costs.** Before, the token was a bearer until its first use, and
+the session lived in one process. Now:
+
+- **The token is worth a session for its whole hour.** Whoever holds it
+  and the file has what the token bought. A copy of the file without the
+  token opens nothing.
+- **Section 7's runner rule still holds.** "Never in `~/.coffre`, because
+  a self-hosted runner's disk outlives the job." The file outlives the job
+  too, but it is sealed by a token the next job does not have, and it is
+  useless once that token expires.
+- **The session outlives the command**, until the token's `exp`, at most
+  an hour. Before, `coffre run` logged out at its end. Revoking the
+  session or freezing the binding ends it sooner, as for any session.
+
+Tokens stay single use at the server, which changes nothing here. Azure's
+repeating tokens keep their own rule (workload-access.md, section 4.2).
+
+### 9.5 Threats
+
+- **An Owner pins a claim that names no one.** Say a binding on a
+  company's IdP pins `{ "email_verified": "true" }`, or on Capy, `{ "org":
+  "o_123" }` alone. The first is refused (section 9.1). The second is
+  allowed, and the plan says it plainly: anyone with a token from that
+  organization, in any project, signs in. Coffre cannot know what a
+  custom issuer's claims mean, so it says what the binding trusts, in
+  words, before it is saved.
+- **Anyone who can start a thread in the bound Capy project acts as the
+  service account**, and so does a prompt injection that steers an agent
+  in one. The token is the machine's, and every command on the machine can
+  read it. So a binding for agents should be a use-only account: a
+  workload's binding with no `reads`, whose sessions use credentials
+  through coffre's proxy and never hold a value (workload-access.md,
+  section 6). Its credentials' own limits (section 8.1 there) bound what a
+  steered agent can spend.
+- **Several organizations, one key set.** As in section 9.1: the exact
+  `iss` keeps another organization's tokens out.
+- **A recorded claim is the issuer's word**, as every run claim is
+  (section 2): it says which thread asked, not which one sent a request.
+
+**The formal models.** The claims' match is not modelled
+(formal/Lifecycle.tla, "Not modelled: … the proof's claims and the
+binding's match"), and 0.17 needs no change there. The match is a pure
+decision on one verified token and one sealed binding, made before the
+sign-in's statement. It takes no lock, orders nothing and keeps no state,
+so it is invisible to every property the models check. What they do check
+is unchanged: the token is spent once (`SpentOnce`), the vault verifies it
+against the binding it sealed (`SignInsOnValidTokens`), and a session is
+renewed only by its key and never past its `notAfter` (Workload.tla,
+`NotAfter`). The session kept on disk changes no protocol: the server sees
+a renewal and requests signed by the session's key, as from `coffre serve`.
+The Lean proofs cover access, the vault's per-key decision, the AAD and
+the chain, none of them a binding's claims.
 
 ## Review responses
 

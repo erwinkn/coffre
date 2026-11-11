@@ -67,7 +67,7 @@ type World = Awaited<ReturnType<typeof world>>;
 function binding(w: World, sensitive = false, by = ROOT): MadeBinding {
   return {
     id: randomUUID(), principal: CI, generation: 0, profile: 'github', issuer: ISSUER, origin: ORIGIN, jwksUri: `${ISSUER}/.well-known/jwks`, claims: JSON.stringify({ repository_id: '1' }),
-    scope: storedScope([{ ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }), sensitive }]), policy: null, revoked: false,
+    scope: storedScope([{ ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }), sensitive }]), policy: null, record: null, revoked: false,
     jwks: null, label: 'deploys', createdBy: by.slice('user:'.length), createdAt: Date.now(), authMac: randomBytes(32).toString('base64'),
   };
 }
@@ -88,7 +88,7 @@ async function read(id: string): Promise<{ columns: SignInInput['binding']['colu
   return {
     columns: {
       id, principal: row!.principal, generation: row!.generation, profile: row!.profile, issuer: row!.issuer, origin: ORIGIN, jwksUri: row!.jwksUri, claims: row!.claims,
-      scope: row!.scope, policy: row!.policy, revoked: row!.revokedAt !== null,
+      scope: row!.scope, policy: row!.policy, record: row!.record, revoked: row!.revokedAt !== null,
     },
     seal: row!.seal === null ? null : Buffer.from(row!.seal).toString('base64'),
     authMac: Buffer.from(row!.authMac).toString('base64'),

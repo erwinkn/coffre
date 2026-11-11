@@ -1666,6 +1666,8 @@ function wayObject(row: UseRow, request: UseRequest): WayInput | null {
         id: request.credential, principal: String(b.principal), generation: Number(b.generation), profile: String(b.profile), issuer: String(b.issuer),
         // A sealed binding names the instance it was made on (0040): one with none bears out no seal.
         origin: text(b.origin) ?? '', jwksUri: String(b.jwks_uri), claims: String(b.claims), scope: text(b.scope), policy: text(b.policy), revoked: b.revoked_at != null,
+        // A Cloudflare binding records nothing (`checkRecord`, here and in the app), so its object is whole without the column, which this statement does not read.
+        record: null,
       });
     }
     case 'access':

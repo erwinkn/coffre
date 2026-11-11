@@ -27,7 +27,8 @@ export function summary(binding: Pick<BindingView, 'profile' | 'issuer' | 'claim
   if (binding.profile === 'gitlab') {
     return { title: `GitLab project ${claims.project_id}`, detail: `${claimValues(binding.claims.pipeline_source).join(', ')} at ${claims.ref_type} ${claims.ref}` };
   }
-  return { title: issuerName(binding.issuer), detail: `sub ${claims.sub}` };
+  // A custom issuer's binding, by every claim it pins (docs/design/oidc.md, section 9.1).
+  return { title: issuerName(binding.issuer), detail: Object.entries(binding.claims).map(([name, value]) => `${name} ${claimValues(value).join(', ')}`).join(' · ') };
 }
 
 /** An issuer as a title: its host, when it is a URL; a binding that carries its keys may name any string. */
@@ -85,10 +86,10 @@ export const EMPTY_FORM = {
   projectId: '',
   namespaceId: '',
   sources: ['push'] as string[],
-  // Any other issuer
+  // Any other issuer: its claims, one `name=value` a line, and those its sign-ins record, by name.
   issuer: '',
-  sub: '',
-  extra: '',
+  claims: '',
+  record: '',
   // Its keys, a JWKS pasted, for an issuer coffre cannot fetch them from; empty, they are fetched.
   jwks: '',
 };
@@ -190,7 +191,7 @@ export function lookupFailure(name: string, failure: unknown): GitHubLookup {
 export function bindingOf(
   form: Form,
   found: GitHubIds | null = null,
-): { profile: BearerProfile; issuer: string | null; claims: BindingClaims; jwks?: KeySet } {
+): { profile: BearerProfile; issuer: string | null; claims: BindingClaims; jwks?: KeySet; record?: string[] } {
   const needed = (value: string, what: string) => {
     if (value.trim() === '') throw new Error(`${what} is needed`);
     return value.trim();
@@ -248,14 +249,16 @@ export function bindingOf(
       issuer: form.gitlabUrl.trim() === '' ? null : form.gitlabUrl.trim(),
     };
   }
-  const claims: BindingClaims = { sub: needed(form.sub, 'The subject') };
-  for (const line of form.extra.split('\n').map((each) => each.trim()).filter((each) => each !== '')) {
+  const claims: BindingClaims = {};
+  for (const line of form.claims.split('\n').map((each) => each.trim()).filter((each) => each !== '')) {
     const at = line.indexOf('=');
     if (at <= 0) throw new Error(`"${line}" is not <claim>=<value>`);
     claims[line.slice(0, at).trim()] = line.slice(at + 1).trim();
   }
+  if (Object.keys(claims).length === 0) throw new Error('Name at least one claim that says who, such as sub=… or project=…');
+  const record = form.record.split(/[\s,]+/).filter((name) => name !== '');
   const jwks = keySetOf(form.jwks);
-  return { profile: 'custom', issuer: needed(form.issuer, 'The issuer'), claims, ...(jwks === undefined ? {} : { jwks }) };
+  return { profile: 'custom', issuer: needed(form.issuer, 'The issuer'), claims, ...(jwks === undefined ? {} : { jwks }), ...(record.length === 0 ? {} : { record }) };
 }
 
 /** A JWKS, as the API takes it: each key the server checks. */

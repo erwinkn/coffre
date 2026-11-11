@@ -2105,3 +2105,70 @@ test("a binding a removal closed shadows no other: a run another binding takes s
   assert.equal(made!.createdBy, `binding:${newer}`);
 });
 
+
+/** Capy's issuer, one an organization's, whose `sub` names a thread (docs/design/oidc.md, section 9): its keys fetched, as any issuer's. */
+const CAPY = 'https://api.capy.ai/oidc/orgs/o_123';
+const CAPY_KEYS = 'https://api.capy.ai/oidc/jwks.json';
+
+/** A Capy machine's token for one thread of project p_7, `claims` over it. */
+function capy(code: string, claims: Record<string, unknown> = {}): string {
+  return token(rsa, { iss: CAPY, sub: `org/o_123/project/p_7/thread/${code}`, org: 'o_123', project: 'p_7', thread: code, machine: 'm_9', user: 'u_4', ...claims });
+}
+
+async function bindCapy(claims: BindingClaims, record?: string[]) {
+  published.set(`${CAPY}/.well-known/openid-configuration`, { issuer: CAPY, jwks_uri: CAPY_KEYS });
+  published.set(CAPY_KEYS, { keys: [rsa.jwk, ec.jwk] });
+  return runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'custom', issuer: CAPY, claims, label: 'agents', replaces: [], ...(record === undefined ? {} : { record }) }, { dryRun: false });
+}
+
+test('a custom binding pins any claims (0.17): every thread of the project signs in, each token once; another project, a claim missing or of another type, never', async () => {
+  const made = await bindCapy({ project: 'p_7' }, ['user', 'thread']);
+  assert.ok('binding' in made);
+  assert.deepEqual([made.binding.claims, made.binding.record], [{ project: 'p_7' }, ['thread', 'user']]);
+  const first = capy('ENG-142');
+  assert.equal((await trade(first)).status, 200);
+  assert.equal((await trade(capy('ENG-143'))).status, 200);
+  // Its record: the run's claims (sub names the thread) and the two the binding records, under the entry's MAC like the rest.
+  const signIns = await signInsLogged(db.owner);
+  assert.deepEqual(signIns.map(({ run }) => [run.sub, run.thread, run.user, run.machine]), [
+    ['org/o_123/project/p_7/thread/ENG-142', 'ENG-142', 'u_4', undefined],
+    ['org/o_123/project/p_7/thread/ENG-143', 'ENG-143', 'u_4', undefined],
+  ]);
+  // Single use stands.
+  assert.deepEqual([(await trade(first)).status, (await trade(first)).body.reason], [401, 'replayed']);
+  const refused = async (claims: Record<string, unknown>) => (await trade(capy('ENG-144', claims))).body;
+  const other = await refused({ project: 'p_8' });
+  assert.deepEqual([other.reason, other.message], ['no_match', `no binding of ${shownMember(MEMBER)} trusts these claims: project differ`]);
+  assert.equal((await refused({ project: undefined })).reason, 'no_match');
+  assert.equal((await refused({ project: 7 })).reason, 'no_match');
+  assert.equal((await refused({ project: ['p_7'] })).reason, 'no_match');
+  // Another organization's token, signed by the same keys, names another issuer: no binding of the service trusts it.
+  assert.equal((await refused({ iss: 'https://api.capy.ai/oidc/orgs/o_999' })).reason, 'no_match');
+  assert.equal((await signInsLogged(db.owner)).length, 2, 'the refused wrote nothing');
+  // Listed as made: its claims and the claims it records.
+  const listed = (await runtime.workloads!.listBindings(await contextFor(deps, ROOT), SERVICE)).find((binding) => binding.id === made.binding.id);
+  assert.deepEqual(listed?.record, ['thread', 'user']);
+});
+
+test('a custom binding that pins no claim, or only claims that say how its token was issued, is refused; so is a record that names no claim', async () => {
+  const refusal = async (claims: BindingClaims, record?: string[]) => bindCapy(claims, record).then(() => null, (error: { status?: number; message: string }) => [error.status, error.message]);
+  assert.match(String((await refusal({}))?.[1]), /names one or more claims/);
+  assert.match(String((await refusal({ email_verified: 'true' }))?.[1]), /says how a token was issued, not to whom/);
+  assert.match(String((await refusal({ project: 'p_7' }, ['a b']))?.[1]), /not a claim name a binding can record/);
+  assert.match(String((await refusal({ project: 'p_7' }, Array.from({ length: 9 }, (_, i) => `c${i}`)))?.[1]), /at most 8 claims/);
+  assert.equal(await refusal({ project: 'p_7', email_verified: 'true' }), null);
+});
+
+test("a binding's recorded claims are under its MAC: a writer who edits or clears them leaves no binding that signs in", async () => {
+  for (const record of ['["user"]', null]) {
+    await resetDatabase(db.owner);
+    for (const [principal] of [[`user:${DEV}`], [MEMBER]] as const) assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal })).ok, true);
+    await holdSomething(db.owner, deps.vault, MEMBER, `user:${ROOT}`);
+    const made = await bindCapy({ project: 'p_7' }, ['thread', 'user']);
+    assert.ok('binding' in made);
+    await db.owner.update(serviceBindings).set({ record }).where(eq(serviceBindings.id, made.binding.id));
+    const { status, body } = await trade(capy('ENG-142'));
+    assert.deepEqual([status, body.reason], [401, 'no_match'], String(record));
+    assert.deepEqual(await signInsLogged(db.owner), []);
+  }
+});

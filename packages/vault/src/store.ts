@@ -1963,7 +1963,8 @@ export async function bindingsAt(db: Queryable, ids: readonly string[]): Promise
   return new Map(rows.map((row) => {
     const columns: Omit<BindingColumns, 'origin'> = {
       id: row.id, principal: row.principal, generation: Number(row.generation), profile: row.profile, issuer: row.issuer, jwksUri: row.jwks_uri,
-      claims: row.claims, scope: row.scope, policy: row.policy, revoked: Boolean(row.revoked),
+      // A binding the cutover seals is one 0.14 made, before any recorded claims.
+      claims: row.claims, scope: row.scope, policy: row.policy, record: null, revoked: Boolean(row.revoked),
     };
     return [row.id, { columns, origin: row.origin, seal: bytes(row.seal), logged: Boolean(row.logged) }];
   }));

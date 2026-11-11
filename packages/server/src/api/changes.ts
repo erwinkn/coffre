@@ -465,7 +465,7 @@ export function sealedBinding(row: BindingRow, publicUrl: string): { columns: Bi
   return {
     columns: {
       id: row.id, principal: row.principal, generation: row.generation, profile: row.profile, issuer: row.issuer, origin: row.origin ?? publicUrl, jwksUri: row.jwksUri, claims: row.claims,
-      scope: row.scope, policy: row.policy, revoked: row.revokedAt !== null,
+      scope: row.scope, policy: row.policy, record: row.record ?? null, revoked: row.revokedAt !== null,
     },
     seal: sealText(row.seal ?? null),
   };

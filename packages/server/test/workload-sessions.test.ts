@@ -36,6 +36,8 @@ const MEMBER = `token:${SERVICE}`;
 const IP = '203.0.113.9';
 const GITHUB = 'https://token.actions.githubusercontent.com';
 const CLUSTER = 'https://cluster.acme.example';
+/** Capy's issuer, an organization's, whose `sub` names a thread (docs/design/oidc.md, section 9). */
+const CAPY = 'https://api.capy.ai/oidc/orgs/o_123';
 const TENANT = 'https://login.microsoftonline.com/7f1c0d3e-0000-4000-8000-00000000c0de/v2.0';
 /** A v2 token's audience: the API application's client ID. */
 const ENTRA_AUDIENCE = '0d2c4e6a-8b1f-4a3c-9e5d-7f6a8b9c0d1e';
@@ -157,7 +159,7 @@ beforeEach(async () => {
   await resetDatabase(db.owner);
   forgetKeys();
   published = new Map<string, unknown>();
-  for (const issuer of [GITHUB, CLUSTER, TENANT]) {
+  for (const issuer of [GITHUB, CLUSTER, TENANT, CAPY]) {
     published.set(`${issuer}/.well-known/openid-configuration`, { issuer, jwks_uri: `${issuer}/keys` });
     published.set(`${issuer}/keys`, { keys: [signer.jwk] });
   }
@@ -350,6 +352,25 @@ test("a projected Kubernetes token is spent once, and its session ends at the to
   assert.ok(Date.parse(renewed.body.expiresAt as string) <= expiry);
   await sleep(expiry - Date.now() + 300);
   assert.equal((await me(first)).status, 401, 'dead at its token\'s exp');
+});
+
+test("a custom binding's key-bound session (0.17): any thread of its project, each token once, its session ending at the token's exp, the claims it records in its record", async () => {
+  const made = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, {
+    profile: 'custom', issuer: CAPY, claims: { project: 'p_7' }, label: 'agents', replaces: [], policy: {}, record: ['user', 'thread'],
+  }, { dryRun: false });
+  assert.ok('binding' in made);
+  assert.deepEqual([made.binding.policy, made.binding.record], [{}, ['thread', 'user']]);
+  const thread = (code: string, claims: Record<string, unknown> = {}) => token(CAPY, { aud: ORIGIN, sub: `org/o_123/project/p_7/thread/${code}`, project: 'p_7', thread: code, user: 'u_4', exp: seconds() + 3600, ...claims });
+  const jwt = thread('ENG-142');
+  const first = await session({ oidc: jwt });
+  // The token names no key, so it is spent, and its session ends at its exp.
+  assert.ok(Math.abs(Date.parse(first.answer.body.notAfter as string) - (seconds() + 3600) * 1000) <= 1500);
+  await session({ oidc: thread('ENG-143') });
+  assert.deepEqual((await signInsLogged(db.owner)).map(({ run }) => [run.thread, run.user]), [['ENG-142', 'u_4'], ['ENG-143', 'u_4']]);
+  const again = await signIn({ oidc: jwt }, await generateProofKey());
+  assert.deepEqual([again.status, again.body.reason], [401, 'replayed']);
+  const other = await signIn({ oidc: thread('ENG-144', { project: 'p_8' }) }, await generateProofKey());
+  assert.deepEqual([other.status, other.body.reason], [401, 'no_match']);
 });
 
 test("an Entra managed identity's token, which its platform repeats for hours, is never spent, may be hours old, and ends its session at its exp", async () => {

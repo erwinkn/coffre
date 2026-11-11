@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **A custom OIDC binding pins any claims, records the ones you name, and
+  one ID token serves every `coffre run` of its life (T253, 0.17; docs/design/oidc.md,
+  section 9).** A `custom` binding no longer requires `sub`: it pins one or
+  more claims of any name, each matched exactly, so an issuer whose `sub`
+  names a run (Capy's, per thread) binds by its project instead. A binding
+  that pins none, or only claims that say how a token was issued
+  (`email_verified`, `acr`, `azp`, …), is refused. The CLI, the Trust
+  dialog and the MCP approval page say who it lets in. A binding may name
+  up to 8 claims to `record` in each sign-in's audit entry
+  (`coffre trust --record thread,user`), stored in a new nullable
+  `service_bindings.record` (0083), under the binding's MAC and the
+  vault's seal. `coffre --service <name> run --proof oidc:<file>` reads
+  the token from a file, and keeps the key-bound session it bought, sealed
+  by the token, for the runs after it until the token expires: a second
+  run no longer gets `replayed`. Tokens stay single use at the server.
+  The `fly` and `vercel` profiles stay as they are.
 - **A use whose key AWS KMS throttled counts as overload to the `/use`
   throttle, however fast it failed (T250).** KMS answers
   `ThrottlingException` at once, so a use whose three tries were all

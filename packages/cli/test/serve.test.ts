@@ -9,7 +9,7 @@ import { once } from 'node:events';
 import { request } from 'node:http';
 import { connect as connectTcp } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -20,9 +20,14 @@ import { fakeCoffre, fakePostgres } from './workload-fake.ts';
 const MAIN = new URL('../src/main.ts', import.meta.url).pathname;
 const CODE = `coffre_enr_${'k'.repeat(43)}`;
 
-function cli(t: test.TestContext, args: string[], stdin = CODE): { child: ChildProcess; stderr: () => string; stdout: () => string } {
+/** A home of its own for one test, removed after it: where the CLI keeps what it keeps. */
+function homeFor(t: test.TestContext): string {
   const home = mkdtempSync(join(tmpdir(), 'coffre-serve-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
+  return home;
+}
+
+function cli(t: test.TestContext, args: string[], stdin = CODE, home = homeFor(t)): { child: ChildProcess; stderr: () => string; stdout: () => string } {
   const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_') && !key.startsWith('ACTIONS_'))), COFFRE_STATE_DIR: home, HOME: home };
   // From the package, whose dependencies a run's command imports.
   const child = spawn(process.execPath, ['--conditions=coffre:source', MAIN, ...args], { env, cwd: new URL('..', import.meta.url).pathname, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -333,4 +338,81 @@ test("a service's run refuses a credential two of its environments name, and a r
   const [exit, signal] = await once(run.child, 'exit');
   assert.deepEqual([exit, signal], [null, 'SIGTERM']);
   assert.ok(slow.log.includes('POST /api/auth/logout 200'), slow.log.join('\n'));
+});
+
+/** An ID token as a platform writes one to a file: a JWT whose `exp` the CLI reads, unverified, to bound the session it keeps. */
+function idToken(exp: number, thread: string): string {
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${part({ alg: 'RS256', kid: 'capy' })}.${part({ iss: 'https://api.capy.ai/oidc/orgs/o_123', sub: `org/o_123/project/p_7/thread/${thread}`, project: 'p_7', exp })}.${randomBytes(32).toString('base64url')}`;
+}
+
+test("runs on one ID token in a file share the session it bought, sealed by it, with no second exchange and no logout; the next token buys the next session (docs/design/oidc.md, section 9.4)", async (t) => {
+  const spent = new Set<string>();
+  const coffre = await fakeCoffre({
+    plan: { environment: 'market/prod', values: { TWILIO_SID: 'AC012' }, credentials: [] },
+    // As the server does: an ID token buys one session.
+    exchange: (proof) => {
+      const token = String(proof.oidc);
+      if (spent.has(token)) return { status: 401, body: { error: 'unauthorized', reason: 'replayed', message: 'this token was exchanged already: ask your platform for a fresh one' } };
+      spent.add(token);
+      return null;
+    },
+  });
+  t.after(() => coffre.close());
+  const home = homeFor(t);
+  const file = join(home, 'oidc.jwt');
+  const first = idToken(Math.floor(Date.now() / 1000) + 3600, 'ENG-142');
+  writeFileSync(file, `${first}\n`);
+  const run = async () => {
+    const each = cli(t, ['--url', coffre.url, '--service', 'capy-agent', 'run', '--proof', `oidc:${file}`, '--', process.execPath, '-e', 'console.log(process.env.TWILIO_SID)'], '', home);
+    const [code] = await once(each.child, 'exit');
+    return { code, ...each };
+  };
+
+  const one = await run();
+  assert.equal(one.code, 0, one.stderr());
+  assert.equal(one.stdout().trim(), 'AC012');
+  const two = await run();
+  assert.equal(two.code, 0, two.stderr());
+  assert.equal(two.stdout().trim(), 'AC012');
+  assert.match(two.stderr(), /on the session this token bought before/);
+  // One exchange, for both; neither logs out, the session being the next run's. The second asks the gate for its nonce first, as any new process does.
+  assert.deepEqual(coffre.log, ['POST /api/auth/workload 200', 'GET /use/market/prod 200', 'GET /use/market/prod use_dpop_nonce', 'GET /use/market/prod 200']);
+
+  // Kept yours alone, and sealed: nothing in it reads without the token.
+  const directory = join(home, '.coffre', 'sessions');
+  const [kept, ...more] = readdirSync(directory);
+  assert.deepEqual(more, []);
+  assert.equal(statSync(directory).mode & 0o777, 0o700);
+  assert.equal(statSync(join(directory, kept!)).mode & 0o777, 0o600);
+  const sealed = readFileSync(join(directory, kept!), 'utf8');
+  const [session] = [...coffre.sessions.values()];
+  assert.ok(!sealed.includes(session!.token) && !sealed.includes(first) && !sealed.includes('"d"'), 'neither the session, the token nor the key in clear');
+  assert.deepEqual(Object.keys(JSON.parse(sealed) as object).sort(), ['data', 'iv', 'until', 'v']);
+
+  // The platform's next token buys the next session, kept beside the first until that one ends.
+  writeFileSync(file, idToken(Math.floor(Date.now() / 1000) + 3600, 'ENG-143'));
+  const three = await run();
+  assert.equal(three.code, 0, three.stderr());
+  assert.deepEqual(coffre.log.slice(4), ['POST /api/auth/workload 200', 'GET /use/market/prod 200']);
+  assert.equal(readdirSync(directory).filter((name) => name.endsWith('.json')).length, 2);
+
+  // A kept session the instance ended is no one's: the run says the token is spent, and forgets it.
+  for (const each of coffre.sessions.values()) each.revoked = true;
+  const four = await run();
+  assert.equal(four.code, 1);
+  assert.match(four.stderr(), /no longer knows the session this ID token bought, and the token is spent/);
+  assert.equal(readdirSync(directory).filter((name) => name.endsWith('.json')).length, 1);
+});
+
+test("a token with no exp is not kept: its run's session ends with it, as any other proof's", async (t) => {
+  const coffre = await fakeCoffre({ plan: { environment: 'market/prod', values: {}, credentials: [] } });
+  t.after(() => coffre.close());
+  const home = homeFor(t);
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const run = cli(t, ['--url', coffre.url, '--service', 'capy-agent', 'run', '--proof', 'oidc', '--', process.execPath, '-e', ''], `${part({ alg: 'RS256' })}.${part({ sub: 'x' })}.c2ln`, home);
+  const [code] = await once(run.child, 'exit');
+  assert.equal(code, 0, run.stderr());
+  assert.deepEqual(coffre.log, ['POST /api/auth/workload 200', 'GET /use/market/prod 200', 'POST /api/auth/logout 200']);
+  assert.throws(() => readdirSync(join(home, '.coffre', 'sessions')), /ENOENT/);
 });

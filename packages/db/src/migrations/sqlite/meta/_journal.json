@@ -295,6 +295,13 @@
       "when": 1794253447613,
       "tag": "0041_flat_history",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "6",
+      "when": 1794354067582,
+      "tag": "0042_binding_record",
+      "breakpoints": true
     }
   ]
 }

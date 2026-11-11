@@ -24,6 +24,7 @@ import {
   BindingInvalid,
   checkPolicy,
   claimValues,
+  customExposure,
   EVENT_EXPOSURE,
   fullRef,
   GITHUB_EVENTS,
@@ -94,6 +95,8 @@ export type TrustFlags = {
   'session-days'?: string;
   'overlap-minutes'?: string;
   'on-contention'?: string;
+  /** Repeated, or a comma list: claims of each sign-in's token to record (docs/design/oidc.md, section 9.3). */
+  record?: string[];
 };
 
 /** `coffre trust`'s flags, as `parseArgs` reads them. */
@@ -142,6 +145,7 @@ export const TRUST_OPTIONS = {
   'session-days': { type: 'string' },
   'overlap-minutes': { type: 'string' },
   'on-contention': { type: 'string' },
+  record: { type: 'string', multiple: true },
   scope: { type: 'string', multiple: true },
   label: { type: 'string' },
   replace: { type: 'string', multiple: true },
@@ -169,7 +173,7 @@ export type PolicyRequest = {
 };
 
 /** A binding as the CLI asks for it: a bearer one, with no policy; a workload's, with one. */
-export type BindingRequest = { profile: WorkloadProfile; issuer: string | null; claims: BindingClaims; policy?: PolicyRequest };
+export type BindingRequest = { profile: WorkloadProfile; issuer: string | null; claims: BindingClaims; policy?: PolicyRequest; record?: string[] };
 
 /**
  * The platform's own CLI, where one turns a name into the ID a binding
@@ -198,8 +202,8 @@ export const TRUST_USAGE = `usage: coffre trust <service>                       
        coffre trust <service> --github <owner> --reusable … --any-repository
        coffre trust <service> --gitlab <group>/<project> (--branch <b> | --tag <t>)
                     [--source push,web,schedule] [--gitlab-url <url>]
-       coffre trust <service> --issuer <url> --claim sub=<subject> [--claim <name>=<value> …]
-       coffre trust <service> --issuer <iss> --jwks-file <path> --claim sub=<subject> [--claim …]
+       coffre trust <service> --issuer <url> --claim <name>=<value> [--claim <name>=<value> …]
+       coffre trust <service> --issuer <iss> --jwks-file <path> --claim <name>=<value> [--claim …]
        coffre trust <service> --issuer <iss> --replace-keys --jwks-file <path>
          IDs, when the lookup cannot see a private repository, owner or project:
                     [--repository-id <n> --owner-id <n>] [--project-id <n> --namespace-id <n>]
@@ -210,7 +214,10 @@ export const TRUST_USAGE = `usage: coffre trust <service>                       
          by the branch it merges into
          --github-environment takes only the jobs that run in that GitHub environment, under its
          protection rules
-         --claim names a nested claim by its path: kubernetes.io.serviceaccount.uid=<uid>
+         --claim names a nested claim by its path: kubernetes.io.serviceaccount.uid=<uid>; a custom
+         issuer's binding pins one or more claims, each exact, that say who: sub, or project=p_7
+         --record <claim>,… copies those claims of each sign-in's token into its audit entry, as
+         --record thread,user: identifiers, never names or emails (the log keeps them)
          --jwks-file uploads the issuer's public keys, a JWKS, for an issuer coffre cannot fetch them
          from, such as a private Kubernetes cluster's (kubectl get --raw /openid/v1/jwks): then
          --issuer is any string its tokens name, and coffre asks it nothing
@@ -305,6 +312,15 @@ export function describeEvents(binding: Pick<BindingPlan, 'profile' | 'claims'>)
   return lines.join('\n');
 }
 
+/**
+ * What trusting the binding exposes, as the plan says it below its lines:
+ * the events that run unreviewed code (`describeEvents`), or who a custom
+ * issuer's claims let in (`customExposure`). Null when neither applies.
+ */
+export function describeExposure(binding: Pick<BindingPlan, 'profile' | 'claims'> & { issuer: string | null }): string | null {
+  return binding.profile === 'custom' && binding.issuer !== null ? customExposure(binding.issuer, binding.claims) : describeEvents(binding);
+}
+
 function listing(items: readonly string[], last: 'and' | 'or' = 'and'): string {
   return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} ${last} ${items.at(-1)}`;
 }
@@ -348,13 +364,20 @@ const POLICY_FLAGS = {
  * The binding the flags describe, its IDs looked up where they were not
  * given: one, whatever the events (GitHub) or pipeline sources (GitLab) it
  * names; `push` unless told. A workload's platform, or `--workload`, makes
- * one with a policy, for a key-bound session. Throws a sentence.
+ * one with a policy, for a key-bound session. `--record` adds the claims
+ * its sign-ins record, which the server checks. Throws a sentence.
  */
 export async function bindingFrom(
   flags: TrustFlags,
   lookup: Lookup,
   options: { service?: string; platforms?: PlatformLookup } = {},
 ): Promise<BindingRequest> {
+  const binding = await describedBinding(flags, lookup, options);
+  const record = listOf(flags.record);
+  return record === undefined ? binding : { ...binding, record };
+}
+
+async function describedBinding(flags: TrustFlags, lookup: Lookup, options: { service?: string; platforms?: PlatformLookup }): Promise<BindingRequest> {
   const platforms = PLATFORMS.filter((name) => flags[name] !== undefined && flags[name] !== false);
   const named = [...platforms, ...(['github', 'gitlab'] as const).filter((name) => flags[name] !== undefined)];
   if (named.length === 0 && flags.issuer === undefined) {
@@ -738,7 +761,7 @@ export function keysLine(binding: Pick<BindingPlan, 'jwksUri' | 'keys'>): string
 export type PolicyView = PolicyRequest & { keyAudience?: true };
 
 /** A binding, as the lines describing it take it: a plan, a saved one, and a workload's with its policy. */
-type Described = Pick<BindingPlan, 'profile' | 'issuer' | 'jwksUri' | 'keys' | 'claims'> & { scope: BindingPlan['scope'] | null; policy?: PolicyView | null };
+type Described = Pick<BindingPlan, 'profile' | 'issuer' | 'jwksUri' | 'keys' | 'claims'> & { scope: BindingPlan['scope'] | null; policy?: PolicyView | null; record?: string[] | null };
 
 /** A binding, or a plan for one, as lines: what it trusts, every claim in full, and a workload's policy. */
 export function describeBinding(binding: Described): string[] {
@@ -747,7 +770,9 @@ export function describeBinding(binding: Described): string[] {
   // A proof that is no ID token has no issuer to ask, and no keys.
   const urn = (Object.values(PROFILE_URNS) as string[]).includes(binding.issuer);
   const signer = urn ? [] : [`  issuer   ${binding.issuer}`, `  keys     ${keysLine(binding)}`];
-  return [`  profile  ${binding.profile}`, ...signer, ...claims, `  reaches  ${reaches(binding.scope)}`, ...policyLines(binding.profile, binding.policy ?? null)];
+  // A server before 0.17 says nothing of recorded claims.
+  const records = binding.record == null ? [] : [`  records  ${binding.record.join(', ')}, from each sign-in's token into its audit entry`];
+  return [`  profile  ${binding.profile}`, ...signer, ...claims, ...records, `  reaches  ${reaches(binding.scope)}`, ...policyLines(binding.profile, binding.policy ?? null)];
 }
 
 /**

@@ -60,8 +60,9 @@ test("the credential writes that take the fence wait LOCK_WAIT_MS for each lock,
          AND proname IN ('revoke_credential', 'change_bindings', 'sign_in', 'issue_token') ORDER BY proname, pronargs`);
     const waits = rows.map(({ name, config }) => [name, (config ?? []).find((setting) => setting.startsWith('lock_timeout='))]);
     assert.deepEqual(waits, [
-      // 0.15.0's (53 arguments, which 0079 makes delegate) and 0079's with its sweep (54, W331): both wait LOCK_WAIT_MS, as a
-      // `CREATE OR REPLACE` names its settings again.
+      // 0.15.0's (53 arguments, which 0079 makes delegate), 0079's with its sweep (54, W331, which 0083 makes delegate) and
+      // 0083's with the binding's record (55, T253): each waits LOCK_WAIT_MS, as a `CREATE OR REPLACE` names its settings again.
+      ['change_bindings', `lock_timeout=${LOCK_WAIT_MS}ms`],
       ['change_bindings', `lock_timeout=${LOCK_WAIT_MS}ms`],
       ['change_bindings', `lock_timeout=${LOCK_WAIT_MS}ms`],
       ['issue_token', `lock_timeout=${HOT_LOCK_TIMEOUT_MS / 1000}s`],

@@ -104,6 +104,26 @@ export async function generateProofKey(): Promise<ProofKey> {
   return { privateKey: pair.privateKey, jwk: { kty: kty as 'EC', crv: crv as 'P-256', x: x!, y: y! } };
 }
 
+/**
+ * A new key whose private half can be written down, as a JWK: only for a
+ * session one process hands the next (`workload`'s `keep`, docs/design/oidc.md,
+ * section 9.4), which seals it before it touches a disk.
+ */
+export async function exportableProofKey(): Promise<ProofKey & { exported: JsonWebKey }> {
+  const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const exported = await crypto.subtle.exportKey('jwk', pair.privateKey);
+  const { kty, crv, x, y } = exported;
+  return { privateKey: pair.privateKey, jwk: { kty: kty as 'EC', crv: crv as 'P-256', x: x!, y: y! }, exported };
+}
+
+/** A key `exportableProofKey` wrote down, taken up again, its private half not exportable from here on. Throws on anything else than a P-256 private key. */
+export async function importProofKey(exported: JsonWebKey): Promise<ProofKey> {
+  const { kty, crv, x, y, d } = exported;
+  if (kty !== 'EC' || crv !== 'P-256' || typeof x !== 'string' || typeof y !== 'string' || typeof d !== 'string') throw new TypeError('a kept session\'s key is a P-256 private key, as a JWK');
+  const privateKey = await crypto.subtle.importKey('jwk', { kty, crv, x, y, d }, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  return { privateKey, jwk: { kty: 'EC', crv: 'P-256', x, y } };
+}
+
 /** A method, as RFC 9110 writes one: a token, of any length the proof's own limit leaves. */
 export const METHOD_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 

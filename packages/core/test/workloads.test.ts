@@ -6,7 +6,9 @@ import {
   canonicalClaims,
   checkBinding,
   checkFetchUrl,
+  checkRecord,
   claimAt,
+  customExposure,
   differingClaims,
   githubEventsAt,
   githubReusable,
@@ -14,6 +16,9 @@ import {
   GITHUB_ISSUER,
   GITLAB_ISSUER,
   MAX_ISSUER_BYTES,
+  recordedNames,
+  recordText,
+  runClaims,
   type BindingClaims,
 } from '@coffre/core/identity';
 
@@ -200,7 +205,6 @@ test('a known issuer forces its profile; any other issuer is custom, by its subj
   refused({ profile: 'custom', issuer: GITHUB_ISSUER, claims: { sub: 'repo:acme/api:ref:refs/heads/main' } }, /signs only for the github profiles/);
   refused({ profile: 'github', issuer: GITLAB_ISSUER, claims: { ...GITHUB } }, /signs only for the gitlab profile/);
   refused({ profile: 'custom', issuer: null, claims: { sub: 'x' } }, /names its issuer/);
-  refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { email: 'deploy@acme.iam.gserviceaccount.com' } }, /requires sub/);
   checkBinding({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: '104000000000000000000' } });
   // A GitHub Enterprise Server is checked as GitHub.
   refused({ profile: 'github', issuer: 'https://github.acme.example/_services/token', claims: { ...GITHUB, event_name: 'pull_request_target' } }, /event_name/);
@@ -289,4 +293,91 @@ test('a binding that carries its keys names any issuer, exactly, but never one c
   for (const issuer of ['', ' https://idp', 'https://idp\n', 'x'.repeat(MAX_ISSUER_BYTES + 1)]) assert.throws(() => custom(issuer), BindingInvalid);
   assert.throws(() => checkBinding({ profile: 'github', issuer: null, claims: {} }, { uploaded: true }), /publishes its keys/);
   assert.throws(() => checkBinding({ profile: 'gitlab', issuer: GITLAB_ISSUER, claims: {} }, { uploaded: true }), /publishes its keys/);
+});
+
+/** Capy's token for one thread of project p_7 (docs/design/oidc.md, section 9): its `sub` changes with every thread. */
+const CAPY_ISSUER = 'https://api.capy.ai/oidc/orgs/o_123';
+const capy = (thread: string, more: Record<string, unknown> = {}) => ({
+  iss: CAPY_ISSUER, aud: 'https://secrets.acme.example', sub: `org/o_123/project/p_7/thread/${thread}`,
+  org: 'o_123', project: 'p_7', thread, machine: 'm_9', user: 'u_4', jti: 'j', iat: 1, nbf: 0, exp: 3601, ...more,
+});
+
+test('a custom binding pins one or more claims of any name, each exact, and needs no sub (0.17)', () => {
+  const binding = checkBinding({ profile: 'custom', issuer: CAPY_ISSUER, claims: { project: 'p_7', org: 'o_123' } });
+  assert.deepEqual(binding.claims, { org: 'o_123', project: 'p_7' });
+  // Every thread of the project matches, whatever its sub; every claim must, exactly.
+  assert.deepEqual(differingClaims('custom', binding.claims, capy('ENG-142')), []);
+  assert.deepEqual(differingClaims('custom', binding.claims, capy('ENG-143')), []);
+  assert.deepEqual(differingClaims('custom', binding.claims, capy('ENG-142', { project: 'p_8' })), ['project']);
+  assert.deepEqual(differingClaims('custom', binding.claims, capy('ENG-142', { project: 'p_7 ', org: 'O_123' })), ['org', 'project']);
+  // No prefix, no pattern: a value is a value.
+  assert.deepEqual(differingClaims('custom', binding.claims, capy('ENG-142', { project: 'p_70' })), ['project']);
+  assert.deepEqual(differingClaims('custom', { sub: 'org/o_123/project/p_7/thread/*' }, capy('ENG-142')), ['sub']);
+});
+
+test('a claim the token lacks, or carries as another type, matches no custom binding', () => {
+  const binding = checkBinding({ profile: 'custom', issuer: CAPY_ISSUER, claims: { project: 'p_7', tier: '7', verified: 'true' } }).claims;
+  const token = capy('ENG-142', { tier: '7', verified: 'true' });
+  assert.deepEqual(differingClaims('custom', binding, token), []);
+  const { project: _, ...missing } = token;
+  assert.deepEqual(differingClaims('custom', binding, missing), ['project']);
+  // A number or a boolean is no string, however it would print.
+  assert.deepEqual(differingClaims('custom', binding, { ...token, tier: 7 }), ['tier']);
+  assert.deepEqual(differingClaims('custom', binding, { ...token, verified: true }), ['verified']);
+  assert.deepEqual(differingClaims('custom', binding, { ...token, project: ['p_7'] }), ['project']);
+  assert.deepEqual(differingClaims('custom', binding, { ...token, project: { id: 'p_7' } }), ['project']);
+  assert.deepEqual(differingClaims('custom', binding, { ...token, project: null }), ['project']);
+  // And a binding's own values are strings only.
+  refused({ profile: 'custom', issuer: CAPY_ISSUER, claims: { tier: 7 as unknown as string } }, /nonempty string/);
+  refused({ profile: 'custom', issuer: CAPY_ISSUER, claims: { verified: true as unknown as string } }, /nonempty string/);
+});
+
+test('a custom binding that pins no claim, or only claims that say how a token was issued, is refused', () => {
+  refused({ profile: 'custom', issuer: CAPY_ISSUER, claims: {} }, /names one or more claims/);
+  refused({ profile: 'custom', issuer: CAPY_ISSUER, claims: { email_verified: 'true' } }, /email_verified says how a token was issued, not to whom/);
+  refused({ profile: 'custom', issuer: CAPY_ISSUER, claims: { acr: 'phr', azp: 'client' } }, /acr, azp say how a token was issued/);
+  // Beside a claim that says who, they narrow.
+  assert.deepEqual(checkBinding({ profile: 'custom', issuer: CAPY_ISSUER, claims: { email_verified: 'true', project: 'p_7' } }).claims, { email_verified: 'true', project: 'p_7' });
+  // A workload's platform still names its own, and the claimless proofs none.
+  refused({ profile: 'kubernetes', issuer: 'https://k8s.acme.example', claims: {} }, /requires sub/);
+  refused({ profile: 'enrollment', issuer: null, claims: { sub: 'x' } }, /names no claims: its proof carries none/);
+});
+
+test('who a custom binding lets in, said in words', () => {
+  assert.equal(
+    customExposure(CAPY_ISSUER, { org: 'o_123', project: 'p_7' }),
+    'Anyone holding a token from https://api.capy.ai/oidc/orgs/o_123 that says org=o_123 and project=p_7 signs in as this service account. ' +
+      'Coffre cannot tell whether these claims name one workload: you vouch that this issuer gives such a token to nobody else.',
+  );
+  assert.match(customExposure(CAPY_ISSUER, { project: 'p_7' }), /that says project=p_7 signs in/);
+  assert.match(customExposure(CAPY_ISSUER, { a: '1', b: '2', c: '3' }), /that says a=1, b=2 and c=3 signs in/);
+});
+
+test('a binding records claims by name: sorted, each once, at most eight, only where its proof is an ID token', () => {
+  assert.deepEqual(checkRecord('custom', ['user', 'thread', 'machine', 'user']), ['machine', 'thread', 'user']);
+  assert.equal(checkRecord('custom', []), null);
+  assert.equal(checkRecord('custom', undefined), null);
+  assert.equal(checkRecord('github', null), null);
+  assert.deepEqual(checkRecord('kubernetes', ['kubernetes.io.pod.uid']), ['kubernetes.io.pod.uid']);
+  assert.throws(() => checkRecord('custom', 'user'), /record lists claim names/);
+  assert.throws(() => checkRecord('custom', [7]), /record lists claim names/);
+  assert.throws(() => checkRecord('custom', ['a b']), /"a b" is not a claim name a binding can record/);
+  assert.throws(() => checkRecord('custom', ['__proto__']), /not a claim name/);
+  assert.throws(() => checkRecord('custom', Array.from({ length: 9 }, (_, i) => `c${i}`)), /at most 8 claims/);
+  for (const profile of ['aws', 'enrollment', 'cloudflare'] as const) assert.throws(() => checkRecord(profile, ['user']), /records no claims: its proof carries none/);
+  // One spelling, stored and read back.
+  assert.equal(recordText(['machine', 'user']), '["machine","user"]');
+  assert.equal(recordText(null), null);
+  assert.deepEqual(recordedNames('["machine","user"]'), ['machine', 'user']);
+  assert.deepEqual(recordedNames(null), []);
+  assert.deepEqual(recordedNames('not json'), []);
+});
+
+test("a sign-in's record holds the run's claims and those its binding records, each bounded; recording refuses nothing", () => {
+  const token = capy('ENG-142', { user: 'u_4', machine: 'm_9', score: 3, admin: true, groups: ['a'], long: 'x'.repeat(300) });
+  // `sub` is a run claim already: the thread is in it.
+  assert.deepEqual(runClaims(token), { sub: 'org/o_123/project/p_7/thread/ENG-142', jti: 'j' });
+  assert.deepEqual(runClaims(token, ['machine', 'user', 'thread', 'score', 'admin', 'groups', 'long', 'absent']), {
+    sub: 'org/o_123/project/p_7/thread/ENG-142', jti: 'j', machine: 'm_9', user: 'u_4', thread: 'ENG-142', score: 3, long: 'x'.repeat(256),
+  });
 });

@@ -55,7 +55,7 @@ async function bindingOf(id: string): Promise<SignInInput['binding']> {
   return {
     columns: {
       id, principal: row!.principal, generation: row!.generation, profile: row!.profile, issuer: row!.issuer, origin: ORIGIN, jwksUri: row!.jwksUri, claims: row!.claims,
-      scope: row!.scope, policy: row!.policy, revoked: row!.revokedAt !== null,
+      scope: row!.scope, policy: row!.policy, record: row!.record, revoked: row!.revokedAt !== null,
     },
     seal: row!.seal === null ? null : Buffer.from(row!.seal).toString('base64'),
   };
@@ -76,7 +76,7 @@ async function world() {
     actor: ROOT, via: null, actorAccess: null, connection: null, reason: 'replaced', ends: [], live: [], reads: [], revokedAt: Date.now(), revokedBy: 'root@acme.example',
     make: {
       id: binding, principal: CI, generation: 0, profile: 'github', issuer: ISSUER, origin: ORIGIN, jwksUri: `${ISSUER}/.well-known/jwks`, claims: JSON.stringify({ repository_id: '1' }),
-      scope, policy: null, revoked: false, jwks: null, label: 'deploys', createdBy: 'root@acme.example', createdAt: Date.now(), authMac: randomBytes(32).toString('base64'),
+      scope, policy: null, record: null, revoked: false, jwks: null, label: 'deploys', createdBy: 'root@acme.example', createdAt: Date.now(), authMac: randomBytes(32).toString('base64'),
     },
     policy: { seq: null, protected: [] }, appKey: APP_KEY,
   });

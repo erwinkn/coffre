@@ -14,7 +14,8 @@
  *
  *   - a P-256 key made here, non-extractable; the key, the session's token
  *     and the gate's nonce live in this closure only, never on disk or in
- *     the environment;
+ *     the environment, unless the caller keeps the session for the next
+ *     process (`keep`), which then holds what it is handed;
  *   - the exchange, retried while an enrollment code is `full` (5 minutes)
  *     or its session awaits approval (10), and after a spent projected token,
  *     once the kubelet writes the next;
@@ -28,7 +29,7 @@
  *     once if the gate asks for a fresh one;
  *   - logout on `close()`, and on SIGTERM.
  */
-import { base64url, bodyDigest, bodyLine, contentDigest, createProof, declaredDigest, generateProofKey, thumbprint, type ProofKey, type PublicJwk } from './dpop.ts';
+import { base64url, bodyDigest, bodyLine, contentDigest, createProof, declaredDigest, exportableProofKey, generateProofKey, importProofKey, thumbprint, type ProofKey, type PublicJwk } from './dpop.ts';
 import { CoffreError } from './index.ts';
 import type { Proof, ProofContext } from './workload-proofs.ts';
 
@@ -52,7 +53,21 @@ export type WorkloadOptions = {
   log?: (line: string) => void;
   /** `false` for a process that ends its own way, and calls `close()` itself: no logout on SIGTERM. */
   sigterm?: boolean;
+  /**
+   * A session one process hands the next, for a proof that is spent once and
+   * given again unchanged (an ID token in a file, for its hour): `coffre
+   * run`'s, which seals it by that token (docs/design/oidc.md, section 9.4).
+   * The workload starts from `session` while it lasts, or exchanges once and
+   * hands `save` what it bought, its key's private half included; `save`
+   * hears each renewal, and null once the session is lost. It never proves
+   * again: its next proof is the next process's. `close()` stops using it and
+   * logs nothing out.
+   */
+  keep?: { session: KeptSession | null; save: (session: KeptSession | null) => void };
 };
+
+/** A session as `keep` hands it on: its key, written down, and what the exchange answered. */
+export type KeptSession = { key: JsonWebKey; token: string; expiresAt: number; notAfter: number; places: string[] };
 
 export type NarrowOptions = {
   places?: string[];
@@ -125,6 +140,8 @@ const FRESH_NONCE_MS = 100_000;
 /** How long the exchange waits out a full enrollment code, and a session awaiting approval. */
 const FULL_MS = 5 * 60_000;
 const PENDING_MS = 10 * 60_000;
+/** A kept session is renewed when taken up with less than this left: half the hour a renewal gives (workload-access.md, section 5.4). */
+const KEPT_RENEW_MS = 30 * 60_000;
 /** An enrollment session renews every 30 seconds: its expiry, 90 seconds past its last renewal, is its liveness. */
 const ENROLLMENT_RENEW_MS = 30_000;
 /** Refusals no new proof can change: the code was superseded by a newer deploy's. */
@@ -155,7 +172,14 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
   const origin = url.origin;
   const base: Fetch = options.fetch ?? ((input, init) => fetch(input, init));
   const log = options.log ?? ((line: string) => console.error(line));
-  const key = await generateProofKey();
+  const kept = options.keep;
+  // A kept session's own key, or one that can be written down for the next process; anyone else's never can.
+  const resumed = kept?.session != null && Date.now() < Math.min(kept.session.expiresAt, kept.session.notAfter) - 5000 ? kept.session : null;
+  const made = kept === undefined ? null : resumed === null ? await exportableProofKey() : null;
+  const key: ProofKey = kept === undefined ? await generateProofKey() : made ?? (await importProofKey(resumed!.key));
+  const written = made?.exported ?? resumed?.key ?? null;
+  /** What `keep` is told: the session held now, with its key; null once lost. */
+  const hand = (held: Session | null) => kept?.save(held === null ? null : { key: written!, token: held.token, expiresAt: held.expiresAt, notAfter: held.notAfter, places: held.places });
   /** Aborted by `close()`: an exchange, its waits and its proof's stop with it. */
   const lifetime = new AbortController();
   // A proof's own requests (a metadata server's) end with the session too.
@@ -211,7 +235,8 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
     }
   };
 
-  let session: Session | null = await exchange();
+  let session: Session | null = resumed === null ? await exchange() : { token: resumed.token, expiresAt: resumed.expiresAt, notAfter: resumed.notAfter, places: resumed.places, issuedAt: Date.now() };
+  if (resumed === null) hand(session);
   if (options.place !== undefined && !session.places.includes(options.place)) {
     throw new Error(`${options.service} reaches ${session.places.join(', ') || 'no environment'}, not ${options.place}`);
   }
@@ -229,8 +254,8 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
   /** The exchange in flight, which requests without a session wait for; and why the last one failed, while none holds. */
   let attempt: Promise<Session> | null = null;
   let failure: unknown = null;
-  /** A refusal no new proof can change (a superseded code, a proof given once and spent), once seen. */
-  let final: unknown = null;
+  /** A refusal no new proof can change (a superseded code, a proof given once and spent), once seen; a kept session's, from the start. */
+  let final: unknown = kept === undefined ? null : new Error(`${options.service}'s session was kept for the proof that bought it: the next proof is the next run's`);
   let tries = 0;
   /** The renewal in flight for each session: one each, so that an old session's renewal answered late takes no new session's turn. */
   const renewals = new WeakMap<Session, Promise<void>>();
@@ -253,7 +278,8 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
   const plan = (held: Session) => {
     planRenewal(held);
     // An enrollment's `notAfter` is its code's end, which no new proof passes. A projected token's next is written at 80% of its life.
-    if (!enrolled) at('prove', held.notAfter - (held.notAfter - held.issuedAt) / 10, () => prove().catch(() => undefined));
+    // A kept session's next proof is the next process's.
+    if (!enrolled && kept === undefined) at('prove', held.notAfter - (held.notAfter - held.issuedAt) / 10, () => prove().catch(() => undefined));
   };
 
   /** A new session, with a fresh proof and the same key: requests in flight finish on the old one. Retried with backoff while it fails, unless it cannot change. */
@@ -300,7 +326,10 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
         const { response, body } = await api('/api/auth/workload/renew', held.token);
         if (response.ok && typeof body?.expiresAt === 'string') {
           held.expiresAt = Date.parse(body.expiresAt);
-          if (session === held) planRenewal(held);
+          if (session === held) {
+            planRenewal(held);
+            hand(held);
+          }
           return;
         }
         // Asked for a nonce once more, it says nothing of the session: tried again soon, as when coffre is out of reach.
@@ -320,6 +349,7 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
   const lose = () => {
     if (closed) return;
     session = null;
+    hand(null);
     clearTimeout(timers.renew);
     clearTimeout(timers.prove);
     prove().catch(() => undefined);
@@ -336,6 +366,8 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
   };
 
   plan(session);
+  // A kept session taken up with less than half the hour a renewal gives left is renewed first, by its key, as `coffre serve` would have.
+  if (resumed !== null && session.expiresAt < session.notAfter && session.expiresAt - Date.now() < KEPT_RENEW_MS) await renew();
 
   const signals = (globalThis as { process?: NodeJS.Process }).process;
   let closing: Promise<void> | null = null;
@@ -348,7 +380,9 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
       for (const timer of Object.values(timers)) clearTimeout(timer);
       session = null;
       try {
-        const ended = await Promise.allSettled(roots.filter((root) => root.notAfter > Date.now()).map((root) => logout(api, root.token)));
+        // A kept session goes on in the next process: nothing is logged out.
+        const live = kept === undefined ? roots.filter((root) => root.notAfter > Date.now()) : [];
+        const ended = await Promise.allSettled(live.map((root) => logout(api, root.token)));
         const failed = ended.find((each): each is PromiseRejectedResult => each.status === 'rejected');
         if (failed !== undefined) throw failed.reason;
       } finally {

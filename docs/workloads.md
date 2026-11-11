@@ -532,6 +532,48 @@ makes one session per job, ending at the token's own expiry. On an instance
 without the workload exchange, keep the `coffre login --id-token` recipe in
 [ci.md](ci.md).
 
+### Capy, and any issuer whose claims say who
+
+Capy signs an ID token for each machine of an agent's thread, an hour long,
+and writes it to a file it replaces about 15 minutes before it expires
+(`CAPY_OIDC_TOKEN_FILE`). Its `sub`,
+`org/<org>/project/<project>/thread/<thread>`, names the thread, so the
+binding pins the project instead. Any issuer's claims work this way: a
+custom binding pins one or more of them, of any name, each matched
+exactly ([design, section 9](design/oidc.md#9-any-claims-recorded-claims-one-token-for-many-runs-017)).
+
+```sh
+coffre trust capy-agent --issuer https://api.capy.ai/oidc/orgs/<org> \
+  --claim project=<project> --record thread,user,machine --workload --apply
+```
+
+The plan says who it lets in, before it is saved:
+
+```text
+Anyone holding a token from https://api.capy.ai/oidc/orgs/<org> that says project=<project> signs in as this service account.
+```
+
+In the project's cloud setup, set the token's audience to the instance's
+URL. Each command the agent runs then signs in by the token in the file:
+
+```sh
+coffre --url https://secrets.acme.example --service capy-agent \
+  run --proof oidc:"$CAPY_OIDC_TOKEN_FILE" market/dev -- pnpm test
+```
+
+- **One token, many runs.** A token is spent once, so the first run keeps
+  the session it bought in `~/.coffre/sessions/`, encrypted under a key
+  derived from the token, and every run after it with the same token goes
+  on with that session. The session ends with the token, at most an hour
+  later. Capy's next token buys the next one.
+- **`--record`** copies those claims of each sign-in's token into its audit
+  entry, beside `sub`, which every sign-in records already. Record
+  identifiers, never names or emails: the log keeps them.
+- **Anyone who can start a thread in the project acts as the account**, and
+  so does a prompt injection that steers an agent in one. Give it a
+  use-only account: a binding with no `reads`, whose credentials it uses
+  through coffre and never holds.
+
 ### Any language
 
 Run the sidecar beside the app, or wrap the app's command:

@@ -12,6 +12,7 @@ import { credentialScopeInWords, INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProje
 import {
   BEARER_PROFILES,
   claimValues,
+  customExposure,
   defaultIssuer,
   EVENT_EXPOSURE,
   GITHUB_ISSUER,
@@ -852,6 +853,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
           .describe('The ID token claims a run must carry, such as repository_id and ref; event_name or pipeline_source may be a list, as ["push", "pull_request"]; environment, on GitHub, the GitHub environment the job runs in, as "production", matched whatever its case'),
         scope: credentialScope,
         label: z.string().trim().min(1).optional(),
+        record: z.array(z.string()).optional().describe("Claims of each run's token to record in its sign-in's audit entry beyond the run's own, by name, as [\"user\"]: identifiers, never names or emails"),
       })
       .strict(),
     names: ({ service }) => [serviceMember(service)],
@@ -859,18 +861,18 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       fresh: 'always',
       summary: ({ service, profile }) => `let ${profile} CI runs sign in as ${shownService(service)}`,
       // The binding is checked, and its issuer asked where its keys are, before anyone is asked to approve it.
-      check: async ({ api }, { service, profile, issuer, claims, scope, label }) =>
-        void (await api.bindings.preview(serviceMember(service), { profile, issuer: issuer ?? null, claims, ...(scope === undefined ? {} : { scope }), label: label ?? null })),
+      check: async ({ api }, { service, profile, issuer, claims, scope, label, record }) =>
+        void (await api.bindings.preview(serviceMember(service), { profile, issuer: issuer ?? null, claims, ...(scope === undefined ? {} : { scope }), label: label ?? null, ...(record === undefined ? {} : { record }) })),
       // What its runs will reach, and the bindings it takes the place of, as the server plans them: Approve refuses either changed.
-      replaces: async (api, { service, profile, issuer, claims, scope, label }) => {
-        const plan = await api.bindings.preview(serviceMember(service), { profile, issuer: issuer ?? null, claims, ...(scope === undefined ? {} : { scope }), label: label ?? null });
+      replaces: async (api, { service, profile, issuer, claims, scope, label, record }) => {
+        const plan = await api.bindings.preview(serviceMember(service), { profile, issuer: issuer ?? null, claims, ...(scope === undefined ? {} : { scope }), label: label ?? null, ...(record === undefined ? {} : { record }) });
         const replaced = reaching(plan, { replaces: plan.replaces.map(({ id }) => id) });
         if (plan.replaces.length === 0) return replaced;
         const moved = plan.replaces.some(({ why }) => why === 'keys_moved') ? ', since the issuer moved its keys' : '';
         return { ...replaced, details: [...replaced.details, { label: 'Replaces', value: `${plan.replaces.length === 1 ? 'a binding' : `${plan.replaces.length} bindings`} of the account${moved}`, note: plan.replaces.map(({ id }) => id).join(', ') }] };
       },
       // The model picks the IDs: each is named back from GitHub or GitLab, where it can be, so the person reads what they trust.
-      preview: async (_api, { service, profile, issuer, claims, label }, { transport }, replaced) => {
+      preview: async (_api, { service, profile, issuer, claims, label, record }, { transport }, replaced) => {
         const names = await namesOf(transport, profile, issuer ?? null, claims);
         // An issuer the app named that is not GitHub's or GitLab's own: whoever runs it signs the tokens.
         const unfamiliar = issuer !== undefined && issuer !== GITHUB_ISSUER && issuer !== GITLAB_ISSUER;
@@ -880,12 +882,15 @@ export const CHANGE_TOOLS: readonly Tool[] = [
             ? { label: 'Runs from', value: issuer, kind: 'mono', note: "Not GitHub's or GitLab's own: whoever runs this host can sign in as the account. Approve only if it is yours.", warn: true }
             : { label: 'Runs from', value: issuer ?? `${profile}'s own issuer` },
           ...claimLines(claims, names),
+          // A custom issuer's claims mean what it says they mean: who they let in, in words (docs/design/oidc.md, section 9.1).
+          ...(profile === 'custom' && issuer !== undefined ? [{ label: 'Who signs in', value: customExposure(issuer, claims), warn: true as const }] : []),
+          ...(record === undefined || record.length === 0 ? [] : [{ label: 'Records', value: record.join(', '), kind: 'mono' as const, note: "Copied from each run's token into its sign-in's audit entry, kept as long as the log" }]),
           ...replaced,
           ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
         ];
       },
-      apply: async (api, { service, profile, issuer, claims, label }, { replaced }) => {
-        const made = await api.bindings.create(serviceMember(service), { profile, issuer: issuer ?? null, claims, scope: pinned(replaced), label: label ?? null });
+      apply: async (api, { service, profile, issuer, claims, label, record }, { replaced }) => {
+        const made = await api.bindings.create(serviceMember(service), { profile, issuer: issuer ?? null, claims, scope: pinned(replaced), label: label ?? null, ...(record === undefined ? {} : { record }) });
         return { result: { service: shownService(service), binding: made.binding.id }, text: `CI runs that match are trusted as ${shownService(service)}.` };
       },
     },

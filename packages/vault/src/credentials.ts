@@ -21,7 +21,7 @@ import {
   type ServiceAccount,
   type ServiceSetting,
 } from '@coffre/core/access';
-import { EXCHANGED_CREDENTIAL_MS, MAX_SESSION_HOURS, POLICY_DEFAULTS, POLICY_FIELDS, SESSION_MS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
+import { checkRecord, EXCHANGED_CREDENTIAL_MS, MAX_SESSION_HOURS, POLICY_DEFAULTS, POLICY_FIELDS, recordText, SESSION_MS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
 import { CLOCK_SKEW_MS, isConfirmation } from '@coffre/core/vault';
 import type { BindingColumns, ChangeBindingsInput, CredentialColumns, IssueTokenInput, LoggedChange, MadeBinding, IssueTokenRefusal, RequestTrace, RevokeCredentialInput, SignInCredential, SignInInput, SignInRefusal } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
@@ -231,15 +231,29 @@ function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): Omit<Si
   };
 }
 
-/** A binding's columns as the app names them; throws on a shape no app of this release sends. */
+/**
+ * A binding's columns as the app names them; throws on a shape no app of
+ * this release sends. An app before 0.17 names no `record`: none, null.
+ */
 export function checkBinding(columns: BindingColumns | undefined): BindingColumns {
   const c = columns ?? ({} as BindingColumns);
   const text = (value: unknown) => typeof value === 'string';
   if (!text(c.id) || !UUID.test(c.id) || !text(c.principal) || !Number.isInteger(c.generation) || !text(c.profile) || !text(c.issuer) || !text(c.origin) || !webUrl(c.origin) || !text(c.jwksUri)
-    || !text(c.claims) || (c.scope !== null && !text(c.scope)) || (c.policy !== null && !text(c.policy)) || typeof c.revoked !== 'boolean') {
-    throw new Error('a binding is named by its columns as its row keeps them: id, account, generation, profile, issuer, origin (an http(s) URL), keys, claims, scope, policy, revoked');
+    || !text(c.claims) || (c.scope !== null && !text(c.scope)) || (c.policy !== null && !text(c.policy)) || typeof c.revoked !== 'boolean'
+    || (c.record != null && !recorded(c.profile, c.record))) {
+    throw new Error('a binding is named by its columns as its row keeps them: id, account, generation, profile, issuer, origin (an http(s) URL), keys, claims, scope, policy, record, revoked');
   }
-  return c;
+  return c.record === undefined ? { ...c, record: null } : c;
+}
+
+/** Whether `record` is a binding's recorded claims in their one spelling, for a profile whose proof carries claims (`checkRecord`). */
+function recorded(profile: string, record: unknown): boolean {
+  if (typeof record !== 'string') return false;
+  try {
+    return recordText(checkRecord(profile as WorkloadProfile, JSON.parse(record))) === record;
+  } catch {
+    return false;
+  }
 }
 
 /** An instance's public URL, http or https, as a binding's `origin` must be: checked where it enters, so a sign-in never parses a bad one (Fable on PR 3b). */
@@ -602,7 +616,7 @@ export function checkChangeBindings(input: ChangeBindingsInput): void {
   const ids = [...(make === null ? [] : [make.id]), ...ends.map((end) => end?.before?.columns?.id), ...ends.flatMap((end) => (end?.credentials ?? []).map((credential) => credential?.before?.columns?.id))];
   if (new Set(ids).size !== ids.length) throw new Error('a change of bindings names each binding and credential once');
   if (make !== null) {
-    checkBinding(make);
+    if (checkBinding(make).record === null) make.record = null;
     if (make.revoked || (make.jwks !== null && typeof make.jwks !== 'string') || (make.label !== null && typeof make.label !== 'string') || typeof make.createdBy !== 'string'
       || !isBase64(make.authMac, 32) || make.scope === null || !Number.isSafeInteger(make.createdAt)) {
       throw new Error('a binding made is live, has a scope, names its keys, label and maker, and carries the app\'s MAC');

@@ -51,6 +51,8 @@ export function bindingObject(row: BindingColumns): BindingInput {
   return {
     kind: 'binding', id: row.id, principal: row.principal, generation: row.generation, profile: row.profile, issuer: row.issuer,
     origin: row.origin, jwksUri: row.jwksUri, claims: row.claims, scope: scopeOf(row.scope), policy: row.policy, revoked: row.revoked,
+    // Only when set: a binding without (every one before 0.17) seals as it always did.
+    ...(row.record == null ? {} : { record: row.record }),
   };
 }
 

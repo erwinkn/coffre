@@ -193,7 +193,9 @@ export const SECTIONS = [
           'made once, in your personal config; as a --service, key-bound',
           'where the instance has it: --proof says how it proves itself (none:',
           "a GitHub Actions job's ID token), the environments are the session's",
-          'unless named, and credentials go through a local listener',
+          'unless named, and credentials go through a local listener;',
+          '--proof oidc:<file> reads an ID token from a file, and the session it',
+          'buys serves the runs after it until the token expires',
         ],
       },
       {

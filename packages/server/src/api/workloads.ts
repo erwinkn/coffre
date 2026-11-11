@@ -10,6 +10,7 @@ import {
   checkBinding,
   checkFetchUrl,
   checkPolicy,
+  checkRecord,
   CLOCK_TOLERANCE_SECONDS,
   decodeWorkloadToken,
   differingClaims,
@@ -30,6 +31,8 @@ import {
   UPLOADED_KEYS,
   POLICY_FIELDS,
   policyText,
+  recordedNames,
+  recordText,
   REPEATING_PROFILES,
   tokenHint,
   uploadedKeys,
@@ -519,6 +522,8 @@ export type BindingView = {
   scope: ScopeByPath | null;
   /** A workload's binding's policy (docs/design/workload-access.md, section 11), its reads by path and name; null for one `/api/auth/oidc` takes. */
   policy: PolicyView | null;
+  /** The claims its sign-ins record beyond the run's (docs/design/oidc.md, section 9.3), sorted; null for none. */
+  record: string[] | null;
   label: string | null;
   createdAt: string;
   createdBy: string;
@@ -541,6 +546,8 @@ export type BindingPlan = {
   scope: ScopeByPath;
   /** What it says beyond its claims, canonical, its reads by path and name; null for a binding `/api/auth/oidc` takes. */
   policy: PolicyView | null;
+  /** The claims its sign-ins record beyond the run's, sorted; null for none. */
+  record: string[] | null;
   /** The places of `scope` that hold a sensitive value its credentials will not read: only an Owner of their project binds one that does (R32). */
   withheld: string[];
   /** `asked`: named in `replaces`. `keys_moved`: the service's bindings on the issuer, under its old keys' URL. */
@@ -566,6 +573,12 @@ export type BindingInput = {
    * (`ReadsByPath`): the binding stores them by ID.
    */
   policy?: unknown;
+  /**
+   * Claims of its sign-ins' tokens to record beyond the run's, by name
+   * (`checkRecord`; docs/design/oidc.md, section 9.3): a Capy thread's
+   * `user`, say. Any ID token's profile takes them.
+   */
+  record?: string[];
   /**
    * The issuer's public keys, a JWKS, for an issuer coffre cannot or should
    * not fetch them from, such as a private Kubernetes cluster's: then the
@@ -681,12 +694,14 @@ export class WorkloadService {
     const details = { principalType: 'service', principalId: serviceId, profile: input.profile, issuer: input.issuer };
     const uploaded = input.jwks === undefined ? null : await keysOf(input.jwks);
     let policy: ReturnType<typeof checkBinding>;
+    let record: string[] | null;
     // A workload's binding, which signs in at `/api/auth/workload` alone: every one but a bearer binding of today's five profiles.
     // Its policy checked whole but for `reads`, which name places and keys by path and name, found below.
     let rules: BindingPolicy | null = null;
     let wantedReads: unknown;
     try {
       policy = checkBinding(input, { allowLoopback: this.#deps.config.allowLoopback, uploaded: uploaded !== null });
+      record = checkRecord(policy.profile, input.record);
       if (!isBearerProfile(policy.profile) || input.policy !== undefined || this.#deps.signin.config.useOnly) {
         if (input.policy !== undefined && (typeof input.policy !== 'object' || input.policy === null || Array.isArray(input.policy))) throw new BindingInvalid('a policy is an object');
         const { reads, ...rest } = (input.policy ?? {}) as Record<string, unknown>;
@@ -753,7 +768,7 @@ export class WorkloadService {
       if (rules !== null && reads.length > 0) rules = checked(() => checkPolicy(policy.profile, { ...rules, reads: readsById(reads) }, { service: member }));
       const scope = reads.length === 0 ? issued.scope : readsScope({ ...ctx, caller }, issued.scope, reads, details);
       const plan = (replaces: typeof replaced): BindingPlan => ({
-        ...policy, jwksUri, keys: uploaded?.keys ?? null, scope: byPath, policy: rules === null ? null : shownPolicy(rules, reads), withheld, replaces: replaces.map(({ id, why }) => ({ id, why })),
+        ...policy, record, jwksUri, keys: uploaded?.keys ?? null, scope: byPath, policy: rules === null ? null : shownPolicy(rules, reads), withheld, replaces: replaces.map(({ id, why }) => ({ id, why })),
       });
       if (options.dryRun) return plan(replaced);
 
@@ -773,7 +788,7 @@ export class WorkloadService {
           const row = {
             id: randomUUID(), principal: member, generation: standing.generation, profile: planned.profile, issuer: planned.issuer, jwksUri: planned.jwksUri,
             jwks: uploaded?.jwks ?? null, claims: canonicalClaims(planned.claims), scope: storedScope(scope), policy: rules === null ? null : policyText(rules),
-            label: input.label ?? null, createdBy: ctx.caller.principal.id, createdAt: new Date(),
+            record: recordText(record), label: input.label ?? null, createdBy: ctx.caller.principal.id, createdAt: new Date(),
           };
           const ending = live.filter((candidate) => planned.replaces.some(({ id }) => id === candidate.id));
           const entries = [
@@ -784,7 +799,7 @@ export class WorkloadService {
               metadata: {
                 bindingId: row.id, principalType: 'service', principalId: serviceId, profile: planned.profile, issuer: planned.issuer, jwksUri: planned.jwksUri,
                 ...(uploaded === null ? {} : { keys: uploaded.keys }), claims: planned.claims, scope,
-                ...(rules === null ? {} : { policy: rules }), ...(reads.length === 0 ? {} : { reads: shownPolicy(rules!, reads).reads }),
+                ...(rules === null ? {} : { policy: rules }), ...(record === null ? {} : { record }), ...(reads.length === 0 ? {} : { reads: shownPolicy(rules!, reads).reads }),
                 replaces: planned.replaces.map((replacing) => replacing.id),
               },
             }),
@@ -829,6 +844,8 @@ export class WorkloadService {
           scope: storedScope(scope),
           // None on a bearer binding, which `/api/auth/oidc` takes; canonical JSON on a workload's, under the MAC (`policed_`).
           policy: rules === null ? null : policyText(rules),
+          // The claims its sign-ins record, under the MAC (`recorded_`) when it names any.
+          record: recordText(record),
           label: input.label ?? null,
           createdAt: now,
           createdBy: ctx.caller.principal.id,
@@ -853,6 +870,7 @@ export class WorkloadService {
             claims: planned.claims,
             scope,
             ...(rules === null ? {} : { policy: rules }),
+            ...(record === null ? {} : { record }),
             ...(reads.length === 0 ? {} : { reads: shownPolicy(rules!, reads).reads }),
             replaces: planned.replaces.map((replaced) => replaced.id),
           },
@@ -941,7 +959,7 @@ export class WorkloadService {
             const { scope, byPath } = scopes.get(old.id)!;
             const row = {
               id: randomUUID(), principal: member, generation: standing.generation, profile: old.profile, issuer: old.issuer, jwksUri, jwks: uploaded.jwks,
-              claims: old.claims, scope: storedScope(scope), policy: old.policy, label: old.label, createdBy: ctx.caller.principal.id,
+              claims: old.claims, scope: storedScope(scope), policy: old.policy, record: old.record, label: old.label, createdBy: ctx.caller.principal.id,
               // A millisecond apart, in the order of those they replace: an exchange tries bindings oldest first, and still does.
               createdAt: new Date(now + i),
             };
@@ -950,7 +968,7 @@ export class WorkloadService {
               allowed(ctx, 'token.bind', {
                 metadata: {
                   bindingId: row.id, principalType: 'service', principalId: serviceId, profile: old.profile, issuer: old.issuer, jwksUri, keys: uploaded.keys,
-                  claims: JSON.parse(old.claims) as BindingClaims, scope, replaces: [old.id],
+                  claims: JSON.parse(old.claims) as BindingClaims, ...(old.record === null ? {} : { record: recordedNames(old.record) }), scope, replaces: [old.id],
                 },
               }),
             ]);
@@ -992,6 +1010,7 @@ export class WorkloadService {
             claims: old.claims,
             scope: storedScope(scope),
             policy: old.policy,
+            record: old.record,
             label: old.label,
             // A millisecond apart, in the order of those they replace: an exchange tries bindings oldest first, and still does.
             createdAt: new Date(now.getTime() + i),
@@ -1012,6 +1031,7 @@ export class WorkloadService {
               jwksUri,
               keys: uploaded.keys,
               claims: JSON.parse(old.claims) as BindingClaims,
+              ...(old.record === null ? {} : { record: recordedNames(old.record) }),
               scope,
               replaces: [old.id],
             },
@@ -1628,7 +1648,7 @@ export class WorkloadService {
           notAfter: notAfter.toISOString(),
           ...(committed.enrollmentId === undefined ? {} : { enrollmentId: committed.enrollmentId }),
           ...(committed.pending === true ? { pending: true } : {}),
-          run: runClaims(verified.claims),
+          run: runClaims(verified.claims, recordedNames(verified.binding.record)),
         },
       }));
       return { id, token, expiresAt, notAfter, committed, reached };
@@ -1681,7 +1701,7 @@ export class WorkloadService {
       spent: verified.spentKey?.toString('base64') ?? null,
       // Its proof's end is the session's hard end, held to in the statement.
       validUntil: null,
-      record: { proof: name, issuer: binding.issuer, run: runClaims(verified.claims) },
+      record: { proof: name, issuer: binding.issuer, run: runClaims(verified.claims, recordedNames(binding.record)) },
       // The session's key, by the DPoP proof it signed, and the token where its binding carries its issuer's keys: the
       // vault's to verify (D148, PR 3b). A token of keys its issuer publishes, and a proof that is no ID token (an AWS
       // signed request), are the app's alone, so a compromised app could make sessions of such a binding's.
@@ -1812,7 +1832,7 @@ export class WorkloadService {
           generation: binding.generation,
           issuer,
           expiresAt: credential.expiresAt,
-          run: runClaims(claims),
+          run: runClaims(claims, recordedNames(binding.record)),
         },
       }));
       return { token: credential.token, expiresAt: credential.expiresAt };
@@ -1849,7 +1869,7 @@ export class WorkloadService {
       // The token's times, held to again in the statement, as the commit under 0.14's head holds them: its `exp`, and its `iat`'s hour.
       // Whole ms, down: a token's times may be fractional seconds, which the checks before took.
       validUntil: Math.floor(Math.min((decoded.claims.exp + CLOCK_TOLERANCE_SECONDS) * 1000, (decoded.claims.iat + MAX_TOKEN_AGE_SECONDS) * 1000)),
-      record: { proof: 'oidc', issuer, run: runClaims(claims) },
+      record: { proof: 'oidc', issuer, run: runClaims(claims, recordedNames(binding.record)) },
       idToken: vaultVerifies(binding) ? { token, jwks: binding.jwks! } : null,
       dpop: null,
       // The account's and the binding's newest changes, read beside it: the vault checks and pins them, one statement (T192).
@@ -2170,6 +2190,7 @@ function view(row: Omit<BindingRow, 'origin'>, scope: ScopeByPath | null, policy
     claims: JSON.parse(row.claims) as BindingClaims,
     scope,
     policy,
+    record: row.record === null ? null : recordedNames(row.record),
     label: row.label,
     createdAt: row.createdAt.toISOString(),
     createdBy: row.createdBy,

@@ -1,6 +1,6 @@
 import { expectedAudiences, PROFILE_RULES } from './profile-rules.ts';
 import { CLOCK_TOLERANCE_SECONDS, decodeWorkloadToken, MAX_TOKEN_AGE_SECONDS, uploadedKeys, verifyWorkloadToken, WorkloadTokenRefused, type JSONWebKeySet } from './workload-token.ts';
-import { claimAt, differingClaims, REPEATING_PROFILES, type BindingClaims, type BindingPolicy, type WorkloadProfile } from './workloads.ts';
+import { claimAt, differingClaims, recordedNames, REPEATING_PROFILES, type BindingClaims, type BindingPolicy, type WorkloadProfile } from './workloads.ts';
 
 /**
  * The claims of the run a credential was issued for, as the issuer
@@ -18,10 +18,15 @@ const MAX_RUN_CLAIM = 256;
 /** A binding's `jwks_uri` when it carries its issuer's keys: the SHA-256 of those keys (`UploadedKeys`), where a fetched set's URL would be. */
 export const UPLOADED_KEYS = 'sha256:';
 
-/** The run's claims, as the issuer stated them: those that say which run, each bounded. */
-export function runClaims(claims: Record<string, unknown>): Record<string, string | number> {
+/**
+ * The run's claims, as the issuer stated them: those that say which run,
+ * and those its binding records (`record`, docs/design/oidc.md, section
+ * 9.3), each bounded. A claim that is no string or finite number, or is
+ * missing, is left out: recording never refuses a sign-in.
+ */
+export function runClaims(claims: Record<string, unknown>, record: readonly string[] = []): Record<string, string | number> {
   const run: Record<string, string | number> = {};
-  for (const name of RUN_CLAIMS) {
+  for (const name of [...RUN_CLAIMS, ...record]) {
     const value = claimAt(claims, name);
     if (typeof value === 'string') run[name] = value.slice(0, MAX_RUN_CLAIM);
     else if (typeof value === 'number' && Number.isFinite(value)) run[name] = value;
@@ -50,6 +55,8 @@ export type RunBinding = {
   jwks: string;
   claims: string;
   policy: string | null;
+  /** The claims it records, as its `record` column holds them (`recordText`); null for none. */
+  record: string | null;
 };
 
 /** Why a run's proof buys nothing, as the app's refusals say it (`ExchangeReason`), with the key a refused token named. */
@@ -135,7 +142,7 @@ export async function verifyRunToken(
     const ruled = PROFILE_RULES[binding.profile]?.token(claims, { issuer: binding.issuer, claims: JSON.parse(binding.claims) as BindingClaims, policy: policy! }) ?? null;
     if (ruled !== null) throw new RunProofRefused('no_match', ruled);
   }
-  const run = runClaims(claims);
+  const run = runClaims(claims, recordedNames(binding.record));
   if (context.workload === null) {
     // The token's own times, held to again in the statement: its `exp`, and its `iat`'s hour, whole ms, down.
     const validUntil = Math.floor(Math.min((decoded.claims.exp + CLOCK_TOLERANCE_SECONDS) * 1000, (decoded.claims.iat + MAX_TOKEN_AGE_SECONDS) * 1000));
