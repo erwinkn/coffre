@@ -68,6 +68,8 @@ export async function fakeCoffre(options: FakeOptions = {}) {
   };
   rotate();
   const nonce = () => epochs[0]!.nonce;
+  /** How many session proofs to come the gate refuses for their nonce, whatever nonce they carry. */
+  let challenges = 0;
 
   let publicUrl = '';
   const answer = (res: ServerResponse, { status, body, headers = {} }: Answer) => {
@@ -95,8 +97,9 @@ export async function fakeCoffre(options: FakeOptions = {}) {
     if (typeof proof !== 'string') return 'dpop';
     const verified = await verifyProof(proof, { method: req.method!, url: `${publicUrl}${req.url}`, jkt: session.jkt, token, content });
     if (!verified.ok) return verified.reason;
-    const epoch = epochs.find((each) => each.nonce === verified.nonce);
+    const epoch = challenges > 0 ? undefined : epochs.find((each) => each.nonce === verified.nonce);
     if (epoch === undefined) {
+      challenges = Math.max(0, challenges - 1);
       if (res !== null) answer(res, { status: 401, body: { error: 'unauthorized', reason: 'use_dpop_nonce' }, headers: { 'www-authenticate': 'DPoP error="use_dpop_nonce"' } });
       return 'use_dpop_nonce';
     }
@@ -249,6 +252,10 @@ export async function fakeCoffre(options: FakeOptions = {}) {
       restart: () => {
         epochs = [];
         rotate();
+      },
+      /** The next `count` session proofs refused for their nonce, as a gate restarting before each would. */
+      challenge: (count: number) => {
+        challenges = count;
       },
     },
     close: async () => {

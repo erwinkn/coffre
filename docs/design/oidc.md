@@ -696,7 +696,9 @@ logging out, in `~/.coffre/sessions/`:
   anyway costs a `replayed` run, never a second session.
 - **A session refused** (revoked, frozen, its binding removed) deletes its
   file. The token is spent, so the run says so and waits for none: the
-  next token signs in again.
+  next token signs in again. A 401 that only asks for a fresh DPoP nonce,
+  again after the one retry (the gate restarted meanwhile), refuses nothing:
+  that run fails and the file stays, for the next.
 - **No other proof is kept.** GitHub's, Google's, Fly's and Vercel's
   name the key and are fetched fresh for each run. Kubernetes' projected
   token is a long-running pod's, where `coffre serve` belongs.

@@ -14054,6 +14054,7 @@ async function keyBound(origin, service, spec, runner, positionals, log, fetchIm
 		const plans = [];
 		for (const place of places) {
 			const response = await coffre.fetch(`${origin}/use/${place.split("/").map(encodeURIComponent).join("/")}`, { headers: { accept: "application/json" } });
+			if (askedNonce(response)) throw new Error(`${origin} asked ${service} for a fresh DPoP nonce twice in a row for ${place}: run again${kept === null ? "" : ", on the session this token bought"}`);
 			if (response.status === 401 && kept !== null) {
 				kept.save(null);
 				throw new Error(`${origin} no longer knows the session this ID token bought, and the token is spent: run again once your platform gives a fresh one`);

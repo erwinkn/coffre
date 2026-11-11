@@ -405,6 +405,39 @@ test("runs on one ID token in a file share the session it bought, sealed by it, 
   assert.equal(readdirSync(directory).filter((name) => name.endsWith('.json')).length, 1);
 });
 
+test('a kept session asked for its nonce twice in a row stays kept: the run fails, the next one goes on with it, no second exchange (review r5 of #561)', async (t) => {
+  const spent = new Set<string>();
+  const coffre = await fakeCoffre({
+    plan: { environment: 'market/prod', values: {}, credentials: [] },
+    exchange: (proof) => {
+      const token = String(proof.oidc);
+      if (spent.has(token)) return { status: 401, body: { error: 'unauthorized', reason: 'replayed', message: 'this token was exchanged already' } };
+      spent.add(token);
+      return null;
+    },
+  });
+  t.after(() => coffre.close());
+  const home = homeFor(t);
+  const file = join(home, 'oidc.jwt');
+  writeFileSync(file, idToken(Math.floor(Date.now() / 1000) + 3600, 'ENG-145'));
+  const run = async () => {
+    const each = cli(t, ['--url', coffre.url, '--service', 'capy-agent', 'run', '--proof', `oidc:${file}`, '--', process.execPath, '-e', ''], '', home);
+    const [code] = await once(each.child, 'exit');
+    return { code, ...each };
+  };
+  const one = await run();
+  assert.equal(one.code, 0, one.stderr());
+  // The gate restarts between the second run's first proof and its retry: both are refused for their nonce.
+  coffre.gate.challenge(2);
+  const two = await run();
+  assert.equal(two.code, 1);
+  assert.match(two.stderr(), /asked \S*capy-agent for a fresh DPoP nonce twice in a row for market\/prod: run again, on the session this token bought/);
+  const three = await run();
+  assert.equal(three.code, 0, three.stderr());
+  assert.match(three.stderr(), /on the session this token bought before/);
+  assert.deepEqual(coffre.log, ['POST /api/auth/workload 200', 'GET /use/market/prod 200', 'GET /use/market/prod use_dpop_nonce', 'GET /use/market/prod use_dpop_nonce', 'GET /use/market/prod use_dpop_nonce', 'GET /use/market/prod 200']);
+});
+
 test("a token with no exp is not kept: its run's session ends with it, as any other proof's", async (t) => {
   const coffre = await fakeCoffre({ plan: { environment: 'market/prod', values: {}, credentials: [] } });
   t.after(() => coffre.close());

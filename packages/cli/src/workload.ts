@@ -343,6 +343,9 @@ export async function keyBound(origin: string, service: string, spec: string | u
     const plans: [string, Planned][] = [];
     for (const place of places) {
       const response = await coffre.fetch(`${origin}/use/${place.split('/').map(encodeURIComponent).join('/')}`, { headers: { accept: 'application/json' } });
+      // Asked for a nonce again after the one retry the session's fetch makes (the gate restarted meanwhile): the session
+      // stands, kept for the next run, and this one fails (review r5 of #561).
+      if (askedNonce(response)) throw new Error(`${origin} asked ${service} for a fresh DPoP nonce twice in a row for ${place}: run again${kept === null ? '' : ', on the session this token bought'}`);
       if (response.status === 401 && kept !== null) {
         // The kept session ended at the instance (revoked, frozen, its binding removed): of no use to the next run either.
         kept.save(null);
