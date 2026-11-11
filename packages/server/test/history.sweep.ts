@@ -10,7 +10,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { deriveLogKey } from '@coffre/core/audit';
 import { defineSignin, github } from '@coffre/core/identity';
-import { postgresClient } from '@coffre/db/connect';
+import { createDatabase } from '@coffre/db';
+import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 import { rowsOf } from '@coffre/db/dialect';
 import { appendEntries, logObject, type NewEntry } from '@coffre/db/log';
 import { readFileSync } from 'node:fs';
@@ -24,11 +25,12 @@ import { join } from 'node:path';
 import { SigninService } from '../src/api/signin.ts';
 import { serveApi } from '../src/api/router.ts';
 import { appLogKey } from '../src/db/audit.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { auditReadiness, walkAuditBacklog, writeAuditHeartbeat } from './watch-fixture.ts';
-import { TEST_OWNER_DATABASE_URL } from './db/connections.ts';
+import { TEST_HOT_DATABASE_URL, TEST_OWNER_DATABASE_URL } from './db/connections.ts';
 import { closeVaultDatabase, openVaultDatabase, postgresOnly, withLogUnlocked, withTriggersLifted } from './db/engine.ts';
-import { keepTestConnections } from './db/postgres-pool.ts';
+import { keepTestConnections, testPostgresPool, watched } from './db/postgres-pool.ts';
+import { createClient, type CoffreClient } from '@coffre/client';
 
 const POSTGRES = postgresOnly("auto_explain's plans, Postgres's");
 // Before any pool opens: each path's statements measured on backends that ran them before (`ROUNDS`).
@@ -67,6 +69,9 @@ const ROTATIONS = 246;
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 let signinService: SigninService;
+/** 0.15's hot path's pool, kept as the others are (`keepTestConnections`), and how many statements it has run. */
+let hot: PostgresClient;
+let hotRan = 0;
 
 /** Turns auto_explain on for the runtime logins in this database alone, before any of them connects. */
 async function explainRuntime(): Promise<void> {
@@ -112,7 +117,11 @@ before(async () => {
   await explainRuntime();
   db = await openTestDatabase();
   await resetDatabase(db.owner);
-  deps = testDeps(db.runtime, [ROOT]);
+  // The vault's hot path on a pool of the sweep's own: one connection, kept, as the app's and the vault's are, where the
+  // vault's own would open ten that close when idle; and counted, so that a reveal that never reached it fails (review
+  // r4 of #559: a reveal of a caller with no way in takes 0.14's unwrap, and the hot path's reads went unmeasured).
+  hot = testPostgresPool(TEST_HOT_DATABASE_URL);
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], { hotDatabase: createDatabase(watched(hot, () => (hotRan += 1))) }) });
   signinService = new SigninService({ ...deps, signin: defineSignin({ publicUrl: ORIGIN, providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }) });
   deps.signin = signinService;
   const root = clientFor(deps, ROOT);
@@ -134,7 +143,8 @@ before(async () => {
   await root.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 });
   await root.environments.protect('market/prod');
   // Real uses and reads, a few, then sealed and projected, so that the pages and the checkpointer have their own.
-  for (const member of [READER, ...LEAVERS]) for (let i = 0; i < 3; i += 1) await clientFor(deps, member).secrets.reveal('market/dev');
+  for (const member of [READER, ...LEAVERS]) for (let i = 0; i < 3; i += 1) await throughAccess(member).secrets.reveal('market/dev');
+  assert.ok(hotRan > 0, "the seed's reveals ran no statement on the hot path: they planted no 0.15 use");
   await deps.vault.listReads();
 
   // What the instance's own requests wrote to 0.14's log, beside 0.15's: the shapes `grow` adds to are those.
@@ -150,7 +160,19 @@ after(async () => {
   if (process.env.COFFRE_SWEEP_KEEP !== '1') await resetDatabase(db.owner);
   await db.close();
   await closeVaultDatabase();
+  await hot.end();
 });
+
+/**
+ * The API as `id` sees it signed in behind Access, a way in (`wayIn`): its reveals are 0.15's uses, on the hot path,
+ * where `clientFor`'s caller, who came in no way, reads as 0.14's do.
+ */
+function throughAccess(id: string): CoffreClient {
+  return createClient({
+    url: 'https://coffre.test',
+    transport: async (request) => serveApi(request, { ...await contextFor(deps, id), session: null, access: true }),
+  });
+}
 
 /**
  * The watch and the vault caught up with the grown log, as a deployment's are between its beats: what a beat or a
@@ -260,7 +282,7 @@ type Path = { name: string; run: (round: number) => Promise<unknown>; last?: boo
 
 function paths(): Path[] {
   const root = clientFor(deps, ROOT);
-  const reader = clientFor(deps, READER);
+  const reader = throughAccess(READER);
   const pages = ['', '?detail=1', '?sealed=1', '?sealed=1&hidden=1', '?limit=5', `?actor=${encodeURIComponent(`user:${READER}`)}`, `?actor=${encodeURIComponent(`user:${TAMPERED}`)}`,
     '?path=market', '?path=market%2Fdev', '?path=market%2Fdev%2FAPI_KEY', '?decision=deny', '?sealed=1&path=market%2Fdev', `?sealed=1&actor=${encodeURIComponent(`user:${LEAVER}`)}`];
   const members = [ROOT, READER, TAMPERED, LEAVER].map((member) => `user:${member}`).concat(SERVICE);
@@ -272,8 +294,8 @@ function paths(): Path[] {
     ...members.flatMap((member) => [`/members/${encodeURIComponent(member)}`, `/members/${encodeURIComponent(member)}/access`, `/members/${encodeURIComponent(member)}/tokens`]
       .map((path) => ({ name: `GET ${path} (owner)`, run: () => get(ROOT, path) }))),
     { name: 'a sign-in (members, findings)', run: () => signinService.completeSignin({ provider: 'github', subject: 'tampered', emails: [TAMPERED], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox' }) },
-    { name: 'a reveal (viewer)', run: () => reader.secrets.reveal('market/dev') },
-    { name: 'a reveal of one key (viewer)', run: () => reader.secrets.reveal('market/dev', ['API_KEY']) },
+    { name: 'a reveal (viewer)', run: () => onHotPath(() => reader.secrets.reveal('market/dev')) },
+    { name: 'a reveal of one key (viewer)', run: () => onHotPath(() => reader.secrets.reveal('market/dev', ['API_KEY'])) },
     { name: 'a key write (owner)', run: () => root.secrets.set('market/dev', { SWEPT: randomUUID() }) },
     { name: 'an access change (owner)', run: () => root.access.set(`user:${READER}`, { 'market/dev': 'viewer', 'shop/dev': 'viewer' }) },
     { name: `GET /members/${GHOST} (owner, no row)`, run: () => get(ROOT, `/members/${encodeURIComponent(GHOST)}`) },
@@ -286,6 +308,13 @@ function paths(): Path[] {
     { name: 'an offboarding (owner)', run: (round) => root.members.remove(`user:${LEAVERS[round]}`), last: true },
     { name: "GET the removed member's report (owner)", run: (round) => get(ROOT, `/members/${encodeURIComponent(`user:${LEAVERS[round]}`)}`), last: true },
   ];
+}
+
+/** `reveal`, which must have run a statement on the hot path: one that ran none measured none of its reads. */
+async function onHotPath(reveal: () => Promise<unknown>): Promise<void> {
+  const before = hotRan;
+  await reveal();
+  if (hotRan === before) throw new Error('no statement on the hot path');
 }
 
 /** A tick of a checkpointer that holds a key it replaced, so that it reads the keyring, and the projector after it. */
@@ -324,4 +353,6 @@ test(`the request paths, warm, then measured twice, at ${SIZE.toLocaleString('en
   // fails at both sizes still ran its statements up to there; one that answers otherwise at the larger fails the sweep.
   console.log(`sweep outcomes ${JSON.stringify(outcomes)}`);
   assert.ok(Object.keys(outcomes).length > 0);
+  // The hot path's reads measured: a reveal that failed at both sizes would answer alike at both, and pass the comparison.
+  for (const name of ['a reveal (viewer)', 'a reveal of one key (viewer)']) assert.equal(outcomes[name], 'ok', `${name}: ${outcomes[name]}`);
 });

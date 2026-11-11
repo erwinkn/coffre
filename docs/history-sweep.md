@@ -33,6 +33,11 @@ on a fresh clone of the migrated template:
    `log_nested_statements`, so each statement a function runs is logged too.
 2. **An instance**, through the API: two projects, a fork, keys, a reference,
    members of each kind, a service token, a few reveals sealed and projected.
+   Its reveals come in behind Access, a way in, so they are 0.15's uses, on the
+   hot path's login; a caller who came in no way reads as 0.14's do, through
+   the vault's unwrap, and the hot path's reads went unmeasured (review r4 of
+   #559). The sweep counts the hot path's statements and fails when a reveal,
+   or the instance's, ran none.
 3. **A history `COFFRE_SWEEP_SIZE` long in each shape** that has hidden a walk
    before, oldest first: another member's reads in 0.14's log, a thousand to an
    `occurred_at`; the vault's findings about one member, 0.14's and 0.15's; the
@@ -53,7 +58,7 @@ on a fresh clone of the migrated template:
    warms the plans; a statement in the other two, between the marks
    `/* sweep:<path> */` the file logs, is measured: twice, so that each path
    has a run of each of its statements on a backend that ran it before. Its
-   pools hold one connection each, kept until the end
+   pools, the hot path's included, hold one connection each, kept until the end
    (`keepTestConnections`), as a request takes turns on one through
    Hyperdrive: a pool that closed one idle for a second, or spread its
    statements over ten, sent a path's next run to a backend new to it.
@@ -123,5 +128,12 @@ by its own test (7,069 pages past 390,000 uses sharing one `at`): a walk of
 
 Flat once a backlog is walked (each a batch of a bounded walk, which the first
 sweep measured before the watch caught up): the heartbeat's and the
-verification's walks of the log, their counts of a stretch (`COUNTED_AT_ONCE`,
-T245) and the vault's releases' prune.
+verification's walks of the log, and the vault's releases' prune.
+
+Bounded, not flat, and still listed as growing: the count of the log's prefix
+that the checkpoint, the heartbeat and the verification take (`missingEntry`,
+`count(*) … seq BETWEEN`), which counts at most `COUNTED_AT_ONCE` (1,000,000) entries
+at once (T245), so the whole log until it is that long: 42 pages at 2,000, 241
+at 20,000; and the window a proof or the projector
+reads, up to `WINDOW_MAX` entries (91 and 196 pages), with `lowestAbove`'s walk
+(3 pages) once the window is full.
