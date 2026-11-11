@@ -24,7 +24,9 @@
   (…/.well-known/jwks: timed out after 5 s): its own request to the issuer
   failed, not the token or the job that sent it; try again in 10 s`. Each
   failed fetch logs `workload_keys_unfetched`. An unknown `kid`, or an
-  answer that is not keys, still waits a minute, `Retry-After: 60`.
+  answer that is not keys, still waits a minute, `Retry-After: 60`, and
+  lets no set stand in meanwhile, nor does a fetch that ends after another
+  exchange heard such an answer, or after its set's hour.
 - **A use whose key AWS KMS throttled counts as overload to the `/use`
   throttle, however fast it failed (T250).** KMS answers
   `ThrottlingException` at once, so a use whose three tries were all

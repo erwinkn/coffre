@@ -100,7 +100,8 @@ export function fetchTransport(fetchImpl: typeof fetch = fetch): WorkloadTranspo
         throw FetchRefused.unreached(url, error);
       }
       if (response.status !== 200) {
-        await response.body?.cancel();
+        // The status is the answer: a body that cannot even be cancelled does not make a 503 a refusal.
+        await response.body?.cancel().catch(() => {});
         throw FetchRefused.answered(url, response.status);
       }
       cacheControl?.(response.headers.get('cache-control'));
@@ -121,7 +122,7 @@ export async function capped(url: URL, body: ReadableStream<Uint8Array> | null):
       if (done) break;
       size += value.byteLength;
       if (size > MAX_BODY_BYTES) {
-        await reader.cancel();
+        await reader.cancel().catch(() => {});
         throw new FetchRefused(url, `is larger than ${MAX_BODY_BYTES} bytes`);
       }
       chunks.push(value);

@@ -1,4 +1,4 @@
-import test, { beforeEach } from 'node:test';
+import test, { beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign as signWith, type KeyObject } from 'node:crypto';
 
@@ -37,9 +37,19 @@ let cacheControl: string | null;
 let timeouts: number;
 let answering: number | null;
 let fetches: number;
+/**
+ * The milliseconds calls have spent, as the cache reads them
+ * (`performance.now`): none, but as a test spends them, so that the times
+ * the cache dates are the ones the tests name.
+ */
+let spent = 0;
+mock.method(performance, 'now', () => spent);
+/** How the next fetches answer, one each, before the issuer's own: to hold one while others go on. */
+let scripted: Array<(url: URL) => Promise<void>>;
 const transport: WorkloadTransport = {
   json: async (url, seen) => {
     fetches++;
+    await scripted.shift()?.(url);
     if (timeouts > 0) {
       timeouts--;
       throw FetchRefused.unreached(url, new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
@@ -58,7 +68,29 @@ beforeEach(() => {
   timeouts = 0;
   answering = null;
   fetches = 0;
+  scripted = [];
+  spent = 0;
 });
+
+const timedOut = (url: URL) => FetchRefused.unreached(url, new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+
+/** Once the issuer has been asked `count` times in all. */
+async function started(count: number): Promise<void> {
+  while (fetches < count) await new Promise((resolve) => setImmediate(resolve));
+}
+
+/** A fetch held until `release`, and then answered as `then` says, or as the issuer would. */
+function held(then?: (url: URL) => never): { answer: (url: URL) => Promise<void>; release: () => void } {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  return {
+    answer: async (url) => {
+      await released;
+      then?.(url);
+    },
+    release,
+  };
+}
 
 /** Verify at `at` ms past T0 a token issued then: whom it came from, or why not, with the fetches it cost. */
 async function verify(by: Key, at = 0): Promise<{ outcome: string; fetches: number }> {
@@ -78,7 +110,7 @@ const VERIFIED = 'verified repo:acme/api';
 
 test('cold: one fetch, and a key it lacks is unavailable without a second; during the cooldown no fetch, and known keys still verify', async () => {
   assert.deepEqual(await verify(unknown), { outcome: 'unavailable 60', fetches: 1 });
-  assert.deepEqual(await verify(unknown, 1000), { outcome: 'unavailable 59', fetches: 0 });
+  assert.deepEqual(await verify(unknown, 1500), { outcome: 'unavailable 59', fetches: 0 });
   assert.deepEqual(await verify(known, 2000), { outcome: VERIFIED, fetches: 0 });
   // After the cooldown, a key still missing from a set that is fresh is looked for once more.
   assert.deepEqual(await verify(unknown, KEYS_COOLDOWN_MS + 1), { outcome: 'unavailable 60', fetches: 1 });
@@ -95,7 +127,7 @@ test('warm: a key the cached set lacks is fetched for once, in case the issuer r
   published = [known, rotated];
   assert.deepEqual(await verify(rotated, 1000), { outcome: VERIFIED, fetches: 1 });
   // Within the minute, nothing more is fetched for a key no one has.
-  assert.deepEqual(await verify(unknown, 2000), { outcome: 'unavailable 59', fetches: 0 });
+  assert.deepEqual(await verify(unknown, 2500), { outcome: 'unavailable 59', fetches: 0 });
   // A minute on, a key the issuer still lacks: one fetch, and unavailable, not refused.
   assert.deepEqual(await verify(unknown, KEYS_COOLDOWN_MS + 3000), { outcome: 'unavailable 60', fetches: 1 });
 });
@@ -142,6 +174,64 @@ test('a set whose Cache-Control says less than ten minutes, or forbids keeping i
     [null, 'public, max-age=3600, must-revalidate', 'max-age=86400', 'max-age="1200"', 'max-age=0', 's-maxage=60', 'no-cache="set-cookie"'].map(keptFor),
     [KEYS_KEPT_MS, KEYS_KEPT_MS, KEYS_KEPT_MS, 1_200_000, KEYS_FRESH_MS, KEYS_KEPT_MS, KEYS_FRESH_MS],
   );
+});
+
+test("Cache-Control is read as a list of directives, a quoted argument's commas and words its own; what it cannot read keeps nothing past fresh (review r1 of #565)", () => {
+  const cases: Array<[string, number]> = [
+    ['x-note="example, max-age=3600", max-age=600', KEYS_FRESH_MS],
+    ['x-note="example, max-age=600", max-age=1800', 1_800_000],
+    ['x-note="say \\"no-store\\"", MAX-AGE=1800', 1_800_000],
+    [', public ,, max-age=1800 ,', 1_800_000],
+    ['max-age=1800, max-age=3600', KEYS_FRESH_MS],
+    ['max-age=abc', KEYS_FRESH_MS],
+    ['max-age', KEYS_FRESH_MS],
+    ['max-age=1800, x="unclosed', KEYS_FRESH_MS],
+    ['max-age=1800 public', KEYS_FRESH_MS],
+  ];
+  assert.deepEqual(cases.map(([said]) => keptFor(said)), cases.map(([, ms]) => ms));
+});
+
+test("a set past fresh does not stand in during another call's fetch for a key it lacked, which is no failure (review r1 of #565, F1)", async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  // A second before the set goes stale, a key it lacks is fetched for, slowly.
+  const refetch = held();
+  scripted = [refetch.answer];
+  const lacked = verify(unknown, KEYS_FRESH_MS - 1000);
+  await started(2);
+  // Stale now, and no fetch for the minute: the old set is not taken, though the issuer has not failed.
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1000), { outcome: 'unavailable 58', fetches: 0 });
+  refetch.release();
+  assert.deepEqual(await lacked, { outcome: 'unavailable 60', fetches: 1 });
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1500), { outcome: VERIFIED, fetches: 0 });
+});
+
+test("a set stands in after a timeout only as the entry is once it failed: another call's definite answer, or the end of its hour, ends it (review r1 of #565, F2)", async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  // Stale: A's fetch hangs, B's is answered 404, then A's times out.
+  const hung = held((url) => {
+    throw timedOut(url);
+  });
+  scripted = [hung.answer];
+  const a = verify(known, KEYS_FRESH_MS + 1);
+  await started(2);
+  answering = 404;
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1), { outcome: `unavailable ${KEYS_COOLDOWN_MS / 1000}`, fetches: 1 });
+  answering = null;
+  hung.release();
+  // A takes no old key, and leaves B's minute as it was (its fetches counted with B's).
+  assert.deepEqual(await a, { outcome: `unavailable ${KEYS_COOLDOWN_MS / 1000}`, fetches: 2 });
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 4502), { outcome: 'unavailable 56', fetches: 0 });
+
+  // A fetch begun just before the hour ends, that times out just after it.
+  forgetKeys();
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  scripted = [
+    async (url) => {
+      spent += 200;
+      throw timedOut(url);
+    },
+  ];
+  assert.deepEqual(await verify(known, KEYS_KEPT_MS - 50), { outcome: `unavailable ${KEYS_UNREACHED_MS / 1000}`, fetches: 1 });
 });
 
 test('cold, a fetch that times out is asked again once, at once; failing twice, a 503 that names the issuer and says coffre failed', async () => {

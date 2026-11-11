@@ -127,6 +127,15 @@ test('a fetch the deadline ended says so, and is transient, as is any status tha
   assert.deepEqual([408, 429, 500, 502, 503, 504, 400, 403, 404, 410].map((status) => FetchRefused.answered(url, status).transient), [true, true, true, true, true, true, false, false, false, false]);
 });
 
+test('a status that says the host cannot answer now stays transient when its body cannot even be cancelled (review r1 of #565)', async () => {
+  const url = new URL('https://token.actions.githubusercontent.com/.well-known/jwks');
+  const errored = () => new ReadableStream({ start: (controller) => controller.error(new Error('reset')) });
+  for (const [status, transient] of [[503, true], [404, false]] as const) {
+    const transport = fetchTransport(async () => new Response(errored(), { status }));
+    await assert.rejects(transport.json(url), (error: unknown) => error instanceof FetchRefused && error.status === status && error.transient === transient);
+  }
+});
+
 test("the public fetch, a UI route's upstream's on Node, dials no address that is not public, checked as it connects (review r2 of #467)", async () => {
   // `localhost` resolves to loopback: refused before any byte, whatever the certificate would have said.
   await assert.rejects(publicFetch()(new URL('https://localhost:8443/v1/models'), { method: 'GET' }), (error: Error) => /resolves to an address that is not public/.test(String((error.cause as Error | undefined)?.message)));
