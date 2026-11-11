@@ -40,7 +40,7 @@ export const coffre = createCoffre({
   vault: connectVault(env('VAULT_SOCKET')),
   // What this instance allows: ../../deployment.ts, which the vault reads too.
   deployment,
-  // For tests or local SQLite development only, the vault in this process:
+  // For tests or local development only, the vault in this process:
   // vault: await localVault({ database: env('DATABASE_URL'), hotDatabase: …, checkpointer: { memory: … }, kek: …, owners: […] }),
   auth: signin({
     // GITHUB_ORGANIZATION, when set, lets only its members sign in.

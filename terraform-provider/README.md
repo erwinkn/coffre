@@ -89,7 +89,8 @@ provider_installation {
 (`scripts/terraform-provider.sh`): gofmt, `go vet`, the unit tests, then the
 acceptance tests, on Terraform 1.11 and OpenTofu 1.11, against a local
 coffre that `packages/conformance/scripts/terraform-fixture.ts` boots (the
-Node example on SQLite, ports 3482 and 3483) and seeds. Go and both CLIs are
+Node example on a database of its own on the local Postgres, ports 3482 and
+3483) and seeds. Go and both CLIs are
 pinned by version and SHA-256 and downloaded once. `--unit` runs the first
 three alone, with no coffre and no Terraform.
 

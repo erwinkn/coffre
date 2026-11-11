@@ -2,12 +2,12 @@
 // the app cannot write members, grants or the vault's entries, the vault
 // cannot write the app's tables, and neither can rewrite the log. The
 // vault's hot path's login, 0.15's uses', holds the vault's rights and no
-// more, under its own timeouts. Postgres only: SQLite has no logins.
+// more, under its own timeouts.
 import { HOT_SETTINGS } from '@coffre/db/migrate';
 
 import { using, type Sql } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect, Skip } from '../report.ts';
+import { expect } from '../report.ts';
 import { quoted, tables } from './storage.ts';
 
 const ZEROS = "decode(repeat('00', 32), 'hex')";
@@ -71,7 +71,6 @@ async function noWrites(sql: Sql, names: readonly string[]): Promise<void> {
 }
 
 export async function appLogin(deployment: Deployment): Promise<string> {
-  if (deployment.kind === 'node') throw new Skip('SQLite has no database logins');
   expect(deployment.runtime !== null, 'the app runtime login is missing');
   // The vault's own: its principals, their grants, and `vault_releases` (and any `vault_` table a deployment adds).
   const protectedTables = (await using(deployment.database(), tables)).filter((name) => name === 'principals' || name === 'grants' || name.startsWith('vault_'));
@@ -88,7 +87,6 @@ export async function appLogin(deployment: Deployment): Promise<string> {
 }
 
 export async function vaultLogin(deployment: Deployment): Promise<string> {
-  if (deployment.kind === 'node') throw new Skip('SQLite has no database logins');
   expect(deployment.vaultRuntime !== null, 'the vault runtime login is missing');
   const appTables = await vaultReadOnly(deployment);
   return using(deployment.vaultRuntime(), (sql) => vaultRefuses(sql, appTables));
@@ -101,7 +99,6 @@ export async function vaultLogin(deployment: Deployment): Promise<string> {
  * login holds, no more.
  */
 export async function hotLogin(deployment: Deployment): Promise<string> {
-  if (deployment.kind === 'node') throw new Skip('SQLite has no database logins');
   expect(deployment.hotRuntime !== null, 'the hot path login is missing');
   const appTables = await vaultReadOnly(deployment);
   return using(deployment.hotRuntime(), async (sql) => {

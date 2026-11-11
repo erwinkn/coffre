@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Checks the Terraform provider, terraform-provider/ (docs/design/terraform-provider.md,
 # section 8): gofmt, go vet, its unit tests, then its acceptance tests on
-# Terraform and OpenTofu against a local coffre, the Node example on SQLite
-# that packages/conformance/scripts/terraform-fixture.ts boots on ports 3482
-# and 3483. Never a live instance.
+# Terraform and OpenTofu against a local coffre, the Node example on a
+# database of its own on the local Postgres, that
+# packages/conformance/scripts/terraform-fixture.ts boots on ports 3482 and
+# 3483. Never a live instance.
 #
 # Go, Terraform and OpenTofu are pinned by version and SHA-256, as
 # scripts/formal.sh pins TLC, and downloaded once into the cache below. Run
@@ -88,4 +89,6 @@ fetch "https://github.com/opentofu/opentofu/releases/download/v$TOFU_VERSION/tof
 terraform="$(unpack "terraform-$TERRAFORM_VERSION.zip" terraform "terraform-$TERRAFORM_VERSION")"
 tofu="$(unpack "tofu-$TOFU_VERSION.zip" tofu "tofu-$TOFU_VERSION")"
 
+"$root/scripts/ensure-postgres.sh"
+node --conditions=coffre:source "$root/scripts/ensure-database.mjs" coffre
 TF_ACC=1 go test -count=1 -timeout 30m ./internal/acceptance -args -terraform="$terraform" -tofu="$tofu" -repo="$root"

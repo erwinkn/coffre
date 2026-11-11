@@ -1119,11 +1119,6 @@ The server listens on `127.0.0.1:PORT`. Put a TLS-terminating proxy in front
 of it and forward requests to that address. Its scheduled job runs in the
 server process.
 
-For tests and local development only, every URL can name the same absolute
-SQLite file (`file:/tmp/coffre-local.db`), migrated once with `pnpm exec
-coffre-server migrate file:/tmp/coffre-local.db`. SQLite has no per-login privileges. The deployed example
-uses Postgres; Node conformance uses SQLite to exercise the local option.
-
 ## Your own routes
 
 The app's routes are Start's own, the same on Workers and on Node. Its
@@ -1685,11 +1680,10 @@ rewritten, the vault finds its key wrong, or the anchor cannot be reached
 ## Conformance
 
 Before deploying a changed configuration, run its `pnpm conformance`.
-Workers needs four local Postgres URLs: `--postgres` for the owner,
+It needs four local Postgres URLs: `--postgres` for the owner,
 `--runtime` for the app, `--vault-runtime` for the vault and `--hot-runtime`
 for its hot path. The harness
-creates, migrates and drops its own database. Node uses a temporary SQLite
-file shared by both processes. Both use test keys and a stand-in GitHub,
+creates, migrates and drops its own database. It uses test keys and a stand-in GitHub,
 not your live credentials. [conformance.md](conformance.md) lists the checks,
 and what `coffre verify instance` checks of a live one.
 
@@ -1761,5 +1755,4 @@ The environment variable names above belong to the examples. Packages take
 typed configuration and read no deployment environment variables themselves,
 and the CLI reads none either: it takes flags, and secrets in the files they
 name (`coffre help`). The exception is the `DATABASE_URL` fallback for
-`coffre-server migrate`, which tests and local SQLite use, when no URL is
-given.
+`coffre-server migrate`, which tests use, when no URL is given.

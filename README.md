@@ -120,7 +120,7 @@ pnpm formal:lean       # the Lean proofs of the access rules, envelopes and log,
 pnpm build             # every package
 pnpm typecheck         # every package, the examples and dev/ (after pnpm build)
 pnpm conformance:workers   # examples/workers, held to docs/conformance.md (after pnpm build)
-pnpm conformance:node      # examples/node, its two processes, on SQLite
+pnpm conformance:node      # examples/node, its two processes (after pnpm build)
 pnpm test:consumer     # pack the packages, init both examples outside the repo, run them
                        # --kind workers or --kind node selects one deployment
 pnpm test:image        # the CLI's image for amd64 and arm64, and coffre serve run in it (needs Docker)

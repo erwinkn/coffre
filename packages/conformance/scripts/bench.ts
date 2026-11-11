@@ -22,7 +22,7 @@ import { deviceLogin, personaOn, signIn, signInAdmin } from '../src/checks/peopl
 import { boot, type Deployment, type Kind } from '../src/harness.ts';
 
 const USAGE = `usage: bench.ts workers|node <dir> [--entries <n>] [--members <n>] [--keys <n>] [--warm <n>] [--cold <n>] [--port <n>]
-  [--postgres <url> --runtime <url> --vault-runtime <url> --hot-runtime <url>]   workers: as coffre-conformance takes them`;
+  --postgres <url> --runtime <url> --vault-runtime <url> --hot-runtime <url>   as coffre-conformance takes them`;
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,

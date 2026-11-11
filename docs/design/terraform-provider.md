@@ -654,8 +654,8 @@ mirror.
   a log line.
 - Acceptance tests (`TF_ACC=1`, terraform-plugin-testing), against a local
   coffre that the test harness boots as `pnpm conformance:node` does: the
-  Node example on SQLite in a temp directory, on ports of its own, with no
-  shared Postgres. A seed made through the API: projects `infra` and
+  Node example on a database of its own on the local Postgres, made for the
+  run and dropped after, on ports of its own. A seed made through the API: projects `infra` and
   `market`, each with an environment `prod`, `infra/prod` with an
   inheriting fork `prod-eu`, a service account with
   `contributor` on `infra/prod` and `contributor` on `market/prod` too
