@@ -22,7 +22,7 @@ everywhere else, are what is left of 0.14.
 
 | Table | From | Job today | Secondary indexes |
 |---|---|---|---|
-| `audit_log` | 0.14 | Hash-chained log. Also the store of a dozen facts of current state. Every change still appends to it, under a global lock. | 33 |
+| `audit_log` | 0.14 | Hash-chained log. Also the store of a dozen facts of current state. Every change still appends to it, under a global lock. | 30 |
 | `log_changes` | 0.15 | One signed entry per change to a sealed row. | 20, of which 18 serve the audit page |
 | `log_uses` | 0.15 | One slim signed row per use, partitioned by day. | 2 |
 | `log_reads` and 3 more | 0.15 | Uses as pages list them, with two day tables, two triggers and a cursor. | 10 |
@@ -86,7 +86,7 @@ read by primary key. **Projections** are caches the vault's projector rebuilds f
 --   log_changes_request_id_key  UNIQUE (request_id)                      a retry finds its entry
 -- Its 18 partial indexes on strpos(payload, …) are dropped.
 -- log_uses: unchanged, 2 indexes: UNIQUE (at, request_id) and (number).
--- audit_log: frozen. INSERT revoked from both logins; its 33 secondary indexes and 3 of its 5 triggers dropped.
+-- audit_log: frozen. INSERT revoked from both logins; its 30 secondary indexes and 3 of its 5 triggers dropped.
 
 -- STATE
 CREATE TABLE settings (                 -- the instance's settings, one sealed row; read by key at sign-in and in /api/me
@@ -192,7 +192,7 @@ column into typed ones later changes no seal while the object is the same, so it
 | Operation | Today: statements, round trips, vault calls | Target | What changes |
 |---|---|---|---|
 | Use, one key by name | 1, 1, 1 | 1, 1, 1 | The statement is half as long and reads no `audit_log` (V2a, V2b). |
-| Key write, one key | 7, 2, 2 (`writeKeys`, `waitSealed`) | 7, 2, 2 | The head lock's statement becomes the change lock's: A0's model has the write keep it (below). A1 may fold it into the credential's touch, which would make 6; the budget is 7 until it does. |
+| Key write, one key | 7, 2, 2 (`writeKeys`, `waitSealed`) | 7, 2, 2 | The head lock's statement becomes the change lock's, which every change takes, the two-trip write among them (A0, `WriteTakesChangeLock`). The budget is 7. |
 | Sign-in, browser | 10, 8, 3 (`access`, `prepare`, `waitSealed`) | 8, 5, 3 | The two reads of the head and the `audit_log` insert go. The transaction asks its reads together and leaves its writes to the commit, as a key write does (A1). |
 | Audit page, one visit | 24, 26, 3 at a seeded log, more as the log grows | 6, 4, 2 | The flat check below (P2, P3). |
 | Secrets list | 4, 4, 1 | 4, 4, 1 | The vault's statement reads rows by key; today it spends 3.1 ms planning its reads of `audit_log`. |
@@ -231,8 +231,10 @@ round trip:
    serves an older checkpoint ends below that pair, and the check says `behind`. A witness, where one is configured,
    is a second copy for a signer that lost its memory.
 2. The entries above it, each one's MAC. The checkpointer ticks every 500 ms, so they are a handful; the check reads
-   at most two ticks of the deployment's `/use` cap, derived from both, with no setting of its own: 1,250 entries at
-   today's cap of about 1,250 uses a second. Past that the page says the checkpointer is late, not "verified".
+   at most 1,250 of them, with no setting of its own: `USES_IN_FLIGHT`, the keys one isolate has in flight at most
+   (`packages/core/src/memory.ts`). That is more than two ticks at the database's measured ceiling of 1,040 uses a
+   second (`docs/design/config.md`); no cap a second exists. Past that the page says the checkpointer is late, not
+   "verified".
 3. The frozen log's last row, against the change that anchored it at the upgrade (section 6).
 4. Handed in with the call: the rows shown and the cursor. Each row's MAC, the cursor's, and how far the cursor is
    behind the checkpoint, which the page shows as "listed through 14:05:03".
@@ -274,14 +276,60 @@ statements in its first round trip, one of a single statement inside that statem
 checkpointer, the projector and `check` never do. The order is change lock, issue lock, fence; the checkpointer takes
 the issue lock, then the fence. The two-trip key write keeps the lock (A0, `WriteTakesChangeLock`): without it, the
 write holds the fence and waits for the key's row, while another change of that key holds the row and waits for the
-fence. The member add closes no such cycle without it, and keeps it too: whether a change's decisions about members
-survive an add committed in between is not modelled. Each statement is the one the head's was, so no budget gains one.
+fence. The member add takes it as every change does: one rule, no exemption. Each statement is the one the head's
+was, so no budget gains one.
 
-Then, last before the timeout (D201), L1 makes the fence the checkpointer's alone: uses and changes both take it
-shared, a change's last statement locks the objects it writes exclusive, and a use locks the objects it reads shared,
-in key order. A write to one key then stalls only uses of that key. Ten shared advisory locks cost a use 0.013 ms
-(0.052 ms against 0.039 ms for the one it takes today). L1 moves none of the 14: they are change against
-change, the change lock's, and L1 only replaces the fence, which is change against use.
+**Object locks (L1, D201).** Last before the timeout, the fence becomes the checkpointer's alone: a use and a
+change's last statement take it shared, so its barrier still waits for every number in flight. Each object a decision
+reads gets an advisory lock keyed by the object. A use takes the lock of each object it reads, shared; a change's last
+statement the lock of each object it writes, exclusive. A write to one key then makes only the uses of that key wait,
+for that statement. L1 moves none of the 14 protections: they are change against change, the change lock's. A use
+stays one statement, one round trip, one vault call. The models (T282, a draft stacked on #573) hold it; what they
+fixed:
+
+- **Which objects:** the ones whose newest change a use already seeks. Its credential (or connection, binding or
+  Access account), its member, the roles, the policy, the key and the key's environment: 6. Another place, a personal
+  config's parent, a reference's source and the source's environment make 10 at most by ids. By name, the fork chain
+  adds up to 3 environments; a route, its definition a level and its editor's member.
+- **One order:** the change lock, the issue lock, the fence, the objects' locks sorted by lock key, then a use's
+  principal's lock. A transaction takes its objects' locks once, all of them, before its first read or write under
+  them. Four ways to break that each close a wait cycle, a 1 s stall in Postgres: `revoke_credential`, which takes no
+  issue lock, taking its object before the fence; a batch taking each key's lock as its turn comes; a statement of
+  several `app_change` calls (a project's delete) taking each call's as it comes; and `use_batch` taking its
+  principal's lock before its keys, as it does today.
+- **A use reads ids before it locks.** The call names its credential, key and place; the member is on the
+  credential's row, a reference's source on the reference's. The function reads those ids with no lock, takes the
+  locks, then runs its statement. A key made a reference in between names an object the call did not lock: the
+  statement writes nothing and answers `moved`, and the vault calls again. A use never locks after its first read.
+- **A hold shares what it read.** The fence held exclusive did one more job: it made a two-trip write's hold stand to
+  its COMMIT against a change that takes no change lock. So `hold_inputs` and `admit_hold` take the lock of each
+  object the vault decided on, shared, with those they write; `write_request` reads as a use does, under the same
+  locks. An entry that changes no object (`note`, a refusal) shares the fence and takes none.
+- **Advisory locks, not `FOR SHARE`.** A statement takes its snapshot before it waits for a row's lock, so a use that
+  waited for a change would decide on the other rows as they were before it. Row share locks also write the row
+  (`xmax`, then a multixact for two holders, on the rows every use reads: 0.14.3's cost) and conflict with every
+  update of it, a credential's last use too.
+
+Cost, on the reference rig: 11 shared advisory locks taken in one statement cost 0.0024 ms more than 1 (0.0095 ms
+against 0.0071 ms a round); the 0.013 ms measured first took each in a statement of its own. The bound that matters
+is Postgres's shared lock table, where advisory locks live: `max_locks_per_transaction` (64) times `max_connections`,
+6,400 objects at the defaults. Measured, one session holds 12,832 before `out of shared memory` at 100 connections,
+and 5,248 at 25. What holds locks at once is the pool, 20 connections a Hyperdrive config at 100 and 6 at 25, not the
+1,250 keys an isolate has in flight. Single uses never come near: 20 x 13 = 260. A batch statement of 100 keys holds
+its caller's 4 and 1 to 6 a key: about 110 when its keys share an environment, 604 at the very worst (each key in a
+place of its own and a reference into another). Twenty at once hold 2,200, or 12,080; six hold 660, or 3,624 against
+1,600. Today's batch already takes up to 100 more a statement for the cap's rows (`b_lock`). A full table fails
+whoever asks next, anywhere in the cluster, with an error. L1 must make that impossible, and its PR picks how:
+
+1. **Stripes (recommended).** An object's lock key is its hash modulo 128. A statement then holds 128 object locks at
+   most, whatever it reads: 20 x 128 = 2,560 of 6,400, and 6 x 128 = 768 of 1,600. The price is false sharing: a
+   change makes a single use of other objects wait with probability 7 in 128, and a 100-key batch about half the time,
+   for one statement, where today every change stalls every use. A batch's round 2, which holds its principal's lock
+   exclusive, drops its `b_lock`s, which that lock makes redundant.
+2. **Smaller batch statements**, sized at setup from the lock table as the pools are from `max_connections`: about 25
+   keys a statement at the defaults, so a 100-key request is 4 statements in turn where it is 1.
+3. **A larger table:** `coffre setup` refuses a database whose `max_locks_per_transaction` is below what its pools
+   can ask for. A restart, and not every managed Postgres allows it.
 
 ## 4. The security argument
 
@@ -352,7 +400,7 @@ table, prepared: 0.143 ms against 0.132 ms at 100k changes, 0.196 ms against 0.1
 | `audit_log` reads on request paths | 26 reads in 10 SQL functions, 16 read sites in TypeScript: the snapshot statement's five, `answers.ts`, `policyNow`, `hasTombstone`, `referenceRows` |
 | Freeze probes | about 200 source lines, 22 SQL, 230 test, `WorkloadFreezing.cfg` |
 | Triggers | `audit_log_fence`, `audit_log_refuse_old`, `log_reads_placed_insert`, `log_reads_placed_update`, and `audit_log_releases` with `vault_releases` once V1 deletes the 0.14 read path that counts from them: 5 of 9 |
-| Indexes | all 33 on `audit_log`; 18 on `log_changes` (`sign_in`, `issue_revoke`, `written`, `admitted`, `refused_write`, `refused_add`, each with its `_actor`, `_environment` and `_object` variants); 10 on `log_reads`; `secrets_lookup_idx`; 4 on `secret_references`; `credentials_enrollment_roots_idx` |
+| Indexes | all 30 on `audit_log` (33 until #576); 18 on `log_changes` (`sign_in`, `issue_revoke`, `written`, `admitted`, `refused_write`, `refused_add`, each with its `_actor`, `_environment` and `_object` variants); 10 on `log_reads`; `secrets_lookup_idx`; 4 on `secret_references`; `credentials_enrollment_roots_idx` |
 | `log_reads` and its family | 4 tables, 6 functions (182), 955 source lines, 430 test |
 | The 0.14 chain's upkeep | heartbeats and checkpoints every 5 minutes, `Audit.tla` and 6 scenarios (910, the 7 to 11 minute `Tampering` run among them); `Audit.lean` stays for the verifier |
 | `use_credential`'s copies, last release's overloads | 1,157 lines to about 500; `sign_in/35`, `issue_token/28`, `change_bindings/53` (111) |
@@ -453,17 +501,21 @@ the collapse. Days are working days for one agent under the fast gate. Net lines
 | C1 | The collapse: one upgrade migration from 0.15.0, one baseline for new databases, 80 migration files deleted, functions as one file each, a parity test (0.15.0 plus the migration equals the baseline) | all above | no | it is the migration | 2 | -30,000 |
 | C2 | `AGENTS.md`: 0.16.0 is a clean break like 0.4.0, expand-then-contract resumes with 0.16.1. Old design docs deleted | C1 | no | no | 0.5 | -5,300 |
 
-**Order.** Day 0: E4 alone, since it edits `vault.ts`. Then three lanes at once. V: V0, V2a, then V1 once P2 is in,
-V2b, L1. P: P1, P2, P3. A: T1, A0, then A1 once P2 is in, U1, S1. C1 and C2 close. No stack is deeper than two.
-**Pairs that collide:** V1 and A1 both need `note` in the vault's contract (`packages/core/src/vault.ts`), so V1 lands
-it and A1 uses it. P2 and P3 both edit `server/src/api/audit.ts` and run in sequence, as do E4 and V0 in `vault.ts`.
+**Order.** Day 0: E4 alone, since it edits `vault.ts`. Then three lanes at once, built against a contract pinned
+first (K1): `note` and the row it writes, `settings` and `log_keys`, the upgrade's changes, and `check` with the MAC
+inputs of a projection row and of the cursor. V: V0, V2a, V1, V2b, L1. P: P1, P2, P3. A: T1, A0, A1, U1, S1. C1 and
+C2 close. V1 and A1 are built beside P1 and P2 and land after P2: once entries go to the chain only, a page still
+reading `audit_log` loses them. V2b lands after V1, whose rows it reads; L1 after A1, which freezes `audit_log`,
+whose insert trigger still takes the fence exclusive.
+**Pairs that collide:** V1 and A1 both need `note` in the vault's contract (`packages/core/src/vault.ts`), which the
+contract PR lands first. P2 and P3 both edit `server/src/api/audit.ts` and run in sequence, as do E4 and V0 in `vault.ts`.
 Every schema PR appends to `schema.ts` and the journal, one-line conflicts.
 
-**Estimate.** About 40 agent-days. With three lanes the longest path is E4, P1, P2, V1, V2b, L1, S1, C1: 18 to 22
-working days with L1 in (D201), if the two model-first PRs (A0 and L1) hold their size. They are where the risk is.
-A0 found its counterexample first: the fence cannot stand in for the head, so the 14 protections keep a lock of their
-own and A1 moves none of them. L1's model is the plan's largest, with two shapes left to order, a use and a change's
-last statement; it is written in week one, on A0's, so its counterexamples come before V2b's and A1's code.
+**Estimate.** About 40 agent-days. With the contract pinned, the longest path is the contract, V1, V2b, L1, S1, C1:
+14.5 build days, 15 to 17 working days with the landings in order (18 to 22 while V1 waited for P2). The two
+model-first PRs were where the risk is, and both are written. A0 found that the fence cannot stand in for the head,
+so the 14 protections keep a lock of their own and A1 moves none of them. L1's found the order above and the hold's
+shared locks, before V2b's and A1's code.
 On Node, the projector and the beat run on timers in the vault's process, where Workers use a Durable Object alarm.
 
 ## 8. Decided
