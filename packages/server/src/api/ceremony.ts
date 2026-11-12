@@ -208,21 +208,10 @@ export type CreationOptionsJSON = {
 };
 
 /** A passkey as a ceremony names it to the browser: its credential ID, and how it said it can be reached. */
-export type OfferedPasskey = { credentialId: Buffer; transports: string };
+export type OfferedPasskey = { credentialId: Buffer; transports: string[] };
 
-function descriptor(passkey: OfferedPasskey) {
-  const transports = transportsOf(passkey.transports);
-  return { type: 'public-key' as const, id: Buffer.from(passkey.credentialId).toString('base64url'), ...(transports.length === 0 ? {} : { transports }) };
-}
-
-/** The transports a row stores, as JSON: strings only, and none for anything else. */
-function transportsOf(stored: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(stored);
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
-  } catch {
-    return [];
-  }
+function descriptor({ credentialId, transports }: OfferedPasskey) {
+  return { type: 'public-key' as const, id: Buffer.from(credentialId).toString('base64url'), ...(transports.length === 0 ? {} : { transports }) };
 }
 
 /** A touch of one of these passkeys, user verification required (sections 3.1 and 7.4). */

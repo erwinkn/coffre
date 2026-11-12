@@ -111,7 +111,7 @@ beforeEach(async () => {
   const code = { id: randomUUID(), bindingId, codeHash: randomBytes(32), codeHint: 'coffre_enr_x', scope: '{}', createdBy: ROOT, createdWith: null, expiresAt: new Date(Date.now() + 86_400_000) };
   await db.owner.insert(enrollmentCodes).values({ ...code, authMac: authMac(A, 'enrollments', code) });
   const clientId = randomUUID();
-  await insertOauthClient(deps.db, A, { id: clientId, name: 'Claude', redirectUris: '["http://127.0.0.1/callback"]' });
+  await insertOauthClient(deps.db, A, { id: clientId, name: 'Claude', redirectUris: ['http://127.0.0.1/callback'] });
   await insertConnection(deps.db, A, {
     id: randomUUID(), principal: `user:${ROOT}`, generation: 1, clientId, clientName: 'Claude', clientHost: null, registration: 'dcr',
     scopes: '["read"]', redirectUri: 'http://127.0.0.1/callback', codeHash: randomBytes(32), codeChallenge: 'challenge', codeExpiresAt: new Date(Date.now() + 60_000), expiresAt: new Date(Date.now() + 86_400_000),

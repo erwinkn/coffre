@@ -1095,10 +1095,9 @@ export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, {
     case 'proxy-reserved': {
       const [row] = await db.select({ names: proxyReserved.names, seal: proxyReserved.seal }).from(proxyReserved).where(eq(proxyReserved.id, 1));
       if (row === undefined) return { row: null, seal: null };
-      const value: unknown = typeof row.names === 'string' ? JSON.parse(row.names) : row.names;
-      // Names no change writes (`null`, a list of numbers): no names and no seal, which fails it (`tampered`).
-      if (!Array.isArray(value) || !value.every((name) => typeof name === 'string')) return { row: { kind: 'proxy-reserved', names: [] }, seal: Buffer.alloc(0) };
-      return { row: { kind: 'proxy-reserved', names: value as string[] }, seal: Buffer.from(row.seal) };
+      // Names no change writes (a NULL among them, a list of lists): no names and no seal, which fails it (`tampered`).
+      if (!row.names.every((name: unknown) => typeof name === 'string')) return { row: { kind: 'proxy-reserved', names: [] }, seal: Buffer.alloc(0) };
+      return { row: { kind: 'proxy-reserved', names: row.names }, seal: Buffer.from(row.seal) };
     }
   }
 }

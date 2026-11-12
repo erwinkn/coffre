@@ -434,7 +434,7 @@ async function passkeyOf(principal: string, generationsAgo = 0): Promise<string>
   const id = randomUUID();
   await db.owner.insert(passkeys).values({
     id, authMac: randomBytes(32), principal, generation: member!.generation - generationsAgo, userHandle: randomBytes(16), credentialId: randomBytes(32), publicKey: randomBytes(77),
-    algorithm: -7, transports: '[]', synced: true, name: 'iCloud Keychain', createdBy: principal.slice('user:'.length),
+    algorithm: -7, transports: [], synced: true, name: 'iCloud Keychain', createdBy: principal.slice('user:'.length),
   });
   return id;
 }

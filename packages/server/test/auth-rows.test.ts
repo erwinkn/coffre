@@ -16,7 +16,7 @@ const passkey = {
   id: randomUUID(), principal: 'user:ada@acme.example', generation: 1, userHandle: randomBytes(16), credentialId: randomBytes(32),
   publicKey: randomBytes(77), algorithm: -7, removedAt: null as Date | null,
   // Bookkeeping, outside the MAC.
-  signCount: 0, lastChallengeAt: null as Date | null, transports: '["usb"]', aaguid: null, synced: true, name: 'YubiKey 5C', lastUsedAt: null as Date | null,
+  signCount: 0, lastChallengeAt: null as Date | null, transports: ['usb'], aaguid: null, synced: true, name: 'YubiKey 5C', lastUsedAt: null as Date | null,
 };
 const signedPasskey = { ...passkey, authMac: authMac(KEY, 'passkeys', passkey) };
 
@@ -28,7 +28,7 @@ test("a passkey's MAC covers whose it is, its handle, credential and key, and it
   ];
   for (const change of decides) assert.equal(signedBy(KEY, 'passkeys', { ...signedPasskey, ...change }), false, Object.keys(change)[0]);
   const bookkeeping: Partial<typeof passkey>[] = [
-    { signCount: 7 }, { lastChallengeAt: at }, { name: 'Laptop' }, { lastUsedAt: at }, { transports: '[]' }, { synced: false },
+    { signCount: 7 }, { lastChallengeAt: at }, { name: 'Laptop' }, { lastUsedAt: at }, { transports: [] }, { synced: false },
   ];
   for (const change of bookkeeping) assert.ok(signedBy(KEY, 'passkeys', { ...signedPasskey, ...change }), Object.keys(change)[0]);
   // A removal is signed again, as an app key's rotation signs it again.
