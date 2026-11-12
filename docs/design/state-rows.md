@@ -230,7 +230,8 @@ round trip:
    serves an older checkpoint ends below that pair, and the check says `behind`. A witness, where one is configured,
    is a second copy for a signer that lost its memory.
 2. The entries above it, each one's MAC. The checkpointer ticks every 500 ms, so they are a handful; the check reads
-   1,000 at most, two ticks at 1,000 uses a second. Past that the page says the checkpointer is late, not "verified".
+   at most two ticks of the deployment's `/use` cap, derived from both, with no setting of its own: 1,250 entries at
+   today's cap of about 1,250 uses a second. Past that the page says the checkpointer is late, not "verified".
 3. The frozen log's last row, against the change that anchored it at the upgrade (section 6).
 4. Handed in with the call: the rows shown and the cursor. Each row's MAC, the cursor's, and how far the cursor is
    behind the checkpoint, which the page shows as "listed through 14:05:03".
@@ -259,13 +260,16 @@ isolate knows the log's newest number and up to 10 after a change, as today. Sti
 seq of the newest `policy.change`. After, it compares seals it already read, the roles' and those of the environments
 the request touches, in the digest the two-trip key write already checks under its lock (`hold_inputs`).
 
-**Locks after.** The head lock goes with the last append to `audit_log`. Flows that re-check a decision "under the
-head" re-check under the fence, which they already take next (A1). Then, last before the timeout (D201), L1 makes the
-fence the checkpointer's alone: uses and changes both take it shared, a change locks the objects it writes exclusive,
-and a use locks the objects it reads shared, in key order. A write to one key then stalls only uses of that key. Ten
-shared advisory locks cost a use 0.013 ms (0.052 ms against 0.039 ms for the one it takes today). So that no
-protection is retargeted twice, the models state each re-check against what it needs, the lock that excludes a change
-to what the flow read: A0 binds that to the fence, and L1 binds it again to the object's lock.
+**Locks after.** The head's row, and what is read under it, go with the last append to `audit_log`. Its other job does
+not: it serializes changes against each other from their first statement, which 29 modelled re-checks rely on, and the
+fence cannot take that over where it sits, in a change's last statement (A0's finding: two Owners who each remove
+themselves both pass a count made before it). The shape is the coordinator's to pick; my proposal keeps a lock that
+only changes take, an advisory lock with no row and nothing read under it. Then, last before the timeout (D201), L1
+makes the fence the checkpointer's alone: uses and changes both take it shared, a change locks the objects it writes
+exclusive, and a use locks the objects it reads shared, in key order. A write to one key then stalls only uses of that
+key. Ten shared advisory locks cost a use 0.013 ms (0.052 ms against 0.039 ms for the one it takes today). The models
+state each re-check against what it needs, the lock that excludes a change to what the flow read, so that L1 moves
+none of them a second time.
 
 ## 4. The security argument
 
@@ -356,7 +360,8 @@ tests and the `Reads.tla` scenario. Lost: its table, triggers and migration, whi
 ## 6. The upgrade from 0.15.0
 
 1. **Stop.** Run `coffre verify log` on 0.15.0: the full walk of the old chain, in steps, green. Take the app off its
-   route, let one 5-minute beat pass so that the chain ends in a checkpoint its anchor holds, then back up.
+   route, let one 5-minute beat pass so that the chain ends in a checkpoint its anchor holds, then back up. The beat
+   is the Worker's cron, which fires with the route gone; 0.15.0 has no command or route that runs it on demand.
 2. **`coffre migrate`**, as the owner, one migration. It refuses a database that is not a cut-over 0.15.0 (no cutover
    change in `log_changes`, or a schema past 0049 that is not 0.16's). In SQL it creates the tables; fills `settings`
    and `log_keys` from the newest entries, unsealed; drops the indexes, triggers, functions and tables of section 5;
