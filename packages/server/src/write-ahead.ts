@@ -241,7 +241,7 @@ export async function writeAhead(
   // today's path, whose second read of the row would take one put back meanwhile (formal/Writing.tla, Today).
   if (first === 'ended') return { identity: endedCredential(), written: null };
   if (typeof first === 'string') return null;
-  const rows = (tried: Tried) => namedAhead(runtime.db, answerOf(tried).app);
+  const rows = (tried: Tried) => namedAhead(answerOf(tried).app);
   const ahead = rows(first);
   let touched: Touch | null = null;
   // The credential checked on the rows the vault answered, its MAC and token's hash among them, its expiry at the

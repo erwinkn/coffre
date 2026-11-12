@@ -1,6 +1,6 @@
 import type { Query } from 'drizzle-orm';
 
-import { tablesOf, type Queryable } from './database.ts';
+import type { Queryable } from './database.ts';
 
 /** What Drizzle works out from a select builder before it can run it, once. */
 type Built = { query: Query; fields: unknown; joinsNotNullableMap: unknown };
@@ -21,24 +21,20 @@ type Select = PromiseLike<unknown> & { toSQL(): Query; prepare(...name: never[])
  * values go to the driver as they are, not through a column's encoding:
  * strings, numbers, bigints and bytes.
  *
- *   const member = prepared((db) => db.select().from(tablesOf(db).principals).where(eq(…, sql.placeholder('principal'))));
+ *   const member = prepared((db) => db.select().from(principals).where(eq(…, sql.placeholder('principal'))));
  *   const [row] = await member(db, { principal });
  */
 export function prepared<Q extends Select>(
   build: (db: Queryable) => Q,
 ): (db: Queryable, values?: Record<string, unknown>) => Promise<Awaited<Q>> {
-  // By the database's tables.
-  const builds = new WeakMap<object, Built>();
+  let built: Built | undefined;
   return (db, values = {}) => {
-    const tables = tablesOf(db);
-    let built = builds.get(tables);
     if (built === undefined) {
       const builder = build(db);
       // Drizzle's own preparation, which runs nothing, says which columns come back and which joins may be null.
       // Unnamed on Postgres: no statement is prepared on the server, whose connections a call does not keep.
       const { fields, joinsNotNullableMap } = (builder as unknown as { prepare(): { fields: unknown; joinsNotNullableMap: unknown } }).prepare();
       built = { query: builder.toSQL(), fields, joinsNotNullableMap };
-      builds.set(tables, built);
     }
     const session = (db as unknown as { session: Session }).session;
     const query = session.prepareQuery(built.query, built.fields, undefined, true);

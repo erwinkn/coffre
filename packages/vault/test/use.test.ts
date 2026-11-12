@@ -13,7 +13,7 @@ import { decrypt } from '@coffre/core/envelope';
 import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog } from '@coffre/core/merkle';
 import { USE_DEADLINE_MS, type UseOutcome } from '@coffre/core/vault';
 import { awsKms, KekThrottledError, KekUnavailableError, KMS_REQUEST_MAX_MS, type KeyOperation } from '@coffre/core/kek';
-import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
+import { createDatabase, type Database, type Queryable } from '@coffre/db';
 import { newestAccess } from '@coffre/db/grants';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
@@ -33,6 +33,7 @@ import { variableMemory } from './audit-tree.ts';
 import { HOT_URL, openTestDatabase, OWNER_URL, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, DAY, emptyLog, failing, FENCE, genesis, heldKeks, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, timingOut, until, useDatabases, world } from './use-world.ts';
 import { resolveVaultConfig } from '../src/config.ts';
+import { environments, grants, projects, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 
 let db: TestDatabase;
 /** The hot path's login, as an isolate's uses run on it. */
@@ -305,8 +306,7 @@ test('Unsealed = {}: each input put back from before its change is refused stale
       await run(tx, sql`DELETE FROM grants WHERE principal = ${w2.principal}`);
       await seal('principals', 'principal', w2.principal)(tx, value);
     });
-  const t = tablesOf(db.owner);
-  await db.owner.insert(t.grants).values({ principal: w2.principal, projectId: null, environmentId: w2.dev, environmentSlug: null, role: 'viewer', grantedAt: Date.now(), grantedBy: ROOT });
+  await db.owner.insert(grants).values({ principal: w2.principal, projectId: null, environmentId: w2.dev, environmentSlug: null, role: 'viewer', grantedAt: Date.now(), grantedBy: ROOT });
   await run(db.owner, sql`UPDATE principals SET seal = ${memberBefore} WHERE principal = ${w2.principal}`);
   assert.equal(code(heard(await v.use(ask(w2, key2)))), 'stale', 'the member put back');
   const w3 = await world();
@@ -1062,7 +1062,7 @@ test('before the policy is logged, a use does nothing', async () => {
 /** An environment of the world's project, sealed by its genesis: a fork, or `owner`'s personal config of `parent`. */
 async function environment(w: { project: string }, slug: string, extra: { owner?: string; parentId?: string } = {}): Promise<string> {
   const id = randomUUID();
-  await db.owner.insert(tablesOf(db.owner).environments).values({ id, projectId: w.project, slug, name: slug, protected: false, owner: extra.owner ?? null, parentId: extra.parentId ?? null });
+  await db.owner.insert(environments).values({ id, projectId: w.project, slug, name: slug, protected: false, owner: extra.owner ?? null, parentId: extra.parentId ?? null });
   const object: Input = { kind: 'environment', id, projectId: w.project, slug, owner: extra.owner ?? null, parentId: extra.parentId ?? null, protected: false, deleted: false, archived: false, projectArchived: false };
   await change({ kind: 'environment', id }, { op: 'genesis', value: object }, object, seal('environments', 'id', id));
   return id;
@@ -1107,8 +1107,8 @@ test('a reference reads its source\'s value, decided at its holder: the whole sh
   const row = randomUUID();
   // As 0.15's vault writes it, past the cutover: its entry says so (`log015`).
   const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'reference.create', decision: 'allow', metadata: '{}' }], undefined, undefined, [], true));
-  await db.owner.insert(tablesOf(db.owner).secrets).values({ id: holder, projectId: w.project, environmentId: prod, key: `HELD_${holder.slice(0, 4)}` });
-  await db.owner.insert(tablesOf(db.owner).secretReferences).values({
+  await db.owner.insert(secrets).values({ id: holder, projectId: w.project, environmentId: prod, key: `HELD_${holder.slice(0, 4)}` });
+  await db.owner.insert(secretReferences).values({
     id: row, projectId: w.project, environmentId: prod, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
     createdSeq: appended.seqStart, createdBy: ROOT,
   });
@@ -1136,7 +1136,6 @@ test('a reference reads its source\'s value, decided at its holder: the whole sh
 test("a personal config's key: its owner reads it while they read its parent, which the use weighs (the plain shape's fourth environment)", async () => {
   const w = await world({ caller: 'person' });
   const mine = await environment(w, 'dev-mine', { owner: w.principal, parentId: w.dev });
-  const t = tablesOf(db.owner);
   // A key of the personal config, sealed as `w.key` seals one in dev.
   const id = randomUUID();
   const version = randomUUID();
@@ -1145,8 +1144,8 @@ test("a personal config's key: its owner reads it while they read its parent, wh
   const dek = freshDek();
   const sealed = encrypt(Buffer.from('mine'), { projectId: w.project, environmentId: mine, secretId: id }, dek);
   const wrapped = await CONFIG.keks.wrap(dek, { projectId: w.project, environmentId: mine, secretId: id, owner: ownerKey(w.principal) }, { deadline: Date.now() + 5000, signal: new AbortController().signal });
-  await db.owner.insert(t.secrets).values({ id, projectId: w.project, environmentId: mine, key: 'MINE' });
-  await db.owner.insert(t.secretVersions).values({
+  await db.owner.insert(secrets).values({ id, projectId: w.project, environmentId: mine, key: 'MINE' });
+  await db.owner.insert(secretVersions).values({
     id: version, secretId: id, version: 1, envelopeVersion: sealed.envelopeVersion, ciphertext: sealed.ciphertext, iv: sealed.iv, authTag: sealed.authTag,
     wrappedDek: wrapped.bytes, kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, createdBy: ROOT, sensitive: false,
   });
@@ -1264,8 +1263,8 @@ test('a place renamed, brought back from its deletion, or moved into the key\'s 
   // A fork of another project's, moved into the key's to read it through: a live place of its project, by its row.
   const elsewhere = randomUUID();
   const fork = randomUUID();
-  await db.owner.insert(tablesOf(db.owner).projects).values({ id: elsewhere, slug: projectSlug(elsewhere), name: 'Elsewhere' });
-  await db.owner.insert(tablesOf(db.owner).environments).values({ id: fork, projectId: elsewhere, slug: 'fork', name: 'fork', protected: false });
+  await db.owner.insert(projects).values({ id: elsewhere, slug: projectSlug(elsewhere), name: 'Elsewhere' });
+  await db.owner.insert(environments).values({ id: fork, projectId: elsewhere, slug: 'fork', name: 'fork', protected: false });
   await genesis({ kind: 'environment', id: fork }, { ...environment, id: fork, projectId: elsewhere, slug: 'fork' });
   assert.deepEqual(await both({ place: fork }), ['bad_claim', 'bad_claim'], 'read through another project\'s place');
   await run(db.owner, sql`UPDATE environments SET project_id = ${w.project} WHERE id = ${fork}`);

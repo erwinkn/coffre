@@ -12,7 +12,6 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import type { CredentialColumns, NamedManyInput, NamedManyOutcome, NamedUseInput, NamedUseOutcome, UseManyInput, UseOutcome } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
@@ -22,6 +21,7 @@ import { newRequestId } from '../src/use.ts';
 import { openTestDatabase, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { namedWorld } from './named-world.ts';
 import { ask, change, emptyLog, isolate, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { environments, secretReferences, secrets } from '@coffre/db/schema';
 
 let db: TestDatabase;
 before(async () => {
@@ -289,7 +289,7 @@ test('a batch by ids, a named use and a named batch: the member forged as in Fab
 /** An environment of the world's project, made by its genesis change. */
 async function environment(w: { project: string }, slug: string, extra: { owner?: string; parentId?: string } = {}) {
   const id = randomUUID();
-  await db.owner.insert(tablesOf(db.owner).environments).values({ id, projectId: w.project, slug, name: slug, protected: false, owner: extra.owner ?? null, parentId: extra.parentId ?? null });
+  await db.owner.insert(environments).values({ id, projectId: w.project, slug, name: slug, protected: false, owner: extra.owner ?? null, parentId: extra.parentId ?? null });
   const object = { kind: 'environment', id, projectId: w.project, slug, owner: extra.owner ?? null, parentId: extra.parentId ?? null, protected: false, deleted: false, archived: false, projectArchived: false } as const;
   await change({ kind: 'environment', id }, { op: 'genesis', value: object }, object, seal('environments', 'id', id));
   return { id, object: object as Extract<Input, { kind: 'environment' }> };
@@ -311,8 +311,8 @@ async function reference(w: World, environmentId: string, source: string): Promi
   const holder = randomUUID();
   const row = randomUUID();
   const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'reference.create', decision: 'allow', metadata: '{}' }], undefined, undefined, [], true));
-  await db.owner.insert(tablesOf(db.owner).secrets).values({ id: holder, projectId: w.project, environmentId, key: `HELD_${holder.slice(0, 4)}` });
-  await db.owner.insert(tablesOf(db.owner).secretReferences).values({
+  await db.owner.insert(secrets).values({ id: holder, projectId: w.project, environmentId, key: `HELD_${holder.slice(0, 4)}` });
+  await db.owner.insert(secretReferences).values({
     id: row, projectId: w.project, environmentId, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
     createdSeq: appended.seqStart, createdBy: ROOT,
   });

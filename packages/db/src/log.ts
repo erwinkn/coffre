@@ -5,10 +5,11 @@ import { and, asc, count, desc, eq, gt, gte, lt, lte, sql, type AnyColumn, type 
 
 import { authoredBy, entriesOf, keyedBy, KINDS, type Kind } from './access-entries.ts';
 import { afterCommit } from './commits.ts';
-import { tablesOf, type Queryable, type Transaction } from './database.ts';
+import { type Queryable, type Transaction } from './database.ts';
 import { later, laterRows } from './later.ts';
 import { prepared } from './prepared.ts';
-import { clockMillis, forUpdate, rowsOf } from './dialect.ts';
+import { clockMillis, rowsOf } from './dialect.ts';
+import { auditChainHead, auditLog } from './schema.ts';
 
 export { accessAllowed, authoredBy, changeNamed, changesOf, entriesOf, indexOf, keyedBy, KINDS, type Kind } from './access-entries.ts';
 export { recordField, recorded, RECORDS, type ChangeRecord } from './change-records.ts';
@@ -270,13 +271,9 @@ const HEAD_LINES = { reads: 0x636f6668, code: 0x636f6670 } as const;
 /** Which line of the head's places a wait takes one in (`lockLogHeadQueued`). */
 export type HeadLine = keyof typeof HEAD_LINES;
 
-const lockedHead = prepared((db) => {
-  const { auditChainHead } = tablesOf(db);
-  return forUpdate(
-    db,
-    db.select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash }).from(auditChainHead).where(eq(auditChainHead.onlyRow, true)),
-  );
-});
+const lockedHead = prepared((db) =>
+  db.select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash }).from(auditChainHead).where(eq(auditChainHead.onlyRow, true)).for('update'),
+);
 
 /**
  * Append `entries` under `key`. `check`, when given, runs once the head is
@@ -320,7 +317,6 @@ export async function appendEntries(
   { final = false }: { final?: boolean } = {},
 ): Promise<Appended & { changes: (bigint | null)[]; later: ChangeNumbers | null }> {
   if (entries.length === 0) throw new Error('appendEntries called with no entries');
-  const { auditChainHead, auditLog } = tablesOf(tx);
 
   // Every append queues here, if its transaction has not already.
   if (locked === undefined && !holding.has(tx)) await lockLogHead(tx);
@@ -440,30 +436,26 @@ const ROWS_AT_ONCE = 3000;
  * so the append refuses (`LogHeadMismatch`) rather than writing unlocked.
  */
 const underHead = prepared((db) => {
-  const { auditChainHead, auditLog } = tablesOf(db);
   const moved = sql.raw(MOVES_FROM.map((action) => `'${action}'`).join(', '));
   const newest = (column: SQL) => sql`(SELECT ${column} FROM audit_log ORDER BY seq DESC LIMIT 1)`;
-  return forUpdate(
-    db,
-    db
-      .select({
-        nextSeq: auditChainHead.nextSeq,
-        headHash: auditChainHead.headHash,
-        now: clockMillis(db),
-        lastSeq: newest(sql`seq`).mapWith(auditLog.seq) as SQL<bigint | null>,
-        lastHash: newest(sql`hash`).mapWith(auditLog.hash) as SQL<Buffer | null>,
-        retired: sql<boolean | number>`EXISTS (SELECT 1 FROM audit_log moved WHERE moved.author = ${sql.placeholder('author')} AND moved.subject_principal = ${sql.placeholder('keyId')} AND moved.action IN (${moved}))`,
-      })
-      .from(auditChainHead)
-      .where(eq(auditChainHead.onlyRow, true)),
-  );
+  return db
+    .select({
+      nextSeq: auditChainHead.nextSeq,
+      headHash: auditChainHead.headHash,
+      now: clockMillis(),
+      lastSeq: newest(sql`seq`).mapWith(auditLog.seq) as SQL<bigint | null>,
+      lastHash: newest(sql`hash`).mapWith(auditLog.hash) as SQL<Buffer | null>,
+      retired: sql<boolean>`EXISTS (SELECT 1 FROM audit_log moved WHERE moved.author = ${sql.placeholder('author')} AND moved.subject_principal = ${sql.placeholder('keyId')} AND moved.action IN (${moved}))`,
+    })
+    .from(auditChainHead)
+    .where(eq(auditChainHead.onlyRow, true))
+    .for('update');
 });
 
 // --- reading the vault's entries back ---------------------------------------------
 
 /** An entry's columns, as the chain's codec reads them (`StoredEntry`). */
-export function entryColumns(db: Queryable) {
-  const { auditLog } = tablesOf(db);
+export function entryColumns() {
   return {
     seq: auditLog.seq,
     author: auditLog.author,
@@ -516,10 +508,9 @@ export async function withinBytes(
   order: 'asc' | 'desc' = 'asc',
   by?: { column: AnyColumn; values: readonly string[] },
 ): Promise<{ from: bigint; to: bigint; cut: boolean; count: number; seqs: bigint[] } | null> {
-  const { auditLog } = tablesOf(db);
   if (by !== undefined && by.values.length === 0) return null;
   const sizes = by !== undefined
-    ? (await rowsOf<{ seq: string | number | bigint; bytes: number | string }>(db, streamsOf(db, where, limit, order, by))).map((row) => ({ seq: BigInt(row.seq), bytes: row.bytes }))
+    ? (await rowsOf<{ seq: string | number | bigint; bytes: number | string }>(db, streamsOf(where, limit, order, by))).map((row) => ({ seq: BigInt(row.seq), bytes: row.bytes }))
     : await db
       .select({ seq: auditLog.seq, bytes: sql<number | string>`length(${auditLog.metadata})` })
       .from(auditLog)
@@ -538,8 +529,7 @@ export async function withinBytes(
 }
 
 /** `withinBytes`' sizes of the entries whose `by.column` is one of `by.values`: each value's first `limit` by its index, then the first `limit` of them all. */
-function streamsOf(db: Queryable, where: SQL | undefined, limit: number, order: 'asc' | 'desc', by: { column: AnyColumn; values: readonly string[] }): SQL {
-  const { auditLog } = tablesOf(db);
+function streamsOf(where: SQL | undefined, limit: number, order: 'asc' | 'desc', by: { column: AnyColumn; values: readonly string[] }): SQL {
   const way = sql.raw(order === 'asc' ? 'ASC' : 'DESC');
   const streams = [...new Set(by.values)].map((value) => {
     const keyed = keyedBy(by.column, auditLog.seq, order, sql.param([value]));
@@ -575,7 +565,6 @@ export const COUNTED_AT_ONCE = 1_000_000n;
  */
 export async function missingEntry(db: Queryable, seq: bigint, from = 0n): Promise<{ expected: bigint; found: bigint | null } | null> {
   if (seq - from + 1n > COUNTED_AT_ONCE) throw new Error(`a count of entries ${from} to ${seq} is longer than ${COUNTED_AT_ONCE.toLocaleString('en')} entries`);
-  const { auditLog } = tablesOf(db);
   const whole = async (start: bigint, to: bigint) => {
     const [{ n }] = await db.select({ n: count() }).from(auditLog).where(and(gte(auditLog.seq, start), lte(auditLog.seq, to)));
     return BigInt(n) === to - start + 1n;
@@ -628,9 +617,8 @@ export async function newestVaultEntries(db: Queryable, kind: Kind, limit: numbe
 }
 
 function vaultEntries(db: Queryable, kind: Kind, before?: SQL) {
-  const { auditLog } = tablesOf(db);
   return db
-    .select(entryColumns(db))
+    .select(entryColumns())
     .from(auditLog)
     .where(and(entriesOf(kind), before))
     .orderBy(desc(auditLog.seq))
@@ -643,7 +631,7 @@ function byKind<T>(build: (kind: Kind) => T): Record<Kind, T> {
 }
 
 const newestEntries = byKind((kind) => prepared((db) => vaultEntries(db, kind)));
-const entriesBefore = byKind((kind) => prepared((db) => vaultEntries(db, kind, lt(tablesOf(db).auditLog.seq, sql.placeholder('before')))));
+const entriesBefore = byKind((kind) => prepared((db) => vaultEntries(db, kind, lt(auditLog.seq, sql.placeholder('before')))));
 
 /**
  * The number of the newest entry of `kind`, or null for none: whether one
@@ -663,7 +651,6 @@ const newestSeq = byKind((kind) => prepared((db) => newestSeqQuery(db, kind)));
  * what the newest is, wherever it is read.
  */
 export function newestSeqQuery(db: Queryable, kind: Kind) {
-  const { auditLog } = tablesOf(db);
   return db
     .select({ seq: auditLog.seq })
     .from(auditLog)
@@ -678,7 +665,6 @@ export function newestSeqQuery(db: Queryable, kind: Kind) {
  * whether the key wrote nothing, a little, or most of the log.
  */
 export async function firstEntryUnder(db: Queryable, author: 'app' | 'vault', keyId: string, also?: SQL): Promise<bigint | undefined> {
-  const { auditLog } = tablesOf(db);
   const key = keyedBy(auditLog.keyId, auditLog.seq, 'asc', sql.param([keyId]));
   const [row] = await db.select({ seq: auditLog.seq }).from(auditLog).where(and(authoredBy(author), key.where, also)).orderBy(...key.orderBy).limit(1);
   return (row?.seq as bigint | undefined) ?? undefined;

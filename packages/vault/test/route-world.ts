@@ -5,7 +5,6 @@ import { randomUUID } from 'node:crypto';
 
 import type { Holdings } from '@coffre/core/access';
 import { definitionKeys, type ProxyDefinition, type RouteUseInput } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import type { Reader } from '../src/decide.ts';
@@ -14,6 +13,7 @@ import { frozenHoldings } from '../src/proxy.ts';
 import { rows, run, type TestDatabase } from './database.ts';
 import { namedWorld } from './named-world.ts';
 import { change, genesis, onePeriod, ROOT, seal } from './use-world.ts';
+import { grants as grantsTable, principals } from '@coffre/db/schema';
 
 /** A change's op as the vault logs it: naming its object, which the log's replay reads it by (`loggedChange`). */
 const named = (ref: Ref, op: Op): Op => ({ ...op, ref }) as unknown as Op;
@@ -25,12 +25,11 @@ export async function routeWorld(db: TestDatabase) {
   const member = async (grants: { environmentId: string | null; role: string }[]) => {
     const principal = `user:${randomUUID()}@acme.example`;
     const now = Date.now();
-    const t = tablesOf(db.owner);
-    await db.owner.insert(t.principals).values({
+    await db.owner.insert(principals).values({
       principal, status: 'active', role: null, scope: null, generation: 0, createdAt: now, createdBy: ROOT, statusChangedAt: now, statusChangedBy: ROOT, accessSeq: 0n, mac: Buffer.alloc(32),
     });
     for (const grant of grants) {
-      await db.owner.insert(t.grants).values({ principal, projectId: grant.environmentId === null ? w.project : null, environmentId: grant.environmentId, environmentSlug: null, role: grant.role, grantedAt: now, grantedBy: ROOT });
+      await db.owner.insert(grantsTable).values({ principal, projectId: grant.environmentId === null ? w.project : null, environmentId: grant.environmentId, environmentSlug: null, role: grant.role, grantedAt: now, grantedBy: ROOT });
     }
     const object: Extract<Input, { kind: 'principal' }> = {
       kind: 'principal', principal, status: 'active', generation: 0, role: 'member', scope: { projects: 'all', environments: 'all' },

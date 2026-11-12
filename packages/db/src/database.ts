@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-import { getTableName, is, sql, Table, type Assume, type RelationalSchemaConfig } from 'drizzle-orm';
+import { sql, type Assume, type RelationalSchemaConfig } from 'drizzle-orm';
 import { PgDatabase, PgDialect, type PgQueryResultHKT, type PgTransactionConfig } from 'drizzle-orm/pg-core';
 import { PostgresJsSession, PostgresJsTransaction } from 'drizzle-orm/postgres-js/session';
 
@@ -80,7 +80,7 @@ function brokenRule(error: unknown): QueryOutsideTransaction | undefined {
  * every database, was 4 to 11 ms of a cold isolate's CPU and 0.1 ms of each
  * later call on Workers, where a database is made per call. So the database
  * has none: `db.query` is empty, in type and at run time, and a `db.query.x`
- * fails the typecheck. Only the tables stay, for `tablesOf`.
+ * fails the typecheck.
  */
 type NoRelations = Record<never, never>;
 type Relational = RelationalSchemaConfig<NoRelations>;
@@ -152,33 +152,6 @@ export function createDatabase(client: Client, { lockWaitMs }: { lockWaitMs?: nu
     }
   }) as Database['transaction'];
   return trackCommits(db);
-}
-
-/** The database's tables. Every query builds on these. */
-export function tablesOf(db: Queryable): typeof schema {
-  return db._.fullSchema;
-}
-
-const byName = new WeakMap<object, Map<string, Table>>();
-
-/**
- * The database's own `table`: the server names tables by importing
- * schema.ts, and the database decides which one that means.
- */
-export function own<T extends Table>(db: Queryable, table: T): T {
-  const tables = tablesOf(db);
-  let named = byName.get(tables);
-  if (named === undefined) {
-    named = new Map(
-      Object.values(tables)
-        .filter((value) => is(value, Table))
-        .map((value) => [getTableName(value), value]),
-    );
-    byName.set(tables, named);
-  }
-  const found = named.get(getTableName(table));
-  if (found === undefined) throw new Error(`no table ${getTableName(table)} in this database`);
-  return found as T;
 }
 
 export { prepared } from './prepared.ts';

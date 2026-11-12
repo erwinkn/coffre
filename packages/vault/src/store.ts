@@ -1,8 +1,8 @@
 import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { StoredEntry } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type CredentialColumns, type EnvironmentColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
-import { later, laterRows, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { clockMillis, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
+import { later, laterRows, prepared, type Queryable, type Transaction } from '@coffre/db';
+import { clockMillis, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
 import { accessAllowed, authoredBy, changesOf, entriesOf, entryColumns, firstEntryUnder, newestVaultEntries, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
 
@@ -12,6 +12,7 @@ import { changeHolds, CUTOVER_OBJECT, type ChangeRow, type LogMacKey } from './l
 import type { StoredRole } from './role-rows.ts';
 import { configObject, environmentObject, memberStanding, policyObject, principalObject, secretObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
+import { auditChainHead, auditLog, environments, grants as grantsTable, logChanges, logConfig, policy, principals, projects, proxyDefinitions, proxyReserved, roles, secrets, secretVersions } from '@coffre/db/schema';
 
 /**
  * Every query the vault makes, and the only code in it that holds them.
@@ -105,12 +106,11 @@ export async function now(db: Queryable): Promise<number> {
   return at;
 }
 
-const clock = prepared((db) => db.select({ at: clockMillis(db) }).from(tablesOf(db).auditChainHead));
+const clock = prepared((db) => db.select({ at: clockMillis() }).from(auditChainHead));
 
 // --- members --------------------------------------------------------------------
 
-function memberColumns(db: Queryable) {
-  const { principals } = tablesOf(db);
+function memberColumns() {
   return {
     principal: principals.principal,
     status: principals.status,
@@ -147,13 +147,11 @@ export async function member(db: Queryable, principal: string): Promise<Member |
 }
 
 const memberRow = prepared((db) => {
-  const { principals } = tablesOf(db);
-  return db.select(memberColumns(db)).from(principals).where(eq(principals.principal, sql.placeholder('principal')));
+  return db.select(memberColumns()).from(principals).where(eq(principals.principal, sql.placeholder('principal')));
 });
 
 export async function allMembers(db: Queryable): Promise<Member[]> {
-  const { principals } = tablesOf(db);
-  return ((await db.select(memberColumns(db)).from(principals).orderBy(asc(principals.principal))) as StoredMember[]).map(memberOf);
+  return ((await db.select(memberColumns()).from(principals).orderBy(asc(principals.principal))) as StoredMember[]).map(memberOf);
 }
 
 /**
@@ -163,9 +161,8 @@ export async function allMembers(db: Queryable): Promise<Member[]> {
  * row's MAC reads it, parsed: any way of writing everywhere is everywhere.
  */
 export async function instanceOwners(db: Queryable): Promise<Member[]> {
-  const { principals } = tablesOf(db);
   const rows = await db
-    .select(memberColumns(db))
+    .select(memberColumns())
     .from(principals)
     .where(and(eq(principals.status, 'active'), eq(principals.role, 'owner')))
     .orderBy(asc(principals.principal));
@@ -204,17 +201,13 @@ export function laterLockMembers(tx: Transaction, principals: readonly string[])
 
 /** The members' queues and rows, locked in principal order (`lockMembers`). */
 function membersLocked(tx: Transaction, names: readonly string[], shared: boolean) {
-  const { principals } = tablesOf(tx);
   const queued = sql`${sql.raw(shared ? 'pg_advisory_xact_lock_shared' : 'pg_advisory_xact_lock')}(${MEMBER_QUEUE}, hashtext(${principals.principal}))`;
-  return forUpdate(
-    tx,
-    tx
-      .select({ ...memberColumns(tx), queued })
-      .from(principals)
-      .where(inArray(principals.principal, [...new Set(names)]))
-      .orderBy(asc(principals.principal)),
-    shared ? 'share' : 'no key update',
-  );
+  return tx
+    .select({ ...memberColumns(), queued })
+    .from(principals)
+    .where(inArray(principals.principal, [...new Set(names)]))
+    .orderBy(asc(principals.principal))
+    .for(shared ? 'share' : 'no key update');
 }
 
 /**
@@ -238,7 +231,6 @@ export async function insertMember(
   /** `final`: nothing awaits it, it goes with what the transaction asks next, its COMMIT at the latest (`later`). */
   { final = false }: { final?: boolean } = {},
 ): Promise<void> {
-  const { principals } = tablesOf(tx);
   const statement = tx.insert(principals).values(storedChange(row) as typeof principals.$inferInsert);
   if (final) later(tx, statement);
   else await statement;
@@ -251,7 +243,6 @@ export async function updateMember(
   /** `final`: nothing awaits it, it goes with what the transaction asks next, its COMMIT at the latest (`later`). */
   { final = false }: { final?: boolean } = {},
 ): Promise<void> {
-  const { principals } = tablesOf(tx);
   const statement = tx.update(principals).set(storedChange(change)).where(eq(principals.principal, principal));
   if (final) later(tx, statement);
   else await statement;
@@ -268,14 +259,13 @@ export function grants(db: Queryable, principal?: string): Promise<GrantRow[]> {
  * A grant's row names its environment, or its project when it has none, or
  * neither on every project, with the slug it covers there, if any.
  */
-function at(db: Queryable, place: Place) {
-  const { grants } = tablesOf(db);
-  if (place.environmentId !== null) return eq(grants.environmentId, place.environmentId);
-  if (place.projectId !== null) return and(eq(grants.projectId, place.projectId), isNull(grants.environmentId));
+function at(place: Place) {
+  if (place.environmentId !== null) return eq(grantsTable.environmentId, place.environmentId);
+  if (place.projectId !== null) return and(eq(grantsTable.projectId, place.projectId), isNull(grantsTable.environmentId));
   return and(
-    isNull(grants.projectId),
-    isNull(grants.environmentId),
-    place.environmentSlug === null ? isNull(grants.environmentSlug) : eq(grants.environmentSlug, place.environmentSlug),
+    isNull(grantsTable.projectId),
+    isNull(grantsTable.environmentId),
+    place.environmentSlug === null ? isNull(grantsTable.environmentSlug) : eq(grantsTable.environmentSlug, place.environmentSlug),
   );
 }
 
@@ -317,7 +307,6 @@ export async function environmentsById(
 }
 
 async function environmentRows(db: Queryable, ids: readonly string[] | 'all', seals: boolean): Promise<Map<string, EnvironmentRow>> {
-  const { environments, projects } = tablesOf(db);
   const columns = {
     id: environments.id,
     projectId: environments.projectId,
@@ -508,13 +497,11 @@ function memberLogsPostgres(principals: readonly string[]): SQL {
 }
 
 export async function deleteGrant(tx: Transaction, principal: string, place: Place): Promise<void> {
-  const { grants } = tablesOf(tx);
-  await tx.delete(grants).where(and(eq(grants.principal, principal), at(tx, place)));
+  await tx.delete(grantsTable).where(and(eq(grantsTable.principal, principal), at(place)));
 }
 
 export async function deleteGrants(tx: Transaction, principal: string): Promise<void> {
-  const { grants } = tablesOf(tx);
-  await tx.delete(grants).where(eq(grants.principal, principal));
+  await tx.delete(grantsTable).where(eq(grantsTable.principal, principal));
 }
 
 /**
@@ -523,7 +510,6 @@ export async function deleteGrants(tx: Transaction, principal: string): Promise<
  * wrapped with, before the vault records a check value for it.
  */
 export async function wrappedUnder(db: Queryable, provider: string, keyId: string, limit: number) {
-  const { secretVersions, secrets } = tablesOf(db);
   const rows = await db
     .select({
       projectId: secrets.projectId,
@@ -550,7 +536,6 @@ export async function places(
   environmentIds: readonly string[],
   { seals = false }: { seals?: boolean } = {},
 ): Promise<{ projects: Set<string>; environments: Map<string, EnvironmentRow>; deleted: Set<string> }> {
-  const { projects } = tablesOf(db);
   const [foundProjects, foundEnvironments] = await Promise.all([
     projectIds.length === 0
       ? []
@@ -567,12 +552,11 @@ export async function places(
 
 /** Who holds a grant on every project of 0.4, lapsed or not, which the vault replaces (`#convert`). */
 export async function everyProjectHolders(db: Queryable): Promise<string[]> {
-  const { grants } = tablesOf(db);
   const rows = await db
-    .selectDistinct({ principal: grants.principal })
-    .from(grants)
-    .where(and(isNull(grants.projectId), isNull(grants.environmentId)))
-    .orderBy(asc(grants.principal));
+    .selectDistinct({ principal: grantsTable.principal })
+    .from(grantsTable)
+    .where(and(isNull(grantsTable.projectId), isNull(grantsTable.environmentId)))
+    .orderBy(asc(grantsTable.principal));
   return rows.map((row) => row.principal);
 }
 
@@ -585,11 +569,10 @@ function stored(rows: object[]): StoredEntry[] {
 
 /** Up to `limit` entries of either author from `fromSeq`, oldest first: the chain as it runs. */
 export async function entriesFrom(db: Queryable, fromSeq: bigint, limit: number): Promise<StoredEntry[]> {
-  const { auditLog } = tablesOf(db);
   const batch = await withinBytes(db, gte(auditLog.seq, fromSeq), limit);
   if (batch === null) return [];
   const rows = await db
-    .select(entryColumns(db))
+    .select(entryColumns())
     .from(auditLog)
     .where(and(gte(auditLog.seq, batch.from), lte(auditLog.seq, batch.to)))
     .orderBy(asc(auditLog.seq));
@@ -598,12 +581,11 @@ export async function entriesFrom(db: Queryable, fromSeq: bigint, limit: number)
 
 /** Up to `limit` of the vault's entries after `afterSeq`, oldest first: every one, whatever its action or decision. */
 export async function vaultEntriesAfter(db: Queryable, afterSeq: bigint, limit: number): Promise<StoredEntry[]> {
-  const { auditLog } = tablesOf(db);
   const vault = authoredBy('vault');
   const batch = await withinBytes(db, and(vault, gt(auditLog.seq, afterSeq)), limit);
   if (batch === null) return [];
   const rows = await db
-    .select(entryColumns(db))
+    .select(entryColumns())
     .from(auditLog)
     .where(and(vault, gte(auditLog.seq, batch.from), lte(auditLog.seq, batch.to)))
     .orderBy(asc(auditLog.seq));
@@ -612,7 +594,6 @@ export async function vaultEntriesAfter(db: Queryable, afterSeq: bigint, limit: 
 
 /** The hash of the entry at each of `seqs` the log holds, by seq. */
 export async function hashesAt(db: Queryable, seqs: readonly bigint[]): Promise<Map<bigint, Buffer>> {
-  const { auditLog } = tablesOf(db);
   const hashes = new Map<bigint, Buffer>();
   for (let from = 0; from < seqs.length; from += HASHES_AT_ONCE) {
     const rows = await db
@@ -629,16 +610,14 @@ const HASHES_AT_ONCE = 5000;
 
 /** The entry at `seq`'s hash, or undefined when there is none. */
 export async function hashAt(db: Queryable, seq: bigint): Promise<Buffer | undefined> {
-  const { auditLog } = tablesOf(db);
   const [row] = await db.select({ hash: auditLog.hash }).from(auditLog).where(eq(auditLog.seq, seq));
   return row?.hash;
 }
 
 /** Up to `limit` of the vault's entries before `before` (the newest when undefined), newest first. */
 export async function vaultPage(db: Queryable, before: bigint | undefined, limit: number): Promise<StoredEntry[]> {
-  const { auditLog } = tablesOf(db);
   const rows = await db
-    .select(entryColumns(db))
+    .select(entryColumns())
     .from(auditLog)
     .where(and(authoredBy('vault'), before === undefined ? undefined : lt(auditLog.seq, before)))
     .orderBy(desc(auditLog.seq))
@@ -662,8 +641,7 @@ export async function firstVaultEntryUnder(db: Queryable, keyId: string): Promis
 /** The entries at these seqs, any author, by seq: what a reference names as its seal. */
 export async function entriesAt(db: Queryable, seqs: readonly bigint[]): Promise<Map<bigint, StoredEntry>> {
   if (seqs.length === 0) return new Map();
-  const { auditLog } = tablesOf(db);
-  const rows = stored(await db.select(entryColumns(db)).from(auditLog).where(inArray(auditLog.seq, [...new Set(seqs)])));
+  const rows = stored(await db.select(entryColumns()).from(auditLog).where(inArray(auditLog.seq, [...new Set(seqs)])));
   return new Map(rows.map((row) => [row.seq, row]));
 }
 
@@ -675,22 +653,19 @@ export async function entriesAt(db: Queryable, seqs: readonly bigint[]): Promise
  */
 export async function referenceEnds(db: Queryable, seqs: readonly bigint[]): Promise<StoredEntry[]> {
   if (seqs.length === 0) return [];
-  const { auditLog } = tablesOf(db);
-  return stored(await db.select(entryColumns(db)).from(auditLog)
+  return stored(await db.select(entryColumns()).from(auditLog)
     .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'reference.end'), eq(auditLog.decision, 'allow'), inArray(auditLog.relatedSeq, [...new Set(seqs)]))));
 }
 
 /** The project each environment is in: a holder's ids, checked against each other. */
 /** Whether a project of this id is there, and not deleted. */
 export async function projectLive(db: Queryable, id: string): Promise<boolean> {
-  const { projects } = tablesOf(db);
   const rows = await db.select({ deleted: truth(tombstone(projects.slug)) }).from(projects).where(eq(projects.id, id));
   return rows.length > 0 && !rows[0]!.deleted;
 }
 
 export async function projectsOfEnvironments(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
   if (ids.length === 0) return new Map();
-  const { environments } = tablesOf(db);
   const rows = await db.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(inArray(environments.id, [...new Set(ids)]));
   return new Map(rows.map((row) => [row.id, row.projectId]));
 }
@@ -701,14 +676,12 @@ export type SecretPlace = { secretId: string; projectId: string; environmentId: 
 /** The live keys of these names in these environments, by id: what a proxy definition's save resolves its keys among (a fork chain's). */
 export async function secretsNamed(db: Queryable, environmentIds: readonly string[], names: readonly string[]): Promise<{ id: string; environmentId: string; key: string }[]> {
   if (environmentIds.length === 0 || names.length === 0) return [];
-  const { secrets } = tablesOf(db);
   return db.select({ id: secrets.id, environmentId: secrets.environmentId, key: secrets.key }).from(secrets)
     .where(and(inArray(secrets.environmentId, [...environmentIds]), inArray(secrets.key, [...names]), isNull(secrets.archivedAt)));
 }
 
 export async function secretsByIds(db: Queryable, ids: readonly string[]): Promise<Map<string, SecretPlace>> {
   if (ids.length === 0) return new Map();
-  const { secrets, environments, projects } = tablesOf(db);
   const rows = await db
     .select({
       secretId: secrets.id,
@@ -733,7 +706,6 @@ export async function secretsByIds(db: Queryable, ids: readonly string[]): Promi
  */
 export async function natures(db: Queryable, secretIds: readonly string[]): Promise<Map<string, 'plain' | 'secret' | 'sensitive'>> {
   if (secretIds.length === 0) return new Map();
-  const { secrets, secretVersions } = tablesOf(db);
   const rows = await db
     .select({ id: secrets.id, sensitive: secretVersions.sensitive, plain: truth(isNotNull(secretVersions.plaintext)) })
     .from(secrets)
@@ -754,7 +726,6 @@ export async function restoredNatures(
   items: readonly { secretId: string; from: string }[],
 ): Promise<('plain' | 'secret' | 'sensitive' | null)[]> {
   if (items.length === 0) return [];
-  const { secrets, secretVersions } = tablesOf(db);
   const [current, versions] = await Promise.all([
     db.select({ id: secrets.id, version: secrets.currentVersionId }).from(secrets).where(inArray(secrets.id, [...new Set(items.map((item) => item.secretId))])),
     db.select({
@@ -776,8 +747,7 @@ export async function latestRotation(db: Queryable): Promise<StoredEntry | undef
 
 /** The newest entry `where` holds, or undefined. */
 async function newestOf(db: Queryable, where: SQL): Promise<StoredEntry | undefined> {
-  const { auditLog } = tablesOf(db);
-  const [row] = await db.select(entryColumns(db)).from(auditLog).where(where).orderBy(desc(auditLog.seq)).limit(1);
+  const [row] = await db.select(entryColumns()).from(auditLog).where(where).orderBy(desc(auditLog.seq)).limit(1);
   return row === undefined ? undefined : stored([row])[0];
 }
 
@@ -792,7 +762,6 @@ export async function latestSigned(db: Queryable): Promise<StoredEntry | undefin
  * signs as related (`related_seq`); those before name none.
  */
 export async function latestTallied(db: Queryable): Promise<StoredEntry | undefined> {
-  const { auditLog } = tablesOf(db);
   return newestOf(db, and(entriesOf('signed'), isNotNull(auditLog.relatedSeq))!);
 }
 
@@ -807,26 +776,24 @@ export async function newestCheckpointEntry(db: Queryable): Promise<StoredEntry 
  * holds, but always one. A reader asks again after the last.
  */
 export async function talliedWithin(db: Queryable, after: bigint, through: bigint, limit: number): Promise<StoredEntry[]> {
-  const { auditLog } = tablesOf(db);
   const tallied = and(
     entriesOf('signed'), isNotNull(auditLog.relatedSeq),
     gt(auditLog.seq, after), lte(auditLog.seq, through),
   );
   const batch = await withinBytes(db, tallied, limit);
   if (batch === null) return [];
-  const rows = await db.select(entryColumns(db)).from(auditLog)
+  const rows = await db.select(entryColumns()).from(auditLog)
     .where(and(tallied, gte(auditLog.seq, batch.from), lte(auditLog.seq, batch.to))).orderBy(asc(auditLog.seq));
   return stored(rows);
 }
 
 /** The vault's newest refusal of a checkpoint for a broken log after entry `after`, or undefined: one step of `audit_log_broken_log_idx` (`KINDS`; T245, R48). */
 export async function newestBrokenLog(db: Queryable, after: bigint): Promise<StoredEntry | undefined> {
-  return newestOf(db, and(entriesOf('brokenLog'), gt(tablesOf(db).auditLog.seq, after))!);
+  return newestOf(db, and(entriesOf('brokenLog'), gt(auditLog.seq, after))!);
 }
 
 /** Up to `limit` of the vault's checkpoints that keep a tally after entry `after`, oldest first: each one's entry, and the last entry it signs. */
 export async function talliedAfter(db: Queryable, after: bigint, limit: number): Promise<{ seq: bigint; signs: bigint }[]> {
-  const { auditLog } = tablesOf(db);
   const rows = await db
     .select({ seq: auditLog.seq, signs: auditLog.relatedSeq })
     .from(auditLog)
@@ -838,20 +805,18 @@ export async function talliedAfter(db: Queryable, after: bigint, limit: number):
 
 /** The vault's newest allowed access entry about each member who has one. */
 export async function newestAccessEntries(db: Queryable): Promise<Map<string, StoredEntry>> {
-  const { auditLog } = tablesOf(db);
   const newest = db
     .select({ seq: sql`max(${auditLog.seq})` })
     .from(auditLog)
     .where(accessAllowed())
     .groupBy(auditLog.subjectPrincipal);
-  const rows = stored(await db.select(entryColumns(db)).from(auditLog).where(inArray(auditLog.seq, newest)));
+  const rows = stored(await db.select(entryColumns()).from(auditLog).where(inArray(auditLog.seq, newest)));
   return new Map(rows.flatMap((row) => (row.subjectPrincipal === null ? [] : [[row.subjectPrincipal, row]])));
 }
 
 /** Up to `limit` of the vault's checks of a KEK, oldest first: steps of `audit_log_key_check_idx` (`KINDS`; T245, R48). */
 export async function keyChecks(db: Queryable, limit: number): Promise<StoredEntry[]> {
-  const { auditLog } = tablesOf(db);
-  return stored(await db.select(entryColumns(db)).from(auditLog).where(entriesOf('keyCheck')).orderBy(asc(auditLog.seq)).limit(limit));
+  return stored(await db.select(entryColumns()).from(auditLog).where(entriesOf('keyCheck')).orderBy(asc(auditLog.seq)).limit(limit));
 }
 
 /**
@@ -869,10 +834,9 @@ export async function recentIntents(db: Queryable, since: number): Promise<Store
     before = page.at(-1)!.seq;
   }
   if (intents.length === 0) return [];
-  const { auditLog } = tablesOf(db);
   const oldest = intents.reduce((min, entry) => (entry.seq < min ? entry.seq : min), intents[0]!.seq);
   const outcomes = await db
-    .select(entryColumns(db))
+    .select(entryColumns())
     .from(auditLog)
     .where(and(
       eq(auditLog.author, 'vault'), inArray(auditLog.action, ['secret.read', 'key.wrap', 'key.rewrap']), gt(auditLog.seq, oldest),
@@ -892,7 +856,6 @@ const INTENT_PAGE = 100;
 /** Which of these secrets' newest versions are sensitive, by the versions' own order. */
 export async function newestSensitive(db: Queryable, secretIds: readonly string[]): Promise<Set<string>> {
   if (secretIds.length === 0) return new Set();
-  const { secretVersions } = tablesOf(db);
   const rows = await db
     .select({ secretId: secretVersions.secretId })
     .from(secretVersions)
@@ -906,7 +869,6 @@ export async function newestSensitive(db: Queryable, secretIds: readonly string[
 
 /** How many grants name `role`: all of them, or those on environments. */
 export async function grantsNaming(db: Queryable, role: string, filter: { onEnvironments?: boolean } = {}): Promise<number> {
-  const { grants } = tablesOf(db);
   const rows = await db
     .select({ count: sql<number | string>`count(*)` })
     .from(grants)
@@ -948,7 +910,6 @@ export type SecretVersion = {
 
 export async function versions(db: Queryable, ids: readonly string[]): Promise<SecretVersion[]> {
   if (ids.length === 0) return [];
-  const { secretVersions, secrets, environments, projects } = tablesOf(db);
   const rows = await db
     .select({
       id: secretVersions.id,
@@ -1003,9 +964,9 @@ export async function versions(db: Queryable, ids: readonly string[]): Promise<S
  * `column` of the newest version of a version's secret with its very ciphertext: its value, as it is held now. Known
  * by its IV and tag, which under one data key name one ciphertext, and which, unlike the ciphertext, no erasure empties.
  */
-function heldAs(secretVersions: ReturnType<typeof tablesOf>['secretVersions'], column: SQL): SQL {
-  return sql`SELECT ${column} FROM secret_versions same WHERE same.secret_id = ${secretVersions.secretId}
-    AND same.iv = ${secretVersions.iv} AND same.auth_tag = ${secretVersions.authTag} ORDER BY same.version DESC LIMIT 1`;
+function heldAs(versions: typeof secretVersions, column: SQL): SQL {
+  return sql`SELECT ${column} FROM secret_versions same WHERE same.secret_id = ${versions.secretId}
+    AND same.iv = ${versions.iv} AND same.auth_tag = ${versions.authTag} ORDER BY same.version DESC LIMIT 1`;
 }
 
 // --- 0.15's log: objects and changes ----------------------------------------------
@@ -1046,7 +1007,6 @@ export type ReadKind = Exclude<Kind, 'credential' | 'connection' | 'binding'>;
 
 /** `archived`: a key's rows read even while it is archived, as its unarchive would make them (an end's check, T134). */
 export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, { archived = false } = {}): Promise<HeldObject> {
-  const { principals, environments, projects, logConfig } = tablesOf(db);
   switch (ref.kind) {
     case 'principal': {
       const [row] = await db
@@ -1110,18 +1070,15 @@ export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, {
       return { row: configObject(row.value), seal: row.seal ?? null };
     }
     case 'policy': {
-      const { policy } = tablesOf(db);
       const [row] = await db.select().from(policy).where(eq(policy.name, ref.id));
       return row === undefined ? { row: null, seal: null } : { row: policyObject(row), seal: row.seal };
     }
     case 'role': {
-      const { roles } = tablesOf(db);
       const { scope, name } = roleName(ref.id);
       const [row] = await db.select({ definition: roles.definition, seal: roles.seal }).from(roles).where(and(eq(roles.scope, scope), eq(roles.name, name)));
       return row === undefined ? { row: null, seal: null } : { row: roleRow(ref.id, row.definition), seal: row.seal ?? null };
     }
     case 'proxy': {
-      const { proxyDefinitions } = tablesOf(db);
       const [row] = await db.select({ items: proxyDefinitions.items, digests: proxyDefinitions.digests, seal: proxyDefinitions.seal }).from(proxyDefinitions)
         .where(eq(proxyDefinitions.environmentId, ref.id));
       if (row === undefined) return { row: null, seal: null };
@@ -1136,7 +1093,6 @@ export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, {
       return { row: { kind: 'proxy', id: ref.id, items }, seal: intact ? Buffer.from(row.seal) : Buffer.alloc(0) };
     }
     case 'proxy-reserved': {
-      const { proxyReserved } = tablesOf(db);
       const [row] = await db.select({ names: proxyReserved.names, seal: proxyReserved.seal }).from(proxyReserved).where(eq(proxyReserved.id, 1));
       if (row === undefined) return { row: null, seal: null };
       const value: unknown = typeof row.names === 'string' ? JSON.parse(row.names) : row.names;
@@ -1168,7 +1124,6 @@ export async function proxiesSavedBy(db: Queryable, member: string): Promise<str
  * row, the same however long the object's history.
  */
 export async function newestChange(db: Queryable, ref: Ref, macs: readonly LogMacKey[]): Promise<NewestChange | null> {
-  const { logChanges } = tablesOf(db);
   const [row] = await db
     .select({ at: logChanges.at, requestId: logChanges.requestId, object: logChanges.object, actor: logChanges.actor, payload: logChanges.payload, seal: logChanges.seal, mac: logChanges.mac })
     .from(logChanges)

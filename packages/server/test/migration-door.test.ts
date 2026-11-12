@@ -73,7 +73,7 @@ async function neverMigrated(work: () => Promise<void>): Promise<void> {
 
 /** The ledger's rows forgotten while `work` runs, as on a database migrated by an earlier release. */
 async function unmigrated(work: () => Promise<void>): Promise<void> {
-  const ledger = migrationLedger(db.owner);
+  const ledger = migrationLedger();
   const entries = await rows(sql`SELECT * FROM ${ledger}`);
   await run(sql`DELETE FROM ${ledger}`);
   try {

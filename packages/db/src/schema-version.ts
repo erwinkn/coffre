@@ -19,7 +19,7 @@ export const KNOWN_MIGRATIONS: readonly string[] = journal.entries.map((entry) =
 export async function migrated(db: Queryable): Promise<boolean> {
   // A database never migrated has no ledger at all, which is no migration, not an error. The count alone, one round
   // trip at a cold isolate's door, not two (T206): a ledger missing is its relation's error, 42P01.
-  const counted = await db.select({ n: count() }).from(migrationLedger(db)).then(
+  const counted = await db.select({ n: count() }).from(migrationLedger()).then(
     ([ledger]) => ledger?.n ?? 0,
     (error: unknown) => {
       if (codeIn(error) === UNDEFINED_TABLE) return 0;

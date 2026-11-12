@@ -172,7 +172,7 @@ export async function admitAhead(
   if (first === 'forged') return { identity: unauthenticated(runtime.auth), admission: null };
   if (first === 'ended') return { identity: endedCredential(), admission: null };
   if (typeof first === 'string') return null;
-  const rows = (tried: AdmitTried) => namedAhead(runtime.db, answerOf(tried).app);
+  const rows = (tried: AdmitTried) => namedAhead(answerOf(tried).app);
   const ahead = rows(first);
   let touched: Touch | null = null;
   // The credential checked on the rows the vault answered, its MAC and token's hash among them (AuthChecked: before

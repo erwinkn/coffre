@@ -45,6 +45,7 @@ const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   'packages/server/src/db/answers.ts#newest': { by: SERVER, as: 'policySeqAndSettings' },
   'packages/server/src/db/queries.ts#newestSigned': { by: SERVER, as: 'latestCheckpoint' },
   'packages/server/src/db/queries.ts#talliedAfter': { by: SERVER, as: 'talliedAfter' },
+  'packages/server/src/db/queries.ts#latestTallied': { by: SERVER, as: 'latestTallied' },
   'packages/server/src/db/rotation.ts#newestMove': { by: SERVER, as: 'newestMove' },
   'packages/db/src/log.ts#firstEntryUnder': { by: VAULT, as: 'firstVaultEntryUnder' },
   'packages/server/src/db/rotation.ts#newestAppEntry': { by: SERVER, as: 'newestAppEntry' },
@@ -151,7 +152,8 @@ function sites(): string[] {
     const seen = new Map<string, number>();
     const orders = /orderBy\((?:[^()]|\([^()]*\))*\b(?:asc|desc)\(\w+\.seq\)|(?<!function )keyedBy\(|orderBy\(\w+\.order\)|ORDER BY \$\{\w+\.order\}|ORDER BY (?:(?:\$\{\w+\}|[\w.]+)(?: DESC| ASC)?, )?(?:\w+\.|\$\{\w+\.)?seq\}?(?: DESC| ASC)?(?=\s+LIMIT|`)|\b(?:max|min)\((?:\$\{\w+\.seq\}|(?:\w+\.)?seq)\)/g;
     for (const order of text.matchAll(orders)) {
-      if (tableAt(text, order.index + (/^(max|min)/.test(order[0]) ? 200 : 0)) !== 'audit') continue;
+      // A `keyedBy(` names its table among its arguments, after it; a `max` or `min`, after its parentheses.
+      if (tableAt(text, order.index + (/^(max|min)/.test(order[0]) ? 200 : /^keyedBy/.test(order[0]) ? 120 : 0)) !== 'audit') continue;
       if (/^(?:ORDER|orderBy)/.test(order[0]) && !/limit/i.test(text.slice(order.index, order.index + order[0].length + 120))) continue;
       // A comment's words, not a statement.
       if (/^\s*(?:\/\/|\*)/.test(text.slice(text.lastIndexOf('\n', order.index) + 1, order.index))) continue;
@@ -227,7 +229,7 @@ const NOT_LOGS: Record<string, string> = {
   secret_versions: "the secrets' versions", secret_references: "the secrets' references",
   '${projects}': 'the projects', '${credentials}': 'the credentials', '${mcpConnections}': 'the MCP connections',
   '${serviceBindings}': 'the service bindings', '${secrets}': 'the secrets',
-  '${m}': "the members, `memberAccess`'s name for `principals` (queries.ts)",
+  '${principals}': 'the members',
   sealing: "the checkpoint a use's number falls under, one row of `log_checkpoints` (log-store.ts)",
   spent: 'the ID token spent by a sign-in, its one row (queries.ts)',
 };
@@ -296,10 +298,10 @@ test('the scans list a gate or an aggregate whose table they cannot follow: a CT
   const one = (name: string, body: string): Source[] => [{ file: 'x.ts', text: `export function ${name}(db) {\n${body}\n}\n` }];
   // A gate over a CTE of the log's entries, over the log under a name of its own, and Drizzle's of a query built elsewhere.
   assert.deepEqual(gateSites(one('cte', 'return sql`WITH recent AS (SELECT seq FROM audit_log) SELECT 1 WHERE EXISTS (SELECT 1 FROM recent r WHERE r.seq > 1)`;')), ['x.ts#cte']);
-  assert.deepEqual(gateSites(one('named', "const { auditLog: history } = tablesOf(db);\nreturn sql`SELECT EXISTS (SELECT 1 FROM ${history} h WHERE h.key_id = 'k')`;")), ['x.ts#named']);
+  assert.deepEqual(gateSites(one('named', "return sql`SELECT EXISTS (SELECT 1 FROM ${history} h WHERE h.key_id = 'k')`;")), ['x.ts#named']);
   assert.deepEqual(gateSites(one('elsewhere', 'return db.select().from(grants).where(notExists(given));')), ['x.ts#elsewhere']);
   // The uses' least under a name of their own, and their greatest beside another column.
-  assert.deepEqual(useSites(one('named', 'const { logUses: uses } = tablesOf(db);\nreturn sql`SELECT min(${uses.at}) FROM ${uses} WHERE ${uses.number} > 1`;')), ['x.ts#named']);
+  assert.deepEqual(useSites(one('named', 'return sql`SELECT min(${uses.at}) FROM ${uses} WHERE ${uses.number} > 1`;')), ['x.ts#named']);
   assert.deepEqual(useSites(one('beside', 'return sql`SELECT max(u.at), count(*) AS n FROM log_uses u`;')), ['x.ts#beside']);
   // What reads no log, by what `NOT_LOGS` says it is, is no site.
   const none = one('none', 'return sql`SELECT EXISTS (SELECT 1 FROM principals p) AS any, (SELECT max(v.created_at) FROM secret_versions v) AS at`;');

@@ -13,7 +13,6 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { issuedGrant, storedScope, type CredentialScope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { IssueTokenInput } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { postgresSession } from '@coffre/db/connect';
 import { count, sql } from 'drizzle-orm';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -22,6 +21,7 @@ import type { ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault as openEntry, spoken } from '../src/local.ts';
 import { objectKey } from '../src/inputs.ts';
 import { changePlace, emptyDatabase, OWNER_URL, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, nothingHeld, speaking, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
+import { credentials, secrets } from '@coffre/db/schema';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
 const openRawVault = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
@@ -133,7 +133,6 @@ async function placeReports(): Promise<string[]> {
 }
 
 async function credentialRows(): Promise<number> {
-  const { credentials } = tablesOf(db.owner);
   return (await db.owner.select({ n: count() }).from(credentials))[0]!.n;
 }
 
@@ -176,7 +175,7 @@ for (const [how, { tamper, projectOf, regrants }] of Object.entries(TAMPERS)) {
   test(`a read on a kept answer of access, beside a grant on a place ${how} around the log, opens where the rest hold`, async () => {
     const w = await world();
     const id = randomUUID();
-    await db.owner.insert(tablesOf(db.owner).secrets).values({ id, projectId: w.project, environmentId: w.prod, key: 'DATABASE_URL' });
+    await db.owner.insert(secrets).values({ id, projectId: w.project, environmentId: w.prod, key: 'DATABASE_URL' });
     const secret = { projectId: w.project, environmentId: w.prod, secretId: id, version: 1, path: 'p/prod/DATABASE_URL' };
     const key = randomBytes(32).toString('base64');
     const wrapped = await w.vault.wrap({ principal: ROOT, caller: 'person', items: [{ secret, key }] });
@@ -277,7 +276,7 @@ for (const how of ['renamed', 'brought back from its deletion', 'put back after 
   test(`a key's wrap in a place ${how} around the log is refused, as tampered`, async () => {
     const w = await world();
     const id = randomUUID();
-    await db.owner.insert(tablesOf(db.owner).secrets).values({ id, projectId: w.project, environmentId: w.dev, key: 'DATABASE_URL' });
+    await db.owner.insert(secrets).values({ id, projectId: w.project, environmentId: w.dev, key: 'DATABASE_URL' });
     const wrap = () => w.vault.wrap({ principal: ADA, caller: 'person', items: [{ secret: { projectId: w.project, environmentId: w.dev, secretId: id, version: 1, path: 'p/dev/DATABASE_URL' }, key: randomBytes(32).toString('base64') }] });
     assert.ok((await wrap()).ok, 'a Developer of dev writes there');
     await TAMPERS[how]!.tamper(w);
@@ -289,7 +288,7 @@ for (const how of ['renamed', 'brought back from its deletion', 'put back after 
 test('a new process\'s first call, a read through a fork renamed around the log, is refused as every later one is (review r1)', async () => {
   const w = await world();
   const id = randomUUID();
-  await db.owner.insert(tablesOf(db.owner).secrets).values({ id, projectId: w.project, environmentId: w.prod, key: 'DATABASE_URL' });
+  await db.owner.insert(secrets).values({ id, projectId: w.project, environmentId: w.prod, key: 'DATABASE_URL' });
   const secret = { projectId: w.project, environmentId: w.prod, secretId: id, version: 1, path: 'p/prod/DATABASE_URL' };
   const key = randomBytes(32).toString('base64');
   const wrapped = await w.vault.wrap({ principal: ROOT, caller: 'person', items: [{ secret, key }] });
@@ -307,7 +306,7 @@ test('a new process\'s first call, a read through a fork renamed around the log,
 test('a read through a place archived, then put back unarchived with the archive\'s seal column forged, is refused, warm and fresh: the archive\'s MAC does not hold (T191)', async () => {
   const w = await world();
   const id = randomUUID();
-  await db.owner.insert(tablesOf(db.owner).secrets).values({ id, projectId: w.project, environmentId: w.prod, key: 'DATABASE_URL' });
+  await db.owner.insert(secrets).values({ id, projectId: w.project, environmentId: w.prod, key: 'DATABASE_URL' });
   const secret = { projectId: w.project, environmentId: w.prod, secretId: id, version: 1, path: 'p/prod/DATABASE_URL' };
   const wrapped = await w.vault.wrap({ principal: ROOT, caller: 'person', items: [{ secret, key: randomBytes(32).toString('base64') }] });
   assert.ok(wrapped.ok);
@@ -328,7 +327,7 @@ for (const how of ['put back after its archive, the archive\'s seal column made 
   test(`a read of a key held in a place ${how} around the log is refused, warm and fresh, and reported as a MAC (T191)`, async () => {
     const w = await world();
     const id = randomUUID();
-    await db.owner.insert(tablesOf(db.owner).secrets).values({ id, projectId: w.project, environmentId: w.dev, key: 'DATABASE_URL' });
+    await db.owner.insert(secrets).values({ id, projectId: w.project, environmentId: w.dev, key: 'DATABASE_URL' });
     const secret = { projectId: w.project, environmentId: w.dev, secretId: id, version: 1, path: 'p/dev/DATABASE_URL' };
     const wrapped = await w.vault.wrap({ principal: ROOT, caller: 'person', items: [{ secret, key: randomBytes(32).toString('base64') }] });
     assert.ok(wrapped.ok);
@@ -427,7 +426,7 @@ test('a reference is decided on its holder\'s project as the row the decision ch
   const billing = w.elsewhere;
   const [kept] = [await newEnvironment(db.owner, billing)];
   const sourceId = randomUUID();
-  await db.owner.insert(tablesOf(db.owner).secrets).values({ id: sourceId, projectId: billing, environmentId: kept, key: 'SOURCE' });
+  await db.owner.insert(secrets).values({ id: sourceId, projectId: billing, environmentId: kept, key: 'SOURCE' });
   assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: MAYA })).ok);
   assert.ok((await w.vault.setAccess({ actor: ROOT, caller: 'person', principal: MAYA, changes: [{ projectId: billing, environmentId: null, role: 'developer', expiresAt: null }] })).ok);
   const place = await newEnvironment(db.owner, w.project);

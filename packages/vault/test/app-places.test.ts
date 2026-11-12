@@ -11,7 +11,7 @@ import { ROLES } from '@coffre/core/access';
 import { encrypt, freshDek } from '@coffre/core/envelope';
 import { deletedWithProject, tombstoneOf } from '@coffre/core/schemas';
 import type { EnvironmentColumns, ObjectChange, SecretColumns, UseInput, UseOutcome, Via, VersionColumns } from '@coffre/core/vault';
-import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import { type Queryable, type Transaction } from '@coffre/db';
 import { appChanges, isStaleChange } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
@@ -24,6 +24,7 @@ import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { environmentObject, principalObject, secretObject } from '../src/objects.ts';
 import { openTestDatabase, rows, run, sealed, nothingHeld, withLogUnlocked, withOldWrites, withTriggersLifted, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, emptyLog, isolate, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { environments, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 
 let db: TestDatabase;
 before(async () => {
@@ -105,12 +106,11 @@ async function newVersion(w: World, id: string, value: string, environmentId = w
   const context = { projectId: w.project, environmentId, secretId: id };
   const sealed = encrypt(Buffer.from(value), context, dek);
   const wrapped = await CONFIG.keks.wrap(dek, context, { deadline: Date.now() + 5000, signal: new AbortController().signal });
-  const t = tablesOf(db.owner);
   return {
     columns: { id: version, sensitive: false, plaintext: plain ? value : null, kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, wrappedDek: Buffer.from(wrapped.bytes).toString('base64') },
     insert: async (tx) => {
       const [{ n }] = await rows<{ n: number | string }>(tx, sql`SELECT current_version + 1 AS n FROM secrets WHERE id = ${id}`) as [{ n: number | string }];
-      await (tx as Transaction).insert(t.secretVersions).values({
+      await (tx as Transaction).insert(secretVersions).values({
         id: version, secretId: id, version: Number(n), envelopeVersion: sealed.envelopeVersion, ciphertext: sealed.ciphertext, iv: sealed.iv, authTag: sealed.authTag,
         wrappedDek: wrapped.bytes, kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, createdBy: ROOT, sensitive: false,
         plaintext: plain ? value : null,
@@ -255,7 +255,7 @@ test('an environment made protected, renamed, archived and restored through the 
   const fork = randomUUID();
   const made: EnvironmentColumns = { id: fork, projectId: w.project, slug: 'staging', owner: null, parentId: w.dev, protected: true, archived: false, projectArchived: false };
   await write([{ kind: 'environment', id: fork, before: null, after: made }], async (tx) => {
-    await tx.insert(tablesOf(tx).environments).values({ id: fork, projectId: w.project, slug: 'staging', name: 'staging', parentId: w.dev, protected: true });
+    await tx.insert(environments).values({ id: fork, projectId: w.project, slug: 'staging', name: 'staging', parentId: w.dev, protected: true });
   });
   const stored = await readEnvironment(fork);
   assert.deepEqual(environmentObject(stored.columns), environmentObject(made));
@@ -489,8 +489,7 @@ test("what an unarchive restores is read with two probes of each key's changes, 
 test("a key the log never held, archived (0.14's alone, before the cutover): its unarchive logs nothing, as any of 0.14's rows (T134)", async () => {
   const w = await world();
   const id = randomUUID();
-  const t = tablesOf(db.owner);
-  await db.owner.insert(t.secrets).values({ id, projectId: w.project, environmentId: w.dev, key: `OLD_${id.slice(0, 4)}`, archivedAt: new Date() });
+  await db.owner.insert(secrets).values({ id, projectId: w.project, environmentId: w.dev, key: `OLD_${id.slice(0, 4)}`, archivedAt: new Date() });
   const calls = await prepared([await keyChange(id, (await readKey(id)).columns)]);
   assert.deepEqual(calls.map((call) => call.requestId), [null]);
   await unarchive(id);
@@ -535,10 +534,9 @@ async function reference(w: World, vault: Awaited<ReturnType<typeof deciding>>, 
   const id = randomUUID();
   const made = await vault.reference({ principal: ROOT, caller: 'person', items: [{ id, holder: { projectId: w.project, environmentId: w.dev, secretId: holder, path: 'p/dev/HELD' }, source: { secretId: source } }] });
   assert.ok(made.ok, JSON.stringify(made));
-  const t = tablesOf(db.owner);
   await write([{ kind: 'secret', id: holder, before: null, after: { id: holder, projectId: w.project, environmentId: w.dev, source, reference: id, version: null } }], async (tx) => {
-    await tx.insert(t.secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: `HELD_${holder.slice(0, 4)}` });
-    await tx.insert(t.secretReferences).values({
+    await tx.insert(secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: `HELD_${holder.slice(0, 4)}` });
+    await tx.insert(secretReferences).values({
       id, projectId: w.project, environmentId: w.dev, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
       createdSeq: BigInt(made.seqs[0]!), createdBy: ROOT,
     });
@@ -654,9 +652,8 @@ test("a reference broken whose holder 0.14's log alone holds (no seal, no change
   const made = await vault.reference({ principal: ROOT, caller: 'person', items: [{ id, holder: { projectId: w.project, environmentId: w.dev, secretId: holder, path: 'p/dev/OLD' }, source: { secretId: source } }] });
   assert.ok(made.ok);
   // The app's rows as 0.14 writes them: no seal, no change.
-  const t = tablesOf(db.owner);
-  await db.owner.insert(t.secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: `OLD_${holder.slice(0, 4)}` });
-  await db.owner.insert(t.secretReferences).values({
+  await db.owner.insert(secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: `OLD_${holder.slice(0, 4)}` });
+  await db.owner.insert(secretReferences).values({
     id, projectId: w.project, environmentId: w.dev, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
     createdSeq: BigInt(made.seqs[0]!), createdBy: ROOT,
   });
@@ -686,7 +683,7 @@ test("a reference row a writer planted beside the holder's, to the same source: 
 async function plant(w: World, vault: Awaited<ReturnType<typeof deciding>>, holder: string, source: string): Promise<void> {
   const other = await vault.reference({ principal: ROOT, caller: 'person', items: [{ id: randomUUID(), holder: { projectId: w.project, environmentId: w.dev, secretId: randomUUID(), path: 'p/dev/X' }, source: { secretId: source } }] });
   assert.ok(other.ok);
-  await db.owner.insert(tablesOf(db.owner).secretReferences).values({
+  await db.owner.insert(secretReferences).values({
     id: randomUUID(), projectId: w.project, environmentId: w.dev, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
     createdSeq: BigInt(other.seqs[0]!), createdBy: ROOT,
   });
@@ -788,14 +785,13 @@ test("two references of one holder 0.14's log alone holds, ended in one call: ea
   const [one, two] = [await w.key('one'), await w.key('two')];
   const vault = await deciding();
   const holder = randomUUID();
-  const t = tablesOf(db.owner);
-  await db.owner.insert(t.secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: `OLD_${holder.slice(0, 4)}` });
+  await db.owner.insert(secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: `OLD_${holder.slice(0, 4)}` });
   const vias: Via[] = [];
   for (const source of [one, two]) {
     const id = randomUUID();
     const made = await vault.reference({ principal: ROOT, caller: 'person', items: [{ id, holder: { projectId: w.project, environmentId: w.dev, secretId: holder, path: 'p/dev/OLD' }, source: { secretId: source } }] });
     assert.ok(made.ok);
-    await db.owner.insert(t.secretReferences).values({
+    await db.owner.insert(secretReferences).values({
       id, projectId: w.project, environmentId: w.dev, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
       createdSeq: BigInt(made.seqs[0]!), createdBy: ROOT,
     });
@@ -854,8 +850,7 @@ test("a break by a Developer in a protected environment after a writer marked it
   assert.ok(!(await vault.endReferences({ principal: dana, caller: 'person', reason: 'broken', items: [via] })).ok, 'refused while nothing is edited');
   // Nor beside a reference held in an environment 0.14's log alone holds, which 0.14's reader alone decides (review r12).
   const legacy = randomUUID();
-  const t = tablesOf(db.owner);
-  await db.owner.insert(t.environments).values({ id: legacy, projectId: w.project, slug: 'legacy', name: 'legacy', protected: false });
+  await db.owner.insert(environments).values({ id: legacy, projectId: w.project, slug: 'legacy', name: 'legacy', protected: false });
   const old = randomUUID();
   const oldRef = randomUUID();
   // Made by an isolate still on 0.14's log, as its environment was: 0.15's vault decides on no row its log does not hold
@@ -865,8 +860,8 @@ test("a break by a Developer in a protected environment after a writer marked it
     principal: ROOT, caller: 'person', items: [{ id: oldRef, holder: { projectId: w.project, environmentId: legacy, secretId: old, path: 'p/legacy/OLD' }, source: { secretId: source } }],
   }));
   assert.ok(made.ok, JSON.stringify(made));
-  await db.owner.insert(t.secrets).values({ id: old, projectId: w.project, environmentId: legacy, key: 'OLD' });
-  await db.owner.insert(t.secretReferences).values({
+  await db.owner.insert(secrets).values({ id: old, projectId: w.project, environmentId: legacy, key: 'OLD' });
+  await db.owner.insert(secretReferences).values({
     id: oldRef, projectId: w.project, environmentId: legacy, secretId: old, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
     createdSeq: BigInt(made.seqs[0]!), createdBy: ROOT,
   });
@@ -907,7 +902,7 @@ async function fork(w: World): Promise<string> {
   const slug = `fork-${id.slice(0, 4)}`;
   const made: EnvironmentColumns = { id, projectId: w.project, slug, owner: null, parentId: w.dev, protected: false, archived: false, projectArchived: false };
   await write([{ kind: 'environment', id, before: null, after: made }], async (tx) => {
-    await tx.insert(tablesOf(tx).environments).values({ id, projectId: w.project, slug, name: slug, parentId: w.dev, protected: false });
+    await tx.insert(environments).values({ id, projectId: w.project, slug, name: slug, parentId: w.dev, protected: false });
   });
   return id;
 }

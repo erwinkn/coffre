@@ -11,7 +11,7 @@ import { deriveLogKey } from '@coffre/core/audit';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { TOMBSTONE } from '@coffre/core/schemas';
 import type { CredentialColumns, ObjectChange, PreparedChange } from '@coffre/core/vault';
-import { later, tablesOf, type Transaction } from '@coffre/db';
+import { later, type Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { postgresSession, type PostgresClient } from '@coffre/db/connect';
 import { appChanges, appendEntries, isMovedChange, isStaleChange, laterChanges, newestCommitted } from '@coffre/db/log';
@@ -29,6 +29,7 @@ import * as store from '../src/store.ts';
 import type { VaultOptions } from '../src/vault.ts';
 import { sealThroughDouble } from './audit-tree.ts';
 import { emptyDatabase, locksHere, newProject, openLocalVault, openTestDatabase, OWNER_URL, rows, sealed, nothingHeld, type TestDatabase } from './database.ts';
+import { credentials, environments, logChanges } from '@coffre/db/schema';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -79,7 +80,6 @@ function token(at = Date.now()): Row {
 
 /** The row as stored, with its seal; null if there is none. */
 async function stored(id: string): Promise<(Row & { seal: Buffer | null }) | null> {
-  const { credentials } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, id));
   return row === undefined ? null : { ...row, seal: row.seal ?? null };
 }
@@ -100,7 +100,6 @@ async function prepare(w: World, after: Row, before: Row | null = null, seal?: B
  * entries; rolled back, as `AppChanges.commit` makes it, if a seal moved since the change was prepared (`Moved`).
  */
 async function write(after: Row, calls: readonly PreparedChange[], exists: boolean): Promise<(bigint | null)[]> {
-  const { credentials } = tablesOf(db.owner);
   return db.owner.transaction(async (tx: Transaction) => {
     if (exists) await tx.update(credentials).set({ revokedAt: after.revokedAt, expiresAt: after.expiresAt, scope: after.scope }).where(eq(credentials.id, after.id));
     else await tx.insert(credentials).values({ ...after, authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, createdBy: ROOT });
@@ -114,7 +113,6 @@ class Moved extends Error {}
 
 /** 0.15's log of changes as the replay takes them, each MAC the vault's. */
 async function logged(keys: ChangeKeys): Promise<LoggedChange[]> {
-  const { logChanges } = tablesOf(db.owner);
   const holds = authentic(keys.mac);
   // The cutover's own change, which names no object, passed over.
   return (await db.owner.select().from(logChanges).orderBy(asc(logChanges.number))).filter((raw) => raw.object !== CUTOVER_OBJECT).map((raw) => {
@@ -171,7 +169,6 @@ test('a revoke undone in the database, its old seal put back, is refused at the 
   const revoked = { ...row, revokedAt: new Date() };
   await write(revoked, await prepare(w, revoked, row), true);
   // The writer puts back the live row, with the seal the vault made over it once: valid, but not the newest change's.
-  const { credentials } = tablesOf(db.owner);
   await db.owner.update(credentials).set({ revokedAt: null, seal: live }).where(eq(credentials.id, row.id));
   // Prepared now, from the row put back, the change is not held to the revoke's checked seal: read it again (T190).
   const outcome = await w.vault.prepare!({ actor: ROOT, changes: [{ kind: 'credential', id: row.id, before: { columns: columns(row), seal: live!.toString('base64') }, after: columns(renewed) }] });
@@ -211,7 +208,6 @@ test('app_change_strict, with the COMMIT: its number answers after it; a change 
   const renewed = { ...row, expiresAt: new Date(row.expiresAt.getTime() + 60_000) };
   const revoked = { ...row, revokedAt: new Date() };
   const [renew, revoke] = [await prepare(w, renewed, row), await prepare(w, revoked, row)];
-  const { credentials } = tablesOf(db.owner);
   // As `audited` commits a write: its row, then its changes, nothing awaiting either.
   const commit = (after: Row, calls: readonly PreparedChange[]) => db.owner.transaction(async (tx: Transaction) => {
     later(tx, tx.update(credentials).set({ revokedAt: after.revokedAt, expiresAt: after.expiresAt }).where(eq(credentials.id, after.id)));
@@ -254,7 +250,6 @@ test('a row the vault never sealed is refused as tampered before anything is wri
   assert.equal(outcome.ok ? null : outcome.refusal.code, 'tampered');
   // A row from before the cutover, unsealed, with no change: its change only checks that, logging nothing (plan PR 9 seals it).
   const old = token();
-  const { credentials } = tablesOf(db.owner);
   await db.owner.insert(credentials).values({ ...old, authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, createdBy: ROOT });
   const revoked = { ...old, revokedAt: new Date() };
   const calls = await prepare(w, revoked, old, null);
@@ -304,7 +299,6 @@ test('the vault answers a change of the app\'s once its entry is sealed (R51, Co
 
 test('a deleted environment\'s object holds its slug before the tombstone: the cutover seals it, and its row stays as it was (0025)', async () => {
   const w = await world();
-  const { environments } = tablesOf(db.owner);
   const project = await newProject(db.owner);
   const id = randomUUID();
   const slug = `dev${TOMBSTONE}deleted-2026-10-27`;
@@ -396,7 +390,6 @@ test('an issue of a row its transaction did not write takes the fence, as any ch
   const row = token();
   const calls = await prepare(w, row);
   // The row, committed before the transaction that issues it: a 0.14 row, say, seen by any use.
-  const { credentials } = tablesOf(db.owner);
   await db.owner.insert(credentials).values({ ...row, authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, createdBy: ROOT });
   const use = postgresSession(OWNER_URL);
   try {
@@ -435,7 +428,6 @@ test('an issue of a row a savepoint inserted takes the fence: its xmin is the sa
 test('a 0.14 row\'s call (no request, no op) takes the fence, even on a row its transaction wrote', async () => {
   await world();
   const row = token();
-  const { credentials } = tablesOf(db.owner);
   // A row of 0.14's, unsealed, committed: the app revokes it, in a transaction that writes it, then calls app_change.
   await db.owner.insert(credentials).values({ ...row, authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, createdBy: ROOT });
   const app = postgresSession(OWNER_URL);
@@ -468,7 +460,6 @@ test('an app\'s change beside a 0.14 decision on its principal: head, row, fence
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);
   const row = { ...token(), principal: ADA, kind: 'browser', scope: null };
   const calls = await prepare(w, row);
-  const { credentials } = tablesOf(db.owner);
   // Its row, unsealed, before the transaction that writes it again and seals it.
   await db.owner.insert(credentials).values({ ...row, authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, createdBy: ADA });
   const app = postgresSession(OWNER_URL);

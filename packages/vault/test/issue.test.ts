@@ -10,7 +10,6 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { EVERYWHERE, HANDLE_POLICY, issuedGrant, type Holdings, MAX_PERSONAL_TOKEN_MINUTES, MAX_SERVICE_TOKEN_DAYS, storedScope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { CLOCK_SKEW_MS, type IssueTokenInput } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { postgresSession } from '@coffre/db/connect';
 import { asc, count, desc, eq, sql } from 'drizzle-orm';
 
@@ -18,6 +17,7 @@ import type { ResolvedVaultConfig } from '../src/config.ts';
 import { weighIssue } from '../src/credentials.ts';
 import { objectKey } from '../src/inputs.ts';
 import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, sealed, nothingHeld, withLogUnlocked, type TestDatabase } from './database.ts';
+import { auditLog, credentials, logChanges, passkeys, principals } from '@coffre/db/schema';
 
 const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
@@ -100,7 +100,6 @@ function handleOf(w: World, via: string | null, expiresAt = Date.now() + 1_800_0
 const onViewerToken = (grant: ReturnType<typeof issuedGrant>) => ({ ...grant, permissions: { normal: grant.permissions!.normal, protected: ['secret.use'] } }) as ReturnType<typeof issuedGrant>;
 
 async function credentialRows(): Promise<number> {
-  const { credentials } = tablesOf(db.owner);
   return (await db.owner.select({ n: count() }).from(credentials))[0]!.n;
 }
 
@@ -109,7 +108,6 @@ test("an Owner's service token is one change of the log, its row the object it s
   const input = asked(w, (x) => x, true);
   const outcome = await w.vault.issueToken!(input);
   assert.ok(outcome.ok, JSON.stringify(outcome));
-  const { credentials, logChanges } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, input.credential.id));
   assert.equal(row!.principal, CI);
   assert.equal(row!.scope, input.credential.scope);
@@ -199,7 +197,6 @@ test("a handle's end is held to the scoped credential it was made on, by what th
   const token = personal(w, ROOT, null, Date.now() + 120_000);
   assert.ok((await w.vault.issueToken!(token)).ok);
   // A writer makes the personal token a CLI session, in its row alone: its object, scope and seal unchanged.
-  const { credentials } = tablesOf(db.owner);
   await db.owner.update(credentials).set({ kind: 'cli' }).where(eq(credentials.id, token.credential.id));
   const outcome = await w.vault.issueToken!(handleOf(w, token.credential.id, Date.now() + 3_600_000, onViewerToken));
   assert.equal(!outcome.ok && outcome.why, 'a handle lasts at most a week, and never past the token that made it');
@@ -245,7 +242,6 @@ test("a credential 0.14 made, which the log never held, authorizes no issue of t
   const token = personal(w);
   assert.ok((await w.vault.issueToken!(token)).ok);
   // As 0.14 left it: no seal, no change.
-  const { credentials, logChanges } = tablesOf(db.owner);
   await db.owner.update(credentials).set({ seal: null }).where(eq(credentials.id, token.credential.id));
   await db.owner.delete(logChanges).where(eq(logChanges.object, objectKey({ kind: 'credential', id: token.credential.id })));
   assert.equal(((await w.vault.issueToken!(handleOf(w, token.credential.id, undefined, onViewerToken))) as { refused?: string }).refused, 'unlogged');
@@ -286,7 +282,6 @@ test('a handle is made on a personal token only within its end, and not once it 
   assert.equal(!reads.ok && reads.why, 'a handle reads and uses at most what its person holds, through what it was made on');
   assert.ok((await w.vault.issueToken!(handle(Date.now() + 1_800_000))).ok);
   // Revoked, it makes nothing more.
-  const { credentials } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, token.credential.id));
   const revoked = await w.vault.revokeCredential!({
     actor: ROOT, before: { columns: { id: row!.id, principal: row!.principal, kind: row!.kind, scope: row!.scope, revoked: false, expiresAt: row!.expiresAt.getTime(), generation: row!.generation }, seal: Buffer.from(row!.seal!).toString('base64') },
@@ -301,7 +296,6 @@ test("a revoked token a writer put back, its revoke's seal column written to mat
   const w = await world();
   const token = personal(w, ROOT, null, Date.now() + 3_600_000);
   assert.ok((await w.vault.issueToken!(token)).ok);
-  const { credentials, logChanges } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, token.credential.id));
   const revoked = await w.vault.revokeCredential!({
     actor: ROOT, before: { columns: { id: row!.id, principal: row!.principal, kind: row!.kind, scope: row!.scope, revoked: false, expiresAt: row!.expiresAt.getTime(), generation: row!.generation }, seal: Buffer.from(row!.seal!).toString('base64') },
@@ -325,7 +319,6 @@ test('an account not at the generation named, or removed, gets no token; a polic
   assert.ok((await w.vault.remove({ actor: ROOT, caller: 'person', principal: CI })).ok);
   assert.equal(((await w.vault.issueToken!(asked(w))) as { refused?: string }).refused, 'gone');
   // The app rotated from its key (its `key.rotate`, last: the vault's own entries chain on none after it here).
-  const { auditLog } = tablesOf(db.owner);
   await withLogUnlocked(db.owner, (owner) => owner.insert(auditLog).values({
     seq: 1_000_000n, author: 'app', keyId: 'app:fedcba9876543210', occurredAt: Date.now(), actor: 'system:coffre', action: 'key.rotate', decision: 'allow',
     subjectPrincipal: APP_KEY, metadata: '{}', prevHash: Buffer.alloc(32), mac: Buffer.alloc(32), hash: Buffer.alloc(32),
@@ -361,7 +354,6 @@ test("an issue weighed before its issuer's demotion commits is weighed again, on
 
 test("an issue the app weighed on its issuer's access as it was is refused, for the app to weigh again; at the access as it is, issued", async () => {
   const w = await world();
-  const { principals } = tablesOf(db.owner);
   const [{ accessSeq }] = (await db.owner.select({ accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, ADMIN))) as [{ accessSeq: bigint }];
   const at = (seq: bigint) => asked(w, (input) => ({ ...input, actor: ADMIN, actorAccess: seq.toString(), credential: { ...input.credential, createdBy: 'admin@acme.example' } }));
   assert.equal(((await w.vault.issueToken!(at(accessSeq - 1n))) as { refused?: string }).refused, 'access');
@@ -438,7 +430,6 @@ test('an issue takes the issue lock, never the fence: it commits while a change 
 
 /** A passkey of `principal`'s, as the app writes one at enrollment (PR 4); its MAC is the app's, which the vault never reads. */
 async function passkeyOf(principal: string, generationsAgo = 0): Promise<string> {
-  const { passkeys, principals } = tablesOf(db.owner);
   const [member] = await db.owner.select({ generation: principals.generation }).from(principals).where(eq(principals.principal, principal));
   const id = randomUUID();
   await db.owner.insert(passkeys).values({
@@ -453,7 +444,6 @@ async function confirmedToken(w: World, passkey: string | null): Promise<IssueTo
   const token = personal(w, ROOT, null, Date.now() + 3_600_000);
   assert.ok((await w.vault.issueToken!(token)).ok);
   // Written as the app's sign-in will (PR 4); the vault reads the column, which its seal does not cover.
-  const { credentials } = tablesOf(db.owner);
   await db.owner.update(credentials).set({ passkeyId: passkey }).where(eq(credentials.id, token.credential.id));
   return token;
 }
@@ -475,7 +465,6 @@ test("a token carries the passkey of the credential it came in on, and only that
   // `via`'s own: issued, and the row names it.
   const made = handle(passkey);
   assert.ok((await w.vault.issueToken!(made)).ok);
-  const { credentials, passkeys } = tablesOf(db.owner);
   const [row] = await db.owner.select({ passkeyId: credentials.passkeyId }).from(credentials).where(eq(credentials.id, made.credential.id));
   assert.equal(row!.passkeyId, passkey);
   // One of an earlier generation of theirs, which a removal from the vault ended (`passkeys_live_idx`), though its

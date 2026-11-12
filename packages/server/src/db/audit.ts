@@ -1,10 +1,11 @@
 import { deriveLogKey, GENESIS_HASH, verifyEntries, type ChainVerification, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import type { PreparedChange } from '@coffre/core/vault';
-import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import { type Queryable, type Transaction } from '@coffre/db';
 import { appendEntries, MOVES_FROM, type Appended, type ChangeNumbers, type HeldHead } from '@coffre/db/log';
 import { and, eq, inArray, min } from 'drizzle-orm';
 
 import { auditHashAt, auditRange } from './queries.ts';
+import { auditLog } from '@coffre/db/schema';
 
 export type AuditEntry = {
   actorType: 'user' | 'service' | 'system';
@@ -118,7 +119,6 @@ export async function appVerifier(db: Queryable, keys: AppKeys): Promise<AppVeri
   const previous = keys.previousChainKeys.map(appLogKey);
   const all = [appLogKey(keys.chainKey), ...previous];
   if (previous.length === 0) return { keys: all, movedOn: new Map() };
-  const { auditLog } = tablesOf(db);
   const rows = await db
     .select({ keyId: auditLog.subjectPrincipal, seq: min(auditLog.seq) })
     .from(auditLog)

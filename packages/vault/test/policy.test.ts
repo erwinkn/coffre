@@ -14,11 +14,12 @@ import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { INSTANCE_ROLES, ROLES, UNWRITTEN_FORK_MS, type RoleDefinition } from '@coffre/core/access';
 import type { SecretRef } from '@coffre/core/vault';
 import { entryHash } from '@coffre/core/audit';
-import { tablesOf, type Database } from '@coffre/db';
+import { type Database } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { emptyDatabase, newProject, openTestDatabase, places, rows, sealPlaces, storedVersions, type TestDatabase, openLocalVault, type LocalVault } from './database.ts';
+import { auditChainHead, auditLog, environments } from '@coffre/db/schema';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -96,7 +97,7 @@ test('whoever manages a project\'s environments protects one, before its row exi
   // A fork's alone, as the app protects it before writing its row: its entry names the project, and no environment yet.
   const next = randomUUID();
   assert.ok((await protect(w.vault, ADA, w.project, [next])).ok);
-  const [entry] = (await db.owner.select().from(tablesOf(db.owner).auditLog)).filter((row) => row.action === 'policy.change' && row.metadata.includes(next));
+  const [entry] = (await db.owner.select().from(auditLog)).filter((row) => row.action === 'policy.change' && row.metadata.includes(next));
   assert.deepEqual([entry?.projectId, entry?.environmentId], [w.project, null]);
   // Nor in a project that is not there.
   const nowhere = await protect(w.vault, ROOT, randomUUID(), [randomUUID()]);
@@ -184,7 +185,6 @@ test('a role holds no more in a protected environment than elsewhere, reads only
 
 /** `count` entries in the vault's name that no key of its sealed: what an owner of the database inserts by hand. */
 async function forge(metadata: unknown, count = 1): Promise<void> {
-  const { auditLog, auditChainHead } = tablesOf(db.owner);
   const [head] = await db.owner.select().from(auditChainHead);
   const mac = Buffer.alloc(32, 7);
   let [seq, prevHash] = [head!.nextSeq, head!.headHash];
@@ -279,7 +279,7 @@ test('an id protected before its row exists protects it for ten minutes; one sti
   const w = await world();
   const [refused, written] = [randomUUID(), randomUUID()];
   assert.ok((await protect(w.vault, ROOT, w.project, [refused, written])).ok);
-  await db.owner.insert(tablesOf(db.owner).environments).values({ id: written, projectId: w.project, slug: 'staging', name: 'Staging' });
+  await db.owner.insert(environments).values({ id: written, projectId: w.project, slug: 'staging', name: 'Staging' });
   await sealPlaces(db.owner, [{ id: written, projectId: w.project, slug: 'staging' }]);
   w.clock.offset = UNWRITTEN_FORK_MS + 60_000;
   const young = randomUUID();
@@ -292,7 +292,7 @@ test('an id protected before its row exists protects it for ten minutes; one sti
     [{ environmentId: written, slug: 'staging' }, { environmentId: young, slug: null }].sort((a, b) => (a.environmentId < b.environmentId ? -1 : 1)),
   );
   // The change after keeps no more of it: its entry holds the ids the policy does.
-  const entries = (await db.owner.select().from(tablesOf(db.owner).auditLog)).filter((row) => row.action === 'policy.change' && row.decision === 'allow')
+  const entries = (await db.owner.select().from(auditLog)).filter((row) => row.action === 'policy.change' && row.decision === 'allow')
     .sort((a, b) => Number(a.seq) - Number(b.seq));
   const kept = (JSON.parse(entries.at(-1)!.metadata) as { policy: { protected: { environmentId: string }[] } }).policy.protected.map((place) => place.environmentId);
   assert.deepEqual(kept.sort(), [written, young].sort());

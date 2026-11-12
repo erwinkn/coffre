@@ -10,7 +10,6 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { NamedUseInput, NamedUseOutcome } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
@@ -20,6 +19,7 @@ import { newRequestId, UseCache, useLimits, type Resolved } from '../src/use.ts'
 import { openTestDatabase, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { holding as holdingIn, namedWorld, principalLock, slowed as slowedVault } from './named-world.ts';
 import { change, emptyLog, isolate, onePeriod, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { grants, passkeys } from '@coffre/db/schema';
 
 let db: TestDatabase;
 before(async () => {
@@ -442,7 +442,6 @@ test("a person's credential no live passkey stands behind, as the app's policy s
   const w = await named({ caller: 'person' });
   const held = await w.nameOf(await w.key());
   const passkey = randomUUID();
-  const { passkeys } = tablesOf(db.owner);
   // The vault reads the rows, never their MACs, which are the app's to check on the rows it answers.
   await db.owner.insert(passkeys).values({
     id: passkey, principal: w.principal, generation: 0, userHandle: randomBytes(16), credentialId: randomBytes(32), publicKey: randomBytes(65), algorithm: -7,
@@ -629,7 +628,6 @@ test('a read of ids left behind at its deadline keeps its place in admission unt
 test("rows the seals do not bear out give no standing: a grant a writer put back after its revoke is the account's, which routes the request to the credential's own check (reviews r1 of #412, r2 of D153)", async () => {
   const w = await named();
   const name = await w.nameOf(await w.key());
-  const { grants } = tablesOf(db.owner);
   const held = await db.owner.select().from(grants).where(sql`${grants.principal} = ${w.principal}`);
   await w.revoke();
   await db.owner.insert(grants).values(held);

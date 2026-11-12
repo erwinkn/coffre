@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { createClient } from '@coffre/client';
 import { github, signin } from '@coffre/core/identity';
 import type { Vault, VaultRefused, WriteKeysInput, WriteKeysOutcome } from '@coffre/core/vault';
-import { tablesOf, type Queryable } from '@coffre/db';
+import { type Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { derivedSigningKey } from '@coffre/vault';
 import { replayStored, runCheckpointer, type RunningCheckpointer } from '@coffre/vault/node';
@@ -35,6 +35,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { REFUSAL_UNSEALED_MESSAGE } from '../src/api/errors.ts';
 import { clientFor, entryOf, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, stallingSeal, testDeps, testVault, outcomes } from './api-fixture.ts';
 import { openVaultDatabase } from './db/engine.ts';
+import { credentials, grants, principals, secrets, secretVersions } from '@coffre/db/schema';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -135,7 +136,6 @@ async function world({ fast = true, past = 0n, sealer }: { fast?: boolean; past?
   return { deps, root, runtime, ada, session, write, signOut, client, answers, signingKey: derivedSigningKey(kek), between: (adversary: () => Promise<void>) => void (next = adversary), afterWrap: (adversary: () => Promise<void>) => void (wrapped = adversary) };
 }
 
-const { secrets, secretVersions, principals, grants, credentials } = tablesOf(db.owner);
 
 /** A key's row in market/dev, by name: its id and current version, or none. */
 async function keyRow(name: string): Promise<{ id: string; currentVersion: number; currentVersionId: string | null } | undefined> {

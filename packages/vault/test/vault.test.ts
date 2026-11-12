@@ -21,7 +21,7 @@ import {
 } from '@coffre/core/kek';
 import { EVERYWHERE, type Scope } from '@coffre/core/access';
 import { ACCESS_ACTIONS, checkpointMessage, HOT_LOCK_TIMEOUT_MS, LOCK_WAIT_MS, USE_METADATA_LENGTH, verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
-import { createDatabase, tablesOf, type Database } from '@coffre/db';
+import { createDatabase, type Database } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { everyProjectPreview, findingMetadata, newestChangeNames, reportStands, tamperedMembers } from '@coffre/db/grants';
 import { isUnavailable, SNAPSHOT } from '@coffre/db/dialect';
@@ -62,6 +62,7 @@ import {
   type LocalVault,
   START_OVER,
 } from './database.ts';
+import { auditChainHead, auditLog, environments, grants, principals, projects, secrets, secretVersions, vaultReleases } from '@coffre/db/schema';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
 const openRawVault = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
@@ -345,7 +346,6 @@ test("a key's current sensitive value is made a secret in place by an Owner of i
   await member(w, ADA, [[null, 'maintainer']]);
   const billing = await newProject(db.owner);
   assert.ok((await w.vault.admit({ actor: ROOT, principal: BILL, role: 'owner', scope: { projects: { only: [billing] }, environments: 'all' } })).ok);
-  const { secrets } = tablesOf(db.owner);
   const base = await w.secret(w.prod);
   const key = randomBytes(32).toString('base64');
   const sealed = await w.vault.wrap({ principal: ROOT, items: [{ secret: { ...base, sensitive: true }, key }] });
@@ -401,7 +401,6 @@ test('a rewrap is held to its secret\'s newest version as the decision commits: 
 test("a loosening is held to its key's current version as the decision commits: one written meanwhile refuses it", async () => {
   const remote = service();
   const w = await world({ keks: remote.keks });
-  const { secrets } = tablesOf(db.owner);
   const base = { ...(await w.secret(w.dev)), sensitive: true };
   const [v1] = await versionItems([{ secret: base, wrapped: await wrapped(w, base) }]);
   await db.owner.update(secrets).set({ currentVersionId: v1!.secretVersionId, currentVersion: 1 }).where(eq(secrets.id, base.secretId));
@@ -425,7 +424,6 @@ test('a read records the stored version instead of the app claim', async () => {
   const key = randomBytes(32).toString('base64');
   const sealed = await w.vault.wrap({ principal: ROOT, items: [{ secret, key }] });
   assert.ok(sealed.ok);
-  const { secretVersions, auditLog } = tablesOf(db.owner);
   const id = randomUUID();
   await db.owner.insert(secretVersions).values({
     id, secretId: secret.secretId, version: 1, envelopeVersion: 1,
@@ -453,7 +451,6 @@ test('a restore records the stored source version instead of the app claim', asy
     secret: { ...secret, version: 2 }, ...source, from: 9, wrapped: sealed,
   }] };
   assert.ok((await w.vault.rewrap(input)).ok);
-  const { auditLog } = tablesOf(db.owner);
   const [entry] = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'key.rewrap'));
   assert.equal(JSON.parse(entry.metadata!).from, 1);
   assert.equal(entry.secretVersionId, source.secretVersionId);
@@ -473,7 +470,6 @@ test('a missing version refuses the whole batch before a key service sees it', a
   const result = await w.vault.unwrap(input);
   assert.equal(!result.ok && result.refusal.code, 'bad_claim');
   assert.equal(remote.seen.unwrap, 0);
-  const { auditLog } = tablesOf(db.owner);
   const entries = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'secret.read')).orderBy(asc(auditLog.seq));
   assert.deepEqual(entries.map((entry) => [entry.decision, entry.code, entry.secretVersionId]), [
     ['deny', 'bad_claim', source.secretVersionId], ['deny', 'bad_claim', null],
@@ -508,7 +504,6 @@ test('aliased restore targets keep each source version in its own entry', async 
     secret: target, ...source, from: i + 1, wrapped: wrappedKeys[i],
   })) });
   assert.ok(result.ok);
-  const { auditLog } = tablesOf(db.owner);
   const entries = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'key.rewrap')).orderBy(asc(auditLog.seq));
   assert.deepEqual(entries.map((entry) => entry.secretVersionId), sources.map((source) => source.secretVersionId));
   assert.deepEqual(entries.map((entry) => JSON.parse(entry.metadata!).from), [1, 2]);
@@ -547,7 +542,6 @@ test('a read of several secrets is one entry for each place it read at, listing 
   const read = await w.vault.unwrap({ principal: ADA, purpose: 'run', items: versions, requestId: 'req-1', operationId });
   assert.ok(read.ok, JSON.stringify(read));
 
-  const { auditLog } = tablesOf(db.owner);
   const entries = await db.owner.select().from(auditLog)
     .where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.actor, ADA))).orderBy(asc(auditLog.seq));
   // dev's three in one entry that lists them; prod's one, as a read of one secret always was.
@@ -946,7 +940,6 @@ test('the bulk limit counts a key once across reads of one key and reads of seve
   assert.equal(await read([b!, c!, d!, p!]), 'ok', 'all of them again');
   assert.equal(await read([a!, e!]), 'bulk_limit', 'six');
   assert.equal(await read([f!]), 'bulk_limit');
-  const { auditLog } = tablesOf(db.owner);
   const entries = await db.owner.select().from(auditLog)
     .where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.actor, ADA), eq(auditLog.decision, 'allow')));
   assert.ok(entries.some((entry) => entry.secretId === null) && entries.some((entry) => entry.secretId !== null), 'both shapes of entry are counted');
@@ -1424,7 +1417,7 @@ test("a read given the app's record of a use appends it beside its read, names i
   assert.ok(read.ok && read.used === true, JSON.stringify(read));
   const [opened, used] = (await vaultLog(w)).slice(-2);
   assert.deepEqual([opened!.action, used!.action, used!.outcome, used!.actor], ['secret.read', 'credential.use', 'allow', ADA]);
-  const [row] = await db.owner.select().from(tablesOf(db.owner).auditLog).where(eq(tablesOf(db.owner).auditLog.action, 'credential.use'));
+  const [row] = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'credential.use'));
   assert.deepEqual([row!.metadata, row!.sourceIp, row!.operationId, row!.environmentId], [metadata, '203.0.113.9', operationId, w.dev]);
   // Without one, nothing is named back; refused, no use is appended.
   const plain = await w.vault.unwrap({ principal: ADA, purpose: 'use', items });
@@ -1457,7 +1450,6 @@ test('a checkpoint forgets the releases a day and an hour old, longer than any w
     keys.push(...(await versionItems([{ secret, wrapped: await wrapped(w, secret) }])));
   }
   for (const item of keys) assert.ok((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: [item] })).ok);
-  const { vaultReleases } = tablesOf(db.owner);
   const released = async () => (await db.owner.select().from(vaultReleases).where(eq(vaultReleases.principal, ADA))).length;
   assert.equal(await released(), 3);
   // By the database's clock, which the prune reads: one released a day, an hour and a minute ago; one a minute short.
@@ -1542,7 +1534,6 @@ test('a KEK with no check value yet is proved on the keys it wrapped before one 
   const w = await world({ keks });
   const secret = await w.secret(w.dev);
   const sealed = await wrapped(w, secret);
-  const { auditLog, secretVersions } = tablesOf(db.owner);
   await db.owner.insert(secretVersions).values({
     id: randomUUID(), secretId: secret.secretId, version: 1, envelopeVersion: 1, ciphertext: Buffer.alloc(8), iv: Buffer.alloc(12), authTag: Buffer.alloc(16),
     wrappedDek: Buffer.from(sealed.bytes, 'base64'), kekProvider: sealed.kekProvider, kekId: sealed.kekId, kekVersion: sealed.kekVersion,
@@ -1666,7 +1657,6 @@ async function readWrite(w: World, principal: string, secret: SecretRef): Promis
 
 /** A project made now, with a dev and a prod of its own, and a secret in each. */
 async function laterProject(): Promise<{ project: string; dev: SecretRef; prod: SecretRef; devId: string; prodId: string }> {
-  const { environments, secrets } = tablesOf(db.owner);
   const project = await newProject(db.owner);
   const [devId, prodId] = [randomUUID(), randomUUID()];
   await db.owner.insert(environments).values([
@@ -1724,7 +1714,6 @@ test('a person sets up a service account in the vault too: no more than they hol
   assert.deepEqual(changes[1]!.detail.previous, { serviceAccounts: EVERYWHERE });
 
   // A setting written in the vault's name around it is passed over.
-  const { auditLog, auditChainHead } = tablesOf(db.owner);
   const [head] = await db.owner.select().from(auditChainHead);
   const fields = {
     seq: head.nextSeq, author: 'vault' as const, keyId: VAULT_KEY.keyId, occurredAt: Date.now(), actor: ROOT,
@@ -1745,7 +1734,6 @@ test('a person sets up a service account in the vault too: no more than they hol
  * made-up MAC: what anyone who can insert rows can write.
  */
 async function forgeEntries(count: number, entry: { action: string; actor?: string; code?: string; subjectPrincipal?: string; metadata?: string }): Promise<void> {
-  const { auditLog, auditChainHead } = tablesOf(db.owner);
   const [head] = await db.owner.select().from(auditChainHead);
   const mac = Buffer.alloc(32, 7);
   let [seq, prevHash] = [head.nextSeq, head.headHash];
@@ -1858,7 +1846,6 @@ test('a service account admitted with its first grant is one decision: a grant r
 
 test('a service account whose row was deleted is refused, under forged entries about it too, and never comes back from nothing', log014Only(START_OVER), async () => {
   const w = await world();
-  const { principals } = tablesOf(db.owner);
   const code = (outcome: { ok: boolean; refusal?: { code: string } }) => (outcome.ok ? 'ok' : outcome.refusal!.code);
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'developer', scope: DEV_ONLY })).ok);
   assert.ok((await w.vault.admit({ actor: ROOT, principal: 'token:ci' })).ok);
@@ -1991,7 +1978,6 @@ test('only those who run the instance set roles, never their own, and a scoped a
  * vault of 0.4 would have left them.
  */
 async function everyProjectGrant(principal: string, slug: string | null, role: string, expiresAt: number | null = null): Promise<void> {
-  const { grants, principals } = tablesOf(db.owner);
   const metadata = JSON.stringify({ role, expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(), previousRole: null, place: slug === null ? '*' : `*/${slug}` });
   const appended = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: principal, metadata }], undefined, undefined, [], true));
   await db.owner.insert(grants).values({ principal, projectId: null, environmentId: null, environmentSlug: slug, role, expiresAt, grantedAt: appended.occurredAt, grantedBy: ROOT });
@@ -2059,7 +2045,6 @@ test('a vault of 0.5 replaces the grants on every project of 0.4 once, holding n
   assert.deepEqual([service.role, service.grants.map((grant) => [grant.environmentId, grant.role]).sort()], ['member', [[other.devId, 'developer'], [w.dev, 'developer']].sort()]);
 
   // None is left; the log says what became of each, and still replays.
-  const { grants } = tablesOf(db.owner);
   assert.deepEqual(await db.owner.select().from(grants).where(sql`${grants.projectId} IS NULL AND ${grants.environmentId} IS NULL`), []);
   const log = (await vaultLog(w)).filter((entry) => entry.actor === 'system:vault');
   const revoked = log.filter((entry) => entry.action === 'access.revoke');
@@ -2108,7 +2093,6 @@ test('the conversion takes no read away: viewer on every project beside auditor 
 
 test('migrate marks a member whose row the vault found tampered with, whose grants it leaves as they are', log014Only(CONVERSION), async () => {
   const w = await world();
-  const { grants } = tablesOf(db.owner);
   await member(w, ADA, []);
   await member(w, BOB, []);
   await everyProjectGrant(ADA, null, 'viewer');
@@ -2122,7 +2106,6 @@ test('migrate marks a member whose row the vault found tampered with, whose gran
 
 test('a genuine row put back after a tamper report is left as migrate says, until a change to what they hold settles it', log014Only(CONVERSION), async () => {
   const w = await world();
-  const { grants } = tablesOf(db.owner);
   await member(w, BOB, []);
   await everyProjectGrant(BOB, null, 'viewer');
   await db.owner.update(grants).set({ role: 'owner' }).where(eq(grants.principal, BOB));
@@ -2146,7 +2129,6 @@ test('a genuine row put back after a tamper report is left as migrate says, unti
 
 test('tamper reports forged in the vault\'s name above its own leave the one it wrote standing', log014Only(CONVERSION), async () => {
   const w = await world();
-  const { grants } = tablesOf(db.owner);
   await member(w, BOB, []);
   await everyProjectGrant(BOB, null, 'viewer');
   await db.owner.update(grants).set({ role: 'owner' }).where(eq(grants.principal, BOB));
@@ -2165,7 +2147,6 @@ test('tamper reports forged in the vault\'s name above its own leave the one it 
 
 test('tamper reports forged in the vault\'s name before a change to what a member holds leave the conversion to run, as migrate says', log014Only(CONVERSION), async () => {
   const w = await world();
-  const { grants } = tablesOf(db.owner);
   await member(w, 'token:legacy', []);
   // As many as the vault reads back, all before the grant: none can stand.
   await forgeEntries(32 * 32, { action: 'vault.tampered', code: 'stale', subjectPrincipal: 'token:legacy' });
@@ -2181,7 +2162,6 @@ for (const forged of [1, 32, 33, 32 * 32 - 1, 32 * 32]) {
   const within = forged < 32 * 32;
   test(`after ${forged} tamper report${forged === 1 ? '' : 's'} forged in the vault's name, ${within ? 'migrate lists the conversion of a grant on every project, which the vault makes' : 'more than it reads past, the vault leaves a grant on every project, as migrate warns'}`, log014Only(CONVERSION), async () => {
     const w = await world();
-    const { grants } = tablesOf(db.owner);
     await member(w, 'token:legacy', []);
     await everyProjectGrant('token:legacy', null, 'viewer');
     await forgeEntries(forged, { action: 'vault.tampered', code: 'stale', subjectPrincipal: 'token:legacy' });
@@ -2205,7 +2185,6 @@ for (const forged of [1, 32, 33, 32 * 32 - 1, 32 * 32]) {
 for (const history of ['none', 'forged'] as const) {
   test(`a member with ${history === 'none' ? 'no access entry' : 'only access entries forged in the vault\'s name'} is left as they are under forged reports, and migrate marks them`, log014Only(CONVERSION), async () => {
     const w = await world();
-    const { auditLog, grants, principals } = tablesOf(db.owner);
     const LEGACY = 'token:legacy';
     await member(w, ADA, []);
     if (history === 'forged') await forgeEntries(3, { action: 'member.add', subjectPrincipal: LEGACY });
@@ -2270,7 +2249,6 @@ test('a Member or an Admin everywhere keeps the MAC 0.4 sealed, and any other ro
 
 test('the log is chained, append-only, and shows a rewritten entry', async () => {
   const w = await world();
-  const { auditLog } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
   await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([{ secret, wrapped: await wrapped(w, secret) }]) });
@@ -2289,7 +2267,6 @@ test('the log is chained, append-only, and shows a rewritten entry', async () =>
 });
 
 test('the vault appends only as itself, and writes none of the app\'s rows', async () => {
-  const { auditLog, projects } = tablesOf(db.vault);
   const w = await world();
   await member(w, ADA, []);
   const forged = {
@@ -2319,7 +2296,6 @@ async function longLog(n: number) {
  * `key`, which needs the vault's.
  */
 async function rewrite(seq: bigint, how: 'in place' | 'chained' | LogKey) {
-  const { auditLog, auditChainHead } = tablesOf(db.owner);
   const entries = (await db.owner.select().from(auditLog).where(gte(auditLog.seq, seq)).orderBy(asc(auditLog.seq))) as StoredEntry[];
   await withLogUnlocked(db.owner, async (owned) => {
     if (how === 'in place') {
@@ -2374,7 +2350,6 @@ test('a log of large entries is checked whole and signed, a batch of it in memor
   }
   const fresh = await openLocalVault(db.vault, configure());
   const verified = await fresh.verifyLog({});
-  const { auditLog } = tablesOf(db.owner);
   const written = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.author, 'vault'));
   const through = Math.max(...written.map(({ seq }) => Number(seq)));
   assert.deepEqual(verified, { ok: true, entries: written.length, through }, 'the check stopped short of the last entry');
@@ -2393,7 +2368,6 @@ test('a checkpoint signs the log up to its last entry, in an entry of its own', 
     assert.equal((await store.vaultPage(db.owner, undefined, 1)).length, 0);
   }
   const w = await world();
-  const { auditLog } = tablesOf(db.owner);
   const { checkpointKeys } = await w.vault.about();
   const signed = async () => (await vaultLog(w)).filter((entry) => entry.action === 'audit.checkpoint' && entry.outcome === 'allow');
   assert.deepEqual(await signed(), []);
@@ -2453,7 +2427,6 @@ test('no checkpoint is signed over a rewritten entry, and a full check finds the
 
 test("given the app's head, the vault checks its own entries and leaves the chain's links to the app, which recomputed them", async () => {
   const w = await world();
-  const { auditLog } = tablesOf(db.owner);
   await member(w, ADA, []);
   // One of the app's entries, as the app appends one, between two of the vault's.
   await db.owner.transaction((tx) =>
@@ -2484,7 +2457,6 @@ test("given the app's head, the vault checks its own entries and leaves the chai
 
 test('a full check covers the head the app verified up to, and refuses an entry forged under no key', async () => {
   const w = await world();
-  const { auditLog, auditChainHead } = tablesOf(db.owner);
   await member(w, ADA, []);
   const [last] = (await db.owner.select().from(auditLog).orderBy(asc(auditLog.seq))).slice(-1) as StoredEntry[];
   const upTo = { seq: Number(last.seq), hash: last.hash.toString('hex') };
@@ -2517,7 +2489,6 @@ test('a full check covers the head the app verified up to, and refuses an entry 
 
 test('a full check replays who holds what from the log, and finds what a holder of the vault\'s key wrote around it', async () => {
   const w = await world();
-  const { grants, principals } = tablesOf(db.owner);
   const change = async (principal: string, environmentId: string | null, role: string | null) =>
     assert.ok(
       (
@@ -2576,7 +2547,6 @@ test('a full check replays who holds what from the log, and finds what a holder 
 
 /** Seal `principal`'s row again over what the database now holds, as only the holder of the vault's key can. */
 async function reseal(principal: string) {
-  const { principals } = tablesOf(db.owner);
   const row = (await store.member(db.owner, principal))!;
   const mac = memberMac(rowKey(SIGNING_KEY), row, await store.grants(db.owner, principal));
   await db.owner.update(principals).set({ mac }).where(eq(principals.principal, principal));
@@ -2586,7 +2556,6 @@ async function reseal(principal: string) {
 
 /** A member's row and grants as they are now, to put back later as the database's owner could. */
 async function snapshot(principal: string) {
-  const { principals, grants } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(principals).where(eq(principals.principal, principal));
   const held = await db.owner.select().from(grants).where(eq(grants.principal, principal));
   return async () => {
@@ -2604,7 +2573,6 @@ async function tamperings(w: World) {
 for (const edit of ['forged', 'edited', 'deleted'] as const) {
   test(`a grant ${edit} in the database leaves its member refused as tampered, until an owner starts them over`, log014Only(START_OVER), async () => {
     const w = await world();
-    const { grants } = tablesOf(db.owner);
     await member(w, ADA, [[w.dev, 'viewer']]);
     const secret = await w.secret(w.dev);
     const items = [{ secret, wrapped: await wrapped(w, secret) }];
@@ -2675,7 +2643,6 @@ async function whileHeadHeld<T>(decision: () => Promise<T>, during: () => Promis
 
 test('a grant written around the vault while it decides about its member is refused, not sealed in (review R2)', async () => {
   const w = await world();
-  const { grants } = tablesOf(db.owner);
   // Mallory manages access on a sandbox project, holds nothing on market, and has the owner's login.
   const sandbox = await newProject(db.owner);
   const sandboxEnv = await newEnvironment(db.owner, sandbox);
@@ -2706,7 +2673,6 @@ test('a grant written around the vault while it decides about its member is refu
 
 test('a grant written around the vault while it removes a member goes with the removal', log014Only(START_OVER), async () => {
   const w = await world();
-  const { grants } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
   const removal = await whileHeadHeld(
     () => w.vault.remove({ actor: ROOT, principal: ADA }),
@@ -2728,7 +2694,6 @@ test('a grant written around the vault while it removes a member goes with the r
 
 test('a checkpoint refuses to sign over entries cut from the middle of the log (review R1b)', async () => {
   const w = await world();
-  const { auditLog, grants, principals } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'developer']]);
   // Mallory keeps Ada's row and grants from before her removal.
   const [kept] = await db.owner.select().from(principals).where(eq(principals.principal, ADA));
@@ -2795,7 +2760,6 @@ for (const author of ['vault', 'app'] as const) {
   test(`a refusal of an entry behind the newest checkpoint stands for a call that walks past it, until the entry is whole again: the ${author}'s (T104)`, async () => {
     // A lap of the rehash of the past one entry a call, which reaches nothing near the edit here.
     const w = await world({}, { walks: { scrub: 1 } });
-    const { auditLog } = tablesOf(db.owner);
     for (const name of ['ada', 'bob', 'cy']) await member(w, `user:${name}@acme.example`, [[w.dev, 'viewer']]);
     // One of the app's entries, as the app appends one, which the vault checks by its hash and links alone.
     if (author === 'app') {
@@ -2913,7 +2877,6 @@ test('two checkpoints at once, catching up from the same tally, sign one prefix 
     const both = await Promise.all([w.vault.checkpoint(), other.checkpoint()]);
     assert.ok(both.every((result) => result.ok), JSON.stringify(both));
   }
-  const { auditLog } = tablesOf(db.owner);
   const signed = (await db.owner.select({ signs: auditLog.relatedSeq }).from(auditLog)
     .where(and(eq(auditLog.action, 'audit.checkpoint'), eq(auditLog.decision, 'allow'))).orderBy(asc(auditLog.seq)))
     .map(({ signs }) => Number(signs));
@@ -2936,7 +2899,6 @@ test('checkpoints and checks go on from the newest tally, and read nothing befor
   assert.ok(signed.ok);
   await reads(5);
   // Every read the checkpoint signed edited in place, its hash left as it was.
-  const { auditLog } = tablesOf(db.owner);
   await withLogUnlocked(db.owner, (owned) => owned.update(auditLog).set({ actor: BOB })
     .where(and(eq(auditLog.action, 'secret.read'), lte(auditLog.seq, BigInt(signed.checkpoint.seq)))));
 
@@ -3068,7 +3030,6 @@ test('a verification counts the prefix it resumes from: an entry cut before the 
   const signed = await w.vault.checkpoint();
   assert.ok(signed.ok);
   await reads(2);
-  const { auditLog } = tablesOf(db.owner);
   await withLogUnlocked(db.owner, (owned) => owned.delete(auditLog).where(eq(auditLog.seq, 5n)));
   const verdict = await (await fresh()).verifyLog({});
   assert.deepEqual(!verdict.ok && [verdict.failedAtSeq, verdict.reason], [6, 'sequence gap: expected seq 5, found 6']);
@@ -3081,7 +3042,6 @@ test('on a log longer than one count holds, a cut is found by the counts round t
   const signed = await w.vault.checkpoint();
   assert.ok(signed.ok && signed.checkpoint.seq >= 12);
   // Entry 5 cut: the counts go round from the first entry, four a checkpoint, so the second after counts it.
-  const { auditLog } = tablesOf(db.owner);
   await withLogUnlocked(db.owner, (owned) => owned.delete(auditLog).where(eq(auditLog.seq, 5n)));
   // A verification counts the newest four of the prefix, which hold no gap.
   const early = await w.vault.verifyLog({});
@@ -3123,7 +3083,6 @@ test("access changed after the app's head is read by the vault's own walk, not t
  * sign its checkpoints over the new hashes: all that a holder of its key could.
  */
 async function rewriteMetadata(seq: bigint, change: (metadata: Record<string, unknown>) => Record<string, unknown>) {
-  const { auditLog, auditChainHead } = tablesOf(db.owner);
   const entries = (await db.owner.select().from(auditLog).where(gte(auditLog.seq, seq)).orderBy(asc(auditLog.seq))) as StoredEntry[];
   const signing = await signer(SIGNING_KEY);
   const hashes = new Map<bigint, string>();
@@ -3150,7 +3109,6 @@ async function rewriteMetadata(seq: bigint, change: (metadata: Record<string, un
 
 test('a checkpoint finds a row changed around the vault before its member asks for anything', async () => {
   const w = await world();
-  const { grants } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
   await member(w, BOB, [[w.dev, 'viewer']]);
   assert.ok((await w.vault.checkpoint()).ok);
@@ -3200,7 +3158,6 @@ test('an old member row put back with its grants is refused: the log holds the l
 
 test('a generation edited back is refused, and so is a member row deleted outright', async () => {
   const w = await world();
-  const { principals } = tablesOf(db.owner);
   await member(w, ADA, []);
   await member(w, BOB, []);
   assert.equal((await w.vault.remove({ actor: ROOT, principal: ADA })).ok, true);
@@ -3252,7 +3209,6 @@ test('under 0.15\'s log, a 0.14 write about a member that the log does not accou
 
 test('under 0.15\'s log, a member row put back with its seal, or one never sealed, is refused by the vault\'s own decisions (T179 PR 2)', { skip: LOG === '0.15' ? false : "0.15's log only" }, async () => {
   const w = await world();
-  const { principals } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
   const [before] = await db.owner.select().from(principals).where(eq(principals.principal, ADA));
   const raised = await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] });
@@ -3274,7 +3230,6 @@ test('under 0.15\'s log, an old member row put back with the newest change\'s se
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const putBack = await snapshot(ADA);
-  const { principals } = tablesOf(db.owner);
   const [before] = await db.owner.select().from(principals).where(eq(principals.principal, ADA));
   assert.ok((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: null, expiresAt: null }] })).ok);
   // The revoked row put back, seal and all, and the revoke's change edited to name that seal: its payload, and so the
@@ -3314,7 +3269,6 @@ async function logNewest(): Promise<bigint> {
 
 /** The change each `vault.tampered` about `principal`'s row names (`findingMetadata`), oldest first: undefined for none. */
 async function weighedFindings(principal: string): Promise<(string | undefined)[]> {
-  const { auditLog } = tablesOf(db.owner);
   const found = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
     .where(and(eq(auditLog.action, 'vault.tampered'), eq(auditLog.subjectPrincipal, principal), sql`${auditLog.code} IN ('mac', 'stale')`))
     .orderBy(asc(auditLog.seq));
@@ -3329,7 +3283,6 @@ const vaultCheck = {
 
 /** A `vault.tampered` about `principal`'s row naming `change`, linked to the chain: under the vault's MAC, or `forged`, a made-up one. */
 async function appendFinding(principal: string, change: string, { forged = false, metadata = findingMetadata(change) } = {}): Promise<void> {
-  const { auditLog, auditChainHead } = tablesOf(db.owner);
   const [head] = await db.owner.select().from(auditChainHead);
   const fields = {
     seq: head.nextSeq, author: 'vault' as const, keyId: VAULT_KEY.keyId, occurredAt: Date.now(), actor: 'system:vault',
@@ -3383,7 +3336,6 @@ test('under 0.15\'s log, a finding names the newest change it weighed and stands
 
 test('under 0.15\'s log, a finding is settled by a change with no access entry of 0.14\'s, as 0.16\'s are: the watermark does not freeze', LOG_015_ONLY, async () => {
   const w = await world();
-  const { auditLog } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
   const putBack = await snapshot(ADA);
   assert.ok((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] })).ok);
@@ -3468,7 +3420,6 @@ test('under 0.15\'s log, a finding stands however her newest change is renumbere
 
 test('an entry forged in the vault\'s name about a member is passed over and reported, not obeyed', async () => {
   const w = await world();
-  const { auditLog, auditChainHead } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
@@ -3496,7 +3447,6 @@ test('an entry forged in the vault\'s name about a member is passed over and rep
 test("through a key service, a read that finds a forged entry logs its intent, then its report, in one transaction (review r1 of #278)", async () => {
   const { keks } = service();
   const w = await world({ keks });
-  const { auditLog, auditChainHead } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
@@ -3519,7 +3469,6 @@ test("through a key service, a read that finds a forged entry logs its intent, t
 
 test('the newest entries cut from the log without its head stop the next decision', async () => {
   const w = await world();
-  const { auditLog } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
   const [last] = await db.owner.select({ seq: auditLog.seq }).from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
   await withLogUnlocked(db.owner, (owned) => owned.delete(auditLog).where(eq(auditLog.seq, last.seq)));
@@ -3821,7 +3770,6 @@ test('after a rotation, the replaced KEK vouches for nothing new: entries and ro
   assert.equal((await after.vault.access(ADA)).status, 'active');
   assert.deepEqual(await tamperings(after), [[ADA, 'forged_entry']]);
   // A grant given to her, with her row sealed again under the old row key, leaves her tampered.
-  const { grants, principals } = tablesOf(db.owner);
   await db.owner.insert(grants).values({
     principal: ADA, projectId: after.project, environmentId: null, role: 'owner', expiresAt: null, grantedAt: Date.now(), grantedBy: ROOT,
   });
@@ -4089,7 +4037,6 @@ test('intents and outcomes have their own identities even when caller request id
       { secret, key: randomBytes(32).toString('base64') }, { secret, key: randomBytes(32).toString('base64') },
     ] })).ok);
   }
-  const { auditLog } = tablesOf(db.owner);
   const log = await db.owner.select().from(auditLog).where(eq(auditLog.requestId, 'repeated')).orderBy(asc(auditLog.seq));
   const intents = log.filter((entry) => entry.action === 'key.intent');
   const ids = intents.map((entry) => JSON.parse(entry.metadata).intent);
@@ -4520,7 +4467,6 @@ test('taking someone off the list leaves them an Owner, whom an Owner may then d
 test('an Owner the deployment names whose row was changed around the vault is started over and made one again: at their next request, and as a vault starts', async () => {
   const w = await world();
   // Someone with the database demotes root, the only Owner, writing their row.
-  const { principals } = tablesOf(db.owner);
   await db.owner.update(principals).set({ role: 'developer', owner: false }).where(eq(principals.principal, ROOT));
   // Under 0.15's log, nothing starts them over: refused, holding nothing, and no start writes anything, until a
   // reseal makes their row the log's again (START_OVER).
@@ -4547,7 +4493,6 @@ test('an Owner the deployment names whose row was changed around the vault is st
 test('a row edited to an Owner\'s around the vault makes nobody an Owner, nor anyone the deployment names', async () => {
   const w = await world();
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);
-  const { principals } = tablesOf(db.owner);
   await db.owner.update(principals).set({ role: 'owner', owner: true, scope: null }).where(eq(principals.principal, ADA));
   const ada = await w.vault.access(ADA);
   assert.deepEqual([ada.status, ada.role], ['tampered', 'member']);
@@ -4562,7 +4507,6 @@ test('an Owner\'s scope written another way around the vault is still everywhere
   // The column says everywhere as JSON, not null: the row's MAC reads it parsed, and holds.
   const w = await world({ owners: ['root@acme.example', 'sam@acme.example'] });
   assert.equal((await w.vault.access(SAM)).role, 'owner');
-  const { principals } = tablesOf(db.owner);
   const before = (await ownership()).length;
   await db.owner.update(principals).set({ scope: JSON.stringify(EVERYWHERE) }).where(eq(principals.principal, ROOT));
   const deployed = await namingOwners('root@acme.example', 'sam@acme.example');

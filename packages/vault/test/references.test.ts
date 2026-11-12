@@ -6,13 +6,13 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { deriveLogKey } from '@coffre/core/audit';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { HolderRef, SecretRef, Via } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { appendEntries } from '@coffre/db/log';
 import { and, asc, eq, gte } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { snapshot } from '../src/snapshot.ts';
 import { emptyDatabase, newEnvironment, newProject, openTestDatabase, places, storedVersions, type TestDatabase, openLocalVault, type LocalVault } from './database.ts';
+import { auditLog, secrets, secretVersions } from '@coffre/db/schema';
 
 // References (docs/design/environments.md): the vault's `reference.create`
 // entry is the reference, and a read through one is checked against it.
@@ -52,7 +52,6 @@ async function world() {
   const key = await vault.wrap({ principal: ROOT, items: [{ secret: source, key: randomBytes(32).toString('base64') }] });
   assert.ok(key.ok);
   const [{ secretVersionId }] = await storedVersions(db.owner, [{ secret: source, wrapped: key.wrapped[0] }]);
-  const { secrets } = tablesOf(db.owner);
   await db.owner.update(secrets).set({ currentVersionId: secretVersionId, currentVersion: 1 }).where(eq(secrets.id, source.secretId));
   for (const [principal, changes] of [
     [ADA, [{ projectId: market.project, environmentId: market.prod, role: 'viewer' }, { projectId: billing, environmentId: null, role: 'developer' }]],
@@ -80,7 +79,6 @@ const read = (w: World, principal: string, via?: Via, secretVersionId = w.secret
   w.vault.unwrap({ principal, purpose: 'run', items: [{ secretVersionId, ...(via === undefined ? {} : { via }) }] });
 
 async function vaultEntries(action: string, from = 0n) {
-  const { auditLog } = tablesOf(db.owner);
   const rows = await db.owner.select().from(auditLog)
     .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, action), gte(auditLog.seq, from)))
     .orderBy(asc(auditLog.seq));
@@ -149,7 +147,6 @@ test("a reference reads by its holder's grants alone: its source protected after
 
 test("making a reference takes reading its source, whatever its nature, and using a sensitive one", async () => {
   const w = await world();
-  const { secrets, secretVersions } = tablesOf(db.owner);
   // Protected, market/prod gives Ada, its Viewer, use alone: she refers to nothing of it.
   assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.market.project, environmentIds: [w.market.prod], protected: true } })).ok);
   const ask = (principal = ADA) => w.vault.reference({ principal, items: [{ id: randomUUID(), holder: w.holder(), source: { secretId: w.source.secretId } }] });
@@ -171,7 +168,6 @@ test("making a reference takes reading its source, whatever its nature, and usin
 });
 test("a rewrap that brings an old value back takes what could have read it: a secret, its reading; the current one, writing alone", async () => {
   const w = await world();
-  const { secrets } = tablesOf(db.owner);
   // A second value, current now; Wes writes and uses market/prod, protected, and reads none of it.
   const second = { ...w.source, version: 2 };
   const wrapped = await w.vault.wrap({ principal: ROOT, items: [{ secret: second, key: randomBytes(32).toString('base64') }] });
@@ -241,7 +237,6 @@ test('a reference the vault did not make is refused: no entry, another one, a fo
   const [stored] = await storedVersions(db.owner, [{ secret: other, wrapped: key.wrapped[0] }]);
   assert.equal(await refusedAs(via, stored!.secretVersionId), 'bad_claim');
   // A version of the source that is not its current one.
-  const { secrets } = tablesOf(db.owner);
   await db.owner.update(secrets).set({ currentVersionId: null }).where(eq(secrets.id, w.source.secretId));
   assert.equal(await refusedAs(via), 'bad_claim');
   await db.owner.update(secrets).set({ currentVersionId: w.secretVersionId }).where(eq(secrets.id, w.source.secretId));

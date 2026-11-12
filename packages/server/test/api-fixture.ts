@@ -8,7 +8,8 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
 import { sealEntry, type LogFields } from '@coffre/core/audit';
 import { UNSEALED, type Through, type UseInput, type UseOutcome, type Vault, type VaultEntry } from '@coffre/core/vault';
-import { tablesOf, type Database } from '@coffre/db';
+import { type Database } from '@coffre/db';
+import { auditLog, credentials, environments, grants, logConfig, principals, projects, proxyDefinitions, proxyReserved, secretReferences, secrets, secretVersions, serviceBindings, logUses, logChanges, auditChainHead, deviceLogins, enrollmentCodes, identities, spentIdTokens, cappedAlerts, dismissedKeys, mcpApprovals, mcpConnections, oauthClients, policy, roles, passkeys, bulkCap, logReads, logReadDays, logReadsCursor } from '@coffre/db/schema';
 import { rowsOf } from '@coffre/db/dialect';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { derivedSigningKey } from '@coffre/vault';
@@ -171,7 +172,6 @@ export const START_OVER_014 = LOG === '0.15' ? "0.15's log changes no tampered m
  * use) and the place; a repeat its isolate's cover rides writes none.
  */
 export async function usesLogged(owner: Database): Promise<{ credential: string; secret: string; purpose: number; place: string | null }[]> {
-  const { logUses } = tablesOf(owner);
   return owner.select({ credential: logUses.credential, secret: logUses.secret, purpose: logUses.purpose, place: logUses.place }).from(logUses).orderBy(logUses.number);
 }
 
@@ -180,7 +180,6 @@ export async function usesLogged(owner: Database): Promise<{ credential: string;
  * or, where the vault refused by its own path and logged it, the vault's code: one of them, never both.
  */
 export async function refusedIn(owner: Database): Promise<string | null> {
-  const { auditLog } = tablesOf(owner);
   const [newest] = await owner.select({ author: auditLog.author, code: auditLog.code, metadata: auditLog.metadata }).from(auditLog)
     .where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'deny'))).orderBy(desc(auditLog.seq)).limit(1);
   if (newest === undefined) return null;
@@ -197,7 +196,6 @@ export type LoggedSignIn = { actor: string; credentialId: string; bindingId: str
  * sign-in (D147). `record` is the entry's metadata, or the change's payload.
  */
 export async function signInsLogged(owner: Database): Promise<LoggedSignIn[]> {
-  const { auditLog, logChanges } = tablesOf(owner);
   const entries = await owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog)
     .where(and(eq(auditLog.action, 'token.exchange'), eq(auditLog.decision, 'allow'))).orderBy(auditLog.seq);
   const changes = await owner.select({ actor: logChanges.actor, payload: logChanges.payload }).from(logChanges).orderBy(logChanges.number);
@@ -220,7 +218,6 @@ export async function signInsLogged(owner: Database): Promise<LoggedSignIn[]> {
  * issued what kind (D147). `scope` is the token's, as stored.
  */
 export async function issuesLogged(owner: Database): Promise<{ actor: string; kind: string; targetCredentialId: string; label: string | null }[]> {
-  const { auditLog, logChanges } = tablesOf(owner);
   const entries = await owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog)
     .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow'))).orderBy(auditLog.seq);
   const changes = await owner.select({ payload: logChanges.payload }).from(logChanges).orderBy(logChanges.number);
@@ -243,7 +240,6 @@ export async function issuesLogged(owner: Database): Promise<{ actor: string; ki
  * with its reason (D147). Who, and which credential: as each one names them.
  */
 export async function revokesLogged(owner: Database): Promise<{ actor: string; reason: 'revoke' | 'sign_out'; targetCredentialId: string }[]> {
-  const { auditLog, logChanges } = tablesOf(owner);
   const entries = await owner.select({ actor: auditLog.actor, action: auditLog.action, metadata: auditLog.metadata }).from(auditLog)
     .where(and(inArray(auditLog.action, ['token.revoke', 'sign_out']), eq(auditLog.decision, 'allow'))).orderBy(auditLog.seq);
   const changes = await owner.select({ actor: logChanges.actor, payload: logChanges.payload }).from(logChanges).orderBy(logChanges.number);
@@ -288,7 +284,6 @@ export function watchUses(vault: TestVault): { asked: UseInput[]; answered: UseO
 
 /** The ids of the keys named `key`, in any environment: what a use names (`watchUses`). */
 export async function keyIds(owner: Database, key: string): Promise<string[]> {
-  const { secrets } = tablesOf(owner);
   return (await owner.select({ id: secrets.id }).from(secrets).where(eq(secrets.key, key))).map((row) => row.id);
 }
 
@@ -464,7 +459,6 @@ async function cutOverAtOpen(vault: Vault, db: Database): Promise<void> {
   // own checks go on, and nothing of 0.15's is served.
   const asked = await vault.cutover!();
   if (!asked.ok || asked.done) return;
-  const { auditChainHead } = tablesOf(db);
   const [head] = await db.select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash }).from(auditChainHead);
   const to = { seq: (BigInt(head!.nextSeq) - 1n).toString(), hash: Buffer.from(head!.headHash).toString('hex') };
   await vault.cutover!({ checked: { from: asked.from, to }, credentials: [], bindings: [], connections: [], deleted: [] });
@@ -579,38 +573,6 @@ export async function resetDatabase(owner: Database): Promise<void> {
   for (const reset of anchors) reset();
   // The vault's log starts over, the names code reserved in it with it.
   forgetProxyGates();
-  const {
-    credentials,
-    deviceLogins,
-    enrollmentCodes,
-    environments,
-    identities,
-    projects,
-    secrets,
-    secretVersions,
-    serviceBindings,
-    spentIdTokens,
-    cappedAlerts,
-    secretReferences,
-    dismissedKeys,
-    mcpApprovals,
-    mcpConnections,
-    oauthClients,
-    grants,
-    principals,
-    logChanges,
-    logConfig,
-    policy,
-    roles,
-    proxyDefinitions,
-    proxyReserved,
-    passkeys,
-    logUses,
-    bulkCap,
-    logReads,
-    logReadDays,
-    logReadsCursor,
-  } = tablesOf(owner);
   await owner.delete(mcpApprovals);
   await owner.delete(mcpConnections);
   await owner.delete(oauthClients);
@@ -660,7 +622,6 @@ export async function resetDatabase(owner: Database): Promise<void> {
  * sequence moved on (never back, onto a change numbered already). Past 2^53, no JS number holds them.
  */
 export async function numbersFrom(owner: Database, from: bigint, chainKey: Buffer): Promise<void> {
-  const { auditChainHead, auditLog } = tablesOf(owner);
   const key = appLogKey(chainKey);
   const [head] = await owner.select({ headHash: auditChainHead.headHash }).from(auditChainHead);
   const fields: LogFields = {
@@ -685,7 +646,6 @@ export async function numbersFrom(owner: Database, from: bigint, chainKey: Buffe
  * to see them refused, leave such rows on purpose.
  */
 export async function credentialsLogged(owner: Database): Promise<void> {
-  const { credentials, logChanges } = tablesOf(owner);
   const newest = new Map<string, { number: bigint; seal: Buffer | null }>();
   for (const change of await owner.select({ object: logChanges.object, number: logChanges.number, seal: logChanges.seal }).from(logChanges)) {
     const number = BigInt(change.number);
@@ -709,15 +669,13 @@ export async function credentialsLogged(owner: Database): Promise<void> {
  * ExchangeOnlyIssues).
  */
 export async function decisionInputs(owner: Database, except: readonly string[] = []): Promise<Record<string, string[]>> {
-  const tables = tablesOf(owner);
-  const inputs = { principals: tables.principals, grants: tables.grants, credentials: tables.credentials, secrets: tables.secrets,
-    secretVersions: tables.secretVersions, secretReferences: tables.secretReferences, environments: tables.environments, projects: tables.projects, logConfig: tables.logConfig,
-    proxyDefinitions: tables.proxyDefinitions, proxyReserved: tables.proxyReserved, serviceBindings: tables.serviceBindings };
-  const { auditLog } = tables;
+  const inputs = { principals, grants, credentials, secrets,
+    secretVersions, secretReferences, environments, projects, logConfig,
+    proxyDefinitions, proxyReserved, serviceBindings };
   const text = (row: object) => JSON.stringify(row, (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value));
   const read: Record<string, string[]> = {};
   for (const [name, table] of Object.entries(inputs)) {
-    const rows = (await owner.select().from(table as typeof tables.projects)) as Record<string, unknown>[];
+    const rows = (await owner.select().from(table as typeof projects)) as Record<string, unknown>[];
     read[name] = rows
       .filter((row) => name !== 'credentials' || !except.includes(row.id as string))
       // A binding's last use is stamped by every exchange: no decision reads it.
@@ -744,7 +702,6 @@ function objectKey(kind: string, id: string): string {
  * made (docs/design/instance-roles.md, "Credentials' scopes").
  */
 export async function holdSomething(owner: Database, vault: Vault, service: string, actor: string): Promise<string> {
-  const { projects } = tablesOf(owner);
   const slug = `${service.replace(/^token:/, '')}-reads`;
   const id = randomUUID();
   await owner.insert(projects).values({ id, slug, name: slug });
