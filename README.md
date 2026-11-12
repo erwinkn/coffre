@@ -174,6 +174,7 @@ coffre run --keep-existing market/dev -- ./app      # a variable already set in 
                                             # a person, where the deployment has the credential proxy: placeholders, not values;
                                             # the app's own config points at <coffre>/use/<credential> (docs/design/credential-proxy.md)
 coffre export   market/dev --format dotenv  # or json, shell, github; several environments, as run
+                                            # a person, where the deployment has the credential proxy: placeholders too, not values (--keys, --watch refused)
 coffre export   market/prod --output-file .env --watch --on-change 'systemctl reload app'   # kept current, read only once it changed
 coffre version  market/prod                 # what a read would open, as a version that changes when it would; reads no value
 coffre history  market/dev/DATABASE_URL
