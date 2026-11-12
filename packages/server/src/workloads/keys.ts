@@ -53,8 +53,8 @@ export const KEYS_COOLDOWN_MS = 60 * 1000;
  * when the 503 is sent, so each retry comes after the URL may be fetched
  * again, 5 to 7.5 s after the answer before it, and two of them reach past
  * a blip like T258's. It still spares an unreachable issuer: an isolate
- * starts no fetch of its keys within 5 s of one that failed, whatever
- * anonymous requests ask of it.
+ * starts no fetch of its keys within 5 s of one that failed, nor beside one
+ * that follows a failure, whatever anonymous requests ask of it.
  */
 export const KEYS_COLD_COOLDOWN_MS = 5_000;
 /** At most this many key sets, and `MAX_KEYS` keys in each. */
@@ -172,6 +172,10 @@ export async function verifyWithKeys(
       keys = kept(entry, now);
       if (keys === null) throw standing;
     } else {
+      // A fetch after a failed one counts as failed until it settles, so that
+      // the exchanges meanwhile use the set kept, or are answered at once,
+      // rather than each fetch too: one attempt in flight per cooldown.
+      if (entry?.failedAt != null) remember(url, { ...entry, failedAt: now });
       try {
         keys = await fetchKeys(transport, url);
         fetched = true;

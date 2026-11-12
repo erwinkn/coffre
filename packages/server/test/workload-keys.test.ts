@@ -249,3 +249,30 @@ test('fresh, a key it lacks fetched for in vain: said once, and the set verifies
   assert.equal(said.length, 1);
   assert.match(said[0]!, /^verifying with the issuer's keys fetched 10 min ago: the issuer's keys could not be fetched: /);
 });
+
+test('cold, a fetch after a failed one under way: the exchanges meanwhile fetch nothing beside it and are answered at once', async () => {
+  down = true;
+  assert.deepEqual(await verify(known), { outcome: `unavailable ${KEYS_COLD_COOLDOWN_MS / 1000}`, fetches: 1 });
+  let fail!: () => void;
+  held = new Promise((resolve) => (fail = resolve));
+  const probe = verify(known, KEYS_COLD_COOLDOWN_MS);
+  assert.deepEqual(await verify(known, KEYS_COLD_COOLDOWN_MS + 1000), { outcome: `unavailable ${KEYS_COLD_COOLDOWN_MS / 1000 - 1}`, fetches: 0 });
+  fail();
+  assert.equal((await probe).outcome, `unavailable ${KEYS_COLD_COOLDOWN_MS / 1000}`);
+});
+
+test('stale, a fetch after a failed one under way: the exchanges meanwhile verify with the set kept, fetching nothing, and its failure is said once', async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  down = true;
+  const said = await warnings(async () => {
+    assert.deepEqual(await verify(known, KEYS_FRESH_MS), { outcome: VERIFIED, fetches: 1 });
+    let fail!: () => void;
+    held = new Promise((resolve) => (fail = resolve));
+    const probe = verify(known, KEYS_FRESH_MS + KEYS_COOLDOWN_MS);
+    assert.deepEqual(await verify(known, KEYS_FRESH_MS + KEYS_COOLDOWN_MS + 1000), { outcome: VERIFIED, fetches: 0 });
+    fail();
+    assert.equal((await probe).outcome, VERIFIED);
+  });
+  // The failure before, and the probe's: none for the exchange beside it.
+  assert.equal(said.length, 2);
+});
