@@ -609,6 +609,10 @@ REMOVALS=(
   'WritingDigest TodayUnheld={"protected"} TodayPolicyStandsAtCommit'
   'WritingDigest TodayUnheld={"roles"} TodayPolicyStandsAtCommit'
   'WritingDigest TodayUnheld={"policy"} TodayPolicyStandsAtCommit'
+  # That digest read from the seals the rows store (expert review of #573): a seal is a MAC over its row's values, so
+  # a database writer who puts env's row back, unprotected, puts back the seal the caller was loaded with, and the
+  # commit writes there. The numbers are the log's, each object's newest change's.
+  "WritingDigest TodayPolicyOnLog TodayPolicyStandsAtCommit"
   'WritingDigest Unheld={"protected"} WritesStandAtCommit'
   # A refusal down today's path, as before PR 6: a try the vault served, abandoned at its hold, then refused, goes on
   # there with the caller the first try checked, and writes once the grant is back, the session revoked since (review

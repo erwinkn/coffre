@@ -75,11 +75,14 @@
 (* the two does not stop it, but for the policy's, which the commit holds  *)
 (* to as the caller was loaded with (TodayPolicyHeld, `policyStill`;       *)
 (* review r3 of #469). The policy has no revision of its own since 0.16:   *)
-(* it is the seals of the rows the request read of it, the roles', the     *)
-(* policy row's and the environment's protection, compared as a digest     *)
-(* (before, one number stood for all three, the seq of the newest          *)
-(* `policy.change`). A digest that leaves one out lets its change past     *)
-(* (TodayUnheld). What the commit does not hold: a grant revoked, a        *)
+(* it is what the request read of it, object by object, the roles, the     *)
+(* policy row and the environment's protection, each by the number of its  *)
+(* newest change in the log, compared as a digest (before, one number      *)
+(* stood for all three, the seq of the newest `policy.change`). A digest   *)
+(* that leaves one out lets its change past (TodayUnheld). And the numbers *)
+(* are the log's, never the seal a row stores: a row a database writer put *)
+(* back stores the seal it had when the caller was loaded                  *)
+(* (TodayPolicyOnLog). What the commit does not hold: a grant revoked, a   *)
 (* session ended (TodayStandsAtCommit, EXPECTED broken: the window every   *)
 (* write has had since 0.14; review r1). A write goes there from its vault *)
 (* step (an object but the caller's credential not as the log has it) or   *)
@@ -234,14 +237,18 @@ CONSTANTS
     \* Without, one whose seal wait failed after its COMMIT goes down it too.
     FallBackUncommitted,
     \* Today's commit holds to the policy the caller was loaded with: the
-    \* seals of the roles, of the policy row and of the environment's
-    \* protection, as the front door read them (`audited`'s `policyStill`,
-    \* 409 `policy_changed`). Without, a roles change between today's
-    \* decision and its commit does not stop it.
+    \* roles, the policy row and the environment's protection, each by the
+    \* number of its newest change, as the front door read them (`audited`'s
+    \* `policyStill`, 409 `policy_changed`). Without, a roles change between
+    \* today's decision and its commit does not stop it.
     TodayPolicyHeld,
     \* The parts of the policy that digest skips: normally none. Each left
-    \* out in turn stands for a `policyStill` that compares one seal too few.
+    \* out in turn stands for a `policyStill` that compares one too few.
     TodayUnheld,
+    \* That digest takes each number from the log's newest change of its
+    \* object, as the hold's read does (ReadOnLog). Without, from the seal
+    \* its row stores: a row put back reads as the caller was loaded with.
+    TodayPolicyOnLog,
     \* The add's decision holds the caller's session to the generation of
     \* the membership it was issued under (`credentialEnded`): a session of
     \* a membership removed and restored since is ended, 401, before its row
@@ -399,6 +406,7 @@ Init ==
                                 [] p \in Adders -> "a.read"
                                 [] p = "ck" -> "ck"
                                 [] p = "dbw" -> "tamper"
+                                [] p = "unp" -> "unprotect"
                                 [] p = "fsg" -> "forge"
                                 [] p = "sub" -> "substitute"
                                 [] p = "rfl" -> "refile"
@@ -445,11 +453,13 @@ Request(p, r) == [p |-> p, n |-> next, live |-> Decide(p, r), replay |-> Decide(
 \* refuses: Fable's review of #469); on a later try, kept: each later try the vault serves is checked to be the same
 \* credential (`Written.again`), and today's path, after one, goes on with the caller the first checked (review r2 of
 \* #469). Only the token's resolution is kept: the caller's standing is the read's, and no step after rechecks it on
-\* today's path. With it, the policy the caller was loaded with: the seals of the roles, of the policy row and of the
-\* environment's protection as the front door read them (0.16: their digest; before it, `Caller.policySeq`, one number
-\* for the three), which today's commit holds to (TodayPolicyHeld).
+\* today's path. With it, the policy the caller was loaded with: the roles, the policy row and the environment's
+\* protection, each by the number of its newest change in the log as the front door read it (0.16: their digest; before
+\* it, `Caller.policySeq`, one number for the three), which today's commit holds to (TodayPolicyHeld). Not by the seal
+\* its row stores (TodayPolicyOnLog), which a row put back brings back with it.
 PolicyObjects == {"roles", "policy", "protected"}
-Auth(p) == IF tries[p] = 1 THEN [tok |-> names[Token], pol |-> [o \in PolicyObjects |-> seal[o]]]
+PolicyNumber(o) == IF TodayPolicyOnLog THEN seal[o] ELSE RowSeal(o)
+Auth(p) == IF tries[p] = 1 THEN [tok |-> names[Token], pol |-> [o \in PolicyObjects |-> PolicyNumber(o)]]
                            ELSE l[p].auth
 
 \* The vault's statement: the read under the fence shared, the request
@@ -615,8 +625,8 @@ WToday(p) ==
 
 \* ... and the app's transaction: under the change lock and the fence, it finds
 \* the policy the caller was loaded with still in force (`policyStill`: each
-\* seal of its digest, else 409 `policy_changed`, the end; review r3 of
-\* #469), the environment
+\* number of its digest, read from the log, else 409 `policy_changed`, the
+\* end; review r3 of #469), the environment
 \* still live (`checkEnvironment`) and the key's row where
 \* the decision found it (`app_change`, else `ObjectMoved`, asked again);
 \* then the key's next version, its change numbered. Its write binds no
@@ -624,7 +634,7 @@ WToday(p) ==
 WTodayCommit(p) ==
     /\ pc[p] = "w.tcommit"
     /\ changeLock = None /\ held = None
-    /\ IF \/ TodayPolicyHeld /\ \E o \in PolicyObjects \ TodayUnheld : seal[o] # l[p].auth.pol[o]
+    /\ IF \/ TodayPolicyHeld /\ \E o \in PolicyObjects \ TodayUnheld : PolicyNumber(o) # l[p].auth.pol[o]
           \/ ~ok["env"]
          THEN /\ Goto(p, "done")
               /\ UNCHANGED <<kver, seal, next, l, tries, writes>>
@@ -832,6 +842,17 @@ Tamper(p) ==
     /\ Goto(p, "done")
     /\ UNCHANGED <<ok, names, svc, kver, seal, forged, gen, next, sealedTo, changeLock, held, l, tries, trips, requests, writes, admits, answered, refusals>>
 
+\* A database writer puts env's row back as it was, unprotected, once an
+\* Owner protected it: the whole row, so the seal it stores is again the one
+\* the caller was loaded with. Nothing logged: the log's newest change of it
+\* is still the protection.
+Unprotect(p) ==
+    /\ pc[p] = "unprotect"
+    /\ seal["protected"] > 0
+    /\ putBack' = putBack \cup {"protected"}
+    /\ Goto(p, "done")
+    /\ UNCHANGED <<ok, names, svc, kver, seal, forged, gen, next, sealedTo, changeLock, held, l, tries, trips, requests, writes, admits, answered, refusals>>
+
 \* A database writer puts a revoked or demoted row back, live, and writes its
 \* seal into the log's newest change of it, the revoke or the demotion: row
 \* and log agree, StaleFirst passes, and the change's MAC no longer holds
@@ -894,7 +915,7 @@ Tick ==
 
 Step(p) == WVault(p) \/ WRest(p) \/ WDecide(p) \/ WApp(p) \/ WFence(p) \/ WCommit(p) \/ WToday(p) \/ WTodayCommit(p)
         \/ ARead(p) \/ ADecide(p) \/ AWrite(p) \/ ACommit(p) \/ AToday(p) \/ Answer(p) \/ Change(p)
-        \/ GiveBack(p) \/ Remove(p) \/ Restore(p) \/ Tamper(p) \/ Forge(p) \/ Substitute(p) \/ Rename(p)
+        \/ GiveBack(p) \/ Remove(p) \/ Restore(p) \/ Tamper(p) \/ Unprotect(p) \/ Forge(p) \/ Substitute(p) \/ Rename(p)
         \/ Refuse(p) \/ Refile(p)
 
 Terminating ==
@@ -912,7 +933,7 @@ TypeOK ==
     /\ ok \in [Movable -> BOOLEAN]
     /\ names \in [NameParts -> Nat]
     /\ seal \in [Objects -> Nat]
-    /\ putBack \subseteq {"cred", "member", "bob"}
+    /\ putBack \subseteq {"cred", "member", "bob", "protected"}
     /\ gen \in {0, 1}
     /\ forged \subseteq putBack
     /\ changeLock \in Procs \cup {None}

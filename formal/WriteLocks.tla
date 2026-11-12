@@ -8,6 +8,16 @@
 (* the queue or failing one: meanwhile the fence is held and every use     *)
 (* waits.                                                                  *)
 (*                                                                         *)
+(* That queue is the lock manager's, which an advisory lock goes through.  *)
+(* A row's lock does not quite: FOR SHARE joins the shares already held on *)
+(* a row even while a writer waits for them (`lockMembers` in the vault's  *)
+(* store.ts, which pairs each member's row with an advisory lock for that  *)
+(* reason). The model queues rows like the rest, and loses nothing by it   *)
+(* here: in each flow one process at most asks for a given row shared (the *)
+(* issue), so no share is ever there for another to join past a writer. A  *)
+(* flow with two shared requests of one row must model that row's lock     *)
+(* apart.                                                                  *)
+(*                                                                         *)
 (* Three locks are global. The change lock (0.16; before it, the row       *)
 (* `audit_chain_head`, 0.14's head) is an advisory lock that only changes  *)
 (* take, exclusive, where they took the head: in their first statement,    *)
@@ -80,7 +90,7 @@
 (* held by the add's hold.                                                 *)
 (*                                                                         *)
 (* Flow = "change": the order itself, for every change of more than one    *)
-(* statement.                                                              *)
+(* statement, whichever way it takes the issue lock.                       *)
 (*   vault    the vault's change of a member (`#decideOnce`,               *)
 (*            `change_input`): the member's row, the change lock, the      *)
 (*            issue lock shared, the fence. On `main` the issue lock is    *)
@@ -90,6 +100,13 @@
 (*   app      the app's change (`audited`, `app_change`): the change lock, *)
 (*            a credential's row it writes, the issue lock shared, the     *)
 (*            fence;                                                       *)
+(*   policy   the vault's change of the policy (`changePolicy`), which an  *)
+(*            issue compares: the actor's row, the change lock, the issue  *)
+(*            lock exclusive (`holdIssues`, so that an issue in flight is  *)
+(*            ordered against it), the fence;                              *)
+(*   slug     the app's change of a protected environment's slug, which an *)
+(*            issue compares too (`changes.commit`): the change lock, the  *)
+(*            issue lock exclusive, the fence;                             *)
 (*   issue    a token issued to that member on that credential: the        *)
 (*            member's row FOR SHARE, the credential's, the issue lock;    *)
 (*   barrier, use as above.                                                *)
@@ -114,7 +131,7 @@ CONSTANTS Flow, TouchFirst, WriteTakesChangeLock, MembersFirst, AddTakesChangeLo
 
 Procs == CASE Flow = "write" -> {"write", "patch", "issue", "barrier", "revoke", "use"}
            [] Flow = "add" -> {"add", "demote", "issue", "barrier", "revoke", "use"}
-           [] Flow = "change" -> {"vault", "app", "issue", "barrier", "use"}
+           [] Flow = "change" -> {"vault", "app", "policy", "slug", "issue", "barrier", "use"}
 
 \* Each one's locks, in the order it takes them: a lock and its mode, S(hared) or X (exclusive).
 Changing(takes) == IF takes THEN << <<"change", "X">> >> ELSE << >>
@@ -128,6 +145,8 @@ Plan(p) ==
             IF MembersFirst THEN << <<"member", "X">> >> \o Changing(AddTakesChangeLock) \o << <<"issue", "S">>, <<"fence", "X">> >>
                             ELSE Changing(AddTakesChangeLock) \o << <<"member", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
       [] p \in {"demote", "vault"} -> << <<"member", "X">>, <<"change", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
+      [] p = "policy" -> << <<"member", "X">>, <<"change", "X">>, <<"issue", "X">>, <<"fence", "X">> >>
+      [] p = "slug" -> << <<"change", "X">>, <<"issue", "X">>, <<"fence", "X">> >>
       [] p = "app" ->
             IF ~ChangeLockFirst THEN << <<"issue", "S">>, <<"change", "X">>, <<"cred", "X">>, <<"fence", "X">> >>
             ELSE IF ~IssueBeforeFence THEN << <<"change", "X">>, <<"cred", "X">>, <<"fence", "X">>, <<"issue", "S">> >>

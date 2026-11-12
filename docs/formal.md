@@ -2510,8 +2510,9 @@ put back so after his demotion while he adds svc (`WritingForge`, T190),
 her write while the key is made a reference, the roles redefined and her
 session revoked, a try the vault served abandoned at its hold and the next
 not served, down today's path (`WritingFallBack`, PR 3), the same while the
-policy is changed and the environment protected, which the digest of the
-policy's seals stops (`WritingDigest`, T272), or while the key
+policy is changed and the environment protected, and a database writer puts
+the environment's row back, which the policy's digest stops, read from the
+log (`WritingDigest`, T272), or while the key
 is made a reference and her session revoked before that path
 (`WritingCallerShape`, review r2 of #469); her write while her grant is
 taken and given back and her session revoked, a try abandoned at its hold
@@ -2609,7 +2610,8 @@ it.
 | today's path holds each object's newest change to its MAC too (TodayChangeMacChecked, T190 on that path) | `TodayStandsAtDecision` (Forge): Ada's grant revoked and her member row put back with its seal forged; the two-trip path refuses it (`tampered`) and sends it down today's path, which decides on it |
 | a request goes down today's path only from a try that committed nothing (FallBackUncommitted) | `OneWritePerRequest` (FallBack): a seal wait failing after the COMMIT taken for `served: false`, and the key written twice |
 | today's commit holds to the policy the caller was loaded with (TodayPolicyHeld: `audited`'s `policyStill`) | `TodayPolicyStandsAtCommit` (FallBack): the roles redefined after today's wrap, and the write commits on a right the caller no longer has (review r3 of #469) |
-| that policy is the seals of all the request read of it, compared as a digest: the roles', the policy row's and the environment's protection (`TodayUnheld = {}`; 0.16, where 0.15 held one number, the seq of the newest `policy.change`) | `TodayPolicyStandsAtCommit` (Digest): with the protection's seal left out, an Owner protects the environment after the front door and today's commit writes there all the same; with the roles' or the policy row's left out, that change is missed as without `TodayPolicyHeld`. And `WritesStandAtCommit` with the two-trip hold skipping the protection (`Unheld = {"protected"}`) |
+| that policy is all the request read of it, compared as a digest: the roles, the policy row and the environment's protection, each by the number of its newest change (`TodayUnheld = {}`; 0.16, where 0.15 held one number, the seq of the newest `policy.change`) | `TodayPolicyStandsAtCommit` (Digest): with the protection left out, an Owner protects the environment after the front door and today's commit writes there all the same; with the roles or the policy row left out, that change is missed as without `TodayPolicyHeld`. And `WritesStandAtCommit` with the two-trip hold skipping the protection (`Unheld = {"protected"}`) |
+| the digest's numbers are the log's, each object's newest change's, never the seal its row stores (TodayPolicyOnLog; expert review of #573) | `TodayPolicyStandsAtCommit` (Digest): an Owner protects the environment after today's decision, and a database writer puts its row back, unprotected, with the seal it had; read from the rows, the digest is the one the caller was loaded with, and the commit writes there |
 | a change answers once sealed (WaitForSeal) | `AnsweredSealed` |
 | a refused try is answered by the vault's record of it, and goes nowhere else (RefusalLogged, PR 6) | `TodayCallerStandsAtDecision` (Caller): the refusal down today's path, after a try abandoned at its hold, goes on with the caller the first try checked, and writes once her grant is back, her session revoked since (review r2 of #469) |
 | the record ends the request (RefusalEnds) | `RefusedOrWritten` (Caller): a refusal recorded, and then a write down today's path |
@@ -2705,10 +2707,14 @@ change of a member (`#decideOnce`, `change_input`: the member's row, the
 change lock, the issue lock shared, the fence; see below for where its issue
 lock comes from), the app's change (`audited`,
 `app_change`: the change lock, a credential's row, the issue lock shared,
-the fence), a token issued to that member (`issue_token`: the member's row
-shared, the credential's, the issue lock shared), the checkpointer's barrier
-(the issue lock exclusive, then the fence; never the change lock) and a use
-(the fence shared). 6,472 states.
+the fence), the two changes that take the issue lock exclusive, since an
+issue compares what they move (`holdIssues`: the vault's change of the
+policy, after its actor's row and the change lock; the app's change of a
+protected environment's slug, after the change lock; each then the fence), a
+token issued to that member (`issue_token`: the member's row shared, the
+credential's, the issue lock shared), the checkpointer's barrier (the issue
+lock exclusive, then the fence; never the change lock) and a use (the fence
+shared). 133,936 states.
 
 | protection | turned off, TLC finds |
 |---|---|
@@ -3180,6 +3186,21 @@ So 0.16 keeps one lock for it, the **change lock** (T272): an advisory lock
 everywhere, and the protections that rely on it end in `UnderChangeLock`
 (`ChangeTakesChangeLock` in Factor.tla).
 
+**A statement of its own.** Under READ COMMITTED a statement reads the
+database as it was when the statement began, however long it then waits for
+a lock. The head made up for that: its row came back as its last holder left
+it, whatever the snapshot, so a commit the snapshot had missed showed as a
+head ahead of the log it read (`snapshot.ts`, `current`). An advisory lock
+returns nothing to compare. So the wait for the change lock ends in one
+statement, and
+every read it orders is in a later one: a statement of the transaction's, or
+of a `VOLATILE` plpgsql function's body, each of which reads afresh. Never
+the same statement, a CTE of it, or a `STABLE` function, and no
+`pg_try_advisory_xact_lock` folded into the snapshot's read. Sent under one
+Sync with the members' rows, it is still its own statement; a member with no
+row yet is decided on from a read after it, since locking no row held
+nothing.
+
 **Who takes it.** Every holder of the head on `main` at `7aee14e6c`:
 
 | Holder today | What it is | In 0.16 |
@@ -3190,13 +3211,14 @@ everywhere, and the protections that rely on it end in `UnderChangeLock`
 | `vault.ts:1686`, `#rotate` | the vault's row key moved | the change lock, after every member's row, until the rotation is a change of `log_keys` |
 | `context.ts:273`, `audited` | every transaction of the app's | the change lock first, when its work changes rows; one that only logs becomes an event (`note`) and takes none |
 | `secrets.ts:1074`, `vault.ts:4345` (`laterHead`) | the two-trip key write, the member add | the change lock, kept (WriteLocks.tla) |
-| SQL: `app_change`, `change_input`, `change_bindings`, `revoke_credential` | a change's last statement, or its only one | the change lock where each took the head: held already by a change of several statements, taken there by a change of one |
+| SQL: `app_change`, `change_input`, `change_bindings`, `revoke_credential` | a change's last statement, or its only one | the change lock where each took the head: held already by a change of several statements, taken there by a change of one. `change_bindings` took it only to end something (an unbind, a bind that replaces a binding): a bind that only makes one takes neither the head nor the fence, ordered by the account's and the actor's rows and by what it compares, and stays so |
+| `vault.ts:5102`, `reserveProxy` (`#decide` with `CODE_QUEUE`) | the code's proxy names reserved, a change when it adds one: a read before any lock answers every call but the first, and one call at a time waits for the head, in a line of one place (`lockLogHeadQueued`, `HeadBusy`) | the change lock, behind the same read and the same line of one place |
 | `key-rotation.ts:153` | a step of the app key's rotation, which signs 0.14's entries again | 0.14's head while that chain is written; AppKey.tla is as it was |
 | `vault.ts:3715`, `checkpoint` | a checkpoint of 0.14's chain | ends with the chain's last append; Audit.tla is as it was |
 | `vault.ts:3558`, `#checkKeks` | a key's check value, recorded once | none: an event. The head only kept a second record out |
 | `vault.ts:1042`, `:1383`, `:4076`; `context.ts:616`, `alerts.ts:64`, `watch.ts:183`, `db/audit.ts:59` | an entry that changes nothing: a refusal's record, a report, an alert | none: an event, under the fence shared |
 | `vault.ts:3960`, `#cutOver` | 0.15's cutover | deleted |
-| `log.ts:258` (`lockLogHeadQueued`), `:339` (`appendEntries`) | the reads' line; 0.14's append | deleted |
+| `log.ts:258` (`lockLogHeadQueued`), `:339` (`appendEntries`) | the reads' line of 16 places; 0.14's append | deleted; the line itself stays for `reserveProxy`'s one place, in front of the change lock |
 | `snapshot.postgres.ts:44` (`FOR UPDATE SKIP LOCKED`) | the Postgres half of the snapshot's head above: the row taken in the statement that reads | goes with the row; the change lock is a statement of its own, before the read |
 | `verify-runtime.ts:103` | `coffre-server verify`'s probe that the runtime login can update the head, rolled back | deleted with the row |
 | 0.15's checkpointer (its barrier), a 0.15 use, and in 0.16 the projector and the audit page's check | | never took the head, never take the change lock |
@@ -3216,11 +3238,27 @@ lock, the write waits for the row with the fence held (`WriteLocks`,
 
 **The policy revision.** A change that decided on the policy commits only
 while that policy is in force. 0.15 compared one number, the seq of the
-newest `policy.change` in 0.14's log. 0.16 compares seals, those of the rows
-the request read: the roles', the policy row's, the protection of the
-environments it touches. Writing.tla's `WritingDigest` holds today's commit
-to each (`TodayUnheld`, one run per seal left out), and Lifecycle.tla's
-issue and revoke compare the roles' the same way (`IssuePolicyHeld`,
+newest `policy.change` in 0.14's log. 0.16 compares one number for each
+object the request read of the policy: the roles, the policy row, the
+protection of the environments it touches. Each is the number of that
+object's newest change in `log_changes`, which the request's reads seek
+already and `hold_inputs` compares already (`ReadOnLog`, `ReadByNumber`).
+
+Never the seal a row stores, though the design calls this a digest of seals.
+A seal is a MAC over the row's values, so the same values have the same
+seal: a database writer who puts an old row back puts its genuine seal back
+with it. Take an environment that was unprotected when the caller was
+loaded. An Owner protects it, and the writer puts the row back as it was. A
+commit that compares the rows' seals finds the one it loaded, and writes to
+a protected environment; the log's newest change of it is the protection,
+with another number. A number also tells a policy changed and changed back
+from one that never moved, as 0.15's seq did: both answer 409
+`policy_changed`.
+
+Writing.tla's `WritingDigest` holds today's commit to each number
+(`TodayUnheld`, one run per object left out) and to the log
+(`TodayPolicyOnLog`, with that writer), and Lifecycle.tla's issue and revoke
+hold to the roles under the issue lock (`IssuePolicyHeld`,
 `RevokePolicyHeld`).
 
 **What still says "head".** Bulk.tla (the bulk limit of 0.14's read),

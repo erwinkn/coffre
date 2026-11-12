@@ -52,12 +52,14 @@ ForgeProcs == {"w1", "bob", "end", "rev", "dem", "fsg", "ck"}
 FallBackProcs == {"w1", "shp", "rol", "end", "ck"}
 
 \* Ada writes key k while it is made a reference, the roles redefined, the
-\* policy changed and env protected: the policy today's commit holds to is
-\* the seals of all it read of it (T272), so each of the three changes after
-\* the front door stops the write (TodayUnheld leaves one seal out of the
-\* digest); and the two-trip path's hold reads the protection as it reads
-\* the rest.
-DigestProcs == {"w1", "shp", "rol", "pol", "prv", "ck"}
+\* policy changed and env protected, and a database writer puts env's row
+\* back, unprotected: the policy today's commit holds to is all it read of
+\* it, each object by its newest change's number (T272), so each of the
+\* three changes after the front door stops the write (TodayUnheld leaves
+\* one out of the digest), the row put back or not (TodayPolicyOnLog: read
+\* from the rows' seals, the digest is the one she was loaded with); and
+\* the two-trip path's hold reads the protection as it reads the rest.
+DigestProcs == {"w1", "shp", "rol", "pol", "prv", "unp", "ck"}
 
 \* Ada writes key k while her grant is taken away and given back and her
 \* session revoked: a try the vault served whose hold fails, then a refusal
