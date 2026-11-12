@@ -46,6 +46,21 @@ function phaseOf(principal: string, key: string, refresh: number): number {
   return createHash('sha256').update(`${principal}/${key.toLowerCase()}`, 'utf8').digest().readUIntBE(0, 6) % refresh;
 }
 
+/** The phases of every key with a value in `place` (`project/environment`), for each of `principals`. Reads the keys from `db`. */
+async function bulkPhases(db: Queryable, principals: readonly string[], place: string): Promise<number[]> {
+  const [project, environment] = place.split('/');
+  const keys = await rowsOf<{ id: string }>(db, sql`
+    SELECT s.id FROM secrets s JOIN environments e ON e.id = s.environment_id JOIN projects q ON q.id = e.project_id
+     WHERE q.slug = ${project} AND e.slug = ${environment} AND s.current_version_id IS NOT NULL`);
+  if (keys.length === 0) throw new Error(`no key with a value in ${place}`);
+  return principals.flatMap((principal) => keys.map(({ id }) => phaseOf(principal, id, MINUTE_MS)));
+}
+
+/** How long from `at` until the first of `phases` turns its period. */
+function untilTurn(phases: readonly number[], at: number): number {
+  return Math.min(...phases.map((phase) => MINUTE_MS - ((((at - phase) % MINUTE_MS) + MINUTE_MS) % MINUTE_MS)));
+}
+
 /**
  * Waits until no key with a value in `place` (`project/environment`) turns its bulk-cap period within `ms` for any of
  * `principals`, so that calls taking less than `ms` share each key's period (a minute, `refreshMs` of the default
@@ -53,21 +68,33 @@ function phaseOf(principal: string, key: string, refresh: number): number {
  * next one leaves `ms` for every key. The database's clock and this one are the machine's.
  */
 export async function inBulkPeriod(ms: number, db: Queryable, principals: readonly string[], place: string, now: () => number = Date.now): Promise<void> {
-  const [project, environment] = place.split('/');
-  const keys = await rowsOf<{ id: string }>(db, sql`
-    SELECT s.id FROM secrets s JOIN environments e ON e.id = s.environment_id JOIN projects q ON q.id = e.project_id
-     WHERE q.slug = ${project} AND e.slug = ${environment} AND s.current_version_id IS NOT NULL`);
-  if (keys.length === 0) throw new Error(`no key with a value in ${place}`);
-  const phases = principals.flatMap((principal) => keys.map(({ id }) => phaseOf(principal, id, MINUTE_MS)));
-  const left = (at: number) => Math.min(...phases.map((phase) => MINUTE_MS - ((((at - phase) % MINUTE_MS) + MINUTE_MS) % MINUTE_MS)));
+  const phases = await bulkPhases(db, principals, place);
   const start = now();
-  for (let at = start; at < start + MINUTE_MS; at += left(at) + 50) {
-    if (left(at) >= ms) {
+  for (let at = start; at < start + MINUTE_MS; at += untilTurn(phases, at) + 50) {
+    if (untilTurn(phases, at) >= ms) {
       if (at > start) await sleep(at - now());
       return;
     }
   }
   throw new Error(`no time in the next minute leaves ${ms} ms in every one of ${phases.length} keys' periods`);
+}
+
+/**
+ * Waits until just after a key with a value in `place` turned its bulk-cap period for one of `principals`, at a turn
+ * the next of which is at least `ms` away: a use made before the wait wrote that key's row in its last period, and
+ * calls after it taking less than `ms` share every key's period. Waits at most a minute and `ms`, or throws if no turn
+ * in the next minute leaves `ms`.
+ */
+export async function pastBulkTurn(ms: number, db: Queryable, principals: readonly string[], place: string, now: () => number = Date.now): Promise<void> {
+  const phases = await bulkPhases(db, principals, place);
+  const start = now();
+  for (let turn = start + untilTurn(phases, start); turn < start + MINUTE_MS + ms; turn += untilTurn(phases, turn + 1) + 1) {
+    if (untilTurn(phases, turn + 1) + 1 >= ms + 100) {
+      await sleep(turn + 50 - now());
+      return;
+    }
+  }
+  throw new Error(`no turn in the next minute of ${phases.length} keys' periods leaves ${ms} ms before the next`);
 }
 
 const DAY_MS = 86_400_000;

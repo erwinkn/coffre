@@ -12,7 +12,7 @@ import { encrypt, freshDek } from '@coffre/core/envelope';
 import { deletedWithProject, tombstoneOf } from '@coffre/core/schemas';
 import type { EnvironmentColumns, ObjectChange, SecretColumns, UseInput, UseOutcome, Via, VersionColumns } from '@coffre/core/vault';
 import { type Queryable, type Transaction } from '@coffre/db';
-import { appChanges, isStaleChange } from '@coffre/db/log';
+import { appChanges, appendEntries, isStaleChange } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
 import { keptObjects, loggedChange, NotLogged, prepareChanges, type ChangeKeys } from '../src/changes.ts';
@@ -20,6 +20,7 @@ import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, type Ref } from '../src/inputs.ts';
 import { grants, loggedChanges, loggedChangesQuery, member } from '../src/store.ts';
 import { logMacKey } from '../src/log-entry.ts';
+import { vaultLogKey } from '../src/log.ts';
 import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { environmentObject, principalObject, secretObject } from '../src/objects.ts';
 import { openTestDatabase, rows, run, sealed, nothingHeld, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
@@ -856,19 +857,28 @@ test("a break by a Developer in a protected environment after a writer marked it
   const legacy = randomUUID();
   await db.owner.insert(environments).values({ id: legacy, projectId: w.project, slug: 'legacy', name: 'legacy', protected: false });
   const [old, oldRef] = [randomUUID(), randomUUID()];
-  // The vault makes none there (its row is not as the log holds it), so it is a writer's, on the entry of that refusal.
+  // The vault makes none there (its row is not as the log holds it): it refuses as tampered.
   const made = await vault.reference({
     principal: ROOT, caller: 'person', items: [{ id: oldRef, holder: { projectId: w.project, environmentId: legacy, secretId: old, path: 'p/legacy/OLD' }, source: { secretId: source } }],
   });
   assert.equal(made.ok ? 'made' : made.refusal.code, 'tampered');
-  const [{ seq }] = await rows<{ seq: number }>(db.owner, sql`SELECT max(seq)::int AS seq FROM audit_log`) as [{ seq: number }];
+  // So the reference is one 0.14 made there before the cutover: the vault's own `reference.create`, allowed, under its
+  // key, as `via`'s entry is, naming the legacy holder. The batch then reaches the per-reference decision, not a seal.
+  const [{ metadata }] = await rows<{ metadata: string }>(db.owner, sql`SELECT metadata FROM audit_log WHERE seq = ${BigInt(via.seq)}`) as [{ metadata: string }];
+  const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{
+    actor: ROOT, action: 'reference.create', decision: 'allow', projectId: w.project, environmentId: legacy,
+    metadata: JSON.stringify({ ...JSON.parse(metadata), reference: oldRef, subject: 'p/legacy/OLD', secretId: old }),
+  }], undefined, undefined, [], true));
+  const seq = Number(appended.seqStart);
   await db.owner.insert(secrets).values({ id: old, projectId: w.project, environmentId: legacy, key: 'OLD' });
   await db.owner.insert(secretReferences).values({
     id: oldRef, projectId: w.project, environmentId: legacy, secretId: old, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
     createdSeq: BigInt(seq), createdBy: ROOT,
   });
   const batch = await vault.endReferences({ principal: dana, caller: 'person', reason: 'broken', items: [via, { reference: oldRef, seq }] });
-  assert.ok(!batch.ok, JSON.stringify(batch));
+  // Refused as the protected reference alone is, past both seals: not `bad_claim`, an entry the vault never sealed.
+  assert.equal(batch.ok ? 'ended' : batch.refusal.code, refused.ok ? 'ended' : refused.refusal.code);
+  assert.equal(batch.ok ? 'ended' : batch.refusal.code, 'tampered');
   await run(db.owner, sql`UPDATE projects SET slug = ${slug} WHERE id = ${w.project}`);
   assert.deepEqual((await endedAt(holder)).map((at) => at !== null), [false]);
   assert.ok((await vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'role', role: 'developer', definition: null } })).ok);

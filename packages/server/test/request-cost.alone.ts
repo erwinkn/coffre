@@ -45,6 +45,7 @@ import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, cutOverAtOpen, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testAnchor, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { answer, type Pages } from './start-fixture.ts';
+import { inBulkPeriod, pastBulkTurn } from './window-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
@@ -512,25 +513,24 @@ async function cost(request: () => Promise<unknown>): Promise<Cost> {
 }
 
 /**
- * The bulk cap's period: a tenth of its window, at most a minute (the vault's default window, 15 minutes, which this
- * deployment keeps), aligned on the epoch. A key's first use in a new one moves its row of the cap's, one statement
- * more (`useNamedMany`'s "3, a key entering her cap's set"), whichever request comes first after the minute turns.
+ * The bulk cap's periods: a tenth of its window, at most a minute (the vault's default window, 15 minutes, which this
+ * deployment keeps), each principal's key starting its own at a phase of its own (`phaseOf`, T204). A key's first use
+ * in a new one moves its row of the cap's, one statement more (`useNamedMany`'s "3, a key entering her cap's set"),
+ * whichever request comes first after that key's period turns. The requests' callers: the reader, and ci-web's token,
+ * which its CI runs and its workloads use too. Every key they reveal is market/dev's.
  */
-const CAP_PERIOD_MS = 60_000;
+const CAPPED = [`user:${READER}`, SERVICE];
+const PERIOD_ROOM_MS = 2_000;
 
 /**
- * What `request` costs once its keys' rows of the cap's are this period's: run once, then measured, both within one
- * period, or both again if the period turned between them (a stalled runner): the vault reads this process's clock.
- * What a hot request costs any other time of the minute; the minute's first is a test of its own ("a reveal's first
- * use of its keys in a new period").
+ * What `request` costs once its keys' rows of the cap's are their periods': run once, then measured, both within
+ * every key's period (`inBulkPeriod`). What a hot request costs any other time; the first after a key's period turned
+ * is a test of its own ("a reveal's first use of its keys in a new period").
  */
 async function repeated(request: () => Promise<unknown>): Promise<Cost> {
-  for (;;) {
-    const period = Math.floor(Date.now() / CAP_PERIOD_MS);
-    await request();
-    const spent = await cost(request);
-    if (Math.floor(Date.now() / CAP_PERIOD_MS) === period) return spent;
-  }
+  await inBulkPeriod(PERIOD_ROOM_MS, db.owner, CAPPED, 'market/dev');
+  await request();
+  return cost(request);
 }
 
 /**
@@ -1007,14 +1007,14 @@ test("a reveal after the reader's access changed costs what any other does", asy
 });
 
 /**
- * A reveal of an environment, the first use of its keys after the bulk
- * cap's period turned (`CAP_PERIOD_MS`): its keys' rows of the cap's moved
- * to the new period, one statement more, once. The next
- * costs its budget.
+ * A reveal of an environment, the first use of its keys after one of their
+ * periods of the bulk cap turned (`pastBulkTurn`): that key's row of the
+ * cap's moves to the new period, one statement more, once. The next costs
+ * its budget.
  */
 test("a reveal's first use of its keys in a new period of the bulk cap moves their rows: one statement more, once", async () => {
   await reader.secrets.reveal('market/dev');
-  await sleep(CAP_PERIOD_MS - (Date.now() % CAP_PERIOD_MS) + 50);
+  await pastBulkTurn(PERIOD_ROOM_MS, db.owner, [`user:${READER}`], 'market/dev');
   const first = await cost(() => reader.secrets.reveal('market/dev'));
   const next = await cost(() => reader.secrets.reveal('market/dev'));
   assert.deepEqual({ app: first.app.statements, vault: first.vault.statements, vaultCalls: first.vaultCalls }, { app: 0, vault: 3, vaultCalls: 1 });
