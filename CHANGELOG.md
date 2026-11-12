@@ -13,12 +13,13 @@
   GitHub's JWKS timed out at 5 s, and the `Retry-After: 60` it answered
   was past what the CLI waits, so the CLI did not ask again. Now a fetch
   the issuer did not answer (the deadline, a network error, a 408, 429 or
-  5xx) is asked once more at once when nothing can stand in for it; a set
-  past its ten minutes stands in for one the issuer could not serve, as
+  5xx) is asked once more at once, but for a 429, when nothing can stand
+  in for it; a set past its ten minutes stands in for one the issuer could not serve, as
   long as its `Cache-Control` max-age, an hour at most (GitHub's says an
   hour), and never for a key it lacks; the isolate waits ten seconds, not
   a minute, before fetching again, and says `Retry-After: 10`, which the
-  CLI waits out and asks again. The 503 names the issuer and says the
+  CLI waits out and asks again; an exchange that fails during that pause
+  is told what is left of it. The 503 names the issuer and says the
   failed request was coffre's, not the token's: `coffre could not fetch
   the signing keys of the issuer https://token.actions.githubusercontent.com
   (…/.well-known/jwks: timed out after 5 s): its own request to the issuer

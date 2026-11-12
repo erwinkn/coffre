@@ -15,20 +15,20 @@ type Entry = {
   fetchedAt: number;
   /** Until when `keys` stand in for a set the issuer cannot be asked for now (`keptFor`). */
   keptUntil: number;
-  quiet: Quiet | null;
+  /** The last fetch's failure, until the URL may be fetched again; a success clears it. */
+  failed: Failure | null;
+  /** No fetch for a key the set lacks before then: the minute after one (`KEYS_COOLDOWN_MS`). Only that path sets or reads it. */
+  kidUntil: number;
 };
 
 /**
- * No fetch of the URL before `until`; until then a token no usable key
- * verifies is told `why`, said of its own issuer: bindings to several
- * issuers may share one URL, its keys and its quiets. `standIn` when the issuer did not answer: then,
- * and only then, a set past fresh verifies meanwhile, up to `keptUntil`.
- * The quiet after a key the set lacked, or after an answer that was not
- * keys, lets no stale set stand in. `absent` for the minute after a key the
- * set lacked: `why` is then true only of a token whose key the set lacks,
- * and the quiet holds back no refresh of a set past fresh.
+ * A fetch that failed: no fetch of the URL before `until`. `message`, the
+ * transport's, says what it met; the 503 names each token's own issuer,
+ * since bindings to several issuers may share one URL. `standIn` when the
+ * issuer did not answer: then, and only then, a set past fresh verifies
+ * meanwhile, up to `keptUntil`.
  */
-type Quiet = { until: number; why: (issuer: string) => string; standIn: boolean; absent?: true };
+type Failure = { until: number; message: string; standIn: boolean };
 
 /**
  * The time the cache goes by: the caller's `now` (tests set it), moved on by
@@ -125,28 +125,31 @@ function directives(header: string): Array<[name: string, value: string | null]>
  * The keys at `url`, fetched now, and kept. When the issuer did not answer
  * and `retry`, asked once more at once (on Node, on a connection of its
  * own): a request lost on its way, or one host of many stuck, rarely is
- * twice. Failing, that URL waits `KEYS_UNREACHED_MS` before the next fetch, or
- * `KEYS_COOLDOWN_MS` after an answer that was not its keys, which also ends
- * the stand-in of the set kept: an issuer that answers anything but keys is
- * not one whose old keys outlive their ten minutes.
+ * twice. Not after a 429, which asks for time, nor once another call's
+ * failure has stopped fetches of the URL meanwhile. Failing, that URL waits
+ * `KEYS_UNREACHED_MS` before the next fetch, or `KEYS_COOLDOWN_MS` after an
+ * answer that was not its keys, which also ends the stand-in of the set
+ * kept: an issuer that answers anything but keys is not one whose old keys
+ * outlive their ten minutes.
  *
  * A fetch that fails after another call fetched the URL meanwhile takes
  * that call's set instead, as new as its own would have been, and asks no
  * more: say a stale set, A's fetch hanging, B's answered, then A's timing
  * out: A verifies under B's set.
  *
- * Other calls may have failed meanwhile too. A failure is told to the
- * entry as it is now, not as it was when this fetch began: it keeps a quiet
- * another call set (a definite answer's over a timeout's, else the longer),
- * but for `own`, the one this call set before it fetched, and says that
- * quiet's `Retry-After`. A success leaves `own` on, in the same write.
+ * Another call's failure may stand meanwhile too. It stays, so that every
+ * `Retry-After` it was told stays true, unless it was a timeout's and this
+ * one a definite answer, which ends the stand-in; the 503 says the failure
+ * that stands, and its time left. `kid` for a fetch for a key the set
+ * lacked: a failure lifts the minute after it, since the issuer said
+ * nothing of that key, and the failure alone then holds the next one back.
  */
 async function fetchKeys(
   transport: WorkloadTransport,
   url: string,
   issuer: string,
   clock: Clock,
-  { retry, own = null }: { retry: boolean; own?: Quiet | null },
+  { retry, kid }: { retry: boolean; kid: boolean },
 ): Promise<JSONWebKeySet> {
   const before = entries.get(url)?.keys ?? null;
   for (let attempt = 1; ; attempt++) {
@@ -158,40 +161,31 @@ async function fetchKeys(
       if (keys.length > MAX_KEYS) throw new FetchRefused(new URL(url), `holds more than ${MAX_KEYS} keys`);
       const set = { keys: keys.filter((key) => typeof key === 'object' && key !== null && (key as { use?: unknown }).use !== 'enc') } as JSONWebKeySet;
       const at = clock();
-      remember(url, { keys: set, fetchedAt: at, keptUntil: at + keptFor(cacheControl), quiet: own });
+      remember(url, { keys: set, fetchedAt: at, keptUntil: at + keptFor(cacheControl), failed: null, kidUntil: entries.get(url)?.kidUntil ?? 0 });
       return set;
     } catch (error) {
       const transient = error instanceof FetchRefused && error.transient;
+      const at = clock();
       const entry = entries.get(url);
       const meanwhile = entry?.keys != null && entry.keys !== before;
-      const retrying = transient && retry && attempt === 1 && !meanwhile;
+      const standing = failure(url, at);
+      const retrying = transient && retry && attempt === 1 && !meanwhile && standing === null && (error as FetchRefused).status !== 429;
       // One line a failed fetch, the one a retry then answers included; the quiet after the last spaces them out.
       console.error({ event: 'workload_keys_unfetched', url, attempt, transient, retrying, error: (error as Error).message }, "coffre could not fetch an issuer's signing keys");
       if (retrying) continue;
       const keptUntil = entry?.keys == null ? 0 : transient ? entry.keptUntil : Math.min(entry.keptUntil, entry.fetchedAt + KEYS_FRESH_MS);
-      // Fresh for minutes, a set fetched meanwhile needs no quiet; a definite answer still ends its stand-in.
+      const base = { keys: entry?.keys ?? null, fetchedAt: entry?.fetchedAt ?? 0, kidUntil: entry?.kidUntil ?? 0, keptUntil };
+      // Fresh for minutes, a set fetched meanwhile needs no failure on; a definite answer still ends its stand-in.
       if (meanwhile) {
-        remember(url, { ...entry, keptUntil, quiet: own ?? entry.quiet });
+        remember(url, { ...base, failed: entry.failed });
         return entry.keys!;
       }
-      const at = clock();
-      const message = (error as Error).message;
-      const why = (of: string) =>
-        `coffre could not fetch the signing keys of the issuer ${of} (${message}): ` +
-        'its own request to the issuer failed, not the token or the job that sent it';
-      const failed: Quiet = { until: at + (transient ? KEYS_UNREACHED_MS : KEYS_COOLDOWN_MS), why, standIn: transient };
-      const other = entry?.quiet != null && entry.quiet !== own && at < entry.quiet.until ? entry.quiet : null;
-      const pause = other === null ? failed : stronger(failed, other);
-      remember(url, { keys: entry?.keys ?? null, fetchedAt: entry?.fetchedAt ?? 0, keptUntil, quiet: pause });
-      throw new IssuerUnavailable(why(issuer), secondsLeft(pause, at), { cause: error, transient: pause.standIn });
+      const own: Failure = { until: at + (transient ? KEYS_UNREACHED_MS : KEYS_COOLDOWN_MS), message: (error as Error).message, standIn: transient };
+      const failed = standing !== null && !(standing.standIn && !own.standIn) ? standing : own;
+      remember(url, { ...base, failed, kidUntil: kid ? 0 : base.kidUntil });
+      throw unavailable(url, issuer, at, { kid: false, cause: error });
     }
   }
-}
-
-/** Of two quiets on at once, the one that stands: a definite answer's over a timeout's, else the one that ends later. */
-function stronger(a: Quiet, b: Quiet): Quiet {
-  if (a.standIn !== b.standIn) return a.standIn ? b : a;
-  return a.until >= b.until ? a : b;
 }
 
 function remember(url: string, entry: Entry): void {
@@ -201,10 +195,10 @@ function remember(url: string, entry: Entry): void {
   while (entries.size > MAX_KEY_SETS) entries.delete(entries.keys().next().value!);
 }
 
-/** The URL's quiet, still on at `at`, or null. */
-function quiet(url: string, at: number): Quiet | null {
-  const pause = entries.get(url)?.quiet ?? null;
-  return pause !== null && at < pause.until ? pause : null;
+/** The URL's failure, if it still stops fetches at `at`, or null. */
+function failure(url: string, at: number): Failure | null {
+  const failed = entries.get(url)?.failed ?? null;
+  return failed !== null && at < failed.until ? failed : null;
 }
 
 /** The URL's set, if it may still stand in at `at`, or null. */
@@ -213,25 +207,26 @@ function kept(url: string, at: number): JSONWebKeySet | null {
   return entry?.keys != null && at < entry.keptUntil ? entry.keys : null;
 }
 
-function secondsLeft(pause: Quiet, at: number): number {
-  return Math.max(1, Math.ceil((pause.until - at) / 1000));
+/**
+ * The 503 for a token of `issuer` no usable key verifies at `at`: why, and
+ * the seconds until `url` is fetched again for it. With `kid`, for a key
+ * the set lacks, whose fetch also waits out the minute after the last one.
+ */
+function unavailable(url: string, issuer: string, at: number, { kid, cause }: { kid: boolean; cause?: unknown }): IssuerUnavailable {
+  const entry = entries.get(url);
+  const failed = failure(url, at);
+  const until = Math.max(failed?.until ?? 0, kid ? (entry?.kidUntil ?? 0) : 0);
+  const why =
+    failed !== null
+      ? `coffre could not fetch the signing keys of the issuer ${issuer} (${failed.message}): ` +
+        'its own request to the issuer failed, not the token or the job that sent it'
+      : `the token's key is not among the signing keys ${issuer} publishes, which coffre fetched from ${url} a moment ago`;
+  return new IssuerUnavailable(why, Math.max(1, Math.ceil((until - at) / 1000)), { cause, transient: failed?.standIn ?? false });
 }
 
-/** `IssuerUnavailable` for a quiet: its reason, said of `issuer`, and the seconds it has left. */
-function quieted(pause: Quiet, at: number, issuer: string): IssuerUnavailable {
-  return new IssuerUnavailable(pause.why(issuer), secondsLeft(pause, at), { transient: pause.standIn });
-}
-
-/** Why a token is refused whose key a set lacks that coffre fetched a moment ago. */
-function absentWhy(url: string): (issuer: string) => string {
-  return (issuer) => `the token's key is not among the signing keys ${issuer} publishes, which coffre fetched from ${url} a moment ago`;
-}
-
-/** No fetch of `url` for `KEYS_COOLDOWN_MS` from `at`, after a key its set lacked. */
-function pauseFor(url: string, at: number): Quiet {
-  const pause: Quiet = { until: at + KEYS_COOLDOWN_MS, why: absentWhy(url), standIn: false, absent: true };
-  remember(url, { ...(entries.get(url) ?? { keys: null, fetchedAt: 0, keptUntil: 0 }), quiet: pause });
-  return pause;
+/** No fetch of `url` for a key its set lacks for `KEYS_COOLDOWN_MS` from `at`. */
+function pauseKids(url: string, at: number): void {
+  remember(url, { ...(entries.get(url) ?? { keys: null, fetchedAt: 0, keptUntil: 0, failed: null }), kidUntil: at + KEYS_COOLDOWN_MS });
 }
 
 /**
@@ -259,6 +254,7 @@ function pauseFor(url: string, at: number): Quiet {
  *   fresh set lacks the kid                     one fetch; 503, Retry-After 60, if the new set lacks it too
  *   stale set, during another's kid refetch     fetched, as any stale set; the minute stays on
  *   stale set; A times out after B was answered  A verified under B's set, no second attempt
+ *   cold; A fails at 10 s, B at 13 s            B told 7 s, what is left of A's pause, which stands
  */
 export async function verifyWithKeys(
   transport: WorkloadTransport,
@@ -277,44 +273,43 @@ export async function verifyWithKeys(
   let keys: JSONWebKeySet;
   if (fresh) {
     keys = entry.keys!;
+  } else if (failure(url, now) !== null) {
+    // The minute after a key the set lacked holds back no refresh of a stale set: a token whose key the old set has is
+    // not held up a minute, past the CLI's patience (review r5 of #565).
+    standIn = unavailable(url, expected.issuer, now, { kid: false });
+    const set = standIn.transient ? kept(url, now) : null;
+    if (set === null) throw standIn;
+    keys = set;
   } else {
-    // The minute after a key the set lacked holds back fetches for unknown keys only, never a stale set's refresh, which
-    // keeps it on (review r5 of #565): a token whose key the old set has is not held up to a minute, past the CLI's patience.
-    const pause = quiet(url, now);
-    if (pause !== null && !pause.absent) {
-      standIn = quieted(pause, now, expected.issuer);
-      const set = pause.standIn ? kept(url, now) : null;
-      if (set === null) throw standIn;
+    try {
+      keys = await fetchKeys(transport, url, expected.issuer, clock, { retry: kept(url, now) === null, kid: false });
+      fetched = true;
+    } catch (error) {
+      const set = error instanceof IssuerUnavailable && error.transient ? kept(url, clock()) : null;
+      if (set === null) throw error;
+      standIn = error as IssuerUnavailable;
       keys = set;
-    } else {
-      try {
-        keys = await fetchKeys(transport, url, expected.issuer, clock, { retry: kept(url, now) === null, own: pause });
-        fetched = true;
-      } catch (error) {
-        const set = error instanceof IssuerUnavailable && error.transient ? kept(url, clock()) : null;
-        if (set === null) throw error;
-        standIn = error as IssuerUnavailable;
-        keys = set;
-      }
     }
   }
   try {
     return await verifyWorkloadToken(token, keys, expected);
   } catch (error) {
     if (!absentKey(error)) throw error;
-    if (fetched) throw quieted(pauseFor(url, clock()), clock(), expected.issuer);
     if (standIn !== null) throw standIn;
-    const pause = quiet(url, clock());
-    if (pause !== null) throw quieted(pause, clock(), expected.issuer);
+    if (fetched) {
+      pauseKids(url, clock());
+      throw unavailable(url, expected.issuer, clock(), { kid: true });
+    }
+    if (failure(url, clock()) !== null || clock() < entries.get(url)!.kidUntil) throw unavailable(url, expected.issuer, clock(), { kid: true });
   }
   // The issuer may have rotated: fetch once, and wait a minute before the next, whatever it finds. Paused first, so that
   // a token naming another unknown key meanwhile fetches nothing.
-  const pause = pauseFor(url, clock());
-  const rotated = await fetchKeys(transport, url, expected.issuer, clock, { retry: true, own: pause });
+  pauseKids(url, clock());
+  const rotated = await fetchKeys(transport, url, expected.issuer, clock, { retry: true, kid: true });
   try {
     return await verifyWorkloadToken(token, rotated, expected);
   } catch (error) {
-    if (absentKey(error)) throw quieted(pause, clock(), expected.issuer);
+    if (absentKey(error)) throw unavailable(url, expected.issuer, clock(), { kid: true });
     throw error;
   }
 }

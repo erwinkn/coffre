@@ -428,7 +428,7 @@ moving to its new app key), the step's sign-in, its reads of values and
 its `require-complete` check are asked again, about 2 s and then 5 s
 later, before the step fails. An instance that says `Retry-After` (5 s on
 a 503 `unavailable`) is asked no sooner than that, up to 10 s, and no wait
-is longer than 15 s; one that says to come back later than 15 s (an
+is longer than 15 s; one that says to come back later than 15 s (a
 key the issuer's set lacks, which it will not look for again for a
 minute) fails the step at once. An issuer that did not answer the
 instance's fetch of its keys is a 503 `issuer_unavailable` that says 10 s,

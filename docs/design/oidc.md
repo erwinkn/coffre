@@ -290,7 +290,9 @@ GitHub's JWKS timed out twice for one deploy job while it answered other
 hosts in 0.4 s.
 - With no set to fall back on (a cold isolate, or one past its stand-in),
   the fetch is asked once more at once (on Node, on a new connection;
-  Workers' `fetch` says nothing of which it uses).
+  Workers' `fetch` says nothing of which it uses). Not after a 429, which
+  asks for time, nor once another exchange's failed fetch has paused the
+  URL meanwhile.
 - A set past its ten minutes stands in for the one the issuer could not
   serve, for as long as its answer's `Cache-Control` lets it, counted from
   coffre's fetch: its `max-age`, at most an hour, an hour if it says none, never past
@@ -320,13 +322,20 @@ hosts in 0.4 s.
   after an unknown `kid` holds back fetches for unknown keys only: a set
   that goes stale meanwhile is fetched again as any other, and the minute
   stays on. A token whose key the old set has is not held up to a minute,
-  past the CLI's patience, by another exchange's made-up `kid`.
+  past the CLI's patience, by another exchange's made-up `kid`. The cache
+  keeps the two apart, a failed fetch's pause and an unknown `kid`'s
+  minute, so that neither ends or stretches the other.
 - A fetch that fails is told to the cache as it is then, not as it was when
   the fetch began. Another exchange's answer that was not keys, which came
   meanwhile, still ends the stand-in, and its minute stands. A set whose
   hour ended during the fetch does not stand in. Times are the ones at which
   the fetch ended: a fetch that timed out after 5 s waits its ten seconds
   from then.
+- A pause already on stays, so that every `Retry-After` it was told stays
+  true: say exchange A's fetch times out at 10 s, pausing until 20 s, and
+  B's at 13 s; B is told 7 s, not 10, and A, back at 20 s, fetches. Only
+  an answer that is not keys replaces a timeout's ten seconds, since it
+  ends the stand-in.
 - A fetch that fails after another exchange's fetch of the URL was
   answered takes that set, as new as its own would have been, and asks
   no more. Say the set is stale, exchange A's fetch hangs, B's is

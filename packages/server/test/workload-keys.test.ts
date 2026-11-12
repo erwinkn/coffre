@@ -92,6 +92,12 @@ function held(then?: (url: URL) => never): { answer: (url: URL) => Promise<void>
   };
 }
 
+/** A fetch held until `release`, and then timed out. */
+const hang = () =>
+  held((url) => {
+    throw timedOut(url);
+  });
+
 /** Verify at `at` ms past T0 a token issued then: whom it came from, or why not, with the fetches it cost. */
 async function verify(by: Key, at = 0): Promise<{ outcome: string; fetches: number }> {
   const before = fetches;
@@ -332,6 +338,84 @@ test("a quiet one issuer's failure set on a URL another issuer shares tells that
   )) as IssuerUnavailable;
   assert.deepEqual([fetches, quiet.retryAfter], [2, 9]);
   assert.ok(quiet.message.startsWith(`coffre could not fetch the signing keys of the issuer ${other} (`), quiet.message);
+});
+
+test('a later failure keeps the pause another call already set, so that its Retry-After stays true (review r7 of #565)', async () => {
+  // Cold, the issuer hanging. R1 starts at 0 s, R2 at 3 s; each times out twice. Clocks read `spent`.
+  const hangs = [hang(), hang(), hang(), hang()];
+  scripted = hangs.map((each) => each.answer);
+  const r1 = verify(known, 0);
+  await started(1);
+  spent = 3000;
+  const r2 = verify(known, 3000);
+  await started(2);
+  spent = 5000;
+  hangs[0].release();
+  await started(3);
+  spent = 8000;
+  hangs[1].release();
+  await started(4);
+  spent = 10_000;
+  hangs[2].release();
+  assert.equal((await r1).outcome, `unavailable ${KEYS_UNREACHED_MS / 1000}`);
+  // R2 fails at 13 s: told the 7 s left of R1's pause, which it does not push on.
+  spent = 13_000;
+  hangs[3].release();
+  assert.equal((await r2).outcome, 'unavailable 7');
+  assert.equal(fetches, 4);
+  // R1 comes back when told, and is fetched for.
+  spent = 0;
+  assert.deepEqual(await verify(known, 20_000), { outcome: VERIFIED, fetches: 1 });
+});
+
+test("a fetch under way asks no second time once another call's failure has paused the URL (review r7 of #565)", async () => {
+  const hangs = [hang(), hang(), hang()];
+  scripted = hangs.map((each) => each.answer);
+  const r1 = verify(known, 0);
+  await started(1);
+  spent = 5000;
+  hangs[0].release();
+  await started(2);
+  // R3 starts at 8 s; R1's second attempt fails at 10 s, pausing the URL until 20 s; R3's first fails at 13 s.
+  spent = 8000;
+  const r3 = verify(known, 8000);
+  await started(3);
+  spent = 10_000;
+  hangs[1].release();
+  assert.equal((await r1).outcome, `unavailable ${KEYS_UNREACHED_MS / 1000}`);
+  spent = 13_000;
+  hangs[2].release();
+  assert.equal((await r3).outcome, 'unavailable 7');
+  // R1's two attempts and R3's one.
+  assert.equal(fetches, 3);
+});
+
+test("a stale set's refresh answered after another call's kid fetch leaves that call's minute on (review r7 of #565)", async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  // Stale: R1's refresh (a key the set has) hangs; R2's (a key it lacks) is answered, and starts the minute.
+  const slow = held();
+  scripted = [slow.answer];
+  const r1 = verify(known, KEYS_FRESH_MS + 1);
+  await started(2);
+  assert.deepEqual(await verify(unknown, KEYS_FRESH_MS + 2), { outcome: `unavailable ${KEYS_COOLDOWN_MS / 1000}`, fetches: 1 });
+  slow.release();
+  // Its own fetch and R2's.
+  assert.deepEqual(await r1, { outcome: VERIFIED, fetches: 2 });
+  // A second unknown key a second later fetches nothing.
+  assert.deepEqual(await verify(unknown, KEYS_FRESH_MS + 1002), { outcome: 'unavailable 59', fetches: 0 });
+});
+
+test('a 429 is not asked again at once, though the set stands in on it as on a timeout (review r7 of #565)', async () => {
+  answering = 429;
+  assert.deepEqual(await verify(known), { outcome: `unavailable ${KEYS_UNREACHED_MS / 1000}`, fetches: 1 });
+  forgetKeys();
+  answering = 503;
+  assert.deepEqual(await verify(known), { outcome: `unavailable ${KEYS_UNREACHED_MS / 1000}`, fetches: 2 });
+  forgetKeys();
+  answering = null;
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  answering = 429;
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1), { outcome: VERIFIED, fetches: 1 });
 });
 
 test('what a fetch finds, and the quiet after one that failed, are dated once its seconds are spent, not when the exchange began (review r5 of #565)', async () => {
