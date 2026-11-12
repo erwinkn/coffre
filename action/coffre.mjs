@@ -7464,7 +7464,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload--1E6YeFC.js
+//#region ../client/dist/workload-jgHP66Oa.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;
@@ -8222,14 +8222,15 @@ function surface(core) {
 	const placeUrl = () => `${origin}/use/${placeOf().split("/").map(encodeURIComponent).join("/")}`;
 	const url = (name) => core.places().length === 1 ? `${origin}/use/${encodeURIComponent(name)}` : `${placeUrl()}/${encodeURIComponent(name)}`;
 	/** What coffre makes with the environment's values, at the environment's URL: a signature, a verdict, a presigned URL, a minted child. */
-	const compute = async (asked, what) => {
-		const response = await signed(placeUrl(), {
+	const compute = (asked, what) => computed(placeUrl(), { "content-type": "application/json" }, JSON.stringify(asked), what);
+	const computed = async (at, headers, sent, what) => {
+		const response = await signed(at, {
 			method: "POST",
 			headers: {
-				"content-type": "application/json",
+				...headers,
 				accept: "application/json"
 			},
-			body: JSON.stringify(asked)
+			body: sent
 		});
 		const body = await response.json().catch(() => null);
 		if (!response.ok || body === null) throw refusal(response.status, body, `coffre ${what} nothing`);
@@ -8251,10 +8252,11 @@ function surface(core) {
 				return signed(target.href, init);
 			},
 			sign: async (message) => {
-				const body = await compute({ sign: {
+				const bytes = typeof message === "string" ? new TextEncoder().encode(message) : message;
+				const body = await (bytes.length > 1048576 ? computed(`${placeUrl()}?sign=${encodeURIComponent(name)}`, { "content-type": "application/octet-stream" }, bytes, "signed") : compute({ sign: {
 					credential: name,
-					message: bytesOf(message)
-				} }, "signed");
+					message: base64url(bytes)
+				} }, "signed"));
 				if (typeof body.signature !== "string") throw new Error("coffre signed nothing");
 				return body.signature;
 			},
@@ -13518,7 +13520,12 @@ async function forwarder(coffre, origin, address) {
 			let again = false;
 			if (method !== "GET" && method !== "HEAD") {
 				const length = req.headers["content-length"];
-				if (headers.has("x-amz-content-sha256")) {
+				const rawSign = method === "POST" && target.searchParams.has("sign") && /^\/use\/[^/]+\/[^/]+$/.test(target.pathname) && (headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase() === "application/octet-stream";
+				let raw = false;
+				try {
+					raw = rawSign && length !== void 0 && declaredDigest(headers.get("content-digest") ?? "") !== null;
+				} catch {}
+				if (headers.has("x-amz-content-sha256") || raw) {
 					if (length !== void 0) headers.set("content-length", length);
 					const stream = Readable.toWeb(req);
 					body = () => stream;
