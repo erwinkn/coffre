@@ -110,6 +110,10 @@ jobs:
         with:
           # Tests use coffre:source and generate their own Worker fixtures.
           build: 'false'
+      # The parity test of the collapsed migrations (packages/db/test/collapse.test.ts) upgrades 0.15.0 as its tag
+      # holds it, which a checkout of one commit lacks. After `prepare`, which reserves Postgres's port first.
+      - name: Fetch 0.15.0's tag
+        run: git fetch --depth=1 --no-tags origin tag v0.15.0
       - name: Tests
         run: pnpm test
 
