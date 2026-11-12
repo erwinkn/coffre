@@ -14406,7 +14406,10 @@ const SECTIONS = [
 					"made once, in your personal config; as a --service, key-bound",
 					"where the instance has it: --proof says how it proves itself (none:",
 					"a GitHub Actions job's ID token), the environments are the session's",
-					"unless named, and credentials go through a local listener"
+					"unless named, and credentials go through a local listener;",
+					"a person, where the deployment has the credential proxy, gets",
+					"placeholders, not values: a request through <coffre>/use swaps",
+					"each for its value; keys they may read come as they are"
 				]
 			},
 			{
@@ -14418,7 +14421,11 @@ const SECTIONS = [
 					"needs it; --output-file writes them to a file only you can",
 					"read, which --watch keeps current: it asks their version",
 					"each interval, reads only once it changed, and runs",
-					"--on-change after each new file"
+					"--on-change after each new file; as run, a person where the",
+					"deployment has the credential proxy gets placeholders, not",
+					"values (--keys and --watch are refused): the app sends one",
+					"to <coffre>/use/<credential>, which swaps it for the value;",
+					"keys they may read come as they are, --format github reads values"
 				]
 			},
 			{
