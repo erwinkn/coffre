@@ -105,7 +105,9 @@ CREATE TABLE log_keys (                 -- every key the app or the vault has wr
 ALTER TABLE policy                      -- the protected set, whole, beside the cap (section 3): three aligned lists
   ADD COLUMN protected uuid[] NOT NULL DEFAULT '{}',            -- the environments' ids, with a row or not yet
   ADD COLUMN protected_projects uuid[] NOT NULL DEFAULT '{}',   -- each one's project
-  ADD COLUMN protected_at bigint[] NOT NULL DEFAULT '{}';       -- when each was protected, ms
+  ADD COLUMN protected_at bigint[] NOT NULL DEFAULT '{}',       -- when each was protected, ms
+  ADD CHECK (cardinality(protected) = cardinality(protected_projects)
+         AND cardinality(protected) = cardinality(protected_at));
 ALTER TABLE principals DROP COLUMN access_seq, DROP COLUMN mac;   -- 0.14's pointer into audit_log and its row MAC
 -- secret_references.created_seq loses its foreign key to audit_log and stays, as the number that orders a key's
 -- references. The chain's sequence moves past the old log's last seq, so a new reference sorts after every old one:
@@ -278,8 +280,11 @@ in the change that records the same act, under the vault's MAC:
 - *Why that name.* Keys sort, and until P2 deletes them 0.15's readers know a payload by how it starts (`RECORDS`,
   `packages/db/src/change-records.ts`: `{"caller":"`, `{"code":"`, `{"digest":`, `{"inputs":"`,
   `{"op":"credential.revoke",`). `reported` sorts after `op`, so no start moves. Each record is also known by text its
-  payload holds (`"inputs":"`, `"signIn":{`), which a `detail` could hold by chance, so until P2 the carrier refuses a
-  `detail` whose encoding holds one of those texts; that check is deleted with `RECORDS`.
+  payload holds (`"inputs":"`, `"signIn":{`), which a `detail` could hold by chance, so the writer refuses a `detail`
+  whose encoding holds one of those texts, in `note`'s input check and in the carrier alike. The refusal lasts as long
+  as one reader knows a payload by its text. P2 does not end that: `originsOf`, the read of admitted principals, one
+  partial index and P1's `changeEvent` are left, and each needs an owner before section 2's "18 partial indexes
+  dropped" is whole.
 - *A fact the change's own record states is not repeated.* A token's kind and label are in the vault's `issue` record
   of the same payload, and a sign-in's run in `signIn`. The projector reads them there for the page's line, as
   `originsOf` reads a credential's origin there already, and the entry's detail leaves them out.
@@ -340,9 +345,11 @@ member on its own check of the row, whatever the page shows.
 It is not derived at read. `stale` could be, with no key (a row's seal against its newest change's); `mac` cannot, and
 no call of these pages hands the vault the rows they list, so weighing them would add a vault call to each. The
 upgrade carries no finding over: its precheck, on 0.15.0, lists the members a finding stands for and refuses while any
-does (an Owner's change to the member settles one). So 0.14's rule (a finding newer than the member's newest access
-entry), `weighedBy` and `tamperedMembers` go, and old `tamper` entries stay listed like any old entry. V1 writes the
-event, its id's form pinned beside `findingEventId`; P2 writes the reader (`api/members.ts`, `db/queries.ts`).
+does. The runbook says how one is cleared on 0.15.0: an Owner changes what the member holds (a grant given or taken,
+or the member removed), which is the change after the one the finding names. So 0.14's rule (a finding newer than the
+member's newest access entry), `weighedBy` and `tamperedMembers` go, and old `tamper` entries stay listed like any old
+entry. V1 writes the event, its id's form pinned beside `findingEventId`; P2 writes the reader (`api/members.ts`,
+`db/queries.ts`).
 
 **The audit page's check, flat (D200).** Today a visit asks the list, a walk of 0.14's chain from its last anchored
 point, and 0.15's trees. The walk is what grows: in #559's sweep the checks took 42 statements at 2,000 entries and
@@ -508,18 +515,30 @@ What follows from that. A protect or an unprotect is a real change of the policy
 carrying the whole policy as its value as `bulk.limit` does. So the policy's number moves by itself, in the one
 decision that changes the set. Ada's caller is loaded while `prod` is unprotected, an Owner protects `prod`, and Ada's
 key write to `prod` then finds the policy's number moved: 409 `policy_changed`, as today. A creation decides nothing
-and touches nothing: an environment is protected when the list holds its id. `environment.protect` is no longer
-written. `'*'` (`EVERY_ENVIRONMENT`) is never stored: it is what the vault answers when it cannot read its policy
-(`CLOSED_POLICY`), as today. The list holds ids and not slugs, as main's does: the policy's reader joins each id's row
-for its slug and project (`livePolicy`), so the re-read of the loaded set and the issue lock a rename of a protected
-environment takes stay exactly as they are. The model holds a narrower digest per write (the roles, the policy row and
-the written environment's protection, `WritingDigest`); one number for every protection compares more often than that,
-never less, and no route has a set of environments to remember.
+and touches nothing: an environment is protected when the list holds its id. `environment.protect` goes with the
+flag's last reader (below). `'*'` (`EVERY_ENVIRONMENT`) is never stored: it is what the vault answers when it cannot
+read its policy (`CLOSED_POLICY`), as today. The list holds ids and not slugs, as main's does: the policy's reader
+joins each id's row for its slug and project (`livePolicy`), so the re-read of the loaded set and the issue lock a
+rename of a protected environment takes stay exactly as they are. The model holds a narrower digest per write (the
+roles, the policy row and the written environment's protection, `WritingDigest`); one number for every protection
+compares more often than that, never less, and no route has a set of environments to remember.
 
 An environment's `protected` column stays, frozen. Every seal since the cutover covers that field, and dropping it
-from the object would seal every environment again and give the replay two mappings. After V2b nothing reads it but to
-check the row's seal, a new row has it `false`, and the pages derive what they show from the policy, as they do today
-(`protectedFor`). It goes when environments are next sealed again.
+from the object would seal every environment again and give the replay two mappings. But it is read today, so the
+order matters. The commit that adds the list and the op keeps writing `environment.protect` beside the policy's
+change, in key order: otherwise a protect stops protecting on main while 0.15's use, key write and `readerOf` still
+decide from the flag. The commit that moves the last of those readers to the list (V2b) deletes that writer, and
+renames the column in the schema and the queries, so that a leftover `e.protected` fails where it would have answered
+`false`; the object's field keeps its name in the mapping, so no seal moves. From then on a new row has it `false`,
+nothing reads it but to check the row's seal, and the pages derive what they show from the policy, as they do today
+(`protectedFor`). No 0.16 is tagged while anything writes `environment.protect` or reads the flag. The column goes
+when environments are next sealed again.
+
+The list stays small by its own writer. A protect rewrites it whole, so each `policy.protect` drops the entries whose
+environment is deleted and those with no row that are older than the time a fork has to write it
+(`UNWRITTEN_FORK_MS`). That loses nothing: no op brings a deleted environment back under its id (`prepareChanges` has
+`environment.delete` and nothing that reverses it), and the policy already reads past a fork never written. So the
+list is bounded by the live protected environments, and the policy row a use reads does not grow with history.
 
 The upgrade fills the list as it fills the settings. The migration takes it from the newest `policy.change` entry and
 leaves out an id with no live row: with the app off its route no fork is in flight. The vault's step checks it against
@@ -528,11 +547,11 @@ the one existing object 0.16 seals again. One test per path: protect, unprotect,
 creation, which must touch nothing. That change carries the `policy.change` entry (above), from the PR that deletes
 the vault's append of it to `audit_log`, not before. It is built with the carrier, and A1's two numbers stack on it.
 
-Under L1 a protect locks the policy object alone, exclusive, as a change of the cap does. Every use holds it shared,
-so a protect excludes uses for its last statement, and `ChangeLocks`' policy change is its scenario already: no model
-changes. What a use pays is the list in the policy row, 16 bytes an id, read when its copy of the policy is not
-cached, and a lookup in it; V2a measures it. A protect's change holds the whole policy, so its payload grows with the
-set, as the `policy.change` entry's does today.
+Under L1, which lands after V2b, a protect locks the policy object alone, exclusive, as a change of the cap does.
+Every use holds it shared, so a protect excludes uses for its last statement, and `ChangeLocks`' policy change is its
+scenario already: no model changes. What a use pays is the list in the policy row, 16 bytes an id, read when its copy
+of the policy is not cached, and a lookup in it; V2a measures it. A protect's change holds the whole policy, so its
+payload grows with the set, as the `policy.change` entry's does today.
 
 **Locks after.** `audit_chain_head`, the reads under it, the 0.14 appends and the queued read head are deleted; one
 advisory lock statement stays in multi-statement changes. The head did two jobs and only the first dies with the last
