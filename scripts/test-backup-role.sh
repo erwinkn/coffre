@@ -118,41 +118,32 @@ if [[ "$accepted" == true ]] || ! grep -Fq 'coffre_backup owns database objects'
     exit 1
 fi
 
-# Databases at 0018, the schema before this migration, whose public holds a
-# table of another role, as migrate.test.ts's reporting table, and in which
-# the group was granted a write. 0019 then grants coffre's tables, and only
-# them, whoever migrates (the owner, the superuser, or a member of the owner
-# on a database the owner made), and revokes the write.
-tree="$scratch/migrations-0018"
-cp -r packages/db/src/migrations/postgres "$tree"
-# Every migration from 0019 on goes: the journal's indexes must run without a gap.
-node -e 'const fs = require("fs"), path = require("path"), tree = process.argv[1], f = path.join(tree, "meta/_journal.json"), j = JSON.parse(fs.readFileSync(f, "utf8"));
-for (const e of j.entries.filter((e) => e.idx >= 19)) { fs.rmSync(path.join(tree, `${e.tag}.sql`)); fs.rmSync(path.join(tree, "meta", `${String(e.idx).padStart(4, "0")}_snapshot.json`), { force: true }); }
-j.entries = j.entries.filter((e) => e.idx < 19); fs.writeFileSync(f, JSON.stringify(j))' "$tree"
+# 0019 grants the group coffre's tables on a new database, made by the owner
+# or the superuser, and a later migrate, by either or by a member of the
+# owner, leaves a table of another role in public, as migrate.test.ts's
+# reporting table, ungranted. A member never migrates a new database: the
+# baseline alters the runtime roles, which takes CREATEROLE. Nor does a
+# database from before 0019 migrate: this version upgrades only from 0.15.0
+# (T273).
 as_superuser -c 'CREATE ROLE reporting NOLOGIN'
 for logins in migration_owner:local-owner-only,migration_owner:local-owner-only postgres:local-bootstrap-only,postgres:local-bootstrap-only \
     migration_owner:local-owner-only,migration_member:local-member-only; do
     maker="${logins%%,*}" login="${logins#*,}"
-    database="at_0018_${login%%:*}"
-    url="postgresql://$maker@127.0.0.1:$port/$database"
+    database="foreign_${login%%:*}"
     as_superuser -c "CREATE DATABASE $database OWNER ${maker%%:*}"
-    (cd packages/db && node --conditions=coffre:source --input-type=module -e '
-        const { postgresClient } = await import("./src/postgres.ts");
-        const { createDatabase } = await import("./src/database.ts");
-        const { migrate } = await import("drizzle-orm/postgres-js/migrator");
-        const client = postgresClient(process.argv[1], { max: 1 });
-        await migrate(createDatabase(client), { migrationsFolder: process.argv[2] });
-        await client.end();
-    ' "$url" "$tree")
-    as_superuser -d "$database" <<'SQL'
+    for step in empty foreign; do
+        if [[ "$step" == foreign ]]; then
+            as_superuser -d "$database" <<'SQL'
 CREATE TABLE public.reporting_rows (n integer);
 ALTER TABLE public.reporting_rows OWNER TO reporting;
-GRANT INSERT ON projects TO coffre_backup;
 SQL
-    DATABASE_URL="postgresql://$login@127.0.0.1:$port/$database" pnpm --filter @coffre/db run db:migrate >"$scratch/at_0018.log" 2>&1 \
-        || { cat "$scratch/at_0018.log" >&2; exit 1; }
+        fi
+        by="$login"; [[ "$step" == empty ]] && by="$maker"
+        DATABASE_URL="postgresql://$by@127.0.0.1:$port/$database" pnpm --filter @coffre/db run db:migrate >"$scratch/$step.log" 2>&1 \
+            || { cat "$scratch/$step.log" >&2; exit 1; }
+    done
     [[ "$(as_superuser -d "$database" -At -c "SELECT has_table_privilege('coffre_backup', 'projects', 'SELECT') AND NOT has_table_privilege('coffre_backup', 'projects', 'INSERT')")" == t ]] \
-        || { echo "0019, as ${login%%:*}, did not leave the group exactly SELECT on projects" >&2; exit 1; }
+        || { echo "0019 then a migrate as ${login%%:*} did not leave the group exactly SELECT on projects" >&2; exit 1; }
     [[ "$(as_superuser -d "$database" -At -c "SELECT has_table_privilege('coffre_backup', 'reporting_rows', 'SELECT')")" == f ]] \
         || { echo "0019, as ${login%%:*}, granted the group another role's table" >&2; exit 1; }
 done
