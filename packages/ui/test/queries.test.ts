@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
-import { dehydrate, hydrate, QueryObserver, type QueryClient } from '@tanstack/react-query';
+import { dehydrate, focusManager, hydrate, InfiniteQueryObserver, QueryObserver, type QueryClient } from '@tanstack/react-query';
 
 import {
   affects,
@@ -183,6 +183,50 @@ test('the audit log is read on every visit, and its verification once with the p
   assert.equal(queries.auditEntries(client, {}).staleTime, 0);
   assert.equal(queries.auditChain(client).staleTime, undefined);
   assert.equal(queries.auditChain(client).refetchOnMount, false);
+});
+
+test("a member's actions log is read again on a new visit, not on focus: its loaded pages do not change", async (t) => {
+  const asked: unknown[] = [];
+  // Three pages of an append-only log, the newest first, each saying where it stopped.
+  const client = {
+    audit: {
+      list: async (query: { before?: string }) => {
+        asked.push(query.before);
+        return { entries: [], next: query.before === undefined ? 'p2' : query.before === 'p2' ? 'p3' : null };
+      },
+    },
+  } as unknown as CoffreClient;
+  const queryClient = createQueryClient();
+  // As the app's provider does: the client listens for the window's focus.
+  queryClient.mount();
+  t.after(() => queryClient.unmount());
+  const observer = new InfiniteQueryObserver(queryClient, queries.actionsLog(client, 'ada@acme.example'));
+  const unsubscribe = observer.subscribe(() => {});
+  t.after(() => (unsubscribe(), focusManager.setFocused(undefined)));
+  await observer.refetch();
+  await observer.fetchNextPage();
+  await observer.fetchNextPage();
+  assert.deepEqual(asked, [undefined, 'p2', 'p3']);
+  asked.length = 0;
+
+  // Alt-tab away and back: nothing is asked.
+  focusManager.setFocused(false);
+  focusManager.setFocused(true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(asked, []);
+
+  // A change made here still refreshes it.
+  await refresh(queryClient, []);
+  assert.ok(asked.length > 0);
+
+  // A new visit mounts it again, stale at once: it reads from the newest page.
+  unsubscribe();
+  asked.length = 0;
+  const leave = new InfiniteQueryObserver(queryClient, queries.actionsLog(client, 'ada@acme.example')).subscribe(() => {});
+  t.after(leave);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(asked[0], undefined);
+  assert.ok(asked.length > 0);
 });
 
 test('the audit page loads its entries and its verification together, and a check that fails does not fail the load', async () => {
