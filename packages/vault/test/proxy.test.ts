@@ -609,7 +609,7 @@ const BEFORE_0084 = [
   `ALTER TABLE proxy_reserved ADD CONSTRAINT proxy_reserved_names_check CHECK (jsonb_typeof(names) = 'array')`,
 ];
 
-test('a reserved set sealed before 0084 verifies after it: the same names, in the same order, under the same seal (T278)', ON_015, async () => {
+test('a reserved set sealed before 0084 verifies after it: the same names, in the same order, under the same seal (T278)', async () => {
   const w = await world();
   assert.ok((await w.vault.reserveProxy({ names: ['stripe', 'maps', 'openai'] })).ok);
   const before = await readObject(db.owner, RESERVED_REF);
@@ -623,7 +623,7 @@ test('a reserved set sealed before 0084 verifies after it: the same names, in th
   assert.deepEqual(after, before);
   assert.ok(sealOf(w.keys[0]!, RESERVED_REF, after.row!).equals(after.seal!), "the vault's seal over the object the row makes");
   // A vault opened on the migrated schema reads the set intact, and code's reservation of the same names changes nothing.
-  const fresh = await openLocalVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const fresh = await openLocalVault(db.vault, w.config, { sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await fresh.proxy({ projectId: w.project, environmentId: w.dev })).reservedState, 'ok');
   const changes = await count(sql`SELECT count(*) AS n FROM log_changes`);
   assert.ok((await fresh.reserveProxy({ names: ['stripe', 'maps', 'openai'] })).ok);
