@@ -38,7 +38,9 @@ names is printed, marked `(known)`, and passes. So:
 - a change that fixes one deletes its lines: the sweep prints `FLAT` for each
   line whose statement grew no more, and passes;
 - `--write-known` rewrites the list with what grew in that run, keeping the
-  comments of each statement it already listed; a new one's reads
+  comments of each statement it already listed, and refuses to when the run
+  failed or cannot be compared (a `GONE`, `COLD`, `CANCELLED`, unparsed plan
+  or changed answer): such a run measured only part of the paths; a new one's reads
   `from ?` until someone fills it in. A statement whose plan flips between
   runs, growing in one and flat in the next (two today, their lines say
   which), drops out of a list written from a flat run: put its lines back.

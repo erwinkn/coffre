@@ -24,6 +24,9 @@ while [ $# -gt 0 ]; do
         *) echo "usage: scripts/growth-sweep.sh [--size <n>] [--out <dir>] [--write-known]" >&2; exit 2 ;;
     esac
 done
+case "$size" in
+    '' | *[!0-9]* | 0*) echo "--size takes a positive whole number of entries, not '$size'" >&2; exit 2 ;;
+esac
 if [ "${COMPOSE_PROJECT_NAME:-coffre}" = coffre ] || [ "${COFFRE_POSTGRES_PORT:-55432}" = 55432 ]; then
     echo "the sweep reads the server's log and logs every plan: set COMPOSE_PROJECT_NAME and COFFRE_POSTGRES_PORT to a Postgres of your own" >&2
     exit 2
@@ -49,6 +52,8 @@ for n in "$size" "$((size * 10))"; do
     fi
 done
 echo "logs in $out"
+# A failed run measured only part of the paths: the known list is not rewritten from it.
+if [ "$failed" -ne 0 ]; then write=(); fi
 compared=0
 node scripts/growth-sweep.mjs "$out/$size.log" "$out/$((size * 10)).log" "$out/$size.outcomes.json" "$out/$((size * 10)).outcomes.json" \
     --known scripts/growth-sweep-known.txt "${write[@]}" || compared=$?

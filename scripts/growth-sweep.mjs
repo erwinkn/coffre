@@ -259,10 +259,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const still = new Set(grown.map(({ after }) => `${idOf(after.shape)} ${after.path}`));
     for (const line of [...known].filter((one) => !still.has(one))) console.log(`FLAT  ${line}: known to grow, but grew no more here; delete its line once a run on main agrees`);
   }
-  if (writeFile !== undefined) {
-    writeFileSync(writeFile, listOf(grown, notes));
-    console.log(`wrote the ${grown.length} statements that grew or are new to ${writeFile}`);
-  }
   // A sweep is clean only if both runs went the same way to the end: a statement too slow at the larger size, cut by a
   // timeout, leaves no plan behind, and would otherwise read as none that grew (review r1 of #559).
   const problems = [];
@@ -281,5 +277,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (before === null || after === null) problems.push(`no outcomes in ${before === null ? smallOut : largeOut}: the run did not finish`);
   else for (const { name, small: was, large: now } of changedOutcomes(before, after)) problems.push(`ANSWER ${name}: ${was} at the smaller size, ${now} at the larger`);
   for (const problem of problems) console.log(problem);
+  // A run that cannot be compared measured only part of the paths: written, its list would drop the lines of every
+  // statement it never reached. Unknown growers alone are what --write-known is for.
+  if (writeFile !== undefined && problems.length > 0) console.log(`did not write ${writeFile}: the runs cannot be compared`);
+  else if (writeFile !== undefined) {
+    writeFileSync(writeFile, listOf(grown, notes));
+    console.log(`wrote the ${grown.length} statements that grew or are new to ${writeFile}`);
+  }
   process.exit(unknown.length === 0 && problems.length === 0 ? 0 : 1);
 }
