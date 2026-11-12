@@ -659,8 +659,8 @@ export const passkeys = pgTable(
     signCount: bigint('sign_count', { mode: 'number' }).notNull().default(0),
     // The newest challenge an assertion of it answered, by when it was issued: the replay guard (section 7.3).
     lastChallengeAt: timestamp('last_challenge_at', { withTimezone: true }),
-    // Display only: what the browser said it can reach it by (a JSON array), its model, whether it syncs, and its name.
-    transports: text().notNull().default('[]'),
+    // Display only: what the browser said it can reach it by, its model, whether it syncs, and its name.
+    transports: text().array().notNull().default(sql`'{}'`),
     aaguid: bytea(),
     synced: boolean().notNull(),
     name: text().notNull(),
@@ -680,7 +680,6 @@ export const passkeys = pgTable(
     check('passkeys_credential_id_check', sql`octet_length(${table.credentialId}) BETWEEN 16 AND 1023`),
     check('passkeys_algorithm_check', sql`${table.algorithm} IN (-8, -7, -257)`),
     check('passkeys_sign_count_check', sql`${table.signCount} BETWEEN 0 AND 4294967295`),
-    check('passkeys_transports_check', sql`jsonb_typeof(${table.transports}::jsonb) = 'array'`),
     check('passkeys_aaguid_check', sql`${table.aaguid} IS NULL OR octet_length(${table.aaguid}) = 16`),
     check('passkeys_name_check', sql`char_length(${table.name}) BETWEEN 1 AND 64`),
     check('passkeys_removed_check', sql`(${table.removedAt} IS NULL) = (${table.removedBy} IS NULL)`),
@@ -807,16 +806,13 @@ export const oauthClients = pgTable(
     authMac: bytea('auth_mac').notNull(),
     // Its own claim, shown as unverified.
     name: text().notNull(),
-    // JSON: a list of HTTPS or loopback URLs.
-    redirectUris: text('redirect_uris').notNull(),
+    // HTTPS or loopback URLs.
+    redirectUris: text('redirect_uris').array().notNull(),
     createdAt: createdAt(),
     createdIp: text('created_ip'),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
   },
-  (table) => [
-    check('oauth_clients_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
-    check('oauth_clients_redirect_uris_check', sql`${table.redirectUris}::jsonb IS NOT NULL`),
-  ],
+  (table) => [check('oauth_clients_auth_mac_check', sql`octet_length(${table.authMac}) = 32`)],
 );
 
 /**
@@ -1225,12 +1221,11 @@ export const proxyReserved = pgTable(
   'proxy_reserved',
   {
     id: smallint().primaryKey(),
-    names: jsonb().notNull(),
+    names: text().array().notNull(),
     seal: bytea().notNull(),
   },
   (table) => [
     check('proxy_reserved_id_check', sql`${table.id} = 1`),
-    check('proxy_reserved_names_check', sql`jsonb_typeof(${table.names}) = 'array'`),
     check('proxy_reserved_seal_check', sql`octet_length(${table.seal}) = 16`),
   ],
 );

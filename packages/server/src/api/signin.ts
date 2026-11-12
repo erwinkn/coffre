@@ -888,7 +888,7 @@ export class SigninService {
         signCount: verified.signCount,
         // Its own challenge is spent: nothing issued before it is answered with it.
         lastChallengeAt: new Date(state.issuedAt),
-        transports: JSON.stringify(verified.transports),
+        transports: verified.transports,
         aaguid: verified.aaguid === null ? null : Buffer.from(verified.aaguid),
         synced: verified.backupEligible,
         name: passkeyName(verified.aaguid, state.passkeysEver!),
@@ -1149,7 +1149,7 @@ export class SigninService {
             signCount: verified.signCount,
             // Its own challenge is spent: nothing issued before it is answered with it.
             lastChallengeAt: new Date(state.issuedAt),
-            transports: JSON.stringify(verified.transports),
+            transports: verified.transports,
             aaguid: verified.aaguid === null ? null : Buffer.from(verified.aaguid),
             synced: verified.backupEligible,
             name: passkeyName(verified.aaguid, state.passkeysEver),
@@ -2538,7 +2538,7 @@ type Factor =
       id: string;
       row: {
         id: string; userHandle: Buffer; credentialId: Buffer; publicKey: Buffer; algorithm: number; signCount: number; lastChallengeAt: Date;
-        transports: string; aaguid: Buffer | null; synced: boolean; name: string;
+        transports: string[]; aaguid: Buffer | null; synced: boolean; name: string;
       };
     };
 

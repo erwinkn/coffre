@@ -5,6 +5,12 @@
 - **Node deployments are not tested in 0.16.0.** A Node deployment stays
   on 0.15.0 until 0.16.1, which brings Node back on Postgres; SQLite is
   gone.
+- **Three lists are `text[]` columns, no longer JSON (0084).** The
+  proxy's reserved names, a passkey's transports and a registered MCP
+  client's redirects. The migration converts them in place, the same
+  strings in the same order: the reserved set's seal and a client's MAC
+  still verify, with no new key. `log_config` stays for now: the vault
+  still reads the roles' object from it.
 - **Eight indexes no query read are gone (0083).** On `audit_log`, by
   operation, the freeze lookup's first index (`audit_log_frozen_idx` has
   served it since 0082) and an enrollment code's tombstone; on

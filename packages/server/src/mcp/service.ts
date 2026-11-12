@@ -655,7 +655,7 @@ export class McpService {
     const name = clientName(fields.client_name, 'Unnamed app');
     // Each registration revokes a few that were never used, so live ones cannot pile up (W19's review, P3-4).
     await sweepOauthClients(this.#deps.db, this.#deps.chainKey, new Date(Date.now() - UNUSED_REGISTRATION_MS), SWEEP_LIMIT);
-    await insertOauthClient(this.#deps.db, this.#deps.chainKey, { id, name, redirectUris: JSON.stringify(redirects.kept), createdIp: meta.sourceIp });
+    await insertOauthClient(this.#deps.db, this.#deps.chainKey, { id, name, redirectUris: redirects.kept, createdIp: meta.sourceIp });
     return {
       client_id: id,
       client_id_issued_at: Math.floor(Date.now() / 1000),

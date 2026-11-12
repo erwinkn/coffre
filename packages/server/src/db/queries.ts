@@ -2605,7 +2605,7 @@ export type OauthClientRow = Tables['oauthClients']['$inferSelect'];
 export type ConnectionRow = Tables['mcpConnections']['$inferSelect'];
 
 export async function insertOauthClient(db: Queryable, chainKey: Buffer, row: Omit<NewRow<Tables['oauthClients']>, 'authMac'> & {
-  id: string; name: string; redirectUris: string;
+  id: string; name: string; redirectUris: string[];
 }): Promise<void> {
   const signed = { ...row, revokedAt: null };
   await insert(db, oauthClients, { ...signed, authMac: authMac(chainKey, 'oauth_clients', signed) });

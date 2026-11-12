@@ -9,6 +9,8 @@ import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { DEFAULT_POLICY, type Holdings, type Scope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
@@ -16,10 +18,11 @@ import { RELEASE, versioned, type ProxyDefinition, type ProxyView, type SaveProx
 import { createDatabase } from '@coffre/db';
 import { postgresClient, postgresSession } from '@coffre/db/connect';
 import { gaveUp } from '@coffre/db/dialect';
+import { migrateDatabase, migrationsFolder } from '@coffre/db/migrate';
 import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { applyOp, indexBytes, objectKey, sealKey, sealOf, type FrozenHoldings, type ProxyInput, type ProxyItem, type Ref } from '../src/inputs.ts';
+import { applyOp, indexBytes, objectKey, RESERVED_REF, sealKey, sealOf, type FrozenHoldings, type ProxyInput, type ProxyItem, type Ref, type ReservedInput } from '../src/inputs.ts';
 import { openLocalVault as openEntry } from '../src/local.ts';
 import { replayStored } from '../src/log-replay.ts';
 import { frozenAllows, frozenHoldings, frozenOwns, proxyLookup, type ProxyLevel } from '../src/proxy.ts';
@@ -548,7 +551,7 @@ test("names reserved already are found so while another transaction is open on t
 test('the reserved set forged around the vault refuses every save: fail closed (R64)', ON_015, async () => {
   const w = await world();
   assert.ok((await w.vault.reserveProxy({ names: ['maps'] })).ok);
-  await run(db.owner, sql`UPDATE proxy_reserved SET names = '[]'::jsonb`);
+  await run(db.owner, sql`UPDATE proxy_reserved SET names = '{}'`);
   assert.equal((await w.view()).reservedState, 'tampered');
   const outcome = await w.save({ seal: null, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } });
   assert.equal(outcome.ok, false);
@@ -563,11 +566,10 @@ test('the reserved set forged around the vault refuses every save: fail closed (
 test('a released name put back with its old seal, the log\'s newest seal forged to match, is no name reserved: code\'s reservation decides under the head and refuses (T190)', ON_015, async () => {
   const w = await world();
   assert.ok((await w.vault.reserveProxy({ names: ['maps'] })).ok);
-  const [before] = await rows<{ names: unknown; seal: Uint8Array }>(db.owner, sql`SELECT names, seal FROM proxy_reserved`);
+  const [before] = await rows<{ names: string[]; seal: Uint8Array }>(db.owner, sql`SELECT names, seal FROM proxy_reserved`);
   assert.ok((await w.vault.releaseProxy({ actor: ROOT, caller: 'person', name: 'maps' })).ok);
   // The row and the newest change's seal agree again, as a seal-only check wants; the change's MAC does not cover them.
-  const names = typeof before!.names === 'string' ? before!.names : JSON.stringify(before!.names);
-  await run(db.owner, sql`UPDATE proxy_reserved SET names = ${names}::jsonb, seal = ${before!.seal}`);
+  await run(db.owner, sql`UPDATE proxy_reserved SET names = ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(before!.names)}::jsonb)), seal = ${before!.seal}`);
   const object = objectKey({ kind: 'proxy-reserved', id: 'instance' });
   await run(db.owner, sql`UPDATE log_changes SET seal = ${before!.seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${object})`);
   const changes = await count(sql`SELECT count(*) AS n FROM log_changes`);
@@ -589,10 +591,44 @@ test('items or names no change writes fail the seal like any forgery: the tab sh
   assert.ok(reserved.ok);
   assert.deepEqual(reserved.cleared.map((each) => each.environmentId), [other]);
   // A reserved set whose names are no names: tampered, and every save refused.
-  await run(db.owner, sql`UPDATE proxy_reserved SET names = '[1]'::jsonb`);
+  await run(db.owner, sql`UPDATE proxy_reserved SET names = ARRAY[NULL]::text[]`);
   const forged = await w.view(other);
   assert.deepEqual([forged.state, forged.reservedState], ['ok', 'tampered']);
   assert.equal((await w.save({ seal: forged.seal, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } }, other)).ok, false);
+});
+
+/** The three lists 0084 types (T278) as 0083 left them, and the ledger without 0084: 0.15.0's schema, for these. */
+const BEFORE_0084 = [
+  `DELETE FROM drizzle.__drizzle_migrations WHERE created_at = ${JSON.parse(readFileSync(join(migrationsFolder(), 'meta/_journal.json'), 'utf8')).entries.find((entry: { tag: string }) => entry.tag === '0084_text_lists').when}`,
+  `ALTER TABLE oauth_clients ALTER COLUMN redirect_uris TYPE text USING to_jsonb(redirect_uris)::text`,
+  `ALTER TABLE oauth_clients ADD CONSTRAINT oauth_clients_redirect_uris_check CHECK (redirect_uris::jsonb IS NOT NULL)`,
+  `ALTER TABLE passkeys ALTER COLUMN transports DROP DEFAULT`,
+  `ALTER TABLE passkeys ALTER COLUMN transports TYPE text USING to_jsonb(transports)::text`,
+  `ALTER TABLE passkeys ALTER COLUMN transports SET DEFAULT '[]'`,
+  `ALTER TABLE passkeys ADD CONSTRAINT passkeys_transports_check CHECK (jsonb_typeof(transports::jsonb) = 'array')`,
+  `ALTER TABLE proxy_reserved ALTER COLUMN names TYPE jsonb USING to_jsonb(names)`,
+  `ALTER TABLE proxy_reserved ADD CONSTRAINT proxy_reserved_names_check CHECK (jsonb_typeof(names) = 'array')`,
+];
+
+test('a reserved set sealed before 0084 verifies after it: the same names, in the same order, under the same seal (T278)', ON_015, async () => {
+  const w = await world();
+  assert.ok((await w.vault.reserveProxy({ names: ['stripe', 'maps', 'openai'] })).ok);
+  const before = await readObject(db.owner, RESERVED_REF);
+  for (const statement of BEFORE_0084) await run(db.owner, sql.raw(statement));
+  const [old] = await rows<{ names: unknown }>(db.owner, sql`SELECT names FROM proxy_reserved`);
+  assert.equal(typeof old!.names === 'string' ? old!.names : JSON.stringify(old!.names), JSON.stringify((before.row as ReservedInput).names), "0.15.0's row: the names as JSON");
+
+  await migrateDatabase(OWNER_URL);
+
+  const after = await readObject(db.owner, RESERVED_REF);
+  assert.deepEqual(after, before);
+  assert.ok(sealOf(w.keys[0]!, RESERVED_REF, after.row!).equals(after.seal!), "the vault's seal over the object the row makes");
+  // A vault opened on the migrated schema reads the set intact, and code's reservation of the same names changes nothing.
+  const fresh = await openLocalVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  assert.equal((await fresh.proxy({ projectId: w.project, environmentId: w.dev })).reservedState, 'ok');
+  const changes = await count(sql`SELECT count(*) AS n FROM log_changes`);
+  assert.ok((await fresh.reserveProxy({ names: ['stripe', 'maps', 'openai'] })).ok);
+  assert.equal(await count(sql`SELECT count(*) AS n FROM log_changes`), changes);
 });
 
 // --- the version gate (section 3, "One version at a time") ----------------------------------------------------------

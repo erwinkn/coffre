@@ -54,7 +54,7 @@ export async function resolveClient(deps: ClientDeps, clientId: string): Promise
   if (REGISTERED.test(clientId)) {
     const row = await findOauthClient(deps.db, deps.chainKey, clientId);
     if (row !== null) {
-      return { clientId, name: row.name, host: null, redirectUris: JSON.parse(row.redirectUris) as string[], registration: 'dcr' };
+      return { clientId, name: row.name, host: null, redirectUris: row.redirectUris, registration: 'dcr' };
     }
   }
   throw new ClientInvalid('the client_id is neither the HTTPS URL of a client metadata document nor a client registered here');

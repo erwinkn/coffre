@@ -1125,7 +1125,7 @@ export const passkeys = pgTable('passkeys', {
   // The newest challenge an assertion of it answered, by when it was issued: the replay guard (section 7.3).
   lastChallengeAt: timestamp('last_challenge_at', { withTimezone: true }),
   // Display only: what the browser said it can reach it by, its model, whether it syncs, and its name.
-  transports: text().notNull().default('[]'),   // JSON array
+  transports: text().array().notNull().default(sql`'{}'`),
   aaguid: bytea(),
   synced: boolean().notNull(),
   name: text().notNull(),
@@ -1234,7 +1234,7 @@ above, with these choices:
   is decided. `credentials` and `mcp_connections` name theirs when they are
   inserted, which the app's `INSERT` already covers.
 - Checks beyond 5.1's: a 16-byte user handle and AAGUID, the counter a
-  uint32, transports a JSON array, a name of 1 to 64 characters, `removed_by`
+  uint32, a name of 1 to 64 characters, `removed_by`
   exactly when `removed_at`; a credential's `confirmed_at` only with a
   passkey and only on a browser or CLI session (a personal token or handle
   copies the passkey alone, so it never passes a fresh check); and a device

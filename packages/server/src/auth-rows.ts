@@ -145,6 +145,8 @@ function tupleOf<K extends AuthTable>(table: K, row: Fields[K]): string {
     if (value === undefined) throw new Error(`missing ${table}.${field} for its authentication MAC`);
     if (value instanceof Date) return value.getTime();
     if (value instanceof Uint8Array) return Buffer.from(value).toString('hex');
+    // A list as its JSON text, which a client's redirects were until 0.16 made them a text[] (T278): its MAC stands.
+    if (Array.isArray(value)) return JSON.stringify(value);
     return value;
   });
   return JSON.stringify(['coffre.auth.v2', kind, ...values]);

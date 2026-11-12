@@ -584,7 +584,7 @@ test("a binding 0.14 made is ended by the vault with no change; one of the log's
 test("a bind through an MCP connection goes ahead only while it is connected; an id the log holds already is no binding to make, its row deleted or not (review r3)", async () => {
   const w = await world();
   const client = randomUUID();
-  await db.owner.insert(oauthClients).values({ id: client, name: 'agent', redirectUris: '[]', authMac: randomBytes(32) } as never);
+  await db.owner.insert(oauthClients).values({ id: client, name: 'agent', redirectUris: [], authMac: randomBytes(32) } as never);
   const connection = randomUUID();
   await db.owner.insert(mcpConnections).values({
     id: connection, authMac: randomBytes(32), principal: ROOT, generation: 0, clientId: client, clientName: 'agent', registration: 'dcr', scopes: '[]',

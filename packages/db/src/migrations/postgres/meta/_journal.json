@@ -568,6 +568,13 @@
       "when": 1794517995252,
       "tag": "0083_drop_unread_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1794521808607,
+      "tag": "0084_text_lists",
+      "breakpoints": true
     }
   ]
 }
