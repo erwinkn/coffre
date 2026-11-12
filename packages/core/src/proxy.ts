@@ -352,7 +352,8 @@ function hmacOf(hmac: Record<string, unknown>, what: string, also: readonly stri
   only(hmac, [...also, 'key', 'encoding', 'prefix', 'maxBytes'], what);
   if (hmac.encoding !== 'hex' && hmac.encoding !== 'base64' && hmac.encoding !== 'base64url') problem(`${what}.encoding is hex, base64 or base64url`);
   const maxBytes = hmac.maxBytes ?? null;
-  // As the proxy takes them (`checkSigner`): 1 MiB at most, a prefix of printable ASCII; none is '' here, as it is stored.
+  // As the proxy takes a definition saved in the Proxy tab, which signs as JSON alone: 1 MiB at most (`checkSigner` lets
+  // code's hmac() signer take up to 12 MiB, raw), a prefix of printable ASCII; none is '' here, as it is stored.
   if (maxBytes !== null && (typeof maxBytes !== 'number' || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_MESSAGE_BYTES)) problem(`${what}.maxBytes is a whole number of bytes, 1 MiB at most, or none`);
   const prefix = hmac.prefix ?? '';
   if (prefix !== '' && (typeof prefix !== 'string' || !SIGNATURE_PREFIX.test(prefix))) problem(`${what}.prefix is up to 32 printable characters with no space, sha256=, or none`);

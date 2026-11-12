@@ -751,7 +751,9 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     // made for `<a>/<b>`; otherwise route `<a>` at `/<b>…` (section 6), the handle found outside the body or in it. A
     // made-for list this isolate keeps decides, no call made; else the route use reads both, the place itself and route
     // `<a>`, in its one call (C2b4), and the place's answer, nothing used, falls through to what the place's URL serves.
-    if (!coded(proxy, place[0]!)) {
+    // Never a raw sign's (`POST /use/<a>/<b>`, octet-stream): its body is the message, which no route's item reads a handle
+    // from, and `signRaw` refuses before a byte of it is read (review r1 of #572).
+    if (!coded(proxy, place[0]!) && !(raw.length === 2 && request.method === 'POST' && isRaw(request))) {
       const handle = await uiHandle(request, url);
       if (handle instanceof Response) return handle;
       if (handle !== null) {
@@ -844,6 +846,11 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   if (credential === undefined && proxy.verifiers.has(place[2]!)) return failure(404, `${place[2]} is a verifier, which reaches no upstream: credential(${JSON.stringify(place[2])}).verify(message, signature)`);
   if (credential === undefined) return noCredential(place[2]!);
   return forward(request, coffre, proxy, `${place[0]}/${place[1]}`, credential, raw.slice(3), url.search, peeked.get(credential));
+}
+
+/** Whether a request to `compute` sends its message raw, the body itself (`Content-Type: application/octet-stream`). */
+function isRaw(request: Request): boolean {
+  return (request.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase() === 'application/octet-stream';
 }
 
 /** Whether code defines `name`, of any kind: a name code holds is never a UI item's (R66). */
@@ -1824,7 +1831,7 @@ function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bo
  */
 async function compute(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null): Promise<Response> {
   // A message sent raw, the body itself, which is never read whole: an hmac() signer's (`signRaw`).
-  if ((request.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase() === 'application/octet-stream') return signRaw(request, coffre, proxy, path);
+  if (isRaw(request)) return signRaw(request, coffre, proxy, path);
   // Read up to what the longest message takes, as base64url in JSON beside the rest: under `proxy.editable`, what an HMAC saved
   // in the Proxy tab may take, 1 MiB.
   const ui = proxy.editable && coffre.useRoute !== undefined;

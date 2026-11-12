@@ -183,7 +183,10 @@ test("a webhook body is 64 KiB at most, or its hmac()'s maxBytes; one past it is
   assert.equal(typeof (await used(env, 'dfns-key').sign(sized(64 * 1024))), 'string');
 });
 
-/** A body that sends `first` bytes, then waits, never ending: what coffre must refuse without reading on. How much was pulled. */
+/**
+ * A body that sends `first` bytes, then waits, never ending: what coffre must refuse without reading on. How much a
+ * reader asked of it: nothing is pulled ahead (no queue, `highWaterMark` 0), so 0 is a body nobody read.
+ */
 function stalled(first: number): { body: ReadableStream<Uint8Array>; pulled: () => number } {
   let pulled = 0;
   return {
@@ -193,7 +196,7 @@ function stalled(first: number): { body: ReadableStream<Uint8Array>; pulled: () 
         pulled += first;
         out.enqueue(new Uint8Array(first).fill(1));
       },
-    }),
+    }, { highWaterMark: 0 }),
     pulled: () => pulled,
   };
 }
@@ -233,7 +236,7 @@ test('a raw sign is refused before its body is read: the handle, the signer, its
     const body = stalled(64 * 1024);
     const answer = await signRaw(who, name, body.body, { 'content-length': String(SUMSUB_BYTES), ...headers }, place);
     const text = await answer.text();
-    assert.ok(body.pulled() <= 64 * 1024, `${name}: read on past its first part`);
+    assert.equal(body.pulled(), 0, `${name}: its body read`);
     return [answer.status, (JSON.parse(text) as { message?: string }).message ?? text] as const;
   };
   assert.deepEqual(await asked('sumsub-key', {}, 'market/dev', `coffre_use_${'x'.repeat(43)}`).then(([status]) => status), 401);
@@ -253,6 +256,21 @@ test('a raw sign is refused before its body is read: the handle, the signer, its
   const [status, message] = await asked('iframe-token', { 'content-length': '10' }, 'market/empty', empty.env.COFFRE_HANDLE!);
   assert.equal(status, 409);
   assert.match(message, /market\/empty's IFRAME_TOKEN_SECRET is empty/);
+});
+
+test('under proxy.editable too, a raw sign with no handle outside its body is refused before the body is read, its length declared or not', async () => {
+  runtime.deployment = { ...defineDeployment(), proxy: { ...defineDeployment().proxy, editable: true } };
+  const { env } = await run();
+  for (const length of [String(SUMSUB_BYTES), '1024', null]) {
+    const body = stalled(1024);
+    const answer = await signRaw(env.COFFRE_HANDLE!, 'sumsub-key', body.body, { authorization: null, 'content-length': length });
+    assert.equal(answer.status, length === null ? 411 : 401, `${length}: ${await answer.text()}`);
+    assert.equal(body.pulled(), 0, `${length}: its body read`);
+  }
+  // With its handle, as the client sends it: signed.
+  const message = Buffer.alloc(100 * 1024, 's');
+  const signed = await signRaw(env.COFFRE_HANDLE!, 'sumsub-key', message, { 'content-length': String(message.length), 'content-digest': digestOf(message) });
+  assert.deepEqual(await signed.json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, message) });
 });
 
 test('a raw message longer or shorter than it declares, or other than its Content-Digest, is signed by nothing', async () => {

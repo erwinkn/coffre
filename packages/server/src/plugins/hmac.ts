@@ -2,7 +2,8 @@ import { createHmac } from 'node:crypto';
 
 /**
  * An HMAC-SHA256 with a secret the app never holds, in WebCrypto, so the
- * same on Workers: what an `hmac()` signer or verifier of the credential
+ * same on Workers, and a raw message's in `node:crypto`'s, a part at a time
+ * (`hmacParts`): what an `hmac()` signer or verifier of the credential
  * proxy answers (docs/design/credential-proxy.md, section 5). The key is the
  * value's UTF-8 bytes, as Node's `createHmac('sha256', value)` takes a
  * string. A signature is written as its scheme says, a prefix and an
