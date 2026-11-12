@@ -94,7 +94,7 @@ function proxy() {
       yousign: { upstream: `${upstreamAt}/yousign`, inject: header('authorization', `Bearer {STRIPE_KEY}`) },
       s3: { upstream: `${upstreamAt}/s3`, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }) },
     },
-    signers: { 'dfns-key': privateKey('SIGNING_KEY') },
+    signers: { 'dfns-key': privateKey('SIGNING_KEY'), 'sumsub-key': hmac('WEBHOOK_SECRET', { encoding: 'hex', maxBytes: 11 * 1024 * 1024 }) },
     verifiers: { webhook: hmac('WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) },
     tunnels: { db: postgres('DATABASE_URL') },
     insecureUpstreams: true,
@@ -452,6 +452,52 @@ test('a 55 MB document that declares its Content-Digest streams through the SDK 
   }
 });
 
+test("a workload signs a 10 MiB message raw through the SDK, its proof binding the bytes by their Content-Digest; other bytes, or none declared, are signed by nothing", { timeout: 60_000 }, async () => {
+  await bind();
+  const coffre = await workload({
+    url: ORIGIN,
+    service: SERVICE,
+    proof: { name: 'github', kind: 'oidc', prove: async (context) => ({ oidc: runToken(keyAudience(context)) }) },
+    fetch: (input, init) => answer(new Request(input, init), runtime, ui, IP),
+    log: () => undefined,
+    sigterm: false,
+  });
+  const message = Buffer.concat([Buffer.from('1761480000POST/resources/applicants/abc/info/idDoc'), document(10 * 1024 * 1024).body]);
+  try {
+    assert.equal(await coffre.credential('sumsub-key').sign(message), createHmac('sha256', WEBHOOK_SECRET).update(message).digest('hex'));
+  } finally {
+    await coffre.close();
+  }
+  const held = await session();
+  const url = `${ORIGIN}/use/market/prod?sign=sumsub-key`;
+  const bytes = randomBytes(2 * 1024 * 1024);
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  /** `sent` streamed, its headers those given, its proof signing `signed` headers (those, unless told) and `line`. */
+  const raw = async (sent: Uint8Array, headers: Record<string, string>, options: { signed?: Record<string, string>; line?: string } = {}) => {
+    const proof = await createProof(held.key, { method: 'POST', url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: options.signed ?? headers, body: options.line ?? digest } });
+    const request = new Request(url, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...headers, 'content-length': String(sent.length), authorization: `DPoP ${held.token}`, dpop: proof }, body: chunked(sent), duplex: 'half' } as RequestInit);
+    return read((await pluginRoute(request, runtime, IP))!);
+  };
+  const declared = { 'content-type': 'application/octet-stream', 'content-digest': contentDigest(digest) };
+  const signed = await raw(bytes, declared);
+  assert.deepEqual([signed.status, signed.body], [200, { signature: createHmac('sha256', WEBHOOK_SECRET).update(bytes).digest('hex') }]);
+  // Other bytes than the digest the proof signs: no signature.
+  const tampered = Buffer.from(bytes);
+  tampered[1000] = tampered[1000]! ^ 1;
+  const swapped = await raw(tampered, declared);
+  assert.deepEqual([swapped.status, swapped.body.message], [400, 'the body is not what its Content-Digest says']);
+  // No digest declared: the proof would sign nothing of the bytes.
+  const undeclared = await raw(bytes, { 'content-type': 'application/octet-stream' }, { line: await bodyDigest('') });
+  assert.equal(undeclared.status, 400);
+  assert.match(undeclared.body.message as string, /a workload's raw message declares its SHA-256, which its proof signs/);
+  // The digest's header unsigned, or a digest other than the one signed.
+  const unsigned = await raw(bytes, declared, { signed: { 'content-type': 'application/octet-stream' } });
+  assert.deepEqual([unsigned.status, unsigned.body.message], [400, 'content-digest says what binds the body, so the proof signs it: name it in hdr']);
+  const other = createHash('sha256').update('another document').digest('hex');
+  const resigned = await raw(bytes, declared, { signed: { 'content-type': 'application/octet-stream', 'content-digest': contentDigest(other) }, line: other });
+  assert.deepEqual([resigned.status, resigned.body.reason], [401, 'req']);
+});
+
 test('a body other than its Content-Digest says, short of its length, past it, or declaring it badly is refused, and the upstream never gets it whole', { timeout: 60_000 }, async () => {
   await bind();
   const held = await session();
@@ -635,7 +681,7 @@ test('sign and presign take a workload, its proof signing what is asked; the pla
   assert.equal(plan.status, 200, JSON.stringify(plan.body));
   assert.equal(plan.body.environment, 'market/prod');
   assert.deepEqual(plan.body.values, { REGION: 'eu-west-3' }, 'its plain value, and no secret one: it uses them');
-  assert.deepEqual([...(plan.body.credentials as string[])].sort(), ['dfns-key', 'dpopped', 'metered', 's3', 'stripe', 'webhook', 'yousign']);
+  assert.deepEqual([...(plan.body.credentials as string[])].sort(), ['dfns-key', 'dpopped', 'metered', 's3', 'stripe', 'sumsub-key', 'webhook', 'yousign']);
   assert.deepEqual(plan.body.tunnels, { db: { key: 'DATABASE_URL', url: 'wss://secrets.acme.example/use/market/prod/db' } });
   assert.deepEqual([...(plan.body.useOnly as string[])].sort(), ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'DATABASE_URL', 'SIGNING_KEY', 'STRIPE_KEY', 'WEBHOOK_SECRET']);
 });

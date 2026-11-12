@@ -1751,15 +1751,41 @@ run` calls the same `credential(name).verify` from
   `<header>.<payload>`, base64url).
 - **Bounded.** A message is 64 KiB at most: Equisafe's largest webhook in
   90 days of production was DFNS's, 5,234 bytes (p99 2,272), Yousign's
-  2,013. `hmac(…, { maxBytes })` takes up to 1 MiB for a provider whose
-  bodies run longer. coffre reads a request up to what the longest of its
-  signers and verifiers takes, before it knows who asks, and refuses past
-  it with 413, before anything is opened. That read counts against the
+  2,013. `hmac(…, { maxBytes })` takes up to 1 MiB as JSON for a provider
+  whose bodies run longer, and a signer's up to 12 MiB raw (below). coffre
+  reads a JSON request up to what the longest of its signers and verifiers
+  takes as JSON, before it knows who asks, and refuses past it with 413,
+  before anything is opened; past 1 MiB, the 413 names the raw shape. That read counts against the
   16 MiB of bodies an isolate holds read whole, as any other. On a
   413 the client's `verify` throws, and the app answers the provider
   4xx, so that it stops retrying. The CPU is the body's: about 0.2 ms at
   4 KiB, 3 ms at 512 KiB and 5 ms at 1 MiB on Node, within a Worker's
   10 ms on the Free plan.
+- **Raw, for a long message (0.16).** SumSub signs a request as
+  HMAC-SHA256(secret, `ts + method + path + body`), and a document
+  upload's body is the whole multipart file, 10.1 MiB at most. Such a
+  message goes as the request's body itself, `POST
+  /use/<project>/<env>?sign=sumsub-key` with `Content-Type:
+  application/octet-stream`, and coffre feeds its bytes to the HMAC as
+  they come, 64 KiB at a time into one buffer, never held, so it takes
+  none of the isolate's 16 MiB of bodies. The caller sends `ts + method +
+  path` and then the file, one stream: a signature over a concatenation
+  needs no help from coffre. `credential(name).sign` and the SDK's send a
+  message past 1 MiB this way on their own, and `coffre serve` streams it
+  through. Raw is for an `hmac()` signer whose `maxBytes` takes the
+  message, up to 12 MiB (`MAX_RAW_MESSAGE_BYTES`, derived from R27 in
+  [config](config.md)); a private key (415) and a verifier sign nothing
+  raw, and a verifier checks JSON alone, since a webhook's body is small.
+  Everything is refused before a byte is read: the signer and its kind,
+  a missing `Content-Length` (411) or one past `maxBytes` (413), the
+  caller and its proof, the environment, the secret. A workload's
+  request declares the body's SHA-256 in a `Content-Digest`, which its
+  proof signs, as a declared body through a credential does (section 4);
+  a handle's may. The signature answers only once the body ended at its
+  length and matched its digest; otherwise 400, and no signature.
+  Opened, logged and limited as a JSON sign. A raw sign whose cached
+  values lapse while its body uploads answers 503 `late`, as a slow JSON
+  one does.
 - **Opened as a credential's values are, logged once a minute.** A
   webhook comes on a request's path, and the vault is the instance's
   narrowest point, so a verify or an HMAC signature opens its secret as a

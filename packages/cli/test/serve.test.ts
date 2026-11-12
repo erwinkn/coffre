@@ -13,6 +13,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { credential } from '@coffre/client/credential';
 import { postgresClient } from '@coffre/db/connect';
 
 import { fakeCoffre, fakePostgres } from './workload-fake.ts';
@@ -314,6 +315,39 @@ test('through the sidecar, a 55 MB document is held once, in memory, hashed as i
   });
   assert.equal(refusedAtOnce, 413);
   assert.equal(coffre.forwarded.length, forwards);
+});
+
+test("through the sidecar, a raw message to sign, from credential(name).sign past 1 MiB, streams to coffre with its Content-Digest, never held", { timeout: 120_000 }, async (t) => {
+  const coffre = await fakeCoffre({ upstream: (sent) => ({ status: 200, body: { signature: `${sent.query}:${sent.sha256}:${sent.length}` } }) });
+  t.after(() => coffre.close());
+  const run = cli(t, ['serve', '--url', coffre.url, '--service', 'api-prod', '--proof', 'enrollment', '--listen', '127.0.0.1:0']);
+  const [, listener] = await said(run, /(http:\/\/127\.0\.0\.1:\d+)\/use\/<credential>/);
+  // What `coffre serve` gives the app: each credential at the listener, and no handle.
+  const sumsub = credential('sumsub-key', { COFFRE_CREDENTIALS: JSON.stringify({ 'sumsub-key': `${listener}/use/market/prod/sumsub-key` }), COFFRE_HANDLE: '' });
+  const message = randomBytes(10 * 1024 * 1024);
+  const sha256 = createHash('sha256').update(message).digest();
+  assert.equal(await sumsub.sign(message), `sign=sumsub-key:${sha256.toString('hex')}:${message.length}`);
+  const forwarded = coffre.forwarded.at(-1)!;
+  assert.deepEqual([forwarded.path, forwarded.headers['content-digest'], forwarded.headers['content-type']], ['/use/market/prod', `sha-256=:${sha256.toString('base64')}:`, 'application/octet-stream']);
+  // At 1 MiB, JSON, as before.
+  await sumsub.sign(message.subarray(0, 1024 * 1024));
+  assert.equal(coffre.forwarded.at(-1)!.headers['content-type'], 'application/json');
+  // Streamed, not held: coffre has 6 MiB of it before the app sends past 8 MiB, which a sidecar reading it whole would wait for.
+  const start = coffre.received;
+  let sent = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull: async (out) => {
+      if (sent >= message.length) return out.close();
+      for (let waited = 0; sent === 8 * 1024 * 1024 && coffre.received - start < 6 * 1024 * 1024; waited += 10) {
+        if (waited > 20_000) return out.error(new Error(`coffre got ${coffre.received - start} bytes while the sidecar held the rest`));
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      out.enqueue(message.subarray(sent, sent + 1024 * 1024));
+      sent += 1024 * 1024;
+    },
+  });
+  const streamed = await fetch(`${listener}/use/market/prod?sign=sumsub-key`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', 'content-length': String(message.length), 'content-digest': `sha-256=:${sha256.toString('base64')}:` }, body, duplex: 'half' } as RequestInit);
+  assert.deepEqual(await streamed.json(), { signature: `sign=sumsub-key:${sha256.toString('hex')}:${message.length}` });
 });
 
 test("a service's run refuses a credential two of its environments name, and a run stopped before its command starts logs out first", async (t) => {

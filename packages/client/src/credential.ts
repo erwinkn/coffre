@@ -29,7 +29,10 @@ export type ProxiedCredential = {
    * A signature of `message` (a string signs as its UTF-8) by a signer's
    * key, which stays in coffre: a private key's, what Node's
    * `crypto.sign(undefined, message, key)` gives, base64url, each one use
-   * in coffre's log; an HMAC secret's, as its `hmac()` writes it.
+   * in coffre's log; an HMAC secret's, as its `hmac()` writes it. A message
+   * past 1 MiB goes raw, its bytes as the request's body, which coffre
+   * signs as they come, never held: an `hmac()` signer's whose `maxBytes`
+   * takes it, SumSub's document upload say.
    */
   sign(message: Uint8Array | string): Promise<string>;
   /**
@@ -42,6 +45,9 @@ export type ProxiedCredential = {
 };
 
 type Env = Record<string, string | undefined>;
+
+/** The longest message `sign` sends as JSON, base64url: what coffre reads whole. A longer one goes raw. */
+const JSON_MESSAGE_BYTES = 1024 * 1024;
 
 /** The credential `name`, as `coffre run` gave the app it; `env` and `fetcher` for tests and odd runtimes. */
 export function credential(
@@ -69,6 +75,16 @@ export function credential(
     });
     return { answer, body: (await answer.json()) as { url?: string; expiresAt?: string; signature?: string; valid?: boolean; message?: string } };
   };
+  /** A message past what JSON takes, signed raw: its bytes as the body, with the SHA-256 that `coffre serve` streams it by, and coffre checks. */
+  const raw = async (bytes: Uint8Array) => {
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>));
+    const answer = await fetcher(`${url.slice(0, url.lastIndexOf('/'))}?sign=${encodeURIComponent(name)}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${handle}`, 'content-type': 'application/octet-stream', 'content-length': String(bytes.length), 'content-digest': `sha-256=:${btoa(String.fromCharCode(...digest))}:` },
+      body: bytes as Uint8Array<ArrayBuffer>,
+    });
+    return { answer, body: (await answer.json()) as { signature?: string; message?: string } };
+  };
   const bytesOf = (message: Uint8Array | string) => {
     const bytes = typeof message === 'string' ? new TextEncoder().encode(message) : message;
     let binary = '';
@@ -88,7 +104,8 @@ export function credential(
       return { url: body.url, expiresAt: body.expiresAt! };
     },
     sign: async (message) => {
-      const { answer, body } = await compute({ sign: { credential: name, message: bytesOf(message) } });
+      const bytes = typeof message === 'string' ? new TextEncoder().encode(message) : message;
+      const { answer, body } = bytes.length > JSON_MESSAGE_BYTES ? await raw(bytes) : await compute({ sign: { credential: name, message: bytesOf(bytes) } });
       if (!answer.ok || body.signature === undefined) throw new Error(`coffre signed nothing: ${body.message ?? answer.status}`);
       return body.signature;
     },
