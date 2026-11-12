@@ -212,7 +212,7 @@ Live(x) == ~Gone(x) /\ ~Archived(x)
 AppLive == Live("env")
 
 \* A reference is ended once its `reference.end` is in the log (vault
-\* store.ts, endedReferences; server db/queries.ts, referenceRows).
+\* store.ts, referenceEnds; server db/queries.ts, referenceRows).
 Ended(r) == \E i \in 1..Len(log) : log[i].kind = "reference.end" /\ log[i].via = r
 
 \* The holder's reference, while it reads: not ended, its source live and

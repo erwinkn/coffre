@@ -146,7 +146,7 @@ export async function lock<T extends Table>(tx: Transaction, table: T, match: Ma
 
 /**
  * An environment's rows of `secrets`, archived ones included. The table is
- * indexed by project first (`secrets_lookup_idx`), which a read by
+ * keyed by project first (its unique key), which a read by
  * environment alone does not name: it would walk that index end to end, or the
  * table, every project's keys and every archived one in it (T152). So the
  * project is read off the environment, once for the statement (an init plan),
@@ -3210,8 +3210,8 @@ async function environmentSlugs(db: Queryable, ids: readonly string[]): Promise<
  * with no such entry, or one about another reference, is no reference.
  * Looked up by project or source, the seals are found first, through the
  * log's `also` indexes, so that a row edited to name other places still
- * shows where its seal says; by maker, through its actor index
- * (`audit_log_actor_idx`), since the maker is the seal's actor (D46).
+ * shows where its seal says; by maker, through `audit_log_releases_idx`
+ * (author, actor, action), since the maker is the seal's actor (D46).
  */
 export async function referenceRows(
   db: Queryable,
