@@ -98,14 +98,15 @@ async function after(origin, idp, file, cli) {
     say(`the same offboarding reports, of ${Object.keys(saved.reports).join(', ')}`);
 
     // A use through the credential proxy: the plan `coffre run` builds an app's environment from, for a handle. Every
-    // key the Owner lists is in it, given or left out by name; no value is printed.
+    // key the Owner lists, archived ones aside, is in it, given or left out by name; no value is printed.
     const { keys } = await owner.call('GET', `/api/secrets/${DEV}`);
     const { token } = await owner.call('POST', '/api/handles', { label: 'upgrade check', expiresInMinutes: 10, paths: [DEV] });
     const response = await fetch(`${origin}/use/${DEV}`, { headers: { authorization: `Bearer ${token}` } });
-    assert.equal(response.status, 200, `a use of ${DEV} through the proxy answered ${response.status}: ${await response.text()}`);
-    const plan = await response.json();
+    const body = await response.text();
+    assert.equal(response.status, 200, `a use of ${DEV} through the proxy answered ${response.status}: ${body}`);
+    const plan = JSON.parse(body);
     const given = Object.keys(plan.env);
-    const missing = keys.map(({ key }) => key).filter((key) => !given.includes(key) && !plan.left.includes(key));
+    const missing = keys.filter(({ archived }) => !archived).map(({ key }) => key).filter((key) => !given.includes(key) && !plan.left.includes(key));
     assert.ok(given.length > 0, `the plan for ${DEV} gives no key; it leaves out ${plan.left.join(', ') || 'none'}`);
     assert.deepEqual(missing, [], `the plan for ${DEV} neither gives nor leaves out ${missing.join(', ')}`);
     say(`a handle's use of ${DEV} through the proxy gives ${given.length} keys and leaves out ${plan.left.length}`);
