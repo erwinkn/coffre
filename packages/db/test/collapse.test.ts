@@ -36,18 +36,29 @@ async function database(name: string, template?: string): Promise<string> {
 
 /**
  * `migrations` applied as the migrator applies them, but for its ledger's rows: in one transaction, then the indexes
- * built online, then the database restricted.
+ * built online, then the database restricted. Each statement, with the rows it inserted, updated or deleted.
  */
-async function apply(url: string, migrations: readonly string[]): Promise<void> {
+async function apply(url: string, migrations: readonly string[]): Promise<{ statement: string; written: number }[]> {
   const client = postgresSession(url);
+  const WRITTEN = `SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0)::int8::text AS n FROM pg_stat_xact_all_tables`;
+  const applied: { statement: string; written: number }[] = [];
   try {
     await client.begin(async (tx) => {
       await tx.unsafe(LEDGER);
-      for (const sql of migrations) for (const statement of statements(sql)) if (onlineIndex(statement) === null) await tx.unsafe(statement);
+      for (const sql of migrations) {
+        for (const statement of statements(sql)) {
+          if (onlineIndex(statement) !== null) continue;
+          const [before] = await tx.unsafe<{ n: string }[]>(WRITTEN);
+          await tx.unsafe(statement);
+          const [after] = await tx.unsafe<{ n: string }[]>(WRITTEN);
+          applied.push({ statement, written: Number(after!.n) - Number(before!.n) });
+        }
+      }
     });
     const session = { client, briefly: <T>(run: () => Promise<T>) => run(), waitShort: async () => {}, waitLong: async () => {} };
     for (const index of onlineIndexes(migrations)) await buildOnline(session, index);
     await restrictDatabase(client);
+    return applied;
   } finally {
     await client.end();
   }
@@ -55,7 +66,9 @@ async function apply(url: string, migrations: readonly string[]): Promise<void> 
 
 /** One line per object, sorted; a table partitioned by day has days named by the date the database was made. */
 const CATALOG = `
-  WITH rel AS (
+  WITH fn AS (
+    SELECT p.oid FROM pg_proc p WHERE p.pronamespace NOT IN ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)
+  ), rel AS (
     SELECT c.oid, CASE WHEN c.relnamespace = 'public'::regnamespace THEN '' ELSE c.relnamespace::regnamespace::text || '.' END || c.relname AS name
       FROM pg_class c WHERE c.relnamespace IN ('public'::regnamespace, 'drizzle'::regnamespace)
   ), acl AS (
@@ -64,13 +77,13 @@ const CATALOG = `
     UNION ALL
     SELECT 'grant on ' || r.name || '.' || a.attname, a.attacl FROM rel r JOIN pg_attribute a ON a.attrelid = r.oid WHERE a.attacl IS NOT NULL
     UNION ALL
-    SELECT 'grant on ' || p.oid::regprocedure::text, coalesce(p.proacl, acldefault('f'::"char", p.proowner)) FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace
+    SELECT 'grant on ' || p.oid::regprocedure::text, coalesce(p.proacl, acldefault('f'::"char", p.proowner)) FROM fn JOIN pg_proc p ON p.oid = fn.oid
     UNION ALL
     SELECT 'grant on schema ' || n.nspname, coalesce(n.nspacl, acldefault('n'::"char", n.nspowner)) FROM pg_namespace n WHERE n.nspname IN ('public', 'drizzle')
     UNION ALL
     SELECT 'grant on database', d.datacl FROM pg_database d WHERE d.datname = current_database() AND d.datacl IS NOT NULL
   )
-  SELECT 'relation ' || r.name AS line, concat_ws(' | ', c.relkind, c.relpersistence, c.relrowsecurity, c.relforcerowsecurity, c.reloptions::text,
+  SELECT 'relation ' || r.name AS line, concat_ws(' | ', pg_get_userbyid(c.relowner), c.relkind, c.relpersistence, c.relrowsecurity, c.relforcerowsecurity, c.reloptions::text,
          pg_get_partkeydef(c.oid), pg_get_expr(c.relpartbound, c.oid), (SELECT i.inhparent::regclass::text FROM pg_inherits i WHERE i.inhrelid = c.oid),
          CASE WHEN c.relkind IN ('v', 'm') THEN pg_get_viewdef(c.oid) END,
          CASE WHEN c.relkind IN ('i', 'I') THEN pg_get_indexdef(c.oid) || (SELECT ' valid ' || i.indisvalid FROM pg_index i WHERE i.indexrelid = c.oid) END,
@@ -87,9 +100,9 @@ const CATALOG = `
   UNION ALL
   SELECT 'trigger ' || r.name || '.' || t.tgname, pg_get_triggerdef(t.oid) || ' ' || t.tgenabled::text FROM rel r JOIN pg_trigger t ON t.tgrelid = r.oid WHERE NOT t.tgisinternal
   UNION ALL
-  SELECT 'function ' || p.oid::regprocedure::text, pg_get_functiondef(p.oid) FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace
+  SELECT 'function ' || p.oid::regprocedure::text, 'owner ' || pg_get_userbyid(p.proowner) || ' ' || pg_get_functiondef(p.oid) FROM fn JOIN pg_proc p ON p.oid = fn.oid
   UNION ALL
-  SELECT 'type ' || t.typname, concat_ws(' | ', t.typtype, format_type(t.typbasetype, t.typtypmod), t.typnotnull, t.typdefault,
+  SELECT 'type ' || t.typname, concat_ws(' | ', pg_get_userbyid(t.typowner), t.typtype, format_type(t.typbasetype, t.typtypmod), t.typnotnull, t.typdefault,
          (SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = t.oid))
     FROM pg_type t WHERE t.typnamespace = 'public'::regnamespace AND t.typtype IN ('c', 'd', 'e', 'r')
      AND (t.typrelid = 0 OR (SELECT c.relkind FROM pg_class c WHERE c.oid = t.typrelid) = 'c')
@@ -112,7 +125,9 @@ const CATALOG = `
   UNION ALL
   SELECT 'comment on ' || pg_describe_object(d.classoid, d.objoid, d.objsubid), d.description FROM pg_description d WHERE d.objoid >= 16384
   UNION ALL
-  SELECT 'extension ' || x.extname, x.extversion FROM pg_extension x`;
+  SELECT 'extension ' || x.extname, x.extversion FROM pg_extension x
+  UNION ALL
+  SELECT 'schema ' || n.nspname, pg_get_userbyid(n.nspowner) FROM pg_namespace n WHERE n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema'`;
 
 /** Rows a migration wrote at the time it ran: equal only where both databases ran it at once. */
 const WHEN_MIGRATED: Record<string, string[]> = { checkpoint_fence: ['at_floor'] };
@@ -155,9 +170,16 @@ function differences(left: readonly string[], right: readonly string[]): { only:
   return { only: { left: cut(onlyLeft), right: cut(onlyRight) } };
 }
 
+/** A statement without its comment lines. */
+const code = (statement: string) => statement.replace(/^\s*--[^\n]*\n/gm, '').trim();
+
 const same = (left: readonly string[], right: readonly string[]) => assert.deepEqual(differences(left, right), { only: { left: [], right: [] } });
 
-/** Rows a 0.15.0 database holds that the upgrade's statements read: the reads it placed, and its bulk policy. */
+/**
+ * Rows a 0.15.0 database holds that the upgrade's statements read: the reads it placed, and its bulk policy. Each
+ * statement of the upgrade that writes rows must write some from them (or `WRITES_NOTHING` say why it writes none),
+ * so a backfill added later fails this test until the seed gives it rows.
+ */
 const SEED = `
   INSERT INTO log_config (name, value, seal) VALUES ('policy', '{"kind":"policy","bulk":{"count":50,"windowMs":60000}}', '\\x000102030405060708090a0b0c0d0e0f');
   INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, mac)
@@ -167,6 +189,11 @@ const SEED = `
          CASE WHEN n = 1 THEN '00000000-0000-4000-8000-000000000007'::uuid END, CASE WHEN n = 1 THEN '00000000-0000-4000-8000-000000000008'::uuid END,
          '\\x000102030405060708090a0b0c0d0e0f'
     FROM generate_series(1, 2) AS n;`;
+
+/** The upgrade's statements that look like they write rows but write none, by design. */
+const WRITES_NOTHING: { reason: string; matches: RegExp }[] = [
+  { reason: '0076 makes the old names as views, and grants on them', matches: /EXECUTE format\('CREATE VIEW public\.%I WITH \(security_invoker = true\)/ },
+];
 
 let collapsed: Collapsed;
 let release: string[];
@@ -220,8 +247,12 @@ test('on a 0.15.0 database with rows, the upgrade writes what the numbered migra
   const stepped = await database('stepped', `${PREFIX}_seeded`);
   await apply(stepped, (await numbered()).slice(release.length).map(({ sql }) => sql));
   const upgraded = await database('seeded_upgraded', `${PREFIX}_seeded`);
-  await apply(upgraded, [assemble(collapsed.upgrade, collapsed.functions)]);
-  const steppedState = await state(stepped, { timed: true });
-  assert.ok(steppedState.some((line) => line.startsWith('row of policy: ')) && steppedState.some((line) => line.startsWith('row of log_read_place_days: ')), 'the seed reaches both backfills');
-  same(steppedState, await state(upgraded, { timed: true }));
+  const applied = await apply(upgraded, [assemble(collapsed.upgrade, collapsed.functions)]);
+  const writers = applied.filter(({ statement }) => /^(?:INSERT|UPDATE|DELETE|MERGE|WITH|COPY|DO|CALL)\s/i.test(code(statement)));
+  assert.ok(writers.length > 0);
+  for (const { statement, written } of writers) {
+    if (WRITES_NOTHING.some(({ matches }) => matches.test(statement))) continue;
+    assert.ok(written > 0, `the seed gives this statement no rows to write; seed what it reads:\n${code(statement).slice(0, 300)}`);
+  }
+  same(await state(stepped, { timed: true }), await state(upgraded, { timed: true }));
 });
