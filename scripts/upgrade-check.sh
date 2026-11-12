@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The upgrade Equisafe will make, on a database of the script's own: from
+# The upgrade Equisafe will make, on a Postgres of the script's own: from
 # 0.14.5 through 0.15.0 to this checkout, on Workers (state-rows.md, section 6,
 # "How it is tested"; Node is not checked in 0.16.0, D198).
 #
@@ -13,18 +13,24 @@
 #   3. On 0.15.0, as the Owner: `coffre verify log` green, a beat, then the
 #      audit API's pages (heartbeats and checkpoints left out) and every
 #      removed member's offboarding report, saved.
-#   4. This checkout's `coffre migrate`, and its Workers example started on
-#      the same database, keys and Durable Objects' storage.
+#   4. What this checkout's migrations would lose refused first (`lists`),
+#      then its `coffre migrate`, and its Workers example started on the
+#      same database, keys and Durable Objects' storage.
 #   5. The same entries in the same order, the same reports, a use through
 #      the credential proxy, a change, and `coffre verify log` green.
 #
+# It checks the data, not the deployment's files: each version is a fresh
+# `init`, and the last this checkout's example, where Equisafe runs `coffre
+# update` and `coffre setup` on its own folder (both ask questions and touch
+# Cloudflare). `pnpm test:consumer` holds what `init` writes.
+#
 # About 4 minutes, 3 of them 0.14.5's conformance. It needs network (npm),
-# Postgres (scripts/ensure-postgres.sh: COMPOSE_PROJECT_NAME and
-# COFFRE_POSTGRES_PORT name your own) and this checkout built. It runs on a
-# database of its own, `coffre_upgrade_<hex>`, ports <n> to <n>+2 (3282 by
-# default), and a temporary directory, or <dir>, which is kept; every CLI
-# runs with a home inside it and `--url`, never yours. The database, the
-# processes and the temporary directory go when it ends, however it ends.
+# Docker and this checkout built. It starts a Postgres of its own (a compose
+# project and a free port, never the shared :55432), uses ports <n> to <n>+2
+# (3282 by default) and a temporary directory, or <dir>, which is kept for a
+# look and cleared on the next run; every CLI runs with a home inside it and
+# `--url`, never yours. The Postgres, every process it started and the
+# temporary directory go when it ends, however it ends but SIGKILL.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,7 +43,57 @@ while [[ "${1:-}" == --* ]]; do
         *) echo "upgrade-check: unknown option $1" >&2; exit 2 ;;
     esac
 done
+if ! [[ "$port" =~ ^[0-9]{4,5}$ ]] || ((port < 1024 || port + 2 > 65535)); then
+    echo "upgrade-check: --port takes a port from 1024 to 65533, the first of three" >&2
+    exit 2
+fi
+started=$SECONDS
+caller_home="$HOME"
+log() { printf '==> [%dm%02ds] %s\n' $(((SECONDS - started) / 60)) $(((SECONDS - started) % 60)) "$1"; }
+
+# Every process the script started, however deep (conformance's wrangler and
+# workerd, the IdP, a deployment): a signal that ends the script reaches none
+# of them by itself.
+descendants() {
+    local table
+    table="$(ps -eo pid=,ppid=)"
+    awk -v root=$$ '{ parent[$1] = $2 } END {
+        for (p in parent) { q = p; while (q in parent && q != root) q = parent[q]; if (q == root && p != root) print p }
+    }' <<<"$table"
+}
+# Processes, or process groups as -<pid>: TERM, then KILL what is left after 5 s.
+stop() {
+    (($#)) || return 0
+    kill -TERM -- "$@" 2>/dev/null || true
+    for _ in $(seq 50); do
+        kill -0 -- "$@" 2>/dev/null || return 0
+        sleep 0.1
+    done
+    kill -KILL -- "$@" 2>/dev/null || true
+}
+work=''
 keep=false
+postgres=false
+finish() {
+    local result=$? newest pids
+    set +eu
+    mapfile -t pids < <(descendants)
+    stop "${pids[@]}"
+    # As the caller, whose HOME holds docker's compose plugin.
+    if [[ "$postgres" == true ]]; then
+        (cd "$root" && HOME="$caller_home" docker compose down --volumes --remove-orphans) >/dev/null 2>&1 ||
+            echo "upgrade-check: could not remove Postgres $COMPOSE_PROJECT_NAME; COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME docker compose down --volumes" >&2
+    fi
+    if ((result != 0)); then
+        # The step that failed wrote last.
+        newest="$(ls -t "$work"/*.log 2>/dev/null | head -n 1)"
+        [[ -z "$newest" ]] || printf -- '--- %s, last lines\n%s\n' "$newest" "$(tail -n 40 "$newest")" >&2
+        echo "upgrade check failed after $((SECONDS - started)) s" >&2
+    fi
+    [[ "$keep" == true || -z "$work" ]] || rm -rf -- "$work"
+}
+trap finish EXIT
+
 if [[ -n "${1:-}" ]]; then
     work="$1"
     keep=true
@@ -47,14 +103,21 @@ fi
 case "$work" in
 "$root" | "$root"/*)
     echo "upgrade-check: $work is inside the workspace; give it a directory outside" >&2
+    keep=true
     exit 2
     ;;
 esac
 mkdir -p "$work"
 work="$(cd "$work" && pwd)"
-export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
-database="coffre_upgrade_$(openssl rand -hex 4)"
-pg="127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}"
+# A kept directory's last run: its Durable Objects' storage and CLI home would meet a new database.
+rm -rf -- "$work/state" "$work/home"
+
+export COFFRE_POSTGRES_PORT
+COFFRE_POSTGRES_PORT="$(node -e "const s = require('node:net').createServer().listen(0, '127.0.0.1', () => { console.log(s.address().port); s.close(); })")"
+[[ "$COFFRE_POSTGRES_PORT" != 55432 ]] || { echo "upgrade-check: picked the shared Postgres port" >&2; exit 1; }
+export COMPOSE_PROJECT_NAME="coffre_upgrade_$(openssl rand -hex 4)"
+database=coffre_upgrade
+pg="127.0.0.1:$COFFRE_POSTGRES_PORT"
 owner="postgresql://coffre_owner:local-dev-only@$pg"
 runtime="postgresql://coffre_runtime:local-runtime-only@$pg/$database"
 vault_runtime="postgresql://coffre_vault_runtime:local-vault-only@$pg/$database"
@@ -64,53 +127,28 @@ hot_runtime="postgresql://coffre_vault_hot:local-hot-only@$pg/$database"
 origin="http://localhost:$port"
 idp_origin="http://127.0.0.1:$((port + 1))"
 store="$(pnpm --dir "$root" store path)"
-started=$SECONDS
-caller_home="$HOME"
 # shellcheck source=compat/release.sh
 . "$root/scripts/compat/release.sh"
-log() { printf '==> [%dm%02ds] %s\n' $(((SECONDS - started) / 60)) $(((SECONDS - started) % 60)) "$1"; }
 
-# Each server in a process group of its own, which stopping it stops whole (wrangler's workerd too).
-idp=''
-coffre=''
-stop() {
-    local pid="$1"
-    [[ -n "$pid" ]] || return 0
-    kill -TERM -- "-$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-}
-finish() {
-    local result=$?
-    stop "$coffre"
-    stop "$idp"
-    # As the caller, whose HOME holds docker's compose plugin.
-    (cd "$root" && HOME="$caller_home" docker compose exec -T postgres psql -qU coffre_owner -d postgres \
-        -c "DROP DATABASE IF EXISTS $database WITH (FORCE)") >/dev/null 2>&1 ||
-        echo "upgrade-check: could not drop $database; drop it by hand" >&2
-    if ((result != 0)); then
-        # The step that failed wrote last.
-        newest="$(ls -t "$work"/*.log 2>/dev/null | head -n 1)"
-        [[ -z "$newest" ]] || printf -- '--- %s, last lines\n%s\n' "$newest" "$(tail -n 40 "$newest")" >&2
-        echo "upgrade check failed after $((SECONDS - started)) s" >&2
-    fi
-    [[ "$keep" == true ]] || rm -rf -- "$work"
-}
-trap finish EXIT
-
+log "Postgres $COMPOSE_PROJECT_NAME on :$COFFRE_POSTGRES_PORT"
+postgres=true
 "$root/scripts/ensure-postgres.sh"
 # The logins the deployments run as, made once for the cluster.
 node --conditions=coffre:source "$root/scripts/ensure-database.mjs" coffre >/dev/null
 export HOME="$work/home" npm_config_update_notifier=false
 mkdir -p "$HOME"
 
+build() ( cd "$1" && ./node_modules/.bin/vite build app )
+
 # A deployment of $1 serving $database, on conformance's keys and Owner, as
 # its harness runs one: both Workers under wrangler dev, the app as it
 # builds, and the Durable Objects' storage in $work/state, kept from one
-# version to the next, as a deploy keeps it.
+# version to the next, as a deploy keeps it (0.14.5's conformance writes it
+# there too, `fill`).
+coffre=''
 serve() {
     local project="$1" config
-    quietly "building $(basename "$project")'s app" "$work/$(basename "$project")-build.log" \
-        bash -c "cd '$project' && ./node_modules/.bin/vite build app"
+    quietly "building $(basename "$project")'s app" "$work/$(basename "$project")-build.log" build "$project"
     config="$(node "$root/packages/conformance/src/draining.ts" "$project/app/dist/server")"
     (
         cd "$project"
@@ -131,7 +169,7 @@ serve() {
     ) >"$work/$(basename "$project").log" 2>&1 &
     coffre=$!
     for _ in $(seq 120); do
-        if curl -sf "$origin/livez" >/dev/null; then return; fi # pins: local
+        if curl -sf "http://localhost:$port/livez" >/dev/null; then return; fi # pins: local
         kill -0 "$coffre" 2>/dev/null || break
         sleep 1
     done
@@ -149,7 +187,7 @@ migrate() {
 
 log "coffre $from, as init writes it (--workers), filled by its own conformance on $database"
 release "$from" workers "$work/coffre-$from"
-node "$root/scripts/upgrade-check.mjs" fill "$work/coffre-$from/node_modules/@coffre/conformance/dist/main.js" "$database"
+node "$root/scripts/upgrade-check.mjs" fill "$work/coffre-$from/node_modules/@coffre/conformance/dist/main.js" "$database" "$work/state"
 quietly "coffre $from's conformance" "$work/coffre-$from-conformance.log" \
     pnpm --dir "$work/coffre-$from" conformance --postgres "$owner" --runtime "${runtime%/*}" --vault-runtime "${vault_runtime%/*}" --port "$port"
 tail -n 1 "$work/coffre-$from-conformance.log" | sed 's/^/    /'
@@ -161,13 +199,15 @@ quietly "coffre $through's migrate" "$work/coffre-$through-migrate.log" \
 # This checkout's dev IdP signs the Owner in from here on: a GitHub account is the same for any IdP, by its email.
 env -u COFFRE_DEV_PUBLIC_URL -u COFFRE_DEV_IDP_PUBLIC_URL COFFRE_DEV_IDP_PORT=$((port + 1)) \
     setsid node --conditions=coffre:source "$root/dev/idp/server.ts" >"$work/idp.log" 2>&1 &
-idp=$!
 serve "$work/coffre-$through"
 node --conditions=coffre:source "$root/scripts/upgrade-check.mjs" before "$origin" "$idp_origin" "$work/before.json" -- \
     "$work/coffre-$through/node_modules/.bin/coffre"
-stop "$coffre"
+stop "-$coffre"
+wait "$coffre" 2>/dev/null || true
+coffre=''
 
-log "this checkout: its migrate, and its Workers example on the same database"
+log "this checkout: what its migrations would lose refused, its migrate, and its Workers example on the same database"
+node --conditions=coffre:source "$root/scripts/upgrade-check.mjs" lists "$owner/$database"
 cli=(node --conditions=coffre:source "$root/packages/cli/src/main.ts")
 quietly "this checkout's migrate" "$work/migrate.log" migrate "$root/examples/workers" "${cli[@]}"
 serve "$root/examples/workers"

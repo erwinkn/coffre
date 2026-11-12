@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // The steps of `pnpm upgrade:check` (upgrade-check.sh) that are not a shell's:
 //
-//   fill <conformance's dist/main.js> <database>
+//   fill <conformance's dist/main.js> <database> <state>
 //               0.14.5's conformance made to fill a database and leave it:
-//               it makes <database>, keeps it, and stops before the checks
-//               that tamper with the log for good.
+//               it makes <database>, keeps it and its Durable Objects'
+//               storage in <state>, and stops before the checks that tamper
+//               with the log for good.
 //   before <origin> <idp> <out.json> -- <cli…>
 //               on 0.15.0, as its Owner: the log verified by `coffre verify
 //               log`, a beat, then the audit API's pages and every removed
@@ -13,6 +14,9 @@
 //               on this checkout, as its Owner: the same entries in the
 //               same order, the same reports, a use through the credential
 //               proxy, a change, a beat, and `coffre verify log` green.
+//   lists <owner's URL of the database>
+//               on 0.15.0's database, before this checkout's migrate: no
+//               OAuth client's redirects that 0084 would cut (`brokenLists`).
 //
 // <cli…> is the CLI of the version serving, as a command line; it runs in a
 // home of its own, given as HOME, and is told the instance with --url.
@@ -30,28 +34,34 @@ const DEV = 'conformance/dev';
 const BEATS = new Set(['audit.heartbeat', 'audit.checkpoint']);
 
 const say = (line) => process.stderr.write(`    ${line}\n`);
-const [command, ...args] = process.argv.slice(2);
-if (command === 'fill') fill(args[0], args[1]);
-else if (command === 'before' || command === 'after') {
-    const split = args.indexOf('--');
-    const [origin, idp, file] = args.slice(0, split);
-    await (command === 'before' ? before : after)(origin, idp, file, args.slice(split + 1));
-} else {
-    console.error('usage: upgrade-check.mjs fill|before|after …');
-    process.exit(2);
+if (import.meta.main) {
+    const [command, ...args] = process.argv.slice(2);
+    if (command === 'fill') fill(args[0], args[1], args[2]);
+    else if (command === 'lists') await lists(args[0]);
+    else if (command === 'before' || command === 'after') {
+        const split = args.indexOf('--');
+        const [origin, idp, file] = args.slice(0, split);
+        await (command === 'before' ? before : after)(origin, idp, file, args.slice(split + 1));
+    } else {
+        console.error('usage: upgrade-check.mjs fill|lists|before|after …');
+        process.exit(2);
+    }
 }
 
 /**
  * Each edit must match the release's bundle exactly once, or this fails, as scripts/compat/renamed-tables.mjs does.
  * The file is moved aside and a new one takes its place, never written through: pnpm links it from its store.
  */
-function fill(file, database) {
+function fill(file, database, state) {
     assert.match(database, /^coffre_[a-z0-9_]+$/);
+    assert.ok(state?.startsWith('/'), 'fill takes the Durable Objects\' storage as an absolute path');
     const edits = [
         // The harness's own scratch database, by the name given.
         ['const name = `coffre_conformance_${randomBytes(4).toString("hex")}`;', `const name = ${JSON.stringify(database)};`],
         // Kept when the run ends.
         ['sql.exec(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`)', 'Promise.resolve()'],
+        // The Durable Objects' storage where the next versions find it, not in the scratch directory it removes.
+        ['const state = join(scratch, "state");', `const state = ${JSON.stringify(state)};`],
         // The suite stops after the beats it runs and its look at the writes: what follows deletes, forges and cuts
         // entries, and the log stays broken for good.
         ['\tawait report.check("no audit, no value",', '\treturn report.failed;\n\tawait report.check("no audit, no value",'],
@@ -76,6 +86,7 @@ async function before(origin, idp, out, cli) {
 
 async function after(origin, idp, file, cli) {
     const saved = JSON.parse(readFileSync(file, 'utf8'));
+    assert.ok(Object.keys(saved.reports).length > 0, '0.15.0 listed no removed member');
     const owner = await ownerOf(origin, idp);
     const now = await snapshot(owner);
     sameEntries(saved.entries, now.entries);
@@ -86,11 +97,18 @@ async function after(origin, idp, file, cli) {
     }
     say(`the same offboarding reports, of ${Object.keys(saved.reports).join(', ')}`);
 
-    // A use through the credential proxy: the plan `coffre run` builds an app's environment from, for a handle.
+    // A use through the credential proxy: the plan `coffre run` builds an app's environment from, for a handle. Every
+    // key the Owner lists is in it, given or left out by name; no value is printed.
+    const { keys } = await owner.call('GET', `/api/secrets/${DEV}`);
     const { token } = await owner.call('POST', '/api/handles', { label: 'upgrade check', expiresInMinutes: 10, paths: [DEV] });
-    const plan = await fetch(`${origin}/use/${DEV}`, { headers: { authorization: `Bearer ${token}` } });
-    assert.equal(plan.status, 200, `a use of ${DEV} through the proxy answered ${plan.status}: ${await plan.text()}`);
-    say(`a handle's use of ${DEV} through the proxy answers 200`);
+    const response = await fetch(`${origin}/use/${DEV}`, { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(response.status, 200, `a use of ${DEV} through the proxy answered ${response.status}: ${await response.text()}`);
+    const plan = await response.json();
+    const given = Object.keys(plan.env);
+    const missing = keys.map(({ key }) => key).filter((key) => !given.includes(key) && !plan.left.includes(key));
+    assert.ok(given.length > 0, `the plan for ${DEV} gives no key; it leaves out ${plan.left.join(', ') || 'none'}`);
+    assert.deepEqual(missing, [], `the plan for ${DEV} neither gives nor leaves out ${missing.join(', ')}`);
+    say(`a handle's use of ${DEV} through the proxy gives ${given.length} keys and leaves out ${plan.left.length}`);
 
     // A change, read back.
     const value = randomBytes(18).toString('base64url');
@@ -182,7 +200,10 @@ async function verifyLog(owner, cli) {
         let text = '';
         child.stdout.on('data', (chunk) => (text += chunk));
         child.stderr.on('data', (chunk) => (text += chunk));
-        const done = new Promise((resolve) => child.once('exit', (code) => resolve({ code, text })));
+        const done = new Promise((resolve, reject) => {
+            child.once('error', reject);
+            child.once('exit', (code) => resolve({ code, text }));
+        });
         return { done, text: () => text };
     };
 
@@ -201,5 +222,33 @@ async function verifyLog(owner, cli) {
     const verified = await output(run(['--url', owner.origin, 'verify', 'log'])).done;
     assert.equal(verified.code, 0, `coffre verify log failed:\n${verified.text}`);
     say(`coffre verify log: ${verified.text.trim().split('\n').at(-1)}`);
-    await output(run(['logout', owner.origin])).done;
+    const out = await output(run(['logout', owner.origin])).done;
+    assert.equal(out.code, 0, `coffre logout failed:\n${out.text}`);
+}
+
+/**
+ * 0084 makes `oauth_clients.redirect_uris`, JSON text on 0.15.0, a text[]: the strings of an array, in order. It would
+ * drop anything else without a word (a non-string element; all of a non-array), so a client whose redirects are
+ * anything else stops the upgrade here, by id. The other two lists 0084 converts have no table on 0.15.0.
+ */
+export async function brokenLists(sql) {
+    const rows = await sql.unsafe(`
+        SELECT id::text FROM oauth_clients
+        WHERE CASE WHEN jsonb_typeof(redirect_uris::jsonb) = 'array'
+            THEN EXISTS (SELECT FROM jsonb_array_elements(redirect_uris::jsonb) AS e WHERE jsonb_typeof(e) <> 'string')
+            ELSE true END
+        ORDER BY id`);
+    return rows.map(({ id }) => id);
+}
+
+async function lists(url) {
+    const { postgresSession } = await import('@coffre/db/connect');
+    const sql = postgresSession(url);
+    try {
+        const broken = await brokenLists(sql);
+        assert.deepEqual(broken, [], `0084 would cut the redirects of the OAuth clients ${broken.join(', ')}: they are not a JSON array of strings`);
+    } finally {
+        await sql.end();
+    }
+    say('every OAuth client\'s redirects are a JSON array of strings, as 0084 converts them');
 }

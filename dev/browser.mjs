@@ -145,7 +145,7 @@ export function browser(api, idp, tunnel = {}, { passkeys } = {}) {
      */
     async function touched(session, email, method, path, body) {
         const first = await send(session, method, path, body);
-        const refusal = first.status === 403 ? await first.clone().json() : null;
+        const refusal = first.status === 403 ? await first.clone().json().catch(() => null) : null;
         if (refusal?.error !== 'touch_required') return answered(method, path, first);
         const key = await keys.get(email);
         if (key === null) throw new Error(`coffre asked ${email} for a touch of a passkey this browser does not hold`);
