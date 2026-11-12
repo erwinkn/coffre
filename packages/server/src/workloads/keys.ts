@@ -140,16 +140,18 @@ function directives(header: string): Array<[name: string, value: string | null]>
  * Another call's failure may stand meanwhile too. It stays, so that every
  * `Retry-After` it was told stays true, unless it was a timeout's and this
  * one a definite answer, which ends the stand-in; the 503 says the failure
- * that stands, and its time left. `kid` for a fetch for a key the set
- * lacked: a failure lifts the minute after it, since the issuer said
- * nothing of that key, and the failure alone then holds the next one back.
+ * that stands, and its time left. `kid`, for a fetch for a key the set
+ * lacked, is the end of the minute this call paused such fetches for: a
+ * failure lifts it, since the issuer said nothing of that key, and the
+ * failure alone then holds the next one back. A minute another call set
+ * since stays.
  */
 async function fetchKeys(
   transport: WorkloadTransport,
   url: string,
   issuer: string,
   clock: Clock,
-  { retry, kid }: { retry: boolean; kid: boolean },
+  { retry, kid }: { retry: boolean; kid: number | null },
 ): Promise<JSONWebKeySet> {
   const before = entries.get(url)?.keys ?? null;
   for (let attempt = 1; ; attempt++) {
@@ -182,7 +184,7 @@ async function fetchKeys(
       }
       const own: Failure = { until: at + (transient ? KEYS_UNREACHED_MS : KEYS_COOLDOWN_MS), message: (error as Error).message, standIn: transient };
       const failed = standing !== null && !(standing.standIn && !own.standIn) ? standing : own;
-      remember(url, { ...base, failed, kidUntil: kid ? 0 : base.kidUntil });
+      remember(url, { ...base, failed, kidUntil: kid !== null && base.kidUntil === kid ? 0 : base.kidUntil });
       throw unavailable(url, issuer, at, { kid: false, cause: error });
     }
   }
@@ -224,9 +226,11 @@ function unavailable(url: string, issuer: string, at: number, { kid, cause }: { 
   return new IssuerUnavailable(why, Math.max(1, Math.ceil((until - at) / 1000)), { cause, transient: failed?.standIn ?? false });
 }
 
-/** No fetch of `url` for a key its set lacks for `KEYS_COOLDOWN_MS` from `at`. */
-function pauseKids(url: string, at: number): void {
-  remember(url, { ...(entries.get(url) ?? { keys: null, fetchedAt: 0, keptUntil: 0, failed: null }), kidUntil: at + KEYS_COOLDOWN_MS });
+/** No fetch of `url` for a key its set lacks for `KEYS_COOLDOWN_MS` from `at`, which ends when it returns. */
+function pauseKids(url: string, at: number): number {
+  const kidUntil = at + KEYS_COOLDOWN_MS;
+  remember(url, { ...(entries.get(url) ?? { keys: null, fetchedAt: 0, keptUntil: 0, failed: null }), kidUntil });
+  return kidUntil;
 }
 
 /**
@@ -282,7 +286,7 @@ export async function verifyWithKeys(
     keys = set;
   } else {
     try {
-      keys = await fetchKeys(transport, url, expected.issuer, clock, { retry: kept(url, now) === null, kid: false });
+      keys = await fetchKeys(transport, url, expected.issuer, clock, { retry: kept(url, now) === null, kid: null });
       fetched = true;
     } catch (error) {
       const set = error instanceof IssuerUnavailable && error.transient ? kept(url, clock()) : null;
@@ -300,12 +304,13 @@ export async function verifyWithKeys(
       pauseKids(url, clock());
       throw unavailable(url, expected.issuer, clock(), { kid: true });
     }
-    if (failure(url, clock()) !== null || clock() < entries.get(url)!.kidUntil) throw unavailable(url, expected.issuer, clock(), { kid: true });
+    // Other calls may have evicted the entry meanwhile (64 other URLs): then nothing pauses this one.
+    if (failure(url, clock()) !== null || clock() < (entries.get(url)?.kidUntil ?? 0)) throw unavailable(url, expected.issuer, clock(), { kid: true });
   }
   // The issuer may have rotated: fetch once, and wait a minute before the next, whatever it finds. Paused first, so that
   // a token naming another unknown key meanwhile fetches nothing.
-  pauseKids(url, clock());
-  const rotated = await fetchKeys(transport, url, expected.issuer, clock, { retry: true, kid: true });
+  const paused = pauseKids(url, clock());
+  const rotated = await fetchKeys(transport, url, expected.issuer, clock, { retry: true, kid: paused });
   try {
     return await verifyWorkloadToken(token, rotated, expected);
   } catch (error) {

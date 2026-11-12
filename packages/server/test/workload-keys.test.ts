@@ -466,6 +466,30 @@ test('a key the fresh set lacks is fetched for with a retry, and a timeout leave
   timeouts = 2;
   assert.deepEqual(await verify(unknown, KEYS_COOLDOWN_MS + 2000), { outcome: `unavailable ${KEYS_UNREACHED_MS / 1000}`, fetches: 2 });
   assert.deepEqual(await verify(rotated, KEYS_COOLDOWN_MS + 3000), { outcome: VERIFIED, fetches: 0 });
+  // The failure lifted that fetch's minute: its ten seconds alone hold the next unknown key back (review r8 of #565).
+  assert.deepEqual(await verify(unknown, KEYS_COOLDOWN_MS + 7000), { outcome: 'unavailable 5', fetches: 0 });
+  assert.deepEqual(await verify(unknown, KEYS_COOLDOWN_MS + 2000 + KEYS_UNREACHED_MS), { outcome: `unavailable ${KEYS_COOLDOWN_MS / 1000}`, fetches: 1 });
+});
+
+test("a failed kid fetch lifts its own minute, not one another call set since (review r8 of #565)", async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  // A's fetch for a key the set lacks, at 1 s, pauses such fetches until 61 s and hangs; C's, at 62 s, until 122 s, and hangs.
+  const [a, c] = [hang(), held()];
+  scripted = [a.answer, c.answer];
+  const ra = verify(unknown, 1000);
+  await started(2);
+  const rc = verify(unknown, 62_000);
+  await started(3);
+  // A times out twice: its own minute, long over, is lifted; C's stays.
+  timeouts = 1;
+  a.release();
+  assert.equal((await ra).outcome, `unavailable ${KEYS_UNREACHED_MS / 1000}`);
+  // C's fetch is answered, without the key: told the rest of its minute, which the next unknown key waits out.
+  c.release();
+  assert.equal((await rc).outcome, `unavailable ${KEYS_COOLDOWN_MS / 1000}`);
+  // The first, A's retry and C's.
+  assert.equal(fetches, 4);
+  assert.deepEqual(await verify(unknown, 63_000), { outcome: 'unavailable 59', fetches: 0 });
 });
 
 test('an issuer that answers, but not with keys, is not asked again at once, and ends the stand-in of the set it published before', async () => {
