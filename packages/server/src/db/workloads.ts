@@ -10,47 +10,18 @@ import { hasTombstone, insert, newestChangeColumns, newestChanges, type BindingR
 
 // A workload's key-bound sessions (docs/design/workload-access.md, section
 // 5): the one statement every request runs, the bindings an exchange reads,
-// the freezes, and the conditional renewal. Queries of their own, beside
+// and the conditional renewal. Queries of their own, beside
 // queries.ts's, as every query of the server's lives under src/db.
 
 type Tables = typeof schema;
 export type SessionRow = Tables['credentials']['$inferSelect'];
-
-/** The freeze kinds the log holds (section 8.2): a target is frozen while its newest allowed one of these is a freeze. */
-const FREEZE_ACTIONS = ['workload.freeze', 'workload.unfreeze'] as const;
-
-/** The expression `audit_log_frozen_idx` indexes: the target an entry names. */
-function namedTarget(db: Queryable): SQL<string> {
-  const { auditLog } = tablesOf(db);
-  return sql<string>`((${auditLog.metadata})::jsonb ->> 'target')`;
-}
-
-/**
- * Whether `target` (a value, a column or an expression) is frozen now: its
- * newest allowed freeze or lift is a freeze. One index lookup each, through
- * `audit_log_frozen_idx`, its condition as constants, which every plan
- * proves (T245, R48); a null target is never frozen. Their MACs are not
- * checked: a forged freeze can only refuse, and a deleted one breaks the
- * chain, which the next verification finds.
- */
-function frozen(db: Queryable, target: SQL | string): SQL<boolean> {
-  const { auditLog } = tablesOf(db);
-  // The target through `= ANY`, ordered by the target then `seq` (`keyedBy`): asked plainly, Postgres drops
-  // the target from the order and, under a plan for any target, walked `audit_log_app_idx` back from the newest entry,
-  // 701 pages behind 20,000 of the app's other entries (`sign_in`'s, 0082).
-  const named = namedTarget(db);
-  const newest = sql`(SELECT ${auditLog.action} FROM ${auditLog} WHERE ${auditLog.author} = 'app'
-    AND ${auditLog.action} IN (${sql.raw(FREEZE_ACTIONS.map((action) => `'${action}'`).join(', '))}) AND ${auditLog.decision} = 'allow'
-    AND ${named} = ANY(ARRAY[CAST(${target} AS text)]) ORDER BY ${named} DESC, ${auditLog.seq} DESC LIMIT 1)`;
-  return truth(sql`COALESCE(${newest} = 'workload.freeze', false)`);
-}
 
 /** Whether binding `id` (a column, as text) has a tombstone, as a boolean (`hasTombstone`). */
 function tombstoned(db: Queryable, id: SQL): SQL<boolean> {
   return truth(hasTombstone(db, id));
 }
 
-/** A binding's ID as text, to compare with what an entry or a target names. */
+/** A binding's ID as text, as a tombstone names it. */
 function idText(id: SQL | AnyColumn): SQL {
   return sql`${id}::text`;
 }
@@ -85,31 +56,25 @@ function placeColumns(db: Queryable, otherwise: SQL) {
 /** A one-row source, for a statement that reads only expressions. */
 const single = sql`(SELECT 1 AS ${sql.identifier('one')}) AS ${sql.identifier('single')}`;
 
-/** Text joined: `||`. */
-const joined = (...parts: (SQL | string)[]) => sql.join(parts.map((part) => (typeof part === 'string' ? sql`${part}` : part)), sql` || `);
-
 /**
  * Section 5.3's one statement, by the session token's hash: the session's
  * row and its ancestors' (a `narrow` child's, root first, at most four),
  * each with its member's standing as `principals` holds it (read
  * without the vault's MAC: removal only moves the generation on, so a
  * stale read can only refuse), its binding and whether a tombstone names
- * it, and the freezes of the instance, the service, the binding, the
- * session and, when the request names one, the credential it uses
- * (`credential:<environment id>/<name>`): in the place the request names,
- * by ID or by path (`market/prod`, found by its slugs), or when it names
- * none, in the one environment the session's row was made for. Each row
- * also says that place, its ID and its path as named now (null when a path
- * names no environment). With the database clock, which
- * keeps it out of Hyperdrive's cache and is what renewal decides on, and
- * the newest policy change, as `findCredential` reads it.
+ * it, and the place the request uses: the one it names, by ID or by
+ * path (`market/prod`, found by its slugs), or when it names none, the one
+ * environment the session's row was made for, its ID and its path as
+ * named now (null when a path names no environment). With the database
+ * clock, which keeps it out of Hyperdrive's cache and is what renewal
+ * decides on, and the newest policy change, as `findCredential` reads it.
  *
  * One row per credential; the session's is the one with `tokenHash`, and
  * none at all for a token nobody holds. Nothing is checked here: the
  * caller holds every row to its MAC and every clause (`standingSession`).
  */
-export async function workloadSession(db: Queryable, tokenHash: Buffer, uses: { place: NamedPlace; credential: string | null }) {
-  const rows = await sessionRows(db, { tokenHash, ...placeParams(uses.place), credential: uses.credential });
+export async function workloadSession(db: Queryable, tokenHash: Buffer, place: NamedPlace) {
+  const rows = await sessionRows(db, { tokenHash, ...placeParams(place) });
   return rows.map((row) => ({
     ...row,
     policySeq: row.policySeq === null ? null : BigInt(row.policySeq),
@@ -126,12 +91,10 @@ export function sessionStatement(db: Queryable) {
   const bindingId = sql`CASE WHEN ${credentials.kind} = 'workload' AND ${credentials.createdBy} LIKE 'binding:%' THEN CAST(substr(${credentials.createdBy}, 9) AS uuid) END`;
   // The session's ancestors, by the IDs its row lists (under its MAC): the IDs as uuids, an array, so each is a primary-key lookup.
   const ancestors = sql`${credentials.id} = ANY(ARRAY(SELECT CAST(jsonb_array_elements_text(${sql.identifier('own')}.${sql.identifier('ancestors')}::jsonb) AS uuid) FROM ${credentials} AS ${sql.identifier('own')} WHERE ${sql.identifier('own')}.${sql.identifier('token_hash')} = ${tokenHash}))`;
-  // The credential it uses, in the environment named or else the row's one place: null when it names none, or the row several.
-  const name = sql`CAST(${sql.placeholder('credential')} AS text)`;
+  // The row's one place: null when it lists none, or several.
   const onlyPlace = sql`CASE WHEN jsonb_array_length(${credentials.places}::jsonb) = 1 THEN ${credentials.places}::jsonb -> 0 ->> 'environmentId' END`;
   // The place it uses: named, or else the row's one.
   const { place, placePath } = placeColumns(db, onlyPlace);
-  const used = sql`CASE WHEN ${name} IS NULL THEN NULL ELSE 'credential:' || ${place} || '/' || ${name} END`;
   return db
     .select({
       credential: credentials,
@@ -139,13 +102,6 @@ export function sessionStatement(db: Queryable) {
       bindingTombstoned: tombstoned(db, idText(serviceBindings.id)),
       memberStatus: principals.status,
       memberGeneration: principals.generation,
-      frozen: {
-        instance: frozen(db, 'instance'),
-        service: frozen(db, sql`${credentials.principal}`),
-        binding: frozen(db, joined('binding:', idText(serviceBindings.id))),
-        session: frozen(db, joined('session:', idText(credentials.id))),
-        credential: frozen(db, used),
-      },
       place,
       placePath,
       now: clockMillis(db),
@@ -160,32 +116,23 @@ export function sessionStatement(db: Queryable) {
 /**
  * A Cloudflare call's binding (section 9.2), in one statement: the
  * service's live bindings of profile `cloudflare`, each with whether a
- * tombstone names it, its member's standing, the place the call names, by
- * ID or path, with its path as named now, and the freezes of the instance,
- * the service, the binding and, in that place, the credential the call
- * uses. A service holds at most a few; the caller takes the oldest that
- * stands.
+ * tombstone names it, its member's standing, and the place the call
+ * names, by ID or path, with its path as named now. A service holds at
+ * most a few; the caller takes the oldest that stands.
  */
-export async function callBindings(db: Queryable, principal: string, uses: { place: NamedPlace; credential: string | null }) {
-  return bindingCalls(db, { principal, ...placeParams(uses.place), credential: uses.credential });
+export async function callBindings(db: Queryable, principal: string, place: NamedPlace) {
+  return bindingCalls(db, { principal, ...placeParams(place) });
 }
 
 const bindingCalls = prepared((db) => {
   const { serviceBindings, principals } = tablesOf(db);
   const { place, placePath } = placeColumns(db, sql`NULL`);
-  const name = sql`CAST(${sql.placeholder('credential')} AS text)`;
   return db
     .select({
       binding: serviceBindings,
       tombstoned: tombstoned(db, idText(serviceBindings.id)),
       memberStatus: principals.status,
       memberGeneration: principals.generation,
-      frozen: {
-        instance: frozen(db, 'instance'),
-        service: frozen(db, sql`${serviceBindings.principal}`),
-        binding: frozen(db, joined('binding:', idText(serviceBindings.id))),
-        credential: frozen(db, sql`CASE WHEN ${name} IS NULL THEN NULL ELSE 'credential:' || ${place} || '/' || ${name} END`),
-      },
       place,
       placePath,
       now: clockMillis(db),
@@ -250,15 +197,6 @@ export async function workloadCandidates(
   }
   const bindings = rows.filter((row) => !row.tombstoned).map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
   return { bindings, newest: newestChanges(rows) };
-}
-
-/** Which of these freeze targets are frozen now, in one statement: the exchange's check, under the log's head. */
-export async function frozenTargets(db: Queryable, targets: readonly string[]): Promise<string[]> {
-  if (targets.length === 0) return [];
-  // One row of booleans: `frozen` is a scalar subquery each.
-  const columns = Object.fromEntries(targets.map((target, i) => [`t${i}`, frozen(db, target)]));
-  const [row] = (await db.select({ ...columns, now: clockMillis(db) }).from(single)) as unknown as Record<string, boolean>[];
-  return targets.filter((_, i) => row?.[`t${i}`] === true);
 }
 
 /** Insert a workload's session, its MAC over everything that binds it (`workload_credentials`). */

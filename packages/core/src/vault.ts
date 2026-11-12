@@ -1147,12 +1147,12 @@ export type SignInCredential = {
 
 /**
  * Why a sign-in made nothing, the statement's own words: the account or
- * the binding not as named, frozen, busy (a lock not had in time), its
+ * the binding not as named, busy (a lock not had in time), its
  * times past or too far, the token spent, the app's key one it
  * rotated from.
  */
 /** Why a sign-in made nothing; `unsealed`: its binding is none the vault sealed (one 0.14 made, or a row not its object), which signs nobody in (PR 3a). */
-export type SignInRefusal = 'unbound' | 'frozen' | 'busy' | 'expired' | 'replayed' | 'retired' | 'unsealed' | 'proof';
+export type SignInRefusal = 'unbound' | 'busy' | 'expired' | 'replayed' | 'retired' | 'unsealed' | 'proof';
 
 /**
  * A sign-in's answer. `proof`: the vault's check of the token or the DPoP

@@ -5,13 +5,13 @@
 //
 //   1. the proof's shape, with no I/O (`parseProof`);
 //   2. one statement (`workloadSession`): the session's row, its member's
-//      generation, its binding, its ancestors and the freezes;
+//      generation, its binding and its ancestors;
 //   3. the row, every clause: kind, MAC, not revoked or expired, not past
 //      `not_after`, approved where its binding says `approve`, its member's
 //      generation, its binding standing, its ancestors standing;
 //   4. the proof against the request: key, signature, method, URL, token,
 //      and, for a request coffre forwards, its content (`verifyProof`);
-//   5. its client address within the binding's `sources`, and no freeze;
+//   5. its client address within the binding's `sources`;
 //   6. the gate: the nonce, the proof's `jti` once, and any counts.
 //
 // The API (`authenticateRequest`), renewal, logout and the credential
@@ -79,8 +79,7 @@ export type StandingSession = {
 export type SessionAsk = {
   /**
    * The environment it uses, by ID or by path (`market/prod`), and the
-   * credential there by name, for the `credential:` freeze; null for
-   * neither. A path that names no environment is refused, once the proof
+   * credential there by name; null for neither. A path that names no environment is refused, once the proof
    * holds.
    */
   place: string | null;
@@ -102,16 +101,9 @@ export type SessionAsk = {
   /** Whether a `narrow` child may ask it: only `/use`, narrow and logout. */
   children?: boolean;
   /**
-   * Whether a freeze refuses it: every use, but renewal and logout. A
-   * freeze stops use at the next request and keeps the session, so lifting
-   * it restores service (section 8.2); a renewal it refused would end the
-   * session, and the lift would restore nothing.
-   */
-  freezes?: boolean;
-  /**
    * Whether the request ends the session, logout: proving the key is all
-   * it takes to end one's own session, so no freeze, approval still to
-   * come, `noReads` or `sources` keeps it alive.
+   * it takes to end one's own session, so no approval still to come,
+   * `noReads` or `sources` keeps it alive.
    */
   ending?: boolean;
 };
@@ -360,7 +352,7 @@ async function sessionRowsFor(runtime: Pick<CoffreRuntime, 'db' | 'chainKey'>, t
   }
   let rows: Awaited<ReturnType<typeof workloadSession>>;
   try {
-    rows = await workloadSession(runtime.db, tokenHash, { place, credential: ask.credential });
+    rows = await workloadSession(runtime.db, tokenHash, place);
   } catch (error) {
     console.error('checking a workload session failed', logged(error));
     throw refusal(new ApiError('unavailable', 'coffre cannot check who you are right now'));
@@ -381,7 +373,7 @@ async function sessionRowsFor(runtime: Pick<CoffreRuntime, 'db' | 'chainKey'>, t
   return { own: { ...own, binding }, rows };
 }
 
-/** Every clause past the row's own, once the proof holds (or, for a recheck, held): its place, approval, ancestors, `noReads`, `sources`, the freezes and an unsigned body. */
+/** Every clause past the row's own, once the proof holds (or, for a recheck, held): its place, approval, ancestors, `noReads`, `sources` and an unsigned body. */
 function clauses(
   runtime: Pick<CoffreRuntime, 'chainKey'>,
   workloads: { noReads: boolean },
@@ -405,7 +397,7 @@ function clauses(
   if (policy.approve === true && row.approvedAt === null && !ending) {
     throw refusal(new ApiError('unauthenticated', 'this session waits for a manager of its service to approve it', 'pending'));
   }
-  // Its ancestors, a `narrow` child's, each live, the service's own, its MAC good, and unfrozen.
+  // Its ancestors, a `narrow` child's, each live, the service's own, and its MAC good.
   const ancestors = ancestorsOf(row.ancestors);
   if (ancestors === null) throw unknown();
   const lineage = ancestors.map((id) => rows.find((candidate) => candidate.credential.id === id));
@@ -422,10 +414,6 @@ function clauses(
   }
   if (policy.sources !== undefined && !ending && (sourceIp === null || !addressWithin(sourceIp, policy.sources))) {
     throw refusal(new ApiError('unauthenticated', sourceIp === null ? 'coffre cannot tell where this request comes from, and the binding names its sources' : `${sourceIp} is outside the binding's sources`, 'source'));
-  }
-  const frozen = own.frozen;
-  if (ask.freezes !== false && !ending && (frozen.instance || frozen.service || frozen.binding || frozen.session || frozen.credential || lineage.some((ancestor) => ancestor!.frozen.session))) {
-    throw refusal(new ApiError('forbidden', 'frozen: a manager stopped this use; nothing passes until they lift it', 'frozen'));
   }
   // An upload no digest binds: column B is use for it, which only a binding that says so takes (section 5.1).
   if (ask.body === UNSIGNED_BODY && policy.unsignedUploads !== true) {

@@ -21,7 +21,7 @@ import { checkAuthRow } from './auth-rows.ts';
 import { environmentPaths, places as placeRows, type BindingRow, type CredentialRead } from './db/queries.ts';
 import { namedManyAhead, readAhead, type ReadAhead } from './db/read-ahead.ts';
 import { uses015 } from './api/changes.ts';
-import { callBindings, frozenTargets } from './db/workloads.ts';
+import { callBindings } from './db/workloads.ts';
 import { reveal, type PickKeys } from './api/secrets.ts';
 import { refusedUse } from './api/keys.ts';
 import { fetchApi } from './fetch-api.ts';
@@ -155,10 +155,10 @@ export type PluginContext = {
   /**
    * The request as a workload's (docs/design/workload-access.md, section
    * 5.3), never answered from a cache: its key-bound session, `Authorization:
-   * DPoP coffre_wl_…`, in one statement with its binding, its ancestors and
-   * every freeze that names it, the credential it uses at `place` among
-   * them; its proof, for this request and, with `body`, the content coffre
-   * forwards; then its gate, the proof once and `counts` in the same call.
+   * DPoP coffre_wl_…`, in one statement with its binding and its
+   * ancestors; its proof, for this request and, with `body`, the content
+   * coffre forwards; then its gate, the proof once and `counts` in the same
+   * call.
    * No vault call. A `narrow` child is a workload too, with its
    * `constraints`. Through a Cloudflare service binding (`bindingRoute`),
    * the caller its binding's `props` name, with no proof and no session.
@@ -174,9 +174,9 @@ export type PluginContext = {
   workload(request: Request, at: WorkloadAt): Promise<WorkloadUse | null>;
   /**
    * Whether a workload this context's `workload` returned still stands, as
-   * section 5.3's statement says now, freezes and the credential it used
-   * included, without its proof or its gate: what an open tunnel's rechecks
-   * ask, its socket authenticated already (section 7.1). No vault call.
+   * section 5.3's statement says now, the place it used included, without
+   * its proof or its gate: what an open tunnel's rechecks ask, its socket
+   * authenticated already (section 7.1). No vault call.
    * False for a caller this context did not make.
    */
   recheck(caller: WorkloadUse): Promise<boolean>;
@@ -458,9 +458,8 @@ export function bindingRoute(request: Request, runtime: CoffreRuntime, principal
 /**
  * A Cloudflare call's caller (section 9.2): the service's oldest live
  * binding of profile `cloudflare`, its MAC, revocation and tombstone, its
- * member's generation, and the freezes of the instance, the service, the
- * binding and the credential it uses, in one statement; then the gate's
- * counts, with no proof. The same `WorkloadUse` a session's request makes,
+ * member's generation, and the place it names, in one statement; then
+ * the gate's counts, with no proof. The same `WorkloadUse` a session's request makes,
  * `credentialId` `binding:<id>`, so the proxy sees one kind of caller.
  * Throws `WorkloadRefused`.
  */
@@ -481,7 +480,7 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
   }
   let rows: Awaited<ReturnType<typeof callBindings>>;
   try {
-    rows = await callBindings(runtime.db, principal, { place: named, credential: at.credential });
+    rows = await callBindings(runtime.db, principal, named);
   } catch (error) {
     console.error('checking a cloudflare binding failed', logged(error));
     throw await refusedWith(new ApiError('unavailable', 'coffre cannot check who you are right now'));
@@ -513,10 +512,6 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
   if (at.credential !== null && place === null) {
     throw await refusedWith(new ApiError('bad_request', 'name the environment it uses, /use/<project>/<environment>/<credential>: this service reaches none, or several'));
   }
-  // The credential's freeze, when the call named no environment and the statement could not know which.
-  const frozen = found.frozen.instance || found.frozen.service || found.frozen.binding || found.frozen.credential
-    || (asked === null && place !== null && at.credential !== null && (await frozenTargets(runtime.db, [`credential:${place}/${at.credential}`])).length > 0);
-  if (frozen) throw await refusedWith(new ApiError('forbidden', 'frozen: a manager stopped this use; nothing passes until they lift it', 'frozen'));
   const counts = typeof at.counts === 'function' ? await at.counts({ service: principal, place, name: at.credential, credential: binding.id, way: 'binding' }) : at.counts;
   if (counts !== undefined && counts.length > 0) {
     let admitted;
@@ -559,7 +554,7 @@ async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceI
   const token = dpopToken(request);
   if (token === null) return null;
   let session: StandingSession;
-  // The fields a plugin may ask, each by name: nothing it adds reaches the checks (a `freezes`, say).
+  // The fields a plugin may ask, each by name: nothing it adds reaches the checks (an `ending`, say).
   const asking = (where: { place: string | null; credential: string | null; unless?: string }) => standingSession(request, runtime, token, sourceIp, {
     ...where,
     ...(at.body === undefined ? {} : { body: at.body }),
@@ -810,7 +805,7 @@ function pluginContext(
         ({ identity: caller, expiresAt } = made);
       }
       recalled = caller.caller.recalled;
-      // A workload uses the environment its statement checked, freezes and all: a path renamed onto another since reads nothing.
+      // A workload uses the environment its statement checked: a path renamed onto another since reads nothing.
       const place = typeof handle !== 'string' && handle.place !== null ? { environmentId: handle.place } : {};
       const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), { purpose: asked.purpose, keys: asked.keys, logged: asked.logged, only: asked.only === true, ...place, ...(ahead == null ? {} : { ahead }) });
       return { values: read.values, plain: read.plain, keys: read.keys, environment: { path: read.environment.path, personal: read.environment.personal }, expiresAt };

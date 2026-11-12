@@ -72,7 +72,7 @@ type SignInRecord = { binding: string; proof: string; issuer: string; run: Recor
 export type SignInCall = {
   requestId: string; at: number; actor: string; payload: string; mac: Buffer; seal: Buffer;
   /** The binding's columns as the vault checked its seal (`bindingSeal`): the statement holds the row to both. */
-  binding: BindingColumns; bindingSeal: Buffer; principal: string; appKey: string; spent: Buffer | null; validUntil: number | null; frozen: boolean; longest: number;
+  binding: BindingColumns; bindingSeal: Buffer; principal: string; appKey: string; spent: Buffer | null; validUntil: number | null; longest: number;
   credential: SignInCredential & { createdBy: string; tokenHashBytes: Buffer; authMacBytes: Buffer };
   pins: SignInPins;
 };
@@ -223,7 +223,7 @@ function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): Omit<Si
   const row = { at, requestId: randomUUID(), object: objectKey(ref), actor: principal, payload, seal };
   return {
     ...row, mac: entryMac(keys.mac, { tree: 'changes', row }),
-    binding, bindingSeal, principal, appKey, spent: spent === null ? null : Buffer.from(spent, 'base64'), validUntil, frozen: credential.kind === 'workload', longest,
+    binding, bindingSeal, principal, appKey, spent: spent === null ? null : Buffer.from(spent, 'base64'), validUntil, longest,
     credential: { ...credential, createdBy: `binding:${binding.id}`, tokenHashBytes: Buffer.from(credential.tokenHash, 'base64'), authMacBytes: Buffer.from(credential.authMac, 'base64') },
   };
 }

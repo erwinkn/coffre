@@ -84,7 +84,7 @@ import {
   type CredentialRow,
   type PlaceRow,
 } from '../db/queries.ts';
-import { databaseNow, frozenTargets, insertSession, keyNames, renewSession, signedSession, workloadCandidates } from '../db/workloads.ts';
+import { databaseNow, insertSession, keyNames, renewSession, signedSession, workloadCandidates } from '../db/workloads.ts';
 import { RemovalUnderWay, type RemovalBudget } from '../removal.ts';
 import { logged } from '../logged.ts';
 import { newestVaultSeq } from '@coffre/db/log';
@@ -157,11 +157,10 @@ export type ExchangeReason =
   | 'busy'
   | 'issuer_unavailable'
   // A workload's sign-in's own (docs/design/workload-access.md, section 4.1): its DPoP header missing or bad, a client
-  // address outside the binding's `sources` or none to check, an older enrollment code, a freeze, a code at capacity.
+  // address outside the binding's `sources` or none to check, an older enrollment code, a code at capacity.
   | 'dpop'
   | 'source'
   | 'superseded'
-  | 'frozen'
   | 'full'
   // With 0.15's log, a binding the vault never sealed (one 0.14 made), or one changed around it: it signs nobody in (PR 3a).
   | 'unsealed';
@@ -1500,7 +1499,7 @@ export class WorkloadService {
    * 2. the binding's `sources`, a bearer token not spent yet, and the
    *    member, from the vault;
    * 3. in one transaction that holds the log's head, on database facts
-   *    only: the member and the binding again, no freeze, the proof
+   *    only: the member and the binding again, the proof
    *    spent, the proof's own commit (an enrollment's capacity), the
    *    session made and `token.exchange` logged;
    * 4. the proof's `after`, outside it.
@@ -1542,8 +1541,8 @@ export class WorkloadService {
     if (policy.sources !== undefined && (meta.sourceIp === null || !addressWithin(meta.sourceIp, policy.sources))) {
       throw new ExchangeRefused('source', meta.sourceIp === null ? 'coffre cannot tell where this request comes from, and the binding names its sources' : `${meta.sourceIp} is outside the binding's sources`);
     }
-    // With 0.15's log, the vault makes the session (T149): it spends the token, and weighs the account, the binding, its
-    // freezes, in one call. A proof that decides in the transaction (`commit`) makes it as below.
+    // With 0.15's log, the vault makes the session (T149): it spends the token, and weighs the account and the binding, in
+    // one call. A proof that decides in the transaction (`commit`) makes it as below.
     if (kind.commit === undefined && (await vaultMakesCredentials(vault))) {
       return this.#signInByVault(vault as CredentialsVault, { member, name, kind, verified, policy, given: request.proof[name] }, meta, ctx);
     }
@@ -1576,9 +1575,6 @@ export class WorkloadService {
     return audited(this.#deps, async (tx, log) => {
       const now = new Date();
       if (!(await stillMember(tx, member, standing)) || (await standingBinding(tx, chainKey, binding.id, member, binding.generation)) === null) throw unbound();
-      if ((await frozenTargets(tx, ['instance', member, `binding:${binding.id}`])).length > 0) {
-        throw new ExchangeRefused('frozen', `${shownMember(member)} is frozen: a manager stopped its use, and no session is made until they lift it`);
-      }
       if (spent !== undefined && !(await consumeToken(tx, spent))) throw new ExchangeRefused('replayed', 'this token was exchanged already: ask your platform for a fresh one');
       const committed = kind.commit === undefined ? {} : await kind.commit(tx, verified, ctx);
       if (committed instanceof ExchangeRefused) throw committed;
@@ -1645,8 +1641,7 @@ export class WorkloadService {
   /**
    * `#signIn` with 0.15's log, for a proof that decides nothing in a
    * transaction (oidc, aws): the vault makes the session (T149), in one
-   * call. Its binding as read here, its account, its freezes and
-   * the token spent once are weighed in the vault's statement, under their
+   * call. Its binding as read here, its account and the token spent once are weighed in the vault's statement, under their
    * rows' locks; no 0.14 head, and no `token.exchange` entry: its change
    * records the run (D147). The environments it reaches are read first, for
    * its row and its answer, as nothing the vault decides is made of them.
@@ -1694,7 +1689,6 @@ export class WorkloadService {
       if (outcome.refused === 'proof') throw proofRefusal(outcome, member, binding);
       throw signInRefusal(outcome.refused, {
         unbound: `no workload binding of ${shownMember(member)} takes this proof`,
-        frozen: `${shownMember(member)} is frozen: a manager stopped its use, and no session is made until they lift it`,
         replayed: 'this token was exchanged already: ask your platform for a fresh one',
         expired: 'the proof has expired',
       });
@@ -1897,7 +1891,7 @@ function signedInCredential(row: {
 }
 
 /** A sign-in the vault refused, as the workload's owner reads it: today's codes and words, each path its own. */
-function signInRefusal(refused: Exclude<SignInRefusal, 'proof'>, words: Record<Exclude<SignInRefusal, 'frozen' | 'retired' | 'unsealed' | 'proof' | 'busy'>, string> & { frozen?: string }): ExchangeRefused {
+function signInRefusal(refused: Exclude<SignInRefusal, 'proof'>, words: Record<Exclude<SignInRefusal, 'retired' | 'unsealed' | 'proof' | 'busy'>, string>): ExchangeRefused {
   switch (refused) {
     // An instance under an app key the log moved on from, as for the seconds a deploy takes: 503, as its append would answer.
     case 'retired': throw new KeyRetired('the app\'s key is one it rotated from: a newer deployment replaces this one');
@@ -1907,7 +1901,6 @@ function signInRefusal(refused: Exclude<SignInRefusal, 'proof'>, words: Record<E
     case 'busy': return new ExchangeRefused('busy', 'coffre is busy: try again shortly', 503, '1');
     case 'replayed': return new ExchangeRefused('replayed', words.replayed);
     case 'expired': return new ExchangeRefused('expired', words.expired);
-    case 'frozen': return new ExchangeRefused('frozen', words.frozen ?? words.unbound);
     // Made before the vault sealed bindings, or changed around it: a manager binds it again (PR 3a).
     case 'unsealed': return new ExchangeRefused('unsealed', 'this binding is none the vault sealed, made before it sealed them or changed since: bind it again');
   }
