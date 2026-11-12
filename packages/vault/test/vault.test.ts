@@ -1953,6 +1953,23 @@ async function everyProjectGrant(principal: string, slug: string | null, role: s
   await reseal(principal);
 }
 
+test("a grant on a slug in every project of 0.4, converted after the cutover, becomes none on a place a writer renamed to that slug and back (T159, review r7)", async () => {
+  // As 0.4 left it: dev and prod, and CI a Viewer of every project's staging, which none is.
+  const where = await places(db.owner);
+  await rowOf05('token:ci', { role: 'member' }, ROOT);
+  await everyProjectGrant('token:ci', 'staging', 'viewer');
+  // The cutover, by a vault that makes no call after it: nothing converted yet, dev and prod sealed as they are.
+  await openLocalVault(db.vault, configure());
+  // A writer renames prod to staging, its seal kept; a new vault converts on its first call; the writer puts prod back.
+  await run(db.owner, sql`UPDATE environments SET slug = 'staging' WHERE id = ${where.prod}`);
+  const upgraded = await fresh();
+  assert.deepEqual((await upgraded.access('token:ci')).grants, [], 'converted on the places as the log holds them');
+  await run(db.owner, sql`UPDATE environments SET slug = 'prod' WHERE id = ${where.prod}`);
+  const ci = await upgraded.access('token:ci');
+  assert.equal(ci.status, 'active');
+  assert.deepEqual(ci.grants, [], 'no place answered to staging as the log holds it');
+});
+
 test('an environment grant whose environment is gone seals as that environment, never as one on every project', () => {
   const key = rowKey(SIGNING_KEY);
   const row = {

@@ -436,8 +436,8 @@ before(async () => {
   // The credential proxy itself, its upstream an egress that answers at once: the request costs only what coffre does.
   const credentials = { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response(null, { status: 204 }) } } };
   const verifiers = { webhook: hmac('WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) };
-  // The proxy's cache keeps an answer 60 s and asks the vault again in the last 15: that one request costs 4 statements
-  // and 7 of the vault's, not 1. A Cloudflare call's answer is kept 60 s whatever `proxy.cacheValues` says (a binding has no
+  // The proxy's cache keeps an answer 60 s and asks the vault again in the last 15: that one request costs 2 statements
+  // and 1 of the vault's, as a cold one does, not 1 and none. A Cloudflare call's answer is kept 60 s whatever `proxy.cacheValues` says (a binding has no
   // session to outlast it), so a request warmed at second 44 of an entry's life and measured at 45, as a loaded runner
   // does after a long test, was that request. Each `warm` renews the proxy: its entries are then as old as the gap
   // between the warm-up and the measurement.
@@ -520,14 +520,17 @@ const CAP_PERIOD_MS = 60_000;
 
 /**
  * What `request` costs once its keys' rows of the cap's are this period's: run once, then measured, both within one
- * period. What a hot request costs any other time of the minute, the clock aside; the minute's first is a
- * test of its own ("a reveal's first use of its keys in a new period").
+ * period, or both again if the period turned between them (a stalled runner): the vault reads this process's clock.
+ * What a hot request costs any other time of the minute; the minute's first is a test of its own ("a reveal's first
+ * use of its keys in a new period").
  */
 async function repeated(request: () => Promise<unknown>): Promise<Cost> {
-  const left = CAP_PERIOD_MS - (Date.now() % CAP_PERIOD_MS);
-  if (left < 5_000) await sleep(left + 50);
-  await request();
-  return cost(request);
+  for (;;) {
+    const period = Math.floor(Date.now() / CAP_PERIOD_MS);
+    await request();
+    const spent = await cost(request);
+    if (Math.floor(Date.now() / CAP_PERIOD_MS) === period) return spent;
+  }
 }
 
 /**
