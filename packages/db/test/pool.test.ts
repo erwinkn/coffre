@@ -40,18 +40,25 @@ test('a Node process done with its queries exits at once: its idle connections h
     const { postgresClient } = await import(${JSON.stringify(new URL('../src/postgres.ts', import.meta.url).href)});
     const client = postgresClient(${JSON.stringify(DATABASE)}, { max: 2, idle_timeout: 10 });
     const pause = () => new Promise((resolve) => setTimeout(resolve, 50));
+    // A wait that holds nothing open: across it, only a held connection's socket keeps the process alive.
+    const idle = () => new Promise((resolve) => setTimeout(resolve, 50).unref());
     const round = (a, b) => Promise.all([client.unsafe(\`select pg_sleep(0.3), \${a} as n\`), client.unsafe(\`select pg_sleep(0.3), \${b} as n\`)]);
     const answers = [...(await round(1, 2))];
     // Both connections idle, unref'd: taken again, each holds the process open until its statement answers.
     await pause();
     answers.push(...(await round(3, 4)));
-    // A transaction's connection, between its statements, is not idle.
+    // A transaction's connection, between its statements, is not idle, nor is a reserved one.
     await pause();
     answers.push([await client.begin(async (tx) => {
       await tx.unsafe('select 1');
-      await pause();
+      await idle();
       return (await tx.unsafe('select pg_sleep(0.3), 5 as n'))[0];
     })]);
+    const reserved = await client.reserve();
+    await reserved.unsafe('select 1');
+    await idle();
+    answers.push(await reserved.unsafe('select 6 as n'));
+    reserved.release();
     console.log(answers.map(([row]) => row.n).join(','));
   `;
   const started = performance.now();
@@ -61,7 +68,7 @@ test('a Node process done with its queries exits at once: its idle connections h
     ),
   );
   const seconds = (performance.now() - started) / 1000;
-  assert.equal(output.trim(), '1,2,3,4,5');
+  assert.equal(output.trim(), '1,2,3,4,5,6');
   assert.ok(seconds < 5, `the process exited ${seconds.toFixed(1)} s after it started, its two connections idle`);
 });
 
