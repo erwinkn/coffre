@@ -18,8 +18,13 @@ import { TEST_OWNER_DATABASE_URL } from './connections.ts';
  */
 
 const TAG = '0084_text_lists';
-const CLIENT = '77777777-7777-4777-8777-777777777777';
-const REDIRECTS = ['https://claude.ai/api/mcp/auth_callback', 'http://127.0.0.1:33418/'];
+/** Each client's redirects: two plain, one that JSON and an array literal both escape (a quote, a comma, a backslash, a
+ * brace, a non-ASCII letter) and repeats, and none. */
+const CLIENTS: [string, string[]][] = [
+  ['77777777-7777-4777-8777-777777777771', ['https://claude.ai/api/mcp/auth_callback', 'http://127.0.0.1:33418/']],
+  ['77777777-7777-4777-8777-777777777772', ['http://127.0.0.1:1/cb?a="b",c\\d{é}', 'http://127.0.0.1:1/cb?a="b",c\\d{é}', 'NULL']],
+  ['77777777-7777-4777-8777-777777777773', []],
+];
 
 /** The three columns as 0083 left them, and the ledger without 0084: what `coffre migrate` finds on 0.15.0's schema. */
 const BEFORE = [
@@ -35,8 +40,8 @@ const BEFORE = [
 ];
 
 /** A client's MAC as 0.15.0 made it, by hand: its redirects the column's JSON text, inside the tuple's JSON. */
-function macBefore(chainKey: Buffer, redirects: string): Buffer {
-  const tuple = JSON.stringify(['coffre.auth.v2', 'oauth_clients', CLIENT, 'Claude', redirects, null]);
+function macBefore(chainKey: Buffer, id: string, redirects: string): Buffer {
+  const tuple = JSON.stringify(['coffre.auth.v2', 'oauth_clients', id, 'Claude', redirects, null]);
   return createHmac('sha256', deriveKey(chainKey, 'signin-rows/v1')).update(tuple).digest();
 }
 
@@ -46,8 +51,10 @@ test(`${TAG} turns the JSON lists into text[], and a client registered before ke
   const chainKey = randomBytes(32);
 
   for (const statement of BEFORE) await db.unsafe(statement);
-  const redirects = JSON.stringify(REDIRECTS);
-  await db.unsafe(`INSERT INTO oauth_clients (id, auth_mac, name, redirect_uris) VALUES ($1, $2, 'Claude', $3)`, [CLIENT, macBefore(chainKey, redirects), redirects]);
+  for (const [id, list] of CLIENTS) {
+    const redirects = JSON.stringify(list);
+    await db.unsafe(`INSERT INTO oauth_clients (id, auth_mac, name, redirect_uris) VALUES ($1, $2, 'Claude', $3)`, [id, macBefore(chainKey, id, redirects), redirects]);
+  }
   await db.unsafe(`INSERT INTO principals (principal, status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
     VALUES ('user:ada@acme.example', 'active', true, 1, 1, 'setup', 1, 'setup', 1, $1)`, [randomBytes(32)]);
   const passkey = (id: string, byte: number) => db.unsafe(`
@@ -59,11 +66,13 @@ test(`${TAG} turns the JSON lists into text[], and a client registered before ke
 
   await migrateDatabase(TEST_OWNER_DATABASE_URL);
 
-  const [client] = await db.unsafe(`SELECT id, name, redirect_uris, auth_mac FROM oauth_clients`);
-  assert.deepEqual(client!.redirect_uris, REDIRECTS);
-  const row = { id: client!.id as string, name: client!.name as string, redirectUris: client!.redirect_uris as string[], revokedAt: null, authMac: Buffer.from(client!.auth_mac as Uint8Array) };
-  assert.ok(signedBy(chainKey, 'oauth_clients', row), 'the client signed before checks after');
-  assert.equal(signedBy(chainKey, 'oauth_clients', { ...row, redirectUris: [...REDIRECTS, 'https://evil.example/cb'] }), false);
+  const clients = await db.unsafe(`SELECT id, name, redirect_uris, auth_mac FROM oauth_clients ORDER BY id`);
+  assert.deepEqual(clients.map((client) => [client.id, client.redirect_uris]), CLIENTS);
+  for (const client of clients) {
+    const row = { id: client.id as string, name: client.name as string, redirectUris: client.redirect_uris as string[], revokedAt: null, authMac: Buffer.from(client.auth_mac as Uint8Array) };
+    assert.ok(signedBy(chainKey, 'oauth_clients', row), `client ${row.id}, signed before, checks after`);
+    assert.equal(signedBy(chainKey, 'oauth_clients', { ...row, redirectUris: [...row.redirectUris, 'https://evil.example/cb'] }), false);
+  }
 
   const keys = await db.unsafe(`SELECT transports FROM passkeys ORDER BY id`);
   assert.deepEqual(keys.map((key) => key.transports), [[], ['hybrid', 'internal']]);

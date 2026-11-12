@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **0.16 upgrades offline, from exactly 0.15.0.** Stop the deployment,
+  run `coffre migrate`, then deploy 0.16: 0.15.0's code cannot run on
+  the new schema. To go back, restore the backup taken before the
+  upgrade.
 - **Node deployments are not tested in 0.16.0.** A Node deployment stays
   on 0.15.0 until 0.16.1, which brings Node back on Postgres; SQLite is
   gone.
