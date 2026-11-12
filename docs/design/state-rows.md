@@ -214,7 +214,7 @@ column into typed ones later changes no seal while the object is the same, so it
 
 | Operation | Today: statements, round trips, vault calls | Target | What changes |
 |---|---|---|---|
-| Use, one key by name | 1, 1, 1 | 1, 1, 1 | The statement is half as long and reads no `audit_log` (V2a, V2b). |
+| Use, one key by name | 1, 1, 1 | 1, 1, 1 | Its four statements become two, a lean one for the cached case and the full one, and neither reads `audit_log` (V2a, V2b). |
 | Key write, one key | 7, 2, 2 (`writeKeys`, `waitSealed`) | 7, 2, 2 | The head lock's statement becomes the change lock's, which every change takes, the two-trip write among them (A0, `WriteTakesChangeLock`). The budget is 7. |
 | Sign-in, browser | 11, 8, 3 measured (`access`, `prepare`, `waitSealed`) | 9, 5, 3 | The two reads of the head and the `audit_log` insert go. The transaction asks its reads together and leaves its writes to the commit, as a key write does (A1). |
 | Audit page, one visit | 24, 26, 3 at a seeded log, more as the log grows | 6, 4, 2 | The flat check below (P2, P3). |
@@ -282,12 +282,21 @@ read has no reader, so the table is not built. The 5-minute beat keeps one job: 
 is looking and raises a finding when it fails. A scheduled re-derivation of the projections does not earn its place:
 it would vouch for rows as they were when it ran, and a row deleted later is the recheck's to find, as today.
 
-**One use function.** `use_credential` is 1,157 lines because its statement exists four times: with or without the
-seal seeks, with or without a reference and forks; 648 lines are those copies. The target is one statement of about
-500 lines: the seal seeks hang on `LEFT JOIN LATERAL … ON NOT cached`, the reference and fork rows are left joins by
-primary key, and the access rule stays in `decide.ts`, written once. It reads the credential, the member, the grants,
-the key, its version, its environment, the policy, the cap row and the fence row by key, with no seal seek when the
-isolate knows the log's newest number and up to 10 after a change, as today. Still one call per use.
+**Two use statements, one rule.** `use_credential` is 1,157 lines because its statement exists four times: with or
+without the seal seeks, with or without a reference and forks; 648 lines are those copies. The target is two
+statements, about 700 to 750 lines. The full one is the definition: its seal seeks hang on `LEFT JOIN LATERAL … ON NOT
+cached`, its reference and fork rows are left joins by primary key. The lean one serves the cached case and hands off
+to the full one by answering `whole`, as today; a test holds it to the full one's answers. The access rule is written
+once, an inlined SQL function both call (A645, option C). A use reads the credential, the member, the grants, the key,
+its version, its environment, the policy, the cap row and the fence row by key, with no seal seek when the isolate
+knows the log's newest number and up to 10 after a change, as today. Still one client statement, one round trip and
+one vault call per use.
+
+One statement for every case was the first target, and W386 measured it out on the 2-vCPU rig. Postgres initializes
+every plan node and subplan each time a statement runs, whether the node runs or not, about 3 µs a node. With 82 nodes
+against the lean statement's 59, a cached use costs 0.959 ms of Postgres CPU against 0.784 (+22%), a mixed load +11%,
+probing the same, a reference 11% less. The whole difference is executor start-up, 358 µs against 227; the run time is
+equal (107 µs against 100). A join that never runs is not free, so the cached case keeps a statement without them.
 
 **The policy revision disappears.** The app re-checks "the policy has not changed since I loaded the caller" on the
 seq of the newest `policy.change`. After, it compares what it already read of the roles, the policy row and the
@@ -333,6 +342,8 @@ fixed:
   credential's row, a reference's source on the reference's. The function reads those ids with no lock, takes the
   locks, then runs its statement. A key made a reference in between names an object the call did not lock: the
   statement writes nothing and answers `moved`, and the vault calls again. A use never locks after its first read.
+  The locks are a statement of their own, ahead of the lean and the full read statement alike (taken inside a reading
+  statement, they would come after its snapshot). A handoff from the lean one takes none, so a use still waits once.
 - **A hold shares what it read.** The fence held exclusive did one more job: it made a two-trip write's hold stand to
   its COMMIT against a change that takes no change lock. So `hold_inputs` and `admit_hold` take the lock of each
   object the vault decided on, shared, with those they write; `write_request` reads as a use does, under the same
@@ -435,7 +446,7 @@ table, prepared: 0.143 ms against 0.132 ms at 100k changes, 0.196 ms against 0.1
 | Indexes | all 30 on `audit_log` (33 until #576); 18 on `log_changes` (`sign_in`, `issue_revoke`, `written`, `admitted`, `refused_write`, `refused_add`, each with its `_actor`, `_environment` and `_object` variants); 10 on `log_reads`; `secrets_lookup_idx`; 4 on `secret_references`; `credentials_enrollment_roots_idx` |
 | `log_reads` and its family | 4 tables, 6 functions (182), 955 source lines, 430 test |
 | The 0.14 chain's upkeep | heartbeats and checkpoints every 5 minutes, `Audit.tla` and 6 scenarios (910, the 7 to 11 minute `Tampering` run among them); `Audit.lean` stays for the verifier |
-| `use_credential`'s copies, last release's overloads | 1,157 lines to about 500; `sign_in/35`, `issue_token/28`, `change_bindings/53` (111) |
+| `use_credential`'s copies, last release's overloads | 1,157 lines to about 700 to 750, two statements and not one (section 3); `sign_in/35`, `issue_token/28`, `change_bindings/53` (111) |
 | Functions restated whole in migrations | 30,607 of the 33,140 lines of migration SQL, 19,347 of them `use_credential` 22 times |
 | Drizzle snapshots | 328,176 lines; the migrator reads only the journal |
 | `docs/design/0.15-plan.md`, `log-015.md` | 5,204 lines |
@@ -518,7 +529,7 @@ the collapse. Days are working days for one agent under the fast gate. Net lines
 |---|---|---|---|---|---|---|
 | E1-E7 | The early list, handed out: snapshots, sessions, `ActionsLog`, the 0.14 mode, freeze probes, dead indexes | #564 for four of them | no | E6 | 3 | -330,000 |
 | V0 | Cutover deleted; migrate refuses a database not cut over. `vault/cutover.ts`, `server/cutover.ts`, `store.ts`, `vault.ts`, `formal/Migration015*` | E4 | no, `WriteLocks` edit with it | no | 1.5 | -4,800 |
-| V2a | One use statement, same reads. `use_credential`, `use_route`, `vault/use.ts` | E4 | no | yes | 3 | -700 |
+| V2a | Two use statements for four, the access rule one inlined SQL function, same reads. `use_credential`, `use_route`, `vault/use.ts` | E4 | no | yes | 3 | -400 to -450 |
 | P1 | The projector and its four tables; every change, event and use, and the old log backward from its anchor; `coffre audit rebuild`. Adds, because nothing can be deleted until pages can read it. | E4 | no, `Reads.tla` with it | yes | 4 | +900 |
 | P2 | Pages read the projection: `GET /audit`, the report, MCP. Deletes `log_reads`, the three-log merge, 18 + 11 + 10 indexes | P1 | no | yes | 3 | -2,300 |
 | P3 | The page's check, flat: one `check` call a visit (6 statements, 4 round trips), the beat runs the same; the full walk in steps behind a Verify button and `coffre verify`, which also holds each listed read inside retention to the report's summary, the floor taken from the sealed retention change (`reads_from` has no MAC); the page's walk of 0.14's chain deleted | P2 | no | no | 2 | -300 |
