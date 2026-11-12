@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
-import { contextFor, clientFor, keyIds, LOG, usesLogged } from './api-fixture.ts';
+import { contextFor, clientFor, keyIds, usesLogged } from './api-fixture.ts';
 import { browserFor, db, deps, entries, fromPage, ROOT, route, runtime, sessionFor, useMcp, DEV } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
@@ -68,17 +68,11 @@ test("ESO's store check and reads: lookup-self, then an environment, logged as o
   // The environment's own version, as `GET /api/projects/market/prod/version` answers it, without a read.
   assert.equal(metadata.custom_metadata.coffre_version, (await clientFor(deps, ROOT).environments.version('market/prod')).version);
 
-  // One entry for the environment, naming every key it opened (#242). Under 0.15's log, a use of each, on the token.
-  if (LOG === '0.14') {
-    const reads = (await entries('secret.read')).filter((entry) => entry.decision === 'allow');
-    assert.deepEqual(reads.map((entry) => entry.actor), ['token:eso']);
-    assert.equal(JSON.stringify(reads[0]!.metadata.secrets).includes('STRIPE_KEY'), true);
-  } else {
-    const uses = await usesLogged(db.owner);
-    assert.equal(new Set(uses.map((use) => use.credential)).size, 1, 'one credential, the token');
-    const stripe = await keyIds(db.owner, 'STRIPE_KEY');
-    assert.ok(uses.some((use) => stripe.includes(use.secret)));
-  }
+  // A use of each key the environment opened, on the token (#242).
+  const uses = await usesLogged(db.owner);
+  assert.equal(new Set(uses.map((use) => use.credential)).size, 1, 'one credential, the token');
+  const stripe = await keyIds(db.owner, 'STRIPE_KEY');
+  assert.ok(uses.some((use) => stripe.includes(use.secret)));
 });
 
 test('one value, by its key', async () => {

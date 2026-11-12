@@ -245,7 +245,6 @@ export class VaultEntrypoint extends WorkerEntrypoint implements VaultEntry {
       const { vault: resolvedConfig, uses } = resolved(config);
       const prepared = await prepareVault(resolvedConfig, {
         uses,
-        log: '0.15',
         sealThrough: durableSealThrough(namespace),
         heldOutside: durableHeldOutside(namespace),
         callsEndWithRequest: true,

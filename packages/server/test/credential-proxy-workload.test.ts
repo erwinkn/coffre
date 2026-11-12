@@ -25,7 +25,6 @@ import { eq } from 'drizzle-orm';
 import { WebSocket } from 'ws';
 
 import { resolveConfig } from '../src/config.ts';
-import { insertSession } from '../src/db/workloads.ts';
 import type { Gates } from '../src/gate.ts';
 import { upgrade } from '../src/node-sockets.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
@@ -34,7 +33,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, holdSomething, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, environments } from '@coffre/db/schema';
 import { answer, type Pages } from './start-fixture.ts';
 import { pinnedGates } from './window-fixture.ts';
@@ -619,35 +618,6 @@ test('past a limit, 429 with Retry-After and nothing sent; one alert per workloa
   assert.match(alerts[0]!.text, /^api-prod is past its limit for metered per minute, from 203\.0\.113\.9/);
 });
 
-// Its child is planted in the database, as `narrow` would make it, sealed by nothing.
-test("a narrowed session is held to its constraints on the URL sent, and one limited to paths signs nothing", { skip: LOG_014_ONLY }, async () => {
-  await bind();
-  const parent = await session();
-  const root = await sessionRow(parent);
-  const key = await generateProofKey();
-  const child = { token: `coffre_wl_${Buffer.alloc(32, 7).toString('base64url')}`, key };
-  await insertSession(deps.db, deps.chainKey, {
-    id: randomUUID(), kind: 'workload', tokenHash: hashToken(child.token), tokenHint: 'coffre_wl_Bwc', generation: root.generation, principal: MEMBER,
-    identityId: null, label: 'refund-agent', createdBy: root.createdBy, expiresAt: root.expiresAt, revokedAt: null, scope: root.scope, places: root.places,
-    jkt: await thumbprint(key.jwk), notAfter: root.notAfter!, ancestors: JSON.stringify([root.id]), constraints: JSON.stringify({ credentials: ['stripe'], methods: ['POST'], paths: ['/stripe/v1/refunds'] }), enrollmentId: null, approvedAt: null, approvedBy: null,
-  });
-  // Its paths are the URL sent's, the upstream's own path (`/stripe` here) included.
-  assert.equal((await use(child, 'POST', '/use/stripe/v1/refunds/re_1', { body: '' })).status, 200);
-  for (const [method, path] of [['POST', '/use/stripe/v1/refunds/%2e%2e/charges'], ['POST', '/use/stripe/v1/refundsX'], ['GET', '/use/stripe/v1/refunds'], ['POST', '/use/s3/v1/refunds']]) {
-    const refused = await use(child, method!, path!, method === 'POST' ? { body: '' } : {});
-    assert.ok(refused.status === 403 || refused.status === 400, `${method} ${path}: ${refused.status}`);
-  }
-  const signed = await use(child, 'POST', '/use', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sign: { credential: 'dfns-key', message: 'aGk' } }) });
-  assert.deepEqual([signed.status, signed.body.reason], [403, 'narrowed']);
-  const verified = await use(child, 'POST', '/use', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verify: { credential: 'webhook', message: 'aGk', signature: 'sha256=00' } }) });
-  assert.deepEqual([verified.status, verified.body.reason], [403, 'narrowed']);
-  // Raw too (Fable's review of #572).
-  const hi = createHash('sha256').update('hi').digest('hex');
-  const rawSigned = await use(child, 'POST', '/use?sign=sumsub-key', { headers: { 'content-type': 'application/octet-stream', 'content-length': '2', 'content-digest': contentDigest(hi) }, body: 'hi' });
-  assert.deepEqual([rawSigned.status, rawSigned.body.reason], [403, 'narrowed']);
-  assert.equal(reached.length, 1);
-});
-
 test('sign and presign take a workload, its proof signing what is asked; the plan gives plain values only', async () => {
   await bind();
   const held = await session();
@@ -701,13 +671,8 @@ test("verify takes a workload, its proof binding the body and signature checked;
   const swapped = await use(held, 'POST', '/use/market/prod', { headers: { 'content-type': 'application/json' }, body: ask(body, signature), signed: { body: ask(body, 'sha256=00') } });
   assert.equal(swapped.body.reason, 'req');
   assert.ok(vaultCalls - opened <= 1, 'the vault asked once at most, then the cache');
-  if (LOG === '0.14') {
-    const uses = (await entries('credential.use')).filter((entry) => entry.credential === 'webhook');
-    assert.deepEqual(uses.map((entry) => entry.hmac), [true]);
-  } else {
-    // 0.15's record: one use of the secret, its row slim (R53), naming no verifier.
-    assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
-  }
+  // The record: one use of the secret, its row slim (R53), naming no verifier.
+  assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
   // A verifier signs nothing.
   const signed = await use(held, 'POST', '/use', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sign: { credential: 'webhook', message: 'aGk' } }) });
   assert.equal(signed.status, 404);
@@ -917,34 +882,3 @@ test("a path rule fills the first segment its template frames, whatever the app 
   assert.equal(reached.length, 2);
 });
 
-// A `narrow` child's paths are weighed on the URL the app sent, its segment as the app wrote it, never the token's: a
-// child no one could write without the token is no child at all (review r2 of #483). Planted, as above.
-test("a narrowed session's paths are weighed on the app's segment, before the token goes in", { skip: LOG_014_ONLY }, async () => {
-  runtime = makeRuntime({
-    plugins: checkPlugins([credentialProxy({
-      credentials: { telegram: { upstream: `${upstreamAt}/tg`, inject: path('bot{STRIPE_KEY}') } },
-      insecureUpstreams: true,
-    })]),
-  });
-  await bind();
-  const parent = await session();
-  const root = await sessionRow(parent);
-  const narrowed = async (paths: string[], fill: number) => {
-    const key = await generateProofKey();
-    const child = { token: `coffre_wl_${Buffer.alloc(32, fill).toString('base64url')}`, key };
-    await insertSession(deps.db, deps.chainKey, {
-      id: randomUUID(), kind: 'workload', tokenHash: hashToken(child.token), tokenHint: child.token.slice(0, 13), generation: root.generation, principal: MEMBER,
-      identityId: null, label: 'bot', createdBy: root.createdBy, expiresAt: root.expiresAt, revokedAt: null, scope: root.scope, places: root.places,
-      jkt: await thumbprint(key.jwk), notAfter: root.notAfter!, ancestors: JSON.stringify([root.id]), constraints: JSON.stringify({ credentials: ['telegram'], methods: ['POST'], paths }), enrollmentId: null, approvedAt: null, approvedBy: null,
-    });
-    return child;
-  };
-  const send = (child: Awaited<ReturnType<typeof narrowed>>) => use(child, 'POST', '/use/telegram/botcoffre/sendMessage', { headers: { 'content-type': 'application/json' }, body: '{"chat_id":1}' });
-  const sent = await send(await narrowed(['/tg/botcoffre/sendMessage'], 8));
-  assert.equal(sent.status, 200, JSON.stringify(sent.body));
-  assert.equal(reached.at(-1)!.url, `/tg/bot${STRIPE_KEY}/sendMessage`);
-  const refused = await send(await narrowed([`/tg/bot${STRIPE_KEY}/sendMessage`], 9));
-  assert.deepEqual([refused.status, refused.body.reason], [403, 'narrowed']);
-  assert.ok(!JSON.stringify(refused.body).includes(STRIPE_KEY));
-  assert.equal(reached.length, 1);
-});

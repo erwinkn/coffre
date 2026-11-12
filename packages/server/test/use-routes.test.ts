@@ -2,9 +2,8 @@
 // each value a request opens on a credential is one `use_credential` call, logged as its request and decided on the rows
 // as they are then. Here every routed path, through the whole app as a deployment runs it: a reveal of one key, a run of
 // a whole environment (a reference, a plain value, a fork's inherited keys), the credential proxy's use, sign and verify
-// on a person's handle, and a CI run's sign-in then its read. Each runs with the switch off too, which logs 0.14's
-// entries and no use. With it on, every live answer is the replay's (R53), and a checkpointer on the vault's seed seals
-// every use (T128).
+// on a person's handle, and a CI run's sign-in then its read. Every live answer is the replay's (R53), and a
+// checkpointer on the vault's seed seals every use (T128).
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac, generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
@@ -85,11 +84,11 @@ after(async () => {
 });
 
 /**
- * The instance with 0.14's log alone, or 0.15's with its uses, its changes sealed by a checkpointer on the vault's
+ * The instance with its uses, its changes sealed by a checkpointer on the vault's
  * seed (each change waits for its tick, R51), and `inFlight`, the isolate's uses in flight at most. `batches` false: a
  * 0.15 vault from before T165 and T167, mid-deploy, which serves a request's several keys in no one call.
  */
-async function instance(log: '0.14' | '0.15', inFlight?: number, batches = true): Promise<void> {
+async function instance(inFlight?: number, batches = true): Promise<void> {
   await checkpointer?.stop();
   checkpointer = null;
   await resetDatabase(db.owner);
@@ -98,12 +97,8 @@ async function instance(log: '0.14' | '0.15', inFlight?: number, batches = true)
   await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
   const kek = randomBytes(32);
   signingKey = derivedSigningKey(kek);
-  if (log === '0.15') {
-    checkpointer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [signingKey], memory: join(scratch, `memory-${(made += 1)}`), intervalMs: 3_600_000 });
-  }
-  const vault = log === '0.15'
-    ? testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: checkpointer!.sealThrough, heldOutside: checkpointer!.heldOutside, ...(inFlight === undefined ? {} : { uses: { inFlight } }) })
-    : testVault([ROOT], {}, { kek }, {}, { log: '0.14' });
+  checkpointer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [signingKey], memory: join(scratch, `memory-${(made += 1)}`), intervalMs: 3_600_000 });
+  const vault = testVault([ROOT], {}, { kek }, {}, { sealThrough: checkpointer.sealThrough, heldOutside: checkpointer.heldOutside, ...(inFlight === undefined ? {} : { uses: { inFlight } }) });
   if (!batches) {
     delete vault.useMany;
     delete vault.useNamedMany;
@@ -187,7 +182,7 @@ async function usesLogged(): Promise<{ number: bigint | number | string; purpose
   return db.owner.select({ number: logUses.number, purpose: logUses.purpose, place: logUses.place }).from(logUses).orderBy(logUses.number);
 }
 
-/** The vault's 0.14 reads and the proxy's `credential.use`: what 0.14's log holds of the reads. */
+/** The vault's reads and the proxy's `credential.use` entries: what the log holds of the reads besides the uses. */
 async function readEntries(): Promise<{ action: string; actor: string }[]> {
   return db.owner.select({ action: auditLog.action, actor: auditLog.actor }).from(auditLog)
     .where(and(eq(auditLog.decision, 'allow'), sql`${auditLog.action} IN ('secret.read', 'credential.use')`));
@@ -195,59 +190,52 @@ async function readEntries(): Promise<{ action: string; actor: string }[]> {
 
 const hmacOf = (body: string) => createHmac('sha256', WEBHOOK).update(body).digest('hex');
 
-for (const log of ['0.14', '0.15'] as const) {
-  test(`${log}: a reveal, a run, the proxy's use, sign and verify, and a CI run's read each open their values${log === '0.15' ? ' by one use each, sealed, and live as replayed' : ' as 0.14 does'}`, async () => {
-    await instance(log);
-    const before = (await readEntries()).length;
-    const issued = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
-    const ci = bearer(issued.token);
-    // A reveal of one key, a run of a whole environment (a reference's source, and a plain value no use opens) and of a
-    // fork that inherits each of its keys.
-    assert.deepEqual((await ci.secrets.reveal('market/dev/API_KEY')).values, { API_KEY });
-    const run = { API_KEY, WEBHOOK, REGION: 'eu-west-3', REF: 'from-prod' };
-    assert.deepEqual({ ...(await ci.secrets.reveal('market/dev')).values }, run);
-    assert.deepEqual({ ...(await ci.secrets.reveal('market/feature')).values }, run);
-    // The credential proxy, on a person's handle: the real key injected, a signature made and one checked.
-    const { handle, credential: named } = await handleFor(DEV);
-    const used = await send(new Request(`${ORIGIN}/use/market/dev/api/thing`, { headers: { 'x-api-key': handle } }));
-    assert.equal(used.status, 200);
-    assert.deepEqual(await used.json(), { real: true });
-    assert.equal(await named('webhook').sign('payload'), hmacOf('payload'));
-    assert.equal(await named('incoming').verify('event', hmacOf('event')), true);
-    assert.equal(await named('incoming').verify('event', hmacOf('other')), false);
-    // A CI run: its sign-in, then its read on the credential it was issued.
-    const exchanged = await ciSignIn();
-    assert.deepEqual({ ...(await bearer(exchanged).secrets.reveal('market/dev', ['API_KEY', 'REF'])).values }, { API_KEY, REF: 'from-prod' });
+test("a reveal, a run, the proxy's use, sign and verify, and a CI run's read each open their values by one use each, sealed, and live as replayed", async () => {
+  await instance();
+  const before = (await readEntries()).length;
+  const issued = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  const ci = bearer(issued.token);
+  // A reveal of one key, a run of a whole environment (a reference's source, and a plain value no use opens) and of a
+  // fork that inherits each of its keys.
+  assert.deepEqual((await ci.secrets.reveal('market/dev/API_KEY')).values, { API_KEY });
+  const run = { API_KEY, WEBHOOK, REGION: 'eu-west-3', REF: 'from-prod' };
+  assert.deepEqual({ ...(await ci.secrets.reveal('market/dev')).values }, run);
+  assert.deepEqual({ ...(await ci.secrets.reveal('market/feature')).values }, run);
+  // The credential proxy, on a person's handle: the real key injected, a signature made and one checked.
+  const { handle, credential: named } = await handleFor(DEV);
+  const used = await send(new Request(`${ORIGIN}/use/market/dev/api/thing`, { headers: { 'x-api-key': handle } }));
+  assert.equal(used.status, 200);
+  assert.deepEqual(await used.json(), { real: true });
+  assert.equal(await named('webhook').sign('payload'), hmacOf('payload'));
+  assert.equal(await named('incoming').verify('event', hmacOf('event')), true);
+  assert.equal(await named('incoming').verify('event', hmacOf('other')), false);
+  // A CI run: its sign-in, then its read on the credential it was issued.
+  const exchanged = await ciSignIn();
+  assert.deepEqual({ ...(await bearer(exchanged).secrets.reveal('market/dev', ['API_KEY', 'REF'])).values }, { API_KEY, REF: 'from-prod' });
 
-    const uses = await usesLogged();
-    const reads = (await readEntries()).length - before;
-    if (log === '0.14') {
-      assert.deepEqual(uses, [], 'with the switch off, no use');
-      assert.ok(reads > 0, "0.14's reads, as before");
-      return;
-    }
-    assert.equal(reads, 0, "with the switch on, nothing of the reads in 0.14's log: no head taken for them");
-    // One use per sealed value, but for repeats an isolate's cover rides (they write none): every purpose here, and the
-    // fork's reads through their place.
-    const purposes = new Set(uses.map((row) => Number(row.purpose)));
-    for (const [purpose, code] of [['reveal', 0], ['run', 1], ['use', 4]] as const) assert.ok(purposes.has(code), `a ${purpose} logged`);
-    const [feature] = await db.owner.select({ id: environments.id }).from(environments).where(eq(environments.slug, 'feature'));
-    assert.ok(uses.some((row) => row.place === feature!.id), "the fork's inherited keys, read through it");
-    // The replay of the log allows each, as live did, and finds nothing out of place.
-    const replayed = await replayStored(db.owner, [signingKey]);
-    assert.deepEqual(replayed.faults, []);
-    assert.deepEqual([...replayed.decided.entries()].filter(([, code]) => code !== null), [], 'every use allowed, as live');
-    assert.equal(replayed.decided.size, uses.length);
-    // The checkpointer seals them: each use's MAC is the log's, over the uses tree.
-    const tick = await checkpointer!.checkpointer.tick();
-    assert.ok(tick.signed, tick.failures.join('; '));
-    assert.equal(Number(checkpointer!.checkpointer.pair.pair.uses.size), uses.length);
-    assert.deepEqual(await checkpointer!.alarms(), []);
-  });
-}
+  const uses = await usesLogged();
+  const reads = (await readEntries()).length - before;
+  assert.equal(reads, 0, 'nothing of the reads in the entries: no head taken for them');
+  // One use per sealed value, but for repeats an isolate's cover rides (they write none): every purpose here, and the
+  // fork's reads through their place.
+  const purposes = new Set(uses.map((row) => Number(row.purpose)));
+  for (const [purpose, code] of [['reveal', 0], ['run', 1], ['use', 4]] as const) assert.ok(purposes.has(code), `a ${purpose} logged`);
+  const [feature] = await db.owner.select({ id: environments.id }).from(environments).where(eq(environments.slug, 'feature'));
+  assert.ok(uses.some((row) => row.place === feature!.id), "the fork's inherited keys, read through it");
+  // The replay of the log allows each, as live did, and finds nothing out of place.
+  const replayed = await replayStored(db.owner, [signingKey]);
+  assert.deepEqual(replayed.faults, []);
+  assert.deepEqual([...replayed.decided.entries()].filter(([, code]) => code !== null), [], 'every use allowed, as live');
+  assert.equal(replayed.decided.size, uses.length);
+  // The checkpointer seals them: each use's MAC is the log's, over the uses tree.
+  const tick = await checkpointer!.checkpointer.tick();
+  assert.ok(tick.signed, tick.failures.join('; '));
+  assert.equal(Number(checkpointer!.checkpointer.pair.pair.uses.size), uses.length);
+  assert.deepEqual(await checkpointer!.alarms(), []);
+});
 
 test('0.15: a use the rows refuse refuses the request, logged as its request, and the replay refuses it too', async () => {
-  await instance('0.15');
+  await instance();
   const issued = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
   const ci = bearer(issued.token);
   assert.deepEqual((await ci.secrets.reveal('market/dev/API_KEY')).values, { API_KEY });
@@ -292,7 +280,7 @@ test('0.15: a use the rows refuse refuses the request, logged as its request, an
 
 test(`0.15: of a vault that serves no batch, mid-deploy, a whole environment of more keys than a request has uses in flight (${USES_AT_ONCE}) opens each by one use each, and one refused refuses the read`, async () => {
   // The app asks such a vault one use a key, four at a time.
-  await instance('0.15', undefined, false);
+  await instance(undefined, false);
   const many = Object.fromEntries(Array.from({ length: USES_AT_ONCE * 2 + 1 }, (_, i) => [`KEY_${i}`, `value-${i}`]));
   await root.environments.create('market/many');
   await root.secrets.set('market/many', many);
@@ -313,7 +301,7 @@ test(`0.15: of a vault that serves no batch, mid-deploy, a whole environment of 
 });
 
 test('0.15: past its uses in flight, the isolate refuses a read at once, by the API and the proxy, 503 with the vault\'s Retry-After, and logs nothing', async () => {
-  await instance('0.15', 0);
+  await instance(0);
   const { token } = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
   const refused = await send(new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path: 'market/dev/API_KEY' }) }));
   assert.equal(refused.status, 503, await refused.clone().text());
@@ -331,7 +319,7 @@ test('0.15: past its uses in flight, the isolate refuses a read at once, by the 
 });
 
 test("0.15: a read through a fork vouches for no kept answer: its uses check where the values are held, and the app asks", async () => {
-  await instance('0.15');
+  await instance();
   await root.access.set(CI, { market: null, 'market/dev': 'viewer', 'market/feature': 'viewer' });
   const ci = bearer((await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 })).token);
   assert.equal((await ci.secrets.reveal('market/feature/API_KEY')).values.API_KEY, API_KEY);
@@ -344,7 +332,7 @@ test("0.15: a read through a fork vouches for no kept answer: its uses check whe
 });
 
 test('0.15: a value written between the app\'s read and its use answers 409, to ask again: the answer is never of two versions', async () => {
-  await instance('0.15');
+  await instance();
   const ci = bearer((await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 })).token);
   // Two keys, which the app reads before their uses, by ids, as a workload's read takes them: a request by name is the
   // vault's one call, which reads its rows with the use, so there is no read before it to differ from.

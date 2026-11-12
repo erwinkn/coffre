@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { eq } from 'drizzle-orm';
 
-import { clientFor, openTestDatabase, resetDatabase, START_OVER_014, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { grants, principals } from '@coffre/db/schema';
 
 const ROOT = 'admin@acme.example';
@@ -36,34 +36,6 @@ async function deleteMember() {
   await db.owner.delete(grants).where(eq(grants.principal, MEMBER));
   await db.owner.delete(principals).where(eq(principals.principal, MEMBER));
 }
-
-test('R3: removal recovers a member whose row was deleted around the vault', { skip: START_OVER_014 }, async () => {
-  const { generation } = await deps.vault.access(MEMBER);
-  await deleteMember();
-  assert.equal((await deps.vault.access(MEMBER)).status, 'tampered');
-
-  const { report } = await root.members.remove(MEMBER);
-  assert.equal(report?.status, 'removed');
-  await root.members.add(MEMBER);
-  const recovered = await deps.vault.access(MEMBER);
-  assert.equal(recovered.status, 'active');
-  assert.ok(recovered.generation > generation);
-  assert.deepEqual(recovered.grants, []);
-});
-
-test('R3: removal recovers an edited row of an already removed member', { skip: START_OVER_014 }, async () => {
-  await root.members.remove(MEMBER);
-  const { generation } = await deps.vault.access(MEMBER);
-  await db.owner.update(principals).set({ statusChangedBy: 'user:someone@acme.example' }).where(eq(principals.principal, MEMBER));
-  assert.equal((await deps.vault.access(MEMBER)).status, 'tampered');
-
-  await root.members.remove(MEMBER);
-  await root.members.add(MEMBER);
-  const recovered = await deps.vault.access(MEMBER);
-  assert.equal(recovered.status, 'active');
-  assert.ok(recovered.generation > generation);
-  assert.deepEqual(recovered.grants, []);
-});
 
 test('R3: a member with access history but no row is listed as tampered before their next use', async () => {
   await deleteMember();

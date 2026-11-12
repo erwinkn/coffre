@@ -60,7 +60,7 @@ export type TestVault = SpeakingVault<Vault> & VaultEntry & {
    * 0.15's reads as the audit pages list them, once the log is sealed and the
    * vault's projector has gone that far (T166): a checkpointer of its own,
    * under the vault's signing key, ticks once, then the projector runs to its
-   * newest pair. Nothing under 0.14's log.
+   * newest pair.
    */
   listReads(): Promise<void>;
 };
@@ -144,28 +144,6 @@ export function waitUntil(promise: Promise<unknown>): void {
  * nobody has signed in yet, and the configuration names someone who never
  * comes.
  */
-/**
- * Which log the suite's vaults keep (`VaultOptions.log`): 0.15's, the
- * default, the app's writes logged through the vault (`prepare`), unless
- * `COFFRE_TEST_LOG` says 0.14, which runs every server test on 0.14's
- * alone, as CI does beside it until 0.16 removes it. Its changes answer
- * once committed here: no checkpointer runs (`sealedNow`).
- */
-export const LOG = process.env.COFFRE_TEST_LOG === '0.14' ? '0.14' : '0.15';
-
-/** For a test whose setup writes an input's row around the app (a session's end moved in the database), which 0.15's log refuses as not the vault's: run under 0.14's only. */
-export const LOG_014_ONLY = LOG === '0.15' ? "0.15's log refuses a row written around the app: this test's setup is 0.14's" : false;
-
-/**
- * Whether a test may edit roles and read values on a credential: not under 0.15's log, which holds no roles until the
- * cutover makes their genesis (plan PR 9). A use decides on the built-in roles meanwhile (vault decide.ts, `noEdits`),
- * where 0.14 decides on the edited ones.
- */
-export const EDITS_ROLES = LOG === '0.14';
-
-/** For a test of 0.14's start over of a tampered member, which 0.15's log does not take (the vault's tests' START_OVER): run under 0.14's only. */
-export const START_OVER_014 = LOG === '0.15' ? "0.15's log changes no tampered member until a reseal makes its row the log's again (plan PR 9), never 0.14's start over" : false;
-
 /**
  * The uses 0.15's log holds, oldest first: each read's record there, where 0.14's are its `secret.read` and
  * `credential.use` entries. Slim (R53): the credential, the key, the purpose's code (`log-replay.ts`, PURPOSES: 4 a
@@ -336,7 +314,7 @@ export function testVault(
    * `cutover: 'app'`: a 0.15 vault left for the app's door to cut over (cutover.test.ts), not cut over as it opens.
    * `throttled: false`: its throttle off, for a suite whose answers are `late` on purpose (`VaultOptions.throttled`).
    */
-  { cutover, ...log }: Pick<VaultOptions, 'log' | 'sealThrough' | 'heldOutside' | 'uses' | 'throttled'> & { cutover?: 'app' } = LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld } : { log: '0.14' },
+  { cutover, ...options }: Pick<VaultOptions, 'sealThrough' | 'heldOutside' | 'uses' | 'throttled'> & { cutover?: 'app' } = { sealThrough: sealedNow, heldOutside: nothingHeld },
 ): TestVault {
   const { kek } = keys;
   const signingKey = derivedSigningKey(kek);
@@ -349,14 +327,14 @@ export function testVault(
         database,
         kek: { id: 'test-kek-1', key: kek.toString('base64') },
         owners: owners.length > 0 ? owners.slice(0, 1) : ['nobody@coffre.test'],
-        // With 0.15's log, its uses too, over the hot path's login: the app opens values through them.
-        ...(log.log === '0.15' ? { hotDatabase: hotDatabaseUrl() } : {}),
+        // Its uses over the hot path's login: the app opens values through them.
+        hotDatabase: hotDatabaseUrl(),
         ...config,
       },
-      { clockOffset: () => offset, walks, ...log },
+      { clockOffset: () => offset, walks, ...options },
     ));
-    // Under 0.15's log, cut over from 0.14 first, as the app's door has it (cutover.ts).
-    if (log.log === '0.15' && cutover !== 'app') await cutOverAtOpen(opened, database);
+    // Cut over from 0.14 first, as the app's door has it (cutover.ts).
+    if (cutover !== 'app') await cutOverAtOpen(opened, database);
     const [first, ...others] = owners.map((email) => `user:${email}`);
     // A vault given the wrong keys checks no row and answers nobody: its own tests ask it.
     const signedIn = first === undefined ? null : await opened.access(first).catch(() => null);
@@ -431,7 +409,6 @@ export function testVault(
       offset = 0;
     },
     async listReads() {
-      if (log.log !== '0.15') return;
       const memory = mkdtempSync(join(tmpdir(), 'coffre-reads-'));
       const signer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [config.signingKey === undefined ? signingKey : Buffer.from(config.signingKey, 'base64')], memory: join(memory, 'memory'), intervalMs: 3_600_000 });
       try {
@@ -454,7 +431,7 @@ export function testVault(
  * head. The app's own half, which vouches, is cutover.test.ts's. Refused,
  * the vault stays as it is: the test asks what it asks of it.
  */
-async function cutOverAtOpen(vault: Vault, db: Database): Promise<void> {
+export async function cutOverAtOpen(vault: Vault, db: Database): Promise<void> {
   // Refused (a test that broke 0.14's chain before its vault's first call): left so, as the door leaves it; 0.14's
   // own checks go on, and nothing of 0.15's is served.
   const asked = await vault.cutover!();
@@ -588,7 +565,7 @@ export async function resetDatabase(owner: Database): Promise<void> {
   // A reference names its vault entry: it goes before the log.
   await owner.delete(secretReferences);
   await emptyLog(owner);
-  // 0.15's log, which the change path writes (unless COFFRE_TEST_LOG=0.14), gone with the rows it is of.
+  // 0.15's log, which the change path writes, gone with the rows it is of.
   await owner.delete(logChanges);
   await owner.delete(logConfig);
   await owner.delete(policy);

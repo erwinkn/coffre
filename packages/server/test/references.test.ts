@@ -6,7 +6,7 @@ import { and, asc, eq, gte } from 'drizzle-orm';
 
 import { auditChainHead, auditLog, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 import { withTriggersLifted } from './db/engine.ts';
-import { clientFor, LOG_014_ONLY, openTestDatabase, refusedIn, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, refusedIn, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // References between environments and projects (docs/design/environments.md).
 // market/prod/DATABASE_URL is the source; billing/prod holds references to it.
@@ -201,22 +201,6 @@ test("the source's access manager breaks it, and a run of the holder stops, sayi
   const { entries } = await root.audit.list({ path: 'billing/prod', detail: '1', limit: 50 });
   assert.ok(entries.some((entry) => entry.action === 'reference.end' && entry.decision === 'allow'), "billing/prod's log shows the reference broken");
 });
-
-test('an archived source refuses reads through it until it is back, and never reads as empty', { skip: LOG_014_ONLY }, async () => {
-  await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL') });
-  // Archived before archiving a read source was refused (D41): as data from then has it.
-  await db.owner.update(secrets).set({ archivedAt: new Date() }).where(eq(secrets.key, 'DATABASE_URL'));
-  await db.owner.update(secrets).set({ archivedAt: null }).where(and(eq(secrets.key, 'DATABASE_URL'), eq(secrets.environmentId, (await holderEnvironment())!)));
-  assert.match(await refusal(bo.secrets.reveal('billing/prod')), /409: .*which is archived: market\/prod's maintainers can unarchive it, or set a value for DATABASE_URL/);
-  await caro.secrets.update('market/prod/DATABASE_URL', { archived: false });
-  assert.deepEqual((await bo.secrets.reveal('billing/prod')).values.DATABASE_URL, 'postgres://v1');
-});
-
-/** The environment billing/prod's references are held in. */
-async function holderEnvironment(): Promise<string | undefined> {
-  const [row] = await db.owner.select({ environmentId: secretReferences.environmentId }).from(secretReferences);
-  return row?.environmentId;
-}
 
 test('archiving what live references read is refused, naming them and who can break them; restoring never is (D41)', async () => {
   await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL') });

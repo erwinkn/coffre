@@ -27,9 +27,9 @@ import { localVault, spoken, type SpokenVault } from '@coffre/vault/node';
 import { resolveConfig } from '../../src/config.ts';
 import { pageClient } from '../../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../../src/runtime.ts';
-import { clientFor, entryOf, contextFor, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
+import { clientFor, entryOf, contextFor, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault } from '../api-fixture.ts';
 import { answer, type Pages } from '../start-fixture.ts';
-import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from '../db/connections.ts';
+import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from '../db/connections.ts';
 import { watched } from '../db/postgres-pool.ts';
 import { farPostgres, percentile } from './far.ts';
 
@@ -83,7 +83,7 @@ try {
     get: (_, name: string) => async (...args: unknown[]) => {
       const instance = idle.pop() ?? await (async () => {
         const pool = new CountedPool(new HyperdrivePool(farVault.url), 'vault');
-        return { pool, vault: spoken(await localVault({ database: createDatabase(pool.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { log: '0.14' })) };
+        return { pool, vault: spoken(await localVault({ database: createDatabase(pool.client), hotDatabase: TEST_HOT_DATABASE_URL, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { sealThrough: sealedNow, heldOutside: nothingHeld })) };
       })();
       instance.pool.cost = cost;
       cost.vaultCalls += 1;

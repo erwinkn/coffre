@@ -83,14 +83,6 @@ const STEPS = [
   },
   { name: 'tests', job: 'tests', postgres: true, needs: code, run: ['pnpm test'] },
   {
-    name: 'tests-014',
-    job: 'tests-014',
-    postgres: true,
-    needs: code,
-    env: { COFFRE_TEST_LOG: '0.14' },
-    run: ['./scripts/test-suite.sh'],
-  },
-  {
     name: 'matrices',
     job: 'matrices-shard',
     postgres: true,
@@ -448,7 +440,7 @@ try {
     for (const command of code === 0 ? step.run : []) {
       if (interrupted) break
       console.log(`\n== ${step.name}: ${command}`)
-      code = await sh(command, step.name === 'pins' ? { GH_TOKEN: pinsToken } : step.env)
+      code = await sh(command, step.name === 'pins' ? { GH_TOKEN: pinsToken } : {})
       if (code !== 0) break
     }
     const partial = step.name === 'consumer' ? clientNodes() : ''

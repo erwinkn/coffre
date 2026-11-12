@@ -10,11 +10,9 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { eq } from 'drizzle-orm';
 
 import { coffreRoute } from '../src/app.ts';
-import { clientFor, LOG, usesLogged } from './api-fixture.ts';
+import { clientFor, usesLogged } from './api-fixture.ts';
 import { db, deps, entries, ORIGIN, ROOT, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { secrets } from '@coffre/db/schema';
-
-const skip = LOG === '0.15' ? false : "0.14's reads go through the vault's unwrap, which logs its own refusals";
 
 useMcp(async () => {
   const root = clientFor(deps, ROOT);
@@ -37,7 +35,7 @@ for (const [what, ask, purpose] of [
   ["a fork's copy", (owner: CoffreClient) => owner.environments.create('market/copy', { from: 'dev' }), 'copy'],
   ["a dry run's compare", (owner: CoffreClient) => owner.secrets.dryRun('market/dev', { API_KEY: 'sk_live_other_0123456789' }), 'compare'],
 ] as const) {
-  test(`${what} the vault refuses before its principal's lock is logged by the app, once, as the use was and why (review r3 of D153)`, { skip }, async () => {
+  test(`${what} the vault refuses before its principal's lock is logged by the app, once, as the use was and why (review r3 of D153)`, async () => {
     const owner = bearer(await sessionFor(ROOT));
     await forge();
     const [denied, logged] = [(await refusals()).length, (await usesLogged(db.owner)).length];
@@ -53,7 +51,7 @@ for (const [what, ask, purpose] of [
 // A read of one key at a fork, inheriting a reference its parent holds: the vault's one call by name (T165), its refusal
 // answered as the one `no`, and logged where the key is held, at the holder's place and key (review r5 of D153), as a
 // use by ids would be, with the named request's path and key.
-test("a fork's read of a reference its parent holds, refused before its principal's lock, is logged at the holder's place and key (review r5 of D153)", { skip }, async () => {
+test("a fork's read of a reference its parent holds, refused before its principal's lock, is logged at the holder's place and key (review r5 of D153)", async () => {
   const root = clientFor(deps, ROOT);
   await root.environments.create('market/holder');
   await root.secrets.set('market/holder', { LINK: { ref: 'market/dev/API_KEY' } });

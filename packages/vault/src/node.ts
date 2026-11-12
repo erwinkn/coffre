@@ -65,17 +65,16 @@ export type NodeVaultConfig = VaultConfig & {
 };
 
 /**
- * The vault in this process, and under 0.15's log, the default, its
- * checkpointer, opened before the vault serves, so that no call meets a log
- * with no checkpoint yet. A configuration without what 0.15 needs is refused.
+ * The vault in this process, and its checkpointer, opened before the vault
+ * serves, so that no call meets a log with no checkpoint yet. A
+ * configuration without what 0.15's log needs is refused.
  */
 export async function localVault(config: NodeVaultConfig, options: VaultOptions = {}): Promise<LocalVault> {
   // The cover a repeat rides is the deployment's `audit.repeatsWithinSeconds`, which `uses.coverMs` gave until 0.16.
   const coverMs = options.uses?.coverMs;
   const resolved = resolveVaultConfig(config, coverMs === undefined ? [] : [{ old: 'serveVault(config, { uses: { coverMs } })', options: { audit: { repeatsWithinSeconds: coverMs / 1000 } } }]);
-  const log015 = (options.log ?? '0.15') === '0.15';
-  const own = log015 && options.sealThrough === undefined;
-  if (log015 && config.hotDatabase === undefined) {
+  const own = options.sealThrough === undefined;
+  if (config.hotDatabase === undefined) {
     throw new Error("the vault's uses run as a login of their own: set hotDatabase in the vault's configuration, the database as coffre_vault_hot (HOT_DATABASE_URL)");
   }
   if (own && config.checkpointer?.memory === undefined) {
@@ -97,7 +96,7 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
   try {
     const db = await open(config.database);
     // The same URL is the same connection.
-    const hot = config.hotDatabase === undefined ? undefined : config.hotDatabase === config.database ? db : await open(config.hotDatabase);
+    const hot = config.hotDatabase === config.database ? db : await open(config.hotDatabase);
     const uses = { ...options.uses, coverMs: resolved.deployment.audit.repeatsWithinSeconds * 1000 };
     if (own) {
       // A connection of its own, which it cuts once it stalls (T169): what a stalled tick awaits holds none of the vault's.

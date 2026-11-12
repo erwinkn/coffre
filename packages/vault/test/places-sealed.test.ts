@@ -58,7 +58,7 @@ function configure(): ResolvedVaultConfig {
  */
 async function world() {
   const config = configure();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const vault = await openLocalVault(db.vault, config, { sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   const [dev, prod] = [await newEnvironment(db.owner, project), await newEnvironment(db.owner, project)];
@@ -298,7 +298,7 @@ test('a new process\'s first call, a read through a fork renamed around the log,
   assert.ok((await read(w.vault)).ok, 'read through dev, another place of its project');
   await run(db.owner, sql`UPDATE environments SET slug = 'renamed' WHERE id = ${w.dev}`);
   // A vault that has made no call yet: it learns the log is cut over as it reads, not after.
-  const fresh = speaking(await openRawVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld }));
+  const fresh = speaking(await openRawVault(db.vault, w.config, { sealThrough: sealed, heldOutside: nothingHeld }));
   assert.equal((await read(fresh)).ok, false);
   assert.equal((await read(fresh)).ok, false);
 });
@@ -316,7 +316,7 @@ test('a read through a place archived, then put back unarchived with the archive
   // Archived, dev is no place to read through; put back, its row and newest seal say it is one again.
   await putBack(w.dev, { archived: true });
   assert.equal((await read(w.vault)).ok, false);
-  const fresh = speaking(await openRawVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld }));
+  const fresh = speaking(await openRawVault(db.vault, w.config, { sealThrough: sealed, heldOutside: nothingHeld }));
   assert.equal((await read(fresh)).ok, false);
   assert.ok((await placeReports()).includes('mac'), 'reported as the place\'s, a MAC');
 });
@@ -336,7 +336,7 @@ for (const how of ['put back after its archive, the archive\'s seal column made 
     assert.ok((await read(w.vault)).ok, 'a Developer of dev reads there');
     await TAMPERS[how]!.tamper(w);
     assert.equal((await read(w.vault)).ok, false);
-    const fresh = speaking(await openRawVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld }));
+    const fresh = speaking(await openRawVault(db.vault, w.config, { sealThrough: sealed, heldOutside: nothingHeld }));
     assert.equal((await read(fresh)).ok, false);
     assert.ok((await placeReports()).includes('mac'), 'reported as the place\'s, a MAC');
   });
@@ -460,7 +460,7 @@ test('a reference is decided on its holder\'s project as the row the decision ch
 test('a protected place whose row a writer deleted outright stays protected: the log holds it, so it is no fork never written (review r5)', async () => {
   const w = await world();
   let offset = 0;
-  const vault = await openLocalVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld, clockOffset: () => offset });
+  const vault = await openLocalVault(db.vault, w.config, { sealThrough: sealed, heldOutside: nothingHeld, clockOffset: () => offset });
   const [a, b] = [await newEnvironment(db.owner, w.project), await newEnvironment(db.owner, w.project)];
   assert.ok((await vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'protect', projectId: w.project, environmentIds: [a, b], protected: true } })).ok);
   // Maya, a Developer of the whole instance, reads no protected place; CI views the project, by Root's grant.

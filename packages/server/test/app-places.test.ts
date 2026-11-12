@@ -35,9 +35,9 @@ after(async () => {
   await db.close();
 });
 
-/** 0.15's log on, and its use path, over the hot login. */
+/** The vault's use path, over the hot login. */
 function vault015() {
-  return testVault([ROOT], { hotDatabase: TEST_HOT_DATABASE_URL }, undefined, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
+  return testVault([ROOT], { hotDatabase: TEST_HOT_DATABASE_URL }, undefined, {}, { sealThrough: sealedNow, heldOutside: nothingHeld });
 }
 
 /** The instance, with `log`'s vault, and a sign-in, which issues tokens. */
@@ -665,27 +665,4 @@ test('a write refused by `prepare` (a key\'s row not the vault\'s) stores nothin
   const ended = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog).where(and(eq(auditLog.action, 'reference.end'), eq(auditLog.relatedSeq, made[0]!.seq)));
   assert.deepEqual(ended.map((row) => (JSON.parse(row.metadata) as { reason?: string }).reason), ['abandoned']);
   assert.deepEqual(await db.owner.select().from(secretReferences), [], 'nothing stored');
-});
-
-test('with 0.14\'s log, a deletion leaves its erased keys unarchived and a project\'s environments\' slugs as they were, and logs nothing of 0.15\'s', async () => {
-  await instance(testVault([ROOT], {}, undefined, {}, { log: '0.14' }));
-  await root.projects.create('market');
-  await root.environments.create('market/dev');
-  await root.secrets.set('market/dev', { A: 'one' });
-  const id = await keyIn(await environmentId('dev'), 'A');
-  await root.environments.update('market/dev', { archived: true });
-  await root.environments.delete('market/dev');
-  const [key] = await db.owner.select({ archivedAt: secrets.archivedAt }).from(secrets).where(eq(secrets.id, id));
-  assert.equal(key?.archivedAt, null);
-  assert.deepEqual(await db.owner.select().from(logChanges), []);
-  // A project's deletion leaves its environments' slugs as they were: its entries are read by them under its tombstone.
-  await root.environments.create('market/prod');
-  const prod = await environmentId('prod');
-  await root.projects.update('market', { archived: true });
-  await root.projects.delete('market');
-  const [row] = await db.owner.select({ slug: environments.slug }).from(environments).where(eq(environments.id, prod));
-  assert.equal(row!.slug, 'prod');
-  const [project] = await db.owner.select({ slug: projects.slug }).from(projects);
-  assert.match(project!.slug, /^market~deleted-/);
-  assert.ok((await root.audit.list({ path: `${project!.slug}/prod` })).entries.length > 0);
 });

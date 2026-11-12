@@ -231,32 +231,23 @@ export type VaultOptions = {
   /** How long a reservation of code's proxy names (`reserveProxy`) waits for the log's head in all; `CALL_DEADLINE_MS` unless set. Tests shorten it. */
   codeWaitMs?: number;
   /**
-   * Which log the vault keeps (0.15's plan, "Behind one switch"): 0.15's,
-   * the default since its flip (plan PR 10), where each decision that
-   * changes an input also logs it as a change of 0.15's log (`changes.ts`),
-   * or 0.14's alone, for the suites until 0.16 removes it. Not a
-   * deployment's to set: once cut over, the database refuses 0.14's writes.
-   */
-  log?: '0.14' | '0.15';
-  /**
-   * Under 0.15's log, what a change waits for before it answers: its entry
-   * sealed in a signed checkpoint, and witnessed or past the witnesses'
-   * bound (R51): the checkpointer's `sealThrough` (checkpointer.ts). A
-   * change whose entry it does not seal fails, though committed. Required
-   * under 0.15's log.
+   * What a change waits for before it answers: its entry sealed in a
+   * signed checkpoint, and witnessed or past the witnesses' bound (R51):
+   * the checkpointer's `sealThrough` (checkpointer.ts). A change whose
+   * entry it does not seal fails, though committed. Required.
    */
   sealThrough?: SealThrough;
   /**
-   * Under 0.15's log, the pairs held where no database writer reaches: the
-   * signer's memory (`durableHeldOutside` on Workers, the Node runner's
-   * `heldOutside`), later a witness's. The verifier holds every walk to
-   * them; without, a database rolled back whole to an earlier pair would
-   * verify until the signer's next tick refuses it (verifier.ts). Required
-   * under 0.15's log, as `sealThrough` is (T151).
+   * The pairs held where no database writer reaches: the signer's memory
+   * (`durableHeldOutside` on Workers, the Node runner's `heldOutside`),
+   * later a witness's. The verifier holds every walk to them; without, a
+   * database rolled back whole to an earlier pair would verify until the
+   * signer's next tick refuses it (verifier.ts). Required, as
+   * `sealThrough` is (T151).
    */
   heldOutside?: () => Promise<readonly PairNotes[]>;
   /**
-   * Under 0.15's log, whether the checkpointer seals (T169), bounded: what
+   * Whether the checkpointer seals (T169), bounded: what
    * `sealing()` answers, and `/readyz` asks. The Node runner's `sealing`;
    * on Workers the entrypoint asks the object itself. Without, it seals.
    */
@@ -299,13 +290,12 @@ export type PreparedVault = {
   logKey: LogKey;
   /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
-  options: Required<Omit<VaultOptions, 'walks' | 'log' | 'sealThrough' | 'heldOutside' | 'sealing' | 'uses' | 'callsEndWithRequest' | 'throttled'>> & { walks: Walks };
+  options: Required<Omit<VaultOptions, 'walks' | 'sealThrough' | 'heldOutside' | 'sealing' | 'uses' | 'callsEndWithRequest' | 'throttled'>> & { walks: Walks };
   /**
-   * 0.15's log, when it is on: the keys its changes are sealed and MACed
-   * with, from the vault's signing keys, and what each waits on to answer.
-   * Null under 0.14's alone.
+   * 0.15's log: the keys its changes are sealed and MACed with, from the
+   * vault's signing keys, and what each waits on to answer.
    */
-  log015: (ChangeKeys & { macs: readonly LogMacKey[]; sealThrough: SealThrough; heldOutside: () => Promise<readonly PairNotes[]>; sealing: () => Promise<Sealing> | Sealing }) | null;
+  log015: ChangeKeys & { macs: readonly LogMacKey[]; sealThrough: SealThrough; heldOutside: () => Promise<readonly PairNotes[]>; sealing: () => Promise<Sealing> | Sealing };
   /** Whether this process wrote its bulk cap into 0.15's log, or found it there (`#limit`). */
   limited: boolean;
   /** Whether this process made every role's row what the log's roles object says, sealed, or found it so (`#syncRoles`). */
@@ -352,7 +342,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     config,
     ...(await keysOf(config.signingKeys)),
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, codeWaitMs: options.codeWaitMs ?? CALL_DEADLINE_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
-    log015: (options.log ?? '0.15') === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside, options.sealing) : null,
+    log015: log015(config.signingKeys, options.sealThrough, options.heldOutside, options.sealing),
     limited: false,
     rolesSynced: false,
     cutover: false,
@@ -375,7 +365,7 @@ function log015(
   sealThrough: SealThrough | undefined,
   heldOutside: (() => Promise<readonly PairNotes[]>) | undefined,
   sealing: (() => Promise<Sealing> | Sealing) = () => ({ ok: true }),
-): NonNullable<PreparedVault['log015']> {
+): PreparedVault['log015'] {
   if (sealThrough === undefined) throw new Error("0.15's log answers a change once its entry is sealed (R51): give the vault the checkpointer's sealThrough");
   if (heldOutside === undefined) throw new Error("0.15's log is verified against the pairs held where no database writer reaches: give the vault the checkpointer's heldOutside");
   const macs = seeds.map((seed) => logMacKey(seed));
@@ -679,8 +669,8 @@ type Decision = {
    * was deciding. A `Refused` there refuses the decision.
    */
   underLock: ((locked: Queryable) => Promise<void>)[];
-  /** Under 0.15's log, the changes its writes make, each staged beside its write (`changes.ts`); null under 0.14's alone. */
-  changes: Changes | null;
+  /** The changes its writes make to 0.15's log, each staged beside its write (`changes.ts`). */
+  changes: Changes;
 };
 
 /**
@@ -851,14 +841,12 @@ class VaultService implements Vault {
 
   /** What 0.15's uses run on, every way they are asked (use.ts, `UsePath`). */
   #usePath(): UsePath {
-    // Behind the switch: a vault keeping 0.14's log alone has no 0.15 objects to decide on.
     const { log015, uses: cache } = this.#prepared;
-    if (log015 === null) throw new Error("0.15's uses need 0.15's log: the vault's log option is '0.14'");
     if (this.#hot === undefined) throw new Error("0.15's uses need the hot path's login: configure the vault's hotDatabase");
     // An isolate's first uses read the cutover's marker (`#cutOverYet`) within their admission, as any call holds a connection.
     const ready = this.#prepared.cutover ? undefined : () => this.#cutOverYet();
     return {
-      db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, macKeys: log015.macs ?? [log015.mac], keks: this.#config.keks, cache, ...(ready === undefined ? {} : { ready }),
+      db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, macKeys: log015.macs, keks: this.#config.keks, cache, ...(ready === undefined ? {} : { ready }),
       oldWrite: (principal, old, through, starts) => this.#oldWrite(principal, old, through, starts),
     };
   }
@@ -976,14 +964,13 @@ class VaultService implements Vault {
           principals.length === 0 ? new Map<string, Member>() : store.lockMembers(tx, principals, shared),
           this.#snapshot(tx, principals, asked, true, shared ? READ_QUEUE : queue),
         ]);
-        const log015 = this.#prepared.log015;
         const d: Decision = {
           tx, members, at: this.#at(reads), reads, log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],
-          changes: (staged = log015 === null ? null : new Changes(log015)),
+          changes: (staged = new Changes(this.#prepared.log015)),
         };
         const result = await decide(d);
         // Each object 0.15's log will change, read and checked before the writes change its rows.
-        await d.changes?.prepare(tx);
+        await d.changes.prepare(tx);
         // A read is logged once per place, whichever way it ends (`readsByPlace`).
         const entries = [...reports, ...readsByPlace(d.log)];
         let at = d.at;
@@ -1010,22 +997,23 @@ class VaultService implements Vault {
           const resealed = await this.#seal(d, principal, accessSeq.get(principal));
           if (resealed === null) continue;
           written.set(objectKey(memberRef(principal)), resealed.object);
-          d.changes?.cite(memberRef(principal), resealed.accessSeq);
+          d.changes.cite(memberRef(principal), resealed.accessSeq);
         }
         // Last: the fence, which they take exclusive (0.14's append took it already, OldWritesFence), is held from
         // here to the commit, so as few round trips as can be. The append comes first, and its trigger took the issue
         // lock before the fence (0026): a change taking the fence before the issue lock would wait in a circle with the
         // barrier, which takes them in that order (Migration015.tla, IssueBeforeFence).
         // With the COMMIT, under its Sync: their numbers answer after it.
-        const numbers = d.changes === null ? null : await d.changes.commit(tx, at, written);
+        const numbers = await d.changes.commit(tx, at, written);
         return { result, numbers };
       });
       const committed = await (retries === null ? transaction() : retryingLocks(transaction, retries));
       this.#reported(reports);
       // A change answers once its entries are sealed (R51; HotPathOne's CommitBeforeAnswer): the newest of them, with
       // every number below it.
+      // An answer `first` gave changed nothing: there is no seal to wait for.
       const newest = committed.numbers === null ? null : await newestCommitted(this.#db, committed.numbers);
-      if (newest !== null) await this.#prepared.log015!.sealThrough(newest);
+      if (newest !== null) await this.#prepared.log015.sealThrough(newest);
       return { ok: true, ...committed.result };
     } catch (thrown) {
       const caught = (staged as Changes | null)?.failed(thrown) ?? thrown;
@@ -1143,7 +1131,7 @@ class VaultService implements Vault {
     const weighed = weighedOf(log);
     // The newest change's own MAC, under the vault's key its tag names, as a use checks one (`changeHolds`, T190): its
     // seal and `old` are only what a writer could not have edited once it holds (0.14's walk checked each entry it took so).
-    if (newest !== null && !changeHolds(this.#prepared.log015!.macs, newest.row)) {
+    if (newest !== null && !changeHolds(this.#prepared.log015.macs, newest.row)) {
       this.#report(reports, principal, 'mac', 'log:change', null, weighed);
       return 'mac';
     }
@@ -1155,7 +1143,7 @@ class VaultService implements Vault {
         return 'stale';
       }
     } else {
-      if (!sealedObject(this.#prepared.log015!.seals, memberRef(principal), principalObject(row, grants), log.seal)) {
+      if (!sealedObject(this.#prepared.log015.seals, memberRef(principal), principalObject(row, grants), log.seal)) {
         this.#report(reports, principal, 'mac', 'log:seal', null, weighed);
         return 'mac';
       }
@@ -1186,8 +1174,8 @@ class VaultService implements Vault {
   }
 
   #checksSeals(): boolean {
-    const { log015, cutover, marked } = this.#prepared;
-    return log015 !== null && (cutover || marked);
+    const { cutover, marked } = this.#prepared;
+    return cutover || marked;
   }
 
   /**
@@ -1210,7 +1198,7 @@ class VaultService implements Vault {
     if (read === undefined) return null;
     let fault = PLACE_FAULTS.get(read);
     if (fault === undefined) {
-      const log015 = this.#prepared.log015!;
+      const log015 = this.#prepared.log015;
       // The newest change's seal is held to the row only once that change's MAC holds (T190, review r3): else a row
       // put back after an archive or a protection, its old seal written into the change, passes as the log's.
       fault = !sealedObject(log015.seals, { kind: 'environment', id }, read.object, read.seal) || (row.deleted && !read.object.deleted)
@@ -1402,14 +1390,14 @@ class VaultService implements Vault {
     if (prepared.since === null) await this.#settle(start);
     // Under 0.15's log, nothing of its own before the cutover (`cutover`): the conversion and the Owners it names, and
     // the bulk cap, after it, as decisions of 0.15's log.
-    if (prepared.superseded === null && prepared.log015 !== null && !prepared.cutover && !prepared.marked) {
+    if (prepared.superseded === null && !prepared.cutover && !prepared.marked) {
       if ((await (start.cutover ?? store.cutoverNumber(this.#db))) === null) return prepared.superseded;
       prepared.marked = true;
     }
     // A log with no entry of the vault's holds nothing to convert, and stays empty until someone acts.
     if (prepared.superseded === null && prepared.since !== null && !prepared.converted) await this.#convert(start);
-    if (prepared.superseded === null && prepared.log015 !== null && !prepared.limited) await this.#limit(start);
-    if (prepared.superseded === null && prepared.log015 !== null && !prepared.rolesSynced) await this.#syncRoles(start);
+    if (prepared.superseded === null && !prepared.limited) await this.#limit(start);
+    if (prepared.superseded === null && !prepared.rolesSynced) await this.#syncRoles(start);
     return prepared.superseded;
   }
 
@@ -1430,13 +1418,12 @@ class VaultService implements Vault {
   #start(): StartReads | null {
     const db = this.#db;
     const prepared = this.#prepared;
-    const log015 = prepared.log015 !== null;
     const settle = prepared.since === null;
     const convert = !prepared.converted;
     // The cutover mark's, until the cutover or the mark; the Owners' declaration's, until the conversion lands.
-    const cutover = log015 && !prepared.cutover && (!prepared.marked || convert);
-    const limit = log015 && !prepared.limited;
-    const sync = log015 && !prepared.rolesSynced;
+    const cutover = !prepared.cutover && (!prepared.marked || convert);
+    const limit = !prepared.limited;
+    const sync = !prepared.rolesSynced;
     if (!settle && !convert && !cutover && !limit && !sync) return null;
     const asked: StartReads = {
       rotation: settle ? store.latestRotation(db) : undefined,
@@ -1447,7 +1434,7 @@ class VaultService implements Vault {
       holders: convert ? store.everyProjectHolders(db) : undefined,
       policy: limit ? store.readObject(db, POLICY_REF as Ref & { kind: 'policy' }) : undefined,
       roles: sync ? store.roleRows(db) : undefined,
-      whole: sync ? heldByLog(prepared.log015!, db, ROLES_REF as Ref & { kind: 'roles' }) : undefined,
+      whole: sync ? heldByLog(prepared.log015, db, ROLES_REF as Ref & { kind: 'roles' }) : undefined,
     };
     // A step that returns first leaves the reads after it unawaited: their failures are the call's own, not unhandled.
     for (const read of Object.values(asked)) (read as Promise<unknown> | undefined)?.catch(() => {});
@@ -1503,7 +1490,7 @@ class VaultService implements Vault {
     const outcome = await this.#decideNow([], async (d) => {
       const { row } = await store.readObject(d.tx, POLICY_REF as Ref & { kind: 'policy' });
       const op = limitChange(row?.kind === 'policy' ? row : null, this.#config.bulkLimit);
-      if (op !== null) d.changes!.stage(POLICY_REF as Ref & { kind: 'policy' }, op, VAULT_ACTOR);
+      if (op !== null) d.changes.stage(POLICY_REF as Ref & { kind: 'policy' }, op, VAULT_ACTOR);
     });
     if (outcome.ok) this.#prepared.limited = true;
   }
@@ -1522,14 +1509,14 @@ class VaultService implements Vault {
    * start after an Owner writes it again.
    */
   async #syncRoles(start: StartReads): Promise<void> {
-    const log015 = this.#prepared.log015!;
+    const log015 = this.#prepared.log015;
     const wholeOf = (held: Held): RolesInput => (held.log === 'live' && held.object.kind === 'roles' ? held.object : noEdits());
     try {
       const [rows, whole] = await Promise.all([start.roles ?? store.roleRows(this.#db), start.whole ?? heldByLog(log015, this.#db, ROLES_REF as Ref & { kind: 'roles' })]);
       if (roleChanges(log015.seals, wholeOf(whole), rows).length > 0) {
         const outcome = await this.#decideNow([], async (d) => {
-          const [held, under] = await Promise.all([d.changes!.held(d.tx, ROLES_REF as Ref & { kind: 'roles' }), store.roleRows(d.tx)]);
-          for (const { ref, op } of roleChanges(log015.seals, wholeOf(held), under)) d.changes!.stage(ref, op, VAULT_ACTOR);
+          const [held, under] = await Promise.all([d.changes.held(d.tx, ROLES_REF as Ref & { kind: 'roles' }), store.roleRows(d.tx)]);
+          for (const { ref, op } of roleChanges(log015.seals, wholeOf(held), under)) d.changes.stage(ref, op, VAULT_ACTOR);
         });
         if (!outcome.ok) return;
       }
@@ -1568,7 +1555,7 @@ class VaultService implements Vault {
 
     for (const grant of everyProject) {
       drop(grant);
-      d.changes?.stage(memberRef(principal), { op: 'access.revoke', place: placeOf(grant) }, VAULT_ACTOR);
+      d.changes.stage(memberRef(principal), { op: 'access.revoke', place: placeOf(grant) }, VAULT_ACTOR);
       // A lapsed one goes with no entry: it changes nothing anyone holds.
       if (!live(grant, d.at)) continue;
       const narrowed = conversion.narrowed.filter((loss) => loss.grant.environmentSlug === grant.environmentSlug);
@@ -1589,7 +1576,7 @@ class VaultService implements Vault {
         reason: 'every-project',
       }));
       d.writes.push(() => store.updateMember(d.tx, principal, after));
-      d.changes?.stage(memberRef(principal), { op: 'member.role', ...asStored(after.role, after.scope) }, VAULT_ACTOR);
+      d.changes.stage(memberRef(principal), { op: 'member.role', ...asStored(after.role, after.scope) }, VAULT_ACTOR);
     }
     for (const given of conversion.grants) {
       const place = { projectId: given.projectId, environmentId: given.environmentId, environmentSlug: null };
@@ -1601,7 +1588,7 @@ class VaultService implements Vault {
         await store.insertGrant(d.tx, grant);
         d.grants.get(principal)!.push(grant);
       });
-      d.changes?.stage(memberRef(principal), { op: 'access.grant', grant: inputGrant({ ...place, role: given.role, expiresAt: given.expiresAt }) }, VAULT_ACTOR);
+      d.changes.stage(memberRef(principal), { op: 'access.grant', grant: inputGrant({ ...place, role: given.role, expiresAt: given.expiresAt }) }, VAULT_ACTOR);
       d.log.push({
         ...accessEntry(VAULT_ACTOR, 'access.grant', principal, 'allow', correlation, {
           role: given.role,
@@ -1691,7 +1678,7 @@ class VaultService implements Vault {
       // must be held to the log that holds it. Since 0.16.0, a member added down the two-trip path and changed no
       // further has no 0.14 access entry, which 0.14's rule reads as stale: left under the old key, refused after
       // (review r1 of #490). The cutover is never undone, so a retry finds it the same.
-      if (this.#prepared.log015 !== null && !this.#checksSeals() && (await store.cutOver(tx))) this.#prepared.marked = true;
+      if (!this.#checksSeals() && (await store.cutOver(tx))) this.#prepared.marked = true;
       // Once 0.15's log holds the rows, each one's seals, all in one read (`#onLog`).
       const logs = this.#checksSeals() ? await store.memberLogs(tx, [...rows.keys()]) : undefined;
       for (const row of rows.values()) {
@@ -1766,8 +1753,8 @@ class VaultService implements Vault {
    * is to a key it does not hold: a vault given a newer KEK has replaced
    * this one, which writes nothing more. Checked under the head's lock, so
    * that an instance still running with the replaced KEK, as during a
-   * deploy, cannot write after the rotation. Under 0.15's log, its entries
-   * say so (`log015`): once cut over, the log refuses a write without it.
+   * deploy, cannot write after the rotation. Its entries say they are 0.15's
+   * (`log015`): once cut over, the log refuses a write without it.
    */
   async #append(
     tx: Transaction,
@@ -1788,7 +1775,7 @@ class VaultService implements Vault {
         throw new Error(prepared.superseded);
       }
       for (const check of underLock) await check(locked);
-    }, head === undefined ? undefined : { head, last: head.last, at: held!.at }, [], prepared.log015 !== null, { final });
+    }, head === undefined ? undefined : { head, last: head.last, at: held!.at }, [], true, { final });
     // The head still held, as this append left it, for the next append of the same transaction: a remote key's intent,
     // then the decision's reports.
     if (head !== undefined) {
@@ -2469,7 +2456,7 @@ class VaultService implements Vault {
         return refuses(reader, 'grant.manage', { projectId: seal.source.projectId }, false) === null ? null : holder;
       });
       const codes: (RefusalCode | null)[] = mayEnd(actor, environments);
-      // With 0.15's log, also as 0.15 decides it, on sealed objects alone (R53): the actor's principal object, the
+      // Also as 0.15 decides it, on sealed objects alone (R53): the actor's principal object, the
       // roles object and each holder environment's object, each as its log has it and checked against its seal
       // (`readerOf`, as a use's reader). 0.14's reader reads rows no seal covers (an environment's slug, a project's
       // tombstone, the protection they make): a writer who swapped one could let a member end what they may not
@@ -2477,7 +2464,7 @@ class VaultService implements Vault {
       // does not bear out refuses the end. Per reference: one whose holder environment, or the actor, 0.14's log alone
       // holds (before the cutover) is 0.14's reader's alone, and no other reference of the call with it (review r12).
       const allowed14 = !codes.some((code) => code !== null);
-      if (d.changes !== null && allowed14) {
+      if (allowed14) {
         const member = await d.changes.held(d.tx, { kind: 'principal', id: principal });
         const roles = await d.changes.held(d.tx, ROLES_REF as Ref & { kind: 'roles' });
         const places = new Map<string, EnvironmentInput>();
@@ -2500,7 +2487,7 @@ class VaultService implements Vault {
       if (!codes.some((code) => code !== null)) (await ended(d.tx)).forEach((code, i) => (codes[i] = code));
       const first = codes.find((code) => code !== null) ?? null;
       if (first !== null) throw new Refused(refusal(first, REFUSAL_MESSAGES[first]), vias.map((via, i) => entry(via, seals[i]!, 'deny', codes[i] ?? first)));
-      // With 0.15's log, each reference ended ends in its row, beside 0.14's entry, in this transaction (0029;
+      // Each reference ended ends in its row, beside 0.14's entry, in this transaction (0029;
       // formal/SealedObjects.tla, EndInRow and EndWithEntry). Decided only on what the vault authenticates (R53): that
       // it has not ended is 0.14's log's (`ended` above), and what its holder reads is the holder's object, as its log
       // has it and checked against its seal (`heldByLog`: ReferenceInObject, LivenessFromLog), never its rows, which
@@ -2516,36 +2503,34 @@ class VaultService implements Vault {
       //   ended, then deleted again, still no object (EndWhileArchived). Otherwise its unarchive would restore it
       //   live, the row's end cleared by a writer, or refuse an honest one for the end in its rows. Its rows must make
       //   the kept object, as a live holder's must make its sealed one: else the end is refused, reported.
-      if (d.changes !== null) {
-        const changes = d.changes;
-        const rows: string[] = [];
-        const staged = new Set<string>();
-        const end = (ref: Ref & { kind: 'secret' }, at: { projectId: string; environmentId: string }, archived: boolean) => {
-          if (staged.has(ref.id)) return;
-          staged.add(ref.id);
-          changes.stage(ref, { op: 'secret.write', projectId: at.projectId, environmentId: at.environmentId, version: '', nature: 'secret', key: null, digest: null, source: null, reference: null }, principal);
-          if (archived) changes.stage(ref, { op: 'secret.delete' }, principal);
-        };
-        for (const [i, { holder }] of seals.entries()) {
-          const reference = vias[i]!.reference;
-          const ref = { kind: 'secret' as const, id: holder.secretId };
-          const held = await changes.held(d.tx, ref);
-          if (held.log === 'live' && held.object.kind === 'secret' && held.object.reference === reference) {
-            end(ref, holder, false);
-            continue;
-          }
-          if (held.log === 'gone') {
-            const kept = await changes.kept(d.tx, ref);
-            if (kept?.kind === 'secret' && kept.reference === reference) {
-              // Its rows must make that object, or its end would write none of them: refused, reported, as a live one's.
-              await changes.rowsAsKept(d.tx, ref, kept);
-              end(ref, kept, true);
-            }
-          }
-          rows.push(reference);
+      const changes = d.changes;
+      const rows: string[] = [];
+      const staged = new Set<string>();
+      const end = (ref: Ref & { kind: 'secret' }, at: { projectId: string; environmentId: string }, archived: boolean) => {
+        if (staged.has(ref.id)) return;
+        staged.add(ref.id);
+        changes.stage(ref, { op: 'secret.write', projectId: at.projectId, environmentId: at.environmentId, version: '', nature: 'secret', key: null, digest: null, source: null, reference: null }, principal);
+        if (archived) changes.stage(ref, { op: 'secret.delete' }, principal);
+      };
+      for (const [i, { holder }] of seals.entries()) {
+        const reference = vias[i]!.reference;
+        const ref = { kind: 'secret' as const, id: holder.secretId };
+        const held = await changes.held(d.tx, ref);
+        if (held.log === 'live' && held.object.kind === 'secret' && held.object.reference === reference) {
+          end(ref, holder, false);
+          continue;
         }
-        if (rows.length > 0) d.writes.push((at) => store.endReferenceRows(d.tx, rows, at));
+        if (held.log === 'gone') {
+          const kept = await changes.kept(d.tx, ref);
+          if (kept?.kind === 'secret' && kept.reference === reference) {
+            // Its rows must make that object, or its end would write none of them: refused, reported, as a live one's.
+            await changes.rowsAsKept(d.tx, ref, kept);
+            end(ref, kept, true);
+          }
+        }
+        rows.push(reference);
       }
+      if (rows.length > 0) d.writes.push((at) => store.endReferenceRows(d.tx, rows, at));
       const entries = vias.map((via, i) => entry(via, seals[i]!, 'allow', null));
       d.log.push(...entries);
       const answer = { seqs: [] as number[] };
@@ -2665,7 +2650,7 @@ class VaultService implements Vault {
     // (plan PR 9). Otherwise, the change the writes below make.
     if (!tampered) {
       const op = row === undefined ? 'member.add' : row.status === 'removed' ? 'member.restore' : 'member.role';
-      d.changes?.stage(memberRef(principal), { op, ...asStored(owner.role, owner.scope) }, VAULT_ACTOR);
+      d.changes.stage(memberRef(principal), { op, ...asStored(owner.role, owner.scope) }, VAULT_ACTOR);
     }
     if (row === undefined && !tampered) {
       d.log.push(accessEntry(VAULT_ACTOR, 'member.add', principal, 'allow', correlation, { ...owner, reason }));
@@ -2950,7 +2935,7 @@ class VaultService implements Vault {
 
     if (change.role === null) {
       clear();
-      if (existing !== undefined) d.changes?.stage(memberRef(principal), { op: 'access.revoke', place: placeOf(place) }, actor);
+      if (existing !== undefined) d.changes.stage(memberRef(principal), { op: 'access.revoke', place: placeOf(place) }, actor);
       if (current === undefined) return 'unchanged';
       entry('access.revoke', null);
       return 'revoked';
@@ -2964,7 +2949,7 @@ class VaultService implements Vault {
       d.grants.get(principal)!.push(grant);
     });
     // In place of whatever it held there, lapsed or not, as clearing it then inserting this does.
-    d.changes?.stage(memberRef(principal), { op: 'access.grant', grant: inputGrant({ ...placeOf(place), role, expiresAt }) }, actor);
+    d.changes.stage(memberRef(principal), { op: 'access.grant', grant: inputGrant({ ...placeOf(place), role, expiresAt }) }, actor);
     entry('access.grant', role);
     return current === undefined ? 'created' : 'updated';
   }
@@ -3012,7 +2997,7 @@ class VaultService implements Vault {
       if (changed) {
         d.log.push(accessEntry(actor, 'member.role', principal, 'allow', input, { role: wanted.role, scope: wanted.scope, previousRole: row.role, previousScope: row.scope }));
         d.writes.push(() => store.updateMember(d.tx, principal, { role: wanted.role, scope: wanted.scope }));
-        d.changes?.stage(memberRef(principal), { op: 'member.role', ...asStored(wanted.role, wanted.scope) }, actor);
+        d.changes.stage(memberRef(principal), { op: 'member.role', ...asStored(wanted.role, wanted.scope) }, actor);
         return { created: false, ...wanted, generation: row.generation };
       }
       return { created: false, role: row.role, scope: row.scope, generation: row.generation };
@@ -3073,7 +3058,7 @@ class VaultService implements Vault {
     if (wanted?.role === 'owner' && !ownsInstance(acting.live)) throw refused('not_allowed', OWNERS_ONLY);
     const { role, scope } = wanted ?? { role: 'member' as const, scope: EVERYWHERE };
     d.log.push(accessEntry(actor, row === undefined ? 'member.add' : 'member.restore', principal, 'allow', correlation, { role, scope }));
-    d.changes?.stage(memberRef(principal), { op: row === undefined ? 'member.add' : 'member.restore', ...asStored(role, scope) }, actor);
+    d.changes.stage(memberRef(principal), { op: row === undefined ? 'member.add' : 'member.restore', ...asStored(role, scope) }, actor);
     d.writes.push(async (at) => {
       if (row === undefined) {
         await store.insertMember(d.tx, {
@@ -3141,9 +3126,9 @@ class VaultService implements Vault {
       d.log.push(accessEntry(actor, 'member.remove', principal, 'allow', input, { revoked: revoked.length, generation }));
       // In 0.15's log, what the writes below do, op by op: every grant revoked, lapsed ones too, the role back to a
       // Member's, then the removal.
-      for (const grant of held) d.changes?.stage(memberRef(principal), { op: 'access.revoke', place: placeOf(grant) }, actor);
-      if (row.role !== 'member') d.changes?.stage(memberRef(principal), { op: 'member.role', ...asStored('member', EVERYWHERE) }, actor);
-      d.changes?.stage(memberRef(principal), { op: 'member.remove' }, actor);
+      for (const grant of held) d.changes.stage(memberRef(principal), { op: 'access.revoke', place: placeOf(grant) }, actor);
+      if (row.role !== 'member') d.changes.stage(memberRef(principal), { op: 'member.role', ...asStored('member', EVERYWHERE) }, actor);
+      d.changes.stage(memberRef(principal), { op: 'member.remove' }, actor);
       d.touched.add(principal);
       d.writes.push(async (at) => {
         await store.deleteGrants(d.tx, principal);
@@ -3373,14 +3358,14 @@ class VaultService implements Vault {
         seq: newest === null ? null : Number(newest),
       };
       if (!readable || JSON.stringify(next) !== JSON.stringify(edits)) {
-        // With 0.15's log, ordered against the vault's issues in flight, which check the policy under the issue lock shared:
-        // exclusive, its rows written, before its append's trigger takes the fence (`holdIssues`).
-        if (this.#prepared.log015 !== null) await holdIssues(d.tx);
+        // Ordered against the vault's issues in flight, which check the policy under the issue lock shared: exclusive,
+        // its rows written, before its append's trigger takes the fence (`holdIssues`).
+        await holdIssues(d.tx);
         const made = entry('allow', { policy: next, change: describeChange(change), before: describeBefore(change, before) });
         d.log.push(made);
-        for (const { ref, op } of changes) d.changes?.stage(ref, op, actor);
+        for (const { ref, op } of changes) d.changes.stage(ref, op, actor);
         d.after.push((seqOf) => {
-          for (const { ref } of changes) d.changes?.cite(ref, BigInt(seqOf(made)));
+          for (const { ref } of changes) d.changes.cite(ref, BigInt(seqOf(made)));
         });
         d.after.push((seqOf) => (answer.seq = seqOf(made)));
       }
@@ -3392,16 +3377,14 @@ class VaultService implements Vault {
    * What a change of one role writes to 0.15's log, in this order (T178, 0.16; formal/Roles.tla's 0.16 change): the
    * row of each other role brought to what the log's roles object says, sealed, as the vault's start does (EditSyncs:
    * one 0.15.0 changed since is not left behind this one); the role's own row, its object; and the whole object
-   * (DualWrite), which 0.16's uses still decide on. Under 0.14's log alone, the whole object's change, which nothing
-   * stages. Each staged under the change's actor.
+   * (DualWrite), which 0.16's uses still decide on. Each staged under the change's actor.
    */
   async #roleWrites(d: Decision, table: RoleTable, role: string, definition: RoleDefinition | null): Promise<{ ref: Ref & { kind: 'roles' | 'role' }; op: Op }[]> {
     const op: Op = { op: 'role.define', table, role, definition };
     const whole = { ref: ROLES_REF as Ref & { kind: 'roles' }, op };
-    if (d.changes == null) return [whole];
     const [held, rows] = await Promise.all([d.changes.held(d.tx, ROLES_REF as Ref & { kind: 'roles' }), store.roleRows(d.tx)]);
     const object: RolesInput = held.log === 'live' && held.object.kind === 'roles' ? held.object : noEdits();
-    return [...roleChanges(this.#prepared.log015!.seals, object, rows, { table, role }), { ref: roleRef(table, role), op }, whole];
+    return [...roleChanges(this.#prepared.log015.seals, object, rows, { table, role }), { ref: roleRef(table, role), op }, whole];
   }
 
   setSettings(input: SetSettingsInput): Promise<Outcome<{ settings: Settings }>> {
@@ -3870,7 +3853,7 @@ class VaultService implements Vault {
     return JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };
   }
 
-  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log?: '0.15'; uses?: true; batchUses?: true; namedBatches?: true; sealing?: true; credentials?: true; issues?: true; writes?: true }> {
+  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log: '0.15'; sealing: true; credentials: true; issues: true; binds: true; sweeps: true; admits: true; uses?: true; batchUses?: true; namedBatches?: true; writes?: true }> {
     await this.#settled();
     const { signers, since } = this.#prepared;
     // A key it replaced vouches only for prefixes before its first entry under the current one: none, before it has one.
@@ -3881,15 +3864,20 @@ class VaultService implements Vault {
       // For an app of 0.5 while it runs beside this vault: there are none, and its lists and checks need the field.
       rootAdmins: [],
       // With it, the vault makes sign-ins through bindings and revokes credentials itself (credentials.ts).
-      ...(this.#prepared.log015 === null ? {} : { log: '0.15' as const, sealing: true as const, credentials: true as const, issues: true as const, binds: true as const, sweeps: true as const }),
+      log: '0.15',
+      sealing: true,
+      credentials: true,
+      issues: true,
+      binds: true,
+      sweeps: true,
       // 0.15's uses need its log and the hot path's login: the app opens values through them only then (`use`).
       // A request's several keys in one call too (`useMany`, T167), said so that an app newer than its vault asks for it
       // only of a vault that has it.
       // And a request's several keys by name (`useNamedMany`, T165), which reads them with the caller's standing first.
-      ...(this.#prepared.log015 === null || this.#hot === undefined ? {} : { uses: true as const, batchUses: true as const, namedBatches: true as const }),
+      ...(this.#hot === undefined ? {} : { uses: true as const, batchUses: true as const, namedBatches: true as const }),
       // A key write decided on one read (`writeKeys`, T179 PR 3), where this vault serves it.
       ...(this.#serveWrites() ? { writes: true as const } : {}),
-      ...(this.#serveAdmits() ? { admits: true as const } : {}),
+      admits: true,
     };
   }
 
@@ -3910,7 +3898,7 @@ class VaultService implements Vault {
    * cutover's change naming it. Answers once that change is sealed (R51).
    */
   async cutover(input?: CutoverInput | null): Promise<CutoverOutcome> {
-    const log015 = this.#log015();
+    const log015 = this.#prepared.log015;
     const prepared = this.#prepared;
     if (prepared.cutover || (await this.#cutoverSealed())) {
       prepared.cutover = true;
@@ -3952,7 +3940,7 @@ class VaultService implements Vault {
 
   /** The cutover's transaction (`cutover`): its change's number, another vault's if it cut over first. */
   async #cutOver(tx: Transaction, input: CutoverInput, walked: Walked, reports: NewEntry[]): Promise<bigint> {
-    const log015 = this.#log015();
+    const log015 = this.#prepared.log015;
     const { logKeys } = this.#prepared;
     await store.boundLockWaits(tx, LOCK_WAIT_MS);
     const principals = (await store.allMembers(tx)).map((row) => row.principal);
@@ -4088,10 +4076,10 @@ class VaultService implements Vault {
     if (!(await this.#cutOverNow())) throw new Error(NOT_CUT_OVER);
   }
 
-  /** Whether the vault may serve 0.15's log: kept by 0.14's alone, or cut over, its change sealed (`#cutoverSealed`). */
+  /** Whether the vault may serve 0.15's log: cut over, its change sealed (`#cutoverSealed`). */
   async #cutOverNow(start?: StartReads): Promise<boolean> {
     const prepared = this.#prepared;
-    if (prepared.log015 === null || prepared.cutover) return true;
+    if (prepared.cutover) return true;
     if (!(await this.#cutoverSealed(start))) return false;
     prepared.cutover = true;
     return true;
@@ -4110,7 +4098,7 @@ class VaultService implements Vault {
   async #cutoverSealed(start?: StartReads): Promise<boolean> {
     const number = await (start?.cutover ?? store.cutoverNumber(this.#db));
     if (number === null) return false;
-    if (!(await this.#signedPast(number, start))) await this.#log015().sealThrough(number);
+    if (!(await this.#signedPast(number, start))) await this.#prepared.log015.sealThrough(number);
     return true;
   }
 
@@ -4140,7 +4128,7 @@ class VaultService implements Vault {
    * reported nowhere: the app reads it again.
    */
   async prepare(input: PrepareInput): Promise<Outcome<Prepared>> {
-    const log015 = this.#log015();
+    const log015 = this.#prepared.log015;
     if (typeof input?.actor !== 'string' || input.actor.length === 0 || !Array.isArray(input.changes)) throw new Error('prepare takes an actor and the changes the app will write');
     // Before the cutover, a change of 0.14's rows alone, which logs nothing (`prepareChanges`): what the app key's
     // rotation makes as it signs sessions out, which the app's door finishes before it cuts over (review r3). One that
@@ -4203,8 +4191,8 @@ class VaultService implements Vault {
    */
   async writeKeys(input: WriteKeysInput): Promise<WriteKeysOutcome> {
     const unserved = (why: string): WriteKeysOutcome => ({ served: false, why });
-    const log015 = this.#prepared.log015;
-    if (log015 === null || !this.#serveWrites()) return unserved('vault');
+    const { log015 } = this.#prepared;
+    if (!this.#serveWrites()) return unserved('vault');
     validateWriteKeys(input);
     if (!(await this.#cutOverNow())) return unserved('vault');
     if ((await this.#kekMismatch(Date.now() + CALL_DEADLINE_MS)) !== null) return unserved('kek');
@@ -4273,8 +4261,7 @@ class VaultService implements Vault {
    */
   async admitRead(input: AdmitReadInput): Promise<AdmitReadOutcome> {
     const unserved = (why: string): AdmitReadOutcome => ({ served: false, why });
-    const log015 = this.#prepared.log015;
-    if (log015 === null || !this.#serveAdmits()) return unserved('vault');
+    const { log015 } = this.#prepared;
     validateAdmitRead(input);
     if ((await this.#settled()) !== null || !(await this.#cutOverNow())) return unserved('vault');
     const at = Date.now() + this.#prepared.options.clockOffset();
@@ -4320,8 +4307,7 @@ class VaultService implements Vault {
    * as `admitRead`, this isolate's keys settled and its config's Owners weighed: else `unserved`, today's path.
    */
   async admitWrite(input: AdmitWriteInput): Promise<AdmitWriteOutcome> {
-    const log015 = this.#prepared.log015;
-    if (log015 === null || !this.#serveAdmits()) throw new Error('this vault writes no prepared add: it does not serve admitRead');
+    const { log015 } = this.#prepared;
     const opened = openTicket(log015.macs, input?.ticket, Date.now() + this.#prepared.options.clockOffset());
     if (opened === 'expired') return { written: false, why: 'expired' };
     if (opened === null) throw new Error("an add's ticket is the vault's own, as admitRead answered it: this one is not");
@@ -4374,8 +4360,7 @@ class VaultService implements Vault {
    * record is the vault's, MAC'd here as it is written, its time this isolate's clock now.
    */
   async recordRefusal(input: RecordRefusalInput): Promise<RecordRefusalOutcome> {
-    const log015 = this.#prepared.log015;
-    if (log015 === null || !(this.#serveWrites() || this.#serveAdmits())) throw new Error('this vault records no refusal: it serves neither writeKeys nor admitRead');
+    const { log015 } = this.#prepared;
     const now = Date.now() + this.#prepared.options.clockOffset();
     const opened = openRefusal(log015.macs, input?.ticket, now);
     if (opened === 'expired') return { recorded: false, why: 'expired' };
@@ -4385,14 +4370,9 @@ class VaultService implements Vault {
     return { recorded: true, number: number.toString() };
   }
 
-  /** Whether this vault serves `admitRead` and `admitWrite`: 0.15's log. */
-  #serveAdmits(): boolean {
-    return this.#prepared.log015 !== null;
-  }
-
-  /** Whether this vault serves `writeKeys`: 0.15's log, its key-encryption key in memory (a key service's intent and outcome are records of their own, PR 7). */
+  /** Whether this vault serves `writeKeys`: its key-encryption key in memory (a key service's intent and outcome are records of their own, PR 7). */
   #serveWrites(): boolean {
-    return this.#prepared.log015 !== null && !this.#remote(this.#config.keks.primary);
+    return !this.#remote(this.#config.keks.primary);
   }
 
   /**
@@ -4407,7 +4387,7 @@ class VaultService implements Vault {
    * "Retries"), then `busy`, asked again shortly: a churn fails fast (R44).
    */
   async signIn(input: SignInInput): Promise<SignInOutcome> {
-    const log015 = this.#log015();
+    const log015 = this.#prepared.log015;
     await this.#cutOverYet();
     const at = Date.now() + this.#prepared.options.clockOffset();
     // The proof, verified here on the sealed binding (D148): what the credential is held to comes of the token, not the app.
@@ -4461,7 +4441,7 @@ class VaultService implements Vault {
    * credentials they sweep go ahead so too.
    */
   async revokeCredential(input: RevokeCredentialInput): Promise<RevokeCredentialOutcome> {
-    const log015 = this.#log015();
+    const log015 = this.#prepared.log015;
     await this.#cutOverYet();
     const notLogged = async (error: NotLogged) => {
       const reports: NewEntry[] = [];
@@ -4497,7 +4477,7 @@ class VaultService implements Vault {
    * fetch, and a proof that is no ID token (an AWS signed request) take the
    * app's word for the token, as their binding's seal says.
    */
-  async #proven(log015: NonNullable<PreparedVault['log015']>, input: SignInInput, at: number): Promise<SignInInput | { ok: false; refused: 'unsealed' } | { ok: false; refused: 'proof'; reason: string; message: string; kid: string | null }> {
+  async #proven(log015: PreparedVault['log015'], input: SignInInput, at: number): Promise<SignInInput | { ok: false; refused: 'unsealed' } | { ok: false; refused: 'proof'; reason: string; message: string; kid: string | null }> {
     const binding = checkBinding(input?.binding?.columns);
     const seal = typeof input.binding.seal === 'string' ? Buffer.from(input.binding.seal, 'base64') : null;
     if (seal === null || binding.revoked || binding.principal !== input.principal || !sealedObject(log015.seals, { kind: 'binding', id: binding.id }, bindingObject(binding), seal)) {
@@ -4557,7 +4537,7 @@ class VaultService implements Vault {
    * does, up to three times; then `moved`, and the app asks again.
    */
   async issueToken(input: IssueTokenInput): Promise<IssueTokenOutcome> {
-    const log015 = this.#log015();
+    const log015 = this.#prepared.log015;
     await this.#settled();
     await this.#cutOverYet();
     const scope = checkIssue(input);
@@ -4567,7 +4547,7 @@ class VaultService implements Vault {
     }
   }
 
-  async #issueOnce(log015: NonNullable<PreparedVault['log015']>, input: IssueTokenInput, scope: CredentialScope): Promise<IssueTokenOutcome> {
+  async #issueOnce(log015: PreparedVault['log015'], input: IssueTokenInput, scope: CredentialScope): Promise<IssueTokenOutcome> {
     const read = await this.#issuerRead(log015, { ...input, scope, service: input.credential.kind === 'service' });
     if ('refused' in read) return read;
     const why = weighIssue(input, scope, read.holder, read.places, read.via?.columns ?? null, read.issue.at, read.service, this.#config.deployment.services.tokenMaxDays);
@@ -4592,7 +4572,7 @@ class VaultService implements Vault {
    * caller records them before it writes.
    */
   async #issuerRead(
-    log015: NonNullable<PreparedVault['log015']>,
+    log015: PreparedVault['log015'],
     input: Pick<IssueTokenInput, 'actor' | 'via' | 'principal' | 'generation' | 'actorAccess' | 'policy'> & { scope: CredentialScope; service: boolean },
   ): Promise<{ ok: false; refused: IssueTokenRefusal; why?: string } | {
     issue: IssueRead; holder: Holdings; places: (Place | null)[]; via: Awaited<ReturnType<typeof store.issuingCredential>>;
@@ -4710,7 +4690,7 @@ class VaultService implements Vault {
    * ends are its reads.
    */
   async changeBindings(input: ChangeBindingsInput): Promise<ChangeBindingsOutcome> {
-    const log015 = this.#log015();
+    const log015 = this.#prepared.log015;
     await this.#settled();
     await this.#cutOverYet();
     checkChangeBindings(input);
@@ -4749,7 +4729,7 @@ class VaultService implements Vault {
 
   /** Once entry `number` is sealed and witnessed, or its witnesses past their 2 s (R51): what a change the app made waits for. */
   async waitSealed(input: { number: string }): Promise<Outcome<{ witnessed: boolean | null }>> {
-    const log015 = this.#log015();
+    const log015 = this.#prepared.log015;
     if (typeof input?.number !== 'string' || !/^[1-9][0-9]{0,18}$/.test(input.number)) throw new Error('waitSealed takes an entry\'s number, in decimal');
     const sealed = await log015.sealThrough(BigInt(input.number));
     return { ok: true, witnessed: sealed.witnessed ?? null };
@@ -4757,8 +4737,7 @@ class VaultService implements Vault {
 
   /**
    * 0.15's log checked (verifier.ts): the newest pair and every entry above
-   * it, held to the pairs held outside. With 0.14's log alone, there is
-   * none to check. The signer remembers a pair before the database has it
+   * it, held to the pairs held outside. The signer remembers a pair before the database has it
    * (RememberFirst), so a check that lands in between finds the database
    * behind (`Verdict.behind`): it is checked again 50 ms later, then a
    * tick later (reviews r4, r5). A rollback is still behind then.
@@ -4775,7 +4754,7 @@ class VaultService implements Vault {
    * carries the holdings its save froze.
    */
   async proxy(input: ProxyInput): Promise<ProxyView> {
-    const keys = this.#log015();
+    const keys = this.#prepared.log015;
     if (!UUID.test(String(input?.projectId)) || !UUID.test(String(input?.environmentId))) throw new Error('an environment is named by its project\'s id and its own');
     await this.#settled();
     // The row and its newest change, read apart: a save that commits between them makes them disagree for that read
@@ -4836,7 +4815,7 @@ class VaultService implements Vault {
    * project, or not at all.
    */
   saveProxy(input: SaveProxyInput): Promise<Outcome<{ view: ProxyView }>> {
-    const keys = this.#log015();
+    const keys = this.#prepared.log015;
     const { actor, projectId, environmentId } = input;
     if (typeof actor !== 'string' || !UUID.test(String(projectId)) || !UUID.test(String(environmentId))) throw new Error('a save names its editor, and an environment by its project\'s id and its own');
     const ref = { kind: 'proxy' as const, id: environmentId };
@@ -4848,7 +4827,7 @@ class VaultService implements Vault {
     const named = typeof input.items === 'object' && input.items !== null && !Array.isArray(input.items) ? Object.keys(input.items) : null;
     const refused = (code: RefusalCode, message = REFUSAL_MESSAGES[code]) => new Refused(refusal(code, message), [entry('deny', { names: named ?? [] }, code)]);
     return this.#decide([actor], async (d) => {
-      const changes = d.changes!;
+      const changes = d.changes;
       validateCorrelation(input);
       // What it asks, before anything is read: every definition as the vault keeps it, at most MAX_PROXY_ITEMS named.
       if (named === null || named.length > MAX_PROXY_ITEMS) throw refused('invalid', `a save names at most ${MAX_PROXY_ITEMS} items, each its definition or null`);
@@ -5046,7 +5025,7 @@ class VaultService implements Vault {
    * object then held by the log, so a forged row lists nothing.
    */
   async proxySavedBy(input: { member: string }): Promise<{ items: SavedProxyItem[] }> {
-    const keys = this.#log015();
+    const keys = this.#prepared.log015;
     if (typeof input?.member !== 'string' || !/^(user|token):/.test(input.member)) throw new Error('a member is named user:<email> or token:<name>');
     await this.#settled();
     const found = await store.proxiesSavedBy(this.#db, input.member);
@@ -5068,7 +5047,7 @@ class VaultService implements Vault {
    * stays shadowed by the name, which no deploy drops.
    */
   async reserveProxy(input: ReserveProxyInput): Promise<Outcome<{ reserved: string[]; cleared: ClearedItem[] }>> {
-    const keys = this.#log015();
+    const keys = this.#prepared.log015;
     const problem = reservedProblem(input?.names);
     if (problem !== null) throw new Error(problem);
     const wanted = [...new Set(input.names)].sort();
@@ -5120,7 +5099,7 @@ class VaultService implements Vault {
 
   /** `reserveProxy`'s decision, under the head: the names missing added, and the UI items of those names deleted. */
   async #reserve(d: Decision, wanted: readonly string[], input: ReserveProxyInput): Promise<{ reserved: string[]; cleared: ClearedItem[] }> {
-    const changes = d.changes!;
+    const changes = d.changes;
     const reserved = await changes.held(d.tx, RESERVED_REF);
     const names = reserved.log === 'live' && reserved.object.kind === 'proxy-reserved' ? reserved.object.names : [];
     const adding = wanted.filter((name) => !names.includes(name));
@@ -5155,7 +5134,6 @@ class VaultService implements Vault {
    * defines it is the app's to warn of: no code is an input of the log.
    */
   releaseProxy(input: ReleaseProxyInput): Promise<Outcome<{ reserved: string[] }>> {
-    this.#log015();
     const { actor, name } = input;
     if (typeof actor !== 'string') throw new Error('a release names who asks');
     const entry = (decision: 'allow' | 'deny', code: RefusalCode | null = null): NewEntry => ({
@@ -5165,7 +5143,7 @@ class VaultService implements Vault {
     });
     const refused = (code: RefusalCode, message = REFUSAL_MESSAGES[code]) => new Refused(refusal(code, message), [entry('deny', code)]);
     return this.#decide([actor], async (d) => {
-      const changes = d.changes!;
+      const changes = d.changes;
       validateCorrelation(input);
       if (typeof name !== 'string' || !CREDENTIAL_NAME.test(name)) throw refused('invalid', 'a release names one reserved name');
       if (input.caller !== 'person' || input.credentialScope != null || !actor.startsWith('user:')) throw refused('not_allowed', 'an Owner of the whole instance releases a name, signed in as themselves');
@@ -5181,12 +5159,10 @@ class VaultService implements Vault {
     });
   }
 
-  /** Whether 0.15's checkpointer seals (T169): what `/readyz` asks. Under 0.14's log alone, nothing waits on one. */
+  /** Whether 0.15's checkpointer seals (T169): what `/readyz` asks. */
   async sealing(): Promise<Sealing> {
-    const log015 = this.#prepared.log015;
-    if (log015 === null) return { ok: true };
     try {
-      return await log015.sealing();
+      return await this.#prepared.log015.sealing();
     } catch (error) {
       return { ok: false, reason: (error as Error).message };
     }
@@ -5194,7 +5170,6 @@ class VaultService implements Vault {
 
   async verifyTrees(): Promise<TreeVerification> {
     await this.#settled();
-    if (this.#prepared.log015 === null) return { kept: false };
     const anchors = await this.#prepared.log015.heldOutside();
     const keys = await this.#verifierKeys();
     const walk = () => verifyTrees(this.#db, keys, { anchors });
@@ -5253,7 +5228,6 @@ class VaultService implements Vault {
    */
   async verifyReads(input: { from: string }): Promise<ReadsVerification> {
     await this.#settled();
-    if (this.#prepared.log015 === null) return { kept: false };
     const from = (input as { from?: unknown } | undefined)?.from;
     const at = typeof from === 'string' ? /^(?:start|([0-9]{1,19}))$/.exec(from) : null;
     if (at === null) throw new Error('verifyReads starts at start, or at a stretch\'s next');
@@ -5271,12 +5245,6 @@ class VaultService implements Vault {
 
   async #verifierKeys(): Promise<VerifierKeys> {
     return (this.#prepared.verifier ??= await verifierKeys(this.#config.signingKeys));
-  }
-
-  #log015(): NonNullable<PreparedVault['log015']> {
-    const log015 = this.#prepared.log015;
-    if (log015 === null) throw new Error("this vault keeps 0.14's log: the app writes its rows as 0.14 does (`about().log`)");
-    return log015;
   }
 
   async keyChecks(): Promise<KeyChecks> {

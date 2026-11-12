@@ -19,7 +19,7 @@ import { forgetDocuments } from '../src/mcp/clients.ts';
 import { McpService } from '../src/mcp/service.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, logChanges, mcpConnections, oauthClients } from '@coffre/db/schema';
 import { addPasskey, confirmedSession, removePasskey, touchFor, type Touch } from './passkey-rows.ts';
 
@@ -550,20 +550,9 @@ test("an owner reads a person's connected apps in their report; removal disconne
   const rows = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${DEV}`));
   assert.deepEqual(rows.map((row) => [row.revokedAt !== null, row.revokedBy]), [[true, ROOT], [true, ROOT]], 'revoked, not only dead by the generation');
 
-  // As a removal before this release left them, dead by the generation alone: re-admission revokes them. 0.15's log holds
-  // each connection as an object, which a row un-revoked around coffre is not: its re-admission refuses to change it, as
-  // it refuses a credential's (T147); the cutover seals a removal's leftovers as 0.14 left them, and re-admission ends them.
-  if (LOG === '0.15') return;
-  await updateAuth(db.owner, deps.chainKey, mcpConnections, { principal: `user:${DEV}` }, { revokedAt: null, revokedBy: null });
-  assert.equal((await as('PUT', `/api/members/user:${DEV}`)).status, 200);
-  const readmitted = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${DEV}`));
-  assert.deepEqual(readmitted.map((row) => row.revokedBy), [ROOT, ROOT]);
-  const back = (await (await as('GET', `/api/members/user:${DEV}`)).json()) as Report;
-  assert.deepEqual([back.live.apps, back.apps], [0, []], 'a fresh start');
-  assert.equal((await route('/api/oauth/token', tokenRequest({ grant_type: 'refresh_token', refresh_token: app.refresh_token, client_id: CLAUDE_CODE }))).status, 400);
 });
 
-test("an app of an earlier membership, sealed live by the cutover, ends by its change at re-admission, or at a sign-in's sweep (T147)", { skip: LOG === '0.15' ? false : "0.14's re-admission is the test above" }, async () => {
+test("an app of an earlier membership, sealed live by the cutover, ends by its change at re-admission, or at a sign-in's sweep (T147)", async () => {
   const member = `user:${DEV}`;
   for (const sweep of ['re-admission', 'sign-in'] as const) {
     await connect();

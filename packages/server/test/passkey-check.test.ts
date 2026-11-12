@@ -18,7 +18,7 @@ import { AuthRowTampered } from '../src/auth-rows.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { passkeyStands } from '../src/passkey-check.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, deviceLogins, passkeys } from '@coffre/db/schema';
 import * as rows from './passkey-rows.ts';
 import { touching } from './passkey-rows.ts';
@@ -263,8 +263,7 @@ test('a reveal by a credential whose passkey fails its MAC gets the 401 any requ
 test('a key write or a member\'s add by a credential the check refuses is refused before it writes, by the fast path and today\'s alike', async () => {
   const root = clientFor(deps, ROOT);
   await root.members.add(`user:${BOB}`, { role: 'admin' });
-  // The vault's fast-path calls, counted: 0.15's vault serves them. And
-  // the refusals it records in place of 0.14's deny entry (T179 PR 6).
+  // The vault's fast-path calls, counted, and the refusals it records (T179 PR 6).
   const served = { writes: 0, adds: 0 };
   let recorded = 0;
   const vault = deps.vault;
@@ -292,9 +291,8 @@ test('a key write or a member\'s add by a credential the check refuses is refuse
   // Ada, a Developer, may not add a member, which the handler decides; but first the router asks her for a passkey she
   // does not hold (section 4.5): a prompt, which writes nothing and records no refusal of the vault's.
   assert.equal(await answer(ada!.members.add('user:erin@acme.example', { role: 'developer' })), 'fresh_check_required');
-  // The fast paths are 0.15's log's (`admit-held.test.ts`); under 0.14's both go today's way.
-  const fast = LOG === '0.15' ? { writes: 1, adds: 1 } : { writes: 0, adds: 0 };
-  assert.deepEqual(served, fast, "the fast path served each, under 0.15's log");
+  // The fast paths are the log's (`admit-held.test.ts`).
+  assert.deepEqual(served, { writes: 1, adds: 1 }, 'the fast path served each');
   assert.equal(recorded, 0, 'a prompt records no refusal');
   const keyNow = async () => {
     const { values, version } = await root.secrets.reveal('market/dev', ['API_KEY']);
@@ -319,7 +317,7 @@ test('a key write or a member\'s add by a credential the check refuses is refuse
   ]);
   assert.deepEqual(answers, ['passkey_required', 'passkey_required', 'passkey_required', 'passkey_required']);
   assert.equal(recorded, 0, 'no refusal recorded for a credential the check refuses');
-  assert.deepEqual(served, { writes: 2 * fast.writes, adds: 2 * fast.adds }, 'where it serves them, the vault served the refused write and add too');
+  assert.deepEqual(served, { writes: 2, adds: 2 }, 'where it serves them, the vault served the refused write and add too');
   assert.deepEqual(await keyNow(), before, 'the key is as it was');
   assert.deepEqual(await membersNow(), members, 'nobody was added');
 });

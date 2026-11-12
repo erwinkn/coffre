@@ -6,10 +6,10 @@ import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 import { createClient, CoffreError } from '@coffre/client';
 import { defineSignin, github } from '@coffre/core/identity';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { clientFor, LOG, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, watchUses, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, watchUses, type FixtureDeps } from './api-fixture.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
 import { auditLog, principals, grants, credentials as storedCredentials, identities, environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets, secretReferences, secretVersions } from '@coffre/db/schema';
 import { SigninService } from '../src/api/signin.ts';
@@ -72,8 +72,8 @@ async function scenario(operations: readonly Operation[]) {
   await resetDatabase(database.owner);
   // Fake deployment keys are fixed so randomness cannot change any verdict.
   const vault = testVault([ROOT], {}, { kek: Buffer.alloc(32, 17) });
-  // Under 0.15's log, a read on a credential is a use, which `reads` counts by its answers.
-  const uses = LOG === '0.15' ? watchUses(vault) : null;
+  // A read on a credential is a use, which `reads` counts by its answers.
+  const uses = watchUses(vault);
   const deps: FixtureDeps = { db: database.runtime, vault, chainKey: Buffer.alloc(32, 23), anchor: testAnchor() };
   // The model is of access, with no passkey anywhere: what a passkey adds, the passkey suites hold (`passkey-*.test.ts`).
   const signinConfig = defineSignin({ publicUrl: 'https://coffre.test', providers: [github({ clientId: 'property', clientSecret: 'property' })], passkeys: 'off' });
@@ -331,11 +331,10 @@ async function scenario(operations: readonly Operation[]) {
     return database.owner.select().from(auditLog).where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'allow'))).orderBy(auditLog.seq);
   }
   /**
-   * Under 0.15's log, the uses the vault answered with a value: each read on a credential, counted as answered, since
-   * a repeat rides its cover and writes no row of its own. A use's row is slim (R53): what 0.14's entry says of a
-   * read beyond that it was, its project, is 0.14's alone.
+   * The uses the vault answered with a value: each read on a credential, counted as answered, since
+   * a repeat rides its cover and writes no row of its own. A use's row is slim (R53).
    */
-  const usesAllowed = () => uses?.answered.filter((outcome) => outcome.ok).length ?? 0;
+  const usesAllowed = () => uses.answered.filter((outcome) => outcome.ok).length;
   async function invariants() {
     for (const credential of credentials) {
       if (credential.live && model.active[credential.member]) await signin.verify(credential.token);
@@ -611,18 +610,6 @@ async function scenario(operations: readonly Operation[]) {
           createdSeq: unsealed!.seq, createdBy: 'user:mallory@acme.example',
         });
         model.forged = true;
-        // And the genuine row, if billing follows one, edited to name another source: what it reads, and where it shows, stay the seal's.
-        // With 0.15's log, the edit moves its holder's object from under its seal: every later change of it is refused
-        // (`tampered`), which this model of 0.14's answers does not take (app-places.test.ts holds 0.15's).
-        const { reference } = model.billing;
-        const other = model.environments.find((each) => each.n !== reference?.source);
-        if (LOG === '0.14' && reference?.live === true && other !== undefined) {
-          const [otherSecret] = await database.owner.select({ id: storedSecrets.id }).from(storedSecrets)
-            .where(and(eq(storedSecrets.environmentId, other.id), eq(storedSecrets.key, 'VALUE')));
-          await database.owner.update(secretReferences)
-            .set({ sourceEnvironmentId: other.id, sourceSecretId: otherSecret!.id })
-            .where(and(eq(secretReferences.projectId, model.billing.projectId), eq(secretReferences.sourceProjectId, model.project!.id), ne(secretReferences.secretId, holder)));
-        }
         break;
       }
       // Archived, then deleted, as one step: so random sequences reach deletions, which need both.

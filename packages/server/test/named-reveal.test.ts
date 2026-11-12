@@ -94,7 +94,7 @@ before(async () => {
   await resetDatabase(db.owner);
   await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
   // Its throttle off: one vault answers the whole file, a held key `late` under its principal's lock on purpose (D154); the throttle's own answer is the last test's.
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, throttled: false }) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { sealThrough: sealedNow, heldOutside: nothingHeld, throttled: false }) });
   runtime = runtimeOver(counted(deps.vault, true));
   unnamed = runtimeOver(counted(deps.vault, false));
   deps.signin = runtime.signin!;
@@ -225,7 +225,7 @@ test('revoked, someone learns nothing of a key made since, by its path or a list
   await root.access.set(`user:${GONE}`, { 'market/dev': null });
   await root.secrets.set('market/dev', { MADE_SINCE: 'made-since' });
   // The vault as it is, and one of the same instance with every call in flight taken: busy before it reads anything.
-  const busy = runtimeOver(testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, uses: { inFlight: 0 } }));
+  const busy = runtimeOver(testVault([ROOT], {}, { kek }, {}, { sealThrough: sealedNow, heldOutside: nothingHeld, uses: { inFlight: 0 } }));
   for (const at of [runtime, busy]) {
     const logged = (await usesLogged(db.owner)).length;
     for (const ask of [(key: string) => ({ path: `market/dev/${key}` }), (key: string) => ({ path: 'market/dev', keys: [key] })]) {
@@ -753,7 +753,7 @@ test("a vault whose throttle refuses answers a key held, one never made and one 
   await root.access.set(`user:${PROBE}`, { 'market/thr-gone': null });
   // A vault of its own, its throttle on as a deployment's is, every statement on its databases and the app's counted.
   const databases = await countedDatabases();
-  const vault = testVault([ROOT], { database: databases.vault, hotDatabase: databases.hot }, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
+  const vault = testVault([ROOT], { database: databases.vault, hotDatabase: databases.hot }, { kek }, {}, { sealThrough: sealedNow, heldOutside: nothingHeld });
   const at = runtimeOver(counted(vault, true), 'github', databases.app);
   /** The whole response: its status, every header, its body's bytes. */
   const whole = async (response: Response) => ({ status: response.status, headers: [...response.headers].sort(), body: await response.text() });

@@ -4,12 +4,10 @@ import assert from 'node:assert/strict';
 
 import { CoffreError } from '@coffre/client';
 import { github, signin, type AuthConfig, type Principal } from '@coffre/core/identity';
-import { eq } from 'drizzle-orm';
 
 import { apiCredential, fetchApi as serveApi, pageClient as clientForPage, pageCredential } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, openTestDatabase, resetDatabase, START_OVER_014, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { principals } from '@coffre/db/schema';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://coffre.test';
 const ROOT = 'admin@acme.example';
@@ -191,26 +189,6 @@ test('someone signed in but not a member reaches /me and nothing else', async ()
   assert.equal(me.registered, false);
   assert.deepEqual(me.environments, []);
   await assert.rejects(client.projects.list(), { status: 403, code: 'registration_required' });
-});
-
-test('a member whose record fails the vault\'s check is told so, and listed so, until an owner starts them over', { skip: START_OVER_014 }, async () => {
-  // Someone who owns the database makes DEV an owner, around the vault.
-  await db.owner.update(principals).set({ owner: true, role: 'admin' }).where(eq(principals.principal, `user:${DEV}`));
-  const page = () => pageClient(new Request(`${ORIGIN}/projects`, { headers: { cookie: `${SESSION}=${DEV}` } }), runtimeFor(own));
-  const client = page();
-  const me = await client.me();
-  assert.deepEqual([me.registered, me.tampered], [false, true]);
-  await assert.rejects(client.projects.list(), (error: unknown) =>
-    error instanceof CoffreError && error.status === 403 && error.code === 'vault_refused' && /integrity check/.test(error.message));
-
-  const root = clientFor(deps, ROOT);
-  const listed = (await root.members.list()).members.find((member) => member.principalId === DEV);
-  assert.deepEqual([listed?.tampered, listed?.instanceRole], [true, 'member']);
-  await root.members.remove(`user:${DEV}`);
-  await root.members.add(`user:${DEV}`);
-  // The next page load: a render checks its caller once, so the one above still sees them as it did.
-  const again = await page().me();
-  assert.deepEqual([again.registered, again.tampered], [true, false]);
 });
 
 test('how to sign in is public', async () => {

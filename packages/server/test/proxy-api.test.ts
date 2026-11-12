@@ -18,7 +18,6 @@ import { SigninService } from '../src/api/signin.ts';
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { LOG } from './api-fixture.ts';
 import { auditLog } from '@coffre/db/schema';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
@@ -30,7 +29,6 @@ const PAT = 'user:pat@acme.example';
 const VIC = 'user:vic@acme.example';
 const CI = 'token:ci';
 const SIGNIN = defineSignin({ publicUrl: ORIGIN, providers: [github({ clientId: 'a', clientSecret: 'b' })] });
-const ON_015 = { skip: LOG === '0.14' ? "proxy definitions are 0.15's log's objects" : false };
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
@@ -78,7 +76,6 @@ beforeEach(async () => {
   lin = clientFor(deps, 'lin@acme.example');
   pat = clientFor(deps, 'pat@acme.example');
   vic = clientFor(deps, 'vic@acme.example');
-  if (LOG === '0.14') return;
   await root.projects.create('market');
   await root.projects.create('billing');
   for (const path of ['market/dev', 'billing/prod']) await root.environments.create(path);
@@ -115,7 +112,7 @@ function bearer(token: string, over: CoffreRuntime = runtime): CoffreClient {
   return createClient({ url: ORIGIN, headers: () => ({ authorization: `Bearer ${token}` }), transport: (request) => fetchApi(request, over, { sourceIp: null }) });
 }
 
-test('whoever lists an environment reads its definitions, which no holdings cross; an Owner saves, a Viewer and a Developer cannot', ON_015, async () => {
+test('whoever lists an environment reads its definitions, which no holdings cross; an Owner saves, a Viewer and a Developer cannot', async () => {
   const empty = await vic.proxy.get('market/dev');
   assert.deepEqual([empty.items, empty.seal, empty.state, empty.editable, empty.code], [[], null, 'ok', false, [STRIPE]]);
   // What the page says of its reader: why they may not save, and that they route no sensitive key and release no name.
@@ -138,7 +135,7 @@ test('whoever lists an environment reads its definitions, which no holdings cros
   assert.deepEqual((await root.proxy.get('market/dev')).items.map((item) => item.definition.name), ['openai']);
 });
 
-test("a role an Owner gives proxy.edit routes what its holder reads, where the use finds it: an inherited key takes reading the parent", ON_015, async () => {
+test("a role an Owner gives proxy.edit routes what its holder reads, where the use finds it: an inherited key takes reading the parent", async () => {
   // Lin holds the role on market/dev-eu alone: its own key, and one not made yet, she routes.
   const own = await lin.proxy.save('market/dev-eu', { seal: null, items: { eu: route('eu', ['EU_KEY']), later: route('later', ['NOT_MADE_YET']) } });
   assert.deepEqual(own.items.map((item) => [item.definition.name, item.savedBy, item.routesSensitive]), [['eu', LIN, false], ['later', LIN, false]]);
@@ -162,7 +159,7 @@ test("a role an Owner gives proxy.edit routes what its holder reads, where the u
   assert.deepEqual((JSON.parse(entry!.metadata) as { proxy: { saved: { routesSensitive: string[] }[] } }).proxy.saved[0]!.routesSensitive, ['STRIPE_SECRET_KEY']);
 });
 
-test("the tab marks an item that would not route now, until someone who reads its keys saves it again (decision 5)", ON_015, async () => {
+test("the tab marks an item that would not route now, until someone who reads its keys saves it again (decision 5)", async () => {
   await root.access.set(LIN, { 'market/dev': 'router' });
   const saved = await lin.proxy.save('market/dev', { seal: null, items: { openai: route('openai'), maps: route('maps', ['MAPS_KEY']) } });
   // A save's answer leaves the mark out: the tab reads it.
@@ -198,7 +195,7 @@ test("the tab marks an item that would not route now, until someone who reads it
   assert.equal((await vic.proxy.get('market/dev')).items.find((item) => item.definition.name === 'openai')!.notCleared?.code, 'not_owner_at_save');
 });
 
-test("an Owner's save of a sensitive key stops routing once they are no Owner, and the mark says so, not that the save was no Owner's", ON_015, async () => {
+test("an Owner's save of a sensitive key stops routing once they are no Owner, and the mark says so, not that the save was no Owner's", async () => {
   await pat.proxy.save('market/dev', { seal: null, items: { stripe2: route('stripe2', ['STRIPE_SECRET_KEY']) } });
   const mark = async () => (await vic.proxy.get('market/dev')).items[0]!.notCleared;
   assert.equal(await mark(), null);
@@ -212,7 +209,7 @@ test("an Owner's save of a sensitive key stops routing once they are no Owner, a
   assert.equal(await mark(), null);
 });
 
-test("a fork's inherited item is marked where the fork resolves its keys: its own value over its parent's", ON_015, async () => {
+test("a fork's inherited item is marked where the fork resolves its keys: its own value over its parent's", async () => {
   await root.access.set(LIN, { 'market/dev': 'router', 'market/dev-eu': null });
   await lin.proxy.save('market/dev', { seal: null, items: { openai: route('openai') } });
   const inherited = async () => (await vic.proxy.get('market/dev-eu')).inheritedNotCleared;
@@ -230,7 +227,7 @@ test("a fork's inherited item is marked where the fork resolves its keys: its ow
   assert.deepEqual([frozen.key, frozen.code, frozen.environment], ['OPENAI_API_KEY', 'unread_at_save', 'dev-eu']);
 });
 
-test("a reference is decided where it lives (R71): its sensitive value is routed by an Owner of the holder's project, whatever project its source is in", ON_015, async () => {
+test("a reference is decided where it lives (R71): its sensitive value is routed by an Owner of the holder's project, whatever project its source is in", async () => {
   await root.access.set(LIN, { 'market/dev': 'router' });
   // BILLING_REF reads billing/prod's secret: her read of market/dev covers it (R20).
   const seal = (await lin.proxy.save('market/dev', { seal: null, items: { billing: route('billing', ['BILLING_REF']) } })).seal;
@@ -241,7 +238,7 @@ test("a reference is decided where it lives (R71): its sensitive value is routed
   assert.deepEqual(owners.items.map((item) => item.definition.name), ['billing', 'leak']);
 });
 
-test('who may save at all: the tab writes only where the deployment says, a person on a session of theirs, never a name code defines', ON_015, async () => {
+test('who may save at all: the tab writes only where the deployment says, a person on a session of theirs, never a name code defines', async () => {
   // A name code defines wins in every environment: no UI item takes it.
   assert.deepEqual(await refusal(root.proxy.save('market/dev', { seal: null, items: { stripe: route('stripe') } })),
     { status: 409, reason: 'reserved', message: "stripe is defined in this deployment's code, which wins the name in every environment" });
@@ -270,7 +267,7 @@ test('who may save at all: the tab writes only where the deployment says, a pers
   assert.deepEqual((await bearer(token.token).proxy.get('market/dev')).items, []);
 });
 
-test('a name code reserved is freed by an Owner of the whole instance, never one this code still defines', ON_015, async () => {
+test('a name code reserved is freed by an Owner of the whole instance, never one this code still defines', async () => {
   const seal = (await root.proxy.save('market/dev', { seal: null, items: { maps: route('maps', ['MAPS_KEY']) } })).seal;
   const reserved = await deps.vault.reserveProxy({ names: ['maps', 'stripe'] });
   assert.ok(reserved.ok && reserved.cleared.length === 1);
@@ -287,7 +284,7 @@ test('a name code reserved is freed by an Owner of the whole instance, never one
   assert.deepEqual(await denials('proxy.release'), ['requires_instance_owner', 'defined_in_code', 'invalid']);
 });
 
-test("a vault on another release: a signed-in request answers 503 deploying, Retry-After 1, and nobody is signed out; matched again, it is served", ON_015, async () => {
+test("a vault on another release: a signed-in request answers 503 deploying, Retry-After 1, and nobody is signed out; matched again, it is served", async () => {
   const token = await root.tokens.issue(`user:${ROOT}`, { label: 'agent', expiresInMinutes: 60, scope: { market: 'viewer' } });
   let theirs = RELEASE;
   const calls: string[] = [];

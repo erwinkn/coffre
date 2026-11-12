@@ -88,7 +88,7 @@ async function instance() {
     if (control.hold) return {} as Awaited<ReturnType<SealThrough>>;
     return cp.sealThrough(number, deadline);
   };
-  const opened = await openLocalVault(db.vault, config, { log: '0.15', sealThrough, heldOutside }, async () => {}, hot);
+  const opened = await openLocalVault(db.vault, config, { sealThrough, heldOutside }, async () => {}, hot);
   await cutOver(opened, db.vault);
   const vault = speaking(opened);
   const keys: ChangeKeys = { seals: [sealKey(seed)], mac: logMacKey(seed) };
@@ -160,7 +160,7 @@ async function newestRow() {
   }).then(() => {});
 }
 
-test('a log the vault wrote verifies on a page\'s check; with 0.14\'s alone there is none', async () => {
+test('a log the vault wrote verifies on a page\'s check', async () => {
   const w = await instance();
   for (let i = 0; i < 3; i += 1) assert.ok((await w.use()).ok);
   assert.ok((await w.grant(BO, 'viewer')).ok);
@@ -171,9 +171,6 @@ test('a log the vault wrote verifies on a page\'s check; with 0.14\'s alone ther
   clean(checked);
   assert.equal(checked.unsealed, 1);
   assert.equal(checked.checkpoint?.upto, w.cp.pair.pair.upto.toString());
-
-  const old = await openLocalVault(db.vault, w.config, { log: '0.14' }, async () => {}, hot);
-  assert.deepEqual(await old.verifyTrees!(), { kept: false });
 });
 
 test('R25: a page\'s check reads the newest pair and the entries since, whatever the log holds below it, and no row', async () => {

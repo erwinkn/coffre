@@ -63,7 +63,7 @@ async function bindingOf(id: string): Promise<SignInInput['binding']> {
 /** A vault keeping 0.15's log, the service account CI a viewer of a project, and a binding of CI's the Owner made: what a CI run signs in through. */
 async function world() {
   const config = configure();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const vault = await openLocalVault(db.vault, config, { sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   assert.ok((await vault.admit({ actor: ROOT, principal: CI })).ok);

@@ -20,7 +20,7 @@ import { hashToken } from '@coffre/core/identity';
 import { replayStored } from '@coffre/vault/node';
 import { eq } from 'drizzle-orm';
 
-import { clientFor, contextFor, issuesLogged, LOG, usesLogged } from './api-fixture.ts';
+import { clientFor, contextFor, issuesLogged, usesLogged } from './api-fixture.ts';
 import { browserFor, callRaw, connect, db, deps, DEV, entries, fromPage, NO, refusedFor, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { credentials, environments } from '@coffre/db/schema';
 import { coffreRoute } from '../src/app.ts';
@@ -284,19 +284,13 @@ test('a sensitive value opens for no person, on any credential of theirs nor thr
   assert.deepEqual(one.body.result!.content, [{ type: 'text', text: 'not available: no such key, or no access to it' }]);
   assert.equal(await refusedFor(), 'sensitive');
 
-  // The vault refused each read of one, and logged it: the app's API holds no rule of its own for this.
+  // Every refusal is decided before its use, which writes nothing (D153): the vault logs none, and the app's entry of
+  // each request records it, by the person, on a credential and through MCP on its connection (T147).
   const refused = (await entries('secret.read')).filter((entry) => entry.decision === 'deny' && entry.author === 'vault');
-  // With 0.15's log, every one of them is decided before its use, which writes nothing (D153): the app's entry records it.
-  if (LOG === '0.14') assert.ok(refused.length >= 4);
-  else assert.equal(refused.length, 0);
-  assert.ok(refused.every((entry) => entry.code === 'sensitive'));
-  if (LOG === '0.15') {
-    // On a credential, and through MCP on its connection (T147), 0.15's "no" is decided before the use, which writes
-    // nothing (D153): the app's entry of each request logs it, by the person.
-    const app = (await entries('secret.read')).filter((entry) => entry.decision === 'deny' && entry.author !== 'vault');
-    assert.ok(app.length >= 4 && app.every((entry) => entry.metadata.reason === 'sensitive'), JSON.stringify(app.map((entry) => entry.metadata)));
-    assert.deepEqual([...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null), []);
-  }
+  assert.equal(refused.length, 0);
+  const app = (await entries('secret.read')).filter((entry) => entry.decision === 'deny' && entry.author !== 'vault');
+  assert.ok(app.length >= 4 && app.every((entry) => entry.metadata.reason === 'sensitive'), JSON.stringify(app.map((entry) => entry.metadata)));
+  assert.deepEqual([...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null), []);
 
   // A service account's reads are values, as in CI.
   const ci = (await runtime.signin!.issueServiceToken(await contextFor(deps, ROOT), 'ci', { label: 'ci', expiresInDays: 1 })).token;
@@ -309,7 +303,7 @@ test('a handle stands in for its environment and reaches nothing but the proxy; 
   assert.match(made.token, /^coffre_use_[A-Za-z0-9_-]{43}$/);
   assert.deepEqual(made.scope, { 'market/dev': 'viewer' });
   assert.ok(Math.abs(Date.parse(made.expiresAt) - Date.now() - 12 * 3_600_000) < 60_000, 'twelve hours unless told');
-  // Its record: 0.14's entry, or with 0.15's log the vault's change (T149, D147).
+  // Its record: the vault's change (T149, D147).
   const [created] = (await issuesLogged(db.owner)).filter((entry) => entry.kind === 'handle');
   assert.equal(created!.actor, `user:${DEV}`);
 
@@ -397,20 +391,10 @@ test("Schumann's own client, its base URL the proxy's stable URL and its key fro
   assert.equal((await helper.fetch('/companies')).status, 200);
   assert.equal(received[1]!.headers['x-api-key'], KEY);
 
-  // One opening of the credential's keys for the minute, however many calls: the vault's read, and the proxy's entry naming it.
+  // One opening of the credential's keys for the minute, however many calls: one use, its row slim (R53), naming
+  // neither the credential nor the host.
   await schumann.get('/companies');
-  if (LOG === '0.15') {
-    // 0.15's record: one use, its row slim (R53), naming neither the credential nor the host.
-    assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
-    return;
-  }
-  const uses = (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'schumann');
-  assert.equal(uses.length, 1);
-  assert.deepEqual(uses[0]!.metadata.keys, ['SCHUMANN_API_KEY']);
-  assert.equal(uses[0]!.metadata.host, new URL(upstreamUrl).host);
-  const reads = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'allow' && entry.metadata.purpose === 'use');
-  assert.equal(reads.length, 1);
-  assert.equal(reads[0]!.operationId, uses[0]!.operationId);
+  assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
 });
 
 test("a credential with an egress leaves through it, never the global fetch, as the proxy made the request: the real key in, the same checks, the log saying so", async () => {
@@ -484,16 +468,6 @@ test("a credential with an egress leaves through it, never the global fetch, as 
     assert.equal((await route('/use/market/dev/maps/geocode?key=' + handle)).status, 200);
     assert.equal(global.mock.callCount(), 1);
     assert.equal(received.length, 1);
-
-    // The log says which credentials' openings went out through their egress, and nothing of the binding: 0.14's
-    // `credential.use`. 0.15's use row is slim (R53), and says neither.
-    if (LOG === '0.14') {
-      const uses = (await entries('credential.use')).filter((entry) => entry.metadata.plan !== true);
-      assert.deepEqual(uses.map((entry) => [entry.metadata.credential, entry.metadata.host, entry.metadata.egress]), [
-        ['schumann', new URL(upstreamUrl).host, true],
-        ['maps', new URL(upstreamUrl).host, undefined],
-      ]);
-    }
   } finally {
     global.mock.restore();
   }
@@ -679,7 +653,7 @@ test('query and Basic credentials, with their methods and paths', async () => {
 
 test("a method override the credential's methods do not take is refused before the vault opens anything (T189); one they take costs the one use", async () => {
   const handle = await handleFor();
-  const opened = async () => (LOG === '0.14' ? (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'maps').length : (await usesLogged(db.owner)).filter((use) => use.purpose === 4).length);
+  const opened = async () => (await usesLogged(db.owner)).filter((use) => use.purpose === 4).length;
   const before = received.length;
   for (const [path, init] of [
     [`/use/market/dev/maps/geocode?key=${handle}`, { headers: { 'x-http-method-override': 'DELETE' } }],
@@ -736,8 +710,7 @@ test("the stable URL, /use/<credential>, is the handle's environment's: a fork's
   assert.equal(((await root.json()) as { path: string }).path, '/v1', 'the credential itself is its upstream');
   // One opening for the environment, whichever URL names it.
   assert.equal((await route('/use/market/dev/schumann/companies', { headers: { 'x-api-key': handle } })).status, 200);
-  if (LOG === '0.14') assert.equal((await entries('credential.use')).filter((entry) => entry.metadata.credential === 'schumann').length, 1);
-  else assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
+  assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
   // A redirect under the upstream stays on the proxy, at the environment's URL, which nothing else can mean.
   assert.equal((await stable('/redirect-inside')).headers.get('location'), `${ORIGIN}/use/market/dev/schumann/companies?page=2`);
 
@@ -880,9 +853,7 @@ test('the plan: placeholders for what the proxy covers, and as they are the valu
   assert.deepEqual(mine.left, ['DATABASE_URL', 'U_PASS']);
 
   // Each value given is logged as the vault's read to expose, one entry per environment it opens in.
-  const exposed = LOG === '0.14'
-    ? (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'allow' && entry.metadata.purpose === 'expose')
-    : (await usesLogged(db.owner)).filter((use) => use.purpose === 5);
+  const exposed = (await usesLogged(db.owner)).filter((use) => use.purpose === 5);
   assert.equal(exposed.length, 4);
 });
 
@@ -926,7 +897,7 @@ test("a handle made for dev reads its reference into a protected prod through de
   assert.equal((await route('/use/market/prod', { headers: { authorization: `Bearer ${made.token}` } })).status, 403);
   const key = await route(`/use/market/prod/maps/geocode?address=paris&key=${made.token}`);
   // Its reason: the app's, or, by name (0.15's log), the vault's own, the app reading nothing more of the key (D153).
-  assert.deepEqual([key.status, await key.json(), await refusedFor()], [404, NO, LOG === '0.15' ? 'no_grant' : 'missing_secret_use']);
+  assert.deepEqual([key.status, await key.json(), await refusedFor()], [404, NO, 'no_grant']);
   assert.equal(received.length, sent, 'nothing reached an upstream');
 });
 
@@ -949,7 +920,7 @@ test("a key named as an object's own property is still missing when the environm
   runtime.plugins = checkPlugins([credentialProxy({ credentials: { odd: { upstream: `${upstreamUrl}/v1`, inject: header('x-api-key', '{constructor}') } }, insecureUpstreams: true })]);
   const handle = await handleFor();
   const missing = await route('/use/market/dev/odd/companies', { headers: { 'x-api-key': handle } });
-  assert.deepEqual([missing.status, await missing.json(), await refusedFor()], [404, NO, LOG === '0.15' ? 'missing' : 'unknown_secret']);
+  assert.deepEqual([missing.status, await missing.json(), await refusedFor()], [404, NO, 'missing']);
   assert.equal(received.length, 0);
 });
 

@@ -71,7 +71,7 @@ before(async () => {
   await resetDatabase(db.owner);
   await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
   const kek = randomBytes(32);
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { sealThrough: sealedNow, heldOutside: nothingHeld }) });
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/dev');
@@ -88,7 +88,7 @@ before(async () => {
   hot = new RecordingPool(TEST_HOT_DATABASE_URL);
   vault = spoken(await localVault(
     { database: createDatabase(vaultPool.client), hotDatabase: createDatabase(hot.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
-    { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
+    { sealThrough: sealedNow, heldOutside: nothingHeld },
   ));
   const runtimeOf = (auth: ReturnType<typeof signin>) => {
     const config = resolveConfig({

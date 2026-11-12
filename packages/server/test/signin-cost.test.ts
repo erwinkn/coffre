@@ -83,7 +83,7 @@ before(async () => {
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { sealThrough: sealedNow, heldOutside: nothingHeld }) });
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/dev');
@@ -117,7 +117,7 @@ before(async () => {
   // The app and the vault on pools of their own that record what they run, as a deployment's; each vault call counted.
   app = new RecordingPool(TEST_RUNTIME_DATABASE_URL);
   vaultPool = new RecordingPool(TEST_VAULT_DATABASE_URL);
-  vault = spoken(await localVault({ database: createDatabase(vaultPool.client), hotDatabase: TEST_HOT_DATABASE_URL, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }));
+  vault = spoken(await localVault({ database: createDatabase(vaultPool.client), hotDatabase: TEST_HOT_DATABASE_URL, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { sealThrough: sealedNow, heldOutside: nothingHeld }));
   const counted = new Proxy(vault, {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);

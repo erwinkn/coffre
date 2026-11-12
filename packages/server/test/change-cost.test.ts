@@ -76,7 +76,7 @@ before(async () => {
   const kek = randomBytes(32);
   // Cut over and seeded through a vault of the suite's own, as signin-cost.test.ts does; then measured through one
   // whose connections go through the proxies.
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { sealThrough: sealedNow, heldOutside: nothingHeld }) });
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   for (const path of ['market/dev', 'market/prod', 'market/base']) await root.environments.create(path);
@@ -103,7 +103,7 @@ before(async () => {
   vaultPool = new HyperdrivePool(relays.vault.url);
   const opened = spoken(await localVault(
     { database: createDatabase(vaultPool), hotDatabase: relays.hot.url, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
-    { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
+    { sealThrough: sealedNow, heldOutside: nothingHeld },
   ));
   vault = opened;
   const counted = new Proxy(opened, {

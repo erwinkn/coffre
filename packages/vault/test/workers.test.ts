@@ -139,7 +139,7 @@ async function freshVault(database: string, hotDatabase = HOT_URL, key = randomB
   stop(): Promise<void>;
 }> {
   // Cut over from 0.14 first, as the app's door has it, from another process: the isolate's calls below are its first.
-  const cut = await openLocalVault(db.vault, resolveVaultConfig({ kek: { id: 'vault-workers-test', key }, owners: ['root@acme.example'] }), { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const cut = await openLocalVault(db.vault, resolveVaultConfig({ kek: { id: 'vault-workers-test', key }, owners: ['root@acme.example'] }), { sealThrough: sealed, heldOutside: nothingHeld });
   await cut.close();
   const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-worker-'));
   const name = 'coffre-vault-workers-test';

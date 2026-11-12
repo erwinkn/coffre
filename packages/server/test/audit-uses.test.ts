@@ -1,11 +1,9 @@
-// Reads on every audit list (T166). With 0.15's log a read writes no 0.14
-// `secret.read` entry: its use is the record (R53), which the vault's
-// projector lists once a pair seals it (`log_reads`), and the audit lists show
-// each where that entry stood, with who read what, which version, for what
-// and through what, at the places and by the members the list asks for, every
-// one vouched for by the vault. Here a checkpointer seals and the projector
-// lists at `settle()`. Under 0.14's log the same lists show its own entries:
-// each test holds both.
+// Reads on every audit list (T166). A read writes no 0.14 `secret.read` entry:
+// its use is the record (R53), which the vault's projector lists once a pair
+// seals it (`log_reads`), and the audit lists show each where that entry
+// stood, with who read what, which version, for what and through what, at the
+// places and by the members the list asks for, every one vouched for by the
+// vault. Here a checkpointer seals and the projector lists at `settle()`.
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -24,8 +22,8 @@ import { READS_BEHIND_MS, readsListed } from '../src/api/audit.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { bulkCap, logCheckpoints, logReadDays, logReadPlaceDays, logReads, logReadsCursor, logTiles, logUses, secrets } from '@coffre/db/schema';
-import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { logReadDays, logReadPlaceDays, logReads, logReadsCursor, logUses, secrets } from '@coffre/db/schema';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { openVaultDatabase } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -67,15 +65,11 @@ beforeEach(async () => {
   await signer?.stop();
   signer = null;
   await resetDatabase(db.owner);
-  if (LOG === '0.15') {
-    for (const table of [logUses, bulkCap, logCheckpoints, logTiles]) await db.owner.delete(table);
-    const kek = randomBytes(32);
-    signer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [derivedSigningKey(kek)], memory: join(scratch, `memory-${Date.now()}`), intervalMs: 3_600_000 });
-    const vault = testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: signer.sealThrough, heldOutside: signer.heldOutside });
-    deps = testDeps(db.runtime, [ROOT], { vault });
-  } else {
-    deps = testDeps(db.runtime, [ROOT]);
-  }
+  for (const table of [logUses, bulkCap, logCheckpoints, logTiles]) await db.owner.delete(table);
+  const kek = randomBytes(32);
+  signer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [derivedSigningKey(kek)], memory: join(scratch, `memory-${Date.now()}`), intervalMs: 3_600_000 });
+  const vault = testVault([ROOT], {}, { kek }, {}, { sealThrough: signer.sealThrough, heldOutside: signer.heldOutside });
+  deps = testDeps(db.runtime, [ROOT], { vault });
   const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: SIGNIN });
   deps.signin = signin;
   runtime = {
@@ -120,9 +114,9 @@ test("a read is on the whole log, its member's page, and its key's, environment'
   assert.equal((await ada.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'dev-key');
   await root.secrets.set('market/dev', { API_KEY: 'dev-key-2' });
   assert.equal((await ada.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'dev-key-2');
-  if (LOG === '0.15') assert.equal((await usesLogged(db.owner)).length, 2, 'each read is a use');
+  assert.equal((await usesLogged(db.owner)).length, 2, 'each read is a use');
 
-  const expected = [`ada@acme.example market/dev/API_KEY v2 reveal ${LOG}`, `ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`];
+  const expected = [`ada@acme.example market/dev/API_KEY v2 reveal 0.15`, `ada@acme.example market/dev/API_KEY v1 reveal 0.15`];
   for (const query of [{}, { actor: ADA }, { actor: 'ada@acme.example' }, { path: 'market/dev/API_KEY', actor: ADA }]) {
     assert.deepEqual(reads(await every(root, query)), expected, JSON.stringify(query));
   }
@@ -130,7 +124,7 @@ test("a read is on the whole log, its member's page, and its key's, environment'
     assert.deepEqual(reads(await every(root, { path })), expected, path);
     const page = await root.audit.list({ path, sealed: '1', limit: 10 });
     assert.equal(page.readsOmitted, undefined, path);
-    if (LOG === '0.15') assert.deepEqual([page.reads?.behind, page.reads?.forged], [false, undefined], path);
+    assert.deepEqual([page.reads?.behind, page.reads?.forged], [false, undefined], path);
   }
   for (const query of [{ path: 'market/prod' }, { path: 'market/dev/OTHER' }, { actor: BOB }, { path: 'market/dev', actor: BOB }, { decision: 'deny' }]) {
     assert.deepEqual(reads(await every(root, query)), [], JSON.stringify(query));
@@ -140,33 +134,12 @@ test("a read is on the whole log, its member's page, and its key's, environment'
   assert.equal(newest!.forged, undefined);
   assert.deepEqual(newest!.token, adaToken, "the token's label, beside the read it made");
   assert.equal(newest!.metadata.credentialId, adaToken.id);
-  // A client older than 0.15 pages 0.14's log alone, by seq: under 0.15's log it lists no use.
+  // A client older than 0.15 pages 0.14's log alone, by seq: it lists no use.
   const old = (await root.audit.list({ limit: 500 })).entries;
-  assert.deepEqual(reads(old), LOG === '0.15' ? [] : expected);
+  assert.deepEqual(reads(old), []);
 });
 
-test("under 0.14's log, a reader of some places sees the reads there and nowhere else, and none in an environment their role leaves out", { skip: LOG !== '0.14' }, async () => {
-  await ada.secrets.reveal('market/dev/API_KEY');
-  const admin = bearer((await root.tokens.issue(`user:${ROOT}`, { label: 'reader', expiresInMinutes: 60, scope: { market: 'viewer' } })).token);
-  await admin.secrets.reveal('market/prod/OTHER');
-  // Bob audits dev alone; then market, but for prod, which is protected and whose log an Auditor's role leaves out.
-  await root.members.add(BOB, { role: 'member' });
-  const bob = clientFor(deps, 'bob@acme.example');
-  await root.access.set(BOB, { 'market/dev': 'auditor' });
-  assert.deepEqual(reads(await every(bob)), [`ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`]);
-  assert.deepEqual(reads(await every(bob, { path: 'market/prod' })), []);
-  await root.access.set(BOB, { market: 'auditor' });
-  assert.deepEqual(reads(await every(bob)), [`${ROOT} market/prod/OTHER v1 reveal ${LOG}`, `ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`]);
-  // An Auditor whose role leaves protected environments' logs out, and prod protected: market's log, but for prod.
-  await root.roles.set('auditor', { name: 'Auditor', description: '', permissions: ['audit.read'], protected: [] });
-  await root.environments.update('market/prod', { protected: true });
-  assert.deepEqual(reads(await every(bob)), [`ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`], 'a protected environment whose log the role leaves out');
-  assert.deepEqual(reads(await every(bob, { actor: ADA })), reads(await every(bob)), 'by member, the same places');
-  assert.deepEqual(reads(await every(bob, { actor: `user:${ROOT}` })), [], "by member, none of the places left out");
-  assert.deepEqual(reads(await every(bob, { path: 'market' })), reads(await every(bob)), 'by path, the same places');
-});
-
-test("under 0.15's log, a reader of some places sees on a place's page the reads at places they read, none at an environment their role leaves out, through a reference or in a fork alike (T175)", { skip: LOG !== '0.15' }, async () => {
+test("a reader of some places sees on a place's page the reads at places they read, none at an environment their role leaves out, through a reference or in a fork alike (T175)", async () => {
   await ada.secrets.reveal('market/dev/API_KEY');
   const admin = bearer((await root.tokens.issue(`user:${ROOT}`, { label: 'reader', expiresInMinutes: 60, scope: { market: 'viewer' } })).token);
   await admin.secrets.reveal('market/prod/OTHER');
@@ -177,8 +150,8 @@ test("under 0.15's log, a reader of some places sees on a place's page the reads
   await root.members.add(BOB, { role: 'member' });
   const bob = clientFor(deps, 'bob@acme.example');
   await root.access.set(BOB, { 'market/dev': 'auditor' });
-  const adaDev = `ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`;
-  const rootProd = `${ROOT} market/prod/OTHER v1 reveal ${LOG}`;
+  const adaDev = `ada@acme.example market/dev/API_KEY v1 reveal 0.15`;
+  const rootProd = `${ROOT} market/prod/OTHER v1 reveal 0.15`;
   for (const [path, shown] of [
     ['market/dev', [adaDev]], ['market/dev/API_KEY', [adaDev]], ['market', [adaDev]], ['market/prod', []], ['market/prod/OTHER', []], ['market/prod-eu', []],
   ] as const) {
@@ -189,7 +162,6 @@ test("under 0.15's log, a reader of some places sees on a place's page the reads
   const outside = async (paths: readonly string[]) => {
     for (const path of paths) {
       const page = await bob.audit.list({ path, sealed: '1', limit: 1 });
-      // 0.14's log may go on (its entries about a place he reads too: the fork's making names prod), 0.15's not.
       assert.deepEqual([reads(page.entries), page.next === null || page.next.endsWith(':-'), page.readsOmitted], [[], true, 'scope'], `${path}: ${page.next}`);
     }
   };
@@ -210,11 +182,11 @@ test("under 0.15's log, a reader of some places sees on a place's page the reads
   // is passed over there, as a read hidden among those he sees.
   await outside(['market/prod', 'market/prod/OTHER']);
   assert.deepEqual(reads(await every(root, { path: 'market/prod-eu' })), [rootProd], "the whole log's reader sees it");
-  // A read through a reference at dev to prod is at prod too: dev's pages leave it out for him, as 0.14's left out an
-  // entry about a place left out, as its main place or the one beside it. The whole log's reader sees it there.
+  // A read through a reference at dev to prod is at prod too: dev's pages leave it out for him. The whole log's reader
+  // sees it there.
   await root.secrets.set('market/dev', { HELD: { ref: 'market/prod/OTHER' } });
   await ada.secrets.reveal('market/dev/HELD');
-  const through = `ada@acme.example market/prod/OTHER v1 reveal ${LOG}`;
+  const through = `ada@acme.example market/prod/OTHER v1 reveal 0.15`;
   for (const path of ['market/dev', 'market/dev/HELD', 'market']) {
     assert.deepEqual(reads(await every(bob, { path })).filter((read) => read === through), [], path);
     assert.deepEqual(reads(await every(root, { path })).filter((read) => read === through), [through], path);
@@ -223,7 +195,7 @@ test("under 0.15's log, a reader of some places sees on a place's page the reads
   for (const path of ['market/dev', 'market']) assert.deepEqual(reads(await every(bob, { path }, 1)), reads(await every(bob, { path })), path);
 });
 
-test("under 0.15's log, a reader of some places sees the reads at them on each place's page, and on a page of no place their own alone, which it says (D160, T175)", { skip: LOG !== '0.15' }, async () => {
+test("a reader of some places sees the reads at them on each place's page, and on a page of no place their own alone, which it says (D160, T175)", async () => {
   await ada.secrets.reveal('market/dev/API_KEY');
   // Bob owns market: he audits it and reads its values, but not the whole log.
   await root.members.add(BOB, { role: 'member' });
@@ -231,9 +203,9 @@ test("under 0.15's log, a reader of some places sees the reads at them on each p
   const bob = clientFor(deps, 'bob@acme.example');
   const bobs = bearer((await bob.tokens.issue(BOB, { label: 'bob', expiresInMinutes: 60, scope: { market: 'viewer' } })).token);
   await bobs.secrets.reveal('market/prod/OTHER');
-  assert.deepEqual(reads(await every(bob, { actor: BOB })), [`bob@acme.example market/prod/OTHER v1 reveal ${LOG}`], 'his own reads');
+  assert.deepEqual(reads(await every(bob, { actor: BOB })), [`bob@acme.example market/prod/OTHER v1 reveal 0.15`], 'his own reads');
   // However he names himself, and only his (review r6): `bob@acme.example` asks for `token:bob@acme.example` too.
-  assert.deepEqual(reads(await every(bob, { actor: 'bob@acme.example' })), [`bob@acme.example market/prod/OTHER v1 reveal ${LOG}`], 'named bare');
+  assert.deepEqual(reads(await every(bob, { actor: 'bob@acme.example' })), [`bob@acme.example market/prod/OTHER v1 reveal 0.15`], 'named bare');
   for (const query of [{}, { actor: ADA }]) {
     assert.deepEqual(reads(await every(bob, query)), [], JSON.stringify(query));
     const page = await bob.audit.list({ ...query, sealed: '1', limit: 10 });
@@ -241,16 +213,16 @@ test("under 0.15's log, a reader of some places sees the reads at them on each p
   }
   // Each page of a place he reads lists its reads, whoever's.
   for (const [query, shown] of [
-    [{ path: 'market' }, [`bob@acme.example market/prod/OTHER v1 reveal ${LOG}`, `ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`]],
-    [{ path: 'market/dev/API_KEY' }, [`ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`]],
-    [{ path: 'market/prod', actor: BOB }, [`bob@acme.example market/prod/OTHER v1 reveal ${LOG}`]],
-    [{ path: 'market', actor: ADA }, [`ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`]],
+    [{ path: 'market' }, [`bob@acme.example market/prod/OTHER v1 reveal 0.15`, `ada@acme.example market/dev/API_KEY v1 reveal 0.15`]],
+    [{ path: 'market/dev/API_KEY' }, [`ada@acme.example market/dev/API_KEY v1 reveal 0.15`]],
+    [{ path: 'market/prod', actor: BOB }, [`bob@acme.example market/prod/OTHER v1 reveal 0.15`]],
+    [{ path: 'market', actor: ADA }, [`ada@acme.example market/dev/API_KEY v1 reveal 0.15`]],
   ] as const) {
     assert.deepEqual(reads(await every(bob, query)), shown, JSON.stringify(query));
     assert.equal((await bob.audit.list({ ...query, sealed: '1', limit: 10 })).readsOmitted, undefined, JSON.stringify(query));
   }
   // The whole log's reader sees both.
-  assert.deepEqual(reads(await every(root)), [`bob@acme.example market/prod/OTHER v1 reveal ${LOG}`, `ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`]);
+  assert.deepEqual(reads(await every(root)), [`bob@acme.example market/prod/OTHER v1 reveal 0.15`, `ada@acme.example market/dev/API_KEY v1 reveal 0.15`]);
 });
 
 test("a read through a reference is filed at its source, of the source's version, its holder beside it; one in a fork, at its key, the fork beside it", async () => {
@@ -264,7 +236,7 @@ test("a read through a reference is filed at its source, of the source's version
     const shown = (await every(root, query)).filter((entry) => entry.action === 'secret.read' && entry.decision === 'allow' && entry.metadata.via !== undefined);
     assert.equal(shown.length, 1, JSON.stringify(query));
     const [read] = shown as [AuditEntryView];
-    // Filed as 0.14 filed it: at the source, the reference's holder beside it.
+    // Filed at the source, the reference's holder beside it.
     assert.deepEqual([read.project, read.environment, read.key, read.version, (read.metadata.via as { path?: unknown }).path], ['market', 'prod', 'SOURCE', 2, 'market/dev/HELD'], JSON.stringify(query));
   }
 
@@ -296,13 +268,11 @@ test('pages tile the reads with every other entry: each once, newest first, what
   }
   const whole = await every(root, { detail: '1' });
   assert.ok(whole.filter((entry) => entry.action === 'secret.read').length >= 2);
-  // The vault vouches for 0.15's changes (here the tokens' issues) as for the reads: a cast or a MAC that drifts marks
+  // The vault vouches for the log's changes (here the tokens' issues) as for the reads: a cast or a MAC that drifts marks
   // every one forged.
-  if (LOG === '0.15') {
-    const changes = whole.filter((entry) => entry.log === '0.15' && entry.action !== 'secret.read');
-    assert.ok(changes.some((entry) => entry.action === 'token.create'), JSON.stringify(changes));
-    assert.ok(changes.every((entry) => entry.forged === undefined), JSON.stringify(changes.filter((entry) => entry.forged)));
-  }
+  const changes = whole.filter((entry) => entry.log === '0.15' && entry.action !== 'secret.read');
+  assert.ok(changes.some((entry) => entry.action === 'token.create'), JSON.stringify(changes));
+  assert.ok(changes.every((entry) => entry.forged === undefined), JSON.stringify(changes.filter((entry) => entry.forged)));
   const key = (entry: AuditEntryView) => `${entry.log}:${entry.seq}`;
   for (const limit of [1, 2, 3, 7]) {
     for (const query of [{ detail: '1' }, {}, { actor: ADA }, { path: 'market/dev' }]) {
@@ -315,7 +285,7 @@ test('pages tile the reads with every other entry: each once, newest first, what
   }
 });
 
-test('a read the vault does not vouch for is shown forged: edited, renumbered, or written around coffre; a cursor moved on, said', { skip: LOG !== '0.15' }, async () => {
+test('a read the vault does not vouch for is shown forged: edited, renumbered, or written around coffre; a cursor moved on, said', async () => {
   await ada.secrets.reveal('market/dev/API_KEY');
   await ada.secrets.reveal('market/dev/OTHER');
   const before = (await every(root)).filter((entry) => entry.action === 'secret.read');
@@ -344,7 +314,7 @@ test('a read the vault does not vouch for is shown forged: edited, renumbered, o
   assert.deepEqual([verdict.ok, verdict.problems], [false, ["the reads' cursor is gone: a database writer deleted it"]]);
 });
 
-test("the whole log's check holds the reads listed to the uses sealed: one deleted, edited, given to another member or listed twice, each named", { skip: LOG !== '0.15' }, async () => {
+test("the whole log's check holds the reads listed to the uses sealed: one deleted, edited, given to another member or listed twice, each named", async () => {
   await root.secrets.set('market/prod', { SOURCE: 'prod-source' });
   await root.secrets.set('market/dev', { HELD: { ref: 'market/prod/SOURCE' }, THIRD: 'third', FOURTH: 'fourth' });
   // Five reads, each sealed by a pair of its own, so that the check goes a stretch for each.
@@ -385,7 +355,7 @@ test("the whole log's check holds the reads listed to the uses sealed: one delet
   ]) assert.ok(named.includes(problem), `${problem}, among ${JSON.stringify(named)}`);
 });
 
-test("a member's day of reads deleted takes them off her report, and the whole log's check names each (review r6)", { skip: LOG !== '0.15' }, async () => {
+test("a member's day of reads deleted takes them off her report, and the whole log's check names each (review r6)", async () => {
   await ada.secrets.reveal('market/dev/API_KEY');
   await settle();
   const [listed] = await db.owner.select({ number: logReads.number }).from(logReads);
@@ -398,7 +368,7 @@ test("a member's day of reads deleted takes them off her report, and the whole l
   assert.deepEqual([verdict.ok, verdict.problems], [false, [`read ${listed!.number} is off its member's pages: their day of it is not listed`]]);
 });
 
-test("a place's day of reads deleted takes them off its pages, and the whole log's check names each (T175)", { skip: LOG !== '0.15' }, async () => {
+test("a place's day of reads deleted takes them off its pages, and the whole log's check names each (T175)", async () => {
   await ada.secrets.reveal('market/dev/API_KEY');
   await settle();
   const [listed] = await db.owner.select({ number: logReads.number, environment: logReads.environment }).from(logReads);
@@ -412,7 +382,7 @@ test("a place's day of reads deleted takes them off its pages, and the whole log
   assert.deepEqual([verdict.ok, verdict.problems], [false, [`read ${listed!.number} is off a place's pages: the day of one of its places is not listed`]]);
 });
 
-test("a read planted ahead of the projector, at other places, is replaced by the projector's, which its own places' pages list: the upsert places it too (T175, Fable's review)", { skip: LOG !== '0.15' }, async () => {
+test("a read planted ahead of the projector, at other places, is replaced by the projector's, which its own places' pages list: the upsert places it too (T175, Fable's review)", async () => {
   await ada.secrets.reveal('market/dev/API_KEY');
   // Sealed, not yet listed: whoever owns the database writes a row of their own at the use's number, elsewhere.
   await signer!.checkpointer.tick();
@@ -425,13 +395,13 @@ test("a read planted ahead of the projector, at other places, is replaced by the
   const [row] = await db.owner.select().from(logReads);
   assert.deepEqual([row!.number, row!.principal, row!.environment === elsewhere.environment], [use!.number, ADA, false]);
   for (const path of ['market/dev/API_KEY', 'market/dev', 'market']) {
-    assert.deepEqual(reads(await every(root, { path })), [`ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`], path);
+    assert.deepEqual(reads(await every(root, { path })), [`ada@acme.example market/dev/API_KEY v1 reveal 0.15`], path);
   }
   const verdict = await root.audit.verifyReads();
   assert.ok(verdict.kept && verdict.ok, JSON.stringify(verdict));
 });
 
-test("a use renumbered after its seal stops the projection, which lists nothing it would derive from it, and the whole log's check says why (WindowChecked)", { skip: LOG !== '0.15' }, async () => {
+test("a use renumbered after its seal stops the projection, which lists nothing it would derive from it, and the whole log's check says why (WindowChecked)", async () => {
   await ada.secrets.reveal('market/dev/API_KEY');
   await ada.secrets.reveal('market/dev/OTHER');
   await signer!.checkpointer.tick();
@@ -446,7 +416,7 @@ test("a use renumbered after its seal stops the projection, which lists nothing 
   assert.ok(verdict.kept && !verdict.ok && /does not hold to the pair that sealed it/.test(verdict.problems.join()), JSON.stringify(verdict));
 });
 
-test("a read waits to be listed until the projector writes it, and the page says how far it lists", { skip: LOG !== '0.15' }, async () => {
+test("a read waits to be listed until the projector writes it, and the page says how far it lists", async () => {
   await ada.secrets.reveal('market/dev/API_KEY');
   // Sealed, not yet projected: not listed, and the page lists reads through nothing yet.
   await signer!.checkpointer.tick();
@@ -474,13 +444,13 @@ test("a listing stopped behind its newest pair says so once that pair is a few s
   // All listed: never behind; strict, as a report is: behind as soon as one waits.
   assert.equal(readsListed(standing(10n, now - 60_000, now - 60_000), false)?.behind, false);
   assert.equal(readsListed(standing(8n, now - 100, now - 200), false, { strict: true })?.behind, true);
-  // No pair at all: 0.14's log alone, no listing to speak of.
+  // No pair at all: no listing to speak of.
   assert.equal(readsListed({ ...standing(0n, 0, 0), sealed: null, sealedAt: null }, false), null);
   // The cursor's row gone: forged, behind, whatever it would have said (review r6).
   assert.deepEqual(readsListed({ ...standing(10n, now, now), missing: true }, false), { through: new Date(now).toISOString(), behind: true, forged: true });
 });
 
-test('the offboarding report names what someone read under either log, current until a new version is written', async () => {
+test('the offboarding report names what someone read, current until a new version is written', async () => {
   await ada.secrets.reveal('market/dev/API_KEY');
   await settle();
   const report = await root.members.get(ADA);
@@ -505,12 +475,12 @@ test("a reference's read is its source's then: repointed, its earlier read stays
   for (const [path, shown] of [['market/prod/SOURCE', ['market/prod/SOURCE']], ['market/stage', ['market/stage/OTHER_SOURCE']], ['market/dev/HELD', ['market/stage/OTHER_SOURCE', 'market/prod/SOURCE']]] as const) {
     assert.deepEqual(held(await every(root, { path })), shown, path);
   }
-  // Bob audits prod alone: its log names the earlier read alone; under 0.15's log on its pages (his page of no place
+  // Bob audits prod alone: its log names the earlier read alone, on its pages (his page of no place
   // lists his own reads alone).
   await root.members.add(BOB, { role: 'member' });
   await root.access.set(BOB, { 'market/prod': 'auditor' });
   const bob = clientFor(deps, 'bob@acme.example');
-  for (const query of [...(LOG === '0.14' ? [{}, { actor: `user:${ROOT}` }] : []), { path: 'market/prod' }, { path: 'market/prod/SOURCE' }]) {
+  for (const query of [{ path: 'market/prod' }, { path: 'market/prod/SOURCE' }]) {
     assert.deepEqual(held(await every(bob, query)), ['market/prod/SOURCE'], JSON.stringify(query));
   }
 });

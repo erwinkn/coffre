@@ -10,17 +10,16 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
-import { CoffreError, createClient } from '@coffre/client';
+import { createClient } from '@coffre/client';
 import { github, signin, type Principal } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
-import { eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { authenticateRequest } from '../src/auth.ts';
 import { answerShown } from '../src/db/answers.ts';
 import { fetchApi, pageClient } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, contextFor, EDITS_ROLES, openTestDatabase, resetDatabase, START_OVER_014, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { principals } from '@coffre/db/schema';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -81,7 +80,6 @@ beforeEach(async () => {
   await root.environments.protect('market/staging');
   await root.environments.update('market/staging', { archived: true });
   await root.environments.delete('market/staging');
-  if (EDITS_ROLES) await root.roles.set('viewer', { name: 'Viewer', description: '', permissions: ['secret.read', 'secret.use', 'secret.archive'], protected: ['secret.use'] });
   await root.settings.set({ serviceAccounts: { projects: 'all', environments: { except: ['prod'] } } });
   calls = [];
 });
@@ -147,19 +145,6 @@ test('a removed member, or one removed and admitted again, is shown as the vault
   assert.equal((await me(token)).status, 401, 'admitted again, a session of before is no one now');
   const body = await (await me(await cliToken(DEV))).json() as { registered: boolean; environments: unknown[] };
   assert.deepEqual([body.registered, body.environments], [true, []]);
-});
-
-test('a row changed around the vault is shown as it says, and decides nothing: what the caller asks next, the vault refuses', { skip: START_OVER_014 }, async () => {
-  const token = await cliToken(DEV);
-  // Someone who owns the database makes DEV an Owner, around the vault.
-  await db.owner.update(principals).set({ owner: true, role: 'owner' }).where(eq(principals.principal, `user:${DEV}`));
-  const shown = await (await me(token)).json() as { instanceRole: string; runsInstance: boolean; tampered: boolean };
-  assert.deepEqual([shown.instanceRole, shown.runsInstance, shown.tampered], ['owner', true, false], 'shown as the row says: the app cannot check it');
-  // Anything else asks the vault, which refuses the row, and their session with it: as before, at every request but this one.
-  const client = bearer(token);
-  for (const asked of [() => render(token).me(), () => client.projects.list(), () => client.members.list(), () => client.secrets.reveal('market/dev')]) {
-    await assert.rejects(asked(), (error: unknown) => error instanceof CoffreError && error.status === 401);
-  }
 });
 
 test('behind Cloudflare Access, an Owner the deployment names, never admitted, is admitted by the vault at their first `GET /api/me`, then shown from the rows', async () => {

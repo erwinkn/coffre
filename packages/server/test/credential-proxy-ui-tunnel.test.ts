@@ -16,7 +16,7 @@ import { defineDeployment, type Deployment } from '@coffre/core/deployment';
 import { github, signin } from '@coffre/core/identity';
 import type { ProxyDefinition } from '@coffre/core/vault';
 
-import { clientFor, LOG } from './api-fixture.ts';
+import { clientFor } from './api-fixture.ts';
 import { trackBackgroundTask } from './background-tasks.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { deps, DEV, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
@@ -29,7 +29,6 @@ import { publicLookup } from '../src/workloads/node-transport.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { appClient, type AppClient } from './tunnel-listener.ts';
 
-const ON = { skip: LOG === '0.14' ? "proxy definitions are 0.15's log's objects" : false };
 const REAL = `${TEST_RUNTIME_DATABASE_URL}?sslmode=disable`;
 const OPENAI = 'sk-openai-dev-0123456789abcdef';
 
@@ -161,7 +160,7 @@ useMcp(async () => {
   await root.environments.create('market/dev');
   await root.secrets.set('market/dev', { DATABASE_URL: { value: REAL, sensitivity: 'sensitive' }, OPENAI_API_KEY: OPENAI });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
-  if (LOG !== '0.14') await save({ db: database() });
+  await save({ db: database() });
   handle = await handleFor('market/dev');
 });
 
@@ -180,7 +179,7 @@ async function upgraded(path = '/use/market/dev/db', token = handle): Promise<'s
   return { status: answer.status, message: ((await answer.json()) as { message: string }).message };
 }
 
-test("the plan names the UI's database as code's, and gives the app no URL of its own; queries run as the real login", ON, async () => {
+test("the plan names the UI's database as code's, and gives the app no URL of its own; queries run as the real login", async () => {
   const plan = (await (await route('/use/market/dev', { headers: { authorization: `Bearer ${handle}` } })).json()) as { env: Record<string, string>; tunnels: Record<string, { key: string; url: string }> };
   assert.deepEqual(plan.tunnels, { db: { key: 'DATABASE_URL', url: `${ORIGIN.replace('https', 'wss')}/use/market/dev/db` } });
   assert.equal(plan.env.DATABASE_URL, undefined);
@@ -196,7 +195,7 @@ test("the plan names the UI's database as code's, and gives the app no URL of it
   }
 });
 
-test('the decided item says where the tunnel dials: a host it does not list is refused before any login', ON, async () => {
+test('the decided item says where the tunnel dials: a host it does not list is refused before any login', async () => {
   await save({ db: database(['db.acme.example']) });
   const refused = await upgraded();
   assert.notEqual(refused, 'session');
@@ -205,7 +204,7 @@ test('the decided item says where the tunnel dials: a host it does not list is r
   assert.equal(await upgraded(), 'session');
 });
 
-test('an Owner who narrows the hosts mid-session ends it within a recheck; the reconnect dials by the new item', ON, async () => {
+test('an Owner who narrows the hosts mid-session ends it within a recheck; the reconnect dials by the new item', async () => {
   const client = appClientOf();
   assert.deepEqual([...await client.unsafe('SELECT 1 AS one')], [{ one: 1 }]);
   // Saved anew, still reaching 127.0.0.1: a session dialled now is the new item's, and the old item's checks end only theirs.
@@ -227,7 +226,7 @@ test('an Owner who narrows the hosts mid-session ends it within a recheck; the r
   assert.equal((await upgraded() as { status: number }).status, 403);
 });
 
-test("another item of the environment saved mid-session ends nothing: the check compares the item's own digest", ON, async () => {
+test("another item of the environment saved mid-session ends nothing: the check compares the item's own digest", async () => {
   const client = appClientOf();
   try {
     assert.deepEqual([...await client.unsafe('SELECT 1 AS one')], [{ one: 1 }]);
@@ -240,7 +239,7 @@ test("another item of the environment saved mid-session ends nothing: the check 
   }
 });
 
-test("a person whose grant ends loses their UI tunnel's sessions at the next check, and opens no other", ON, async () => {
+test("a person whose grant ends loses their UI tunnel's sessions at the next check, and opens no other", async () => {
   const client = appClientOf();
   assert.deepEqual([...await client.unsafe('SELECT 1 AS one')], [{ one: 1 }]);
   await root.access.set(`user:${DEV}`, { market: null });
@@ -251,7 +250,7 @@ test("a person whose grant ends loses their UI tunnel's sessions at the next che
   await another.end();
 });
 
-test('an item deleted mid-session ends it; a name of no database is no tunnel', ON, async () => {
+test('an item deleted mid-session ends it; a name of no database is no tunnel', async () => {
   const client = appClientOf();
   assert.deepEqual([...await client.unsafe('SELECT 1 AS one')], [{ one: 1 }]);
   await save({ db: null, openai: { kind: 'route', name: 'openai', upstream: 'https://api.openai.example/v1', inject: [{ kind: 'header', name: 'authorization', template: 'Bearer {OPENAI_API_KEY}' }], allow: [{ methods: ['GET'], path: '/**' }], limit: { perMinute: null, perDay: null }, placeholder: null, egress: null } });
@@ -264,7 +263,7 @@ test('an item deleted mid-session ends it; a name of no database is no tunnel', 
   assert.deepEqual(route, { status: 404, message: 'openai is a route, which is no database: a tunnel saved in the Proxy tab, or the deployment\'s code, names one' });
 });
 
-test("a fork's tunnel is its parent's item and key, found through the chain", ON, async () => {
+test("a fork's tunnel is its parent's item and key, found through the chain", async () => {
   await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
   handle = await handleFor('market/dev-eu');
   target = '/use/market/dev-eu/db';
@@ -293,7 +292,7 @@ async function withProxy(options: Partial<Parameters<typeof credentialProxy>[0]>
   }
 }
 
-test('a host an Owner typed is dialled only where it resolves to a public address: a name that resolves to a private one gets no connection (review r1 of #485)', ON, async () => {
+test('a host an Owner typed is dialled only where it resolves to a public address: a name that resolves to a private one gets no connection (review r1 of #485)', async () => {
   // Where `db.attacker.example` resolves, as the Owner who typed it would have it: an address on the server's own network.
   let reached = 0;
   const trap = createTcp((socket) => {
@@ -358,7 +357,7 @@ test('the public connect dials no address written as one that is not public, nor
   }
 });
 
-test("an admission answered after its whole bound lets nothing in: the item may have been narrowed since it was decided (review r1 of #485)", ON, async () => {
+test("an admission answered after its whole bound lets nothing in: the item may have been narrowed since it was decided (review r1 of #485)", async () => {
   // R 0.4 s: a bound of 400 ms. The vault decides the old item, the Owner narrows it, and the answer comes 600 ms on.
   holding = async () => {
     await save({ db: database(['127.0.0.1', 'db.acme.example']) });
@@ -370,7 +369,7 @@ test("an admission answered after its whole bound lets nothing in: the item may 
   assert.equal(await upgraded(), 'session');
 });
 
-test("a group's watchdog counts from its admission: one answered late, its first check stalled, ends by the admission's bound (review r1 of #485)", { ...ON, timeout: 20_000 }, async () => {
+test("a group's watchdog counts from its admission: one answered late, its first check stalled, ends by the admission's bound (review r1 of #485)", { timeout: 20_000 }, async () => {
   await withProxy({}, 2, async () => {
     // A bound of 2 s. The answer comes 1.7 s after the use started, and the check due at once does not answer: the
     // watchdog, armed from the admission, ends the session 0.3 s on, before that check's deadline a second on.
@@ -391,7 +390,7 @@ test("a group's watchdog counts from its admission: one answered late, its first
   });
 });
 
-test("a group's clock starts from its admission: one answered late is checked at once, not a whole recheck after (review r1 of #485)", { ...ON, timeout: 20_000 }, async () => {
+test("a group's clock starts from its admission: one answered late is checked at once, not a whole recheck after (review r1 of #485)", { timeout: 20_000 }, async () => {
   await withProxy({}, 2, async () => {
     // A bound of 2 s. The vault decides the old item, the Owner saves it anew, and the answer comes 1.3 s after the use
     // started: past the admission's first recheck, inside its bound.
@@ -412,7 +411,7 @@ test("a group's clock starts from its admission: one answered late is checked at
   });
 });
 
-test("an isolate whose copy of the item's definition turned over claims no digest it lacks, and dials (review r1 of #485)", ON, async () => {
+test("an isolate whose copy of the item's definition turned over claims no digest it lacks, and dials (review r1 of #485)", async () => {
   assert.equal(await upgraded(), 'session');
   // The copies of definitions turned over, the reading's last digest kept: a claim of it would have the vault leave the
   // definition out, and every open answer 503 `moved`.

@@ -16,7 +16,7 @@ import { WebSocket } from 'ws';
 import { defineDeployment, type Deployment } from '@coffre/core/deployment';
 
 
-import { clientFor, LOG, usesLogged } from './api-fixture.ts';
+import { clientFor, usesLogged } from './api-fixture.ts';
 import { trackBackgroundTask } from './background-tasks.ts';
 import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
@@ -39,8 +39,8 @@ let handle: string;
 /** Each connection the listener carried. */
 const carried: Socket[] = [];
 
-/** How the vault opens a value, which a case holds up: 0.14's unwrap, or 0.15's use of the tunnel's one key, by name (T145). */
-const OPENS = LOG === '0.15' ? 'useNamed' : 'unwrap';
+/** How the vault opens a value, which a case holds up: a use of the tunnel's one key, by name (T145). */
+const OPENS = 'useNamed';
 type Opens = (...args: unknown[]) => Promise<unknown>;
 const opens = (): Opens => deps.vault[OPENS] as Opens;
 const openWith = (open: Opens) => void ((deps.vault as unknown as Record<string, unknown>)[OPENS] = open);
@@ -179,12 +179,8 @@ test('queries through the tunnel run as the real login, and the session is logge
     await client.end();
   }
   // The session's own: the checks its group made while it was open, a fifth of a second apart here, are logged as theirs.
-  // Under 0.15, one use of the key, its checks riding its cover; its row slim (R53), naming no tunnel.
-  if (LOG === '0.15') return assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
-  const uses = (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'db' && entry.metadata.recheck !== true);
-  assert.equal(uses.length, 1);
-  assert.equal(uses[0]!.metadata.tunnel, true);
-  assert.deepEqual(uses[0]!.metadata.keys, ['DATABASE_URL']);
+  // One use of the key, its checks riding its cover; its row slim (R53), naming no tunnel.
+  assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
 });
 
 test('a password that is not the handle is refused, before any login to the database', async () => {
@@ -545,9 +541,6 @@ test("a check answered once its group's last session has gone arms nothing: a ne
   // R 4 s: checked every 2 seconds, a check given as long, a group's bytes stopping 4 seconds past its last good check,
   // and the URL kept 4 seconds from when it was opened.
   runtime.deployment = defineDeployment({ proxy: { revokedWithinSeconds: 4 } });
-  // 0.14's openings of the URL, its checks apart. 0.15's uses do not tell them apart (its row slim, R53): there, only
-  // that the cases below hold.
-  const opened = async () => (LOG === '0.14' ? (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'db' && entry.metadata.recheck !== true).length : 0);
   const until = (at: number) => new Promise((resolve) => setTimeout(resolve, Math.max(0, at - Date.now())));
   const started = Date.now();
   const first = appClientOf();
@@ -576,13 +569,11 @@ test("a check answered once its group's last session has gone arms nothing: a ne
   const second = appClientOf();
   await second.unsafe('SELECT 1');
   await second.end();
-  const before = await opened();
   // Past when the gone group's watchdog would have closed it, 6 s on, had the yes armed one, and dropped that URL.
   await until(started + 6_500);
   const third = appClientOf();
   await third.unsafe('SELECT 1');
   await third.end();
-  assert.equal(await opened(), before, 'let in on the URL the cache holds, opened no more');
 });
 
 test('a database that asks for more SCRAM iterations than any needs is refused before the work begins', async () => {

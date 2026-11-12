@@ -41,7 +41,6 @@ import { and, eq } from 'drizzle-orm';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import {
-  columns as drawColumns,
   INSTANCE_ROLES,
   INSTANCE_ROLE_NAMES,
   NATURES,
@@ -70,7 +69,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { contextFor, EDITS_ROLES, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { contextFor, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { environments as storedEnvironments, projects as storedProjects } from '@coffre/db/schema';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -90,7 +89,7 @@ const ACTORS = [ROOT, ...PEOPLE] as const;
 const MEMBERS = [...PEOPLE, ...SERVICES] as const;
 const OP_KINDS = [
   'write', 'write-personal', 'mark', 'refer', 'restore', 'archive', 'unarchive', 'fork', 'grant', 'revoke', 'setup',
-  'instance-role', 'role-edit', 'protect', 'unprotect', 'personal-token', 'service-token', 'binding', 'remove', 'readd',
+  'instance-role', 'protect', 'unprotect', 'personal-token', 'service-token', 'binding', 'remove', 'readd',
 ] as const;
 type Op = {
   kind: typeof OP_KINDS[number];
@@ -103,8 +102,7 @@ type Op = {
   role: string;
   instanceRole: InstanceRole;
   scope: Scope;
-  columns: Columns;
-  /** A role edit's: the instance role of that name. A fork's: whether it inherits. A token's: its whole account, or one place. */
+  /** A fork's: whether it inherits. A token's: its whole account, or one place. */
   flag: boolean;
   /** Which version a restore brings back, which place a token names: taken modulo what there is. */
   index: number;
@@ -124,7 +122,6 @@ const operation = (projectIds: readonly string[]) => gs.record({
   role: gs.sampledFrom([...ROLE_NAMES, ...CUSTOM_ROLES]),
   instanceRole: gs.sampledFrom(INSTANCE_ROLE_NAMES),
   scope: drawScope(projectIds),
-  columns: drawColumns,
   flag: gs.booleans(),
   index: gs.integers({ minValue: 0, maxValue: 5 }),
   onProject: gs.booleans(),
@@ -164,7 +161,6 @@ const inFilter = (filter: Filter, value: string) => filter === 'all' || ('only' 
 /** A role's permissions at a place: its protected column in a protected environment, and its project-wide ones, which have one column, everywhere. */
 const columnsOf = (columns: Columns | undefined, guarded: boolean): readonly Permission[] =>
   columns === undefined ? [] : guarded ? [...columns.protected, ...columns.permissions.filter((permission) => PROJECT_ONLY.includes(permission))] : columns.permissions;
-const sameColumns = (a: Columns, b: Columns) => JSON.stringify([[...a.permissions].sort(), [...a.protected].sort()]) === JSON.stringify([[...b.permissions].sort(), [...b.protected].sort()]);
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let signer: { privateKey: KeyObject; jwk: Record<string, unknown> };
@@ -528,7 +524,6 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
     else grantsOf(member).set(placeKey(projectId, environmentId), role);
     return true;
   }
-  const definition = (name: string, columns: Columns) => ({ name, description: '', permissions: [...columns.permissions], protected: [...columns.protected] });
 
   // The world, as its people would build it, the first five environments of it.
   for (const project of world.projects) {
@@ -546,16 +541,6 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
     if (done === null) continue;
     const row = await realEnv(project.id, { slug: environment.slug });
     envs.push({ key: environment.id, id: row.id, projectId: project.id, project: project.slug, slug: environment.slug, parent: parent?.key ?? null, owner: null });
-  }
-  // Under 0.15's log, before its cutover, no role is edited (`EDITS_ROLES`): its uses decide on the built-in ones.
-  for (const [name, wanted] of EDITS_ROLES ? Object.entries(policy.roles) : []) {
-    if (name === 'owner' || (ROLES[name] !== undefined && sameColumns(wanted, ROLES[name]))) continue;
-    if (await attempt(() => root.roles.set(name, definition(name, wanted))) !== null) roles[name] = wanted;
-  }
-  for (const name of EDITS_ROLES ? (['auditor', 'developer', 'admin'] as const) : []) {
-    const wanted = policy.instanceRoles[name];
-    if (sameColumns(wanted, INSTANCE_ROLES[name])) continue;
-    if (await attempt(() => root.roles.set(name, definition(name, wanted), { instance: true })) !== null) instanceRoles[name] = wanted;
   }
   for (const env of envs.filter((each) => policy.protected.includes(each.key))) {
     if (await attempt(() => root.environments.protect(pathOf(env))) !== null) guarded.add(env.key);
@@ -836,14 +821,6 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
         Object.assign(held, { role: op.instanceRole, scope: realScope(op.scope) });
         return 'access';
       }
-      case 'role-edit': {
-        const instance = op.flag;
-        const name = instance ? (['auditor', 'developer', 'admin'] as const)[op.index % 3]! : op.role;
-        if (name === 'owner' || !EDITS_ROLES) return null;
-        if (await attempt(() => root.roles.set(name, definition(name, op.columns), { instance })) === null) return null;
-        (instance ? instanceRoles : roles)[name] = op.columns;
-        return 'access';
-      }
       case 'protect':
       case 'unprotect': {
         const env = envFor(op, shared());
@@ -972,7 +949,7 @@ const [CI, DEPLOY] = SERVICES;
 /** A change with nothing chosen yet. */
 const CHANGE: Op = {
   kind: 'write', actor: 0, member: 0, env: 0, source: 0, key: 'DATABASE_URL', nature: 'secret', role: 'viewer', instanceRole: 'member',
-  scope: { projects: 'all', environments: 'all' }, columns: { permissions: [], protected: [] }, flag: false, index: 0, onProject: false,
+  scope: { projects: 'all', environments: 'all' }, flag: false, index: 0, onProject: false,
 };
 const actorOf = (principal: string) => ACTORS.indexOf(principal as typeof ACTORS[number]);
 const memberOf = (principal: string) => MEMBERS.indexOf(principal as typeof MEMBERS[number]);

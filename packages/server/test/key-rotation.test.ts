@@ -10,7 +10,6 @@ import { generateToken, github, hashToken, signin, tokenHint } from '@coffre/cor
 import { createDatabase, type Database } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { appendEntries, KeyRetired, lockLogHead } from '@coffre/db/log';
-import { SNAPSHOT } from '@coffre/db/dialect';
 import { asc, desc, eq, sql } from 'drizzle-orm';
 
 import { coffreRoute, keyReady, respond, runScheduled, settleKey } from '../src/app.ts';
@@ -21,15 +20,15 @@ import { auditRange, insertBinding, insertConnection, insertOauthClient, memberS
 import { insertSession } from '../src/db/workloads.ts';
 import { sealAnchor } from '../src/anchor.ts';
 import { toErrorBody } from '../src/api/errors.ts';
-import { finishRotation, keyState, keyStateNow, rotateStep, SIGNED_TABLES } from '../src/key-rotation.ts';
-import { newestAppEntry, newestMove } from '../src/db/rotation.ts';
+import { finishRotation, keyState, rotateStep, SIGNED_TABLES } from '../src/key-rotation.ts';
+import { newestAppEntry } from '../src/db/rotation.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { auditWatch, walkOn } from '../src/plugins/audit-watch.ts';
 import { watchContext } from '../src/watch.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { contextFor, holdSomething, LOG, openTestDatabase, resetDatabase, testAnchor, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { contextFor, holdSomething, openTestDatabase, resetDatabase, testAnchor, testDeps, type FixtureDeps } from './api-fixture.ts';
 import {
   auditLog,
   credentials,
@@ -468,21 +467,6 @@ test('a CLI login approved but not yet taken is used up: everyone signs in again
   assert.deepEqual(await next.signin!.pollDevice(started.deviceCode, { requestId: randomUUID(), sourceIp: null }), { status: 'expired' });
 });
 
-// Its step runs inside a transaction of the test's own, standing in for another start: with 0.15's log, a step's prepare is a vault call, which no transaction may be open around (AGENTS.md).
-test('the door reads where the key stands in one snapshot: a step committed between its reads changes nothing it decides', { skip: LOG === '0.15' && "its step's prepare is a vault call, made here inside the test's own transaction" }, async () => {
-  const keys = startUnder(B, [A]);
-  // Its first read sees no step yet; another start's first step commits before the next.
-  const seen = await deps.db.transaction(async (tx) => {
-    const first = await newestMove(tx);
-    assert.equal((await rotateStep(db.owner, keys, { rows: 2, vault: deps.vault })).kind, 'rotating');
-    return { first, then: await keyState(tx, keys) };
-  }, SNAPSHOT);
-  assert.equal(seen.first, undefined);
-  assert.deepEqual(seen.then, { kind: 'rotating', from: A, next: { table: 'identities', after: null }, others: [] }, 'the whole verdict is from before the step');
-  // Read now, it is the step's: still rotating, never settled halfway.
-  assert.equal((await keyStateNow(deps.db, keys)).kind, 'rotating');
-});
-
 test('a step the door takes while another start holds the head leaves it to that one, and answers rotating at once', async () => {
   const next = startUnder(B, [A]);
   let release = () => {};
@@ -541,9 +525,8 @@ test('a beat of an instance still under the old key, during the rotation, leaves
 });
 
 test('a step entry that does not say where the rotation goes on is refused, and readiness says the key is refused', async () => {
-  // Written under B, with B's MAC, but saying nothing of where the next step goes on: as this release's app writes it,
-  // under 0.15's log too, where its entry says so.
-  await deps.db.transaction((tx) => appendAudit(tx, B, [{ actorType: 'system', actorId: 'coffre-key-rotation', action: 'key.reseal', decision: 'allow', subject: appLogKey(A).keyId, metadata: { from: appLogKey(A).keyId } }], [], LOG === '0.15'));
+  // Written under B, with B's MAC, but saying nothing of where the next step goes on: as this release's app writes it.
+  await deps.db.transaction((tx) => appendAudit(tx, B, [{ actorType: 'system', actorId: 'coffre-key-rotation', action: 'key.reseal', decision: 'allow', subject: appLogKey(A).keyId, metadata: { from: appLogKey(A).keyId } }], [], true));
   const next = startUnder(B, [A]);
   const state = await keyState(deps.db, next);
   assert.equal(state.kind, 'refused');

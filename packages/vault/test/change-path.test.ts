@@ -60,7 +60,7 @@ function keysOf(config: ResolvedVaultConfig): ChangeKeys {
  * itself, standing in for the cutover (`genesis`).
  */
 async function world(options: VaultOptions = {}, config = configure(), { sealed: seal = true }: { sealed?: boolean } = {}) {
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld, ...options });
+  const vault = await openLocalVault(db.vault, config, { sealThrough: sealed, heldOutside: nothingHeld, ...options });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const where = await places(db.owner, { sealed: seal });
   return { vault, config, keys: keysOf(config), ...where };
@@ -432,7 +432,7 @@ test('a policy row planted under no seal of the vault\'s is refused, not taken f
   const config = configure();
   // Its seal is a column it must have (0081), so the writer makes one up.
   await db.owner.insert(policy).values({ name: 'instance', bulkCount: 1_000_000, bulkWindowMs: 60_000, seal: randomBytes(16) });
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const vault = await openLocalVault(db.vault, config, { sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   assert.deepEqual(await opsOf(keysOf(config), { kind: 'policy', id: 'instance' }), []);
   const reports = await rows<{ code: string }>(db.owner, sql`SELECT code FROM audit_log WHERE action = 'vault.tampered'`);
@@ -442,11 +442,11 @@ test('a policy row planted under no seal of the vault\'s is refused, not taken f
 test('an Owner the deployment names again after a removal is restored by the vault at its start, a change of the log', async () => {
   const config = configure();
   const eve = 'user:eve@acme.example';
-  const first = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const first = await openLocalVault(db.vault, config, { sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await first.access(ROOT)).role, 'owner');
   assert.ok((await first.admit({ actor: ROOT, principal: eve, role: 'owner' })).ok);
   assert.ok((await first.remove({ actor: ROOT, principal: eve })).ok);
-  const named = await openLocalVault(db.vault, { ...config, owners: [...config.owners, 'eve@acme.example'] }, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const named = await openLocalVault(db.vault, { ...config, owners: [...config.owners, 'eve@acme.example'] }, { sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await named.access(eve)).role, 'owner');
   assert.deepEqual(await opsOf(keysOf(config), member(eve)), ['member.add', 'member.role', 'member.remove', 'member.restore']);
   await holdsReplay(keysOf(config), [member(eve)]);
@@ -457,7 +457,7 @@ test('an Owner\'s role edit is a change of the roles object, which the cutover m
   const define = (role: string, permissions: Permission[]) => w.vault.changePolicy({
     actor: ROOT, change: { kind: 'role', role, definition: { ...ROLES.viewer, name: role, permissions, protected: permissions } },
   });
-  // The cutover made it from 0.14's policy, which held no edit (cutover.test.ts: one that did).
+  // The cutover made it from 0.14's policy, which held no edit.
   assert.deepEqual(await opsOf(w.keys, { kind: 'roles', id: 'instance' }), ['genesis']);
   assert.ok((await define('reader', ['secret.read', 'secret.use'])).ok);
   assert.ok((await define('user', ['secret.use'])).ok);
@@ -498,7 +498,7 @@ test("the vault's start makes each role's row what the roles object says, sealed
   assert.ok(rows.every((row) => row.definition === null), 'each as it ships');
   for (const id of SHIPPED) assert.deepEqual(await opsOf(w.keys, { kind: 'role', id }), ['role.define'], id);
   const before = (await changeRows()).length;
-  const again = await openLocalVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const again = await openLocalVault(db.vault, w.config, { sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await again.access(ROOT)).role, 'owner');
   assert.equal((await changeRows()).length, before, 'in step: no change');
   await holdsReplay(w.keys, SHIPPED.map((id) => ({ kind: 'role' as const, id })));
@@ -556,7 +556,7 @@ test("0.15.0's change of the roles object leaves each role it moves unsealed (Nu
   assert.deepEqual([row('auditor', 'instance')?.definition, row('auditor', 'instance')?.seal], [quiet, null]);
   assert.ok(row('viewer')?.seal !== null, 'a role it did not move keeps its seal');
   assert.ok(row('auditor')?.seal !== null, "the project's auditor is another role, and keeps its seal");
-  const again = await openLocalVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const again = await openLocalVault(db.vault, w.config, { sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await again.access(ROOT)).role, 'owner');
   now = await rolesNow(keys);
   assert.deepEqual(now.behind, []);
@@ -597,7 +597,7 @@ test('the vault writes its bulk cap into the log at its start, once, and again w
   const config = configure();
   const policy = { kind: 'policy' as const, id: 'instance' };
   const start = async (count: number) => {
-    const vault = await openLocalVault(db.vault, { ...config, bulkLimit: { count, windowMs: 60_000 } }, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+    const vault = await openLocalVault(db.vault, { ...config, bulkLimit: { count, windowMs: 60_000 } }, { sealThrough: sealed, heldOutside: nothingHeld });
     assert.ok((await vault.access(ROOT)).status);
   };
   await start(10);
@@ -701,7 +701,7 @@ test('a 0.15 change beside a 0.14 decision holding its member\'s row: row, head,
 
 test('changes and reads at once, on the same members, all answer, and the log replays to the rows', async () => {
   const w = await world();
-  const vaults = await Promise.all([1, 2, 3].map(async () => openLocalVault(await db.connect(4), w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld })));
+  const vaults = await Promise.all([1, 2, 3].map(async () => openLocalVault(await db.connect(4), w.config, { sealThrough: sealed, heldOutside: nothingHeld })));
   const people = [ADA, BO, 'user:cy@acme.example'];
   for (const person of people) assert.ok((await w.vault.admit({ actor: ROOT, principal: person })).ok);
   const work: Promise<{ ok: boolean }>[] = [];

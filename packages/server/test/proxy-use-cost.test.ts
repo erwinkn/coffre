@@ -99,7 +99,7 @@ before(async () => {
   // Uses go in at or past the floor of `at` (schema 0022), as a deployment's checkpointer keeps it.
   await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
   const kek = randomBytes(32);
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { sealThrough: sealedNow, heldOutside: nothingHeld }) });
   const setup = createRuntime(resolveConfig({ publicUrl: ORIGIN, vault: deps.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64') }), deps.db, deps.vault, transport);
   setupRuntime = setup;
   const root = clientFor(deps, ROOT);
@@ -122,7 +122,7 @@ before(async () => {
   hot = new RecordingPool(TEST_HOT_DATABASE_URL);
   vault = spoken(await localVault(
     { database: createDatabase(vaultPool.client), hotDatabase: createDatabase(hot.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
-    { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
+    { sealThrough: sealedNow, heldOutside: nothingHeld },
   ));
   const config = resolveConfig({
     publicUrl: ORIGIN, vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64'),

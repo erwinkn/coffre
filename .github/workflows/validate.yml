@@ -113,25 +113,6 @@ jobs:
       - name: Tests
         run: pnpm test
 
-  tests-014:
-    # The whole suite again on 0.14's log alone (docs/design/0.15-plan.md: each PR runs it on both settings), beside
-    # the other, which runs 0.15's, the default since plan PR 10: until 0.16 removes the 0.14 path.
-    name: Tests on 0.14's log
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Check out the selected revision
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: $/.github/actions/prepare
-        with:
-          build: 'false'
-      - name: Tests on 0.14's log
-        run: ./scripts/test-suite.sh
-        env:
-          COFFRE_TEST_LOG: '0.14'
-
   # The generated matrices of 0.15's use by name (T158, D153): every key a caller may not have answered alike, whatever
   # the vault's map holds, each statement slowed. Three quarters of an hour in one run, so shards, like the Formal
   # model's: each runs a slice of every matrix's cases (`scripts/matrix-shard.ts`), from its own
@@ -523,7 +504,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [action, pins, checks, tests, tests-014, matrices, schema, formal, proofs, workers, node, terraform, consumer, compat, image]
+    needs: [action, pins, checks, tests, matrices, schema, formal, proofs, workers, node, terraform, consumer, compat, image]
     if: always()
     steps:
       - name: Require every job

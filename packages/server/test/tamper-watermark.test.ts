@@ -8,14 +8,13 @@ import { ACCESS_ACTIONS } from '@coffre/core/vault';
 import { logObject } from '@coffre/db/log';
 import { and, desc, eq, gt, inArray, max } from 'drizzle-orm';
 
-import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { withLogUnlocked } from './db/engine.ts';
 import { auditLog, logChanges, grants, principals } from '@coffre/db/schema';
 
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
 const MEMBER = `user:${DEV}`;
-const LOG_015_ONLY = { skip: LOG === '0.15' ? false : "0.15's log only: a finding names a change only under it" } as const;
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
@@ -71,7 +70,7 @@ async function renumberNewest(to: bigint): Promise<bigint> {
   return newest!.number;
 }
 
-test('a finding stands on every reader until a change after the one it weighed, however that one is renumbered, with or without the access entry 0.14 wrote beside it', LOG_015_ONLY, async () => {
+test('a finding stands on every reader until a change after the one it weighed, however that one is renumbered, with or without the access entry 0.14 wrote beside it', async () => {
   const old = await snapshot();
   await root.access.set(MEMBER, { market: 'viewer' });
   const newest = await snapshot();
@@ -94,7 +93,7 @@ test('a finding stands on every reader until a change after the one it weighed, 
   assert.deepEqual(await tampered(), [false, false, false]);
 });
 
-test('a member the log has a change of, with no row and no access entry of 0.14\'s, is missing: their report says tampered, not 404', LOG_015_ONLY, async () => {
+test('a member the log has a change of, with no row and no access entry of 0.14\'s, is missing: their report says tampered, not 404', async () => {
   await db.owner.delete(grants).where(eq(grants.principal, MEMBER));
   await db.owner.delete(principals).where(eq(principals.principal, MEMBER));
   await dropAccessEntriesAfter(-1n);

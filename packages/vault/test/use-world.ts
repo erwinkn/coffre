@@ -63,12 +63,11 @@ export async function emptyLog(): Promise<void> {
 }
 
 /**
- * 0.15's log switched on. A use never waits for a seal (R51): the
+ * What a vault opens with for uses. A use never waits for a seal (R51): the
  * checkpointer's `sealThrough` fails the test if asked, but for the
  * cutover's own change, which an isolate's first call waits for once.
  */
 export const LOG_015: VaultOptions = {
-  log: '0.15',
   sealThrough: async (number) => {
     if (number === cutoverNumber) return {} as Sealed;
     throw new Error('a use waited for a seal');

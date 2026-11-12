@@ -6,6 +6,14 @@
   run `coffre migrate`, then deploy 0.16: 0.15.0's code cannot run on
   the new schema. To go back, restore the backup taken before the
   upgrade.
+- **The vault's `log: '0.14'` option is gone.** Every vault keeps 0.15's
+  log, the default since 0.15.0, and `VaultOptions` no longer takes `log`.
+  A Node deployment that passes `log: '0.14'` or `log: '0.15'` to
+  `serveVault` or `localVault` (`@coffre/vault/node`) removes it: the
+  field no longer typechecks. Nothing else changes for a deployment on
+  0.15.0, whose vault keeps 0.15's log already. `serveVault` and
+  `localVault` now refuse a configuration without `hotDatabase`, as they
+  did already unless `log: '0.14'` was set.
 - **Node deployments are not tested in 0.16.0.** A Node deployment stays
   on 0.15.0 until 0.16.1, which brings Node back on Postgres; SQLite is
   gone.

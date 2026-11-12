@@ -14,8 +14,8 @@ import { ROLES, roleGrants } from '@coffre/core/access';
 import { createClient, type CoffreClient } from '@coffre/client';
 
 import { replayStored } from '@coffre/vault/node';
-import { clientFor, LOG, usesLogged, outcomes } from './api-fixture.ts';
-import { db, deps, entries, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { clientFor, usesLogged, outcomes } from './api-fixture.ts';
+import { db, deps, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
@@ -111,16 +111,10 @@ test("a Contributor's run gets placeholders and the plain values, never a secret
   const answer = await route('/use/market/dev/api/thing', { headers: { 'x-api-key': handle.token } });
   assert.equal(answer.status, 200);
   assert.deepEqual(await answer.json(), { real: true });
-  // The vault's read was to use, which the Contributor's grant holds: under 0.15's log, uses, each allowed as the
-  // replay of the log says.
-  if (LOG === '0.15') {
-    const used = await usesLogged(db.owner);
-    assert.ok(used.length > 0 && used.every((use) => use.purpose === 4), JSON.stringify(used));
-    assert.deepEqual([...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null), []);
-    return;
-  }
-  const used = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.actor === `user:${CONTRIBUTOR}`);
-  assert.ok(used.length > 0 && used.every((entry) => entry.decision === 'allow' && entry.metadata.purpose === 'use'), JSON.stringify(used.map((entry) => [entry.decision, entry.metadata.purpose])));
+  // The vault's read was to use, which the Contributor's grant holds: uses, each allowed as the replay of the log says.
+  const used = await usesLogged(db.owner);
+  assert.ok(used.length > 0 && used.every((use) => use.purpose === 4), JSON.stringify(used));
+  assert.deepEqual([...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null), []);
 });
 
 test("the vault holds a read to use to secret.use, and any other to secret.read, whatever the app asked", async () => {
@@ -165,8 +159,8 @@ test('a personal token of a Contributor names contributor, and reaches no read',
   const token = await bearer(session).tokens.issue(`user:${CONTRIBUTOR}`, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'contributor' } });
   const agent = bearer(token.token);
   assert.deepEqual((await agent.secrets.list('market/dev')).keys.map((entry) => entry.key), ['API_KEY', 'REGION', 'WEBHOOK']);
-  // Its reason: the app's, or, by name (0.15's log), the vault's own (D153).
-  assert.deepEqual(await refusal(agent.secrets.reveal('market/dev/API_KEY')), { status: 404, reason: LOG === '0.15' ? 'no_grant' : 'missing_secret_read', message: NOT_AVAILABLE });
+  // Its reason: the app's, or, by name, the vault's own (D153).
+  assert.deepEqual(await refusal(agent.secrets.reveal('market/dev/API_KEY')), { status: 404, reason: 'no_grant', message: NOT_AVAILABLE });
 });
 
 test("a Contributor's handle reads their own values in dev@me, and nothing of dev's", async () => {
