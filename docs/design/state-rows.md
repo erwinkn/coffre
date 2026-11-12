@@ -192,7 +192,7 @@ column into typed ones later changes no seal while the object is the same, so it
 | Operation | Today: statements, round trips, vault calls | Target | What changes |
 |---|---|---|---|
 | Use, one key by name | 1, 1, 1 | 1, 1, 1 | The statement is half as long and reads no `audit_log` (V2a, V2b). |
-| Key write, one key | 7, 2, 2 (`writeKeys`, `waitSealed`) | 6, 2, 2 | The head lock's statement goes, if A0's model lets the write drop the change lock; otherwise that statement becomes the change lock's and the count stays 7 (A1). |
+| Key write, one key | 7, 2, 2 (`writeKeys`, `waitSealed`) | 7, 2, 2 | The head lock's statement becomes the change lock's: A0's model has the write keep it (below). A1 may fold it into the credential's touch, which would make 6; the budget is 7 until it does. |
 | Sign-in, browser | 10, 8, 3 (`access`, `prepare`, `waitSealed`) | 8, 5, 3 | The two reads of the head and the `audit_log` insert go. The transaction asks its reads together and leaves its writes to the commit, as a key write does (A1). |
 | Audit page, one visit | 24, 26, 3 at a seeded log, more as the log grows | 6, 4, 2 | The flat check below (P2, P3). |
 | Secrets list | 4, 4, 1 | 4, 4, 1 | The vault's statement reads rows by key; today it spends 3.1 ms planning its reads of `audit_log`. |
@@ -264,20 +264,22 @@ the request touches, in the digest the two-trip key write already checks under i
 **Locks after.** `audit_chain_head`, the reads under it, the 0.14 appends and the queued read head are deleted; one
 advisory lock statement stays in multi-statement changes. The head did two jobs and only the first dies with the last
 append to `audit_log`: ordering the chain. The second is serializing changes against each other from their first
-statement, which 29 modelled re-checks rely on. The fence cannot take it over where it sits, in a change's last
+statement, which 14 modelled protections rely on. The fence cannot take it over where it sits, in a change's last
 statement: two Owners who each remove themselves both pass a count made before it, and no Owner is left (A0's
 finding). So one lock stays, the **change lock**: `pg_advisory_xact_lock` on a key of its own, transaction-scoped,
 taken where `lockLogHead` is today, in the first round trip, under the same wait bound (`boundLockWaits`,
-`retryingLocks`). It has no table and no row, and nothing is read under it. Only multi-statement changes take it; uses,
-the checkpointer, the projector and `check` never do. The order is change lock, issue lock, fence; the checkpointer
-takes the issue lock, then the fence. The two-trip key write and the member add, which hold what they read in their
-last statement, drop the lock where A0's model proves it against the changes that decide on the same objects. No
-budget above counts a statement for it.
+`retryingLocks`). It has no table and no row, and nothing is read under it. Only changes take it: one of several
+statements in its first round trip, one of a single statement inside that statement, where it took the head. Uses, the
+checkpointer, the projector and `check` never do. The order is change lock, issue lock, fence; the checkpointer takes
+the issue lock, then the fence. The two-trip key write keeps the lock (A0, `WriteTakesChangeLock`): without it, the
+write holds the fence and waits for the key's row, while another change of that key holds the row and waits for the
+fence. The member add closes no such cycle without it, and keeps it too: whether a change's decisions about members
+survive an add committed in between is not modelled. Each statement is the one the head's was, so no budget gains one.
 
 Then, last before the timeout (D201), L1 makes the fence the checkpointer's alone: uses and changes both take it
 shared, a change's last statement locks the objects it writes exclusive, and a use locks the objects it reads shared,
 in key order. A write to one key then stalls only uses of that key. Ten shared advisory locks cost a use 0.013 ms
-(0.052 ms against 0.039 ms for the one it takes today). L1 moves none of the 29 re-checks: they are change against
+(0.052 ms against 0.039 ms for the one it takes today). L1 moves none of the 14: they are change against
 change, the change lock's, and L1 only replaces the fence, which is change against use.
 
 ## 4. The security argument
@@ -330,7 +332,7 @@ table, prepared: 0.143 ms against 0.132 ms at 100k changes, 0.196 ms against 0.1
 
 | Change | Model | When |
 |---|---|---|
-| The head becomes the change lock | `Coffre.tla` with its 11 scenarios, `Credentials`, `Issuing`, `Factor`, `Bulk`, `WorkloadEnrollment`, `AppKey`, `Writing`, `WriteLocks`, `Lifecycle`: the 29 "recheck under the head" protections keep their place and take the lock's name; the order change lock, issue lock, fence gets a deadlock check; the key write and the member add are checked without the lock; a re-check whose flow is deleted goes with it | first (A0) |
+| The head becomes the change lock | `Coffre.tla` with its 11 scenarios, `Credentials`, `Issuing`, `Factor`, `WorkloadEnrollment`, `Writing`, `WriteLocks`, `Lifecycle`: 14 "under the head" protections keep their place and take the lock's name, with their 18 runs; the order change lock, issue lock, fence gets a deadlock check; the key write and the member add are checked without the lock. `Bulk`, `Audit` and `AppKey` keep the head, 0.14's chain's, and go with the code that ends it | first (A0) |
 | The policy revision becomes a digest of seals | `Lifecycle` (LifecyclePolicy), `Writing` (WritingProtect) | first (A0) |
 | The cap read from the `policy` row, the 0.14 guard gone from uses | `HotPathOne` (CapSealed, HotPathOnePolicy) | first, small |
 | Per-object locks | `HotPathOne` (UseLocks, ChangeLocks, LockToCommit), `WriteLocks` (NoWaitCycle), `Batching` | first, the largest: its model starts once A0's is in review, stacked on it, ahead of V2b's and A1's code |
@@ -458,7 +460,7 @@ Every schema PR appends to `schema.ts` and the journal, one-line conflicts.
 
 **Estimate.** About 40 agent-days. With three lanes the longest path is E4, P1, P2, V1, V2b, L1, S1, C1: 18 to 22
 working days with L1 in (D201), if the two model-first PRs (A0 and L1) hold their size. They are where the risk is.
-A0 found its counterexample first: the fence cannot stand in for the head, so the 29 re-checks keep a lock of their
+A0 found its counterexample first: the fence cannot stand in for the head, so the 14 protections keep a lock of their
 own and A1 moves none of them. L1's model is the plan's largest, with two shapes left to order, a use and a change's
 last statement; it is written in week one, on A0's, so its counterexamples come before V2b's and A1's code.
 On Node, the projector and the beat run on timers in the vault's process, where Workers use a Durable Object alarm.
