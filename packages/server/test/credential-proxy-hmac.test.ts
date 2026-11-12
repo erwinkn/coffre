@@ -262,7 +262,7 @@ test('a raw sign is refused before its body is read: the handle, the signer, its
   assert.match(message, /market\/empty's IFRAME_TOKEN_SECRET is empty/);
 });
 
-test('under proxy.editable too, a raw sign with no handle outside its body is refused before the body is read, its length declared or not', async () => {
+test('under proxy.editable too, a raw sign with no handle outside its body, or naming no signer, is refused before the body is read, its length declared or not', async () => {
   runtime.deployment = { ...defineDeployment(), proxy: { ...defineDeployment().proxy, editable: true } };
   const { env } = await run();
   for (const length of [String(SUMSUB_BYTES), '1024', null]) {
@@ -271,6 +271,11 @@ test('under proxy.editable too, a raw sign with no handle outside its body is re
     assert.equal(answer.status, length === null ? 411 : 401, `${length}: ${await answer.text()}`);
     assert.equal(body.pulled(), 0, `${length}: its body read`);
   }
+  // With its handle outside the body, an unknown signer: the UI route's probe, then the refusal, the body still unread.
+  const named = stalled(1024);
+  const unknown = await signRaw(env.COFFRE_HANDLE!, 'nope', named.body, { 'content-length': String(SUMSUB_BYTES) });
+  assert.equal(unknown.status, 404, await unknown.text());
+  assert.equal(named.pulled(), 0, 'nope: its body read');
   // With its handle, as the client sends it: signed.
   const message = Buffer.alloc(100 * 1024, 's');
   const signed = await signRaw(env.COFFRE_HANDLE!, 'sumsub-key', message, { 'content-length': String(message.length), 'content-digest': digestOf(message) });

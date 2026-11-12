@@ -141,7 +141,8 @@ The details, and each provider's scheme, are in
 SumSub signs each request as HMAC-SHA256(secret, `ts + method + path + body`),
 hex, and a document upload's body is the whole file. The deployment lets its
 signer take one (`hmac('SUMSUB_SECRET_KEY', { encoding: 'hex', maxBytes: 11 *
-1024 * 1024 })`, 12 MiB at most), and the app signs the bytes it will send:
+1024 * 1024 })`, 12 MiB at most) beside the `sumsub` credential that adds
+the app token to SumSub's requests, and the app signs the bytes it will send:
 
 ```ts
 const form = new FormData();
