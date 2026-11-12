@@ -1,9 +1,9 @@
-import test, { beforeEach, mock } from 'node:test';
+import test, { afterEach, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign as signWith, type KeyObject } from 'node:crypto';
 
 import { forgetKeys, IssuerUnavailable, KEYS_COLD_COOLDOWN_MS, KEYS_COOLDOWN_MS, KEYS_FRESH_MS, KEYS_STALE_MS, verifyWithKeys } from '../src/workloads/keys.ts';
-import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
+import { FETCH_DEADLINE_MS, FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 
 const ISSUER = 'https://token.actions.githubusercontent.com';
 const KEYS = `${ISSUER}/.well-known/jwks`;
@@ -27,36 +27,55 @@ function token(by: Key, at = 0): string {
 }
 
 const [known, rotated, unknown] = [key('known'), key('rotated'), key('unknown')];
-/** What the issuer publishes, how many times it was asked, and whether it answers. */
+/**
+ * What the issuer publishes, how many times it was asked, whether it answers,
+ * whether it answers only once its deadline has run out (the clock moved on),
+ * and a fetch held until the test lets it fail.
+ */
 let published: Key[];
 let fetches: number;
 let down: boolean;
+let slow: boolean;
+let held: Promise<void> | null;
 const transport: WorkloadTransport = {
   json: async (url) => {
     fetches++;
+    if (held !== null) {
+      const until = held;
+      held = null;
+      await until;
+      throw new FetchRefused(url, 'timed out');
+    }
+    if (slow) mock.timers.setTime(Date.now() + FETCH_DEADLINE_MS);
     if (down) throw new FetchRefused(url, 'could not be fetched');
     if (url.href !== KEYS) throw FetchRefused.answered(url, 404);
     return { keys: published.map((each) => each.jwk) };
   },
 };
 
+// The cache reads its own clock, `Date.now()`, which the test drives: `verify` sets it.
 beforeEach(() => {
+  mock.timers.enable({ apis: ['Date'], now: T0 });
   forgetKeys();
   published = [known];
   fetches = 0;
   down = false;
+  slow = false;
+  held = null;
 });
+
+afterEach(() => mock.timers.reset());
 
 /** Verify at `at` ms past T0: whom the token came from, or why not (with its `Retry-After`, if unavailable), with the fetches it cost. */
 async function verify(by: Key, at = 0): Promise<{ outcome: string; fetches: number }> {
   const before = fetches;
+  mock.timers.setTime(T0 + at);
   const outcome = await verifyWithKeys(transport, KEYS, token(by, at), { issuer: ISSUER, audience: AUDIENCE, now: new Date(T0 + at) }).then(
     (claims) => `verified ${String(claims.sub)}`,
     (error: unknown) => (error instanceof IssuerUnavailable ? `unavailable ${error.retryAfter}` : `refused ${(error as Error).message}`),
   );
   return { outcome, fetches: fetches - before };
 }
-
 
 const VERIFIED = 'verified repo:acme/api';
 
@@ -181,4 +200,37 @@ test('cold, the issuer unreachable: unavailable, asking to come back as soon as 
   });
   // Nothing kept stood in: nothing to say.
   assert.deepEqual(said, []);
+});
+
+test('cold, the fetch running out its deadline: the cooldown, and its Retry-After, start as it fails', async () => {
+  [down, slow] = [true, true];
+  assert.deepEqual(await verify(known), { outcome: `unavailable ${KEYS_COLD_COOLDOWN_MS / 1000}`, fetches: 1 });
+  assert.deepEqual(await verify(known, FETCH_DEADLINE_MS + 1000), { outcome: `unavailable ${KEYS_COLD_COOLDOWN_MS / 1000 - 1}`, fetches: 0 });
+  [down, slow] = [false, false];
+  assert.deepEqual(await verify(known, FETCH_DEADLINE_MS + KEYS_COLD_COOLDOWN_MS), { outcome: VERIFIED, fetches: 1 });
+});
+
+test('stale, raced: a fetch failing after another exchange fetched a set without the key stands in with that set, not the older one', async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  // The issuer withdrew `known`. One exchange's fetch hangs; another's gets the new set meanwhile.
+  published = [rotated];
+  let fail!: () => void;
+  held = new Promise((resolve) => (fail = resolve));
+  await warnings(async () => {
+    const hung = verify(known, KEYS_FRESH_MS + MIN);
+    assert.deepEqual(await verify(rotated, KEYS_FRESH_MS + MIN), { outcome: VERIFIED, fetches: 1 });
+    fail();
+    assert.equal((await hung).outcome, `unavailable ${KEYS_COOLDOWN_MS / 1000}`);
+  });
+});
+
+test('fresh, a key it lacks fetched for in vain: said once, and the set verifies on, past its ten minutes, through the cooldown', async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  down = true;
+  const said = await warnings(async () => {
+    assert.deepEqual(await verify(unknown, KEYS_FRESH_MS - 1000), { outcome: `unavailable ${KEYS_COOLDOWN_MS / 1000}`, fetches: 1 });
+    assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1000), { outcome: VERIFIED, fetches: 0 });
+  });
+  assert.equal(said.length, 1);
+  assert.match(said[0]!, /^verifying with the issuer's keys fetched 10 min ago: the issuer's keys could not be fetched: /);
 });

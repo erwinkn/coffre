@@ -49,11 +49,12 @@ export const KEYS_COOLDOWN_MS = 60 * 1000;
  * enough for the CLI to ask again within it. Its `Retry-After` is what is
  * left of this (`IssuerUnavailable.retryAfter`), and the CLI waits at least
  * that when it is 10 s or less (`unavailableWait` in `packages/cli/src/main.ts`,
- * as since 0.14.3), then again, so both its retries come after the URL
- * may be fetched again: 5 to 15 s after the first try, past a blip like
- * T258's. It still spares an unreachable issuer: an isolate starts no
- * fetch of its keys within 5 s of the start of an exchange whose fetch
- * failed, whatever anonymous requests ask of it.
+ * as since 0.14.3), then again: the cooldown starts as the fetch fails,
+ * when the 503 is sent, so each retry comes after the URL may be fetched
+ * again, 5 to 7.5 s after the answer before it, and two of them reach past
+ * a blip like T258's. It still spares an unreachable issuer: an isolate
+ * starts no fetch of its keys within 5 s of one that failed, whatever
+ * anonymous requests ask of it.
  */
 export const KEYS_COLD_COOLDOWN_MS = 5_000;
 /** At most this many key sets, and `MAX_KEYS` keys in each. */
@@ -77,19 +78,32 @@ export function forgetKeys(): void {
   entries.clear();
 }
 
-async function fetchKeys(transport: WorkloadTransport, url: string, now: number): Promise<JSONWebKeySet> {
+/**
+ * Fetch the set at `url` and keep it, or keep that the fetch failed. Times
+ * are read when the fetch settles, not when the exchange began: a fetch that
+ * ran out its `FETCH_DEADLINE_MS` starts its cooldown, and its `Retry-After`,
+ * as it fails. A failure while a set is kept says so once, never with a
+ * token's contents: that set verifies until the URL may be fetched again,
+ * and the exchanges meanwhile keep quiet.
+ */
+async function fetchKeys(transport: WorkloadTransport, url: string): Promise<JSONWebKeySet> {
   try {
     const document = await transport.json(new URL(url));
     const keys = (document as { keys?: unknown } | null)?.keys;
     if (!Array.isArray(keys) || keys.length === 0) throw new FetchRefused(new URL(url), 'holds no keys');
     if (keys.length > MAX_KEYS) throw new FetchRefused(new URL(url), `holds more than ${MAX_KEYS} keys`);
     const set = { keys: keys.filter((key) => typeof key === 'object' && key !== null && (key as { use?: unknown }).use !== 'enc') } as JSONWebKeySet;
-    remember(url, { keys: set, fetchedAt: now, failedAt: null });
+    remember(url, { keys: set, fetchedAt: Date.now(), failedAt: null });
     return set;
   } catch (error) {
-    const entry = { keys: entries.get(url)?.keys ?? null, fetchedAt: entries.get(url)?.fetchedAt ?? 0, failedAt: now };
+    const now = Date.now();
+    // The entry as it is now: another exchange may have fetched meanwhile.
+    const latest = entries.get(url);
+    const entry = { keys: latest?.keys ?? null, fetchedAt: latest?.fetchedAt ?? 0, failedAt: now };
     remember(url, entry);
-    throw unavailable(`the issuer's keys could not be fetched: ${(error as Error).message}`, entry, now, error);
+    const message = `the issuer's keys could not be fetched: ${(error as Error).message}`;
+    if (kept(entry, now) !== null) console.warn(`verifying with the issuer's keys fetched ${Math.round((now - entry.fetchedAt) / 60_000)} min ago: ${message}`);
+    throw unavailable(message, entry, now, error);
   }
 }
 
@@ -138,27 +152,27 @@ export async function verifyWithKeys(
   token: string,
   expected: { issuer: string; audience: string; now: Date; maxAge?: null },
 ): ReturnType<typeof verifyWorkloadToken> {
-  const now = expected.now.getTime();
+  // The cache's clock, read again after each fetch; `expected.now` is the token's.
+  const now = Date.now();
   let entry = entries.get(url);
   let keys = entry?.keys != null && now - entry.fetchedAt < KEYS_FRESH_MS ? entry.keys : null;
   let fetched = false;
   // Why the set kept stands in for one that could not be fetched, when it does.
   let standing: IssuerUnavailable | null = null;
   if (keys === null) {
-    const stale = kept(entry, now);
     if (cooldownLeft(entry, now) > 0) {
       standing = unavailable("the issuer's keys could not be fetched a moment ago", entry, now);
-      if (stale === null) throw standing;
-      keys = stale;
+      keys = kept(entry, now);
+      if (keys === null) throw standing;
     } else {
       try {
-        keys = await fetchKeys(transport, url, now);
+        keys = await fetchKeys(transport, url);
         fetched = true;
       } catch (error) {
-        if (stale === null) throw error;
-        // Said once a failed fetch, never a token's contents: the cooldown that follows keeps quiet.
-        console.warn(`verifying with the issuer's keys fetched ${Math.round((now - entry!.fetchedAt) / 60_000)} min ago: ${(error as Error).message}`);
-        [keys, standing] = [stale, error as IssuerUnavailable];
+        // The set kept as it is now, not as it was before the fetch: one another exchange fetched meanwhile, without a key this one's held, wins.
+        keys = kept(entries.get(url), Date.now());
+        if (keys === null) throw error;
+        standing = error as IssuerUnavailable;
       }
     }
   }
@@ -168,19 +182,21 @@ export async function verifyWithKeys(
     if (!absentKey(error)) throw error;
     // Whether the issuer rotated cannot be asked: as unavailable as the fetch that failed.
     if (standing !== null) throw standing;
+    const at = Date.now();
     entry = entries.get(url);
-    if (fetched || cooldownLeft(entry, now) > 0) {
-      if (fetched) remember(url, { ...(entry ?? { keys, fetchedAt: now }), failedAt: now });
-      throw unavailable(KEY_ABSENT, entries.get(url), now);
+    if (fetched || cooldownLeft(entry, at) > 0) {
+      if (fetched) remember(url, { ...(entry ?? { keys, fetchedAt: at }), failedAt: at });
+      throw unavailable(KEY_ABSENT, entries.get(url), at);
     }
     // The issuer may have rotated: fetch once, and wait a minute before the next.
-    remember(url, { ...(entry ?? { keys: null, fetchedAt: 0 }), failedAt: now });
-    const fresh = await fetchKeys(transport, url, now);
-    remember(url, { keys: fresh, fetchedAt: now, failedAt: now });
+    remember(url, { ...(entry ?? { keys: null, fetchedAt: 0 }), failedAt: at });
+    const fresh = await fetchKeys(transport, url);
+    const after = Date.now();
+    remember(url, { keys: fresh, fetchedAt: after, failedAt: after });
     try {
       return await verifyWorkloadToken(token, fresh, expected);
     } catch (refetched) {
-      if (absentKey(refetched)) throw unavailable(KEY_ABSENT, entries.get(url), now);
+      if (absentKey(refetched)) throw unavailable(KEY_ABSENT, entries.get(url), Date.now());
       throw refetched;
     }
   }
