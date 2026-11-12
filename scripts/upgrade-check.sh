@@ -11,16 +11,16 @@
 #   2. 0.15.0, as `init` writes it: its `coffre migrate`, then its first
 #      request cuts the log over.
 #   3. On 0.15.0, as the Owner: `coffre verify log` green, a beat, then a
-#      read of an environment's values (as hashes) and a use of it through
-#      the credential proxy, the audit API's pages (heartbeats and
-#      checkpoints left out) and every removed member's offboarding report,
-#      saved.
+#      read of an environment's values (as hashes), the audit API's pages
+#      (heartbeats and checkpoints left out) and every removed member's
+#      offboarding report, saved.
 #   4. What this checkout's migrations would lose, or 0.16 cannot read,
 #      refused first (`refusals`), then its `coffre migrate`, and its
 #      Workers example started on the same database, keys and Durable
 #      Objects' storage.
 #   5. The same entries in the same order, the same reports, the same
-#      values and the same use, a change, and `coffre verify log` green.
+#      values, a use of them through the credential proxy (newer than
+#      0.15.0), a change, and `coffre verify log` green.
 #
 # It checks the data, not the deployment's files: each version is a fresh
 # `init`, and the last this checkout's example, where Equisafe runs `coffre

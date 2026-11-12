@@ -8,18 +8,22 @@
 //               with the log for good.
 //   before <origin> <idp> <out.json> -- <cli…>
 //               on 0.15.0, as its Owner: the log verified by `coffre verify
-//               log`, a beat, then an environment's values and a use of it
-//               through the credential proxy (`held`), the audit API's
-//               pages and every removed member's offboarding report, saved.
+//               log`, a beat, then an environment's values (`held`), the
+//               audit API's pages and every removed member's offboarding
+//               report, saved.
 //   after <origin> <idp> <before.json> -- <cli…>
 //               on this checkout, as its Owner: the same entries in the
-//               same order, the same reports, the same values and use, a
+//               same order, the same reports, the same values, a use of
+//               them through the credential proxy (newer than 0.15.0), a
 //               change, a beat, and `coffre verify log` green.
 //   refusals <owner's URL of the database>
 //               on 0.15.0's database, before this checkout's migrate: no
 //               OAuth client's redirects that 0084 would cut
-//               (`brokenLists`), and no loss the log accepted
-//               (`acceptedLosses`).
+//               (`brokenLists`), no loss the log accepted
+//               (`acceptedLosses`), no tamper finding standing
+//               (`standingFindings`), and the policy and the rows
+//               agreeing on what is protected (`disagreeing`), and no
+//               trust binding 0.14 ended alive by the log (`bindingsDiffer`).
 //
 // <cli…> is the CLI of the version serving, as a command line; it runs in a
 // home of its own, given as HOME, and is told the instance with --url.
@@ -28,6 +32,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const OWNER = 'root@conformance.example';
 // conformance's DEV (checks/people.ts), where its people read and write.
@@ -100,11 +105,11 @@ async function after(origin, idp, file, cli) {
     }
     say(`the same offboarding reports, of ${Object.keys(saved.reports).join(', ')}`);
 
-    const { values, given, left } = await held(owner);
+    const { values } = await held(owner);
     for (const [key, hash] of Object.entries(saved.held.values)) assert.equal(values[key], hash, `${DEV}'s ${key} does not read back as 0.15.0 read it`);
     assert.deepEqual(Object.keys(values), Object.keys(saved.held.values), `${DEV} does not hold the keys it held on 0.15.0`);
-    assert.deepEqual({ given, left }, { given: saved.held.given, left: saved.held.left }, `a use of ${DEV} through the proxy is not 0.15.0's`);
-    say(`${DEV}'s ${Object.keys(values).length} values read back as 0.15.0 read them; a use through the proxy gives the same ${given.length} keys and leaves out the same ${left.length}`);
+    const { given, left } = await use(owner);
+    say(`${DEV}'s ${Object.keys(values).length} values read back as 0.15.0 read them; a use through the proxy gives ${given.length} keys and leaves out ${left.length}`);
 
     // A change, read back.
     const value = randomBytes(18).toString('base64url');
@@ -146,23 +151,30 @@ async function ownerOf(origin, idp) {
     };
 }
 
-/**
- * What DEV holds, as the Owner reads it, each value as its SHA-256, never printed; and the plan a handle's use of it
- * through the credential proxy gets (what `coffre run` builds an app's environment from): the keys it gives and the
- * keys it leaves out.
- */
+/** What DEV holds, as the Owner reads it, each value as its SHA-256, never printed. */
 async function held(owner) {
     const { values } = await owner.call('POST', '/api/reveals', { path: DEV });
     const hashes = Object.fromEntries(Object.keys(values).sort().map((key) => [key, createHash('sha256').update(values[key]).digest('hex')]));
     assert.ok(Object.keys(hashes).length > 0, `the Owner reads no value of ${DEV}`);
+    return { values: hashes };
+}
+
+/**
+ * A handle's use of DEV through the credential proxy, which 0.15.0 does not have: the plan `coffre run` builds an
+ * app's environment from. Every key the Owner lists, archived ones aside, is in it, given or left out by name.
+ */
+async function use(owner) {
+    const { keys } = await owner.call('GET', `/api/secrets/${DEV}`);
     const { token } = await owner.call('POST', '/api/handles', { label: 'upgrade check', expiresInMinutes: 10, paths: [DEV] });
     const response = await fetch(`${owner.origin}/use/${DEV}`, { headers: { authorization: `Bearer ${token}` } });
     const body = await response.text();
     assert.equal(response.status, 200, `a use of ${DEV} through the proxy answered ${response.status}: ${body}`);
     const plan = JSON.parse(body);
-    const given = Object.keys(plan.env).sort();
+    const given = Object.keys(plan.env);
+    const missing = keys.filter(({ archived }) => !archived).map(({ key }) => key).filter((key) => !given.includes(key) && !plan.left.includes(key));
     assert.ok(given.length > 0, `the plan for ${DEV} gives no key; it leaves out ${plan.left.join(', ') || 'none'}`);
-    return { values: hashes, given, left: [...plan.left].sort() };
+    assert.deepEqual(missing, [], `the plan for ${DEV} neither gives nor leaves out ${missing.join(', ')}`);
+    return { given, left: plan.left };
 }
 
 /** The audit API's pages, every entry with sign-ins and 0.15's sealed records, beats left out; and every removed member's report. */
@@ -175,12 +187,18 @@ async function snapshot(owner) {
         next = page.next;
     }
     const { removed } = await owner.call('GET', '/api/members');
-    const reports = {};
-    for (const { principalType, principalId } of removed) {
-        const member = `${principalType === 'service' ? 'token' : principalType}:${principalId}`;
-        reports[member] = await owner.call('GET', `/api/members/${encodeURIComponent(member)}`);
+    // A report lists the reads the projector has written, and says `behind` while it has some left: compared only
+    // once it has none, so that two reports differ by what they hold, not by when the projector last ran.
+    for (const deadline = Date.now() + 30_000; ; await sleep(1_000)) {
+        const reports = {};
+        for (const { principalType, principalId } of removed) {
+            const member = `${principalType === 'service' ? 'token' : principalType}:${principalId}`;
+            reports[member] = await owner.call('GET', `/api/members/${encodeURIComponent(member)}`);
+        }
+        const behind = Object.keys(reports).filter((member) => reports[member].reads?.behind);
+        if (behind.length === 0) return { entries, reports };
+        assert.ok(Date.now() < deadline, `the reads of ${behind.join(', ')} still wait to be listed after 30 s`);
     }
-    return { entries, reports };
 }
 
 /**
@@ -273,19 +291,70 @@ export async function acceptedLosses(sql) {
     return rows.map(({ seq }) => seq);
 }
 
+/**
+ * The members a tamper finding stands for (their row changed around the vault, or an older one put back), by the rule
+ * the members page marks them with (`tamperedMembers`, `findingStands`), which reads nothing 0.15.0 lacks. 0.16
+ * carries no finding over (state-rows.md, section 6), so one that stands stops the upgrade here, by member; an
+ * Owner's change to the member, on 0.15.0, settles it.
+ */
+export async function standingFindings(sql) {
+    const [{ createDatabase }, { tamperedMembers }] = await Promise.all([import('@coffre/db'), import('@coffre/db/grants')]);
+    return [...(await tamperedMembers(createDatabase(sql)))].sort();
+}
+
+/**
+ * The environments the newest `policy.change` and their rows disagree on protecting (`protectionDisagrees`, the rule
+ * the vault's step refuses on), by id; null when that entry's edits do not read. 0.16 fills the policy's protected list
+ * from the entry, so either stops the upgrade here. On 0.15.0, an Owner turns the environment's protection off and on
+ * again, or on and off, to end where it should: each turn writes the entry and the row together.
+ */
+export async function disagreeing(sql) {
+    const [{ readEdits, NO_EDITS, protectionDisagrees }, { KINDS }, { TOMBSTONE }] = await Promise.all([import('@coffre/core/vault'), import('@coffre/db/log'), import('@coffre/core/schemas')]);
+    const [entry] = await sql.unsafe(`SELECT metadata FROM audit_log WHERE ${KINDS.policy} ORDER BY seq DESC LIMIT 1`);
+    let edits = NO_EDITS;
+    if (entry !== undefined) try { edits = readEdits(JSON.parse(entry.metadata)); } catch { edits = null; }
+    if (edits === null) return null;
+    const rows = await sql.unsafe('SELECT e.id::text AS id, e.protected, strpos(e.slug, $1) > 0 OR strpos(p.slug, $1) > 0 AS deleted FROM environments e JOIN projects p ON p.id = e.project_id', [TOMBSTONE]);
+    return protectionDisagrees(edits, new Map(rows.map((row) => [row.id, row])));
+}
+
+/**
+ * The trust bindings whose life 0.16's rule (the log's: sealed by its newest change, no `binding.revoke` among them)
+ * and 0.14's tombstone (an allowed app `token.unbind`) disagree on, in plain SQL on 0.15.0's tables, apart from either
+ * release's code. `revived`, live by the log though tombstoned, would come back: they stop the upgrade, by id. `dropped`,
+ * live by 0.15.0 (not revoked, no tombstone, sealed) but dead by the log, is stricter, so safe, and only reported.
+ */
+export async function bindingsDiffer(sql) {
+    const rows = await sql.unsafe(`
+        SELECT id, live AND tombstoned AS revived, NOT live AND unrevoked AND NOT tombstoned AND sealed AS dropped FROM (
+            SELECT s.id::text AS id, s.revoked_at IS NULL AS unrevoked, s.seal IS NOT NULL AS sealed,
+                EXISTS (SELECT FROM audit_log t WHERE t.author = 'app' AND t.action = 'token.unbind' AND t.decision = 'allow' AND t.metadata::jsonb ->> 'bindingId' = s.id::text) AS tombstoned,
+                coalesce(s.seal = (SELECT c.seal FROM log_changes c WHERE c.object = log_object('binding', s.id::text) ORDER BY c.number DESC LIMIT 1), false)
+                    AND NOT EXISTS (SELECT FROM log_changes e WHERE e.object = log_object('binding', s.id::text) AND e.payload::jsonb ->> 'op' = 'binding.revoke') AS live
+            FROM service_bindings s) AS b
+        ORDER BY id`);
+    return { revived: rows.filter((row) => row.revived).map(({ id }) => id), dropped: rows.filter((row) => row.dropped).map(({ id }) => id) };
+}
+
 async function refusals(url) {
     const { postgresSession } = await import('@coffre/db/connect');
     const sql = postgresSession(url);
-    let broken, losses;
+    let broken, losses, tampered, protection, bindings;
     try {
-        [broken, losses] = [await brokenLists(sql), await acceptedLosses(sql)];
+        [broken, losses, tampered] = [await brokenLists(sql), await acceptedLosses(sql), await standingFindings(sql)];
+        [protection, bindings] = [await disagreeing(sql), await bindingsDiffer(sql)];
     } finally {
         await sql.end();
     }
     const refused = [
         broken.length > 0 && `0084 would cut the redirects of the OAuth clients ${broken.join(', ')}: they are not a JSON array of strings`,
         losses.length > 0 && `the log accepted ${losses.length} loss${losses.length === 1 ? '' : 'es'}, at seq ${losses.join(', ')}: 0.16's projector stops at one`,
+        tampered.length > 0 && `a tamper finding stands for ${tampered.join(', ')}: 0.16 carries none over, and an Owner's change to each, on 0.15.0, settles it`,
+        protection === null && 'the newest policy.change does not read: 0.16 fills the protected environments from it, and an Owner\'s change of the policy, on 0.15.0, writes one that does',
+        protection?.length > 0 && `the newest policy.change and the rows disagree on protecting ${protection.join(', ')}: an Owner turns each off and on again (or on and off), on 0.15.0, to end where it should`,
+        bindings.revived.length > 0 && `0.14 ended the trust bindings ${bindings.revived.join(', ')}, which 0.16, reading the log, would bring back: no change on 0.15.0 is known to settle it, so stop and ask coffre's maintainers`,
     ].filter(Boolean);
     assert.deepEqual(refused, [], `the upgrade is refused:\n${refused.join('\n')}`);
-    say('every OAuth client\'s redirects are a JSON array of strings, as 0084 converts them, and the log accepted no loss');
+    if (bindings.dropped.length > 0) say(`${bindings.dropped.length} trust binding${bindings.dropped.length === 1 ? '' : 's'} live on 0.15.0 the log ends, for 0.16: ${bindings.dropped.join(', ')}`);
+    say('every OAuth client\'s redirects are a JSON array of strings, as 0084 converts them; the log accepted no loss; no tamper finding stands; the policy and the rows agree on what is protected; no binding 0.14 ended comes back');
 }

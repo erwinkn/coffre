@@ -48,6 +48,7 @@
     "add:dep": "pnpm add --save-exact"
   },
   "dependencies": {
+    "@coffre/core": "workspace:*",
     "@coffre/db": "workspace:*",
     "js-yaml": "4.3.0"
   },
