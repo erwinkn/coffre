@@ -976,7 +976,9 @@ workload's own.
   (8.2), and a lift is one more entry. Freezes are the design's alone:
   nothing writes one yet (`/freezes` answers "not built"), and the code's
   statement reads none (T268). The protections below that name a freeze
-  are what the change that builds them must bring back.
+  are what the change that builds them must bring back, with the
+  `WorkloadFreezing` scenario T268 deleted, the only one that lifts a
+  freeze: until then `Unfreeze` runs in no scenario.
 - **The tunnel** is opened under the statement. It carries bytes while its
   last good check is less than `Recheck` old: a recheck that has not
   answered by its deadline counts as no. Its rechecks run the statement.
