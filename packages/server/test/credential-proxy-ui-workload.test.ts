@@ -6,7 +6,7 @@
 // list, and whether it takes the body as it came (503 `moved`). (A `narrow` child's constraints are weighed on the URL
 // the decided item's upstream makes too; no test makes one here: 0.15's log refuses a child planted around the app, and
 // `/api/auth/workload/narrow` answers 501 until its PR.)
-// A revocation or a freeze stops the next request whatever the value cache holds. Both engines, 0.15's log.
+// A revocation or a freeze stops the next request whatever the value cache holds. 0.15's log.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, randomUUID, sign as signWith, verify as verifyWith, type KeyObject } from 'node:crypto';
@@ -37,7 +37,6 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, holdSomething, LOG, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 import { credentials, environments } from './db/tables.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { pinnedGates } from './window-fixture.ts';
@@ -221,8 +220,7 @@ async function prodId(): Promise<string> {
 }
 
 async function run(query: SQL): Promise<void> {
-  if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
-  else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
+  await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
 }
 
 test("a session's UI route: by its stable URL and its place's, sent by the decided item, its key injected, one vault call a use", ON_015, async () => {
@@ -448,7 +446,7 @@ test("a workload's plan names its environment's UI routes, giving values only as
   assert.equal(plan.status, 200, JSON.stringify(plan.body));
   assert.deepEqual([...(plan.body.credentials as string[])].sort(), ['openai', 'stripe']);
   assert.deepEqual(plan.body.values, { REGION: 'eu-west-3' }, 'its plain value alone: it uses the others');
-  await run(TEST_ENGINE === 'postgres' ? sql`UPDATE proxy_definitions SET items = jsonb_set(items, '{openai,savedAt}', '1')` : sql`UPDATE proxy_definitions SET items = json_set(items, '$.openai.savedAt', 1)`);
+  await run(sql`UPDATE proxy_definitions SET items = jsonb_set(items, '{openai,savedAt}', '1')`);
   const forged = await use(held, 'GET', '/use/market/prod');
   assert.equal(forged.status, 503, JSON.stringify(forged.body));
   assert.ok(!JSON.stringify(forged.body).includes(OPENAI));

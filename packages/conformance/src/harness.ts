@@ -65,14 +65,12 @@ export type Deployment = {
   serving(): Record<string, number>;
   /** The app's database, as its owner. */
   database(): Promise<Sql>;
-  /** The app's database as the login the app runs as, on an engine that has logins. */
-  runtime: (() => Promise<Sql>) | null;
-  /** The database as the login the vault runs as, likewise. */
-  vaultRuntime: (() => Promise<Sql>) | null;
-  /** The database as the login 0.15's uses run as, likewise. */
-  hotRuntime: (() => Promise<Sql>) | null;
-  /** The file holding the database, when it is one. */
-  databaseFile: string | null;
+  /** The app's database as the login the app runs as. */
+  runtime: () => Promise<Sql>;
+  /** The database as the login the vault runs as. */
+  vaultRuntime: () => Promise<Sql>;
+  /** The database as the login 0.15's uses run as. */
+  hotRuntime: () => Promise<Sql>;
   /** The browser's half of the app's build: its static files. */
   clientDir: string;
   /** The processes' output: all of it, or the last `tail` characters of each. */
@@ -363,7 +361,6 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       runtime: () => postgres(runtime),
       vaultRuntime: () => postgres(vaultRuntime),
       hotRuntime: () => postgres(hotRuntime),
-      databaseFile: null,
       clientDir: join(dir, 'app/dist/client'),
       output,
       mark,
@@ -451,7 +448,6 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       runtime: () => postgres(runtime),
       vaultRuntime: () => postgres(vaultRuntime),
       hotRuntime: () => postgres(hotRuntime),
-      databaseFile: null,
       clientDir: join(dir, 'app/dist/client'),
       output,
       mark,

@@ -23,10 +23,9 @@ import { authMac, AuthRowTampered, checkAuthRow, issuedBy, issuingBinding, signe
  * The server works on what these return and never writes SQL; lint keeps
  * drizzle out of the server and the pages.
  *
- * Each query builds on the tables of the database it is given (`tablesOf`),
- * so the one text runs on Postgres and SQLite; see portable.ts. The
- * server names a table for the generic writes by importing schema.ts, and
- * `own` swaps in the database's twin.
+ * Each query builds on the tables of the database it is given (`tablesOf`).
+ * The server names a table for the generic writes by importing schema.ts,
+ * and `own` finds it among them.
  *
  * Ordinary writes do not check first and do not read back. A unique constraint
  * answers "is it taken", and a conditional update's row count answers "was
@@ -340,7 +339,7 @@ export async function environmentPaths(db: Queryable, ids: readonly string[]): P
 export function policyNow(db: Queryable, ids: readonly string[]): Promise<{ seq: bigint | null; slugs: Map<string, string> }> {
   // Started now (`.then`), not once awaited: under `audited`, ahead of what the work asks next, a first `later` write
   // included, which could otherwise rename a protected environment before this reads it (postgres-js's `flush`).
-  // Nothing protected, the newest change alone: a join on nothing still scans every environment on SQLite.
+  // Nothing protected, the newest change alone.
   if (ids.length === 0) return newestVaultSeq(db, 'policy').then((seq) => ({ seq, slugs: new Map<string, string>() }));
   const { projects, environments } = tablesOf(db);
   const live = sql`${and(inArray(environments.id, [...ids]), standing(environments.slug))}
@@ -493,7 +492,7 @@ function countedPlaceRows(db: Queryable, within?: readonly string[]) {
     .from(secrets)
     .where(and(
       isNull(secrets.archivedAt),
-      dialect.engineOf(db) === 'postgres' ? sql`${secrets.environmentId} = ANY(ARRAY(${counted}))` : inArray(secrets.environmentId, counted),
+      sql`${secrets.environmentId} = ANY(ARRAY(${counted}))`,
     )));
   const keys = db
     .select({ environmentId: live.environmentId, projectId: live.projectId, keys: count().as('keys') })
@@ -1079,7 +1078,7 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
   const found = findingsOf(db, principal);
   // Their newest access entry, one step of `audit_log_access_idx` (`keyedBy`): as the greatest `seq` of their entries,
   // Postgres could walk the vault's back past every read about them since (T245, R48).
-  const changed = keyedBy(db, log.subjectPrincipal, log.seq, 'desc', m.principal, sql`ARRAY[${m.principal}]`);
+  const changed = keyedBy(log.subjectPrincipal, log.seq, 'desc', sql`ARRAY[${m.principal}]`);
   const query = sql`
     SELECT ${m.status} AS status, ${m.owner} AS owner, ${m.role} AS member_role, ${m.scope} AS scope, ${m.statusChangedBy} AS status_changed_by,
       ${found.legacy} AS found_seq, ${found.named} AS found_named,
@@ -1156,8 +1155,8 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
     // index (`changesOf`): as an `EXISTS` of an entry, Postgres took a match among the entries about them for likely and
     // scanned the log, past every refusal about them (1,604 pages behind 20,000; T245, R48, review r8).
     const { auditLog: log } = tablesOf(db);
-    const access = keyedBy(db, log.subjectPrincipal, log.seq, 'desc', principal, sql`ARRAY[${principal}]`);
-    const change = changesOf(db, 'c', logObject('principal', principal));
+    const access = keyedBy(log.subjectPrincipal, log.seq, 'desc', sql`ARRAY[${principal}]`);
+    const change = changesOf('c', logObject('principal', principal));
     const rows = await dialect.rowsOf<{ principal: string }>(db, sql`SELECT CAST(${principal} AS text) AS principal
       WHERE NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = ${principal})
         AND ((SELECT c.number FROM log_changes c WHERE ${change.where} ORDER BY ${change.order} LIMIT 1) IS NOT NULL
@@ -1165,9 +1164,8 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
     return rows.map((row) => row.principal);
   }
   const next = (after: SQL | null) => sql`(SELECT subject_principal FROM audit_log WHERE ${accessAllowed()} AND subject_principal ${after === null ? sql`IS NOT NULL` : sql`> ${after}`} ORDER BY subject_principal LIMIT 1)`;
-  const engine = dialect.engineOf(db);
   // Whom a first add down the two-trip path added: its payload's `ref`, `{"id": principal, "kind": "principal"}`.
-  const added = engine === 'postgres' ? sql.raw(`(log_changes.payload::jsonb -> 'ref' ->> 'id')`) : sql.raw(`json_extract(log_changes.payload, '$.ref.id')`);
+  const added = sql.raw(`(log_changes.payload::jsonb -> 'ref' ->> 'id')`);
   // A plain read, `select …`, which a page's other reads may go with (`groupReads`, @coffre/db/hyperdrive).
   const rows = await dialect.rowsOf<{ principal: string }>(db, sql`SELECT principal FROM (
     WITH RECURSIVE named (principal) AS (
@@ -1179,7 +1177,7 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
     WHERE (principal LIKE 'user:%' OR principal LIKE 'token:%')
       AND NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = named.principal)
     UNION
-    SELECT a.principal FROM (SELECT ${added} AS principal FROM log_changes WHERE ${recorded(engine, sql.raw('log_changes.payload'), 'admitted')}) AS a
+    SELECT a.principal FROM (SELECT ${added} AS principal FROM log_changes WHERE ${recorded(sql.raw('log_changes.payload'), 'admitted')}) AS a
     WHERE NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = a.principal)
   ) AS missing ORDER BY principal`);
   return rows.map((row) => row.principal);
@@ -1206,8 +1204,8 @@ export async function members(
   const principal = filter.member === undefined ? undefined : principalOf(filter.member);
   const of = (column: typeof principals.principal | typeof credentials.principal | typeof identities.principal) =>
     principal === undefined ? undefined : eq(column, principal);
-  // Read binary columns directly. Relational JSON encodes bytea on Postgres
-  // and cannot hold blobs on SQLite, so it cannot carry these MACs unchanged.
+  // Read binary columns directly. Relational JSON encodes bytea, so it cannot
+  // carry these MACs unchanged.
   const [rows, held, bound, granted, tampered] = await Promise.all([
     db
       .select({
@@ -1351,7 +1349,7 @@ async function writtenBy(db: Queryable, members: readonly string[]): Promise<{ a
   if (members.length === 0) return [];
   const { logChanges } = tablesOf(db);
   const rows = await db.select({ actor: logChanges.actor, at: logChanges.at, payload: logChanges.payload }).from(logChanges)
-    .where(and(recorded(dialect.engineOf(db), logChanges.payload, 'written'), inArray(logChanges.actor, [...members])));
+    .where(and(recorded(logChanges.payload, 'written'), inArray(logChanges.actor, [...members])));
   // Ids of a payload's own, which a database writer may have written anything into: looked up only as ids.
   const id = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
   return rows.flatMap(({ actor, at, payload }) => {
@@ -1507,7 +1505,7 @@ function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) =
       credential: credentials, identity: identities, now: clock(db), policySeq: newestPolicy,
       // The passkey it names, by its primary key, and whether its person holds a live one (section 6.2 of passkeys.md).
       passkey: passkeys, passkeyHeld: heldSql(sql`${credentials.principal}`, sql`${credentials.generation}`),
-      ...(shown === 'answer' ? { answer: sql<unknown>`(${answerQuery(db, sql`${credentials.principal}`)})` } : {}),
+      ...(shown === 'answer' ? { answer: sql<unknown>`(${answerQuery(sql`${credentials.principal}`)})` } : {}),
       ...(shown === 'settings' ? { settings: sql<string | null>`(${settingsQuery()})` } : {}),
     })
     .from(credentials)
@@ -1711,11 +1709,9 @@ export async function insertPasskey(
 /**
  * The person's factor lock (section 6.1), which every change to their passkeys takes first, before the log's head, and
  * the vault's issue of their tokens takes too (migration 0064): `pg_advisory_xact_lock(1717658484, hashtext(<principal>))`,
- * started now, not once awaited, so that it goes ahead of the head in the transaction's first Sync. SQLite's one writer
- * is the lock.
+ * started now, not once awaited, so that it goes ahead of the head in the transaction's first Sync.
  */
 export function lockFactor(tx: Transaction, principal: string): Promise<unknown> {
-  if (dialect.engineOf(tx) !== 'postgres') return Promise.resolve();
   return dialect.rowsNow(tx, sql`SELECT pg_advisory_xact_lock(1717658484, hashtext(${principal}))::text AS locked`);
 }
 
@@ -1890,20 +1886,20 @@ export async function bindingRow(db: Queryable, principal: string, id: string): 
  * one call; the batches read `issuedSoonest`, then `credentialRows`.
  */
 /**
- * Live at `at`: on Postgres, at the database's own clock as this statement starts (`now()`, stable, so that it still bounds
+ * Live now: at the database's own clock as this statement starts (`now()`, stable, so that it still bounds
  * the index's range), never the app's: the end's check names every credential live on that clock a moment later
  * (`change_bindings`' `clock_timestamp()`), and an app clock ahead of it would leave some out, each end `moved` (Fable on
- * #520). On SQLite the app and the vault share the process's clock.
+ * #520).
  */
-function liveAt(db: Queryable, at: Date): SQL | Date {
-  return dialect.engineOf(db) === 'postgres' ? sql`now()` : at;
+function liveAt(): SQL {
+  return sql`now()`;
 }
 
-export async function issuedCredentials(db: Queryable, principal: string, bindingIds: readonly string[], at: Date): Promise<CredentialRow[]> {
+export async function issuedCredentials(db: Queryable, principal: string, bindingIds: readonly string[]): Promise<CredentialRow[]> {
   const { credentials } = tablesOf(db);
   if (bindingIds.length === 0) return [];
   return db.select().from(credentials)
-    .where(and(eq(credentials.principal, principal), inArray(credentials.createdBy, bindingIds.map((id) => `binding:${id}`)), isNull(credentials.revokedAt), gt(credentials.expiresAt, liveAt(db, at))));
+    .where(and(eq(credentials.principal, principal), inArray(credentials.createdBy, bindingIds.map((id) => `binding:${id}`)), isNull(credentials.revokedAt), gt(credentials.expiresAt, liveAt())));
 }
 
 /**
@@ -1916,15 +1912,15 @@ export async function issuedCredentials(db: Queryable, principal: string, bindin
  * batch's read starts past the last's, and none walks the binding's history.
  */
 export async function issuedSoonest(
-  db: Queryable, principal: string, bindingIds: readonly string[], at: Date, atMost: number, after: Date | null,
+  db: Queryable, principal: string, bindingIds: readonly string[], atMost: number, after: Date | null,
 ): Promise<{ id: string; bytes: number; expiresAt: Date }[]> {
   const { credentials } = tablesOf(db);
   if (bindingIds.length === 0) return [];
-  const length = (column: AnyColumn) => (dialect.engineOf(db) === 'postgres' ? sql`coalesce(octet_length(${column}), 0)` : sql`coalesce(length(CAST(${column} AS BLOB)), 0)`);
+  const length = (column: AnyColumn) => sql`coalesce(octet_length(${column}), 0)`;
   return db.select({ id: credentials.id, bytes: sql<number | string>`${length(credentials.scope)} + ${length(credentials.places)}`.mapWith(Number), expiresAt: credentials.expiresAt })
     .from(credentials)
     .where(and(
-      eq(credentials.principal, principal), inArray(credentials.createdBy, bindingIds.map((id) => `binding:${id}`)), isNull(credentials.revokedAt), gt(credentials.expiresAt, liveAt(db, at)),
+      eq(credentials.principal, principal), inArray(credentials.createdBy, bindingIds.map((id) => `binding:${id}`)), isNull(credentials.revokedAt), gt(credentials.expiresAt, liveAt()),
       // From the last batch's end (review r6): the index's range starts there, so another binding's credentials that
       // end sooner are walked once a removal, not once a batch. The batch itself, revoked, has left the index; an `id`
       // tie-break here would cost the ordered scan its limit (a bitmap scan of all that follow, sorted). One of these
@@ -1935,12 +1931,12 @@ export async function issuedSoonest(
     .limit(atMost);
 }
 
-/** How many credentials these bindings issued are still live at `at` (`issuedCredentials`): what a removal under way has left. */
-export async function liveIssued(db: Queryable, principal: string, bindingIds: readonly string[], at: Date): Promise<number> {
+/** How many credentials these bindings issued are still live (`issuedCredentials`): what a removal under way has left. */
+export async function liveIssued(db: Queryable, principal: string, bindingIds: readonly string[]): Promise<number> {
   const { credentials } = tablesOf(db);
   if (bindingIds.length === 0) return 0;
   const [row] = await db.select({ n: count() }).from(credentials)
-    .where(and(eq(credentials.principal, principal), inArray(credentials.createdBy, bindingIds.map((id) => `binding:${id}`)), isNull(credentials.revokedAt), gt(credentials.expiresAt, liveAt(db, at))));
+    .where(and(eq(credentials.principal, principal), inArray(credentials.createdBy, bindingIds.map((id) => `binding:${id}`)), isNull(credentials.revokedAt), gt(credentials.expiresAt, liveAt())));
   return Number(row?.n ?? 0);
 }
 
@@ -1992,9 +1988,7 @@ export async function findBinding(db: Queryable, chainKey: Buffer, principal: st
 export async function tombstoned(db: Queryable, ids: readonly string[]): Promise<Set<string>> {
   if (ids.length === 0) return new Set();
   const { auditLog } = tablesOf(db);
-  const bindingId = dialect.engineOf(db) === 'postgres'
-    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`
-    : sql<string>`json_extract(${auditLog.metadata}, '$.bindingId')`;
+  const bindingId = sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`;
   const rows = await db
     .select({ id: bindingId })
     .from(auditLog)
@@ -2005,9 +1999,7 @@ export async function tombstoned(db: Queryable, ids: readonly string[]): Promise
 /** The expression `audit_log_unbind_idx` indexes: the binding an entry names. */
 function namedBinding(db: Queryable): SQL<string> {
   const { auditLog } = tablesOf(db);
-  return dialect.engineOf(db) === 'postgres'
-    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`
-    : sql<string>`json_extract(${auditLog.metadata}, '$.bindingId')`;
+  return sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`;
 }
 
 /** Whether the binding `id` (a column or a value) has a tombstone: an allowed app `token.unbind` naming it. */
@@ -2044,7 +2036,7 @@ export async function exchangeCandidates(
   token: Buffer,
 ): Promise<{ bindings: BindingRow[]; spent: boolean | null; policySeq: bigint | null; newest: NewestChanges }> {
   const { spentIdTokens, serviceBindings, principals } = tablesOf(db);
-  const id = dialect.engineOf(db) === 'postgres' ? sql`${serviceBindings.id}::text` : sql`${serviceBindings.id}`;
+  const id = sql`${serviceBindings.id}::text`;
   const spent = db.select({ hash: spentIdTokens.hash }).from(spentIdTokens).where(eq(spentIdTokens.hash, token));
   const rows = await db
     .select({
@@ -2079,7 +2071,7 @@ export async function exchangeCandidates(
     // Null where nothing was read: no binding, so no row to read it with.
     spent: rows[0]?.spent ?? null,
     policySeq: seq === null ? null : BigInt(seq),
-    newest: await newestChanges(db, principal, rows),
+    newest: newestChanges(rows),
   };
 }
 
@@ -2094,37 +2086,24 @@ export type NewestChanges = { member: LoggedChange | null; bindings: ReadonlyMap
 const NO_CHANGES: NewestChanges = { member: null, bindings: new Map() };
 
 /**
- * `newestChanges`' columns, on Postgres: in the statement that reads the
+ * `newestChanges`' columns: in the statement that reads the
  * bindings, one probe of `log_changes_object_idx` each, the account's an
  * uncorrelated subquery, read once. As text, a JSON array in `loggedChange`'s
- * order. SQLite has no `log_object`: none here, read after (`newestChanges`).
+ * order.
  */
-export function newestChangeColumns(db: Queryable, principal: string, binding: AnyColumn): { memberChange?: SQL<string | null>; bindingChange?: SQL<string | null> } {
-  if (dialect.engineOf(db) !== 'postgres') return {};
+export function newestChangeColumns(db: Queryable, principal: string, binding: AnyColumn): { memberChange: SQL<string | null>; bindingChange: SQL<string | null> } {
   const newest = (object: SQL) => sql<string | null>`(SELECT json_build_array(c.number::text, c.at, c.request_id, c.actor, c.payload, encode(c.seal, 'base64'), encode(c.mac, 'base64'))::text
-    FROM log_changes c WHERE ${changesOf(db, 'c', object).where} ORDER BY ${changesOf(db, 'c', object).order} LIMIT 1)`;
+    FROM log_changes c WHERE ${changesOf('c', object).where} ORDER BY ${changesOf('c', object).order} LIMIT 1)`;
   return { memberChange: newest(sql`${logObject('principal', principal)}::uuid`), bindingChange: newest(sql`log_object('binding', ${binding}::text)`) };
 }
 
 /**
  * `NewestChanges` of the rows a bindings read answered with
- * `newestChangeColumns`; on SQLite, read now by their objects' keys, a
- * statement of their own (SQLite deploys no app: its cost is no sign-in's).
+ * `newestChangeColumns`.
  */
-export async function newestChanges(db: Queryable, principal: string, rows: readonly { binding: { id: string }; memberChange?: string | null; bindingChange?: string | null }[]): Promise<NewestChanges> {
+export function newestChanges(rows: readonly { binding: { id: string }; memberChange?: string | null; bindingChange?: string | null }[]): NewestChanges {
   if (rows.length === 0) return NO_CHANGES;
-  if (dialect.engineOf(db) === 'postgres') {
-    return { member: loggedChange(rows[0]!.memberChange ?? null), bindings: new Map(rows.map((row) => [row.binding.id, loggedChange(row.bindingChange ?? null)])) };
-  }
-  const { logChanges } = tablesOf(db);
-  const read = async (object: string): Promise<LoggedChange | null> => {
-    const [row] = await db.select().from(logChanges).where(eq(logChanges.object, object)).orderBy(desc(logChanges.number)).limit(1);
-    if (row === undefined) return null;
-    const base64 = (bytes: Uint8Array | null) => (bytes === null ? null : Buffer.from(bytes).toString('base64'));
-    return { number: String(row.number), at: Number(row.at), requestId: row.requestId, actor: row.actor, payload: row.payload, seal: base64(row.seal ?? null), mac: base64(row.mac)! };
-  };
-  const [member, ...bindings] = await Promise.all([read(logObject('principal', principal)), ...rows.map((row) => read(logObject('binding', row.binding.id)))]);
-  return { member: member!, bindings: new Map(rows.map((row, i) => [row.binding.id, bindings[i]!])) };
+  return { member: loggedChange(rows[0]!.memberChange ?? null), bindings: new Map(rows.map((row) => [row.binding.id, loggedChange(row.bindingChange ?? null)])) };
 }
 
 /** A change as `newestChangeColumns` renders it, or none. */
@@ -2217,10 +2196,7 @@ export type CredentialOrigin =
 export async function originsOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, CredentialOrigin>> {
   if (credentialIds.length === 0) return new Map();
   const { auditLog, logChanges } = tablesOf(db);
-  const engine = dialect.engineOf(db);
-  const metadata = (field: string) => engine === 'postgres'
-    ? sql<string>`((${auditLog.metadata})::jsonb ->> ${sql.raw(`'${field}'`)})`
-    : sql<string>`json_extract(${auditLog.metadata}, ${sql.raw(`'$.${field}'`)})`;
+  const metadata = (field: string) => sql<string>`((${auditLog.metadata})::jsonb ->> ${sql.raw(`'${field}'`)})`;
   const entries = (action: 'token.exchange' | 'token.create', id: SQL<string>) => sql`
     SELECT ${id} AS credential, ${auditLog.seq} AS seq, ${auditLog.metadata} AS record, '0.14' AS log, ${sql.raw(`'${action}'`)} AS action, ${auditLog.actor} AS actor FROM ${auditLog}
      WHERE ${and(eq(auditLog.author, 'app'), eq(auditLog.action, action), eq(auditLog.decision, 'allow'), inArray(id, [...credentialIds]))}`;
@@ -2231,14 +2207,14 @@ export async function originsOf(db: Queryable, credentialIds: readonly string[])
     UNION ALL
     ${entries('token.create', metadata('targetCredentialId'))}
     UNION ALL
-    SELECT ${engine === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object}, ${logChanges.number}, ${logChanges.payload}, '0.15', NULL, ${logChanges.actor} FROM ${logChanges}
+    SELECT CAST(${logChanges.object} AS text), ${logChanges.number}, ${logChanges.payload}, '0.15', NULL, ${logChanges.actor} FROM ${logChanges}
      WHERE ${logChanges.number} IN (${sql.join([...objects.keys()].map((object) => {
        // Its oldest change, by the object's index: `min(number)` by the object walks the primary key past every other
        // object's changes before its first (381 pages behind 20,000 of them, Sol r7 of #556).
-       const first = changesOf(db, 'c', object, 'asc');
+       const first = changesOf('c', object, 'asc');
        return sql`(SELECT c.number FROM log_changes c WHERE ${first.where} ORDER BY ${first.order} LIMIT 1)`;
      }), sql`, `)})
-       AND ${recorded(engine, logChanges.payload, 'signIn', 'issue')}`);
+       AND ${recorded(logChanges.payload, 'signIn', 'issue')}`);
   return new Map(rows.flatMap((row): [string, CredentialOrigin][] => {
     const id = row.log === '0.14' ? row.credential : objects.get(row.credential);
     if (id === undefined) return [];
@@ -2348,8 +2324,7 @@ export async function sealedPage(
   stop?: AbortController,
 ): Promise<{ rows: RecordedChange[]; more: boolean }> {
   const { logChanges } = tablesOf(db);
-  const engine = dialect.engineOf(db);
-  const of = (records: ChangeRecord[], actor: string | undefined) => and(recorded(engine, logChanges.payload, ...records), actor === undefined ? undefined : eq(logChanges.actor, actor))!;
+  const of = (records: ChangeRecord[], actor: string | undefined) => and(recorded(logChanges.payload, ...records), actor === undefined ? undefined : eq(logChanges.actor, actor))!;
   // The reads one at a time, as `newest` takes them: a project's page of tens of thousands of environments, of a
   // member's two forms, is more reads than a call takes arguments (review r4 of #490), and more than an isolate
   // holds at once, made together (review r5).
@@ -2367,7 +2342,7 @@ export async function sealedPage(
       if ('secretId' in at) {
         // A refusal names no key, as 0.14's entry of it named none.
         if (record === 'written') yield and(of([record], actor), eq(logChanges.object, logObject('secret', at.secretId)))!;
-      } else for (const id of at.environmentIds) yield and(of([record], actor), eq(recordField(engine, logChanges.payload, 'environmentId'), id))!;
+      } else for (const id of at.environmentIds) yield and(of([record], actor), eq(recordField(logChanges.payload, 'environmentId'), id))!;
     }
   }
   function* reads(): Generator<SQL> {
@@ -2380,7 +2355,7 @@ export async function sealedPage(
     if (written !== null) yield* writes('written', written);
     if (refusals?.at != null) yield* writes('refusedWrite', refusals.at);
   }
-  const object = engine === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object;
+  const object = sql`CAST(${logChanges.object} AS text)`;
   const columns = sql`${logChanges.number} AS "number", ${logChanges.at} AS "at", ${logChanges.actor} AS "actor", ${logChanges.payload} AS "payload",
     ${logChanges.requestId} AS "request_id", ${object} AS "object", ${logChanges.seal} AS "seal", ${logChanges.mac} AS "mac"`;
   const rows = await newest<{ number: string | number | bigint; at: string | number; actor: string; payload: string; request_id: string; object: string; seal: Uint8Array | null; mac: Uint8Array }>(
@@ -2400,9 +2375,8 @@ const SIGN_INS: ChangeRecord[] = ['signIn'];
 const HIDDEN: ChangeRecord[] = ['issue', 'revoke', 'signOut'];
 
 /**
- * The most reads one statement of `newest` takes: SQLite's default limit on
- * a compound SELECT's terms is 500, and each read's few parameters keep
- * Postgres's 65,535 far off (review r3 of #490).
+ * The most reads one statement of `newest` takes: each read's few parameters
+ * keep Postgres's 65,535 far off (review r3 of #490).
  */
 export const READS_PER_STATEMENT = 250;
 
@@ -2500,8 +2474,7 @@ export const HIDDEN_COUNTED = 1000;
  */
 export async function sealedReach(db: Queryable, filter: { actors?: readonly string[]; before?: ChangePoint }): Promise<ChangePoint | null> {
   const { logChanges } = tablesOf(db);
-  const engine = dialect.engineOf(db);
-  const reads = recordActors(filter.actors, isMember).map((actor) => and(recorded(engine, logChanges.payload, ...HIDDEN), actor === undefined ? undefined : eq(logChanges.actor, actor))!);
+  const reads = recordActors(filter.actors, isMember).map((actor) => and(recorded(logChanges.payload, ...HIDDEN), actor === undefined ? undefined : eq(logChanges.actor, actor))!);
   if (reads.length === 0) return null;
   const [row] = await newest<{ number: string | number | bigint; at: string | number }>(
     db, reads, sql`${logChanges.number} AS "number", ${logChanges.at} AS "at"`, filter.before, 1, HIDDEN_COUNTED - 1,
@@ -2521,15 +2494,14 @@ export async function sealedHidden(
   filter: { actors?: readonly string[]; from?: ChangePoint; before?: ChangePoint },
 ): Promise<{ action: string; count: number }[]> {
   const { logChanges } = tablesOf(db);
-  const engine = dialect.engineOf(db);
   const actors = filter.actors?.filter(isMember);
   if (actors?.length === 0) return [];
-  const action = sql<string>`CASE WHEN ${recorded(engine, logChanges.payload, 'issue')} THEN 'token.create' WHEN ${recorded(engine, logChanges.payload, 'signOut')} THEN 'sign_out' ELSE 'token.revoke' END`;
+  const action = sql<string>`CASE WHEN ${recorded(logChanges.payload, 'issue')} THEN 'token.create' WHEN ${recorded(logChanges.payload, 'signOut')} THEN 'sign_out' ELSE 'token.revoke' END`;
   return db
     .select({ action, count: count() })
     .from(logChanges)
     .where(and(
-      recorded(engine, logChanges.payload, ...HIDDEN),
+      recorded(logChanges.payload, ...HIDDEN),
       actors === undefined ? undefined : inArray(logChanges.actor, actors),
       filter.from === undefined ? undefined : notBelow(db, filter.from),
       filter.before === undefined ? undefined : below(db, filter.before),
@@ -2556,42 +2528,26 @@ export async function consumeToken(db: Queryable, hash: Buffer): Promise<boolean
 /**
  * Forget up to `atMost` spent tokens, those spent over two hours ago: an
  * exchange refuses a token issued over an hour ago (`MAX_TOKEN_AGE_SECONDS`),
- * so their records guard nothing. On Postgres the runtime login deletes no
+ * so their records guard nothing. The runtime login deletes no
  * row itself, and asks `prune_consumed_tokens`, which deletes only those
  * (migration 0016). How many went.
  */
 export async function pruneSpentTokens(db: Queryable, atMost: number): Promise<number> {
-  if (dialect.engineOf(db) === 'postgres') {
-    // A write, through its function: marked so, it never goes with the reads asked beside it (`groupReads`, @coffre/db/hyperdrive).
-    const [{ pruned }] = await db.execute<{ pruned: number }>(sql`/* writes */ SELECT prune_consumed_tokens(${atMost}) AS pruned`) as unknown as [{ pruned: number }];
-    return pruned;
-  }
-  const { spentIdTokens } = tablesOf(db);
-  const old = db.select({ hash: spentIdTokens.hash }).from(spentIdTokens).where(lt(spentIdTokens.consumedAt, sql`${clockMillis(db)} - ${SPENT_TOKENS_KEPT_MS}`)).limit(atMost);
-  return changedRows(await db.delete(spentIdTokens).where(inArray(spentIdTokens.hash, old)));
+  // A write, through its function: marked so, it never goes with the reads asked beside it (`groupReads`, @coffre/db/hyperdrive).
+  const [{ pruned }] = await db.execute<{ pruned: number }>(sql`/* writes */ SELECT prune_consumed_tokens(${atMost}) AS pruned`) as unknown as [{ pruned: number }];
+  return pruned;
 }
-
-/** How long a spent token's record is kept: prune_consumed_tokens's two hours, which SQLite applies here. */
-export const SPENT_TOKENS_KEPT_MS = 2 * 60 * 60 * 1000;
 
 /**
  * Spend a token and, only if this spent it, insert the credential its
  * exchange issues and stamp the binding's last use: false, and nothing
  * written, when it was spent already, which the primary key decides. One
- * statement on Postgres, under the log's head; SQLite, with no
- * data-modifying CTE, runs them in turn.
+ * statement, under the log's head.
  */
 export async function exchangeToken(db: Queryable, token: Buffer, credential: NewRow<Tables['credentials']>, bindingId: string, at: Date): Promise<boolean> {
   const { spentIdTokens, credentials, serviceBindings } = tablesOf(db);
-  if (dialect.engineOf(db) === 'sqlite') {
-    if (!(await consumeToken(db, token))) return false;
-    await insert(db, credentials, credential);
-    await update(db, serviceBindings, { id: bindingId }, { lastUsedAt: at });
-    return true;
-  }
   const spend = db.insert(spentIdTokens).values({ hash: token }).onConflictDoNothing().returning({ hash: spentIdTokens.hash });
-  // The credential's row once for each token spent: none, or one. Its other columns take the database's defaults: a column
-  // added later with a default of Drizzle's own (`$defaultFn`) gets it from `insert` on SQLite, not here.
+  // The credential's row once for each token spent: none, or one. Its other columns take the database's defaults.
   const columns = Object.entries(getTableColumns(credentials)).filter(([name]) => credential[name as keyof typeof credential] !== undefined);
   const names = sql.join(columns.map(([, column]) => sql.identifier(column.name)), sql`, `);
   const values = sql.join(columns.map(([name, column]) => sql.param(credential[name as keyof typeof credential], column)), sql`, `);
@@ -2662,7 +2618,7 @@ export function priorCredentials(principal: { type: string; id: string }, genera
 
 export type CredentialRow = Tables['credentials']['$inferSelect'];
 
-/** Which credentials: a condition on the engine's own table. */
+/** Which credentials: a condition on the database's own table. */
 export type CredentialsWhere = (credentials: Tables['credentials']) => SQL | undefined;
 
 /** One credential, by its id or its token's hash; a sign-in account's sessions. */
@@ -3358,7 +3314,7 @@ export type SecretPlaceRow = {
 
 /**
  * These secrets, where they are now, by id: any number of them, a thousand
- * a query, within every engine's bound on a statement's parameters (an
+ * a query, within Postgres's bound on a statement's parameters (an
  * offboarding report asks for each secret a member's reads listed).
  */
 export async function secretPlaces(db: Queryable, ids: readonly string[]): Promise<Map<string, SecretPlaceRow>> {
@@ -3567,11 +3523,8 @@ export type AuditFilter = {
  */
 function also(db: Queryable, field: 'projectId' | 'environmentId' | 'secretId', ids: readonly string[]): SQL {
   const { auditLog } = tablesOf(db);
-  const postgres = dialect.engineOf(db) === 'postgres';
-  const present = postgres ? sql`((${auditLog.metadata})::jsonb -> 'also') IS NOT NULL` : sql`json_extract(${auditLog.metadata}, '$.also') IS NOT NULL`;
-  const value = postgres
-    ? sql`(((${auditLog.metadata})::jsonb -> 'also') ->> ${sql.raw(`'${field}'`)})`
-    : sql`json_extract(${auditLog.metadata}, ${sql.raw(`'$.also.${field}'`)})`;
+  const present = sql`((${auditLog.metadata})::jsonb -> 'also') IS NOT NULL`;
+  const value = sql`(((${auditLog.metadata})::jsonb -> 'also') ->> ${sql.raw(`'${field}'`)})`;
   return and(present, inArray(value, [...ids]))!;
 }
 
@@ -3584,11 +3537,8 @@ function also(db: Queryable, field: 'projectId' | 'environmentId' | 'secretId', 
 function listed(db: Queryable, ids: readonly string[]): SQL {
   const { auditLog } = tablesOf(db);
   const named = (secret: SQL) => or(...ids.map((id) => sql`${secret} = ${id}`))!;
-  const among = dialect.engineOf(db) === 'postgres'
-    ? sql`EXISTS (SELECT 1 FROM jsonb_array_elements(((${auditLog.metadata})::jsonb -> 'secrets')) AS listed(secret)
-        WHERE ${named(sql`(listed.secret ->> 'secretId')`)} OR ${named(sql`((listed.secret -> 'also') ->> 'secretId')`)})`
-    : sql`EXISTS (SELECT 1 FROM json_each(${auditLog.metadata}, '$.secrets') AS listed
-        WHERE ${named(sql`json_extract(listed.value, '$.secretId')`)} OR ${named(sql`json_extract(listed.value, '$.also.secretId')`)})`;
+  const among = sql`EXISTS (SELECT 1 FROM jsonb_array_elements(((${auditLog.metadata})::jsonb -> 'secrets')) AS listed(secret)
+        WHERE ${named(sql`(listed.secret ->> 'secretId')`)} OR ${named(sql`((listed.secret -> 'also') ->> 'secretId')`)})`;
   return and(eq(auditLog.action, 'secret.read'), isNull(auditLog.secretId), among)!;
 }
 
@@ -3764,7 +3714,7 @@ export async function auditActionCounts(
  * that they go with what its transaction asks next, its COMMIT at the latest, under one Sync: its credential's last
  * use first, when `verify` left it to the request; then the hold (`hold_inputs`, migration 0061: the issue lock and the
  * fence, then the vault's read again, `coffre_moved` unless it reads as decided); then each new key's row, the
- * versions and each key's current version. Postgres only, as the vault's read is.
+ * versions and each key's current version.
  *
  * The credential's row before the issue lock and the fence, as `issue_token` and `revoke_credential` take it
  * (formal/WriteLocks.tla, TouchFirst): after them, the write would hold the issue lock and wait for an issue's shared

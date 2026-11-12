@@ -15,7 +15,7 @@ import { postgresClient } from '@coffre/db/connect';
 
 import { resolveVaultConfig } from '../src/config.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { emptyDatabase, openTestDatabase, places, postgresOnly, type TestDatabase } from './database.ts';
+import { emptyDatabase, openTestDatabase, places, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 
@@ -59,7 +59,7 @@ function config() {
   return resolveVaultConfig({ kek: { id: 'vault-isolate-test', key: randomBytes(32).toString('base64') }, owners: ['root@acme.example'] });
 }
 
-test('a first call answers while another first call waits on its own I/O', postgresOnly('a database that never answers'), async () => {
+test('a first call answers while another first call waits on its own I/O', async () => {
   const prepared = await prepareVault(config(), { log: '0.14' });
   const stuck = await neverAnswers();
   // The isolate's first call: its database never answers, so whatever it starts never settles.
@@ -74,7 +74,7 @@ test('a first call answers while another first call waits on its own I/O', postg
   }
 });
 
-test("a first key operation answers while another waits on its own key check", postgresOnly('a database that never answers'), async () => {
+test("a first key operation answers while another waits on its own key check", async () => {
   const placed = await places(db.owner);
   const [one, two] = [await placed.secret(placed.dev), await placed.secret(placed.dev)];
   const prepared = await prepareVault(config(), { log: '0.14' });

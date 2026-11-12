@@ -11,7 +11,7 @@ import { deriveLogKey } from '@coffre/core/audit';
 import { defineSignin, github, google, hashToken, signin } from '@coffre/core/identity';
 import { newUseRequestId, type NamedUseOutcome, type UseOutcome } from '@coffre/core/vault';
 import { appendEntries } from '@coffre/db/log';
-import { asc, eq, like, sql, type SQL } from 'drizzle-orm';
+import { asc, eq, like, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { runScheduled } from '../src/app.ts';
@@ -22,7 +22,7 @@ import { resolvePath } from '../src/db/queries.ts';
 import { createRuntime } from '../src/runtime.ts';
 import { auditLog, credentials, environments, identities, logChanges, checkpointFence, projects, secrets, grants, principals } from './db/tables.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
-import { postgresOnly, TEST_ENGINE, withLogUnlocked } from './db/engine.ts';
+import { withLogUnlocked } from './db/engine.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps, type TestVault } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
@@ -47,10 +47,8 @@ beforeEach(async () => {
   await resetDatabase(db.owner);
   // Uses go in today's partition, at or past the floor of `at` (schema 0022), as a deployment's checkpointer keeps them.
   await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
-  if (TEST_ENGINE === 'postgres') {
-    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-    await db.owner.execute(sql`SELECT make_day(${day(Date.now() - 86_400_000)}::date), make_day(${day(Date.now())}::date), make_day(${day(Date.now() + 86_400_000)}::date)`);
-  }
+  const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  await db.owner.execute(sql`SELECT make_day(${day(Date.now() - 86_400_000)}::date), make_day(${day(Date.now())}::date), make_day(${day(Date.now() + 86_400_000)}::date)`);
   const vault = testVault([ROOT], {}, undefined, {}, { log: '0.14' });
   const deps = testDeps(db.runtime, [ROOT], { vault });
   deps.signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: SIGNIN });
@@ -60,8 +58,7 @@ beforeEach(async () => {
 
 /** The deploy: a vault of 0.15's log on the same keys, not cut over, and the app over it, whose door cuts it over. */
 function deploy(signin = SIGNIN, config: { bulkLimit?: { count: number; windowMinutes: number } } = {}) {
-  const hotDatabase = TEST_ENGINE === 'postgres' ? TEST_HOT_DATABASE_URL : process.env.COFFRE_TEST_DATABASE_URL!;
-  const vault = testVault([ROOT], { hotDatabase, ...config }, { kek: old.vault.kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, cutover: 'app' });
+  const vault = testVault([ROOT], { hotDatabase: TEST_HOT_DATABASE_URL, ...config }, { kek: old.vault.kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, cutover: 'app' });
   // The same app, its key the same: a deploy changes neither.
   const deps = testDeps(db.runtime, [ROOT], { vault, chainKey: old.deps.chainKey });
   deps.signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: SIGNIN });
@@ -430,24 +427,14 @@ test("a deployment with no cutover due answers its first requests at once, toget
 
 /**
  * `work` with the refusal of 0.14's writes dropped, as the database's owner may drop it (migration 0047's trigger):
- * off, then on again, however `work` ends. SQLite has no switch: the trigger is dropped and made again.
+ * off, then on again, however `work` ends.
  */
 async function refusalDropped<T>(work: () => Promise<T>): Promise<T> {
-  if (TEST_ENGINE === 'postgres') {
-    await db.owner.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_refuse_old`);
-    try {
-      return await work();
-    } finally {
-      await db.owner.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_refuse_old`);
-    }
-  }
-  const sqlite = db.owner as unknown as { all<Row>(query: SQL): Promise<Row[]>; run(query: SQL): Promise<unknown> };
-  const [trigger] = await sqlite.all<{ sql: string }>(sql`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'audit_log_refuse_old'`);
-  await sqlite.run(sql`DROP TRIGGER audit_log_refuse_old`);
+  await db.owner.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_refuse_old`);
   try {
     return await work();
   } finally {
-    await sqlite.run(sql.raw(trigger!.sql));
+    await db.owner.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_refuse_old`);
   }
 }
 
@@ -530,7 +517,7 @@ test("a use's probe of 0.14's log reads past an access entry forged in the vault
   assert.equal(codeOf(await use(now.vault, token.id, a)), 'stale');
 });
 
-test("an access entry forged in the vault's name holds no use: its check writes nothing, so a use answers while an old isolate holds 0.14's head and the vault has settling left to do (a bulk cap changed at the deploy), and the next decision reports it (reviews r3, r4 of PR 9b)", postgresOnly("0.14's head is a row lock of Postgres"), async () => {
+test("an access entry forged in the vault's name holds no use: its check writes nothing, so a use answers while an old isolate holds 0.14's head and the vault has settling left to do (a bulk cap changed at the deploy), and the next decision reports it (reviews r3, r4 of PR 9b)", async () => {
   await old.root.projects.create('market');
   await old.root.environments.create('market/dev');
   await old.root.secrets.set('market/dev', { A: 'one' });

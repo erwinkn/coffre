@@ -27,7 +27,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { logReadDays, logReadPlaceDays, logReads, logReadsCursor, logUses, secrets } from './db/tables.ts';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
+import { openVaultDatabase } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -393,7 +393,7 @@ test("a member's day of reads deleted takes them off her report, and the whole l
   const [listed] = await db.owner.select({ number: logReads.number }).from(logReads);
   assert.deepEqual((await root.members.get(ADA)).exposed.map((secret) => secret.key), ['API_KEY']);
   await db.owner.delete(logReadDays).where(eq(logReadDays.principal, ADA));
-  // Her report reads her days alone (as her page does on Postgres, whose days are partitions).
+  // Her report reads her days alone (as her page does, whose days are partitions).
   assert.deepEqual((await root.members.get(ADA)).exposed, []);
   const verdict = await root.audit.verifyReads();
   assert.ok(verdict.kept);
@@ -406,8 +406,8 @@ test("a place's day of reads deleted takes them off its pages, and the whole log
   const [listed] = await db.owner.select({ number: logReads.number, environment: logReads.environment }).from(logReads);
   assert.deepEqual(reads(await every(root, { path: 'market/dev' })).length, 1);
   await db.owner.delete(logReadPlaceDays).where(eq(logReadPlaceDays.place, listed!.environment));
-  // On Postgres a place's pages read its days alone, as a member's do; SQLite's read the index.
-  if (TEST_ENGINE === 'postgres') assert.deepEqual(reads(await every(root, { path: 'market/dev' })), []);
+  // A place's pages read its days alone, as a member's do.
+  assert.deepEqual(reads(await every(root, { path: 'market/dev' })), []);
   assert.deepEqual(reads(await every(root, { path: 'market/dev/API_KEY' })).length, 1, "the key's own day stands");
   const verdict = await root.audit.verifyReads();
   assert.ok(verdict.kept);

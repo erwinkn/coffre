@@ -4,7 +4,7 @@
 // decided on sealed objects alone, by a person holding proxy.edit. A row a writer edits, moves an item in, puts back or
 // deletes fails closed (R64); a forged object is replaced whole by an Owner, never carried on. The log replays to the
 // rows. And the version gate: a call on another release runs nothing, in this process as over the socket.
-// Both engines; the change path is 0.15's log's.
+// The change path is 0.15's log's.
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -26,7 +26,7 @@ import { frozenAllows, frozenHoldings, frozenOwns, proxyLookup, type ProxyLevel 
 import type { Reader } from '../src/decide.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { newestChange, readObject } from '../src/store.ts';
-import { emptyDatabase, ENGINE, LOG, locksHere, newEnvironment, newProject, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, run, sealed, sealPlaces, VAULT_URL, type LocalVault, type TestDatabase } from './database.ts';
+import { emptyDatabase, LOG, locksHere, newEnvironment, newProject, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, rows, run, sealed, sealPlaces, VAULT_URL, type LocalVault, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const NOBODY: FrozenHoldings = { role: 'member', scope: { projects: 'all', environments: 'all' }, instance: { normal: [], protected: [] }, grants: [] };
@@ -91,8 +91,7 @@ async function stored(environmentId: string): Promise<{ items: Record<string, Pr
 /** A writer's own row, around the vault: items and index as given, the seal kept unless given. */
 async function write(environmentId: string, items: Record<string, ProxyItem>, digests: Buffer, seal?: Buffer): Promise<void> {
   const json = JSON.stringify(items);
-  if (ENGINE === 'postgres') await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}::jsonb, digests = ${digests}${seal === undefined ? sql`` : sql`, seal = ${seal}`} WHERE environment_id = ${environmentId}`);
-  else await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}, digests = ${digests}${seal === undefined ? sql`` : sql`, seal = ${seal}`} WHERE environment_id = ${environmentId}`);
+  await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}::jsonb, digests = ${digests}${seal === undefined ? sql`` : sql`, seal = ${seal}`} WHERE environment_id = ${environmentId}`);
 }
 
 async function count(query: ReturnType<typeof sql>): Promise<number> {
@@ -309,8 +308,7 @@ test('a row a writer edits, moves an item in, puts back or deletes shows tampere
     // An edit made from it would seal the forgery as its editor's own: refused, whoever asks.
     refusedWith(await w.save({ seal: second.seal, items: { c: route('c') } }), 'tampered', /replaces them whole/);
     // Put right again, for the next one.
-    if (ENGINE === 'postgres') await run(db.owner, sql`INSERT INTO proxy_definitions (environment_id, items, digests, seal) VALUES (${w.dev}, ${JSON.stringify(now.items)}::jsonb, ${now.digests}, ${now.seal}) ON CONFLICT (environment_id) DO UPDATE SET items = EXCLUDED.items, digests = EXCLUDED.digests, seal = EXCLUDED.seal`);
-    else await run(db.owner, sql`INSERT INTO proxy_definitions (environment_id, items, digests, seal) VALUES (${w.dev}, ${JSON.stringify(now.items)}, ${now.digests}, ${now.seal}) ON CONFLICT (environment_id) DO UPDATE SET items = excluded.items, digests = excluded.digests, seal = excluded.seal`);
+    await run(db.owner, sql`INSERT INTO proxy_definitions (environment_id, items, digests, seal) VALUES (${w.dev}, ${JSON.stringify(now.items)}::jsonb, ${now.digests}, ${now.seal}) ON CONFLICT (environment_id) DO UPDATE SET items = EXCLUDED.items, digests = EXCLUDED.digests, seal = EXCLUDED.seal`);
     assert.equal((await w.view()).state, 'ok', how);
   }
   // Forged once more, then replaced whole by an Owner of the project, moving on from the newest change's seal.
@@ -331,8 +329,7 @@ test('a row a writer edits, moves an item in, puts back or deletes shows tampere
 test("a row planted where no change was made is stale, and its environment's first save starts from none", ON_015, async () => {
   const w = await world();
   const items = { a: item(route('a', 'evil.example')) };
-  if (ENGINE === 'postgres') await run(db.owner, sql`INSERT INTO proxy_definitions (environment_id, items, digests, seal) VALUES (${w.dev}, ${JSON.stringify(items)}::jsonb, ${indexBytes(items)}, ${randomBytes(16)})`);
-  else await run(db.owner, sql`INSERT INTO proxy_definitions (environment_id, items, digests, seal) VALUES (${w.dev}, ${JSON.stringify(items)}, ${indexBytes(items)}, ${randomBytes(16)})`);
+  await run(db.owner, sql`INSERT INTO proxy_definitions (environment_id, items, digests, seal) VALUES (${w.dev}, ${JSON.stringify(items)}::jsonb, ${indexBytes(items)}, ${randomBytes(16)})`);
   assert.equal((await w.view()).state, 'stale');
   refusedWith(await w.save({ seal: null, items: { b: route('b') } }), 'tampered', /stale/);
   const replaced = saved(await w.save({ seal: null, items: { b: route('b') }, replace: true }));
@@ -410,7 +407,7 @@ test("code reserves its names: each UI item of one deleted, whole in its entry; 
   assert.deepEqual((await replayStored(db.owner, w.config.signingKeys)).faults, []);
 });
 
-test("names code reserved already are found so without the head, which every isolate's first requests would queue on, and every use behind them; a name to add waits for it (#467's bench)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
+test("names code reserved already are found so without the head, which every isolate's first requests would queue on, and every use behind them; a name to add waits for it (#467's bench)", ON_015, async () => {
   const w = await world();
   assert.ok((await w.vault.reserveProxy({ names: ['maps', 'stripe'] })).ok);
   const holder = postgresSession(OWNER_URL);
@@ -433,7 +430,7 @@ test("names code reserved already are found so without the head, which every iso
   }
 });
 
-test("a deploy's herd of first requests, each finding its code's name missing, waits for the head in one place, not one each, and reads the name the one wrote (#467's bench)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
+test("a deploy's herd of first requests, each finding its code's name missing, waits for the head in one place, not one each, and reads the name the one wrote (#467's bench)", ON_015, async () => {
   const w = await world();
   const holder = postgresSession(OWNER_URL);
   // The code's place in line, and every lock a session of this database waits for.
@@ -460,7 +457,7 @@ test("a deploy's herd of first requests, each finding its code's name missing, w
   }
 });
 
-test("a reservation waits for the head within one bound, however late it took the code's place (review r14 of #467)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
+test("a reservation waits for the head within one bound, however late it took the code's place (review r14 of #467)", ON_015, async () => {
   const w = await world({ codeWaitMs: 1_000 });
   const holder = postgresSession(OWNER_URL);
   const PLACE = 0x636f6670;
@@ -486,7 +483,7 @@ test("a reservation waits for the head within one bound, however late it took th
   }
 });
 
-test("a reservation's wait for the head ends within its bound, however many changes hold the head in turn (review r16 of #467)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
+test("a reservation's wait for the head ends within its bound, however many changes hold the head in turn (review r16 of #467)", ON_015, async () => {
   const w = await world({ codeWaitMs: 1_000 });
   // Two changes, as appends: each locks the head's row and writes a new version of it.
   const first = postgresSession(OWNER_URL);
@@ -529,12 +526,12 @@ test("a reservation's wait for the head ends within its bound, however many chan
   }
 });
 
-test("names reserved already are found so while another transaction holds SQLite's one writer, which a read waits for not (review r15 of #467)", ON_015, async () => {
+test("names reserved already are found so while another transaction is open on the vault's database, which a read waits for not (review r15 of #467)", ON_015, async () => {
   const w = await world({ codeWaitMs: 1_000 });
   assert.ok((await w.vault.reserveProxy({ names: ['maps', 'stripe'] })).ok);
   let end!: () => void;
   const ended = new Promise<void>((resolve) => (end = resolve));
-  // A change under way, holding its transaction (on SQLite, the file's writer queue) for 3 s at most.
+  // A change under way, holding its transaction for 3 s at most.
   const holding = db.vault.transaction(async () => {
     await Promise.race([ended, new Promise((resolve) => setTimeout(resolve, 3_000))]);
   });
@@ -553,8 +550,7 @@ test("names reserved already are found so while another transaction holds SQLite
 test('the reserved set forged around the vault refuses every save: fail closed (R64)', ON_015, async () => {
   const w = await world();
   assert.ok((await w.vault.reserveProxy({ names: ['maps'] })).ok);
-  if (ENGINE === 'postgres') await run(db.owner, sql`UPDATE proxy_reserved SET names = '[]'::jsonb`);
-  else await run(db.owner, sql`UPDATE proxy_reserved SET names = '[]'`);
+  await run(db.owner, sql`UPDATE proxy_reserved SET names = '[]'::jsonb`);
   assert.equal((await w.view()).reservedState, 'tampered');
   const outcome = await w.save({ seal: null, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } });
   assert.equal(outcome.ok, false);
@@ -573,8 +569,7 @@ test('a released name put back with its old seal, the log\'s newest seal forged 
   assert.ok((await w.vault.releaseProxy({ actor: ROOT, caller: 'person', name: 'maps' })).ok);
   // The row and the newest change's seal agree again, as a seal-only check wants; the change's MAC does not cover them.
   const names = typeof before!.names === 'string' ? before!.names : JSON.stringify(before!.names);
-  if (ENGINE === 'postgres') await run(db.owner, sql`UPDATE proxy_reserved SET names = ${names}::jsonb, seal = ${before!.seal}`);
-  else await run(db.owner, sql`UPDATE proxy_reserved SET names = ${names}, seal = ${before!.seal}`);
+  await run(db.owner, sql`UPDATE proxy_reserved SET names = ${names}::jsonb, seal = ${before!.seal}`);
   const object = objectKey({ kind: 'proxy-reserved', id: 'instance' });
   await run(db.owner, sql`UPDATE log_changes SET seal = ${before!.seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${object})`);
   const changes = await count(sql`SELECT count(*) AS n FROM log_changes`);
@@ -596,8 +591,7 @@ test('items or names no change writes fail the seal like any forgery: the tab sh
   assert.ok(reserved.ok);
   assert.deepEqual(reserved.cleared.map((each) => each.environmentId), [other]);
   // A reserved set whose names are no names: tampered, and every save refused.
-  if (ENGINE === 'postgres') await run(db.owner, sql`UPDATE proxy_reserved SET names = '[1]'::jsonb`);
-  else await run(db.owner, sql`UPDATE proxy_reserved SET names = '[1]'`);
+  await run(db.owner, sql`UPDATE proxy_reserved SET names = '[1]'::jsonb`);
   const forged = await w.view(other);
   assert.deepEqual([forged.state, forged.reservedState], ['ok', 'tampered']);
   assert.equal((await w.save({ seal: forged.seal, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } }, other)).ok, false);
@@ -623,7 +617,7 @@ test('in this process, a call on another release answers this one and runs nothi
   await assert.rejects(versioned(entry, '0.0.1').about(), (error: Error & { code?: string }) => error.code === 'deploying');
 });
 
-test('in this process, a call on another release runs no statement at all, the hot path\'s included', { skip: ON_015.skip || postgresOnly('counts Postgres statements').skip }, async () => {
+test('in this process, a call on another release runs no statement at all, the hot path\'s included', ON_015, async () => {
   const w = await world();
   let statements = 0;
   const clients: { end(): Promise<void> }[] = [];

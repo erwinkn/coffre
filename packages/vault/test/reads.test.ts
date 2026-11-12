@@ -13,7 +13,7 @@ import { logStore } from '../src/log-store.ts';
 import { checkReads, cursorHolds, projectReads } from '../src/reads.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
-import { ENGINE, openTestDatabase, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { ask, emptyLog, genesis, isolate, ROOT, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -90,8 +90,8 @@ test("two projectors at once write each read once, and the whole log's check fin
   const tick = await signer();
   await reads(6);
   await tick();
-  // A store each, over a connection each on Postgres: the vault's login and the owner's.
-  const other: Database = ENGINE === 'postgres' ? db.owner : db.vault;
+  // A store each, over a connection each: the vault's login and the owner's.
+  const other: Database = db.owner;
   await Promise.all([projectReads(logStore(db.vault), await keys(), { atOnce: 2 }), projectReads(logStore(other), await keys(), { atOnce: 3 })]);
   assert.equal(await count('log_reads'), 6);
   assert.deepEqual(await checked(), []);
@@ -106,12 +106,11 @@ test("a projector another overtook writes nothing: never the reads retention has
   // A derives its chunk and stops before its write; meanwhile B lists every read, and retention drops their day.
   const paused = Object.assign(Object.create(real) as typeof real, {
     writeReads: async (...args: Parameters<typeof real.writeReads>) => {
-      await projectReads(logStore(ENGINE === 'postgres' ? db.owner : db.vault), await keys());
+      await projectReads(logStore(db.owner), await keys());
       assert.equal(await count('log_reads'), 4);
       const days = await rows<{ at: string | number }>(db.owner, sql`SELECT DISTINCT at FROM log_reads`);
       const named = [...new Set(days.map((row) => new Date(Number(row.at)).toISOString().slice(0, 10).replaceAll('-', '')))];
-      if (ENGINE === 'postgres') for (const day of named) await run(db.owner, sql.raw(`DROP TABLE log_reads_${day}`));
-      else await run(db.owner, sql`DELETE FROM log_reads`);
+      for (const day of named) await run(db.owner, sql.raw(`DROP TABLE log_reads_${day}`));
       await run(db.owner, sql`DELETE FROM log_read_days`);
       wrote = await real.writeReads(...args);
       return wrote;
@@ -122,12 +121,10 @@ test("a projector another overtook writes nothing: never the reads retention has
     assert.equal(wrote, false);
     assert.equal(await count('log_reads'), 0);
     assert.equal(await count('log_read_days'), 0);
-    if (ENGINE === 'postgres') {
-      const today = new Date().toISOString().slice(0, 10).replaceAll('-', '');
-      assert.equal((await rows<{ found: boolean }>(db.owner, sql`SELECT to_regclass(${`public.log_reads_${today}`}) IS NOT NULL AS found`))[0]!.found, false, 'made again');
-    }
+    const today = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+    assert.equal((await rows<{ found: boolean }>(db.owner, sql`SELECT to_regclass(${`public.log_reads_${today}`}) IS NOT NULL AS found`))[0]!.found, false, 'made again');
   } finally {
-    if (ENGINE === 'postgres') await run(db.owner, sql`SELECT make_reads_day((now() AT TIME ZONE 'UTC')::date + d) FROM generate_series(-1, 3) AS d`);
+    await run(db.owner, sql`SELECT make_reads_day((now() AT TIME ZONE 'UTC')::date + d) FROM generate_series(-1, 3) AS d`);
   }
 });
 
@@ -140,7 +137,7 @@ test("a newest pair whose signatures fail, none under a cursor moved on, or one 
   const [newest] = await rows<{ upto: string | number; size: string | number }>(db.owner, sql`SELECT upto, uses_size AS size FROM log_checkpoints ORDER BY upto DESC LIMIT 1`);
   const upto = BigInt(newest!.upto);
   // Whoever owns the database edits the newest pair's uses note (its size), which its signature no longer holds.
-  const nl = sql.raw(ENGINE === 'postgres' ? 'chr(10)' : 'char(10)');
+  const nl = sql.raw('chr(10)');
   await run(db.owner, sql`UPDATE log_checkpoints SET uses_note = replace(uses_note, ${nl} || ${String(newest!.size)} || ${nl}, ${nl} || '999999' || ${nl}) WHERE upto = ${upto}`);
   assert.deepEqual(await checked(), [`the newest pair, through ${upto}, does not hold to the vault's signatures`]);
   await assert.rejects(projectReads(logStore(db.vault), await keys()), /does not hold to the vault's signatures/);
@@ -187,7 +184,7 @@ test("a read through a Cloudflare binding is its service's, as the binding's obj
   assert.deepEqual((await rows<{ principal: string }>(db.owner, sql`SELECT principal FROM log_reads`)).map((row) => row.principal), [w.principal]);
 });
 
-test("a read of a day with no reads' partition yet makes it: a log older than the days made ahead does not stop the projector (review r4)", { skip: ENGINE === 'postgres' ? false : 'Postgres only: partitions' }, async () => {
+test("a read of a day with no reads' partition yet makes it: a log older than the days made ahead does not stop the projector (review r4)", async () => {
   const tick = await signer();
   await reads(2);
   await tick();
@@ -205,7 +202,7 @@ test('an unsigned cursor is the start only: anywhere else, or at another time, i
   assert.equal(cursorHolds(mac, { through: 4n, pair: 0n, at: 0, mac: null }), false);
 });
 
-test("the objects of 300 reads are read in statements SQLite takes: no more than 500 terms of a compound SELECT", async () => {
+test("the objects of 300 reads are read, a batch of them a statement", async () => {
   const asked = Array.from({ length: 600 }, (_, i) => ({ object: randomUUID(), below: BigInt(i + 1), first: i % 2 === 0 }));
   assert.equal((await logStore(db.vault).objects(asked)).filter((found) => found !== null).length, 0);
 });

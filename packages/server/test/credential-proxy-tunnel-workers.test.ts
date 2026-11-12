@@ -4,8 +4,7 @@
 // binding; a cancel request that reaches the same object; a revoked handle
 // whose session the object's recheck ends; and credit flow: a large result
 // sent no faster than the app takes it, so a slow app holds the object to
-// a window of it, not the whole result. Postgres only: the database is
-// the suite's own.
+// a window of it, not the whole result. The database is the suite's own.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -20,10 +19,8 @@ import { WebSocket } from 'ws';
 
 
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 import { appClient, tunnelListener, WINDOW } from './tunnel-listener.ts';
 
-const skip = TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database' : false;
 const HANDLE = `coffre_use_${'h'.repeat(43)}`;
 const REVOKED = `coffre_use_${'r'.repeat(43)}`;
 const NAME = 'coffre-tunnel-workers-test';
@@ -36,7 +33,6 @@ let inspector: number;
 const listeners: { close(): void }[] = [];
 
 before(async () => {
-  if (skip) return;
   dir = mkdtempSync(join(tmpdir(), 'coffre-tunnel-worker-'));
   writeFileSync(
     join(dir, 'wrangler.json'),
@@ -77,7 +73,7 @@ async function listen(tunnel: string, handle = HANDLE): Promise<number> {
 }
 
 
-test('queries through the object, over cloudflare:sockets and over a network binding to a private address', { skip, timeout: 60_000 }, async () => {
+test('queries through the object, over cloudflare:sockets and over a network binding to a private address', { timeout: 60_000 }, async () => {
   for (const tunnel of ['db', 'replica']) {
     const client = appClient(await listen(tunnel), HANDLE);
     try {
@@ -88,7 +84,7 @@ test('queries through the object, over cloudflare:sockets and over a network bin
   }
 });
 
-test('a cancel request, on a connection of its own, reaches the session in the same object', { skip, timeout: 60_000 }, async () => {
+test('a cancel request, on a connection of its own, reaches the session in the same object', { timeout: 60_000 }, async () => {
   const port = await listen('db');
   const client = appClient(port, HANDLE);
   try {
@@ -120,7 +116,7 @@ function cancelRequest({ pid, secret }: { pid: number; secret: number }): Buffer
   return packet;
 }
 
-test("a revoked handle's session ends at the object's recheck", { skip, timeout: 60_000 }, async () => {
+test("a revoked handle's session ends at the object's recheck", { timeout: 60_000 }, async () => {
   const client = appClient(await listen('db', REVOKED), REVOKED);
   // Live, until the worker's stand-in refuses the handle, from its fourth use: its admission's, then a recheck each half second.
   assert.deepEqual([...await client.unsafe('SELECT 1 AS one')], [{ one: 1 }]);
@@ -129,7 +125,7 @@ test("a revoked handle's session ends at the object's recheck", { skip, timeout:
   assert.ok(Date.now() - started < 5000);
 });
 
-test('a WebSocket that does not ask for credit flow, or names no bearer, is refused before any object: an older CLI would let a large result fill one', { skip, timeout: 30_000 }, async () => {
+test('a WebSocket that does not ask for credit flow, or names no bearer, is refused before any object: an older CLI would let a large result fill one', { timeout: 30_000 }, async () => {
   for (const [headers, status] of [[{ authorization: `Bearer ${HANDLE}` }, 426], [{ 'coffre-tunnel-flow': 'credit' }, 401]] as const) {
     const ws = new WebSocket(`${at}/use/market/dev/db`, { headers });
     ws.on('error', () => undefined);
@@ -139,7 +135,7 @@ test('a WebSocket that does not ask for credit flow, or names no bearer, is refu
   }
 });
 
-test('an object holds 32 connections of a run at most, a burst of them included: the next is refused, until one ends', { skip, timeout: 60_000 }, async () => {
+test('an object holds 32 connections of a run at most, a burst of them included: the next is refused, until one ends', { timeout: 60_000 }, async () => {
   // Another handle, so another object, empty: each connection admitted, and waiting at its startup.
   const many = `coffre_use_${'m'.repeat(43)}`;
   const open = async () => {
@@ -168,7 +164,7 @@ test('an object holds 32 connections of a run at most, a burst of them included:
   for (const { ws } of [...burst, again]) ws.close();
 });
 
-test("a pool's 32 connections opened at once are all let in, though each admission reads the URL in turn", { skip, timeout: 90_000 }, async () => {
+test("a pool's 32 connections opened at once are all let in, though each admission reads the URL in turn", { timeout: 90_000 }, async () => {
   // Half a second each, one after another: together, 16 s, past one admission's time to decide had they all started at once.
   const turns = `coffre_use_${'t'.repeat(43)}`;
   const open = async () => {
@@ -189,7 +185,7 @@ test("a pool's 32 connections opened at once are all let in, though each admissi
   assert.deepEqual(JSON.parse(body), { cold: 1, warm: 4 });
 });
 
-test('an admission that takes 20 s, as under a burst of runs at once, is let in', { skip, timeout: 60_000 }, async () => {
+test('an admission that takes 20 s, as under a burst of runs at once, is let in', { timeout: 60_000 }, async () => {
   const loaded = `coffre_use_${'l'.repeat(43)}`;
   const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${loaded}`, 'coffre-tunnel-flow': 'credit' } });
   ws.on('error', () => undefined);
@@ -198,7 +194,7 @@ test('an admission that takes 20 s, as under a burst of runs at once, is let in'
   ws.close();
 });
 
-test("a connection refused at admission frees its slot: 33 refused, then one let in", { skip, timeout: 60_000 }, async () => {
+test("a connection refused at admission frees its slot: 33 refused, then one let in", { timeout: 60_000 }, async () => {
   const refused = `coffre_use_${'f'.repeat(43)}`;
   const open = async () => {
     const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${refused}`, 'coffre-tunnel-flow': 'credit' } });
@@ -213,7 +209,7 @@ test("a connection refused at admission frees its slot: 33 refused, then one let
   admitted.ws.close();
 });
 
-test("a connection refused while its admission goes on holds its slot until the admission is done", { skip, timeout: 60_000 }, async () => {
+test("a connection refused while its admission goes on holds its slot until the admission is done", { timeout: 60_000 }, async () => {
   const slow = `coffre_use_${'s'.repeat(43)}`;
   const open = async () => {
     const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${slow}`, 'coffre-tunnel-flow': 'credit' } });
@@ -233,7 +229,7 @@ test("a connection refused while its admission goes on holds its slot until the 
   assert.equal(await open(), 'coffre took too long to decide');
 });
 
-test('a client that ignores the window is ended: past two windows uncounted, or counting what it was never sent', { skip, timeout: 30_000 }, async () => {
+test('a client that ignores the window is ended: past two windows uncounted, or counting what it was never sent', { timeout: 30_000 }, async () => {
   // The app itself, say, speaking WebSocket with its handle, and no listener in between, to a database that takes nothing:
   // a startup and the password, as a driver sends them, and the session waits on the database, reading no more of the app.
   const flood = new WebSocket(`${at}/use/market/dev/stall`, { headers: { authorization: `Bearer ${HANDLE}`, 'coffre-tunnel-flow': 'credit' } });
@@ -263,7 +259,7 @@ test('a client that ignores the window is ended: past two windows uncounted, or 
   assert.deepEqual([greedyCode, greedyReason.toString()], [1008, 'a count of bytes it was not sent']);
 });
 
-test("a large result goes no faster than the app counts it: uncounted, the object holds back all but a window", { skip, timeout: 120_000 }, async () => {
+test("a large result goes no faster than the app counts it: uncounted, the object holds back all but a window", { timeout: 120_000 }, async () => {
   const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}`, 'coffre-tunnel-flow': 'credit' } });
   // The object says it paces, with a count of nothing, before any byte.
   const [first, binary] = (await once(ws, 'message')) as [Buffer, boolean];
@@ -346,7 +342,7 @@ async function heapHeld(): Promise<number> {
   }
 }
 
-test("a long result streamed through the object leaves its heap as it was: each chunk is let go once sent", { skip, timeout: 180_000 }, async () => {
+test("a long result streamed through the object leaves its heap as it was: each chunk is let go once sent", { timeout: 180_000 }, async () => {
   const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}`, 'coffre-tunnel-flow': 'credit' } });
   await once(ws, 'message');
   let received = 0;

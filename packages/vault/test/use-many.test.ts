@@ -1,6 +1,6 @@
 // B2 (T167): a request's several keys as one vault call, `useMany`, one
-// statement (`use_batch`, migration 0048) where each key had a call of its own,
-// on both engines. Each case is named for what formal/Batching.tla holds of it;
+// statement (`use_batch`, migration 0048) where each key had a call of its own.
+// Each case is named for what formal/Batching.tla holds of it;
 // every key's use is `use_credential`'s, whose own guarantees use.test.ts holds.
 // Every run's live answers are held to the replay of the log (R53).
 import test, { after, before, beforeEach } from 'node:test';
@@ -20,7 +20,7 @@ import type { Input } from '../src/inputs.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { newRequestId, UseCache, useLimits, useMany, type UsePath } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { HOT_URL, openTestDatabase, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
+import { HOT_URL, openTestDatabase, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, emptyLog, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 import { resolveVaultConfig } from '../src/config.ts';
 
@@ -101,7 +101,7 @@ test('a batch is one entry a key, every value opened, in the order asked; a firs
   assert.equal(await replayed(answered), 5);
 });
 
-test('one statement for every key, up to `limits.batch` (100): two with keys entering the set, one once they are in', postgresOnly('the hot pool counted'), async () => {
+test('one statement for every key, up to `limits.batch` (100): two with keys entering the set, one once they are in', async () => {
   const w = await world();
   const ids: string[] = [];
   for (let i = 0; i < 30; i += 1) ids.push(await w.key(`v${i}`));
@@ -192,7 +192,7 @@ test('AnswerWhole: one key the rules refuse (another environment, no grant there
   assert.equal(await count('bulk_cap'), 0, 'refused on the first call\'s rows: nothing entered');
 });
 
-test('StrongestFirst: two batches of one principal\'s, each moving one key on and entering another, both answered, neither waiting on the other', postgresOnly('advisory locks'), async () => {
+test('StrongestFirst: two batches of one principal\'s, each moving one key on and entering another, both answered, neither waiting on the other', async () => {
   const w = await world();
   const [moved, entered1, entered2] = [await w.key(), await w.key(), await w.key()];
   const { use } = await isolate();
@@ -251,7 +251,7 @@ test('a batch names each key with a request id of its own, by ids alone', async 
   await assert.rejects(vault.useMany!({ ...asked, items: [{ ...asked.items[0]!, secretId: 'KEY' }] }), /lowercase UUID/);
 });
 
-test('a replayed batch (its request ids again) writes nothing more: busy, its first answer\'s entries stand', postgresOnly('the request ids\' unique index'), async () => {
+test('a replayed batch (its request ids again) writes nothing more: busy, its first answer\'s entries stand', async () => {
   const w = await world();
   const ids = [await w.key(), await w.key()];
   const { vault } = await isolate();
@@ -264,7 +264,7 @@ test('a replayed batch (its request ids again) writes nothing more: busy, its fi
   assert.equal(await replayed(answered), 2);
 });
 
-test('a batch past `limits.batch` keys is made in statements of that many, in turn: each round so, every value', postgresOnly('the hot pool counted'), async () => {
+test('a batch past `limits.batch` keys is made in statements of that many, in turn: each round so, every value', async () => {
   const w = await world();
   const ids: string[] = [];
   for (let i = 0; i < 5; i += 1) ids.push(await w.key(`v${i}`));
@@ -280,7 +280,7 @@ test('a batch past `limits.batch` keys is made in statements of that many, in tu
   assert.equal(await replayed(answered), 5);
 });
 
-test('past its deadline, a batch sends none of its statements left, and lets go of its admission (review r3 of #433)', postgresOnly('the hot pool counted'), async () => {
+test('past its deadline, a batch sends none of its statements left, and lets go of its admission (review r3 of #433)', async () => {
   const w = await world();
   const ids: string[] = [];
   for (let i = 0; i < 5; i += 1) ids.push(await w.key());
@@ -299,7 +299,7 @@ test('past its deadline, a batch sends none of its statements left, and lets go 
   assert.equal(await count('log_uses'), 0, 'its one statement, past the deadline by Postgres\'s clock, wrote nothing');
 });
 
-test('a batch answered `late` by its timer while the clock is still short of its deadline sends no statement after the one in flight (T170)', postgresOnly('the hot pool counted'), async (t) => {
+test('a batch answered `late` by its timer while the clock is still short of its deadline sends no statement after the one in flight (T170)', async (t) => {
   const w = await world();
   const ids: string[] = [];
   for (let i = 0; i < 3; i += 1) ids.push(await w.key());
@@ -334,7 +334,7 @@ test('a batch answered `late` by its timer while the clock is still short of its
   }
 });
 
-test('a batch that loses its race while one key\'s old-write check reads starts no other key\'s (T177)', postgresOnly('the hot pool counted'), async (t) => {
+test('a batch that loses its race while one key\'s old-write check reads starts no other key\'s (T177)', async (t) => {
   const w = await world();
   const ids = [await w.key(), await w.key()];
   // A 0.14 access entry about the principal that the new log does not account for, before each key's statement (one
@@ -389,7 +389,7 @@ test('a batch that loses its race while one key\'s old-write check reads starts 
   }
 });
 
-test('a batch refused on its second call\'s rows (her grant revoked between the calls) is refused there, each key\'s request logged and counted in the set, as lone uses would be', postgresOnly('the hot pool counted'), async () => {
+test('a batch refused on its second call\'s rows (her grant revoked between the calls) is refused there, each key\'s request logged and counted in the set, as lone uses would be', async () => {
   const w = await world();
   const ids = [await w.key(), await w.key()];
   const revoked = { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants: [] };

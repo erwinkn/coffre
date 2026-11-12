@@ -55,6 +55,9 @@ Workers or two Node processes:
   member, and who holds what. It decides every read and write of a key, and
   nothing else can.
 
+Node is untested in 0.16.0: a Node deployment stays on 0.15.0 until
+0.16.1 brings Node back, on Postgres.
+
 Both use one Postgres database, each through its own login, and both write
 to one audit log. Say Ada runs `coffre run market/prod -- ./deploy`. The app
 checks her session and asks the vault for the data keys of
@@ -110,7 +113,6 @@ The checks:
 
 ```sh
 pnpm test              # lint, then every test on Postgres (needs it up: pnpm db:up)
-pnpm test:sqlite       # the same suite on SQLite
 pnpm test:matrices     # 0.15's use by name: every key a caller may not have, answered alike (hours on Postgres, so only in shards: CI's, or `pnpm validate`'s)
 pnpm test:properties   # bounded Hegel properties; --long for 100x cases (docs/property-tests.md)
 pnpm test:properties:server  # modeled server operations; --long for 40 sequences

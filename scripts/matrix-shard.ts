@@ -34,11 +34,10 @@ export function shardOf<T>(file: string, cases: readonly T[], labelOf: (item: T)
   const ran = sliceOf(cases, spec);
   const dir = process.env.COFFRE_TEST_SHARD_REPORT;
   if (dir !== undefined && dir !== '') {
-    const engine = process.env.COFFRE_TEST_ENGINE ?? 'postgres';
     const path = relative(root, fileURLToPath(file));
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `${engine}-${path.replaceAll('/', '_')}-${spec.shard}-of-${spec.of}.json`),
-      JSON.stringify({ engine, file: path, ...spec, cases: cases.map(labelOf), ran: ran.map(labelOf) }));
+    writeFileSync(join(dir, `${path.replaceAll('/', '_')}-${spec.shard}-of-${spec.of}.json`),
+      JSON.stringify({ file: path, ...spec, cases: cases.map(labelOf), ran: ran.map(labelOf) }));
   }
   return ran;
 }

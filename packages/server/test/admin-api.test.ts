@@ -377,8 +377,7 @@ test('two owners adding the same member at once both succeed, and one of them cr
 });
 
 test('an email is one member however it is capitalised, accents included', async () => {
-  // SQLite's lower() folds ASCII only, so its lowercase check cannot catch an
-  // É; the server folds every email before it reaches the database.
+  // The server folds every email before it reaches the database.
   assert.equal((await root.members.add('user:Émile@Acme.example')).created, true);
   assert.equal((await root.members.add('user:ÉMILE@acme.EXAMPLE')).created, false);
   const stored = await db.owner.select({ principal: principals.principal }).from(principals);

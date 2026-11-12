@@ -1,5 +1,5 @@
 // A route use (0.16, T186 PR C; docs/design/proxy-ui.md, sections 3, 4 and 6; migration 0058, `use_route`;
-// formal/Routing.tla), on both engines: the vault's one call (two on a map miss) finds a UI definition by its name at
+// formal/Routing.tla): the vault's one call (two on a map miss) finds a UI definition by its name at
 // the place, through the fork chain, its seal checked against its object's newest change, and uses every key it sends,
 // each decided twice: for the caller, as a use, and for the item's editor, what their save froze intersected with what
 // they hold now. Each case is named for the model's protection it holds.
@@ -17,10 +17,9 @@ import { ROLES } from '@coffre/core/access';
 import { applyOp, itemDigest, objectKey, ROLES_REF, type Input, type Op, type ProxyItem, type Ref } from '../src/inputs.ts';
 import { purposeCode, replayStored } from '../src/log-replay.ts';
 import { callRoute as postgresRoute, callRouteNamed as postgresNamed } from '../src/use.postgres.ts';
-import { callRoute as sqliteRoute, callRouteNamed as sqliteNamed } from '../src/use.sqlite.ts';
 import { useRoute, type Names, type RouteCall, type UseCall } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
+import { HOT_URL, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
 import { deletesSettled, horizonHeld, weigh, weighingSession, WORLD_TABLES, type HotCall } from '../../../scripts/matrix-weigh.ts';
 import { change, CONFIG, emptyLog, heldKeks, isolate, LOG_015, seal, SIGNING_KEY, timingOut, until, useDatabases } from './use-world.ts';
@@ -261,8 +260,7 @@ test('SealChecked: a row put back from before an edit is `stale`; an item forged
   const { vault } = await isolate();
   const put = async (row: { items: Record<string, ProxyItem>; digests: Buffer; seal: Buffer }) => {
     const json = JSON.stringify(row.items);
-    if (ENGINE === 'postgres') await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}::jsonb, digests = ${row.digests}, seal = ${row.seal} WHERE environment_id = ${w.dev}`);
-    else await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}, digests = ${row.digests}, seal = ${row.seal} WHERE environment_id = ${w.dev}`);
+    await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}::jsonb, digests = ${row.digests}, seal = ${row.seal} WHERE environment_id = ${w.dev}`);
   };
   // Version 7 put back whole: its seal is the vault's, but not its object's newest change's.
   await put(v7);
@@ -305,8 +303,7 @@ test("forks (decision 6): a fork with no item of the name is served by its paren
   assert.equal(own.found.level, 0);
   const row = (await w.stored(eu))!;
   const json = JSON.stringify({});
-  if (ENGINE === 'postgres') await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}::jsonb WHERE environment_id = ${eu}`);
-  else await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json} WHERE environment_id = ${eu}`);
+  await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}::jsonb WHERE environment_id = ${eu}`);
   assert.ok(row.digests.length > 0);
   assert.deepEqual(refused(await vault.useRoute(atFork())), { code: 'tampered', key: null });
 });
@@ -457,7 +454,7 @@ test("the place itself after a warm stable reading: the map's guess (stable, its
   assert.equal(await count('log_uses'), used, 'nothing used');
 });
 
-test("the place itself reads no definition, in either engine's statement: the reading and the gate are its answer, no level of the chain read, nothing used (C2b4; Sol's review r1 of #486)", async () => {
+test("the place itself reads no definition: the reading and the gate are its answer, no level of the chain read, nothing used (C2b4; Sol's review r1 of #486)", async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');
   const ada = await w.member([{ environmentId: null, role: 'owner' }]);
@@ -470,13 +467,12 @@ test("the place itself reads no definition, in either engine's statement: the re
     credential: null, way: 0, principal: null, place: null, at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: 'credential' }), deadline: at + 3000,
     mac: Buffer.alloc(16), keys: null, offset: 0, limit: 100, lock: null, use: true, light: false,
   });
-  const statement = ENGINE === 'postgres' ? postgresRoute : sqliteRoute;
-  const itself = await statement(hot, ask(''));
+  const itself = await postgresRoute(hot, ask(''));
   assert.deepEqual([itself.reading, itself.stood, itself.place], [1, true, w.dev]);
   assert.deepEqual([itself.levels, itself.editor, itself.keys, itself.made, itself.rows], [[], null, [], false, []], 'no definition read: the route block left at once');
   assert.deepEqual(itself.madeFor, [`${w.slug}/dev`], "the handle's places, for the map's next pick");
   // A route at the same place reads its levels: what the place itself skips.
-  const routed = await statement(hot, ask(w.slug));
+  const routed = await postgresRoute(hot, ask(w.slug));
   assert.equal(routed.reading, 1);
   assert.equal(routed.levels.length, 1);
   assert.equal(await count('log_uses'), 0);
@@ -515,9 +511,8 @@ test("T205: the route's named call at a reading of the URL the map picked wrong 
     mac: Buffer.alloc(16), deadline: at + 3000, way: 0, principal: null, route: 'openai',
     names: { tokenHash: w.tokenHash, project: null, environment: null, key: null, handle: false, unless: [], accepts: { signin: true, issuers: [], passkeys: 'off' as const }, forks: true, ...names },
   });
-  const named = ENGINE === 'postgres' ? postgresNamed : sqliteNamed;
   const state = async (names: Partial<Names>) => {
-    const { row, route: read } = await named(hot, call(names));
+    const { row, route: read } = await postgresNamed(hot, call(names));
     return { state: row.state, read: read === null ? null : { keyed: read.keyed, made: read.made, place: read.place } };
   };
   // `/use/<project>/other/openai/…`, the URL's stable reading `<project>` too: the handle was not made for other.
@@ -531,8 +526,8 @@ test("T205: the route's named call at a reading of the URL the map picked wrong 
   assert.deepEqual(await state({ handle: true, unless: [`${w.slug}/other`] }), { state: 'moved', read: { keyed: true, made: false, place: w.dev } });
   // The levels and editor it reads are `use_route`'s, field for field: a copy of its SQL left behind would read `stale`
   // only through `chainFault` or `editorOf` (Fable's review of #507).
-  const { route: read } = await named(hot, call({ project: w.slug, environment: 'dev', unless: [w.slug] }));
-  const routed = await (ENGINE === 'postgres' ? postgresRoute : sqliteRoute)(hot, {
+  const { route: read } = await postgresNamed(hot, call({ project: w.slug, environment: 'dev', unless: [w.slug] }));
+  const routed = await postgresRoute(hot, {
     tokenHash: w.tokenHash, accepts: { signin: true, issuers: [], passkeys: 'off' as const }, project: w.slug, environment: 'dev', named: 'openai', stable: w.slug, reading: 1,
     credential: null, way: 0, principal: null, place: null, at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: 'credential' }), deadline: at + 3000,
     mac: Buffer.alloc(16), keys: null, offset: 0, limit: 100, lock: null, use: false, light: false,
@@ -579,8 +574,7 @@ test('proxyItem: the item a use would find, or every item the place serves, deci
   ]);
   assert.equal(await count('log_uses'), 0);
   // One forged item among them: the whole answer fails (the plan answers 503).
-  if (ENGINE === 'postgres') await run(db.owner, sql`UPDATE proxy_definitions SET items = jsonb_set(items, '{maps,savedAt}', '1') WHERE environment_id = ${eu}`);
-  else await run(db.owner, sql`UPDATE proxy_definitions SET items = json_set(items, '$.maps.savedAt', 1) WHERE environment_id = ${eu}`);
+  await run(db.owner, sql`UPDATE proxy_definitions SET items = jsonb_set(items, '{maps,savedAt}', '1') WHERE environment_id = ${eu}`);
   const forged = await vault.proxyItem({ caller, place: { project: w.slug, environment: 'dev-eu' }, name: null, at, deadline: at + 3000 });
   assert.ok(forged.ok && 'fault' in forged);
   assert.equal(forged.fault, 'tampered');
@@ -601,7 +595,7 @@ test("OneVersion: an edit landing between a use's first round and its second (a 
   let edits = 0;
   const client = postgresClient(HOT_URL, { max: 2 });
   let statements = 0;
-  const pool = ENGINE !== 'postgres' ? null : new Proxy(client, {
+  const pool = new Proxy(client, {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
       if (key !== 'unsafe') return value;
@@ -621,15 +615,13 @@ test("OneVersion: an edit landing between a use's first round and its second (a 
   });
   try {
     const prepared = await prepareVault(CONFIG, LOG_015);
-    const hot: Database = pool === null ? db.vault : createDatabase(pool);
+    const hot: Database = createDatabase(pool);
     const vault = openVault(db.vault, prepared, hot);
     const outcome = answered(await vault.useRoute(w.askRoute('s3')));
     assert.ok(outcome.outcome.ok, JSON.stringify(outcome.outcome));
     assert.ok(outcome.found?.found);
-    if (ENGINE === 'postgres') {
-      assert.equal(edits, 1, 'the edit landed between rounds');
-      assert.equal((outcome.found.item.definition as Extract<ProxyDefinition, { kind: 'route' }>).upstream, 'https://evil.example/v1', 'decided on the version after the edit, every key');
-    }
+    assert.equal(edits, 1, 'the edit landed between rounds');
+    assert.equal((outcome.found.item.definition as Extract<ProxyDefinition, { kind: 'route' }>).upstream, 'https://evil.example/v1', 'decided on the version after the edit, every key');
   } finally {
     await client.end();
   }
@@ -682,12 +674,12 @@ test("T205: a route of one key given a second while the map holds the one: the r
     names: { tokenHash: w.tokenHash, project: w.slug, environment: 'dev', key: null, handle: false, unless: [], accepts: { signin: true, issuers: [], passkeys: 'off' as const }, forks: true },
   };
   const after = await count('log_uses');
-  const { row, route: read } = await (ENGINE === 'postgres' ? postgresNamed : sqliteNamed)(hot, call);
+  const { row, route: read } = await postgresNamed(hot, call);
   assert.deepEqual([row.state, row.n_secret, read?.keyed, read?.made, read?.keys], ['moved', null, false, false, [first, second]]);
   assert.equal(await count('log_uses'), after, 'nothing used');
 });
 
-test("T205: a route of one key given a second, then edited again under the use: served in three attempts, the named call's own handing the second key's read to `use_route` at once (Fable's review of #507)", { skip: ENGINE !== 'postgres' ? 'an edit injected after the hot pool\'s statement' : false }, async () => {
+test("T205: a route of one key given a second, then edited again under the use: served in three attempts, the named call's own handing the second key's read to `use_route` at once (Fable's review of #507)", async () => {
   const w = await routeWorld(db);
   const made = [await w.key('one'), await w.key('two'), await w.key('three')];
   const [first, second, third] = await Promise.all(made.map((id) => w.nameOf(id)));
@@ -733,7 +725,7 @@ test("T205: a route of one key given a second, then edited again under the use: 
   }
 });
 
-test("a later statement's fresh ids reach the map: an edit between a use's statements costs it one attempt, not two (Fable's review of #464)", { skip: ENGINE !== 'postgres' ? 'an edit injected between the hot pool\'s statements' : false }, async () => {
+test("a later statement's fresh ids reach the map: an edit between a use's statements costs it one attempt, not two (Fable's review of #464)", async () => {
   const w = await routeWorld(db);
   const made = [await w.key('one'), await w.key('two'), await w.key('three'), await w.key('four')];
   const names = await Promise.all(made.map((id) => w.nameOf(id)));
@@ -854,7 +846,7 @@ test("the chain is the vault's above the level that serves too: a fork's own rou
   assert.deepEqual(grafted.keys, []);
 });
 
-test("the reading is picked again under the fence: a rename landing between the pick and the gate serves the reading the rows pick then (review r2 of #464)", { skip: ENGINE !== 'postgres' ? 'a rename held between the statement\'s first reads and its fence' : false }, async () => {
+test("the reading is picked again under the fence: a rename landing between the pick and the gate serves the reading the rows pick then (review r2 of #464)", async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');
   const name = await w.nameOf(key);
@@ -887,7 +879,7 @@ test("the reading is picked again under the fence: a rename landing between the 
   assert.deepEqual(values(answer), { [name]: 'sk' });
 });
 
-test("OneVersion holds the roles too: a role edit landing between a use's rounds decides the editor again on the roles after it (review r1 of #464)", { skip: ENGINE !== 'postgres' ? 'an edit injected between the hot pool\'s statements' : false }, async () => {
+test("OneVersion holds the roles too: a role edit landing between a use's rounds decides the editor again on the roles after it (review r1 of #464)", async () => {
   const w = await routeWorld(db);
   const a = await w.key('a');
   const nameA = await w.nameOf(a);
@@ -955,8 +947,7 @@ test("T190: a level's definitions put back from before an edit, the edit's entry
   const { vault } = await isolate();
   assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
   const json = JSON.stringify(old.items);
-  if (ENGINE === 'postgres') await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}::jsonb, digests = ${old.digests}, seal = ${old.seal} WHERE environment_id = ${w.dev}`);
-  else await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}, digests = ${old.digests}, seal = ${old.seal} WHERE environment_id = ${w.dev}`);
+  await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}::jsonb, digests = ${old.digests}, seal = ${old.seal} WHERE environment_id = ${w.dev}`);
   await forgeNewest({ kind: 'proxy', id: w.dev }, old.seal);
   for (const one of [vault, (await isolate()).vault]) {
     assert.deepEqual(refused(await one.useRoute(w.askRoute('openai'))), { code: 'stale', key: null });
@@ -1002,7 +993,7 @@ test("T190: a level's environment archived, its row put back and the archive's e
   const [row] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM environments WHERE id = ${eu}`);
   const archived: Input = { kind: 'environment', id: eu, projectId: w.project, slug: 'dev-eu', owner: null, parentId: w.dev, protected: false, deleted: false, archived: true, projectArchived: false };
   await change(ref, { op: 'environment.archive', archived: true }, archived, async (tx, value) => {
-    await run(tx, ENGINE === 'postgres' ? sql`UPDATE environments SET archived_at = now() WHERE id = ${eu}` : sql`UPDATE environments SET archived_at = ${Date.now()} WHERE id = ${eu}`);
+    await run(tx, sql`UPDATE environments SET archived_at = now() WHERE id = ${eu}`);
     await seal('environments', 'id', eu)(tx, value);
   });
   assert.ok(!answered(await vault.useRoute(atFork())).outcome.ok, 'an archived level serves nothing');
@@ -1047,7 +1038,7 @@ async function watched(): Promise<{ vault: ReturnType<typeof openVault>; gates: 
   return { vault, gates, end: () => client.end() };
 }
 
-test("T205: a warm route use of one key is the vault's one named call, the use made by the map's ids; one that resolves no key (its item deleted since) answers the caller's use of no key at the place, as the whole gate", { skip: ENGINE !== 'postgres' ? "the hot pool's answers" : false }, async () => {
+test("T205: a warm route use of one key is the vault's one named call, the use made by the map's ids; one that resolves no key (its item deleted since) answers the caller's use of no key at the place, as the whole gate", async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');
   const name = await w.nameOf(key);
@@ -1084,8 +1075,8 @@ test("T200, T205: under a light gate, or the route's named call, the caller is d
   const name = await w.nameOf(key);
   const ada = await w.member([{ environmentId: null, role: 'owner' }]);
   await w.save({ openai: { definition: route('openai', [name]), editor: ada } });
-  const watch = ENGINE === 'postgres' ? await watched() : null;
-  const vault = watch?.vault ?? (await isolate()).vault;
+  const watch = await watched();
+  const vault = watch.vault;
   try {
     for (let i = 0; i < 2; i += 1) assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
     const [member] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM principals WHERE principal = ${w.principal}`);
@@ -1104,16 +1095,16 @@ test("T200, T205: under a light gate, or the route's named call, the caller is d
     await forgeNewest({ kind: 'principal', id: w.principal }, Buffer.from(member!.seal));
     // Her account's row not as the log says: the credential's own route (`routeOf`), `stale`, as the whole gate answers it.
     const stale = { served: true, route: 'credential', outcome: { ok: false, code: 'stale', number: null } };
-    const seen = watch?.gates.length ?? 0;
+    const seen = watch.gates.length;
     assert.deepEqual(await vault.useRoute(w.askRoute('openai')), stale);
-    if (watch !== null) assert.equal(watch.gates[seen], 'one:null', 'the warm use went by the route\'s named call (T205), its use made');
+    assert.equal(watch.gates[seen], 'one:null', 'the warm use went by the route\'s named call (T205), its use made');
     assert.deepEqual(await (await isolate()).vault.useRoute(w.askRoute('openai')), stale);
   } finally {
-    await watch?.end();
+    await watch.end();
   }
 });
 
-test("T200: a caller who stands nowhere there reads nothing of the route, its gate asked light or not: each refusal weighed beside its twin (a route the world never saved), its key's blocks and its buffers alike whatever the route names (NoKeyBeforeStanding; the named matrix's weighing, slack 6)", { skip: ENGINE !== 'postgres' ? 'the hot path\'s statements, weighed' : false }, async (t) => {
+test("T200: a caller who stands nowhere there reads nothing of the route, its gate asked light or not: each refusal weighed beside its twin (a route the world never saved), its key's blocks and its buffers alike whatever the route names (NoKeyBeforeStanding; the named matrix's weighing, slack 6)", async (t) => {
   const w = await routeWorld(db);
   const held = await w.key('sk');
   const sensitive = await w.key('sens');

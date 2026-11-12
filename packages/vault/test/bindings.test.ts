@@ -1,7 +1,7 @@
 // A service's trust bindings are the vault's to make and end (T149, PR 3a; credentials.ts; migration 0037): a binding a
 // person makes is weighed as a service token's issue is and sealed, a change of the log; one ended takes every live
 // credential it issued with it, in one statement; and a sign-in takes only a binding the vault sealed (formal/Lifecycle.tla's
-// BindingSealed, its bind and unbind). Both engines unless a case says otherwise.
+// BindingSealed, its bind and unbind).
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,7 +21,7 @@ import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, sealKey } from '../src/inputs.ts';
 import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
-import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, sealed, nothingHeld, ENGINE, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, rows, sealed, nothingHeld, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
@@ -113,25 +113,23 @@ async function newestAsRead(id: string): Promise<NonNullable<SignInInput['newest
 
 /**
  * `w`'s vault on a connection that counts the vault's own reads of newest changes (`loggedChanges`, T190) and runs
- * `before` as `sign_in`'s statement goes out (Postgres) or its transaction opens (SQLite).
+ * `before` as `sign_in`'s statement goes out.
  */
 async function watchedVault(w: World, before: () => Promise<void> = async () => {}): Promise<{ vault: World['vault']; reads: () => number }> {
   const raw = db.vault as unknown as { dialect: { sqlToQuery(query: unknown): { sql: string } } } & Record<string | symbol, unknown>;
-  const postgres = ENGINE === 'postgres';
   let reads = 0;
   const late = new Proxy(raw, {
     get(target, key) {
       const value = Reflect.get(target, key);
       if (typeof value !== 'function') return value;
-      if (key === (postgres ? 'execute' : 'all')) {
+      if (key === 'execute') {
         return async (query: unknown) => {
           const text = target.dialect.sqlToQuery(query).sql;
           if (text.includes('FROM log_changes c WHERE c.number IN')) reads += 1;
-          if (postgres && text.includes('sign_in(')) await before();
+          if (text.includes('sign_in(')) await before();
           return value.call(target, query);
         };
       }
-      if (!postgres && key === 'transaction') return async (...args: unknown[]) => (await before(), value.apply(target, args));
       return value.bind(target);
     },
   });
@@ -203,22 +201,19 @@ test("a binding ended, put back, its end's seal column written to match only onc
   // The writer: the row as it was before its end, its old seal valid. The end's log row untouched, so far: its MAC holds.
   await db.owner.update(serviceBindings).set({ revokedAt: null, seal: row!.seal, authMac: row!.authMac }).where(eq(serviceBindings.id, made.id));
   const [newest] = await db.owner.select({ number: logChanges.number }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'binding', id: made.id }))).orderBy(desc(logChanges.number)).limit(1);
-  // Then, as `sign_in`'s statement goes out (Postgres), or its transaction opens (SQLite): the end's seal column made
-  // the row's, after the vault checked that change's MAC, before the statement compares that column with the row.
+  // Then, as `sign_in`'s statement goes out: the end's seal column made the row's, after the vault checked that change's MAC, before the statement compares that column with the row.
   const forge = async () => { await db.owner.update(logChanges).set({ seal: row!.seal }).where(eq(logChanges.number, newest!.number)); };
   const raw = db.vault as unknown as { dialect: { sqlToQuery(query: unknown): { sql: string } } } & Record<string | symbol, unknown>;
-  const postgres = ENGINE === 'postgres';
   const late = new Proxy(raw, {
     get(target, key) {
       const value = Reflect.get(target, key);
       if (typeof value !== 'function') return value;
-      if (postgres && key === 'execute') {
+      if (key === 'execute') {
         return async (query: unknown) => {
           if (target.dialect.sqlToQuery(query).sql.includes('sign_in(')) await forge();
           return value.call(target, query);
         };
       }
-      if (!postgres && key === 'transaction') return async (...args: unknown[]) => (await forge(), value.apply(target, args));
       return value.bind(target);
     },
   });
@@ -478,7 +473,7 @@ test("a binding that replaces another ends it, and what it issued, in the same s
   assert.deepEqual(await w.vault.changeBindings!(change({ ends: [{ ...forged, before: { ...forged.before, seal: randomBytes(16).toString('base64') } }] })), { ok: false, refused: 'tampered' });
 });
 
-test("an unbind takes the fence for its statement; a bind that ends nothing takes none (RevokeTakesFence, IssueOffFence, R58)", postgresOnly('the fence is an advisory lock'), async () => {
+test("an unbind takes the fence for its statement; a bind that ends nothing takes none (RevokeTakesFence, IssueOffFence, R58)", async () => {
   const w = await world();
   const holder = postgresSession(OWNER_URL);
   try {
@@ -498,7 +493,7 @@ test("an unbind takes the fence for its statement; a bind that ends nothing take
   }
 });
 
-test("an unbind takes 0.14's head first, which 0.14's use of a credential it ends holds from its check to its commit; a bind that ends nothing takes none (EntryLessHead, PR 9b)", postgresOnly("0.14's head is a row lock of Postgres"), async () => {
+test("an unbind takes 0.14's head first, which 0.14's use of a credential it ends holds from its check to its commit; a bind that ends nothing takes none (EntryLessHead, PR 9b)", async () => {
   const w = await world();
   const made = binding(w);
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
@@ -630,7 +625,7 @@ test("a bind through an MCP connection goes ahead only while it is connected; an
   await db.owner.delete(oauthClients);
 });
 
-test("a key a replacing bind reads, renamed while it waits for the fence, has it read again: the names compared once the fence is had (review r4)", postgresOnly('the fence is an advisory lock'), async () => {
+test("a key a replacing bind reads, renamed while it waits for the fence, has it read again: the names compared once the fence is had (review r4)", async () => {
   const w = await world();
   const { secrets } = tablesOf(db.owner);
   const environment = await newEnvironment(db.owner, w.project);
@@ -653,7 +648,7 @@ test("a key a replacing bind reads, renamed while it waits for the fence, has it
   }
 });
 
-test("one new binding id asked for two accounts at once, the first's row deleted once it committed: the second is no second make of it (review r4)", postgresOnly('row locks'), async () => {
+test("one new binding id asked for two accounts at once, the first's row deleted once it committed: the second is no second make of it (review r4)", async () => {
   const w = await world();
   const OTHER = 'token:other';
   assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: OTHER })).ok);

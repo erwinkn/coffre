@@ -21,7 +21,7 @@ import { sql } from 'drizzle-orm';
 
 import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { newRequestId } from '../src/use.ts';
-import { HOT_URL, openTestDatabase, postgresOnly, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { HOT_URL, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { DAY, emptyLog, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -35,7 +35,7 @@ after(() => db.close());
 /** One call's work: its buffers (EXPLAIN's, the function's own statements and their planning included) and the locks its transaction holds after it. */
 type Work = { buffers: number; locks: number };
 
-test('T187: a use reads and locks the same at a handful of days and at a hundred more: first call, sixth and after, and once a day is made', { ...postgresOnly('the hot path'), timeout: 600_000 }, async () => {
+test('T187: a use reads and locks the same at a handful of days and at a hundred more: first call, sixth and after, and once a day is made', { timeout: 600_000 }, async () => {
   const w = await world();
   const id = await w.key();
   const today = new Date(Math.floor(Date.now() / DAY) * DAY);

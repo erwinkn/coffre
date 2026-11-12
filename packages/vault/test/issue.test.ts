@@ -1,6 +1,6 @@
 // The vault issues tokens itself (T149, PR 2; credentials.ts; migration 0036): a service account's token, a person's
 // personal token, a handle, each weighed by the vault on what it reads (formal/Lifecycle.tla's IssueRead), then written
-// in one statement that holds those rows as read (IssuerLocked, IssuerCAS). Both engines unless a case says otherwise.
+// in one statement that holds those rows as read (IssuerLocked, IssuerCAS).
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,7 +17,7 @@ import { asc, count, desc, eq, sql } from 'drizzle-orm';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { weighIssue } from '../src/credentials.ts';
 import { objectKey } from '../src/inputs.ts';
-import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, nothingHeld, withLogUnlocked, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, sealed, nothingHeld, withLogUnlocked, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
@@ -251,7 +251,7 @@ test("a credential 0.14 made, which the log never held, authorizes no issue of t
   assert.equal(((await w.vault.issueToken!(handleOf(w, token.credential.id, undefined, onViewerToken))) as { refused?: string }).refused, 'unlogged');
 });
 
-test("an issue's write holds the credential it came in on to the end the vault authenticated: one extended while it waits, its seal unchanged, ends it (review r3)", postgresOnly('row locks'), async () => {
+test("an issue's write holds the credential it came in on to the end the vault authenticated: one extended while it waits, its seal unchanged, ends it (review r3)", async () => {
   const w = await world();
   const token = personal(w, ROOT, null, Date.now() + 3_600_000);
   assert.ok((await w.vault.issueToken!(token)).ok);
@@ -333,7 +333,7 @@ test('an account not at the generation named, or removed, gets no token; a polic
   assert.equal(((await w.vault.issueToken!(personal(w))) as { refused?: string }).refused, 'retired');
 });
 
-test("an issue weighed before its issuer's demotion commits is weighed again, on what they hold now: refused, nothing written (IssuerLocked, IssuerCAS)", postgresOnly('row locks'), async () => {
+test("an issue weighed before its issuer's demotion commits is weighed again, on what they hold now: refused, nothing written (IssuerLocked, IssuerCAS)", async () => {
   const w = await world();
   const byAdmin = () => asked(w, (input) => ({ ...input, actor: ADMIN, credential: { ...input.credential, createdBy: 'admin@acme.example' } }));
   const holder = postgresSession(OWNER_URL);
@@ -368,7 +368,7 @@ test("an issue the app weighed on its issuer's access as it was is refused, for 
   assert.ok((await w.vault.issueToken!(at(accessSeq))).ok);
 });
 
-test("a policy change waits for the issues in flight, which hold the issue lock shared, before the fence: ordered, and no use waits on them (IssuePolicyHeld, PolicyIssueFirst; review r3)", postgresOnly('the issue lock is an advisory lock'), async () => {
+test("a policy change waits for the issues in flight, which hold the issue lock shared, before the fence: ordered, and no use waits on them (IssuePolicyHeld, PolicyIssueFirst; review r3)", async () => {
   const w = await world();
   const holder = postgresSession(OWNER_URL);
   try {
@@ -390,7 +390,7 @@ test("a policy change waits for the issues in flight, which hold the issue lock 
   }
 });
 
-test("an environment the scope names, renamed while the issue's write waits, refuses it: the slugs it was weighed on are held under the issue lock (Fable on PR 2)", postgresOnly('row locks'), async () => {
+test("an environment the scope names, renamed while the issue's write waits, refuses it: the slugs it was weighed on are held under the issue lock (Fable on PR 2)", async () => {
   const w = await world();
   const scoped = asked(w, (input) => ({ ...input, credential: { ...input.credential, scope: storedScope([issuedGrant({ projectId: w.project, environmentId: w.environment, role: 'viewer' })]) } }));
   const holder = postgresSession(OWNER_URL);
@@ -414,13 +414,13 @@ test("an environment the scope names, renamed while the issue's write waits, ref
   }
 });
 
-test("`issue_token` compares the policy only once it holds the issue lock shared (IssuePolicyHeld)", postgresOnly('a function of 0036'), async () => {
+test("`issue_token` compares the policy only once it holds the issue lock shared (IssuePolicyHeld)", async () => {
   const [{ body }] = await db.owner.execute<{ body: string }>(sql`SELECT pg_get_functiondef(${ISSUE_TOKEN}::regprocedure) AS body`);
   const lock = body.indexOf('pg_advisory_xact_lock_shared(1668244070, 1)');
   assert.ok(lock > 0 && lock < body.indexOf("'policy.change'") && body.indexOf("'policy.change'") < body.indexOf('INSERT INTO public.log_changes'));
 });
 
-test('an issue takes the issue lock, never the fence: it commits while a change holds the fence exclusive (IssueOffFence, R58)', postgresOnly('the fence is an advisory lock'), async () => {
+test('an issue takes the issue lock, never the fence: it commits while a change holds the fence exclusive (IssueOffFence, R58)', async () => {
   const w = await world();
   const holder = postgresSession(OWNER_URL);
   try {
@@ -501,7 +501,7 @@ test('a token on no credential carries no passkey, and one on a credential no pa
   assert.ok((await w.vault.issueToken!(handleOf(w, token.credential.id, undefined, onViewerToken))).ok);
 });
 
-test("a change to a person's passkeys that holds their factor lock: an issue on their session waits for it, then finds the session it revoked ended (review r12, IssueTakesFactor)", postgresOnly('the factor lock is an advisory lock'), async () => {
+test("a change to a person's passkeys that holds their factor lock: an issue on their session waits for it, then finds the session it revoked ended (review r12, IssueTakesFactor)", async () => {
   const w = await world();
   const passkey = await passkeyOf(ROOT);
   const token = await confirmedToken(w, passkey);
@@ -529,7 +529,7 @@ test("a change to a person's passkeys that holds their factor lock: an issue on 
   }
 });
 
-test("an issue takes the factor lock first, and holds it while it waits on a member's row: a change that comes after waits for it, and then reads the token it made (FactorFirst)", postgresOnly('the factor lock is an advisory lock'), async () => {
+test("an issue takes the factor lock first, and holds it while it waits on a member's row: a change that comes after waits for it, and then reads the token it made (FactorFirst)", async () => {
   const w = await world();
   const token = await confirmedToken(w, null);
   const holder = postgresSession(OWNER_URL);
@@ -564,7 +564,7 @@ test("an issue takes the factor lock first, and holds it while it waits on a mem
   }
 });
 
-test('`issue_token` takes the factor lock before any row, and the previous release\'s signature is the same statement carrying no passkey (0064)', postgresOnly('functions of 0064'), async () => {
+test('`issue_token` takes the factor lock before any row, and the previous release\'s signature is the same statement carrying no passkey (0064)', async () => {
   const [{ body }] = await db.owner.execute<{ body: string }>(sql`SELECT pg_get_functiondef(${ISSUE_TOKEN}::regprocedure) AS body`);
   const lock = body.indexOf('pg_advisory_xact_lock(1717658484, hashtext(p_actor))');
   assert.ok(lock > 0 && lock < body.indexOf('FROM public.principals') && lock < body.indexOf('FROM public.credentials'));

@@ -16,7 +16,7 @@ import { cliVersion } from '../src/version.ts';
 import { asSuperuser, CLUSTER, database, emptyCluster, needsCluster } from './cluster.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
-const journal = JSON.parse(readFileSync(join(migrationsFolder('postgres'), 'meta', '_journal.json'), 'utf8')) as {
+const journal = JSON.parse(readFileSync(join(migrationsFolder(), 'meta', '_journal.json'), 'utf8')) as {
   entries: { tag: string; when: number }[];
 };
 const KNOWN = journal.entries.map((entry) => entry.tag);
@@ -347,7 +347,7 @@ test("coffre's objects are what its migrations make, by name, as Postgres folds 
     ]),
     { relations: ['audit_log', 'Mixed', 'folded', 'totals', 'numbers', 'Sums', 'kept'], functions: ['audit_log_append_only', 'Quoted'], types: ['use_row', 'Kind'] },
   );
-  const made = managedObjects(readdirSync(migrationsFolder('postgres')).filter((file) => file.endsWith('.sql')).map((file) => readFileSync(join(migrationsFolder('postgres'), file), 'utf8')));
+  const made = managedObjects(readdirSync(migrationsFolder()).filter((file) => file.endsWith('.sql')).map((file) => readFileSync(join(migrationsFolder(), file), 'utf8')));
   assert.ok(made.relations.includes('vault_members') && made.relations.includes('principals') && made.relations.includes('mcp_approvals') && made.functions.includes('secret_versions_erase_only'), JSON.stringify(made));
   assert.deepEqual(made.types.toSorted(), ['use_row', 'use_view'], JSON.stringify(made));
   // A name followed by a dot is a schema: the SQL that 0022's and 0049's functions run makes no table named public.
@@ -627,7 +627,7 @@ async function migrateThrough(url: string, last: string): Promise<void> {
       await tx.unsafe('CREATE SCHEMA IF NOT EXISTS drizzle');
       await tx.unsafe('CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at bigint)');
       for (const { tag, when } of journal.entries.slice(0, KNOWN.indexOf(last) + 1)) {
-        const text = readFileSync(join(migrationsFolder('postgres'), `${tag}.sql`), 'utf8');
+        const text = readFileSync(join(migrationsFolder(), `${tag}.sql`), 'utf8');
         for (const statement of text.split('--> statement-breakpoint')) await tx.unsafe(statement);
         await tx.unsafe('INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ($1, $2)', [createHash('sha256').update(text).digest('hex'), when]);
       }

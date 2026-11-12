@@ -1,41 +1,18 @@
 import { TOMBSTONE } from '@coffre/core/schemas';
-import { entityKind, getTableColumns, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
+import { getTableColumns, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
 import type { Queryable } from './database.ts';
 
 /**
- * Differences between Postgres and the SQLite used for tests and local dev.
- * Queries stay in the server's queries.ts; it never asks which database it has.
- *
- *                     Postgres                SQLite
- *   isolation         READ COMMITTED          one writer at a time
- *   lock a row        SELECT … FOR UPDATE     one writer at a time
- *   rows changed      count                   rowsAffected
- *   duplicate key     SQLSTATE 23505          SQLITE_CONSTRAINT_UNIQUE
- *   clock             CURRENT_TIMESTAMP       strftime(…, 'now')
- *   clock, in ms      clock_timestamp()       unixepoch('subsec')
- *   a condition read  true / false            1 / 0
- *
- * Nothing here imports SQLite code, so the Worker bundles none.
+ * Postgres's ways, in one place: the queries in the server's queries.ts and
+ * the vault's store.ts use these rather than spell them out.
  */
 
 export type Table = PgTable;
 
-export type Engine = 'postgres' | 'sqlite';
-
-/** Which database this is, from the Drizzle dialect it was opened with. */
-export function engineOf(db: Queryable): Engine {
-  const kind = (db as unknown as { dialect: { constructor: { [entityKind]: string } } }).dialect.constructor[entityKind];
-  if (kind.startsWith('Pg')) return 'postgres';
-  if (kind.startsWith('SQLite')) return 'sqlite';
-  throw new Error(`unsupported database: ${kind}`);
-}
-
 /**
- * Lock the rows a select reads until the transaction ends. SQLite has no row
- * locks and needs none: connect.ts runs one transaction at a time, and each
- * holds the database's write lock from its first statement.
+ * Lock the rows a select reads until the transaction ends.
  *
  * `no key update` is for rows others reference by foreign key: it keeps out
  * every other writer of the row, but not an insert that points at it.
@@ -46,18 +23,15 @@ export function forUpdate<Query extends { for: (strength: 'update' | 'no key upd
   query: Query,
   strength: 'update' | 'no key update' | 'share' = 'update',
 ): ReturnType<Query['for']> {
-  if (engineOf(db) === 'sqlite') return query as ReturnType<Query['for']>;
   return query.for(strength) as ReturnType<Query['for']>;
 }
 
 /**
- * The rows a hand-written query answers, as the driver gives them: what
- * Postgres's `execute` and SQLite's `all` each call a result. Column names
- * are the query's own, unmapped.
+ * The rows a hand-written query answers, as the driver gives them. Column
+ * names are the query's own, unmapped.
  */
 export async function rowsOf<Row>(db: Queryable, query: SQL): Promise<Row[]> {
-  if (engineOf(db) === 'postgres') return [...(await (db as unknown as { execute(query: SQL): Promise<Row[]> }).execute(query))];
-  return (db as unknown as { all<R>(query: SQL): Promise<R[]> }).all<Row>(query);
+  return [...(await (db as unknown as { execute(query: SQL): Promise<Row[]> }).execute(query))];
 }
 
 /**
@@ -66,8 +40,7 @@ export async function rowsOf<Row>(db: Queryable, query: SQL): Promise<Row[]> {
  * later. For a statement that must go first: `policyNow`, ahead of an `audited` work's first `later` write.
  */
 export function rowsNow<Row>(db: Queryable, query: SQL): Promise<Row[]> {
-  if (engineOf(db) === 'postgres') return (db as unknown as { execute(query: SQL): PromiseLike<Row[]> }).execute(query).then((rows) => [...rows]) as Promise<Row[]>;
-  return (db as unknown as { all<R>(query: SQL): PromiseLike<R[]> }).all<Row>(query).then((rows) => rows) as Promise<Row[]>;
+  return (db as unknown as { execute(query: SQL): PromiseLike<Row[]> }).execute(query).then((rows) => [...rows]) as Promise<Row[]>;
 }
 
 /** Insert the rows whose unique keys are free; returns how many that was. */
@@ -101,25 +74,20 @@ export function tombstone(slug: SQLWrapper): SQL {
   return sql`${slug} LIKE ${`%${TOMBSTONE}%`}`;
 }
 
-/** A condition read as a boolean: Postgres returns true or false, SQLite 1 or 0. */
+/** A condition read as a boolean. */
 export function truth(condition: SQL): SQL<boolean> {
   return condition.mapWith((value) => Number(value) === 1);
 }
 
 /** How many rows an insert, update or delete touched. */
 export function changedRows(result: unknown): number {
-  const header = result as { count?: number | null; rowsAffected?: number };
-  return header.count ?? header.rowsAffected ?? 0;
+  return (result as { count?: number | null }).count ?? 0;
 }
 
-const DUPLICATE_KEY = new Set(['23505', 'SQLITE_CONSTRAINT_UNIQUE', 'SQLITE_CONSTRAINT_PRIMARYKEY']);
-
-/** Whether an insert or update failed on a unique constraint. */
+/** Whether an insert or update failed on a unique constraint: SQLSTATE 23505, anywhere in its causes. */
 export function isUniqueViolation(error: unknown): boolean {
-  for (let cause = error; typeof cause === 'object' && cause !== null; ) {
-    const { code, extendedCode } = cause as { code?: unknown; extendedCode?: unknown };
-    if (DUPLICATE_KEY.has(code as string) || DUPLICATE_KEY.has(extendedCode as string)) return true;
-    cause = (cause as { cause?: unknown }).cause;
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    if ((cause as { code?: unknown }).code === '23505') return true;
   }
   return false;
 }
@@ -195,11 +163,7 @@ export function isUnavailable(error: unknown): boolean {
   return isUnreachable(error) || gaveUp(error);
 }
 
-/**
- * A consistent read of several statements that cannot write, such as
- * verifying the chain. SQLite ignores it: its transactions already see one
- * snapshot, and connect.ts runs them one at a time.
- */
+/** A consistent read of several statements that cannot write, such as verifying the chain. */
 export const SNAPSHOT = { isolationLevel: 'repeatable read', accessMode: 'read only' } as const;
 
 /**
@@ -207,12 +171,7 @@ export const SNAPSHOT = { isolationLevel: 'repeatable read', accessMode: 'read o
  * servers order by it, so it is never an application server's.
  */
 export function clock(db: Queryable): SQL<string> {
-  switch (engineOf(db)) {
-    case 'postgres':
-      return sql<string>`CURRENT_TIMESTAMP`;
-    case 'sqlite':
-      return sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
-  }
+  return sql<string>`CURRENT_TIMESTAMP`;
 }
 
 /**
@@ -222,12 +181,7 @@ export function clock(db: Queryable): SQL<string> {
  * before one written while it waited. Read it in a statement after the lock.
  */
 export function clockMillis(db: Queryable): SQL<number> {
-  switch (engineOf(db)) {
-    case 'postgres':
-      return sql`(extract(epoch from clock_timestamp()) * 1000)::bigint`.mapWith(Number);
-    case 'sqlite':
-      return sql`CAST(unixepoch('subsec') * 1000 AS INTEGER)`.mapWith(Number);
-  }
+  return sql`(extract(epoch from clock_timestamp()) * 1000)::bigint`.mapWith(Number);
 }
 
 /**
@@ -236,22 +190,16 @@ export function clockMillis(db: Queryable): SQL<number> {
  * time it names has passed.
  */
 export function ahead(db: Queryable, column: SQLWrapper): SQL {
-  switch (engineOf(db)) {
-    case 'postgres':
-      return sql`${column} > clock_timestamp()`;
-    case 'sqlite':
-      return sql`${column} > CAST(unixepoch('subsec') * 1000 AS INTEGER)`;
-  }
+  return sql`${column} > clock_timestamp()`;
 }
 
 /**
  * The migrator's own ledger, read by readiness to tell a database that is
  * up but not yet migrated from one that is ready. Drizzle keeps it in a
- * `drizzle` schema on Postgres, and in a plain table elsewhere.
+ * `drizzle` schema.
  */
 export function migrationLedger(db: Queryable): SQL {
-  const table = sql.identifier('__drizzle_migrations');
-  return engineOf(db) === 'postgres' ? sql`${sql.identifier('drizzle')}.${table}` : sql`${table}`;
+  return sql`${sql.identifier('drizzle')}.${sql.identifier('__drizzle_migrations')}`;
 }
 
 const TIMESTAMP =
@@ -262,7 +210,7 @@ const TIMESTAMP =
  *
  * The audit chain covers occurred_at as text, so reading a row back has to
  * reproduce it byte for byte. Databases hand timestamps back in their own
- * shapes (`2026-09-27 12:34:56.1+02` from Postgres, ISO text from SQLite),
+ * shapes (`2026-09-27 12:34:56.1+02` from Postgres, ISO text from JavaScript),
  * and a Date would drop the microseconds, so every value goes through here
  * on the way in and out:
  *

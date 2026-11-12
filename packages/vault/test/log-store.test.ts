@@ -1,9 +1,9 @@
-// The checkpointer over 0.15's log as migration 0022 (Postgres) and 0018
-// (SQLite) lay it out, through the vault's own login: the barrier and the
-// window, write_checkpoint and its tiles, and the reads proofs and the
-// verifier make (docs/design/audit-tree.md). The owner plays the change and
-// use paths (plans PR 4 and 5), which write the entries, and a database
-// writer where a case says so.
+// The checkpointer over 0.15's log as migration 0022 lays it out, through
+// the vault's own login: the barrier and the window, write_checkpoint and
+// its tiles, and the reads proofs and the verifier make
+// (docs/design/audit-tree.md). The owner plays the change and use paths
+// (plans PR 4 and 5), which write the entries, and a database writer where
+// a case says so.
 import assert from 'node:assert/strict';
 import { createHmac, randomBytes } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
@@ -18,7 +18,7 @@ import { authentic, entryMac, logMacKey, type LogMacKey, type UseRow } from '../
 import { logWriter } from './log-entries.ts';
 import { logStore, postgresWindow, tileKeys } from '../src/log-store.ts';
 import { variableMemory } from './audit-tree.ts';
-import { ENGINE, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 
 let db: TestDatabase;
 let signers: PairSigners;
@@ -34,8 +34,7 @@ before(async () => {
   signers = await pairSigners('coffre.test/audit', seed);
   verifiers = await pairVerifiers({ changes: signers.changes.verifierKey, uses: signers.uses.verifierKey });
   macKey = logMacKey(seed);
-  // One connection on SQLite, as a deployment has: two to one file would wait on each other's writes.
-  log = logWriter(ENGINE === 'sqlite' ? db.vault : db.owner, macKey);
+  log = logWriter(db.owner, macKey);
   // Today's and tomorrow's uses, as the checkpointer will make them ahead (plan PR 7).
   await log.days();
 });
@@ -88,12 +87,10 @@ test('the uses tree\'s leaf tiles land in ranges made ahead; a restart from the 
     for (let i = 0; i < 300; i += 1) await use();
     assert.ok((await cp.tick()).signed);
   }
-  if (ENGINE === 'postgres') {
-    const ranges = await rows<{ name: string }>(db.owner, sql`
-      SELECT c.relname AS name FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
-       WHERE i.inhparent = 'log_tiles_uses_leaves'::regclass ORDER BY 1`);
-    for (const name of ['log_tiles_uses_0', 'log_tiles_uses_512', 'log_tiles_uses_1024']) assert.ok(ranges.some((r) => r.name === name), `${name} in ${ranges.map((r) => r.name)}`);
-  }
+  const ranges = await rows<{ name: string }>(db.owner, sql`
+    SELECT c.relname AS name FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+     WHERE i.inhparent = 'log_tiles_uses_leaves'::regclass ORDER BY 1`);
+  for (const name of ['log_tiles_uses_0', 'log_tiles_uses_512', 'log_tiles_uses_1024']) assert.ok(ranges.some((r) => r.name === name), `${name} in ${ranges.map((r) => r.name)}`);
   const [tiles] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_tiles WHERE tree = 'uses' AND level = 0`);
   assert.equal(Number(tiles!.n), 4, '900 leaves: three full tiles and the partial one');
   const again = await open(memory);
@@ -193,11 +190,9 @@ test('reads are bounded by their windows: locate finds a use in an old window by
   assert.deepEqual([found.entry.tree, found.index], ['uses', 0]);
   const p = (await cp.prove(first))!;
   assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, cp.pair.pair.uses.root));
-  if (ENGINE === 'postgres') {
-    // The window read and the locate each scan the uses' one index from a floor, never the table.
-    const plan = await rows<{ 'QUERY PLAN': string }>(db.vault, sql`EXPLAIN SELECT 1 FROM log_uses u WHERE u.at >= ${Date.now() - 10_000} AND u.number > 0 AND u.number <= 10`);
-    assert.ok(plan.some((r) => /Index|Bitmap/.test(r['QUERY PLAN'])), plan.map((r) => r['QUERY PLAN']).join('\n'));
-  }
+  // The window read and the locate each scan the uses' one index from a floor, never the table.
+  const plan = await rows<{ 'QUERY PLAN': string }>(db.vault, sql`EXPLAIN SELECT 1 FROM log_uses u WHERE u.at >= ${Date.now() - 10_000} AND u.number > 0 AND u.number <= 10`);
+  assert.ok(plan.some((r) => /Index|Bitmap/.test(r['QUERY PLAN'])), plan.map((r) => r['QUERY PLAN']).join('\n'));
   // A change, as stored: the leaf the checkpointer sealed.
   const [raw] = await rows<{ number: string }>(db.owner, sql`SELECT number FROM log_changes ORDER BY number LIMIT 1`);
   const c = (await store.locate(BigInt(raw!.number)))!;
@@ -254,7 +249,7 @@ test('T119: locate finds a use among its window\'s leaves, by its time in one pr
   await assert.rejects(store.locate(asked), /use \d+ is in none of its window's leaves: the database changed it since its tick/);
 });
 
-test('Fable review: a tile read is planned over the ranges it reads, not every range', { skip: ENGINE === 'postgres' ? false : 'Postgres only: ranges' }, async () => {
+test('Fable review: a tile read is planned over the ranges it reads, not every range', async () => {
   // Forty ranges, as many days of a busy instance's retention would make.
   for (let r = 0; r < 40; r += 1) await run(db.owner, sql`SELECT make_tiles(${r * RANGE}::bigint, ${(r + 1) * RANGE}::bigint)`);
   const keys = [{ level: 0, index: 3 }, { level: 1, index: 0 }];
@@ -295,7 +290,7 @@ test('PR 8 review r2 (W240): a use renumbered into a change\'s place is refused 
   await assert.rejects(reopened.sealThrough(lost), /cannot be proved in the signed changes tree: entry \d+ is in the uses tree/);
 });
 
-test('PR 8 review r3 (W240): a bounded read stops at its limit in the database too: 100,000 changes above, a few pages read', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its plan' }, async () => {
+test('PR 8 review r3 (W240): a bounded read stops at its limit in the database too: 100,000 changes above, a few pages read', async () => {
   // Changes a writer planted above the newest pair, as many as a long log holds.
   await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
     SELECT nextval('log_number'), 0, 'planted-' || g, gen_random_uuid(), 'x', '{}', NULL, '\\x00000000000000000000000000000000'::bytea FROM generate_series(1, 100000) g`);
@@ -312,7 +307,7 @@ test('PR 8 review r3 (W240): a bounded read stops at its limit in the database t
 });
 
 
-test('T245: the window by number reads its first entries in one step of the index, however long the backlog: 400,000 uses behind, a few pages', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its plan' }, async () => {
+test('T245: the window by number reads its first entries in one step of the index, however long the backlog: 400,000 uses behind, a few pages', async () => {
   // A backlog as a stall leaves: uses numbered past the newest pair, stamped now, in today's day.
   await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
     SELECT nextval('log_number'), (extract(epoch FROM now()) * 1000)::bigint, g, gen_random_uuid(), gen_random_uuid(), 1, '\\x00000000000000000000000000000000'::bytea
@@ -343,7 +338,7 @@ test('T245: the window by number reads its first entries in one step of the inde
   assert.ok(indexed.buffers < 400 && indexed.buffers * 5 < sorted.buffers, said);
 });
 
-test("T245: a pair's reads listed by number read the pair's, not every read in the window's times: 100,000 reads in them, a few pages", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its plan' }, async () => {
+test("T245: a pair's reads listed by number read the pair's, not every read in the window's times: 100,000 reads in them, a few pages", async () => {
   const now = Date.now();
   await run(db.owner, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, mac)
     SELECT g, ${now}::bigint - 100000 + g, gen_random_uuid(), 1, 'user:ada@acme.example', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), '\\x00000000000000000000000000000000'::bytea
@@ -369,7 +364,7 @@ for (const [what, stamp, todo] of [
   ['uses stamped one after another', (t0: number) => sql`${t0}::bigint + g`, false],
   ['uses sharing one `at`', (t0: number) => sql`${t0}::bigint`, 'T248: `lowestAbove` walks the uses sealed at the shared `at` (HotPathOne.tla first, R45)'],
 ] as const) {
-  test(`T245, review r8: close() reads as many pages 20,000 uses into a backlog as 2,000 in, ${what}`, { ...(ENGINE === 'postgres' ? {} : { skip: 'Postgres only: its plans' }), todo, timeout: 300_000 }, async () => {
+  test(`T245, review r8: close() reads as many pages 20,000 uses into a backlog as 2,000 in, ${what}`, { todo, timeout: 300_000 }, async () => {
     const PART = 1_000;
     // Stamped before the barrier's floor, as a stall leaves them: each part then signs the lowest `at` left above it.
     const t0 = Date.now() - 60_000;

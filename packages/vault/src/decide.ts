@@ -430,8 +430,7 @@ function gateColumns(roles: Readonly<Record<string, { permissions: readonly Perm
  * Why the caller of a named use has no standing at the place it names, or null if they have: `standingRefusal` on its
  * rows as read, before their seals are checked, which only the vault can (D150 fallback D, W268; formal/Probing.tla,
  * StandingFirst). The named statement decides this first, from rows no key decides (the credential, its account and
- * grants, the roles, the place), and reads the key only for a caller who stands (`use_stands`, 0045; SQLite's twin
- * asks this). A named place is a live environment: one of its own, a fork, weighed as any (R18), or a personal config,
+ * grants, the roles, the place), and reads the key only for a caller who stands (`use_stands`, 0045). A named place is a live environment: one of its own, a fork, weighed as any (R18), or a personal config,
  * weighed with `parents`, its parent, as its owner reads it while they read or use the parent (`personalRefusal`, R8;
  * `use_stands_personal`, 0051, T165). Its seals checked and current, this is `standingRefusal` at that place:
  * `use-stands.test.ts` holds the statement's gate to it.

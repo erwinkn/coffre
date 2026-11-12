@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Node deployments are not tested in 0.16.0.** A Node deployment stays
+  on 0.15.0 until 0.16.1, which brings Node back on Postgres; SQLite is
+  gone.
 - **`coffre-conformance node` checks a Node deployment on Postgres, as
   `workers` does.** It now takes the same four logins, `--postgres`,
   `--runtime`, `--vault-runtime` and `--hot-runtime`, and refuses to boot
@@ -89,6 +92,7 @@
   still waits a minute, `Retry-After: 60`, and lets no set stand in
   meanwhile, nor does a fetch that ends after another exchange heard such
   an answer, or after its set's hour.
+- **Postgres is coffre's only database.** SQLite, which tests, local development and Node's conformance ran on, is gone: a `file:` or `libsql:` database URL is refused, `@coffre/db/schema-sqlite` and `@coffre/db/portable` are no longer exported, and a Node deployment needs Postgres and its logins, as a Workers one does (`examples/node`). A Node deployment on SQLite has no upgrade path: coffre has no converter from SQLite to Postgres, so such a deployment starts fresh on Postgres.
 - **A use whose key AWS KMS throttled counts as overload to the `/use`
   throttle, however fast it failed (T250).** KMS answers
   `ThrottlingException` at once, so a use whose three tries were all

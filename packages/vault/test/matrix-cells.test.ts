@@ -6,12 +6,10 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { postgresOnly } from './database.ts';
-
 /** How long the batch may take to fail and its process to exit: its world made, its cells' connections opened, a second's sleep. */
 const PROMPTLY_MS = 60_000;
 
-test('a matrix cell that fails ends its file: the others settle, their pools end, and the process exits', postgresOnly('a SQLite cell holds no pool of its own'), async () => {
+test('a matrix cell that fails ends its file: the others settle, their pools end, and the process exits', async () => {
   const started = Date.now();
   // Run as a file of its own, not under this runner: its test's failure is its process's to report.
   const { NODE_TEST_CONTEXT: _, ...env } = process.env;

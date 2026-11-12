@@ -196,7 +196,7 @@ function change(keys: SealKeys, replayed: Replayed, entry: LoggedChange): void {
   replayed.newest.set(key, entry.seal);
 }
 
-/** Whether a stored use's statement phased its key: 0074's writes true (Postgres) or 1 (SQLite), the previous release's null. */
+/** Whether a stored use's statement phased its key: 0074's writes true, the previous release's null. */
 export function phasedOf(stored: boolean | number | null): boolean {
   return stored === true || stored === 1;
 }

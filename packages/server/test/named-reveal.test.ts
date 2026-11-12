@@ -10,7 +10,6 @@ import { randomBytes } from 'node:crypto';
 import { cloudflareAccess, github, google, hashToken, signin } from '@coffre/core/identity';
 import type { UseInput, Vault } from '@coffre/core/vault';
 import { createDatabase, type Database } from '@coffre/db';
-import { openDatabase } from '@coffre/db/connect';
 import { and, eq, gt, sql } from 'drizzle-orm';
 
 import { resolveConfig } from '../src/config.ts';
@@ -23,7 +22,6 @@ import { clientFor, entryOf, contextFor, hotDatabaseUrl, openTestDatabase, reset
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { auditLog, credentials as credentialRows, environments, bulkCap, checkpointFence, logUses, grants } from './db/tables.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -288,12 +286,10 @@ test("revoked, with their principal's lock held, someone is answered byte for by
   // would wait past the hot login's 1 s lock_timeout, and answer 503.
   let release!: () => void;
   const released = new Promise<void>((resolve) => { release = resolve; });
-  const held = TEST_ENGINE === 'postgres'
-    ? db.owner.transaction(async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244066, hashtext(${`user:${PROBE}`}))`);
-      await released;
-    })
-    : Promise.resolve();
+  const held = db.owner.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244066, hashtext(${`user:${PROBE}`}))`);
+    await released;
+  });
   await new Promise((resolve) => setTimeout(resolve, 50));
   // Twice, held all the while: the first asks with names this isolate has not read yet, the second with each mapped,
   // an id or none; a key whose first use wrote its row of the cap's would wait no more by the second.
@@ -333,20 +329,18 @@ test("a credential whose MAC a writer broke, its seal intact, is refused 401 for
     assert.ok(!JSON.stringify(read.body).includes(DEV_KEY), `${key}: no value`);
     return read.status;
   };
-  if (TEST_ENGINE === 'postgres') {
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => { release = resolve; });
-    const held = db.owner.transaction(async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244066, hashtext(${`user:${PINNED}`}))`);
-      await released;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    try {
-      assert.deepEqual([await ask('API_KEY'), await ask('NEVER_MADE')], [503, 401], "the held key waits for the lock, before the app's check");
-    } finally {
-      release();
-      await held;
-    }
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const held = db.owner.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244066, hashtext(${`user:${PINNED}`}))`);
+    await released;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  try {
+    assert.deepEqual([await ask('API_KEY'), await ask('NEVER_MADE')], [503, 401], "the held key waits for the lock, before the app's check");
+  } finally {
+    release();
+    await held;
   }
   const logged = (await usesLogged(db.owner)).length;
   assert.deepEqual([await ask('API_KEY'), await ask('NEVER_MADE')], [401, 401]);
@@ -375,20 +369,18 @@ async function heldAlike(at: CoffreRuntime, ask: (key: string) => Promise<{ stat
   await ask('WARM');
   const logged = (await usesLogged(db.owner)).length;
   const rounds = [];
-  if (TEST_ENGINE === 'postgres') {
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => { release = resolve; });
-    const held = db.owner.transaction(async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244066, hashtext(${`user:${person}`}))`);
-      await released;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    try {
-      rounds.push(await asked());
-    } finally {
-      release();
-      await held;
-    }
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const held = db.owner.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244066, hashtext(${`user:${person}`}))`);
+    await released;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  try {
+    rounds.push(await asked());
+  } finally {
+    release();
+    await held;
   }
   rounds.push(await asked());
   for (const { answers, work } of rounds) {
@@ -650,9 +642,8 @@ test("a fork's key, its own or one it inherits, and `dev@me`'s, by its path or a
     assert.deepEqual(calls, ['useNamed'], `${JSON.stringify(body)}: the vault's one call, by name`);
   }
   // Its key read from the vault's rows, by its path or a list of one alike: no layer of the fork read again, which would
-  // be a snapshot transaction of the app's more (reviews r3 and r4 of #453; `readableValues`). On Postgres, where the
-  // vault's rows come with the read ahead, the fork's key opens what dev's own does, a place with no layer to read; on
-  // SQLite, which reads no rows ahead, both forms read the fork's layers, alike.
+  // be a snapshot transaction of the app's more (reviews r3 and r4 of #453; `readableValues`). The vault's rows
+  // come with the read ahead, so the fork's key opens what dev's own does, a place with no layer to read.
   let transactions = 0;
   const watching = runtimeOver(counted(deps.vault, true), 'github', new Proxy(deps.db, {
     get(target, key) {
@@ -673,7 +664,7 @@ test("a fork's key, its own or one it inherits, and `dev@me`'s, by its path or a
   };
   const byPath = await opened({ path: 'market/feature/API_KEY' });
   assert.equal(await opened({ path: 'market/feature', keys: ['API_KEY'] }), byPath, 'a list of one opens what its path does');
-  if (TEST_ENGINE === 'postgres') assert.equal(byPath, await opened({ path: 'market/dev/API_KEY' }), "a fork's key opens what dev's own does");
+  assert.equal(byPath, await opened({ path: 'market/dev/API_KEY' }), "a fork's key opens what dev's own does");
   // Another person's `dev@me`, who has no personal config: dev, read as dev, by name.
   const root = clientFor(deps, ROOT);
   await root.members.add('user:fallback@acme.example');
@@ -737,21 +728,15 @@ test("the proxy's use of a key a fork inherits, on the fork's URL and at a handl
 });
 
 /**
- * Databases opened for one test, each statement sent on them counted: on Postgres the app's, the vault's and the hot
- * path's logins, as the suite's own (`watched`); on SQLite the one file, which all three share, as drizzle prepares them.
+ * Databases opened for one test, each statement sent on them counted: the app's, the vault's and the hot path's logins,
+ * as the suite's own (`watched`).
  */
 async function countedDatabases(): Promise<{ app: Database; vault: Database; hot: Database; statements(): readonly string[]; close(): Promise<void> }> {
   const statements: string[] = [];
-  if (TEST_ENGINE === 'postgres') {
-    const pools = ([['app', TEST_RUNTIME_DATABASE_URL], ['vault', TEST_VAULT_DATABASE_URL], ['hot', hotDatabaseUrl()]] as const)
-      .map(([name, url]) => watched(testPostgresPool(url), ({ text }) => statements.push(`${name}: ${text}`)));
-    const [app, vault, hot] = pools.map((pool) => createDatabase(pool));
-    return { app: app!, vault: vault!, hot: hot!, statements: () => statements, close: async () => { await Promise.all(pools.map((pool) => pool.end())); } };
-  }
-  const opened = await openDatabase(hotDatabaseUrl());
-  const session = (opened.db as unknown as { session: { logger: unknown; options: { logger?: unknown } } }).session;
-  session.logger = session.options.logger = { logQuery: (text: string) => statements.push(text) };
-  return { app: opened.db, vault: opened.db, hot: opened.db, statements: () => statements, close: opened.close };
+  const pools = ([['app', TEST_RUNTIME_DATABASE_URL], ['vault', TEST_VAULT_DATABASE_URL], ['hot', hotDatabaseUrl()]] as const)
+    .map(([name, url]) => watched(testPostgresPool(url), ({ text }) => statements.push(`${name}: ${text}`)));
+  const [app, vault, hot] = pools.map((pool) => createDatabase(pool));
+  return { app: app!, vault: vault!, hot: hot!, statements: () => statements, close: async () => { await Promise.all(pools.map((pool) => pool.end())); } };
 }
 
 test("a vault whose throttle refuses answers a key held, one never made and one its caller may not use alike, byte for byte, by the API and the proxy, before any statement (config.md, Q1, step 2)", async () => {

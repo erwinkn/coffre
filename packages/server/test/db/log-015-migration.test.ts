@@ -6,8 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createDatabase, type Database } from '@coffre/db';
-import { openDatabase } from '@coffre/db/connect';
-import type { Engine } from '@coffre/db/dialect';
 import { readGrants } from '@coffre/db/grants';
 import { migrateDatabase, migrationsFolder } from '@coffre/db/migrate';
 import { migrated } from '@coffre/db/schema-version';
@@ -16,40 +14,38 @@ import { postgresClient, quoteIdentifier } from '@coffre/db/connect';
 
 import { appendAudit } from '../../src/db/audit.ts';
 import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './connections.ts';
-import { TEST_ENGINE } from './engine.ts';
 
 /**
- * 0.15's expand migration (0022_log_015 on Postgres, 0018_log_015 on
- * SQLite) on a database 0.14.5 made and used: every row it held is kept,
+ * 0.15's expand migration (0022_log_015) on a database 0.14.5 made and used: every row it held is kept,
  * each sealed table gains a null seal (an environment its protection too, a binding the origin its seal covers, PR 3b) and nothing else, and 0.14.5's code
  * still reads it and appends to its log, the chain unbroken, as it serves
  * between `coffre migrate` and the deploy.
  */
 
-const TAGS: Record<Engine, string> = { postgres: '0022_log_015', sqlite: '0018_log_015' };
+const TAG = '0022_log_015';
 const SEALED = ['credentials', 'environments', 'secrets', 'service_bindings', 'vault_members'];
 // What 0.16 renamed (0076_table_renames, T178): read under 0.14.5's names before, under these after.
 const RENAMED: Record<string, string> = { vault_members: 'principals', vault_grants: 'grants' };
 const hex = (byte: number, length = 32) => Buffer.alloc(length, byte).toString('hex');
 
-/** The engine's migrations up to the one before 0.15's first: 0.14.5's schema. */
-function before(engine: Engine, dir: string): string {
+/** The migrations up to the one before 0.15's first: 0.14.5's schema. */
+function before(dir: string): string {
   const folder = join(dir, 'migrations');
-  cpSync(migrationsFolder(engine), folder, { recursive: true });
+  cpSync(migrationsFolder(), folder, { recursive: true });
   const file = join(folder, 'meta/_journal.json');
   const journal = JSON.parse(readFileSync(file, 'utf8')) as { entries: { idx: number; tag: string }[] };
-  const at = journal.entries.findIndex((entry) => entry.tag === TAGS[engine]);
-  assert.ok(at > 0, `${TAGS[engine]} is one of the migrations`);
+  const at = journal.entries.findIndex((entry) => entry.tag === TAG);
+  assert.ok(at > 0, `${TAG} is one of the migrations`);
   writeFileSync(file, JSON.stringify({ ...journal, entries: journal.entries.slice(0, at) }));
   // It, and every one of 0.15's after it (0023_change_path, …).
   for (const { tag } of journal.entries.slice(at)) rmSync(join(folder, `${tag}.sql`));
   return folder;
 }
 
-/** 0.14.5's rows in every table the migration adds a column to, as both engines spell them. */
-function rows(engine: Engine): string[] {
-  const bytes = (byte: number, length = 32) => (engine === 'postgres' ? `decode('${hex(byte, length)}', 'hex')` : `X'${hex(byte, length)}'`);
-  const time = (ms: number) => (engine === 'postgres' ? `to_timestamp(${ms / 1000})` : String(ms));
+/** 0.14.5's rows in every table the migration adds a column to. */
+function rows(): string[] {
+  const bytes = (byte: number, length = 32) => `decode('${hex(byte, length)}', 'hex')`;
+  const time = (ms: number) => `to_timestamp(${ms / 1000})`;
   return [
     `INSERT INTO projects (id, slug, name) VALUES ('11111111-1111-4111-8111-111111111111', 'market', 'Acme Market')`,
     `INSERT INTO environments (id, project_id, slug, name) VALUES ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', 'prod', 'Production')`,
@@ -82,7 +78,7 @@ async function postgresDatabase(dir: string): Promise<Engine015> {
   }
   return {
     url: at(TEST_OWNER_DATABASE_URL),
-    folder: before('postgres', dir),
+    folder: before(dir),
     open: async () => {
       const pools = [TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL].map((base) => postgresClient(at(base), { max: 2 }));
       const [owner, app, vault] = pools.map((pool) => createDatabase(pool)) as [Database, Database, Database];
@@ -99,34 +95,15 @@ async function postgresDatabase(dir: string): Promise<Engine015> {
   };
 }
 
-function sqliteDatabase(dir: string): Engine015 {
-  const url = `file:${join(dir, 'coffre.db')}`;
-  return {
-    url,
-    folder: before('sqlite', dir),
-    // SQLite has no logins: the app and the vault open the same file, as two processes would.
-    open: async () => {
-      const opened = await Promise.all([openDatabase(url), openDatabase(url), openDatabase(url)]);
-      const [owner, app, vault] = opened.map(({ db }) => db) as [Database, Database, Database];
-      return { owner, app, vault, close: async () => void (await Promise.all(opened.map(({ close }) => close()))) };
-    },
-    drop: async () => {},
-  };
-}
-
-// A Database is a Postgres one to TypeScript (portable.ts); on SQLite, raw SQL goes through libsql's run and all.
-type Raw = { execute(query: unknown): Promise<Record<string, unknown>[]>; run(query: unknown): Promise<unknown>; all(query: unknown): Promise<Record<string, unknown>[]> };
+type Raw = { execute(query: unknown): Promise<Record<string, unknown>[]> };
 
 async function exec(db: Database, text: string): Promise<void> {
-  const raw = db as unknown as Raw;
-  await (TEST_ENGINE === 'postgres' ? raw.execute(sql.raw(text)) : raw.run(sql.raw(text)));
+  await (db as unknown as Raw).execute(sql.raw(text));
 }
 
 /** Rows as plain values, a column's bytes as hex, so that two reads compare. */
 async function read(db: Database, table: string): Promise<Record<string, unknown>[]> {
-  const raw = db as unknown as Raw;
-  const query = sql.raw(`SELECT * FROM ${table} ORDER BY 1`);
-  const found = TEST_ENGINE === 'postgres' ? [...await raw.execute(query)] : await raw.all(query);
+  const found = [...await (db as unknown as Raw).execute(sql.raw(`SELECT * FROM ${table} ORDER BY 1`))];
   const plain = (value: unknown) =>
     value instanceof Uint8Array ? Buffer.from(value).toString('hex')
       : value instanceof ArrayBuffer ? Buffer.from(value).toString('hex')
@@ -134,9 +111,9 @@ async function read(db: Database, table: string): Promise<Record<string, unknown
   return found.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, plain(value)])));
 }
 
-test(`${TAGS[TEST_ENGINE]} keeps 0.14.5's rows and leaves 0.14.5 serving: its reads, and its appends on an unbroken chain`, async (t) => {
+test(`${TAG} keeps 0.14.5's rows and leaves 0.14.5 serving: its reads, and its appends on an unbroken chain`, async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-log-015-'));
-  const database = TEST_ENGINE === 'postgres' ? await postgresDatabase(dir) : sqliteDatabase(dir);
+  const database = await postgresDatabase(dir);
   t.after(async () => {
     await database.drop();
     rmSync(dir, { recursive: true, force: true });
@@ -147,15 +124,10 @@ test(`${TAGS[TEST_ENGINE]} keeps 0.14.5's rows and leaves 0.14.5 serving: its re
   {
     const opened = await database.open();
     try {
-      if (TEST_ENGINE === 'postgres') {
-        const { migrate } = await import('drizzle-orm/node-postgres/migrator');
-        await migrate(opened.owner as never, { migrationsFolder: database.folder });
-      } else {
-        const { migrate } = await import('drizzle-orm/libsql/migrator');
-        await migrate(opened.owner as never, { migrationsFolder: database.folder });
-      }
+      const { migrate } = await import('drizzle-orm/node-postgres/migrator');
+      await migrate(opened.owner as never, { migrationsFolder: database.folder });
       assert.equal(await migrated(opened.owner), false, "0.14.5's schema lacks this tree's newest migration");
-      for (const statement of rows(TEST_ENGINE)) await exec(opened.owner, statement);
+      for (const statement of rows()) await exec(opened.owner, statement);
       // This tree's appender names `log015` (0044), which 0.14.5's never does: a column of the old schema's only while
       // it appends as 0.14.5 would.
       await exec(opened.owner, 'ALTER TABLE audit_log ADD COLUMN log015 boolean');

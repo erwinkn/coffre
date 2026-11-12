@@ -16,10 +16,8 @@ import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
 import { logOrigin } from '../src/checkpointer.ts';
 import { KEY_OBJECT, logMacKey } from '../src/log-entry.ts';
-import { ENGINE, openTestDatabase, VAULT_URL, type TestDatabase } from './database.ts';
+import { openTestDatabase, VAULT_URL, type TestDatabase } from './database.ts';
 import { logWriter } from './log-entries.ts';
-
-const skip = ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive';
 
 let db: TestDatabase;
 let worker: Unstable_DevWorker;
@@ -60,7 +58,6 @@ async function start(signingKey: Uint8Array, replaced: readonly Uint8Array[] = [
 }
 
 before(async () => {
-  if (skip) return;
   db = await openTestDatabase();
   keys = await logKeysOf(seed);
   dir = mkdtempSync(join(tmpdir(), 'coffre-checkpointer-worker-'));
@@ -79,7 +76,7 @@ const ask = async <T>(op: string, number?: bigint): Promise<T> => {
   return body;
 };
 
-test('the checkpointer\'s object seals on its alarm, a change sealed through it is witnessed and archived', { skip, timeout: 120_000 }, async () => {
+test('the checkpointer\'s object seals on its alarm, a change sealed through it is witnessed and archived', { timeout: 120_000 }, async () => {
   const log = logWriter(db.owner, logMacKey(seed));
   await log.empty();
   await log.days();
@@ -107,7 +104,7 @@ test('the checkpointer\'s object seals on its alarm, a change sealed through it 
   assert.deepEqual(await ask('alarms'), []);
 });
 
-test('deployed again under a new signing key, the object carries its memory across, rotates once, and the witness cosigns the first pair under it', { skip, timeout: 120_000 }, async () => {
+test('deployed again under a new signing key, the object carries its memory across, rotates once, and the witness cosigns the first pair under it', { timeout: 120_000 }, async () => {
   const log = logWriter(db.owner, logMacKey(seed));
   await log.use();
   await worker.stop();

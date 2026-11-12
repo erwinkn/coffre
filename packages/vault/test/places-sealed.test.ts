@@ -4,7 +4,7 @@
 // object's seal and its newest change's before anything is decided on it. `access` holds no grant on it,
 // and keeps it protected with its slug unknown; an issue that names it, an issue to a service account that holds a
 // grant on it, a change of that account by its manager, a grant there and a key's wrap there are refused. Uses decide on the place's seal too (use.test.ts, use-named.test.ts).
-// Both engines, whatever the suite's log.
+// Whatever the suite's log.
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,8 +21,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault as openEntry, spoken } from '../src/local.ts';
 import { objectKey } from '../src/inputs.ts';
-import { newestChanges, newestChangesQuery, newestSeals, newestSealsQuery } from '../src/store.ts';
-import { changePlace, emptyDatabase, ENGINE, OWNER_URL, postgresOnly, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, nothingHeld, sqlitePlan, speaking, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
+import { changePlace, emptyDatabase, OWNER_URL, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, nothingHeld, speaking, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
 const openRawVault = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
@@ -355,23 +354,6 @@ test('unprotecting a place whose tombstone a writer set around the log is refuse
   assert.ok((await w.vault.policy()).protected.includes(w.dev), 'still protected');
 });
 
-test('on SQLite, the newest changes of several places are one probe each, however long their histories (R48, review r1)', { skip: ENGINE === 'sqlite' ? false : 'SQLite only: Postgres reads them in the snapshot' }, async () => {
-  const refs = [randomUUID(), randomUUID(), randomUUID()].map((id) => ({ kind: 'environment' as const, id }));
-  // Both statements: the seals alone (a place deleted, `loggedEnvironments`) and each change whole, its MAC to check
-  // (the places read, `newestChanges`; T190, review by Fable).
-  for (const query of [newestSealsQuery, newestChangesQuery]) {
-    const plan = await sqlitePlan(query(refs));
-    // Each newest number by the index's `max`, then its row by its number: never every change of an object in turn.
-    assert.ok(plan.some((step) => /^SEARCH d USING COVERING INDEX log_changes_object_idx \(object=\?\)/.test(step)), plan.join('\n'));
-    assert.ok(plan.some((step) => /^SEARCH c USING INTEGER PRIMARY KEY/.test(step)), plan.join('\n'));
-    assert.deepEqual(plan.filter((step) => /^SCAN (c|d|log_changes)\b|^SEARCH c USING (COVERING )?INDEX/.test(step)), [], plan.join('\n'));
-  }
-  // However many: a member with 600 grants on places is read as one with 6 (review r2: a compound SELECT stops at 500).
-  const many = Array.from({ length: 600 }, () => ({ kind: 'environment' as const, id: randomUUID() }));
-  assert.deepEqual(await newestSeals(db.vault, many), new Map());
-  assert.deepEqual(await newestChanges(db.vault, many), new Map());
-});
-
 test('a protected place in a project whose tombstone a writer set around the log stays protected: its own object says it lives (review r2)', async () => {
   const w = await world();
   assert.ok((await w.vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'protect', projectId: w.project, environmentIds: [w.dev], protected: true } })).ok);
@@ -406,7 +388,7 @@ test('a person scoped to a slug sets up no service account once its place, renam
   assert.ok((await placeReports()).includes('mac'), 'reported as the place\'s, a MAC');
 });
 
-test("an issue weighed on the account's places by slug is refused when one is renamed while its write waits: those slugs are held under the issue lock too (review r2)", postgresOnly('row locks'), async () => {
+test("an issue weighed on the account's places by slug is refused when one is renamed while its write waits: those slugs are held under the issue lock too (review r2)", async () => {
   const w = await world();
   const slugOf = async (id: string) => (await rows<{ slug: string }>(db.owner, sql`SELECT slug FROM environments WHERE id = ${id}`))[0]!.slug;
   // Maya, a Developer of dev and prod by slug, manages CI, a Viewer of both, and issues it a token on prod.
@@ -439,7 +421,7 @@ test("an issue weighed on the account's places by slug is refused when one is re
   assert.equal((await w.vault.issueToken!(await issueOn(w.vault, { ...input, credential: { ...input.credential, id: randomUUID() } }))).ok, false);
 });
 
-test('a reference is decided on its holder\'s project as the row the decision checks says it, not as an earlier read saw it (review r4)', postgresOnly('row locks'), async () => {
+test('a reference is decided on its holder\'s project as the row the decision checks says it, not as an earlier read saw it (review r4)', async () => {
   const w = await world();
   // Maya, a Developer of billing alone, refers from billing to a key held in a new place of market's.
   const billing = w.elsewhere;
@@ -499,36 +481,4 @@ test('a protected place whose row a writer deleted outright stays protected: the
     [{ environmentId: a, slug: null }, { environmentId: b, slug: null }].sort((x, y) => (x.environmentId < y.environmentId ? -1 : 1)));
   assert.equal((await give()).ok, false);
   assert.equal((await issueProject()).ok, false);
-});
-
-test('on SQLite, a place renamed as the app renames it between a read\'s rows and their newest seals is read as one or the other, never as tampered (review r6)', { skip: ENGINE === 'sqlite' ? false : 'SQLite only: Postgres reads both in one statement' }, async () => {
-  const w = await world();
-  // The vault's database, which starts the rename as it is about to read the newest seals: committed at once when that
-  // read is no transaction, waited on when it is one (connect.ts runs one at a time).
-  let renaming: Promise<void> | null = null;
-  const hooked = <T extends object>(on: T): T => new Proxy(on, {
-    get(target, name, receiver) {
-      const value = Reflect.get(target, name, receiver) as unknown;
-      if (name === 'all' && typeof value === 'function') {
-        return async (query: Parameters<typeof sql>[0]) => {
-          const text = (target as unknown as { dialect: { sqlToQuery(q: unknown): { sql: string } } }).dialect.sqlToQuery(query).sql;
-          if (renaming === null && /json_each/.test(text) && /log_changes c/.test(text)) {
-            renaming = changePlace(db.owner, w.dev, { slug: 'renamed' });
-            await Promise.race([renaming, sleep(300)]);
-          }
-          return (value as (q: unknown) => Promise<unknown>).call(target, query);
-        };
-      }
-      if (name === 'transaction' && typeof value === 'function') {
-        return (work: (tx: object) => Promise<unknown>, config?: unknown) => (value as (w: unknown, c?: unknown) => Promise<unknown>).call(target, (tx: object) => work(hooked(tx)), config);
-      }
-      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
-    },
-  });
-  const vault = speaking(await openRawVault(hooked(db.vault), w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld }));
-  const access = await vault.access(ADA);
-  await renaming;
-  assert.notEqual(renaming, null, 'the rename ran during the read');
-  assert.deepEqual(access.grants.map((grant) => grant.environmentId).sort(), [w.dev, w.prod].sort());
-  assert.deepEqual(await placeReports(), []);
 });

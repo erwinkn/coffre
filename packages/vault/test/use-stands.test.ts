@@ -15,7 +15,7 @@ import { GATE_ROLES, namedStanding } from '../src/decide.ts';
 import { noEdits, type RolesInput } from '../src/inputs.ts';
 import { PURPOSES, purposeCode } from '../src/log-replay.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject } from '../src/objects.ts';
-import { OWNER_URL, openTestDatabase, postgresOnly, type TestDatabase } from './database.ts';
+import { OWNER_URL, openTestDatabase, type TestDatabase } from './database.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -138,7 +138,7 @@ function ruled(c: Caller): string | null {
 
 const CASES = 3000;
 
-test(`the named statement's gate stands a caller exactly where the vault's rule does, on ${CASES} generated callers, at an environment, a fork or a personal config (W268, T165; Probing.tla, StandingFirst, GateWeighsParent)`, { ...postgresOnly('use_stands is a Postgres function'), timeout: 600_000 }, async () => {
+test(`the named statement's gate stands a caller exactly where the vault's rule does, on ${CASES} generated callers, at an environment, a fork or a personal config (W268, T165; Probing.tla, StandingFirst, GateWeighsParent)`, { timeout: 600_000 }, async () => {
   const client = postgresClient(OWNER_URL, { max: 1 });
   const differing: string[] = [];
   const tally = { stands: 0, personal: 0, refused: new Map<string, number>() };

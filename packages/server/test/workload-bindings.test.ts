@@ -15,7 +15,6 @@ import { processLimits } from '../src/workloads/limits.ts';
 import { liveBindings, tombstoned } from '../src/db/queries.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, holdSomething, openTestDatabase, resetDatabase, speaking, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 
 const ROOT = 'admin@acme.example';
 const LEAD = 'lead@acme.example';
@@ -139,7 +138,7 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
 
 test('the longest issuer, beside the longest principal in UTF-8, fits the index entry they share: made, not a 500', async () => {
   // 320 characters of three bytes each, the most a service's ID holds as UTF-8 (`principalId`), and an issuer of
-  // MAX_ISSUER_BYTES that does not compress, on the engine whose index has the limit (review r5).
+  // MAX_ISSUER_BYTES that does not compress (review r5).
   const wide = `token:${Array.from({ length: 320 }, (_, i) => String.fromCodePoint(0x4e00 + ((i * 7919) % 20000))).join('')}`;
   assert.equal(Buffer.byteLength(wide), 6 + 960);
   assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: wide })).ok, true);
@@ -231,12 +230,10 @@ test('a binding is never edited: a change replaces it, and an issuer that moved 
     [[first.id, 'replaced', changed.id], [second.id, 'keys_moved', moved.id], [changed.id, 'keys_moved', moved.id]],
   );
   // The policy itself cannot be changed in place: the app may update the label, last use and revocation only.
-  if (TEST_ENGINE !== 'sqlite') {
-    await assert.rejects(
-      db.runtime.update(serviceBindings).set({ claims: '{}' }).where(eq(serviceBindings.id, moved.id)),
-      (error: Error) => /permission denied/.test(String((error.cause as Error | undefined)?.message)),
-    );
-  }
+  await assert.rejects(
+    db.runtime.update(serviceBindings).set({ claims: '{}' }).where(eq(serviceBindings.id, moved.id)),
+    (error: Error) => /permission denied/.test(String((error.cause as Error | undefined)?.message)),
+  );
 });
 
 test('removing a binding writes its tombstone; a denied attempt is no tombstone, and a removed row put back stays removed', async () => {

@@ -5,7 +5,6 @@
 // the binding, the account, the rate and the token on their rows and writes the credential and its change. No 0.14
 // head, no entry of 0.14's. Each statement reads as many rows, and as many pages, however many credentials the binding
 // issued before, however many tokens were spent, and however long both logs grow.
-// Postgres only: the counts are its statements.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomBytes, randomUUID, sign as signWith } from 'node:crypto';
@@ -23,11 +22,9 @@ import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport
 import { processLimits } from '../src/workloads/limits.ts';
 import { clientFor, entryOf, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
-import { postgresOnly } from './db/engine.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { answer, type Pages } from './start-fixture.ts';
 
-const POSTGRES = postgresOnly("counts the app's and the vault's Postgres statements");
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const SERVICE = 'ci-web';
@@ -83,7 +80,6 @@ let runtime: CoffreRuntime;
 let idToken: () => string;
 
 before(async () => {
-  if (POSTGRES.skip) return;
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
@@ -136,7 +132,6 @@ before(async () => {
 });
 
 after(async () => {
-  if (POSTGRES.skip) return;
   await vault.close();
   await Promise.all([app.pool.end(), vaultPool.pool.end()]);
   await resetDatabase(db.owner);
@@ -175,7 +170,7 @@ function freshSignIn(values: unknown[]): unknown[] {
   return next;
 }
 
-test("a CI run's sign-in is one app statement and one vault call, one statement there: no 0.14 head, no 0.14 entry (T149, T190, T192)", POSTGRES, async () => {
+test("a CI run's sign-in is one app statement and one vault call, one statement there: no 0.14 head, no 0.14 entry (T149, T190, T192)", async () => {
   const ran = await statements();
   assert.deepEqual(shown(ran.app), ['select "service_bindings"."i'], "its service's bindings on the issuer, with whether the token was spent and the newest changes");
   // `sign_in` holds the member's and the binding's rows to their newest changes' seals, which SQL cannot authenticate
@@ -185,7 +180,7 @@ test("a CI run's sign-in is one app statement and one vault call, one statement 
   assert.equal(ran.vaultCalls, 1);
 });
 
-test("a sign-in's statements read as many rows and pages however many credentials its binding issued, tokens were spent, and the logs grow (R48)", POSTGRES, async () => {
+test("a sign-in's statements read as many rows and pages however many credentials its binding issued, tokens were spent, and the logs grow (R48)", async () => {
   const measure = async () => {
     const ran = await statements();
     const measured = [
@@ -261,7 +256,7 @@ function freshIssue(values: unknown[]): unknown[] {
 /** A statement of `holdingSensitive`: which of the scope's environments hold a sensitive value, for what an issue withholds. */
 const holding = ({ text }: Statement) => /^\s*select distinct "environment_id" from "secrets"/i.test(text);
 
-test("a service token's issue: the app's reads and the vault's two answers, as before; then one vault call, its write one statement, no 0.14 head (T149, PR 2)", POSTGRES, async () => {
+test("a service token's issue: the app's reads and the vault's two answers, as before; then one vault call, its write one statement, no 0.14 head (T149, PR 2)", async () => {
   const ran = await issueStatements();
   // The issuer's newest policy and access entries, and the places: the scope as the app works it out, by path. An Owner
   // of every project in it withholds nothing (R71: a reference's sensitive value is its holder's project's to give, R32),
@@ -276,7 +271,7 @@ test("a service token's issue: the app's reads and the vault's two answers, as b
   assert.deepEqual(shown(ran.vault), ['WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', '/* writes */ SELECT issue_to']);
 });
 
-test("a service token's issue by someone who owns no project of its scope: the app reads too what sensitive values its places hold, its own and its references', for what it withholds (R71)", POSTGRES, async () => {
+test("a service token's issue by someone who owns no project of its scope: the app reads too what sensitive values its places hold, its own and its references', for what it withholds (R71)", async () => {
   const ran = await issueStatements(ISSUING_DEVELOPER);
   // As an Owner's, and the settings and places a non-Owner's issue checks; then the two statements of `holdingSensitive`.
   assert.equal(ran.app.length, 6);
@@ -284,7 +279,7 @@ test("a service token's issue by someone who owns no project of its scope: the a
   assert.ok(ran.app.every(({ text }) => /^\s*select/i.test(text)), 'the app writes nothing');
 });
 
-test("an issue's write reads as many rows and pages however long the logs and the account's history grow (R48)", POSTGRES, async () => {
+test("an issue's write reads as many rows and pages however long the logs and the account's history grow (R48)", async () => {
   const measure = async () => {
     const write = (await issueStatements()).vault.find(({ text }) => text.includes('issue_token'))!;
     return { rows: write.rows, pages: await vaultPool.pages(write, freshIssue) };
@@ -318,7 +313,7 @@ async function browserStatements(run: (profile: SignedInAccount) => Promise<unkn
   return ran;
 }
 
-test("a person's sign-in at the callback, with passkeys optional and none of theirs, asks the vault once and reads one statement more than today's, beside the identity: the members it may be with their passkeys (passkeys.md, section 10; review r1 of #500)", POSTGRES, async () => {
+test("a person's sign-in at the callback, with passkeys optional and none of theirs, asks the vault once and reads one statement more than today's, beside the identity: the members it may be with their passkeys (passkeys.md, section 10; review r1 of #500)", async () => {
   await clientFor(deps, ROOT).members.add(`user:${DEVELOPER}`, { role: 'developer' });
   const meta = { requestId: randomUUID(), sourceIp: null, label: 'Firefox on macOS' };
   const today = await browserStatements((profile) => runtime.signin!.completeSignin(profile, meta));

@@ -21,20 +21,18 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import { postgresSession } from '@coffre/db/connect';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
-import { emptyDatabase, ENGINE, HOT_URL, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, places, rows, run, sealed, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
+import { emptyDatabase, HOT_URL, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, places, rows, run, sealed, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
 import { resolveVaultConfig } from '../src/config.ts';
 import { READ_HEAD_WAITERS } from '../src/vault.ts';
 
 const ROOT = 'user:root@acme.example';
-const skip = ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive';
 
 let db: TestDatabase;
 before(async () => {
-  if (!skip) db = await openTestDatabase();
+  db = await openTestDatabase();
 });
 after(() => db?.close());
 beforeEach(async () => {
-  if (skip) return;
   await emptyDatabase(db.owner);
   // 0.15's trees too: each test's checkpointer starts with no memory, over a log of its own.
   for (const table of ['log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
@@ -202,7 +200,7 @@ function assertAllAnswered(results: { ok: boolean; error?: string }[]): void {
   assert.deepEqual(failed, [], 'every call answered, none cancelled as hung');
 }
 
-test('through the entrypoint, a call on another release answers this release and runs nothing: no statement, no connection, the hot path\'s included', { skip, timeout: 120_000 }, async () => {
+test('through the entrypoint, a call on another release answers this release and runs nothing: no statement, no connection, the hot path\'s included', { timeout: 120_000 }, async () => {
   const database = await slowPostgres(0);
   const hot = await slowPostgres(0, HOT_URL);
   const vault = await freshVault(database.url, hot.url);
@@ -228,7 +226,7 @@ test('through the entrypoint, a call on another release answers this release and
   }
 });
 
-test('a fresh isolate answers a page load of concurrent first calls', { skip, timeout: 120_000 }, async () => {
+test('a fresh isolate answers a page load of concurrent first calls', { timeout: 120_000 }, async () => {
   const database = await slowPostgres(20);
   const vault = await freshVault(database.url);
   try {
@@ -249,7 +247,7 @@ test('a fresh isolate answers a page load of concurrent first calls', { skip, ti
   }
 });
 
-test('a fresh isolate answers concurrent first key operations', { skip, timeout: 120_000 }, async () => {
+test('a fresh isolate answers concurrent first key operations', { timeout: 120_000 }, async () => {
   const placed = await places(db.owner);
   const secrets = await Promise.all(Array.from({ length: 6 }, () => placed.secret(placed.dev)));
   const database = await slowPostgres(20);
@@ -267,7 +265,7 @@ test('a fresh isolate answers concurrent first key operations', { skip, timeout:
   }
 });
 
-test('each call opens one connection at most: on Cloudflare, a call that opened several at once was cancelled as hung', { skip, timeout: 120_000 }, async () => {
+test('each call opens one connection at most: on Cloudflare, a call that opened several at once was cancelled as hung', { timeout: 120_000 }, async () => {
   const database = await slowPostgres(5);
   const vault = await freshVault(database.url);
   try {
@@ -302,7 +300,7 @@ test('each call opens one connection at most: on Cloudflare, a call that opened 
   }
 });
 
-test('in workerd, a call\'s statements cost a round trip each at most: none waits to learn its parameters\' types first', { skip, timeout: 120_000 }, async (t) => {
+test('in workerd, a call\'s statements cost a round trip each at most: none waits to learn its parameters\' types first', { timeout: 120_000 }, async (t) => {
   const placed = await places(db.owner);
   const secret = await placed.secret(placed.dev);
   const database = await slowPostgres(2);
@@ -341,7 +339,7 @@ test('in workerd, a call\'s statements cost a round trip each at most: none wait
   }
 });
 
-test('a fresh isolate\'s first call starts in a handful of round trips: the reads each step of its start begins with go together (T206)', { skip, timeout: 180_000 }, async (t) => {
+test('a fresh isolate\'s first call starts in a handful of round trips: the reads each step of its start begins with go together (T206)', { timeout: 180_000 }, async (t) => {
   const key = randomBytes(32).toString('base64');
   // An instance that has served: root its Owner, the cap in the log, by an isolate before.
   const before = await freshVault(VAULT_URL, HOT_URL, key);
@@ -371,7 +369,7 @@ test('a fresh isolate\'s first call starts in a handful of round trips: the read
   }
 });
 
-test('in workerd too, a query on the database inside its own transaction is refused at once, not left to hang', { skip, timeout: 120_000 }, async () => {
+test('in workerd too, a query on the database inside its own transaction is refused at once, not left to hang', { timeout: 120_000 }, async () => {
   const database = await slowPostgres(5);
   const vault = await freshVault(database.url);
   try {
@@ -384,7 +382,7 @@ test('in workerd too, a query on the database inside its own transaction is refu
   }
 });
 
-test('through the entrypoint, the credential a CI run came in on is copied into the entries it caused, never decided on', { skip, timeout: 120_000 }, async () => {
+test('through the entrypoint, the credential a CI run came in on is copied into the entries it caused, never decided on', { timeout: 120_000 }, async () => {
   const placed = await places(db.owner);
   const secret = await placed.secret(placed.dev);
   const credentialId = randomUUID();
@@ -409,7 +407,7 @@ test('through the entrypoint, the credential a CI run came in on is copied into 
   }
 });
 
-test('through the entrypoint, a read past the head\'s places in line fails at once with its code, which the app answers as unavailable', { skip, timeout: 120_000 }, async () => {
+test('through the entrypoint, a read past the head\'s places in line fails at once with its code, which the app answers as unavailable', { timeout: 120_000 }, async () => {
   const placed = await places(db.owner);
   const secret = await placed.secret(placed.dev);
   const vault = await freshVault(VAULT_URL);

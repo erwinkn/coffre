@@ -2,7 +2,7 @@
 // write of the app's to a key or an environment is a change the vault seals before the app's transaction (`prepare`) and
 // the transaction commits beside its rows (`app_change`, 0025). These cases play the app's writes on use-world's sealed
 // world, then hold the use path's live answers to the replay of the log (R53): a write that left a row other than its
-// change sealed would make a use `stale` or `tampered` where the replay allows or refuses otherwise. Both engines.
+// change sealed would make a use `stale` or `tampered` where the replay allows or refuses otherwise.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -22,7 +22,7 @@ import { grants, loggedChanges, loggedChangesQuery, member } from '../src/store.
 import { logMacKey } from '../src/log-entry.ts';
 import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { environmentObject, principalObject, secretObject } from '../src/objects.ts';
-import { ENGINE, openTestDatabase, rows, run, sealed, nothingHeld, sqlitePlan, withLogUnlocked, withOldWrites, withTriggersLifted, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, sealed, nothingHeld, withLogUnlocked, withOldWrites, withTriggersLifted, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, emptyLog, isolate, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -459,8 +459,7 @@ async function history(object: string, count: number): Promise<void> {
 
 test("what an unarchive restores is read with two probes of each key's changes, however long their history: never a walk of it (T134, R48)", { timeout: 600_000 }, async () => {
   const refs: Ref[] = [{ kind: 'secret', id: randomUUID() }, { kind: 'secret', id: randomUUID() }];
-  const cost = async (): Promise<number | string> => {
-    if (ENGINE === 'sqlite') return (await sqlitePlan(loggedChangesQuery(refs, refs, 'sqlite'))).join('; ');
+  const cost = async (): Promise<number> => {
     const [row] = await rows<Record<string, unknown>>(db.owner, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${loggedChangesQuery(refs, refs)}`);
     const json = Object.values(row!)[0];
     const plan = (typeof json === 'string' ? JSON.parse(json) : json) as { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[];
@@ -474,7 +473,7 @@ test("what an unarchive restores is read with two probes of each key's changes, 
   };
   const grown = async (count: number) => {
     for (const ref of refs) await history(objectKey(ref), count);
-    if (ENGINE === 'postgres') await run(db.owner, sql`VACUUM ANALYZE log_changes`);
+    await run(db.owner, sql`VACUUM ANALYZE log_changes`);
     const found = await loggedChanges(db.owner, [KEYS.mac], refs, refs);
     // Each key's archive, its newest change, and the sealed one just below it (their MACs are random here: none holds).
     for (const ref of refs) assert.deepEqual(found.get(objectKey(ref))?.map((change) => change.seal !== null), [false, true], 'found');
@@ -482,14 +481,9 @@ test("what an unarchive restores is read with two probes of each key's changes, 
   };
   const small = await grown(1_000);
   const large = await grown(100_000);
-  if (ENGINE === 'sqlite') {
-    // Each key's newest sealed number by its index, then its row by number: never every row of a key.
-    assert.ok(!/\bSCAN\b/.test(String(large)) && /log_changes_object_idx/.test(String(large)) && /SEARCH c USING INTEGER PRIMARY KEY/.test(String(large)), String(large));
-    return;
-  }
   // Four probes (each key's newest change and the one before it, T190), each and its row's index entry a B-tree level
   // deeper at most.
-  assert.ok(Number(large) - Number(small) <= 8, `${small} index buffers at 1k changes a key, ${large} at 100k`);
+  assert.ok(large - small <= 8, `${small} index buffers at 1k changes a key, ${large} at 100k`);
 });
 
 test("a key the log never held, archived (0.14's alone, before the cutover): its unarchive logs nothing, as any of 0.14's rows (T134)", async () => {

@@ -3,7 +3,6 @@
 // behind Cloudflare Access. Each value is one `use_credential` call on the hot path's login, deciding on the way in
 // itself: no `credentialStill` on the app's connection after it, no vault call but the uses, and nothing of 0.14's
 // head. Before, each was 0.14's unwrap under that head, then the app's check of the way in.
-// Postgres only: the counts are its statements.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -28,12 +27,10 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
-import { postgresOnly } from './db/engine.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { checkpointFence } from './db/tables.ts';
 import { inBulkPeriod } from './window-fixture.ts';
 
-const POSTGRES = postgresOnly("counts the app's and the hot path's Postgres statements");
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
@@ -70,7 +67,6 @@ let access: CoffreRuntime;
 let connectionId: string;
 
 before(async () => {
-  if (POSTGRES.skip) return;
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
@@ -124,7 +120,6 @@ before(async () => {
 });
 
 after(async () => {
-  if (POSTGRES.skip) return;
   await vault.close();
   await Promise.all([app.pool.end(), vaultPool.pool.end(), hot.pool.end()]);
   await new Promise<void>((resolve) => upstream.close(() => resolve()));
@@ -172,7 +167,7 @@ const USE = 'SELECT use_credential( $1::uuid,';
 /** `credentialStill`'s read of the way in, after the vault released (`wayInStands`): what a use through it no longer needs. */
 const STILL = 'select "principals"."status",';
 
-test('through an MCP connection, a Cloudflare binding, or behind Access, a value is the hot path\'s one call: no check of the way in after it, no vault call but the use, nothing of 0.14\'s head (T147)', POSTGRES, async () => {
+test('through an MCP connection, a Cloudflare binding, or behind Access, a value is the hot path\'s one call: no check of the way in after it, no vault call but the use, nothing of 0.14\'s head (T147)', async () => {
   const cases = [
     ['an MCP client\'s reveal', reveal(own, await asDev(own, { via: { connectionId, clientId: 'https://client.example/meta', clientName: 'Client', scopes: ['read', 'reveal'] }, provenance: connectionId }))],
     ['a Worker\'s /use through its binding', async () => (await bindingRoute(new Request(`${ORIGIN}/use/market/dev/api/v1/charges`), own, EDGE))!],

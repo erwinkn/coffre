@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import type { NamedUseInput, NamedUseOutcome } from '@coffre/core/vault';
 import { sql } from 'drizzle-orm';
 
-import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { bufferedBy, keyBlocksOf, namedWorld, slowed as slowedVault, weighed, weighingSession } from './named-world.ts';
 import { emptyLog, isolate, useDatabases, world } from './use-world.ts';
 
@@ -70,12 +70,10 @@ test("a fork's own key, and one it inherits from dev, are each one call by name;
   assert.equal(await uses(), 2, 'a key the fork does not hold: no entry');
   // Its value is dev's, in dev itself, as ever: the removal is the fork's alone.
   assert.equal(codeOf(await vault.useNamed!(w.ask(await w.nameOf(w.removed), { forks: true }))), 'ok');
-  if (ENGINE === 'postgres') {
-    const app = JSON.parse(inherited.app!) as { environment: { id: string }; parent: string | null; secrets: { secret: { id: string } }[] };
-    assert.equal(app.environment.id, w.fork, "the app's place: the fork");
-    assert.equal(app.parent, 'dev', 'and its parent, by slug, as `app_read` names it');
-    assert.deepEqual(app.secrets.map((row) => row.secret.id), [w.inherited]);
-  }
+  const app = JSON.parse(inherited.app!) as { environment: { id: string }; parent: string | null; secrets: { secret: { id: string } }[] };
+  assert.equal(app.environment.id, w.fork, "the app's place: the fork");
+  assert.equal(app.parent, 'dev', 'and its parent, by slug, as `app_read` names it');
+  assert.deepEqual(app.secrets.map((row) => row.secret.id), [w.inherited]);
 });
 
 test('a key a fork inherits takes the standing where it is held: without a grant on dev, refused as a key never made, in one call, nothing written', async () => {
@@ -108,7 +106,7 @@ test("without standing at the fork, its call reads nothing of the key: every key
   // A grant on dev alone: they read dev's keys there, and stand nowhere in the fork.
   await w.grantAt(w.dev, 'viewer');
   const hot = await slowedVault(db);
-  const session = ENGINE === 'postgres' ? weighingSession() : null;
+  const session = weighingSession();
   try {
     const answers: { code: string; calls: number }[] = [];
     const work: number[] = [];
@@ -116,15 +114,15 @@ test("without standing at the fork, its call reads nothing of the key: every key
       const before = hot.statements();
       const outcome = byName(await hot.vault.useNamed!(w.at(name)));
       answers.push({ code: codeOf(outcome), calls: hot.statements() - before });
-      const read = await weighed(hot.last(), session ?? undefined);
+      const read = await weighed(hot.last(), session);
       if (read !== null) work.push(keyBlocksOf(read.blocks));
     }
     assert.ok(answers.every((answer) => answer.code === 'no_grant' && answer.calls === answers[0]!.calls), JSON.stringify(answers));
-    if (ENGINE === 'postgres') assert.ok(work.every((blocks) => blocks === work[0]), `no key's rows read: ${JSON.stringify(work)}`);
+    assert.ok(work.every((blocks) => blocks === work[0]), `no key's rows read: ${JSON.stringify(work)}`);
     assert.equal(await uses(), 0);
   } finally {
     await hot.end();
-    await session?.end();
+    await session.end();
   }
 });
 
@@ -175,10 +173,8 @@ test("`dev@me`: the caller's personal config, their own value first, then dev's;
   assert.equal(inherited.secretId, devKey, "dev's, read through their config");
   assert.deepEqual(cache.keyed(config, await w.nameOf(devKey)), { id: devKey, through: true });
   assert.equal(codeOf(await vault.useNamed!(mine('NEVER_MADE'))), 'missing');
-  if (ENGINE === 'postgres') {
-    const app = JSON.parse(overridden.app!) as { environment: { id: string; owner: string }; parent: string };
-    assert.deepEqual([app.environment.id, app.environment.owner, app.parent], [config, w.principal, 'dev']);
-  }
+  const app = JSON.parse(overridden.app!) as { environment: { id: string; owner: string }; parent: string };
+  assert.deepEqual([app.environment.id, app.environment.owner, app.parent], [config, w.principal, 'dev']);
 });
 
 test("at `dev@me`, a Contributor reads their own value, which use of dev allows, and not dev's, which takes read; revoked at dev, nothing of the key is read (Probing.tla, GateWeighsParent)", async () => {

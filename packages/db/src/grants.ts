@@ -18,7 +18,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, like, lt, or, sql, type SQL } 
 
 import { tablesOf, type Queryable } from './database.ts';
 import { prepared } from './prepared.ts';
-import { engineOf, rowsOf, tombstone, truth } from './dialect.ts';
+import { rowsOf, tombstone, truth } from './dialect.ts';
 import { accessAllowed, changeNamed, changesOf, entriesOf, entryColumns, keyedBy, logObject, newestAuthentic, type Authenticity, type Newest } from './log.ts';
 
 /**
@@ -321,12 +321,12 @@ export function findingMetadata(change: string): string {
 
 /**
  * The change a finding names (`findingMetadata`), in SQL: null for 0.14's, which names none. Only a JSON string
- * counts, on both engines alike: a finding with any other `change` was written around the vault, and is weighed by
+ * counts: a finding with any other `change` was written around the vault, and is weighed by
  * 0.14's rule (a reader with no key takes every entry in the vault's name as its own; the vault's MAC tells them
  * apart, `reportStands`). A name that is no change's names none that is newest, and settles at once.
  */
 function weighedBy(db: Queryable): SQL<string | null> {
-  return changeNamed(engineOf(db), tablesOf(db).auditLog.metadata);
+  return changeNamed(tablesOf(db).auditLog.metadata);
 }
 
 /**
@@ -345,10 +345,9 @@ export function findingStands(newest: { legacy: bigint | null; access: bigint | 
 }
 
 /** A member's newest change's name (`changeName`) in SQL, `object` its object in the log: one probe of `log_changes_object_idx` (R48). */
-function newestNamed(db: Queryable, object: SQL): SQL<string> {
-  const hex = engineOf(db) === 'postgres' ? sql`encode(c.mac, 'hex')` : sql`lower(hex(c.mac))`;
-  const newest = changesOf(db, 'c', object);
-  return sql`coalesce((SELECT ${hex} FROM log_changes c WHERE ${newest.where} ORDER BY ${newest.order} LIMIT 1), ${sql.raw(`'${NO_CHANGE}'`)})`;
+function newestNamed(object: SQL): SQL<string> {
+  const newest = changesOf('c', object);
+  return sql`coalesce((SELECT encode(c.mac, 'hex') FROM log_changes c WHERE ${newest.where} ORDER BY ${newest.order} LIMIT 1), ${sql.raw(`'${NO_CHANGE}'`)})`;
 }
 
 /**
@@ -359,12 +358,11 @@ function newestNamed(db: Queryable, object: SQL): SQL<string> {
 export async function newestChangeNames(db: Queryable, principals: readonly string[]): Promise<Map<string, string>> {
   if (principals.length === 0) return new Map();
   const keys = principals.map((principal) => logObject('principal', principal));
-  const rows = await rowsOf<{ object: string; name: string }>(db, engineOf(db) === 'postgres'
-    ? sql`SELECT k.object, ${newestNamed(db, sql`k.object::uuid`)} AS name FROM unnest(${sql.param(keys)}::text[]) AS k (object)`
-    : sql`SELECT k.value AS object, ${newestNamed(db, sql`k.value`)} AS name FROM json_each(${JSON.stringify(keys)}) k`);
+  const rows = await rowsOf<{ object: string; name: string }>(db,
+    sql`SELECT k.object, ${newestNamed(sql`k.object::uuid`)} AS name FROM unnest(${sql.param(keys)}::text[]) AS k (object)`);
   const names = new Map(rows.map((row) => [String(row.object), row.name] as const));
   return new Map(principals.map((principal, i) => {
-    // Each engine hands back the key it was given; a key that came back otherwise would name "none" for a member
+    // Postgres hands back the key it was given; a key that came back otherwise would name "none" for a member
     // with changes, which the member page (`findingsOf`, in SQL) would not.
     const name = names.get(keys[i]!);
     if (name === undefined) throw new Error(`newestChangeNames: no row for ${keys[i]}`);
@@ -385,7 +383,7 @@ export function findingsOf(db: Queryable, principal: string): { legacy: SQL<stri
     // The newest of 0.14's by `audit_log_tamper_idx`, `(member, change, seq)`: as the greatest `seq`, Postgres walked
     // the member's reports of 0.15's back, or the vault's entries, 1,088 pages behind 20,000 of them (T245).
     legacy: sql`(SELECT CAST(${log.seq} AS text) FROM ${log} WHERE ${of} AND ${weighed} IS NULL ORDER BY ${about.order} LIMIT 1)`,
-    named: sql`(CASE WHEN EXISTS (SELECT 1 FROM ${log} WHERE ${of} AND ${weighed} = ${newestNamed(db, sql`${logObject('principal', principal)}`)}) THEN 1 ELSE 0 END)`,
+    named: sql`(CASE WHEN EXISTS (SELECT 1 FROM ${log} WHERE ${of} AND ${weighed} = ${newestNamed(sql`${logObject('principal', principal)}`)}) THEN 1 ELSE 0 END)`,
   };
 }
 
@@ -439,7 +437,7 @@ export async function accessEntriesAbout(db: Queryable, principal: string, limit
 /** A principal's allowed access entries, newest first: steps of `audit_log_access_idx` (`keyedBy`; T239, T245, R48). */
 function accessEntries(db: Queryable, before?: SQL) {
   const { auditLog } = tablesOf(db);
-  const about = keyedBy(db, auditLog.subjectPrincipal, auditLog.seq, 'desc', sql.placeholder('principal'), sql.placeholder('principals'));
+  const about = keyedBy(auditLog.subjectPrincipal, auditLog.seq, 'desc', sql.placeholder('principals'));
   return db
     .select(entryColumns(db))
     .from(auditLog)
@@ -484,14 +482,13 @@ async function tamperReportsAbout(
  * A member's tamper reports of one kind, 0.15's naming one change or
  * 0.14's naming none, newest first: steps of `audit_log_tamper_idx`,
  * `(member, change, seq)`, however many of the other kind, or of other
- * changes, came since. On Postgres through `= ANY` of the member, ordered
+ * changes, came since. Through `= ANY` of the member, ordered
  * by the member, the change, then `seq` (`keyedBy`): ordered by `seq`
  * alone, Postgres walked `audit_log_vault_idx` back, 1,397 pages behind
  * 40,000 reports naming another change (T245, R48).
  */
 function reportsAbout(db: Queryable, principal: string): { where: SQL; order: SQL } {
   const { auditLog } = tablesOf(db);
-  if (engineOf(db) !== 'postgres') return { where: sql`${auditLog.subjectPrincipal} = ${principal}`, order: sql`${auditLog.seq} DESC` };
   return {
     where: sql`${auditLog.subjectPrincipal} = ANY(${sql.param([principal])}::text[])`,
     order: sql`${auditLog.subjectPrincipal} DESC, ${weighedBy(db)} DESC, ${auditLog.seq} DESC`,

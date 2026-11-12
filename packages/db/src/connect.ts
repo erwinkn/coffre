@@ -1,226 +1,30 @@
-import { resolve } from 'node:path';
-
-import type { Client, InStatement, ResultSet, Transaction as LibsqlTransaction, TransactionMode } from '@libsql/client';
 import { createDatabase, type Database } from './database.ts';
-import type { Engine } from './dialect.ts';
-import { asPostgresDatabase } from './portable.ts';
 import { postgresClient } from './postgres.ts';
 
 export { postgresClient, postgresOptions, postgresSession, quoteIdentifier, quoteLiteral, SessionLost, type ClientOptions, type PostgresClient } from './postgres.ts';
 
 /**
- * Open a database from its URL, on a Node server:
- *
- *   postgres://… or postgresql://…   postgres.js, a pool of up to 10 connections
- *   file:… or libsql:…                @libsql/client (SQLite)
- *
- * The SQLite driver loads only when asked for. The Worker does not
- * come through here; it builds its Postgres database from the Hyperdrive
- * pool with createDatabase. `max`, for a pool of its own beside another,
- * as the vault's checkpointer has (T169). `lockWaitMs`, Postgres's: each
- * transaction's lock waits (`createDatabase`).
+ * Open a Postgres database from its URL, `postgres://…` or
+ * `postgresql://…`, on a Node server: postgres.js, a pool of up to 10
+ * connections. The Worker does not come through here; it builds its
+ * database from the Hyperdrive pool with createDatabase. `max`, for a pool
+ * of its own beside another, as the vault's checkpointer has (T169).
+ * `lockWaitMs`: each transaction's lock waits (`createDatabase`).
  */
 export async function openDatabase(url: string, options: { max?: number; lockWaitMs?: number } = {}): Promise<OpenDatabase> {
-  switch (engineOfUrl(url)) {
-    case 'postgres': {
-      // As node-postgres's pool was: 10 connections, each closed after 10 s idle.
-      const client = postgresClient(url, { max: options.max ?? 10, idle_timeout: 10 });
-      return { engine: 'postgres', db: createDatabase(client, { lockWaitMs: options.lockWaitMs }), close: () => client.end(), cut: () => client.end({ timeout: 0 }) };
-    }
-    case 'sqlite': {
-      const [{ createClient }, { drizzle }, schema] = await Promise.all([
-        import('@libsql/client'),
-        import('drizzle-orm/libsql'),
-        import('./schema.sqlite.ts'),
-      ]);
-      // A lone statement that finds the database locked waits this long.
-      const client = createClient({ url, timeout: 5_000, intMode: 'bigint' });
-      if (url.startsWith('file:')) await client.execute('PRAGMA journal_mode = WAL');
-      const db = drizzle({ client: oneTransactionAtATime(client, writeQueueFor(url)), schema });
-      return { engine: 'sqlite', db: asPostgresDatabase(db), close: async () => client.close(), cut: async () => client.close() };
-    }
-  }
+  checkDatabaseUrl(url);
+  // As node-postgres's pool was: 10 connections, each closed after 10 s idle.
+  const client = postgresClient(url, { max: options.max ?? 10, idle_timeout: 10 });
+  return { db: createDatabase(client, { lockWaitMs: options.lockWaitMs }), close: () => client.end(), cut: () => client.end({ timeout: 0 }) };
 }
 
 /** `close` once what was asked has answered; `cut` at once, what is in flight failing (T169). */
-export type OpenDatabase = { engine: Engine; db: Database; close: () => Promise<void>; cut: () => Promise<void> };
+export type OpenDatabase = { db: Database; close: () => Promise<void>; cut: () => Promise<void> };
 
-export function engineOfUrl(url: string): Engine {
+/** Refuse a URL that names no Postgres database, before anything connects. */
+export function checkDatabaseUrl(url: string): void {
   const scheme = url.slice(0, url.indexOf(':'));
-  if (scheme === 'postgres' || scheme === 'postgresql') return 'postgres';
+  if (scheme === 'postgres' || scheme === 'postgresql') return;
   if (scheme === 'mysql') throw new Error('coffre supports Postgres; MySQL support was removed');
-  if (scheme === 'file' || scheme === 'libsql') return 'sqlite';
   throw new Error(`unsupported database URL scheme: ${scheme}:`);
-}
-
-// --- SQLite: one writer at a time ---------------------------------------------------
-
-/**
- * SQLite lets one connection write at a time and fails the others at once
- * with SQLITE_BUSY rather than queueing them; 24 concurrent audit appends were
- * enough to see it. So transactions queue here instead, in the order they
- * asked, one open at a time per database file, however many clients or
- * connections reach it. Each begins IMMEDIATE (libsql's default), taking the
- * write lock with its first statement, which is what makes a read inside it
- * as good as a locked one (see forUpdate).
- *
- * A lone statement that writes waits its turn too. It cannot wait for the
- * lock itself: libsql's busy wait blocks the thread, so the transaction
- * holding the lock, in this process, cannot go on to commit, and the write
- * fails after `timeout`. A connection whose write failed that way still
- * reads the file as it was then, until its statement is collected:
- *
- *   six MCP calls at once     the first's approval, in a transaction    BEGIN IMMEDIATE, then awaits
- *   another's last_used_at    a lone UPDATE, outside the queue          the thread blocked 5 s, SQLITE_BUSY
- *   it reads the approval     on that connection                        no row
- */
-class WriteQueue {
-  #tail: Promise<void> = Promise.resolve();
-
-  /** Wait for our turn; the returned function ends it. */
-  acquire(): Promise<() => void> {
-    let release!: () => void;
-    const turn = new Promise<void>((done) => (release = done));
-    const ready = this.#tail.then(() => release);
-    this.#tail = this.#tail.then(() => turn);
-    return ready;
-  }
-}
-
-const queues = new Map<string, WriteQueue>();
-
-function writeQueueFor(url: string): WriteQueue {
-  // file:/a.db, file:///a.db and a relative file:a.db from / are one file.
-  const key = url.startsWith('file:') ? resolve(url.replace(/^file:(\/\/)?/, '').split('?')[0]) : url;
-  let queue = queues.get(key);
-  if (queue === undefined) queues.set(key, (queue = new WriteQueue()));
-  return queue;
-}
-
-function oneTransactionAtATime(client: Client, queue: WriteQueue): Client {
-  return new Proxy(client, {
-    get(target, key) {
-      if (key === 'execute') {
-        return async (...args: Parameters<Client['execute']>) => {
-          // Parameters<> sees execute's last overload only, (sql, args); Drizzle calls the other, ({ sql, args }).
-          const [statement] = args as unknown as [InStatement];
-          if (!writes(typeof statement === 'string' ? statement : statement.sql)) return numbers(await target.execute(...args));
-          const release = await queue.acquire();
-          try {
-            return numbers(await target.execute(...args));
-          } finally {
-            release();
-          }
-        };
-      }
-      if (key === 'transaction') {
-        return async (mode?: TransactionMode) => {
-          const release = await queue.acquire();
-          try {
-            return settling(await target.transaction(mode), release);
-          } catch (error) {
-            release();
-            throw error;
-          }
-        };
-      }
-      if (key === 'batch' || key === 'migrate' || key === 'executeMultiple') {
-        return async (...args: unknown[]) => {
-          const release = await queue.acquire();
-          try {
-            const result = await (target[key] as (...args: unknown[]) => Promise<ResultSet[] | void>)(...args);
-            return result?.map(numbers);
-          } finally {
-            release();
-          }
-        };
-      }
-      const value = Reflect.get(target, key, target);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  });
-}
-
-/** Ends the transaction's turn when it commits, rolls back or closes. */
-function settling(tx: LibsqlTransaction, release: () => void): LibsqlTransaction {
-  let settled = false;
-  const settle = () => {
-    if (settled) return;
-    settled = true;
-    release();
-  };
-  const { commit, rollback, close, execute, batch } = tx;
-  tx.execute = async (...args) => numbers(await execute.apply(tx, args));
-  tx.batch = async (...args) => (await batch.apply(tx, args)).map(numbers);
-  tx.commit = async () => {
-    try {
-      return await commit.call(tx);
-    } finally {
-      settle();
-    }
-  };
-  tx.rollback = async () => {
-    try {
-      return await rollback.call(tx);
-    } finally {
-      settle();
-    }
-  };
-  tx.close = () => {
-    try {
-      close.call(tx);
-    } finally {
-      settle();
-    }
-  };
-  return tx;
-}
-
-/**
- * Whether a lone statement may write: all but a query (SELECT or VALUES, or
- * a WITH whose statement is one) and EXPLAIN, read from its words outside
- * parentheses, strings, quoted names and comments.
- *
- *   select … from "mcp_approvals" where …                 reads
- *   WITH policy AS (SELECT …) SELECT json_object(…)       reads
- *   WITH old AS (SELECT …) DELETE FROM …                  writes
- *   update "mcp_connections" set …                        writes
- */
-export function writes(statement: string): boolean {
-  let depth = 0;
-  let first: string | null = null;
-  for (const [token] of statement.matchAll(/--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:[^']|'')*'?|"(?:[^"]|"")*"?|`[^`]*`?|\[[^\]]*\]?|[()]|[A-Za-z_][\w$]*/g)) {
-    if (token === '(') depth += 1;
-    else if (token === ')') depth -= 1;
-    else if (depth === 0 && /^[A-Za-z_]/.test(token)) {
-      const word = token.toLowerCase();
-      if (first === null) {
-        first = word;
-        if (word !== 'with') return !QUERIES.has(word);
-      } else if (STATEMENTS.has(word)) {
-        return !QUERIES.has(word);
-      }
-    }
-  }
-  return true;
-}
-
-const QUERIES = new Set(['select', 'values', 'explain']);
-/** The words a WITH's own statement starts with. */
-const STATEMENTS = new Set(['select', 'values', 'insert', 'update', 'delete', 'replace']);
-
-/** Keep large counters exact; Drizzle's booleans and dates still need safe numbers. */
-function numbers(result: ResultSet): ResultSet {
-  result.rows = result.rows.map((row) => {
-    // libSQL exposes both named and immutable indexed values on each row.
-    const properties = Object.getOwnPropertyDescriptors(row);
-    for (const property of Object.values(properties)) {
-      const value = property.value;
-      if (typeof value === 'bigint' && value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) {
-        property.value = Number(value);
-      }
-    }
-    return Object.create(Object.getPrototypeOf(row), properties);
-  });
-  return result;
 }

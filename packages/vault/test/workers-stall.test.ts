@@ -15,11 +15,9 @@ import { UNSEALED, type Sealing, type UseOutcome } from '@coffre/core/vault';
 import { sql } from 'drizzle-orm';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
-import { emptyDatabase, ENGINE, HOT_URL, openTestDatabase, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { emptyDatabase, HOT_URL, openTestDatabase, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { stallProxy, type StallProxy } from './stall-proxy.ts';
 import { ask, change, emptyLog, KEK, SIGNING_KEY, useDatabases, world } from './use-world.ts';
-
-const skip = ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive';
 
 let db: TestDatabase;
 let worker: Unstable_DevWorker;
@@ -27,7 +25,6 @@ let proxy: StallProxy;
 let dir: string;
 
 before(async () => {
-  if (skip) return;
   db = await openTestDatabase();
   await useDatabases(db);
   await emptyDatabase(db.owner);
@@ -87,7 +84,7 @@ const untilSealing = async (ok: boolean, ms: number, what: string) => {
   }
 };
 
-test("T169, Workers: the checkpointer's connection stops answering: a use answers through the entrypoint, a change answers unsealed within its bound, sealing goes red; answered again, it seals by itself", { skip, timeout: 120_000 }, async () => {
+test("T169, Workers: the checkpointer's connection stops answering: a use answers through the entrypoint, a change answers unsealed within its bound, sealing goes red; answered again, it seals by itself", { timeout: 120_000 }, async () => {
   const w = await world();
   const id = await w.key('postgres://prod');
   // The first call starts the object; it seals within a tick or two.

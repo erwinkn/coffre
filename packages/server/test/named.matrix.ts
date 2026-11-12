@@ -10,8 +10,7 @@
 // row they may not have must be answered alike, one `no` whatever the reason (D153), with the principal's lock held and
 // every statement of the vault's hot path slowed, so that a lock waited for, or a statement more, shows as a 503; and
 // in as many of the vault's calls, of the hot path's statements and of the app's own (reviews r2 and r3 of D153). Each
-// cell is a project, an environment and a person of its own. On SQLite, which has neither the lock nor a hot path of
-// its own to relay, the same answers and calls, and the app's statements as drizzle prepares them.
+// cell is a project, an environment and a person of its own.
 //
 // A map set as it should never be (another place's key, an id never made, another credential's) is the vault's own
 // state, which no request and no API of the app's reaches: use.matrix.ts sets it, in the vault (D150).
@@ -47,7 +46,6 @@ import { clientFor, contextFor, hotDatabaseUrl, openTestDatabase, resetDatabase,
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { checkpointFence } from './db/tables.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -233,19 +231,13 @@ const BUFFER_SLACK = 6;
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 let runtime: CoffreRuntime;
-/** On Postgres, the vault's hot path and the app's database, each through a relay of ours, which counts statements. */
-const POSTGRES = TEST_ENGINE === 'postgres';
+/** The vault's hot path and the app's database, each through a relay of ours, which counts statements. */
 let hot: Awaited<ReturnType<typeof relay>> | null = null;
 let app: Awaited<ReturnType<typeof relay>> | null = null;
 let appPool: ReturnType<typeof postgresClient> | null = null;
-/** On SQLite, the app's statements as drizzle prepares them: its own and its transactions' (each takes its session's logger). */
-let sqliteStatements = 0;
-const appStatements = () => (POSTGRES ? app!.statements() : sqliteStatements);
-/**
- * The hot path's statements of `requests`, on Postgres: SQLite's vault opens its own connection, whose calls
- * use.matrix.ts counts.
- */
-const hotStatements = (requests: readonly string[]) => (POSTGRES ? hot!.statementsOf(requests) : 0);
+const appStatements = () => app!.statements();
+/** The hot path's statements of `requests`. */
+const hotStatements = (requests: readonly string[]) => hot!.statementsOf(requests);
 const vaultCalls: string[] = [];
 /** The request id of each use the app asked of the vault, by name or by ids. */
 const useRequests: string[] = [];
@@ -256,30 +248,21 @@ before(async () => {
   await resetDatabase(db.owner);
   await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
   const kek = randomBytes(32);
-  if (POSTGRES) {
-    // No autovacuum on this database's tables: a row's refusals are weighed on statistics only the row's own ANALYZE
-    // refreshes, before it is weighed, never while it is, as use.matrix.ts weighs its cells. An autoanalyze landing
-    // mid-row (of `environments`, `principals`) had one cell's runs plan `use_credential`'s statements anew, and that
-    // cell read 60 to 260 buffers above the rest of its row, whatever its key (CI, T170: auto_explain showed the
-    // planning, and the places' statement turned from a nested loop to a hash join for every cell after).
-    await rowsOf(db.owner, sql.raw(`DO $$ DECLARE t record; BEGIN
-      FOR t IN SELECT c.oid::regclass AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' LOOP
-        EXECUTE format('ALTER TABLE %s SET (autovacuum_enabled = off)', t.name);
-      END LOOP; END $$`));
-    hot = await relay(hotDatabaseUrl());
-    // The app's own database through a relay too, at no delay: its statements counted as the hot path's are.
-    app = await relay(TEST_RUNTIME_DATABASE_URL);
-    appPool = postgresClient(app.url, { max: 10 });
-    // Its throttle off: one vault answers every cell, its locks held and statements slowed `late` on purpose, which would have it refuse a later cell's setup (config.md, Q1, step 2).
-    deps = testDeps(createDatabase(appPool), [ROOT], { vault: testVault([ROOT], { hotDatabase: hot.url }, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, throttled: false }) });
-  } else {
-    const session = (db.runtime as unknown as { session: { logger: unknown; options: { logger?: unknown } } }).session;
-    const counting = { logQuery: () => { sqliteStatements += 1; } };
-    session.logger = counting;
-    session.options.logger = counting;
-    // Its throttle off, as on Postgres: one vault answers every cell, `late` past the floor on purpose.
-    deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, throttled: false }) });
-  }
+  // No autovacuum on this database's tables: a row's refusals are weighed on statistics only the row's own ANALYZE
+  // refreshes, before it is weighed, never while it is, as use.matrix.ts weighs its cells. An autoanalyze landing
+  // mid-row (of `environments`, `principals`) had one cell's runs plan `use_credential`'s statements anew, and that
+  // cell read 60 to 260 buffers above the rest of its row, whatever its key (CI, T170: auto_explain showed the
+  // planning, and the places' statement turned from a nested loop to a hash join for every cell after).
+  await rowsOf(db.owner, sql.raw(`DO $$ DECLARE t record; BEGIN
+    FOR t IN SELECT c.oid::regclass AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' LOOP
+      EXECUTE format('ALTER TABLE %s SET (autovacuum_enabled = off)', t.name);
+    END LOOP; END $$`));
+  hot = await relay(hotDatabaseUrl());
+  // The app's own database through a relay too, at no delay: its statements counted as the hot path's are.
+  app = await relay(TEST_RUNTIME_DATABASE_URL);
+  appPool = postgresClient(app.url, { max: 10 });
+  // Its throttle off: one vault answers every cell, its locks held and statements slowed `late` on purpose, which would have it refuse a later cell's setup (config.md, Q1, step 2).
+  deps = testDeps(createDatabase(appPool), [ROOT], { vault: testVault([ROOT], { hotDatabase: hot.url }, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, throttled: false }) });
   // Each call the app makes of the vault, by name: its sequence says the route a request took (`routeOf`).
   for (const method of ['useNamed', 'useNamedMany', 'use', 'useMany', 'access', 'unwrap'] as const) {
     const call = deps.vault[method] as ((...args: unknown[]) => Promise<unknown>) | undefined;
@@ -449,9 +432,9 @@ test(`through the app, a person is answered alike for every key they may not hav
   let attributed = 0;
   /** The widest spread of buffers within a row's refusals, over the run. */
   let widest = 0;
-  // On Postgres, the principal's lock held by a connection of its own while each cell is asked; SQLite has none.
-  const holder = POSTGRES ? postgresClient(TEST_RUNTIME_DATABASE_URL, { max: 1 }) : null;
-  const lockDb = holder === null ? null : createDatabase(holder);
+  // The principal's lock held by a connection of its own while each cell is asked.
+  const holder = postgresClient(TEST_RUNTIME_DATABASE_URL, { max: 1 });
+  const lockDb = createDatabase(holder);
   try {
     for (const phase of [ROWS.filter((row) => row.admission === 'as asked'), ROWS.filter((row) => row.admission === 'past the floor')]) {
       for (const row of phase) {
@@ -466,7 +449,7 @@ test(`through the app, a person is answered alike for every key they may not hav
             if (row.admission === 'past the floor') await db.owner.update(checkpointFence).set({ atFloor: Date.now() + 60_000 });
             let release!: () => void;
             const released = new Promise<void>((resolve) => { release = resolve; });
-            const held = lockDb === null ? Promise.resolve() : lockDb.transaction(async (tx) => {
+            const held = lockDb.transaction(async (tx) => {
               await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244066, hashtext(${`user:${c.person}`}))`);
               await released;
             });
@@ -483,7 +466,7 @@ test(`through the app, a person is answered alike for every key they may not hav
                 const statements = hotStatements(useRequests.slice(uses)) - unbound;
                 attributed += statements;
                 // Its last statement on the hot path, as sent, whose own work the row weighs once its lock is let go.
-                const sent = POSTGRES ? hot!.callsOf(useRequests.slice(uses)).at(-1) : undefined;
+                const sent = hot!.callsOf(useRequests.slice(uses)).at(-1);
                 return { answer, calls: vaultCalls.slice(calls), statements, app: appStatements() - own, sent };
               };
               const api = await measured(() => reveal(c.token, c.path));
@@ -491,10 +474,10 @@ test(`through the app, a person is answered alike for every key they may not hav
               // Several keys (T165): two by name, every key of the place, and the proxy's credential of two, each the
               // vault's one call by name, its statements on the hot path all counted (they bind no use's request id).
               const several = async <T>(ask: () => Promise<T>) => {
-                const [calls, own, sent] = [vaultCalls.length, appStatements(), POSTGRES ? hot!.statements() : 0];
+                const [calls, own, sent] = [vaultCalls.length, appStatements(), hot!.statements()];
                 const answer = await ask();
                 await drainBackgroundTasks();
-                return { answer, work: [vaultCalls.slice(calls), POSTGRES ? hot!.statements() - sent : 0, appStatements() - own] };
+                return { answer, work: [vaultCalls.slice(calls), hot!.statements() - sent, appStatements() - own] };
               };
               const many = manyAlike(row)
                 ? {
@@ -524,12 +507,12 @@ test(`through the app, a person is answered alike for every key they may not hav
         if (refused.some((a) => JSON.stringify(a.api) !== JSON.stringify(first!.api) || JSON.stringify(a.proxy) !== JSON.stringify(first!.proxy) || JSON.stringify(a.work) !== JSON.stringify(first!.work))) {
           differing.push(`${label}: ${refused.map((a) => `${a.key} ${JSON.stringify(a.api)} ${JSON.stringify(a.proxy)} ${JSON.stringify(a.work)}`).join(' | ')}`);
         }
-        // On Postgres, as asked: each refusal's last statement in the same form, the probe's (a named call never runs the
+        // As asked: each refusal's last statement in the same form, the probe's (a named call never runs the
         // cached form, `p_known`, the 12th argument); its work inside, which the statements counted do not show (Fable's
         // review, review r12 of D153), in buffers. No standing: no key read (W268, NoKeyBeforeStanding), as many for
         // every key (BUFFER_SLACK, the run's noise). Standing: a key's may cost what its shape does, a key they may know
         // of (R6), never what their asking before left (`histories`, below).
-        if (POSTGRES && row.admission === 'as asked') {
+        if (row.admission === 'as asked') {
           // The statistics as the row's cells left them, and none changing while they are weighed (autovacuum is off,
           // `before`): every cell's statements planned on the same. Each cell is a world of its own, whose own rows its
           // setup wrote over a few times: their tables vacuumed, the key's own relations not (`WORLD_TABLES`).
@@ -594,9 +577,9 @@ test(`through the app, a person is answered alike for every key they may not hav
       }
     }
   } finally {
-    await holder?.end();
+    await holder.end();
   }
-  if (POSTGRES) console.log(`the widest spread of buffers within a row's refusals, beyond their world's key never made, no standing: ${widest}`);
+  console.log(`the widest spread of buffers within a row's refusals, beyond their world's key never made, no standing: ${widest}`);
   assert.deepEqual(differing, []);
-  if (POSTGRES) assert.ok(attributed >= ROWS.length * KEYS.length, `the hot path's statements counted to their requests: ${attributed}`);
+  assert.ok(attributed >= ROWS.length * KEYS.length, `the hot path's statements counted to their requests: ${attributed}`);
 });

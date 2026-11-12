@@ -115,13 +115,6 @@ if (existsSync(routerManifest)) {
     }
 }
 
-// A Node deployment imports SQLite's driver itself, where its server's
-// build leaves it out (examples/node/app/vite.config.ts): the one
-// @coffre/db is built with.
-const libsql = read('packages/db/package.json').dependencies['@libsql/client'];
-const nodeDriver = read('examples/node/package.json').dependencies?.['@libsql/client'];
-if (nodeDriver !== libsql) problems.push(`examples/node/package.json: @libsql/client is ${nodeDriver ?? 'missing'}, and @coffre/db's is ${libsql}`);
-
 const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean);
 let files = 0;
 for (const path of tracked) {

@@ -1,7 +1,6 @@
 // 0.15's verifier (docs/design/0.15-plan.md, PR 8; verifier.ts): a page's check from the newest pair, every entry above
-// it by its MAC and request, held to the signer's memory, over a vault that keeps 0.15's log under a real checkpointer,
-// on both engines. Changes are the vault's own (admit, setAccess) and the cutover's genesis; uses go through the use
-// path.
+// it by its MAC and request, held to the signer's memory, over a vault that keeps 0.15's log under a real checkpointer.
+// Changes are the vault's own (admit, setAccess) and the cutover's genesis; uses go through the use path.
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -28,7 +27,7 @@ import { DAY_MS, dayOf } from '../src/retention.ts';
 import { newRequestId } from '../src/use.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
-import { cutOver, emptyDatabase, ENGINE, openTestDatabase, places, rows, run, speaking, type TestDatabase } from './database.ts';
+import { cutOver, emptyDatabase, openTestDatabase, places, rows, run, speaking, type TestDatabase } from './database.ts';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
 const openLocalVault = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
@@ -41,17 +40,15 @@ let db: TestDatabase;
 let hot: Database;
 before(async () => {
   db = await openTestDatabase();
-  hot = ENGINE === 'postgres' ? await db.hot() : db.vault;
+  hot = await db.hot();
 });
 after(() => db.close());
 beforeEach(async () => {
   await emptyDatabase(db.owner);
   for (const table of ['log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
   await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
-  if (ENGINE === 'postgres') {
-    const today = new Date().toISOString().slice(0, 10);
-    await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
-  }
+  const today = new Date().toISOString().slice(0, 10);
+  await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
 });
 
 type Checked = Extract<TreeVerification, { kept: true }>;
@@ -215,9 +212,7 @@ test('a page\'s check names a forged entry above the newest pair, a forged newes
   clean(await w.verify());
   // A copy of an entry passes a walk's own check when far enough apart, and a page's below its start; the database
   // refuses it while its index stands: gone, or one of its name over other columns (review r2).
-  const [drop, add] = ENGINE === 'postgres'
-    ? [sql`ALTER TABLE log_changes DROP CONSTRAINT log_changes_request_id_key`, sql`ALTER TABLE log_changes ADD CONSTRAINT log_changes_request_id_key UNIQUE (request_id)`]
-    : [sql`DROP INDEX log_changes_request_id_key`, sql`CREATE UNIQUE INDEX log_changes_request_id_key ON log_changes (request_id)`];
+  const [drop, add] = [sql`ALTER TABLE log_changes DROP CONSTRAINT log_changes_request_id_key`, sql`ALTER TABLE log_changes ADD CONSTRAINT log_changes_request_id_key UNIQUE (request_id)`];
   const gone = 'the indexes that keep each request to one entry are gone: a copy of an entry would pass';
   await run(db.owner, drop);
   try {
@@ -269,12 +264,11 @@ test('a retention change in the log is the log\'s own, and the uses below its cu
   const w = await instance();
   for (let i = 0; i < 3; i += 1) assert.ok((await w.use(await w.key())).ok);
   await w.cp.tick();
-  // A retention change, sealed, as retention writes it (retention.ts), for a day ten days ago. Postgres's log_retention
-  // holds its cut to the first pair past the day's end, the first of this log; SQLite's checks nothing, so it cuts at
-  // the newest, and the uses below it are dropped.
+  // A retention change, sealed, as retention writes it (retention.ts), for a day ten days ago. log_retention holds
+  // its cut to the first pair past the day's end, the first of this log.
   const store = logStore(db.vault);
   const day = dayOf(Date.now() - 10 * DAY_MS);
-  const cut = (ENGINE === 'postgres' ? await store.cutAt(Date.parse(`${day}T00:00:00Z`) + DAY_MS) : await store.newest())!;
+  const cut = (await store.cutAt(Date.parse(`${day}T00:00:00Z`) + DAY_MS))!;
   const pair = (await openPair(cut.notes, (await verifierKeys([w.seed])).current.verifiers))!;
   const at = Date.now();
   const requestId = `retention:${day}`;

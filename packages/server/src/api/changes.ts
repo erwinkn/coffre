@@ -241,7 +241,7 @@ export class AppChanges {
    * change (`app_change_strict`), after the 0.14 entries; or, given
    * `append`, which appends them, in its statement, one round trip less
    * under 0.14's head (T123). `append` runs whatever this write dropped.
-   * Nothing awaits them: on Postgres they go with the COMMIT, under its Sync
+   * Nothing awaits them: they go with the COMMIT, under its Sync
    * (`later`), and their numbers answer after it (`sealed`). A row moved
    * since it was read fails the transaction, which `failed` says is
    * `ObjectMoved`: read and prepared again (`retrying`).

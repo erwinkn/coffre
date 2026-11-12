@@ -16,18 +16,15 @@ import type { UseManyOutcome, UseOutcome } from '@coffre/core/vault';
 import { sql } from 'drizzle-orm';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
-import { emptyDatabase, ENGINE, HOT_URL, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { emptyDatabase, HOT_URL, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { ask, emptyLog, KEK, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 import { newRequestId } from '../src/use.ts';
-
-const skip = ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive';
 
 let db: TestDatabase;
 let worker: Unstable_DevWorker;
 let dir: string;
 
 before(async () => {
-  if (skip) return;
   db = await openTestDatabase();
   await useDatabases(db);
   await emptyDatabase(db.owner);
@@ -68,7 +65,7 @@ async function call<T>(method: string, ...args: unknown[]): Promise<T> {
   return body.result as T;
 }
 
-test("on Workers, the vault starts its checkpointer from its first call, says it answers uses, and a use through the entrypoint opens its value, its entry the log's", { skip, timeout: 120_000 }, async () => {
+test("on Workers, the vault starts its checkpointer from its first call, says it answers uses, and a use through the entrypoint opens its value, its entry the log's", { timeout: 120_000 }, async () => {
   const w = await world();
   const id = await w.key('postgres://prod');
   assert.equal((await call<{ open: boolean }>('checkpointerStatus')).open, false, 'nothing started it yet');
@@ -86,7 +83,7 @@ test("on Workers, the vault starts its checkpointer from its first call, says it
   assert.deepEqual(await rows<{ secret: string }>(db.owner, sql`SELECT secret::text FROM log_uses`), [{ secret: id }]);
 });
 
-test('on Workers, the vault says it batches, and a request\'s several keys are one call through the entrypoint (T167)', { skip, timeout: 120_000 }, async () => {
+test('on Workers, the vault says it batches, and a request\'s several keys are one call through the entrypoint (T167)', { timeout: 120_000 }, async () => {
   const w = await world();
   const ids = [await w.key('one'), await w.key('two')];
   // Read without the hot path, as every call but a use is: what it says of uses, it says of batches (cloudflare.ts).
@@ -101,7 +98,7 @@ test('on Workers, the vault says it batches, and a request\'s several keys are o
   assert.deepEqual(opened, ['one', 'two']);
 });
 
-test('on Workers, a vault with no checkpointer bound is refused at its first call, by name', { skip, timeout: 120_000 }, async () => {
+test('on Workers, a vault with no checkpointer bound is refused at its first call, by name', { timeout: 120_000 }, async () => {
   const bare = mkdtempSync(join(tmpdir(), 'coffre-log-worker-bare-'));
   const name = 'coffre-log-workers-bare';
   writeFileSync(join(bare, 'wrangler.json'), JSON.stringify({
@@ -131,7 +128,7 @@ test('on Workers, a vault with no checkpointer bound is refused at its first cal
   }
 });
 
-test("on Workers, an isolate's first calls each wait for the checkpointer's start, however slow: none meets a log with no checkpoint yet (review r1)", { skip, timeout: 120_000 }, async () => {
+test("on Workers, an isolate's first calls each wait for the checkpointer's start, however slow: none meets a log with no checkpoint yet (review r1)", { timeout: 120_000 }, async () => {
   // An empty log no checkpointer has opened yet, as a new instance's.
   await emptyLog();
   for (const table of ['log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
@@ -170,7 +167,7 @@ test("on Workers, an isolate's first calls each wait for the checkpointer's star
   }
 });
 
-test('on Workers, a vault whose hot Hyperdrive is not bound is refused at its first call, naming the binding', { skip, timeout: 120_000 }, async () => {
+test('on Workers, a vault whose hot Hyperdrive is not bound is refused at its first call, naming the binding', { timeout: 120_000 }, async () => {
   const bare = mkdtempSync(join(tmpdir(), 'coffre-log-worker-nohot-'));
   const name = 'coffre-log-workers-nohot';
   writeFileSync(join(bare, 'wrangler.json'), JSON.stringify({

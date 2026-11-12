@@ -36,7 +36,7 @@ const uiBoundaries = {
 /**
  * What each of the vault's files may import: Drizzle only in its queries, and
  * what opens a database from a URL only in its Node entry, since the Worker
- * cannot load it. SQLite only ever through @coffre/db.
+ * cannot load it.
  */
 function vaultBoundaries({ drizzle = false, connect = false } = {}) {
   return {
@@ -49,8 +49,7 @@ function vaultBoundaries({ drizzle = false, connect = false } = {}) {
           },
         ],
     patterns: [
-      ...(drizzle ? [] : [{ ...noDrizzle, message: "The vault's queries live in src/store.ts, a decision's read in src/snapshot.<dialect>.ts, the 0.15 log's checkpoints in src/log-store.ts, a 0.15 use's call in src/use.<dialect>.ts, a key write's in src/write.<dialect>.ts, a member add's in src/admit.<dialect>.ts, a refusal's record in src/refusal.<dialect>.ts, and a sign-in's or a revoke's in src/credentials.<dialect>.ts; add or extend one there." }]),
-      { regex: '^(node:sqlite|@libsql/)', message: 'The vault reaches SQLite only through @coffre/db, and only on Node.' },
+      ...(drizzle ? [] : [{ ...noDrizzle, message: "The vault's queries live in src/store.ts, a decision's read in src/snapshot.postgres.ts, the 0.15 log's checkpoints in src/log-store.ts, a 0.15 use's call in src/use.postgres.ts, a key write's in src/write.postgres.ts, a member add's in src/admit.postgres.ts, a refusal's record in src/refusal.postgres.ts, and a sign-in's or a revoke's in src/credentials.postgres.ts; add or extend one there." }]),
     ],
   };
 }
@@ -130,7 +129,7 @@ export default defineConfig([
   },
   {
     name: 'coffre/vault-store',
-    // Its store, a decision's one read, a statement per dialect (snapshot.ts), a 0.15 use's one call (use.ts), a key write's (write.ts), and a sign-in's or a revoke's (credentials.ts).
+    // Its store, a decision's one read (snapshot.ts), a 0.15 use's one call (use.ts), a key write's (write.ts), and a sign-in's or a revoke's (credentials.ts).
     files: ['packages/vault/src/store.ts', 'packages/vault/src/snapshot.*.ts', 'packages/vault/src/log-store.ts', 'packages/vault/src/use.*.ts', 'packages/vault/src/write.*.ts', 'packages/vault/src/admit.*.ts', 'packages/vault/src/refusal.*.ts', 'packages/vault/src/credentials.*.ts'],
     ...parsing,
     rules: {

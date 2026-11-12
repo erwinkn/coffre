@@ -7,7 +7,6 @@
 // as many pages, however long the log grows and however many keys, environments and members the instance holds. A
 // reveal through the API, of a key, an environment or its named keys, and an export, make one use a value, and no
 // `credentialStill` after them either.
-// Postgres only: the counts are its statements, and SQLite reads as the app's statements always did.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -30,13 +29,11 @@ import type { ProxyDefinition } from '@coffre/core/vault';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
-import { postgresOnly } from './db/engine.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { checkpointFence } from './db/tables.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { inBulkPeriod } from './window-fixture.ts';
 
-const POSTGRES = postgresOnly("counts the app's and the hot path's Postgres statements");
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
@@ -97,7 +94,6 @@ let personal: string;
 let service: string;
 
 before(async () => {
-  if (POSTGRES.skip) return;
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   // Uses go in at or past the floor of `at` (schema 0022), as a deployment's checkpointer keeps it.
@@ -138,7 +134,6 @@ before(async () => {
 });
 
 after(async () => {
-  if (POSTGRES.skip) return;
   await vault.close();
   await Promise.all([app.pool.end(), vaultPool.pool.end(), hot.pool.end()]);
   await new Promise<void>((resolve) => upstream.close(() => resolve()));
@@ -167,7 +162,7 @@ const NAMED = `${ORIGIN}/use/market/dev/api/v1/charges`;
 const STABLE = `${ORIGIN}/use/api/v1/charges`;
 const shown = (ran: Statement[]) => ran.map(({ text }) => text.replace(/\s+/g, ' ').slice(0, 32));
 
-test("a handle's /use is the vault's one call, at its environment's URL or the stable one: its use by the ids it keeps, warm, and, cold, a read by its names, then the use by the ids read; the app runs nothing (T145, D153)", POSTGRES, async () => {
+test("a handle's /use is the vault's one call, at its environment's URL or the stable one: its use by the ids it keeps, warm, and, cold, a read by its names, then the use by the ids read; the app runs nothing (T145, D153)", async () => {
   const use = 'SELECT use_credential( $1::uuid,';
   const named = await statements(NAMED);
   assert.deepEqual(shown(named.app), [], 'the named URL: no statement of the app');
@@ -187,7 +182,7 @@ test("a handle's /use is the vault's one call, at its environment's URL or the s
   assert.deepEqual(stable.vault, [], 'no `access`: the standing is the vault\'s, decided on the sealed rows');
 });
 
-test("a handle's /use reads as many rows and pages however the log and the instance grow", POSTGRES, async () => {
+test("a handle's /use reads as many rows and pages however the log and the instance grow", async () => {
   const measure = async () => {
     const out: { url: string; text: string; rows: number; pages: number }[] = [];
     for (const url of [NAMED, STABLE]) {
@@ -239,7 +234,7 @@ test("a handle's /use reads as many rows and pages however the log and the insta
   }
 });
 
-test("a handle's /use of a UI route is the vault's one call too, at either URL and of two segments, the app running nothing; it answers as many rows whether its environment holds one definition or 256 (T186 PR C, R44, R48)", POSTGRES, async () => {
+test("a handle's /use of a UI route is the vault's one call too, at either URL and of two segments, the app running nothing; it answers as many rows whether its environment holds one definition or 256 (T186 PR C, R44, R48)", async () => {
   const root = clientFor(deps, ROOT);
   const upstreamUrl = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`;
   const route = (name: string): ProxyDefinition => ({
@@ -298,7 +293,7 @@ async function revealed(token: string, body: { path: string; keys?: readonly str
   return ran;
 }
 
-test("a reveal of one key is the vault's one call, as a /use is; a reveal of several is one call too, which reads the place and its keys itself, and runs no check of the credential after it (T145, T165, T167)", POSTGRES, async () => {
+test("a reveal of one key is the vault's one call, as a /use is; a reveal of several is one call too, which reads the place and its keys itself, and runs no check of the credential after it (T145, T165, T167)", async () => {
   const use = 'SELECT use_credential( $1::uuid,';
   const named = 'SELECT use_named_batch( $1::byte';
   const batch = 'SELECT use_batch( $1::uuid, $2::';

@@ -15,14 +15,12 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { unstable_dev } from 'wrangler';
 
-import { ENGINE, VAULT_URL } from './database.ts';
-
-const skip = ENGINE === 'postgres' ? false : 'Postgres only: workerd';
+import { VAULT_URL } from './database.ts';
 
 /** What the statement carries: more than the kernel's buffers on both sides hold. */
 const BYTES = 32 * 1024 * 1024;
 
-test("closed by its time, a call's connection sends nothing it had not written, its statement stuck behind a server that reads nothing, and goes with its request (T170)", { skip, timeout: 120_000 }, async () => {
+test("closed by its time, a call's connection sends nothing it had not written, its statement stuck behind a server that reads nothing, and goes with its request (T170)", { timeout: 120_000 }, async () => {
   const target = new URL(VAULT_URL);
   let client = null as Socket | null;
   let afterPause = 0;

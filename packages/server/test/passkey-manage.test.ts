@@ -1,4 +1,4 @@
-// Managing passkeys (docs/design/passkeys.md, sections 3.6 and 3.7; T176 PR 6), on both engines, through the
+// Managing passkeys (docs/design/passkeys.md, sections 3.6 and 3.7; T176 PR 6), through the
 // deployment's own routes, as a browser goes: a person lists their passkeys, adds another from a session a touch
 // confirmed in the last five minutes, renames one, and removes one with a touch of one they keep, which signs them out
 // everywhere else and gives this browser a new session; an Owner of the whole instance resets someone's, which ends

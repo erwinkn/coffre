@@ -3,7 +3,7 @@
 // at random (half a 500 ms tick), 500 just before the tick, 1,000 when it is late, and `ABOVE_NEWEST`, the most it
 // reads (sized from a Worker's CPU, bench/verifier.ts). Its statements are the same whatever lies below. Its CPU, in the vault's process, is logged, and held only to
 // R27's p99 bound (20 ms) at a tick's worth: CI's machines are slower than a developer's. Measured on one
-// (docs/design/0.15-plan.md, "As built: PR 8"). Postgres, as a deployment runs it.
+// (docs/design/0.15-plan.md, "As built: PR 8").
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -19,7 +19,7 @@ import { logStore } from '../src/log-store.ts';
 import { ABOVE_NEWEST, verifierKeys, verifyTrees } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
 import { logWriter } from './log-entries.ts';
-import { openTestDatabase, postgresOnly, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -53,7 +53,7 @@ function counting(): { db: Database; statements: () => number; close: () => Prom
   return { db: createDatabase(counted(pool)), statements: () => statements, close: () => pool.end() };
 }
 
-test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, its statements flat as the log grows', { ...postgresOnly('the deployed engine'), timeout: 600_000 }, async () => {
+test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, its statements flat as the log grows', { timeout: 600_000 }, async () => {
   for (const table of ['log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles', 'log_changes']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
   await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
   const today = new Date().toISOString().slice(0, 10);
@@ -108,7 +108,7 @@ test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, it
   for (const [where, { cpuMs }] of Object.entries(measured)) if (/ (250|500) above$/.test(where)) assert.ok(cpuMs < 20, `${where}: ${cpuMs} ms`);
 });
 
-test('review r4 (W240): more than `ABOVE_NEWEST` entries above the newest pair are `capped`, not a problem; a forged one among those checked is one', postgresOnly('the deployed engine'), async () => {
+test('review r4 (W240): more than `ABOVE_NEWEST` entries above the newest pair are `capped`, not a problem; a forged one among those checked is one', async () => {
   for (const table of ['log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles', 'log_changes']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
   await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
   const today = new Date().toISOString().slice(0, 10);

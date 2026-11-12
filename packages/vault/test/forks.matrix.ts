@@ -28,7 +28,7 @@ import { sql } from 'drizzle-orm';
 import { BESIDE_CELLS, FREE_CONNECTIONS, POOL, withinShare } from '../../../scripts/matrix-connections.ts';
 import { shardOf } from '../../../scripts/matrix-shard.ts';
 import { deletesSettled, removeDeleted } from '../../../scripts/matrix-weigh.ts';
-import { ENGINE, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
+import { openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
 import { each, endSlowed, holding, namedWorld, principalLocks, slowed, turnsApart, weighed, weighedInTurn, weighingSession, type HotCall } from './named-world.ts';
 import { emptyLog, useDatabases } from './use-world.ts';
 
@@ -39,15 +39,13 @@ before(async () => {
   db = await openTestDatabase({ connections: POOL });
   await useDatabases(db);
   await emptyLog();
-  if (ENGINE === 'postgres') {
-    await run(db.owner, sql.raw(`DO $$ DECLARE t record; BEGIN
-      FOR t IN SELECT c.oid::regclass AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' LOOP
-        EXECUTE format('ALTER TABLE %s SET (autovacuum_enabled = off)', t.name);
-      END LOOP; END $$`));
-    // A row's cells at once, a connection each, beside what the file holds whatever its cells: within its share.
-    const [{ free }] = (await rows<{ free: number }>(db.owner, sql.raw(FREE_CONNECTIONS))) as [{ free: number }];
-    withinShare(import.meta.url, BESIDE_CELLS + KEYS.length, free);
-  }
+  await run(db.owner, sql.raw(`DO $$ DECLARE t record; BEGIN
+    FOR t IN SELECT c.oid::regclass AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' LOOP
+      EXECUTE format('ALTER TABLE %s SET (autovacuum_enabled = off)', t.name);
+    END LOOP; END $$`));
+  // A row's cells at once, a connection each, beside what the file holds whatever its cells: within its share.
+  const [{ free }] = (await rows<{ free: number }>(db.owner, sql.raw(FREE_CONNECTIONS))) as [{ free: number }];
+  withinShare(import.meta.url, BESIDE_CELLS + KEYS.length, free);
 });
 after(() => db.close());
 
@@ -91,8 +89,8 @@ const told = (code: string) => (code === 'ok' || code === 'not served' || code =
 const codeOf = (answer: NamedUseOutcome) => !answer.served ? 'not served' : answer.outcome.ok ? 'ok' : 'busy' in answer.outcome ? `busy:${answer.outcome.busy}` : answer.outcome.code;
 const routeOf = (answer: NamedUseOutcome) => (answer.served ? answer.route : 'not served');
 const count = async (query: ReturnType<typeof sql>) => Number((await rows<{ n: number | string }>(db.owner, query))[0]!.n);
-const delayOf = () => (ENGINE !== 'postgres' ? 0 : 1600);
-const LAPSES_MS = ENGINE === 'postgres' ? 2500 : 300;
+const delayOf = () => 1600;
+const LAPSES_MS = 2500;
 
 
 /** One cell, in its own world and isolate: everything up to its request, then the request, measured. */
@@ -197,7 +195,7 @@ test(`at a fork and at \`dev@me\`, a caller learns nothing of a key they may not
       // Each cell's principal's lock held by another connection, all of the row's on one (a connection each would take as
       // many of Postgres's as the row has cells), while its cells are asked.
       const measureAll = () => each(made, async (c) => ({ key: c.key, ...(await c.measure()) }));
-      const results = ENGINE === 'postgres' ? await holding(db, principalLocks(made.map((c) => c.principal)), measureAll) : await measureAll();
+      const results = await holding(db, principalLocks(made.map((c) => c.principal)), measureAll);
       const label = labelOf(row);
       // The keys they may not have: each answered alike (D153).
       const refused = results.filter((r) => !usable(row, r.key));
@@ -214,7 +212,7 @@ test(`at a fork and at \`dev@me\`, a caller learns nothing of a key they may not
       // A key they may have is theirs to know of: with their principal's lock held and every statement slow, its use, a
       // second call, may run past its deadline, as use.matrix.ts leaves it (use-named-forks.test.ts holds its yes).
       // Without standing at the place, no call reads anything of its key: as many blocks of the key's relations for each.
-      if (ENGINE === 'postgres' && !stands(row)) {
+      if (!stands(row)) {
         // The rows of the cap's the window passed deleted, taken out first: left in, a new session read them, a block or
         // three of `bulk_cap`, whenever a transaction ended before it, in another database too (T240, `removeDeleted`).
         const watcher = postgresClient(OWNER_URL, { max: 1 });

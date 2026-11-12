@@ -27,7 +27,7 @@ import { sql } from 'drizzle-orm';
 
 import { newRequestId } from '../../src/use.ts';
 import { openVault, prepareVault } from '../../src/vault.ts';
-import { HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from '../database.ts';
+import { HOT_URL, openTestDatabase, rows, run, type TestDatabase } from '../database.ts';
 import { CONFIG, DAY, emptyLog, genesis, LOG_015, ROOT, useDatabases, world } from '../use-world.ts';
 
 let db: TestDatabase;
@@ -154,7 +154,7 @@ async function ciRuns(runs: number): Promise<string> {
   return `CI, ${runs} runs of a new credential each, 7 keys one after the other, a run every 2 s: use_credential statements of each key, run by run:\n${perRun.map((run, i) => `  run ${i + 1}: ${run.join(' ')}`).join('\n')}`;
 }
 
-test('how often a named use is decided first, a second call (T158, D153)', { ...postgresOnly('the hot path'), timeout: 3_600_000 }, async () => {
+test('how often a named use is decided first, a second call (T158, D153)', { timeout: 3_600_000 }, async () => {
   for (const isolates of [1, 20]) for (const changes of [0, 1, 10]) console.log(await sidecar(isolates, changes));
   console.log(await ciRuns(10));
 });

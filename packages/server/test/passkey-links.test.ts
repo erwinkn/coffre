@@ -1,5 +1,5 @@
 // What the schema allows a sign-in row to say of a passkey (0063_passkeys,
-// docs/design/passkeys.md, section 5.2), on both engines: a device login
+// docs/design/passkeys.md, section 5.2): a device login
 // names one only once approved, and only a browser or CLI session carries a
 // touch. The MAC covers the link either way (auth-rows.test.ts); these
 // checks make the rows the design rules out impossible to write at all.

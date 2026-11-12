@@ -1210,7 +1210,7 @@ export class WorkloadService {
       // removal is under way, its binding closed, for the next request or scheduled run to go on with.
       // What is left: the credentials still to revoke, and the bindings still to end, so that it falls with every call.
       if (budget !== null && !budget.take(AFTER_REMOVAL_CALLS)) {
-        throw new RemovalUnderWay(ends.length + (await liveIssued(db, member, ends.map(({ id }) => id), at)), ctx !== null && (this.#removalCalls.get(ctx) ?? 0) > 0);
+        throw new RemovalUnderWay(ends.length + (await liveIssued(db, member, ends.map(({ id }) => id))), ctx !== null && (this.#removalCalls.get(ctx) ?? 0) > 0);
       }
       if (ctx !== null) this.#removalCalls.set(ctx, (this.#removalCalls.get(ctx) ?? 0) + 1);
       return vault.changeBindings!({
@@ -1245,13 +1245,13 @@ export class WorkloadService {
     for (;;) {
       const at = new Date();
       if (!sweeps) {
-        outcome = await asked(at, ended(at, await issuedCredentials(db, member, ids, at)), false);
+        outcome = await asked(at, ended(at, await issuedCredentials(db, member, ids)), false);
         break;
       }
       // A batch's worth and one more, by id and size alone (review r5): whether this is the last call, and which this
       // one names, chosen before any row is read whole. A credential's part of the message is its fixed fields, about
       // `CREDENTIAL_BYTES`, and its scope and places, each counted twice, as JSON in JSON escapes their quotes.
-      const soonest = await issuedSoonest(db, member, ids, at, batchOf + 1, after);
+      const soonest = await issuedSoonest(db, member, ids, batchOf + 1, after);
       const chosen: string[] = [];
       let bytes = 0;
       for (const { id, bytes: wide } of soonest) {

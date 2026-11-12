@@ -1,19 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import test from 'node:test';
 
 import { writesAgree } from '../src/checks/audit.ts';
-import { sqlite } from '../src/database.ts';
 import type { Deployment } from '../src/harness.ts';
+import { scratch } from './scratch.ts';
 
 // A deployment's tables, as much of them as `writesAgree` reads, holding one stored version, `extra` beside it.
 async function deploymentWith(t: test.TestContext, extra = ''): Promise<Deployment> {
-  const dir = mkdtempSync(join(tmpdir(), 'coffre-write-test-'));
-  const file = join(dir, 'coffre.db');
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const sql = sqlite(file);
+  const database = await scratch(t);
+  const sql = await database();
   await sql.exec(`
     CREATE TABLE projects (id TEXT, slug TEXT);
     CREATE TABLE environments (id TEXT, project_id TEXT, slug TEXT);
@@ -28,7 +23,7 @@ async function deploymentWith(t: test.TestContext, extra = ''): Promise<Deployme
     ${extra}
   `);
   await sql.close();
-  return { database: async () => sqlite(file) } as Deployment;
+  return { database } as Deployment;
 }
 
 // The key's change in 0.15's log a write down the two-trip path leaves, as the vault makes it (packages/vault/src/changes.ts).

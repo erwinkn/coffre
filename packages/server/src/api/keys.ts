@@ -305,8 +305,7 @@ function decidedValues({ secretId, outcome }: Decided, items: readonly OpenItem[
   if (items.length === 0) return { ok: true, values: [], stood: true };
   if (!outcome.ok) throw refusedUse(outcome);
   const values = items.map((item) => {
-    // Another key than the one the vault decided: renamed between the vault's read and the app's (SQLite's app reads its
-    // own rows). Asked again, the request reads both anew (Fable's review of D153).
+    // Another key than the one the vault decided: renamed between the vault's read and the app's. Asked again, the request reads both anew (Fable's review of D153).
     if ((item.holder ?? item.secret.secretId) !== secretId) throw changed();
     if ('plain' in outcome) {
       if (outcome.versionId !== item.secretVersionId) throw changed();
@@ -335,8 +334,8 @@ export type DecidedMany = {
  * The values of a read of several keys the vault decided already, by name: each item's as the vault handed it back,
  * found by its key's id (a reference's own, a key a fork inherits by its parent's), of the version the app read; a
  * refusal as `useValues` answers it, logged by the app where the vault wrote nothing of it. A value the vault did not
- * hand back for an item the read opens, or of another version, was changed between the vault's read and the app's
- * (SQLite's app reads its own rows): 409, to ask again.
+ * hand back for an item the read opens, or of another version, was changed between the vault's read and the app's:
+ * 409, to ask again.
  */
 function decidedMany({ keys, outcome }: DecidedMany, items: readonly OpenItem[], purpose: Purpose): Keyed<string> & { used?: true; stood: true } {
   if (!outcome.ok) {

@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto';
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import type { PreparedChange } from '@coffre/core/vault';
-import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, lte, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, lt, lte, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { authoredBy, entriesOf, keyedBy, KINDS, type Kind } from './access-entries.ts';
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
 import { later, laterRows } from './later.ts';
 import { prepared } from './prepared.ts';
-import { changedRows, clockMillis, engineOf, forUpdate, rowsOf } from './dialect.ts';
+import { clockMillis, forUpdate, rowsOf } from './dialect.ts';
 
 export { accessAllowed, authoredBy, changeNamed, changesOf, entriesOf, indexOf, keyedBy, KINDS, type Kind } from './access-entries.ts';
 export { recordField, recorded, RECORDS, type ChangeRecord } from './change-records.ts';
@@ -181,11 +181,9 @@ export function lockLogHeadRead(tx: Transaction, key: LogKey): Promise<HeldHead>
  * Lock the log's head and read nothing under it, not waited for (`later`): it goes first in the transaction's next
  * Sync, before whatever is asked after it. For a write that appends no 0.14 entry and still orders itself after every
  * writer that takes the head before its rows (`audited`, `app_change`): 0.16.0's two-trip key write, whose one Sync is
- * BEGIN, this, its hold, its rows, its changes and COMMIT (docs/design/two-trips.md, "Locks"). SQLite's transactions
- * hold the whole file.
+ * BEGIN, this, its hold, its rows, its changes and COMMIT (docs/design/two-trips.md, "Locks").
  */
 export function laterHead(tx: Transaction): void {
-  if (engineOf(tx) === 'sqlite') return;
   later(tx, sql`SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE`);
   holding.add(tx);
 }
@@ -199,10 +197,8 @@ export function laterHead(tx: Transaction): void {
  * trigger takes, as the checkpointer's barrier does: so the issue is
  * ordered against it, and no use waits behind an issue (formal/Lifecycle.tla's
  * IssuePolicyHeld, Migration015.tla's PolicyIssueFirst; T149, review r3).
- * SQLite's transactions hold the whole file.
  */
 export async function holdIssues(tx: Transaction, { final = false }: { final?: boolean } = {}): Promise<void> {
-  if (engineOf(tx) === 'sqlite') return;
   const statement = sql`SELECT pg_advisory_xact_lock(1668244070, 1)`;
   // `final`: nothing awaits it, it goes with what the transaction asks next, in its place (`later`), as `appendEntries`'s.
   if (final) later(tx, statement);
@@ -216,10 +212,9 @@ export async function holdIssues(tx: Transaction, { final = false }: { final?: b
  * own 0.14 entry's trigger waits on nothing (formal/Migration015.tla,
  * CutoverIssueFirst; T132). Every use and every change waits for its
  * commit; the checkpointer's barrier, which takes the issue lock exclusive
- * first, too. SQLite's transactions hold the whole file.
+ * first, too.
  */
 export async function holdFence(tx: Transaction): Promise<void> {
-  if (engineOf(tx) === 'sqlite') return;
   await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(1668244070, 1)`);
   await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244070, 0)`);
 }
@@ -228,14 +223,8 @@ export async function holdFence(tx: Transaction): Promise<void> {
  * Lock the log's head if no one holds it, without waiting: whether it is
  * held now. For work any caller may do, of which one at a time is enough,
  * which a request that finds the head taken leaves to the one that has it.
- * SQLite's transactions hold the whole file, so the head is always free.
  */
 export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
-  if (engineOf(tx) === 'sqlite') {
-    const held = (await lockedHead(tx)).length > 0;
-    if (held) holding.add(tx);
-    return held;
-  }
   const rows = await rowsOf(tx, sql`SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE SKIP LOCKED`);
   if (rows.length > 0) holding.add(tx);
   return rows.length > 0;
@@ -251,11 +240,9 @@ export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
  * beyond them answers in one round trip rather than seconds later, holding
  * a connection all the while. One statement: the place, then, only if one
  * was free, the head; refused, one more says whether the head is there at
- * all. SQLite's transactions hold the whole file. `line`, whose places:
- * each line's are its own.
+ * all. `line`, whose places: each line's are its own.
  */
 export async function lockLogHeadQueued(tx: Transaction, waiters: number, line: HeadLine = 'reads'): Promise<{ nextSeq: bigint; headHash: Buffer }> {
-  if (engineOf(tx) === 'sqlite') return lockLogHead(tx);
   const rows = await rowsOf<{ next_seq: string; head_hash: Buffer }>(tx, sql`
     SELECT next_seq, head_hash FROM audit_chain_head
     WHERE only_row AND (SELECT true FROM generate_series(1, ${waiters}::int) AS place WHERE pg_try_advisory_xact_lock(${HEAD_LINES[line]}, place) LIMIT 1)
@@ -390,7 +377,7 @@ export async function appendEntries(
 
   let numbers: (bigint | null)[] = [];
   let numbered: ChangeNumbers | null = null;
-  if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE && changes.length > 0) {
+  if (rows.length <= ROWS_AT_ONCE && changes.length > 0) {
     // The entries, the head that names the last of them, and the changes, in one statement. The changes run in the
     // select list, in their order; the inserts after it, and their trigger (the fence, for an entry that changes
     // access) at its end: each takes the issue lock before the fence, so either order is the locks' (migration 0026).
@@ -398,7 +385,7 @@ export async function appendEntries(
       moved AS (UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row) `, final);
     if (final) numbered = numbersOf(laterRows(tx, statement), changes);
     else numbers = numbersIn(await rowsOf(tx, statement));
-  } else if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE) {
+  } else if (rows.length <= ROWS_AT_ONCE) {
     // The entries and the head that names the last of them, in one statement.
     const statement = sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()})
       UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row`;
@@ -407,8 +394,7 @@ export async function appendEntries(
   } else {
     // In statements of at most as many entries as one may bind (review r3 of #538): a rotation that logs the
     // outcomes of every key service's call still open may log thousands, and one statement past the bound fails.
-    const atOnce = engineOf(tx) === 'postgres' ? ROWS_AT_ONCE : SQLITE_ROWS_AT_ONCE;
-    for (let start = 0; start < rows.length; start += atOnce) await tx.insert(auditLog).values(rows.slice(start, start + atOnce));
+    for (let start = 0; start < rows.length; start += ROWS_AT_ONCE) await tx.insert(auditLog).values(rows.slice(start, start + ROWS_AT_ONCE));
     await tx.update(auditChainHead).set({ nextSeq: seq, headHash: prevHash }).where(eq(auditChainHead.onlyRow, true));
     if (final && changes.length > 0) numbered = await laterChanges(tx, changes);
     else numbers = await appChanges(tx, changes);
@@ -445,12 +431,6 @@ function heldOf(read: Awaited<ReturnType<typeof underHead>>[number] | undefined,
 
 /** Entries one statement inserts at most, at 21 parameters each (`log015` a literal): Postgres takes 65,535. */
 const ROWS_AT_ONCE = 3000;
-
-/**
- * The same on SQLite, which binds 32,766 variables a statement at most (`SQLITE_MAX_VARIABLE_NUMBER`'s default since
- * 3.32): 21 each, 1,560 rows.
- */
-const SQLITE_ROWS_AT_ONCE = Math.floor(32_766 / 21);
 
 /**
  * `readUnderHead`'s statement. Its `FOR UPDATE` waits for nothing in a
@@ -527,8 +507,7 @@ export const BATCH_BYTES = 8 * 1024 * 1024;
  * values too: a stream of each value's, through the index keyed
  * `(column, seq)` (`keyedBy`), merged; asked as one condition, Postgres
  * walked the primary key back past every other value's entries, 613 pages
- * for an actor's newest behind 20,000 of another's (T245, R48), and SQLite
- * its rowid.
+ * for an actor's newest behind 20,000 of another's (T245, R48).
  */
 export async function withinBytes(
   db: Queryable,
@@ -563,8 +542,7 @@ function streamsOf(db: Queryable, where: SQL | undefined, limit: number, order: 
   const { auditLog } = tablesOf(db);
   const way = sql.raw(order === 'asc' ? 'ASC' : 'DESC');
   const streams = [...new Set(by.values)].map((value) => {
-    const keyed = keyedBy(db, by.column, auditLog.seq, order, value, sql.param([value]));
-    // Each a table of its own, as SQLite takes a compound's terms.
+    const keyed = keyedBy(by.column, auditLog.seq, order, sql.param([value]));
     return sql`SELECT * FROM (SELECT ${auditLog.seq} AS seq, length(${auditLog.metadata}) AS bytes FROM ${auditLog}
       WHERE ${and(keyed.where, where)} ORDER BY ${sql.join(keyed.orderBy, sql`, `)} LIMIT ${limit}) AS ${sql.raw('v')}`;
   });
@@ -701,7 +679,7 @@ export function newestSeqQuery(db: Queryable, kind: Kind) {
  */
 export async function firstEntryUnder(db: Queryable, author: 'app' | 'vault', keyId: string, also?: SQL): Promise<bigint | undefined> {
   const { auditLog } = tablesOf(db);
-  const key = keyedBy(db, auditLog.keyId, auditLog.seq, 'asc', keyId, sql.param([keyId]));
+  const key = keyedBy(auditLog.keyId, auditLog.seq, 'asc', sql.param([keyId]));
   const [row] = await db.select({ seq: auditLog.seq }).from(auditLog).where(and(authoredBy(author), key.where, also)).orderBy(...key.orderBy).limit(1);
   return (row?.seq as bigint | undefined) ?? undefined;
 }
@@ -748,18 +726,9 @@ export async function newestAuthentic(page: (limit: number, before: bigint | und
  * since the app read it, and nothing was done (ChangeCAS: read again). A row
  * that is not its object's newest change's fails the call (`isStaleChange`),
  * and its transaction with it.
- *
- * On SQLite, which has no functions, the same steps in the transaction,
- * which holds the database's one write lock: the fence is implicit there
- * (0.15's plan, "Postgres serves; SQLite is for tests").
  */
 export async function appChanges(tx: Transaction, calls: readonly PreparedChange[]): Promise<(bigint | null)[]> {
   if (calls.length === 0) return [];
-  if (engineOf(tx) === 'sqlite') {
-    const numbers: (bigint | null)[] = [];
-    for (const call of calls) numbers.push(await changeOnSqlite(tx, call, bytes));
-    return numbers;
-  }
   return numbersIn(await rowsOf(tx, callsOf(calls, sql``, false)));
 }
 
@@ -796,15 +765,13 @@ export async function newestCommitted(db: Queryable, numbers: ChangeNumbers): Pr
 }
 
 /**
- * `appChanges` for a write that goes on without their numbers: on Postgres, asked with `later`, so that they go with
+ * `appChanges` for a write that goes on without their numbers: asked with `later`, so that they go with
  * what the transaction asks next, its COMMIT at the latest, under one Sync; through `app_change_strict` (migration
  * 0052), so that a row moved since it was read fails the transaction (`isMovedChange`), Postgres skipping the COMMIT,
- * where `app_change`'s null would let it keep the rows without their change. On SQLite, made in turn, a moved row
- * failing alike.
+ * where `app_change`'s null would let it keep the rows without their change.
  */
 export async function laterChanges(tx: Transaction, calls: readonly PreparedChange[]): Promise<ChangeNumbers> {
   if (calls.length === 0) return { answer: Promise.resolve([]), requests: [] };
-  if (engineOf(tx) === 'sqlite') return { answer: Promise.resolve(strictly(await appChanges(tx, calls))), requests: requestsOf(calls) };
   return numbersOf(laterRows(tx, callsOf(calls, sql``, true)), calls);
 }
 
@@ -861,12 +828,10 @@ export function logObject(kind: string, id: string): string {
 /** Whether `error` is `app_change`'s refusal of a row that is not its object's newest change's: Postgres's `data_corrupted`. */
 export function isStaleChange(error: unknown): boolean {
   for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
-    if (cause instanceof StaleRow || (cause as { code?: unknown }).code === 'XX001') return true;
+    if ((cause as { code?: unknown }).code === 'XX001') return true;
   }
   return false;
 }
-
-class StaleRow extends Error {}
 
 /**
  * Whether `error` is a strict change's refusal of a row whose seal moved since it was read (`app_change_strict`,
@@ -882,74 +847,7 @@ export function isMovedChange(error: unknown): boolean {
 /** The SQLSTATE the strict changes raise for a moved row (migration 0052). */
 export const MOVED = 'CF001';
 
-/** A moved row, where no function raised it: SQLite's steps, or a call that answered null. */
+/** A moved row, where no function raised it: a call that answered null. */
 export class MovedRow extends Error {
   readonly code = MOVED;
-}
-
-const APP_OPS: Record<PreparedChange['kind'], readonly string[]> = {
-  credential: ['credential.issue', 'credential.revoke', 'credential.renew', 'credential.scope'],
-  connection: ['connection.make', 'connection.revoke'],
-  secret: ['secret.write', 'secret.delete'],
-  environment: ['environment.create', 'environment.rename', 'environment.archive', 'project.archive', 'environment.delete'],
-};
-
-/** `app_change` on SQLite. */
-async function changeOnSqlite(tx: Transaction, call: PreparedChange, bytes: (b64: string | null) => Buffer | null): Promise<bigint | null> {
-  const { logChanges, logUses } = tablesOf(tx);
-  const table = appTable(tx, call.kind);
-  const [row] = await tx.select({ seal: table.seal }).from(table).where(eq(table.id, call.id));
-  const held = row?.seal ?? null;
-  const [newest] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, call.object)).orderBy(desc(logChanges.number)).limit(1);
-  if (call.requestId === null) {
-    if (held !== null || newest !== undefined) throw new StaleRow(`the ${call.kind} object's row is not its newest change's: stale`);
-    return 0n;
-  }
-  const seal = bytes(call.seal);
-  const [prior] = await tx.select({ number: logChanges.number, object: logChanges.object, payload: logChanges.payload, seal: logChanges.seal }).from(logChanges).where(eq(logChanges.requestId, call.requestId));
-  if (prior !== undefined) {
-    if (prior.object !== call.object || prior.payload !== call.payload || !sameBytes(prior.seal ?? null, seal)) {
-      throw Object.assign(new Error(`request ${call.requestId} names another change`), { code: 'SQLITE_CONSTRAINT_UNIQUE' });
-    }
-    return BigInt(prior.number);
-  }
-  const payload = JSON.parse(call.payload ?? 'null') as { op?: unknown; ref?: { kind?: unknown; id?: unknown } } | null;
-  if (typeof payload?.op !== 'string' || !(APP_OPS[call.kind] ?? []).includes(payload.op)) throw new Error(`the app makes no change ${String(payload?.op)} to a ${call.kind}`);
-  if (payload.ref?.kind !== call.kind || payload.ref.id !== call.id) throw new Error(`a change names the object it is to: ${call.kind}, ${call.id}`);
-  // ChangeChecksSeal.
-  if (!sameBytes(held, newest?.seal ?? null)) throw new StaleRow(`the ${call.kind} object's row is not its newest change's: stale`);
-  // RestorePinned: an unarchive restores the object its key's log last sealed, still so (0030).
-  const restores = bytes(call.restores);
-  if (restores !== null) {
-    if (call.kind !== 'secret' || payload.op !== 'secret.write' || call.sealFrom !== null) throw new Error("only a key's object made again from none restores one");
-    const [kept] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(and(eq(logChanges.object, call.object), isNotNull(logChanges.seal))).orderBy(desc(logChanges.number)).limit(1);
-    if (!sameBytes(restores, kept?.seal ?? null)) throw new StaleRow('the secret object an unarchive restores is not its newest sealed one: stale');
-  }
-  // ChangeCAS.
-  const from = bytes(call.sealFrom);
-  const done = changedRows(await tx.update(table).set({ seal }).where(and(eq(table.id, call.id), from === null ? isNull(table.seal) : eq(table.seal, from))));
-  if (done === 0) return null;
-  // One sequence for both tables, as `log_number` is on Postgres.
-  const [{ last }] = await tx.select({ last: sql<number | string | null>`max(n)` }).from(
-    sql`(SELECT max(${logChanges.number}) AS n FROM ${logChanges} UNION ALL SELECT max(${logUses.number}) FROM ${logUses})`,
-  );
-  const number = BigInt(last ?? 0) + 1n;
-  await tx.insert(logChanges).values({ number, at: call.at, requestId: call.requestId, object: call.object, actor: call.actor, payload: call.payload!, seal, mac: bytes(call.mac)! });
-  return number;
-}
-
-/** The table whose rows hold an object of this kind, the app's. */
-function appTable(tx: Transaction, kind: PreparedChange['kind']) {
-  const { credentials, mcpConnections, secrets, environments } = tablesOf(tx);
-  switch (kind) {
-    case 'credential': return credentials;
-    case 'connection': return mcpConnections;
-    case 'secret': return secrets;
-    case 'environment': return environments;
-    default: throw new Error(`no object kind ${String(kind)}`);
-  }
-}
-
-function sameBytes(a: Buffer | null, b: Buffer | null): boolean {
-  return a === null || b === null ? a === b : a.equals(b);
 }

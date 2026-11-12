@@ -9,7 +9,6 @@ import { and, asc, eq, inArray } from 'drizzle-orm';
 
 import { auditLog, environments, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
 import { clientFor, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
-import { postgresOnly } from './db/engine.ts';
 
 const ROOT = 'admin@acme.example';
 const LEAD = 'user:lead@acme.example';
@@ -467,7 +466,7 @@ function slowKeyService(kek: Buffer, meanwhile: () => Promise<unknown> | undefin
   };
 }
 
-test('a key decided on before its place is deleted, and released after, is refused as deleted', postgresOnly('on SQLite a decision holds the whole file, so no deletion commits inside one'), async () => {
+test('a key decided on before its place is deleted, and released after, is refused as deleted', async () => {
   await seedMarket();
   await root.environments.update('market/dev', { archived: true });
   const { id } = await currentVersion('dev', 'DATABASE_URL');
@@ -505,7 +504,7 @@ test('a key decided on before its place is deleted, and released after, is refus
   assert.equal((await root.audit.verify()).ok, true);
 });
 
-test('with a key in memory, a deletion asked while a read decides waits for it: the key is released, then the place deleted', postgresOnly('on SQLite a decision holds the whole file, so no deletion commits inside one'), async () => {
+test('with a key in memory, a deletion asked while a read decides waits for it: the key is released, then the place deleted', async () => {
   await seedMarket();
   await root.environments.update('market/dev', { archived: true });
   const { id } = await currentVersion('dev', 'DATABASE_URL');
@@ -543,7 +542,7 @@ test('with a key in memory, a deletion asked while a read decides waits for it: 
   assert.equal((await root.audit.verify()).ok, true);
 });
 
-test('a read through a reference, decided on before its holder is deleted and released after, is refused as deleted', postgresOnly('on SQLite a decision holds the whole file, so no deletion commits inside one'), async () => {
+test('a read through a reference, decided on before its holder is deleted and released after, is refused as deleted', async () => {
   await seedMarket();
   await root.environments.create('web/prod', { name: 'Production' });
   await root.secrets.set('web/prod', { OTHER: 'web-other' });

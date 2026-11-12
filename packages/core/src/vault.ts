@@ -2081,7 +2081,7 @@ export type NamedManyInput = Omit<NamedUseInput, 'key' | 'requestId' | 'forks'> 
 /**
  * One key of a named batch's answer, in the request's order: its name; its id, null for a key the place does not hold;
  * where it is held, for a key the place inherits (a fork's parent, a personal config's dev); the app's rows of it, as a
- * named use answers them (`app`, JSON; null on SQLite); and whether the read leaves it out, unused (`left`).
+ * named use answers them (`app`, JSON); and whether the read leaves it out, unused (`left`).
  */
 export type NamedKey = { key: string; secretId: string | null; held: { environmentId: string; slug: string } | null; app: string | null; left: boolean };
 

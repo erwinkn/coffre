@@ -105,16 +105,12 @@ test('Use matrices passes on held shards, and on nothing else', () => {
     }
 });
 
-test('the use matrices run in shards 1 to n of each engine, which Use matrices checks', () => {
-    const shards = [...workflow.matchAll(/- \{ engine: ([a-z]+), shard: (\d+)\/(\d+) \}/g)].map((m) => ({ engine: m[1], shard: Number(m[2]), of: Number(m[3]) }));
-    const engines = [...new Set(shards.map((s) => s.engine))];
-    assert.deepEqual(engines, ['postgres', 'sqlite']);
-    for (const engine of engines) {
-        const mine = shards.filter((s) => s.engine === engine);
-        assert.deepEqual(mine.map((s) => s.shard), Array.from({ length: mine.length }, (_, i) => i + 1), engine);
-        assert.ok(mine.every((s) => s.of === mine.length), engine);
-    }
-    assert.ok(workflow.includes(`run: node scripts/matrix-coverage.mjs "$RUNNER_TEMP/matrix-shards" ${engines.join(' ')}\n`));
+test('the use matrices run in shards 1 to n, which Use matrices checks', () => {
+    const shards = [...workflow.matchAll(/- \{ shard: (\d+)\/(\d+) \}/g)].map((m) => ({ shard: Number(m[1]), of: Number(m[2]) }));
+    assert.ok(shards.length > 0);
+    assert.deepEqual(shards.map((s) => s.shard), Array.from({ length: shards.length }, (_, i) => i + 1));
+    assert.ok(shards.every((s) => s.of === shards.length));
+    assert.ok(workflow.includes('run: node scripts/matrix-coverage.mjs "$RUNNER_TEMP/matrix-shards"\n'));
 });
 
 test('the plan job and every formal shard run the same exact, pinned Java', () => {

@@ -6,7 +6,7 @@
 // only where the binding says so; a revocation or a freeze stops the next
 // request whatever the value cache holds; limits answer 429 and alert once
 // a window; a narrowed session is held to its constraints on the URL sent;
-// a tunnel ends within a recheck of a freeze. Both engines.
+// a tunnel ends within a recheck of a freeze.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';

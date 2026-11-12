@@ -2,7 +2,7 @@
 // rotation"): a vault and its checkpointer under the old key, then the deploy to the new one, the old key kept to verify
 // what came before. A local KEK rotated (its signing key derived from it) and a key service's explicit signingKey
 // rotated (the old one in previousSigningKeys) give the vault the same list of signing keys, the new first; each is run
-// here end to end, on both engines.
+// here end to end.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -28,7 +28,7 @@ import { credentialObject, environmentObject, secretObject } from '../src/object
 import * as store from '../src/store.ts';
 import { newRequestId } from '../src/use.ts';
 import { variableMemory } from './audit-tree.ts';
-import { cutOver, emptyDatabase, ENGINE, openTestDatabase, places, rows, run, sealed, speaking, type LocalVault, type TestDatabase } from './database.ts';
+import { cutOver, emptyDatabase, openTestDatabase, places, rows, run, sealed, speaking, type LocalVault, type TestDatabase } from './database.ts';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
 const openLocalVault = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
@@ -43,18 +43,16 @@ let hot: Database;
 let keks: KekRegistry;
 before(async () => {
   db = await openTestDatabase();
-  hot = ENGINE === 'postgres' ? await db.hot() : db.vault;
+  hot = await db.hot();
 });
 after(() => db.close());
 beforeEach(async () => {
   keks = new KekRegistry(LocalKekProvider.generate('test-kek-1'));
   await emptyDatabase(db.owner);
   for (const table of ['log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
-  await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}, retired = '{}'` : sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}, retired = '[]'`);
-  if (ENGINE === 'postgres') {
-    const today = new Date().toISOString().slice(0, 10);
-    await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
-  }
+  await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}, retired = '{}'`);
+  const today = new Date().toISOString().slice(0, 10);
+  await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
 });
 
 const b64 = () => randomBytes(32).toString('base64');
@@ -169,8 +167,7 @@ const rotations = async () => (await rows<{ number: string | number; payload: st
 
 /** The fence's retired tags, hex. */
 async function retired(): Promise<string[]> {
-  if (ENGINE === 'postgres') return (await rows<{ tag: string }>(db.owner, sql`SELECT encode(unnest(retired), 'hex') AS tag FROM checkpoint_fence`)).map((r) => r.tag);
-  return JSON.parse((await rows<{ retired: string }>(db.owner, sql`SELECT retired FROM checkpoint_fence`))[0]!.retired) as string[];
+  return (await rows<{ tag: string }>(db.owner, sql`SELECT encode(unnest(retired), 'hex') AS tag FROM checkpoint_fence`)).map((r) => r.tag);
 }
 
 /** The origin a pair's changes note is signed under. */
@@ -315,9 +312,7 @@ async function plantUse(key: ChangeKeys['mac']): Promise<bigint> {
   const at = Date.now();
   const row = { at, requestId: BigInt(newRequestId()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
   const mac = entryMac(key, { tree: 'uses', row });
-  const [planted] = await rows<{ number: string | number }>(db.owner, ENGINE === 'postgres'
-    ? sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES (nextval('log_number'), ${at}, ${row.requestId}, ${row.credential}, ${row.secret}, 1, ${mac}, NULL) RETURNING number`
-    : sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES ((SELECT max(n) + 1 FROM (SELECT max(number) AS n FROM log_changes UNION ALL SELECT max(number) FROM log_uses)), ${at}, ${row.requestId}, ${row.credential}, ${row.secret}, 1, ${mac}, NULL) RETURNING number`);
+  const [planted] = await rows<{ number: string | number }>(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES (nextval('log_number'), ${at}, ${row.requestId}, ${row.credential}, ${row.secret}, 1, ${mac}, NULL) RETURNING number`);
   return BigInt(planted!.number);
 }
 
@@ -412,10 +407,8 @@ test('a backlog sealed a part at a time across the rotation: a pair under the ne
  */
 async function plantRotationIntoOld(w: Awaited<ReturnType<typeof underOldKey>>, oldOrigin: string): Promise<{ planted: bigint; number: bigint }> {
   const planted = await plantUse(w.old.keys.mac);
-  await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE checkpoint_fence SET retired = '{}'` : sql`UPDATE checkpoint_fence SET retired = '[]'`);
-  const [next] = await rows<{ n: string | number }>(db.owner, ENGINE === 'postgres'
-    ? sql`SELECT nextval('log_number') AS n`
-    : sql`SELECT max(n) + 1 AS n FROM (SELECT max(number) AS n FROM log_changes UNION ALL SELECT max(number) FROM log_uses)`);
+  await run(db.owner, sql`UPDATE checkpoint_fence SET retired = '{}'`);
+  const [next] = await rows<{ n: string | number }>(db.owner, sql`SELECT nextval('log_number') AS n`);
   const number = BigInt(next!.n);
   const row = { at: Date.now(), requestId: randomUUID(), object: KEY_OBJECT, actor: 'system:vault', payload: rotationPayload(`coffre.log/${randomBytes(8).toString('hex')}`, oldOrigin, number), seal: null };
   const mac = entryMac(w.old.keys.mac, { tree: 'changes', row });
@@ -465,7 +458,7 @@ for (const gone of ['deleted', 'renumbered'] as const) {
     if (gone === 'deleted') await run(db.owner, sql`DELETE FROM log_changes WHERE number = ${moved!.number}`);
     else await run(db.owner, sql`UPDATE log_changes SET number = ${moved!.number + 1_000_000n} WHERE number = ${moved!.number}`);
     const { planted, number } = await plantRotationIntoOld(w, oldKey.origin);
-    // At or past the rotation (SQLite numbers the next entry max + 1: the deleted rotation's own number, free again).
+    // At or past the rotation.
     assert.ok(moved!.number <= planted);
     // The newest pair is under the new key, so the old key, no rotation of it counting, vouches for nothing: the planted
     // rotation into it counts for nothing either, and the signer writes none (Rotation.tla's ChainRule).
@@ -476,7 +469,7 @@ for (const gone of ['deleted', 'renumbered'] as const) {
     assert.deepEqual(ring.previous.map((p) => p.until), [-1n]);
     const tick = await again.cp.tick();
     assert.ok(!tick.signed);
-    // Each above the head (SQLite may number the planted use at the deleted rotation's place, below it, sealed already).
+    // Each above the head.
     const above = [planted, number].filter((n) => n > now.cp.pair.pair.upto);
     assert.ok(above.includes(number));
     assert.deepEqual(tick.failures.filter((f) => above.some((n) => f.startsWith(`${n}:`))), above.map((n) => `${n}: its MAC does not hold`));
@@ -552,10 +545,8 @@ test('two rotations, A to B to C, and someone who holds A and B: a rotation from
   const plant = async () => {
     const use = await plantUse(ka!.mac);
     // The fence's `retired` emptied first: a row she writes, and its trigger would refuse a change under B.
-    await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE checkpoint_fence SET retired = '{}'` : sql`UPDATE checkpoint_fence SET retired = '[]'`);
-    const [next] = await rows<{ n: string | number }>(db.owner, ENGINE === 'postgres'
-      ? sql`SELECT nextval('log_number') AS n`
-      : sql`SELECT max(n) + 1 AS n FROM (SELECT max(number) AS n FROM log_changes UNION ALL SELECT max(number) FROM log_uses)`);
+    await run(db.owner, sql`UPDATE checkpoint_fence SET retired = '{}'`);
+    const [next] = await rows<{ n: string | number }>(db.owner, sql`SELECT nextval('log_number') AS n`);
     const number = BigInt(next!.n);
     const row = { at: Date.now(), requestId: randomUUID(), object: KEY_OBJECT, actor: 'system:vault', payload: rotationPayload(ka!.origin, kb!.origin, number), seal: null };
     await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (${number}, ${row.at}, ${row.requestId}, ${KEY_OBJECT}, 'system:vault', ${row.payload}, NULL, ${entryMac(kb!.mac, { tree: 'changes', row })})`);

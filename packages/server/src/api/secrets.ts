@@ -2081,7 +2081,7 @@ export async function reveal(
  *   (`ahead`). Allowed, every one of the app's checks after it, the read refused even where it would go on without the
  *   key (the proxy's, then refused for a key its credential needs). A refusal the caller may know of is answered as it
  *   is: a credential ended (401), the vault busy (503), the bulk cap of a use it allowed.
- * - **Not by name** (a fork, a personal config, SQLite's vault, 0.14's log), a request that names its one key (`one`),
+ * - **Not by name** (a fork, a personal config, 0.14's log), a request that names its one key (`one`),
  *   by its path or as the proxy's one: every refusal of the app's that is the key's, not a place's that is none
  *   (`unknown_environment`), a credential's (401), a busy one (503), the bulk cap's, or a read to ask again (`changed`);
  *   and a read that goes on without the key, which the environment does not hold. The vault's own refusal there is in
@@ -2105,7 +2105,7 @@ function refusedAlike<T extends { values: Record<string, string> }>(
   const code = outcome !== undefined && !outcome.ok && 'code' in outcome ? outcome.code : undefined;
   // By name, a read of one key refused: the vault decided on what the request names, and the app reads nothing more of
   // the key, whatever it is (reviews r3 and r4 of D153): the one `no`, logged with the vault's reason, at the place and
-  // key its own rows read, on either engine. A whole environment's read of the keys it lists goes on: what it leaves
+  // key its own rows read. A whole environment's read of the keys it lists goes on: what it leaves
   // out, and why, is its answer.
   if (code !== undefined && one !== null) {
     return async () => {
@@ -2149,7 +2149,7 @@ function refusedAlike<T extends { values: Record<string, string> }>(
 /**
  * A read's place and its keys, `keys` alone when it names them, in one call
  * of `app_read` (db/read-ahead.ts): with 0.15's uses, of a path with no key
- * and no personal config, on Postgres. Null otherwise: the read reads them
+ * and no personal config. Null otherwise: the read reads them
  * itself, as ever.
  */
 export async function readValues(ctx: Pick<ApiContext, 'db' | 'vault'>, path: Path, keys?: readonly string[]): Promise<ReadAhead | null> {

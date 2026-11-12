@@ -1,7 +1,7 @@
 // A use by ids the vault refuses before its principal's lock writes nothing in the vault's log (DecideBeforeLock; review
 // r2 of D153): the app logs the request, whoever asked for it (`withRefusals`, review r3), a fork's copy and a dry run's
 // compare as a reveal does: one entry each, at the use's place and key, with its purpose and the vault's reason. 0.15's
-// log alone, where a request's values are uses; on both engines.
+// log alone, where a request's values are uses.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';

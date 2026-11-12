@@ -31,7 +31,7 @@ import type { CoffreRuntime } from './runtime.ts';
  *   the same at market/dev-ada (a fork) or market/dev@me               today's path, until the read holds the chain
  *
  * Null wherever this path does not serve the request: another route or shape, a token of another kind or refused for
- * its kind alone, a vault that does not serve it (older, mid-deploy; SQLite's; a key service's), or the vault's own
+ * its kind alone, a vault that does not serve it (older, mid-deploy; a key service's), or the vault's own
  * `served: false`. The request then goes as ever, and is answered as ever. A refusal of the vault's decision (PR 6) is
  * served: the caller checked on its rows as a served try's, the route answers it as ever, and the vault records it
  * where that answer would append a 0.14 entry (refused.ts): two round trips.

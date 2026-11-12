@@ -68,7 +68,7 @@ async function truncate(from: bigint) {
   const rows = await entries();
   const before = rows.find((row) => row.seq === from - 1n)!;
   await withLogUnlocked(db.owner, async (owner) => {
-    // A checkpoint names the entry it signs as related: SQLite holds each delete to that key, in turn.
+    // A checkpoint names the entry it signs as related.
     await owner.update(auditLog).set({ relatedSeq: null }).where(gte(auditLog.seq, from));
     await owner.delete(auditLog).where(gte(auditLog.seq, from));
     await owner.update(auditChainHead).set({ nextSeq: from, headHash: before.hash });

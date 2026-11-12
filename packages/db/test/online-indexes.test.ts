@@ -11,16 +11,14 @@ import { migrateDatabase, migrationsFolder, ONLINE_LOCK_KEY } from '../src/migra
 import { buildOnline, onlineIndex, onlineIndexes, unbuiltReason, type OnlineSession } from '../src/online-indexes.ts';
 import { postgresClient, postgresSession, quoteIdentifier } from '../src/postgres.ts';
 
-const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only' : false;
 const BASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 const NAME = `${new URL(BASE).pathname.slice(1)}_online_${randomBytes(4).toString('hex')}`;
 const url = Object.assign(new URL(BASE), { pathname: `/${NAME}` }).toString();
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const ALL = onlineIndexes([readFileSync(join(migrationsFolder('postgres'), '0082_flat_history.sql'), 'utf8')]);
+const ALL = onlineIndexes([readFileSync(join(migrationsFolder(), '0082_flat_history.sql'), 'utf8')]);
 
 before(async () => {
-  if (skip) return;
   const admin = postgresClient(BASE, { max: 1 });
   try {
     await admin.unsafe(`CREATE DATABASE ${quoteIdentifier(NAME)}`);
@@ -31,7 +29,6 @@ before(async () => {
 });
 
 after(async () => {
-  if (skip) return;
   const admin = postgresClient(BASE, { max: 1 });
   try {
     await admin.unsafe(`DROP DATABASE IF EXISTS ${quoteIdentifier(NAME)} WITH (FORCE)`);
@@ -80,7 +77,7 @@ async function state(session: ReturnType<typeof postgresSession>) {
      WHERE c.relname = ANY($1) ORDER BY 1`, [ALL.map(({ name }) => name)]);
 }
 
-test('a migration run builds every online index, each partitioned table on each of its days', { skip }, async () => {
+test('a migration run builds every online index, each partitioned table on each of its days', async () => {
   const session = postgresSession(url);
   try {
     const found = await state(session);
@@ -93,7 +90,7 @@ test('a migration run builds every online index, each partitioned table on each 
   }
 });
 
-test('an online build waits for an older transaction without holding up writes, and the run ends once it ends', { skip }, async () => {
+test('an online build waits for an older transaction without holding up writes, and the run ends once it ends', async () => {
   const session = postgresSession(url);
   const holder = postgresSession(url, { application_name: 'coffre-online-holder' });
   const writer = postgresSession(url);
@@ -131,7 +128,7 @@ test('an online build waits for an older transaction without holding up writes, 
   }
 });
 
-test('an index a cut-short build left invalid is dropped and built again; one built is left as it is', { skip }, async () => {
+test('an index a cut-short build left invalid is dropped and built again; one built is left as it is', async () => {
   const session = postgresSession(url);
   try {
     // What a run killed during CREATE INDEX CONCURRENTLY leaves: the index there, invalid.
@@ -146,7 +143,7 @@ test('an index a cut-short build left invalid is dropped and built again; one bu
   }
 });
 
-test("a run that finds every index built takes no lock a use's insert waits for: a partitioned table's index is asked first", { skip }, async () => {
+test("a run that finds every index built takes no lock a use's insert waits for: a partitioned table's index is asked first", async () => {
   const session = postgresSession(url);
   const writer = postgresSession(url);
   try {
@@ -167,7 +164,7 @@ test("a run that finds every index built takes no lock a use's insert waits for:
   }
 });
 
-test('a run that finds another building its indexes says which are not built yet; the next builds them', { skip }, async () => {
+test('a run that finds another building its indexes says which are not built yet; the next builds them', async () => {
   const session = postgresSession(url);
   const other = postgresSession(url);
   try {
@@ -182,7 +179,7 @@ test('a run that finds another building its indexes says which are not built yet
   }
 });
 
-test("a partitioned table's index left part-built is finished a day at a time, and a day made since takes its own", { skip }, async () => {
+test("a partitioned table's index left part-built is finished a day at a time, and a day made since takes its own", async () => {
   const session = postgresSession(url);
   try {
     // A run cut short after the empty index and one day's: the other days unindexed, the index invalid.
@@ -208,7 +205,7 @@ test("a partitioned table's index left part-built is finished a day at a time, a
   }
 });
 
-test('a day retention detaches between its build and its ATTACH is left out; a failed ATTACH on a day still there fails the build', { skip }, async () => {
+test('a day retention detaches between its build and its ATTACH is left out; a failed ATTACH on a day still there fails the build', async () => {
   const session = postgresSession(url);
   const index = ALL.find(({ name }) => name === 'log_uses_by_number_idx')!;
   const days = async () => (await session.unsafe<{ day: string }[]>(
@@ -259,7 +256,7 @@ test('a day retention detaches between its build and its ATTACH is left out; a f
   }
 });
 
-test("a day retention detaches before the last outstanding ATTACH leaves the table's index valid, as does its only day", { skip }, async () => {
+test("a day retention detaches before the last outstanding ATTACH leaves the table's index valid, as does its only day", async () => {
   const session = postgresSession(url);
   const index = { name: 't245_parts_n_idx', table: 't245_parts', unique: false, body: 'USING btree (n)' };
   const valid = async () => (await session.unsafe<{ valid: boolean }[]>('SELECT indisvalid AS valid FROM pg_index WHERE indexrelid = to_regclass($1)', [index.name]))[0]?.valid;
@@ -297,7 +294,7 @@ test("a day retention detaches before the last outstanding ATTACH leaves the tab
   }
 });
 
-test('before Postgres 16.14, where attaching a day again checks nothing, an index left invalid is made again, its days oldest first; twice, it is left to the next run', { skip }, async () => {
+test('before Postgres 16.14, where attaching a day again checks nothing, an index left invalid is made again, its days oldest first; twice, it is left to the next run', async () => {
   const session = postgresSession(url);
   const index = { name: 't245_old_n_idx', table: 't245_old', unique: false, body: 'USING btree (n)' };
   const valid = async () => (await session.unsafe<{ valid: boolean }[]>('SELECT indisvalid AS valid FROM pg_index WHERE indexrelid = to_regclass($1)', [index.name]))[0]?.valid;

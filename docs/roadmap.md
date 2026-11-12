@@ -73,8 +73,7 @@ Done. coffre is eight packages a deployment imports and configures in code
   one of coffre's swapped, is a route added to its router rather than a
   fork of the package; not supported yet, the way is in
   [architecture.md](architecture.md#the-ui);
-- Postgres through Drizzle, with SQLite for tests and local development, and
-  one set of queries for both;
+- Postgres through Drizzle;
 - the vault, `@coffre/vault`, which holds the vault key and decides access, as a
   Worker behind a service binding or a Node process behind a Unix socket;
 - `coffre init`, whose output is `examples/workers` and `examples/node`, a

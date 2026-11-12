@@ -84,7 +84,7 @@ export async function forgedApproval(deployment: Deployment, people: People): Pr
     const [standing] = await query<{ generation: number }>(sql, 'SELECT generation FROM principals WHERE principal = $1', [person.member]);
     expect(row !== undefined, 'no device row to forge');
     await query(sql, `UPDATE device_logins SET decision = 'approved', decided_at = $1, principal = $2, generation = $3 WHERE id = $4`,
-      [sql.engine === 'sqlite' ? Date.now() : new Date(), person.member, standing.generation, row.id]);
+      [new Date(), person.member, standing.generation, row.id]);
     try {
       const response = await pollDevice(deployment, device.device_code);
       const body = await response.text();

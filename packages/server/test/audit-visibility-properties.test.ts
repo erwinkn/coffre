@@ -1,7 +1,7 @@
 /**
  * Who sees which entries of the log: `GET /api/audit` (`listAudit`), its
  * filter built in JS and read in SQL, held to an independent model on
- * random worlds, logs and queries, on the engine the suite runs on.
+ * random worlds, logs and queries.
  *
  * The rule, from the docs:
  *

@@ -80,8 +80,7 @@ await serveVault({ socket: 'vault.sock', database: 'postgres://coffre_vault_runt
 
 For local development or tests, run one process with
 `vault: await localVault({ database, kek, owners })` in the
-server. `database` is a Postgres URL, or `file:` for SQLite in
-local development and tests.
+server. `database` is a Postgres URL.
 
 `coffre init --workers` or `coffre init --node` writes such a project:
 [examples/workers](../examples/workers) or [examples/node](../examples/node)
@@ -98,7 +97,7 @@ disabled on all three.
 |---|---|---|
 | `@coffre/ui` | the web UI, server-rendered, and its static files | nothing sensitive |
 | `@coffre/server` | `/api`, sign-in, the heartbeat, the queries; hands pages to the UI | sessions, the app login |
-| `@coffre/db` | the Drizzle schemas for Postgres and SQLite, their migrations and migrator, the dialect helpers, the connections, Hyperdrive's included | |
+| `@coffre/db` | the Drizzle schema for Postgres, its migrations and migrator, the dialect helpers, the connections, Hyperdrive's included | |
 | `@coffre/vault` | wraps and unwraps data keys, decides who may, logs every use | the keys, the vault login |
 | `@coffre/client` | the typed API client, the API's types printed from the server's routes | |
 | `@coffre/core` | what the others share: access rules, envelope encryption, vault key providers, the audit chain, identity and sign-in, and `Vault`, the contract between server and vault | |
@@ -156,7 +155,7 @@ database a newer coffre migrated, and asks no instance. Anywhere else, it
 migrates an instance's database, and first asks the instance which version
 it runs (`/me`, to admins and owners of the whole instance only), refusing unless the CLI is
 that version. `coffre-server migrate`, the server's own command, stays for
-the Node conformance harness and SQLite. A Worker has no files, so the migrations each version ships are compiled into
+a Node deployment's own pipeline. A Worker has no files, so the migrations each version ships are compiled into
 `@coffre/db/schema-version` from their journals: `/me` reports how many the
 database has applied of those.
 
@@ -248,9 +247,7 @@ to `@coffre/ui`'s.
 `/_coffre/assets/`, beside `/api` and `/auth`, and never inlines a font, which
 the Content-Security-Policy would refuse as `data:`. It makes the server's
 build hold everything it runs (`ssr.noExternal`), as a Worker's does, so
-that Node resolves nothing from `node_modules`; a Node deployment keeps
-SQLite's driver, with its native binding, out of it, as a dependency of its
-own. And it checks the versions above.
+that Node resolves nothing from `node_modules`. And it checks the versions above.
 
 **On Workers**, `@cloudflare/vite-plugin` builds the app into
 `app/dist/server`, with a `wrangler.json` that says `no_bundle`: `wrangler
@@ -584,7 +581,7 @@ moves both Workers; nothing serves across two releases.
   may open. Each call is one HTTP POST over the socket, `/call`, its body
   the envelope, `{ release, method, args }`. The process facing the network holds no vault key.
 - **Node, in process** (`localVault`): for tests and local development.
-  Both components use one SQLite file. Each call's arguments and results
+  Both components use one Postgres database. Each call's arguments and results
   go through JSON as over RPC, so nothing that only works in-process gets in.
 - **Locally**, `pnpm dev` runs the vault as an auxiliary Worker of the
   app's `vite dev`, and conformance runs both with `wrangler dev`, the app
@@ -604,8 +601,7 @@ configuration secrets. Neither stores the vault key or the app key in the databa
 The database's grants protect members and grants from the app's login;
 row-level security protects each author's entries from the other's login.
 The owner can bypass those restrictions, but cannot forge an entry's MAC
-without its author's key. SQLite has no logins and is only for tests and
-local development.
+without its author's key.
 
 ### Transactions
 
@@ -1190,9 +1186,8 @@ checks admit a tombstone's.
 
 ## Databases
 
-The deployed app database is Postgres. SQLite remains for tests, local Node
-development and conformance. The integration suite runs on both through
-Drizzle, using the same queries.
+The app database is Postgres, deployed, in tests, in local development and
+in conformance; it is the only engine.
 
 Every query lives in one module, `packages/server/src/db/queries.ts`, and the
 rest of the server writes no SQL (lint keeps `drizzle-orm` inside it and
@@ -1207,9 +1202,7 @@ still there": `{ id, revokedAt: null }` changes one row or none. Row locks are
 kept for real races (the audit head, offboarding against sign-in, version counters), and each one says which race it guards.
 
 The database comes from its URL: `postgres://` or `postgresql://` opens
-postgres.js; `file:` or `libsql:` opens @libsql/client for SQLite
-(`packages/db/src/connect.ts`). The SQLite driver loads only when
-asked for. The Worker builds its Postgres database from the Hyperdrive pool
+postgres.js (`packages/db/src/connect.ts`); any other scheme is refused. The Worker builds its Postgres database from the Hyperdrive pool
 with `createDatabase`: one connection for each request or vault call, which
 its queries take turns on and a transaction holds until it ends.
 
@@ -1248,45 +1241,29 @@ opens each client as coffre needs it: unnamed statements, no type lookup on
 connecting, arrays, dates and objects sent and arrays read as node-postgres
 does, and the URL read as node-postgres reads it, TLS included.
 
-Each query is written once, typed against the Postgres schema. Drizzle has no
-type shared by its dialects, so the SQLite database is cast to the Postgres
-one in `portable.ts`; at run time each database travels with its own tables.
-The cast is guarded by a compile-time check that every table's row type
-matches, a parity test for tables, columns, nullability, keys, indexes and
-foreign keys, and the whole suite on both engines on every Drizzle upgrade.
+Each query is written once, typed against the Postgres schema.
 
-What differs stays in the schemas and `packages/db/src/dialect.ts`:
-
-- **Schemas and migrations.** `pgTable` and `sqliteTable` define two schemas
-  and migration trees under `packages/db/src/migrations/`, each a
+- **Schema and migrations.** `pgTable` defines the schema, and its
+  migration tree is under `packages/db/src/migrations/postgres`, from a
   single baseline. Generated tables sit inside a template in
   `packages/db/src/baseline/` that adds the first audit rows and the
   Postgres runtime roles. Until the first deployment, `pnpm db:generate`
   regenerates the baseline rather than adding migrations. Tests catch a
   schema or template that no longer matches its migration. Encrypted bytes
-  use `bytea` in Postgres and `blob` in SQLite.
+  use `bytea`.
 - **Ids come from the application.** Writes know their keys before insertion
   and do not read them back.
 - **Named operations.** Insert if absent, upsert, row locks, rows changed,
   recognising a duplicate key, the clock and reading a condition stay in
   `dialect.ts`. Services contain no database branches.
-- **Locks.** The audit chain locks a permanent head row with `FOR UPDATE`
-  on Postgres. SQLite has one writer, but its driver does not queue for us,
-  so `connect.ts` queues transactions once per database file however many
-  clients open it. Each takes the write lock with its first statement;
-  a row lock there is a no-op. A lone statement that writes queues too:
-  libsql's busy wait blocks the thread, so one waiting on a transaction
-  of the same process would hold that transaction from its commit.
+- **Locks.** The audit chain locks a permanent head row with `FOR UPDATE`.
 - **Shared constraints.** Active identities use a unique index on a generated
   column that holds the subject only while the identity is not revoked.
-  Emails are stored lowercase. Checks stay in both databases, with expressions
-  in each dialect. SQLite's `lower()` folds ASCII only, so the server folds
-  non-ASCII case. No query filters on a JSON field.
+  Emails are stored lowercase. No query filters on a JSON field.
 
-The restricted runtime logins (`coffre_runtime` and
-`coffre_vault_runtime`) and `pnpm test:schema` stay Postgres-only. The
-schema test checks both logins, including which author each may append as.
-SQLite has no logins; its file permissions protect access to the database.
+The restricted runtime logins are `coffre_runtime` and
+`coffre_vault_runtime`. `pnpm test:schema` checks both logins, including
+which author each may append as.
 
 D1 is not a fit for the app database: it has no interactive transactions, and
 the audit chain reads the previous hash, computes the next in JavaScript, then

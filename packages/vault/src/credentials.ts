@@ -25,12 +25,10 @@ import { EXCHANGED_CREDENTIAL_MS, MAX_SESSION_HOURS, POLICY_DEFAULTS, POLICY_FIE
 import { CLOCK_SKEW_MS, isConfirmation } from '@coffre/core/vault';
 import type { BindingColumns, ChangeBindingsInput, CredentialColumns, IssueTokenInput, LoggedChange, MadeBinding, IssueTokenRefusal, RequestTrace, RevokeCredentialInput, SignInCredential, SignInInput, SignInRefusal } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
-import { engineOf } from '@coffre/db/dialect';
 
 import { NotLogged, payloadOf, type ChangeKeys } from './changes.ts';
 import { applyOp, canonical, objectKey, sealed, sealOf, type Op, type Ref } from './inputs.ts';
 import { bindingsOnPostgres, issueOnPostgres, revokeOnPostgres, signInOnPostgres } from './credentials.postgres.ts';
-import { bindingsOnSqlite, issueOnSqlite, revokeOnSqlite, signInOnSqlite } from './credentials.sqlite.ts';
 import { changeHolds, entryMac, MAC_BYTES, type LogMacKey } from './log-entry.ts';
 import type { CheckedChange } from './store.ts';
 import { bindingObject, credentialObject } from './objects.ts';
@@ -165,7 +163,6 @@ export async function signIn(db: Database, keys: ChangeKeys, at: number, input: 
     if (error instanceof SignInRefused) return { state: error.state };
     throw error;
   }
-  if (engineOf(db) === 'sqlite') return db.transaction((tx) => signInOnSqlite(tx, call));
   try {
     return await signInOnPostgres(db, call);
   } catch (error) {
@@ -313,7 +310,6 @@ export async function revokeCredential(db: Database, keys: ChangeKeys, at: numbe
     ref, macFrom: Buffer.from(authMacFrom, 'base64'), mac: Buffer.from(authMac, 'base64'), revokedAt, revokedBy, policy,
     change: { ...row, sealFrom, mac: entryMac(keys.mac, { tree: 'changes', row }) },
   };
-  if (engineOf(db) === 'sqlite') return db.transaction((tx) => revokeOnSqlite(tx, call));
   try {
     return await revokeOnPostgres(db, call);
   } catch (error) {
@@ -540,9 +536,8 @@ export function issueCall(keys: ChangeKeys, input: IssueTokenInput, read: IssueR
   };
 }
 
-/** The issue's statement, on the engine `db` is. */
+/** The issue's statement. */
 export async function issueToken(db: Database, call: IssueCall): Promise<Answer> {
-  if (engineOf(db) === 'sqlite') return db.transaction((tx) => issueOnSqlite(tx, call));
   try {
     return await issueOnPostgres(db, call);
   } catch (error) {
@@ -703,9 +698,8 @@ export function bindingsCall(
   };
 }
 
-/** The change's statement, on the engine `db` is. */
+/** The change's statement. */
 export async function changeBindings(db: Database, call: BindingsCall): Promise<Answer> {
-  if (engineOf(db) === 'sqlite') return db.transaction((tx) => bindingsOnSqlite(tx, call));
   try {
     return await bindingsOnPostgres(db, call);
   } catch (error) {

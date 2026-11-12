@@ -11,10 +11,9 @@ import { createDatabase } from '../src/database.ts';
 import { gaveUp } from '../src/dialect.ts';
 import { postgresClient } from '../src/postgres.ts';
 
-const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only' : false;
 const url = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 
-test("a transaction of a database made with lockWaitMs gives up a lock after it, and the next statement outside it waits as Postgres's default", { skip }, async () => {
+test("a transaction of a database made with lockWaitMs gives up a lock after it, and the next statement outside it waits as Postgres's default", async () => {
   const holder = postgresClient(url, { max: 1 });
   const client = postgresClient(url, { max: 1 });
   const db = createDatabase(client, { lockWaitMs: LOCK_WAIT_MS });
@@ -52,7 +51,7 @@ test("a transaction of a database made with lockWaitMs gives up a lock after it,
   }
 });
 
-test("the credential writes that take the fence wait LOCK_WAIT_MS for each lock, and the issues a use's whole wait (migration 0078)", { skip }, async () => {
+test("the credential writes that take the fence wait LOCK_WAIT_MS for each lock, and the issues a use's whole wait (migration 0078)", async () => {
   const client = postgresClient(url, { max: 1 });
   try {
     const rows = await client.unsafe<{ name: string; config: string[] | null }[]>(

@@ -9,7 +9,7 @@ import {
   type ProxyItemInput, type ProxyItemOutcome, type RouteFound, type RouteUseInput, type RouteUseOutcome, type UseBusy, type UseInput, type UseManyInput, type UseManyOutcome, type UseOutcome, type UsedValue,
 } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
-import { engineOf, isUnreachable } from '@coffre/db/dialect';
+import { isUnreachable } from '@coffre/db/dialect';
 
 import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
@@ -20,8 +20,7 @@ import { bindingObject, configObject, connectionObject, credentialObject, enviro
 import { PURPOSES, purposeCode, WAYS } from './log-replay.ts';
 import { proxyServing, routeEditorRefusal, routeLookup, type RouteLevel } from './proxy.ts';
 import { Throttle } from './throttle.ts';
-import { callBatch as batchPostgres, callNamedBatch as namedPostgres, callRoute as routePostgres, callRouteNamed as routeNamedPostgres, callUse as callPostgres } from './use.postgres.ts';
-import { callBatch as batchSqlite, callNamedBatch as namedSqlite, callRoute as routeSqlite, callRouteNamed as routeNamedSqlite, callUse as callSqlite } from './use.sqlite.ts';
+import { callBatch, callNamedBatch, callRoute, callRouteNamed, callUse } from './use.postgres.ts';
 
 /**
  * 0.15's use (docs/design/0.15-plan.md, PR 5; hot-path-one.md, "A use";
@@ -408,7 +407,7 @@ export type Resolved = { credential: string; environment: string; slugs: { proje
  */
 export type KeyId = { id: string; through: boolean };
 
-/** What `use_credential` answers (schema 0024's `use_row`), as node-postgres reads it; the SQLite twin answers the same. */
+/** What `use_credential` answers (schema 0024's `use_row`), as node-postgres reads it. */
 export type UseRow = {
   state: string | null; number: string | null; covered: string | null; newest: string | null; newest_mac: Buffer | null; inputs: string | null; probed: boolean;
   c_principal: string | null; c_kind: string | null; c_scope: string | null; c_revoked: boolean | null; c_expires: string | null; c_seal: Buffer | null; c_last: Buffer | null;
@@ -735,14 +734,9 @@ async function inStatements(path: UsePath, calls: readonly UseCall[], lock: stri
     // Past the deadline, the round is answered `late` (`raced`): no statement more is sent, and the call lets go of its
     // admission and connection with the one in flight (review r3 of #433). As Postgres's own past-deadline refusal.
     if (start > 0) sends();
-    rows.push(...await batchOf(path.db)(path.db, calls.slice(start, start + size), lock));
+    rows.push(...await callBatch(path.db, calls.slice(start, start + size), lock));
   }
   return rows;
-}
-
-/** The engine's `use_batch`. */
-function batchOf(db: Queryable): (db: Queryable, calls: readonly UseCall[], lock: string | null) => Promise<UseRow[]> {
-  return engineOf(db) === 'postgres' ? batchPostgres : batchSqlite;
 }
 
 /** A use's request as the vault makes it: by its ids, and its way in's (`wayOf`). */
@@ -778,7 +772,7 @@ async function useOnce(path: UsePath, input: Asked, names?: Names, decided = fal
   const made = ready(path, input, request, names, decided);
   // The statement, then, within the same admission and deadline, the MAC check of an access entry its probe found that
   // the new log does not account for (`oldWrite`), never past that entry: one forged in the vault's name is passed over.
-  const answered = await raced(path, input.deadline, () => callOf(path.db)(path.db, made.call), async (row, starts) => ({ row, forged: await forgedPast(path, row, starts, row.probed ? undefined : made.known) }));
+  const answered = await raced(path, input.deadline, () => callUse(path.db, made.call), async (row, starts) => ({ row, forged: await forgedPast(path, row, starts, row.probed ? undefined : made.known) }));
   if ('busy' in answered) return { outcome: answered, row: null, checked: null, request };
   const used = settle(path, input, names, decided, made, answered.row, answered.forged);
   // Refused on a cover, by ids: the request is logged as an entry of its own.
@@ -1126,7 +1120,7 @@ async function namedManySeated(path: UsePath, input: NamedManyInput): Promise<Na
   const answered = await raced(path, input.deadline, async (sends) => {
     // The first statement: the gate, then the request's first keys, or the place's, listed.
     const first = keys === null ? null : keys.slice(0, limit).map(callFor);
-    const read = await namedBatchOf(path.db)(path.db, gate.call, first, limit);
+    const read = await callNamedBatch(path.db, gate.call, first, limit);
     // None listed (a refused gate, or a chain cut since it read it) is never a place that holds no key.
     const listed = keys ?? read.keys;
     if (listed !== null) path.seat?.hold(listed.length);
@@ -1136,7 +1130,7 @@ async function namedManySeated(path: UsePath, input: NamedManyInput): Promise<Na
     // A place of more keys than a statement reads: the rest by their names, in statements of that many, each its gate.
     for (let start = rows.length; listed !== null && read.rows.length > 0 && start < listed.length; start += limit) {
       sends();
-      const more = await namedBatchOf(path.db)(path.db, gate.call, listed.slice(start, start + limit).map(callFor), limit);
+      const more = await callNamedBatch(path.db, gate.call, listed.slice(start, start + limit).map(callFor), limit);
       if (more.rows.length === 0) return { gate: more.gate, listed: null, rows: [], byIds: [], aheads: [] };
       rows.push(...more.rows);
       byIds.push(...more.byIds);
@@ -1322,18 +1316,13 @@ function acceptsOf(input: { accepts: CredentialAcceptance }): CredentialAcceptan
   return { signin: accepts.signin, issuers: [...accepts.issuers], passkeys: accepts.passkeys };
 }
 
-/** The engine's `use_named_batch`. */
-function namedBatchOf(db: Queryable): (db: Queryable, gate: UseCall, calls: readonly NamedBatchCall[] | null, limit: number) => Promise<NamedBatchRows> {
-  return engineOf(db) === 'postgres' ? namedPostgres : namedSqlite;
-}
-
 /** A named batch's key: its name, and its call, by its name alone or by the ids the isolate maps it to. */
 export type NamedBatchCall = { key: string; call: UseCall };
 
 /**
  * A key of a named batch with a sealed value of its own, as the statement resolved its name: its id, whether that value
  * is sensitive, where it is held, inherited, and the app's rows of it, its row and its version's, as `to_json` writes
- * them (none on SQLite, where the app reads its own).
+ * them.
  */
 export type NamedAhead = { id: string; sensitive: boolean; secret: unknown; version: unknown; held: { environmentId: string; slug: string } | null };
 
@@ -1488,11 +1477,6 @@ async function raced<R, T>(path: UsePath, deadline: number, call: (sends: () => 
   } finally {
     clearTimeout(timer);
   }
-}
-
-/** The engine's `use_credential`. */
-function callOf(db: Queryable): (db: Queryable, call: UseCall) => Promise<UseRow> {
-  return engineOf(db) === 'postgres' ? callPostgres : callSqlite;
 }
 
 /**
@@ -1773,11 +1757,6 @@ type RouteGuess = { reading: 1 | 2 | null; credential: string | null; place: str
 /** What a statement of a route use read, and whether each row's principal had an access entry forged past what its log accounts for. */
 type RouteRound = { rows: RouteRows; gateForged: boolean; keysForged: boolean[]; editorForged: boolean };
 
-/** The engine's `use_route`. */
-function routeCallOf(db: Queryable): (db: Queryable, call: RouteCall) => Promise<RouteRows> {
-  return engineOf(db) === 'postgres' ? routePostgres : routeSqlite;
-}
-
 const ROUTE_ATTEMPTS = 3;
 
 /** Why a route use's input is not one: a bug of the app's, which fails the call. */
@@ -1853,7 +1832,7 @@ async function routeStatement(
     offset: keys.offset, limit: cache.limits.batch, lock: keys.lock, use: ask.use,
     light: ask.handle !== null && ask.use && keys.asked !== null && keys.asked.length > 0,
   };
-  return raced(path, ask.deadline, () => routeCallOf(path.db)(path.db, call), async (rows, starts) => {
+  return raced(path, ask.deadline, () => callRoute(path.db, call), async (rows, starts) => {
     const forgedOf = forgedOnce(path, starts);
     const gateForged = await forgedOf(rows.gate, undefined);
     const keysForged: boolean[] = [];
@@ -1867,11 +1846,6 @@ async function editorForgedOf(path: UsePath, editor: EditorRow | null, starts: (
   if (editor === null || path.oldWrite === undefined || editor.access === null || (editor.old !== null && BigInt(editor.access) <= BigInt(editor.old))) return false;
   starts();
   return !(await path.oldWrite(editor.principal, editor.old === null ? null : BigInt(editor.old), BigInt(editor.access), starts));
-}
-
-/** The engine's route's named call (`use_credential`, 0071). */
-function routeNamedOf(db: Queryable): (db: Queryable, call: UseCall) => Promise<RouteNamedRows> {
-  return engineOf(db) === 'postgres' ? routeNamedPostgres : routeNamedSqlite;
 }
 
 /** A guess of nothing: the next statement reads by the names alone, `use_route` picking the reading. */
@@ -1913,7 +1887,7 @@ async function routeNamed(path: UsePath, ask: RouteAsk, guess: RouteGuess, made:
     accepts: handle.accepts, forks: true,
   };
   type Read = { row: UseRow; route: RouteRead | null; forged: boolean; editorForged: boolean };
-  const answered = await raced(path, ask.deadline, () => routeNamedOf(path.db)(path.db, { ...made.call, names }), async ({ row, route }, starts): Promise<Read | { reask: RouteGuess }> => {
+  const answered = await raced(path, ask.deadline, () => callRouteNamed(path.db, { ...made.call, names }), async ({ row, route }, starts): Promise<Read | { reask: RouteGuess }> => {
     if (row.state === 'reread') return { reask: NO_GUESS };
     return { row, route, forged: await forgedOnce(path, starts)(row, undefined), editorForged: route === null ? false : await editorForgedOf(path, route.editor, starts) };
   });

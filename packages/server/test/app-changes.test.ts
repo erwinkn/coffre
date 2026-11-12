@@ -15,7 +15,6 @@ import { logObject } from '@coffre/db/log';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
-import { postgresOnly } from './db/engine.ts';
 import { auditLog, credentials, logChanges } from './db/tables.ts';
 import { clientFor, contextFor, credentialsLogged, holdSomething, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
@@ -172,7 +171,7 @@ test("a revoke weighed on a policy that changes before the vault's statement is 
   assert.deepEqual((await opsByCredential()).get(token.id), ['credential.issue', 'credential.revoke']);
 });
 
-test("a write that moves an environment's slug waits for the vault's issues in flight, which compare the protected slugs under the issue lock; one that moves none does not (T149, review r3)", postgresOnly('the issue lock is an advisory lock'), async () => {
+test("a write that moves an environment's slug waits for the vault's issues in flight, which compare the protected slugs under the issue lock; one that moves none does not (T149, review r3)", async () => {
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/dev', { name: 'dev' });
   await root.environments.create('market/qa', { name: 'qa' });

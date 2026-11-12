@@ -9,17 +9,14 @@ import { eq, sql } from 'drizzle-orm';
 
 import { audited } from '../src/api/context.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { postgresOnly } from './db/engine.ts';
 import { environments } from './db/tables.ts';
 
-const POSTGRES = postgresOnly("orders statements within one Sync, Postgres's");
 const ROOT = 'admin@acme.example';
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 
 before(async () => {
-  if (POSTGRES.skip) return;
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   deps = testDeps(db.runtime, [ROOT]);
@@ -30,12 +27,11 @@ before(async () => {
 });
 
 after(async () => {
-  if (POSTGRES.skip) return;
   await resetDatabase(db.owner);
   await db.close();
 });
 
-test("a work whose first statement is a `later` write to a protected environment's slug commits: the policy was read before it", POSTGRES, async () => {
+test("a work whose first statement is a `later` write to a protected environment's slug commits: the policy was read before it", async () => {
   const ctx = await contextFor(deps, ROOT);
   const [prod] = await db.owner.select({ id: environments.id }).from(environments).where(eq(environments.slug, 'prod'));
   await audited(ctx, async (tx) => {
@@ -45,7 +41,7 @@ test("a work whose first statement is a `later` write to a protected environment
   assert.equal(now?.slug, 'renamed');
 });
 
-test("a factor lock that fails fails the work with its own error, the head's queued behind it heard too: no unhandled rejection (review r13 of #500)", POSTGRES, async () => {
+test("a factor lock that fails fails the work with its own error, the head's queued behind it heard too: no unhandled rejection (review r13 of #500)", async () => {
   const ctx = await contextFor(deps, ROOT);
   const unhandled: unknown[] = [];
   const hear = (reason: unknown) => void unhandled.push(reason);

@@ -1,7 +1,7 @@
 import { TOMBSTONE } from '@coffre/core/schemas';
 import { answerFrom, policyFrom, settingsFrom, type Access, type Settings } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
-import { engineOf, rowsOf } from '@coffre/db/dialect';
+import { rowsOf } from '@coffre/db/dialect';
 import { entriesOf, type Kind } from '@coffre/db/log';
 import { storedRole } from '@coffre/db/grants';
 import { sql, type SQL } from 'drizzle-orm';
@@ -27,7 +27,7 @@ import { sql, type SQL } from 'drizzle-orm';
  * clock is still shown here until the database's clock passes its end.
  */
 export async function answerShown(db: Queryable, principal: string): Promise<Shown> {
-  const [row] = await rowsOf<{ answer: unknown }>(db, sql`SELECT (${answerQuery(db, sql`${principal}`)}) AS answer`);
+  const [row] = await rowsOf<{ answer: unknown }>(db, sql`SELECT (${answerQuery(sql`${principal}`)}) AS answer`);
   return answerOf(principal, row!.answer);
 }
 
@@ -46,15 +46,6 @@ export function shownActive(access: Access): boolean {
 
 /** What `answerShown` answers: the access, the settings, and the newest `policy.change`'s number, read with them. */
 export type Shown = { access: Access; settings: Settings; policySeq: bigint | null };
-
-/**
- * `answerShown`'s query, for the principal `principal` names, to run or to
- * read inside another: as a credential's read takes it with the credential,
- * by its row's principal (`findCredential`). One JSON value.
- */
-export function answerQuery(db: Queryable, principal: SQL): SQL {
-  return (engineOf(db) === 'postgres' ? postgres : sqlite)(principal);
-}
 
 /** The answer about `principal`, from what `answerQuery` read. */
 export function answerOf(principal: string, answer: unknown): Shown {
@@ -103,7 +94,7 @@ export function settingsQuery(): SQL {
   return sql`SELECT metadata FROM (${newest('settings')}) AS settings`;
 }
 
-/** Whole numbers come as JSON numbers or text, as each dialect's query writes them. */
+/** Whole numbers come as JSON numbers or text, as the query writes them. */
 type Int = number | string;
 
 type Raw = {
@@ -121,8 +112,13 @@ const TOMB = `%${TOMBSTONE}%`;
 /** The newest entry of `kind`, as the vault reads its newest (`newestVaultEntries`): one step of the kind's index (`KINDS`). */
 const newest = (kind: Kind) => sql`SELECT seq, metadata FROM audit_log WHERE ${entriesOf(kind)} ORDER BY seq DESC LIMIT 1`;
 
-/** On Postgres: one JSON value, each part one index range, as the vault's own read (vault snapshot.postgres.ts). */
-function postgres(principal: SQL): SQL {
+/**
+ * `answerShown`'s query, for the principal `principal` names, to run or to
+ * read inside another: as a credential's read takes it with the credential,
+ * by its row's principal (`findCredential`). One JSON value, each part one
+ * index range, as the vault's own read (vault snapshot.postgres.ts).
+ */
+export function answerQuery(principal: SQL): SQL {
   return sql`
     WITH policy AS (${newest('policy')})
     SELECT json_build_object(
@@ -150,40 +146,6 @@ function postgres(principal: SQL): SQL {
           WHERE (place #>> '{}') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
         ))
       ),
-      'settings', (${settingsQuery()})
-    ) AS answer`;
-}
-
-/** On SQLite, the same (vault snapshot.sqlite.ts): a JSON value leaving a subquery is wrapped in `json(…)`. */
-function sqlite(principal: SQL): SQL {
-  return sql`
-    WITH policy AS (${newest('policy')})
-    SELECT json_object(
-      'at', CAST(unixepoch('subsec') * 1000 AS INTEGER),
-      'member', json((
-        SELECT json_object('status', status, 'owner', owner, 'role', role, 'scope', scope, 'generation', generation,
-          'statusChangedAt', status_changed_at, 'statusChangedBy', status_changed_by)
-        FROM principals WHERE principal = ${principal}
-      )),
-      'grants', json((
-        SELECT json_group_array(json_object(
-          'projectId', coalesce(g.project_id, env.project_id), 'environmentId', g.environment_id, 'role', g.role,
-          'expiresAt', g.expires_at, 'grantedAt', g.granted_at, 'grantedBy', g.granted_by))
-        FROM grants g LEFT JOIN environments env ON env.id = g.environment_id
-        WHERE g.principal = ${principal}
-      )),
-      'policySeq', (SELECT seq FROM policy),
-      'policy', (SELECT metadata FROM policy),
-      'environments', json((
-        SELECT json_group_array(json_object('id', env.id, 'slug', env.slug, 'deleted', env.slug LIKE ${TOMB} OR project.slug LIKE ${TOMB}))
-        FROM environments env JOIN projects project ON project.id = env.project_id
-        WHERE env.id IN (
-          SELECT json_extract(place.value, '$.environmentId')
-          FROM policy, json_each(policy.metadata, '$.policy.protected') AS place
-          -- Of a forged entry's, an element that is no object names nothing: json_extract would fail on a string.
-          WHERE json_valid(policy.metadata) AND json_type(policy.metadata, '$.policy.protected') = 'array' AND place.type = 'object'
-        )
-      )),
       'settings', (${settingsQuery()})
     ) AS answer`;
 }

@@ -25,7 +25,7 @@
 // COFFRE_DEV_* settings are dropped (they would shard or redirect the suites), and
 // the summary says so. The Pins step needs GH_TOKEN or a logged-in `gh`, to audit the pinned
 // actions against GitHub as CI does, and fails without. The matrices step runs the use matrices as CI's shards do
-// (Postgres in sixths, SQLite in halves, one at a time, then the coverage check). Postgres is the script's own container (a compose project
+// (in sixths, one at a time, then the coverage check). Postgres is the script's own container (a compose project
 // and a free port of its own, never the shared :55432), removed when it ends. The
 // image step is not here: `pnpm test:image` builds for two architectures and is
 // the release's (Validate on the tagged commit runs it).
@@ -55,16 +55,14 @@ const formalModel = (f) =>
   ['scripts/formal.sh', 'scripts/formal-trace.mjs'].includes(f)
 const leanInputs = (f) => f.startsWith('formal/lean/') || anyOf('packages/core/src/', 'packages/vault/src/', 'scripts/formal-lean')(f)
 const BROWSER = '"$COFFRE_VALIDATE_BROWSER"'
-// The use matrices as CI runs them (validate.yml, `matrices-shard`): Postgres in sixths, SQLite in halves, one
+// The use matrices as CI runs them (validate.yml, `matrices-shard`): in sixths, one
 // shard at a time (each takes the slots of a stock Postgres, so none runs beside another), each from a database of
 // its own, then `matrix-coverage.mjs` holds the reports to every case run exactly once. Unsharded, the server's
 // matrix alone outlasts its own 7,200 s timeout on Postgres, so no unsharded run can pass.
-const MATRIX_SHARDS = { postgres: 6, sqlite: 2 }
+const MATRIX_SHARDS = 6
 const matrixCommands = [
-  ...Object.entries(MATRIX_SHARDS).flatMap(([engine, of]) =>
-    Array.from({ length: of }, (_, i) => `COFFRE_TEST_ENGINE=${engine} COFFRE_TEST_SHARD=${i + 1}/${of} COFFRE_TEST_SHARD_REPORT="$COFFRE_VALIDATE_REPORTS/${engine}-${i + 1}" pnpm test:matrices`),
-  ),
-  `node scripts/matrix-coverage.mjs "$COFFRE_VALIDATE_REPORTS" ${Object.keys(MATRIX_SHARDS).join(' ')}`,
+  ...Array.from({ length: MATRIX_SHARDS }, (_, i) => `COFFRE_TEST_SHARD=${i + 1}/${MATRIX_SHARDS} COFFRE_TEST_SHARD_REPORT="$COFFRE_VALIDATE_REPORTS/${i + 1}" pnpm test:matrices`),
+  'node scripts/matrix-coverage.mjs "$COFFRE_VALIDATE_REPORTS"',
 ]
 
 /**

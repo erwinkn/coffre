@@ -14,6 +14,10 @@
 #
 #   pnpm test:compat [--kind workers|node] [--release <version>] [--schema <version>] [--port <n>] [<dir>]
 #
+#   --kind     by default workers: a Node deployment runs on Postgres from
+#              the release after 0.15.0, and 0.15.0's on SQLite, which this
+#              checkout cannot migrate; node joins the default once the
+#              newest release is one of those
 #   --release  the release to hold; by default the newest on npm
 #   --schema   a published version's migrations instead of this checkout's,
 #              to check past releases: --release 0.4.0 --schema 0.4.1
@@ -22,7 +26,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-kinds=(workers node)
+kinds=(workers)
 release=""
 schema=""
 port=3082
@@ -140,7 +144,7 @@ quietly "installing @coffre/cli@$release" "$work/cli.log" \
 migration() {
     cat <<EOF
 url="\${DATABASE_URL:-}"
-for arg in "\$@"; do case "\$arg" in postgres*|file:*) url="\$arg" ;; esac; done
+for arg in "\$@"; do case "\$arg" in postgres*) url="\$arg" ;; esac; done
 if [ -z "\$url" ] && [ ! -t 0 ]; then url="\$(cat)"; fi
 $migrator "\$url"
 EOF
@@ -193,23 +197,19 @@ shim() {
 }
 
 conformance() {
-    local project="$1" kind="$2" log="$3"
+    local project="$1" log="$3"
     rm -f "$work/migrated"
     local code=0
-    if [[ "$kind" == workers ]]; then
-        # The hot path's login, for a release whose harness takes it, as it requires it; one before refuses the flag.
-        local hot=()
-        if grep -rqs -- 'hot-runtime' "$project/node_modules/@coffre/conformance/dist"; then hot=(--hot-runtime "$hot_runtime"); fi
-        # 0.15.0's conformance holds the hot login to generic plans, which 0.16.0's migrations no longer give it
-        # (T207, docs/design/planner-defaults.md): its URL asks for them, as that release's database did, so the
-        # release is held to everything else. The driver sends a URL's `options` as the session's settings.
-        if [[ ${#hot[@]} -gt 0 ]] && grep -rqs -- 'force_generic_plan' "$project/node_modules/@coffre/conformance/dist"; then
-            hot=(--hot-runtime "$hot_runtime?options=-c%20plan_cache_mode%3Dforce_generic_plan")
-        fi
-        pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime" ${hot[@]+"${hot[@]}"} --port "$port" >"$log" 2>&1 || code=$?
-    else
-        pnpm --dir "$project" conformance --port "$port" >"$log" 2>&1 || code=$?
+    # The hot path's login, for a release whose harness takes it, as it requires it; one before refuses the flag.
+    local hot=()
+    if grep -rqs -- 'hot-runtime' "$project/node_modules/@coffre/conformance/dist"; then hot=(--hot-runtime "$hot_runtime"); fi
+    # 0.15.0's conformance holds the hot login to generic plans, which 0.16.0's migrations no longer give it
+    # (T207, docs/design/planner-defaults.md): its URL asks for them, as that release's database did, so the
+    # release is held to everything else. The driver sends a URL's `options` as the session's settings.
+    if [[ ${#hot[@]} -gt 0 ]] && grep -rqs -- 'force_generic_plan' "$project/node_modules/@coffre/conformance/dist"; then
+        hot=(--hot-runtime "$hot_runtime?options=-c%20plan_cache_mode%3Dforce_generic_plan")
     fi
+    pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime" ${hot[@]+"${hot[@]}"} --port "$port" >"$log" 2>&1 || code=$?
     if [[ ! -e "$work/migrated" ]]; then
         echo "compat-check: coffre $release's conformance did not migrate through the shim; see $log" >&2
         exit 1
@@ -224,23 +224,17 @@ for kind in "${kinds[@]}"; do
     quietly "coffre $release init --$kind" "$work/$kind-init.log" "$work/cli/node_modules/.bin/coffre" init "--$kind" "$project"
     # unpinned: init writes no lockfile; this installs what a new deployment's first install does, under its own minimumReleaseAge.
     quietly "installing coffre-$kind" "$work/$kind-install.log" pnpm --dir "$project" install --store-dir "$store"
-    engine="$([[ "$kind" == workers ]] && echo postgres || echo sqlite)"
 
     # 0.16.0 renamed tables (T178, postgres/0076_table_renames.sql). On
     # Postgres a release before it runs through the views kept under the old
     # names, and its conformance is told the new ones where it names tables
-    # (scripts/compat/renamed-tables.mjs). SQLite keeps no views and no
-    # deployment runs it: there the tables go back under the old names after
-    # migrating (scripts/compat/renamed-tables.sqlite.sql). Delete both once
-    # 0.16.0 is the newest release.
-    renamed=()
-    if [[ "$renames" == true && "$kind" == workers ]]; then
+    # (scripts/compat/renamed-tables.mjs). Delete it once 0.16.0 is the
+    # newest release.
+    if [[ "$renames" == true ]]; then
         node "$root/scripts/compat/renamed-tables.mjs" "$project/node_modules/@coffre/conformance/dist/main.js"
-    elif [[ "$renames" == true ]]; then
-        renamed=("$root/scripts/compat/renamed-tables.sqlite.sql")
     fi
 
-    shim "$project" ${renamed[@]+"${renamed[@]}"}
+    shim "$project"
     if conformance "$project" "$kind" "$work/$kind.log"; then
         echo "    conformant"
     else
@@ -251,7 +245,7 @@ for kind in "${kinds[@]}"; do
 
     # The check, shown able to fail: a destructive migration on top, which
     # renames a column the release writes at every sign-in.
-    shim "$project" ${renamed[@]+"${renamed[@]}"} "$root/scripts/compat/destructive.$engine.sql"
+    shim "$project" "$root/scripts/compat/destructive.sql"
     if conformance "$project" "$kind" "$work/$kind-destructive.log"; then
         echo "compat-check: coffre $release passed with a destructive migration applied; the check cannot fail, see $work/$kind-destructive.log" >&2
         exit 1

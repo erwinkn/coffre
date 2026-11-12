@@ -3,7 +3,7 @@
 // Each adversary of the model's scenarios is made here between the vault's read and the app's hold (`between`), and
 // the write commits only as the log stands at its commit: asked again, a request of its own, decided on what moved.
 // The tampering ones (a row put back, its newest change's seal forged, a token hash copied onto another's row) are
-// made before the write, on both engines: SQLite's writes take today's path, one transaction, and refuse them as well.
+// made before the write.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -34,12 +34,11 @@ import { acceptance } from '../src/named-use.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { REFUSAL_UNSEALED_MESSAGE } from '../src/api/errors.ts';
 import { clientFor, entryOf, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, stallingSeal, testDeps, testVault, outcomes } from './api-fixture.ts';
-import { openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
+import { openVaultDatabase } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const ADA = 'ada@acme.example';
-const POSTGRES = TEST_ENGINE === 'postgres' && LOG === '0.15' ? false : "the two-trip write is Postgres's, under 0.15's log";
 const ANY = LOG === '0.15' ? false : "0.15's log only";
 
 const db = await openTestDatabase();
@@ -161,7 +160,7 @@ const exactAsNumber = (value: bigint) => BigInt(Number(value)) === value;
 
 const served = (answers: readonly WriteKeysOutcome[]) => answers.map((answer) => (answer.served ? 'served' : answer.why));
 
-test('a key write the vault decided on its read commits in one of the app\'s round trips, its change naming the request and the read it was decided on, and no 0.14 entry beside it (0.16.0)', { skip: POSTGRES }, async () => {
+test('a key write the vault decided on its read commits in one of the app\'s round trips, its change naming the request and the read it was decided on, and no 0.14 entry beside it (0.16.0)', { skip: ANY }, async () => {
   const w = await world();
   const [{ seq }] = await run(db.owner, sql`SELECT coalesce(max(seq), 0)::text AS seq FROM audit_log`) as { seq: string }[];
   const wrote = await w.write({ NEW_KEY: 'fake-new', API_KEY: 'fake-again' });
@@ -201,15 +200,15 @@ test("numbers past 2^53 (Ada's newest access entry, every object's newest change
   const wrote = await w.write({ NEW_KEY: 'fake-new', API_KEY: 'fake-again' });
   assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
   assert.deepEqual(outcomes(wrote.body.keys), { NEW_KEY: { version: 1, sensitivity: 'secret' }, API_KEY: { version: 2, sensitivity: 'secret' } });
-  // On Postgres the two-trip path served it, its request numbered exactly; SQLite's writes take today's path.
-  if (TEST_ENGINE === 'postgres' && LOG === '0.15') {
+  // The two-trip path served it, its request numbered exactly.
+  if (LOG === '0.15') {
     assert.deepEqual(served(w.answers), ['served']);
     const answer = w.answers[0]!;
     assert.ok(answer.served && BigInt(answer.number) > past, JSON.stringify(answer));
   }
 });
 
-test("the head held and every place in the reads' line taken when Ada writes: the vault's wrap waits for the head, as today's does, and the write commits in one try (Fable's review of #474)", { skip: POSTGRES }, async () => {
+test("the head held and every place in the reads' line taken when Ada writes: the vault's wrap waits for the head, as today's does, and the write commits in one try (Fable's review of #474)", { skip: ANY }, async () => {
   const w = await world();
   let release = () => {};
   let held = () => {};
@@ -232,7 +231,7 @@ test("the head held and every place in the reads' line taken when Ada writes: th
   assert.deepEqual(outcomes(wrote.body.keys), { API_KEY: { version: 2, sensitivity: 'secret' } });
 });
 
-test("Ada's grant taken between the vault's read and the hold: the hold fails, the write asks again, and the vault's refusal answers, nothing written (WritingRevoke, rev)", { skip: POSTGRES }, async () => {
+test("Ada's grant taken between the vault's read and the hold: the hold fails, the write asks again, and the vault's refusal answers, nothing written (WritingRevoke, rev)", { skip: ANY }, async () => {
   const w = await world();
   const before = (await keyRow('API_KEY'))!;
   w.between(async () => void (await w.root.access.set(`user:${ADA}`, { 'market/dev': null })));
@@ -243,7 +242,7 @@ test("Ada's grant taken between the vault's read and the hold: the hold fails, t
   assert.deepEqual(await keyRow('API_KEY'), before);
 });
 
-test("a last use due, handed to a held write that then went down today's path: written there, not lost (Fable's review of #469)", { skip: POSTGRES }, async () => {
+test("a last use due, handed to a held write that then went down today's path: written there, not lost (Fable's review of #469)", { skip: ANY }, async () => {
   const w = await world();
   const long = new Date(Date.now() - 60 * 60 * 1000);
   await db.owner.update(credentials).set({ lastUsedAt: long }).where(eq(credentials.id, w.ada.id));
@@ -259,7 +258,7 @@ test("a last use due, handed to a held write that then went down today's path: w
   assert.ok(after!.lastUsedAt !== null && after!.lastUsedAt.getTime() > long.getTime(), String(after!.lastUsedAt));
 });
 
-test("Ada's session revoked between the read and the hold: nothing commits on it (WritingRevoke, end)", { skip: POSTGRES }, async () => {
+test("Ada's session revoked between the read and the hold: nothing commits on it (WritingRevoke, end)", { skip: ANY }, async () => {
   const w = await world();
   const before = (await keyRow('API_KEY'))!;
   w.between(w.signOut);
@@ -269,7 +268,7 @@ test("Ada's session revoked between the read and the hold: nothing commits on it
   assert.deepEqual(await keyRow('API_KEY'), before);
 });
 
-test("the key Ada writes renamed between the read and the hold: the write lands on the name she wrote, not on the renamed key (WritingNames, ren)", { skip: POSTGRES }, async () => {
+test("the key Ada writes renamed between the read and the hold: the write lands on the name she wrote, not on the renamed key (WritingNames, ren)", { skip: ANY }, async () => {
   const w = await world();
   const before = (await keyRow('API_KEY'))!;
   w.between(async () => void (await w.root.secrets.rename('market/dev/API_KEY', 'OLD_KEY')));
@@ -283,7 +282,7 @@ test("the key Ada writes renamed between the read and the hold: the write lands 
   assert.equal(made.currentVersion, 1);
 });
 
-test('the key Ada makes made meanwhile by another, sensitive: her write asks again and keeps it sensitive (WritingNames, phn)', { skip: POSTGRES }, async () => {
+test('the key Ada makes made meanwhile by another, sensitive: her write asks again and keeps it sensitive (WritingNames, phn)', { skip: ANY }, async () => {
   const w = await world();
   w.between(async () => void (await w.root.secrets.set('market/dev', { NEW_KEY: { value: 'fake-root', sensitivity: 'sensitive' } })));
   const wrote = await w.write({ NEW_KEY: 'fake-ada' });
@@ -294,7 +293,7 @@ test('the key Ada makes made meanwhile by another, sensitive: her write asks aga
   assert.equal((await versionOf(row.currentVersionId))?.sensitive, true);
 });
 
-test("market/dev renamed and a new market/dev made, Ada's grant moved to it, between the read and the hold: the second try's read is the new one's, and nothing commits at either (review r1 of #469)", { skip: POSTGRES }, async () => {
+test("market/dev renamed and a new market/dev made, Ada's grant moved to it, between the read and the hold: the second try's read is the new one's, and nothing commits at either (review r1 of #469)", { skip: ANY }, async () => {
   const w = await world();
   w.between(async () => {
     await w.root.environments.update('market/dev', { slug: 'old' });
@@ -309,7 +308,7 @@ test("market/dev renamed and a new market/dev made, Ada's grant moved to it, bet
   assert.equal(await keyRow('NEW_KEY'), undefined);
 });
 
-test("API_KEY sensitive when the vault first read it, written again as a secret before the hold: Ada's write, saying nothing, stays sensitive, as today's path keeps it (review r1 of #469)", { skip: POSTGRES }, async () => {
+test("API_KEY sensitive when the vault first read it, written again as a secret before the hold: Ada's write, saying nothing, stays sensitive, as today's path keeps it (review r1 of #469)", { skip: ANY }, async () => {
   const w = await world();
   await w.root.secrets.set('market/dev', { API_KEY: { value: 'fake-sensitive', sensitivity: 'sensitive' } });
   w.between(async () => void (await w.root.secrets.set('market/dev', { API_KEY: { value: 'fake-secret', sensitivity: 'secret' } })));
@@ -322,7 +321,7 @@ test("API_KEY sensitive when the vault first read it, written again as a secret 
   assert.equal((await versionOf(row.currentVersionId))?.sensitive, true);
 });
 
-test("a regenerate whose `replaces` names no version's id: 409 `stale`, as today's path answers it, the vault never asked (review r1 of #469)", { skip: POSTGRES }, async () => {
+test("a regenerate whose `replaces` names no version's id: 409 `stale`, as today's path answers it, the vault never asked (review r1 of #469)", { skip: ANY }, async () => {
   const w = await world();
   const before = (await keyRow('API_KEY'))!;
   const wrote = await w.write({ API_KEY: { value: 'a'.repeat(64), generated: { recipe: 'bytes:32:hex' }, replaces: 'no-such-version' } });
@@ -332,7 +331,7 @@ test("a regenerate whose `replaces` names no version's id: 409 `stale`, as today
   assert.deepEqual(await keyRow('API_KEY'), before);
 });
 
-test('market/dev archived between the read and the hold: nothing commits there (WritingPlace, arc)', { skip: POSTGRES }, async () => {
+test('market/dev archived between the read and the hold: nothing commits there (WritingPlace, arc)', { skip: ANY }, async () => {
   const w = await world();
   const before = (await keyRow('API_KEY'))!;
   w.between(async () => void (await w.root.environments.update('market/dev', { archived: true })));
@@ -342,7 +341,7 @@ test('market/dev archived between the read and the hold: nothing commits there (
   assert.deepEqual(await keyRow('API_KEY'), before);
 });
 
-test('the key written by another between the read and the hold: both commit, one version each, neither over the other (WritingRevoke, KeyChangesFlip)', { skip: POSTGRES }, async () => {
+test('the key written by another between the read and the hold: both commit, one version each, neither over the other (WritingRevoke, KeyChangesFlip)', { skip: ANY }, async () => {
   const w = await world();
   w.between(async () => void (await w.root.secrets.set('market/dev', { API_KEY: 'fake-root' })));
   const wrote = await w.write({ API_KEY: 'fake-ada' });
@@ -353,7 +352,7 @@ test('the key written by another between the read and the hold: both commit, one
   assert.deepEqual(versions.map((row) => [Number(row.version), row.created_by]), [[1, ROOT], [2, ROOT], [3, ADA]]);
 });
 
-test("Ada's grant taken and given back between the read and the hold: the same rows, a newer change; the write asks again rather than commit on a read the log no longer shows (WritingABA)", { skip: POSTGRES }, async () => {
+test("Ada's grant taken and given back between the read and the hold: the same rows, a newer change; the write asks again rather than commit on a read the log no longer shows (WritingABA)", { skip: ANY }, async () => {
   const w = await world();
   w.between(async () => {
     await w.root.access.set(`user:${ADA}`, { 'market/dev': null });
@@ -364,7 +363,7 @@ test("Ada's grant taken and given back between the read and the hold: the same r
   assert.deepEqual(served(w.answers), ['served', 'served']);
 });
 
-test('a hold that keeps failing gives up after three tries: 409 `changed`, nothing written (EveryRequestEnds)', { skip: POSTGRES }, async () => {
+test('a hold that keeps failing gives up after three tries: 409 `changed`, nothing written (EveryRequestEnds)', { skip: ANY }, async () => {
   const w = await world();
   const before = (await keyRow('API_KEY'))!;
   // Every try's read moved before its hold: another write of the key each time.
@@ -398,13 +397,13 @@ test("Ada's grant taken, then her member row and grants put back and the seal wr
   await run(db.owner, sql`UPDATE log_changes SET seal = ${member!.seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${logObject('principal', `user:${ADA}`)})`);
   const wrote = await w.write({ API_KEY: 'fake-ada' });
   assert.notEqual(wrote.status, 200, JSON.stringify(wrote.body));
-  if (TEST_ENGINE === 'postgres') assert.deepEqual(served(w.answers), ['tampered']);
+  assert.deepEqual(served(w.answers), ['tampered']);
   assert.deepEqual(await keyRow('API_KEY'), before);
 });
 
-// Postgres's: today's path, SQLite's, checks a credential's row by its MAC alone, which the row put back whole still
-// carries; only 0.15's log says it was revoked (a gap of today's write path, not of this one's: reported with T179 PR 3).
-test("Ada's session revoked and its row put back, live: the vault's read refuses it on the log's newest change, and the write answers 401, never down today's path (WritingTamper, dbw)", { skip: POSTGRES }, async () => {
+// Today's path checks a credential's row by its MAC alone, which the row put back whole still carries; only 0.15's
+// log says it was revoked (a gap of today's write path, not of this one's: reported with T179 PR 3).
+test("Ada's session revoked and its row put back, live: the vault's read refuses it on the log's newest change, and the write answers 401, never down today's path (WritingTamper, dbw)", { skip: ANY }, async () => {
   const w = await world();
   const before = (await keyRow('API_KEY'))!;
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, w.ada.id));
@@ -413,18 +412,18 @@ test("Ada's session revoked and its row put back, live: the vault's read refuses
   const wrote = await w.write({ API_KEY: 'fake-ada' });
   assert.equal(wrote.status, 401, JSON.stringify(wrote.body));
   // Refused on her credential's own log, and never asked down today's path, whose check of the row's MAC alone would take it.
-  if (TEST_ENGINE === 'postgres') assert.deepEqual(served(w.answers), ['forged']);
+  assert.deepEqual(served(w.answers), ['forged']);
   assert.deepEqual(await keyRow('API_KEY'), before);
 });
 
-test("Ada's session revoked and its row put back, writing to an environment that is not there: 401 on her credential's own log, not today's 404 (Fable's review of #469)", { skip: POSTGRES }, async () => {
+test("Ada's session revoked and its row put back, writing to an environment that is not there: 401 on her credential's own log, not today's 404 (Fable's review of #469)", { skip: ANY }, async () => {
   const w = await world();
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, w.ada.id));
   await w.signOut();
   await db.owner.update(credentials).set(row!).where(eq(credentials.id, w.ada.id));
   const wrote = await w.write({ API_KEY: 'fake-ada' }, w.ada.token, 'market/nope');
   assert.equal(wrote.status, 401, JSON.stringify(wrote.body));
-  if (TEST_ENGINE === 'postgres') assert.deepEqual(served(w.answers), ['forged']);
+  assert.deepEqual(served(w.answers), ['forged']);
 });
 
 test("Ada's token hash copied onto the Owner's session: the vault reads the Owner, and the app's check of the row's MAC refuses it before anything commits (WritingTamper, sub; round 6)", { skip: ANY }, async () => {
@@ -436,8 +435,8 @@ test("Ada's token hash copied onto the Owner's session: the vault reads the Owne
   await db.owner.update(credentials).set({ tokenHash: ada!.tokenHash }).where(eq(credentials.id, owner.id));
   const wrote = await w.write({ API_KEY: 'fake-ada' });
   assert.equal(wrote.status, 401, JSON.stringify(wrote.body));
-  // On Postgres the vault served it, on the Owner's rows: what refused it is the app's check (AuthChecked).
-  if (TEST_ENGINE === 'postgres') assert.deepEqual(served(w.answers), ['served']);
+  // The vault served it, on the Owner's rows: what refused it is the app's check (AuthChecked).
+  assert.deepEqual(served(w.answers), ['served']);
   assert.deepEqual(await keyRow('API_KEY'), before);
 });
 
@@ -453,13 +452,13 @@ test("Ada's token hash copied onto a Viewer's session: the vault reads the Viewe
   await db.owner.update(credentials).set({ tokenHash: ada!.tokenHash }).where(eq(credentials.id, viewer.id));
   const wrote = await w.write({ API_KEY: 'fake-ada' });
   assert.equal(wrote.status, 401, JSON.stringify(wrote.body));
-  // On Postgres the vault refused it, on the Viewer's rows, with a ticket: what kept it from the log is the app's check.
-  if (TEST_ENGINE === 'postgres') assert.deepEqual(served(w.answers), ['refused']);
+  // The vault refused it, on the Viewer's rows, with a ticket: what kept it from the log is the app's check.
+  assert.deepEqual(served(w.answers), ['refused']);
   assert.deepEqual(await run(db.owner, sql`SELECT number FROM log_changes WHERE payload LIKE '%"op":"write.refused"%'`), []);
   assert.deepEqual(await keyRow('API_KEY'), before);
 });
 
-test('a change that names a read goes only in a transaction that held it: `app_change_strict` refuses it otherwise', { skip: POSTGRES }, async () => {
+test('a change that names a read goes only in a transaction that held it: `app_change_strict` refuses it otherwise', { skip: ANY }, async () => {
   const w = await world();
   const answer = await w.runtime.vault.writeKeys!({
     tokenHash: createHash('sha256').update('nobody').digest('base64'), accepts: acceptance(w.runtime), project: 'market', environment: 'dev',
@@ -481,7 +480,7 @@ test('a change that names a read goes only in a transaction that held it: `app_c
   );
 });
 
-test("the read moves with every part a key write's decision weighs, its numbers too: what each adversary of Writing.tla changes changes its digest (ReadHeld, ReadByNumber)", { skip: POSTGRES }, async () => {
+test("the read moves with every part a key write's decision weighs, its numbers too: what each adversary of Writing.tla changes changes its digest (ReadHeld, ReadByNumber)", { skip: ANY }, async () => {
   const w = await world();
   const [ada] = await db.owner.select({ tokenHash: credentials.tokenHash }).from(credentials).where(eq(credentials.id, w.ada.id));
   const read = async (keys: readonly string[] = ['API_KEY', 'NEW_KEY']) => {
@@ -535,7 +534,7 @@ async function bothWays(arrange: (w: Awaited<ReturnType<typeof world>>) => Promi
   return { fast: await attempt(true), today: await attempt(false) };
 }
 
-test("a refusal the vault's read finds (a forged change's MAC, a row its newest change does not seal, a row its 0.4 MAC does not cover) is answered as today's path answers it, status and body, and the vault's call adds nothing to either log (T190; StaleFirst)", { skip: POSTGRES }, async () => {
+test("a refusal the vault's read finds (a forged change's MAC, a row its newest change does not seal, a row its 0.4 MAC does not cover) is answered as today's path answers it, status and body, and the vault's call adds nothing to either log (T190; StaleFirst)", { skip: ANY }, async () => {
   const cases: [string, string, (w: Awaited<ReturnType<typeof world>>) => Promise<void>][] = [
     ["Ada's grant taken, her rows put back and the revoke's seal forged (WritingForge)", 'tampered', async (w) => {
       const [member] = await db.owner.select().from(principals).where(eq(principals.principal, `user:${ADA}`));
@@ -577,7 +576,7 @@ test("a refusal the vault's read finds (a forged change's MAC, a row its newest 
   }
 });
 
-test("Ada's session revoked before her write: 401, as today's path answers it, and never sent down that path (ended)", { skip: POSTGRES }, async () => {
+test("Ada's session revoked before her write: 401, as today's path answers it, and never sent down that path (ended)", { skip: ANY }, async () => {
   const { fast, today } = await bothWays(async (w) => w.signOut());
   assert.deepEqual(fast.answers, ['ended']);
   assert.deepEqual({ status: fast.result.status, body: fast.result.body }, { status: today.result.status, body: today.result.body });
@@ -585,7 +584,7 @@ test("Ada's session revoked before her write: 401, as today's path answers it, a
   assert.deepEqual(fast.entries, today.entries);
 });
 
-test("a try the vault served, abandoned at its hold, then refused; Ada's grant given back and her session revoked after: the refusal is recorded and answered, and nothing goes down today's path to write (WritingCaller, TodayCallerStandsAtDecision, closed for refusals by PR 6; review r2 of #469)", { skip: POSTGRES }, async () => {
+test("a try the vault served, abandoned at its hold, then refused; Ada's grant given back and her session revoked after: the refusal is recorded and answered, and nothing goes down today's path to write (WritingCaller, TodayCallerStandsAtDecision, closed for refusals by PR 6; review r2 of #469)", { skip: ANY }, async () => {
   // Before PR 6 the refusal went down today's path, which went on with the caller the first try checked and wrote,
   // her session revoked since. Now the refusal ends the request.
   const w = await world();
@@ -605,7 +604,7 @@ test("a try the vault served, abandoned at its hold, then refused; Ada's grant g
   assert.ok(!made.entries.some((entry) => entry.endsWith(' deny')), made.entries.join(', '));
 });
 
-test("a try the vault served, abandoned at its hold, then not served (the key made a reference), Ada's session revoked before today's path: it writes, for the caller the first try checked (WritingCallerShape, TodayCallerStandsAtDecision, an expected gap; review r2 of #469)", { skip: POSTGRES }, async () => {
+test("a try the vault served, abandoned at its hold, then not served (the key made a reference), Ada's session revoked before today's path: it writes, for the caller the first try checked (WritingCallerShape, TodayCallerStandsAtDecision, an expected gap; review r2 of #469)", { skip: ANY }, async () => {
   // Pinned as it is, not as it should be: today's path goes on with the caller the request authenticated, and its
   // wrap weighs her grant, not her session, as today's front door has always done between its check and its wrap.
   // Here the window spans the tries before it. What the two-trip path does not serve keeps it (PR 3b, PR 7).
@@ -627,7 +626,7 @@ test("a try the vault served, abandoned at its hold, then not served (the key ma
   assert.notEqual(session?.revokedAt, null, 'her session was revoked before the write committed');
 });
 
-test("Developers' write taken away between today's wrap and its commit: 409 `policy_changed`, nothing written, as `audited` holds the commit to the policy the caller was loaded with (WritingFallBack, TodayPolicyHeld; review r3 of #469)", { skip: POSTGRES }, async () => {
+test("Developers' write taken away between today's wrap and its commit: 409 `policy_changed`, nothing written, as `audited` holds the commit to the policy the caller was loaded with (WritingFallBack, TodayPolicyHeld; review r3 of #469)", { skip: ANY }, async () => {
   const w = await world({ fast: false });
   w.afterWrap(async () => {
     await w.root.roles.set('developer', { name: 'Developer', description: 'Read and use secrets.', permissions: ['secret.read', 'secret.use'], protected: ['secret.use'] });
@@ -638,7 +637,7 @@ test("Developers' write taken away between today's wrap and its commit: 409 `pol
   assert.equal((await keyRow('API_KEY'))!.currentVersion, 1);
 });
 
-test("a try the vault served, abandoned at its hold, then refused StaleFirst: today's path refuses it as it would have alone, and the abandoned try leaves no entry in either log (WToday)", { skip: POSTGRES }, async () => {
+test("a try the vault served, abandoned at its hold, then refused StaleFirst: today's path refuses it as it would have alone, and the abandoned try leaves no entry in either log (WToday)", { skip: ANY }, async () => {
   /** API_KEY written again, and a way to put its row back to its first version, as a database writer would. */
   const rewritten = async (w: Awaited<ReturnType<typeof world>>) => {
     const [first] = await db.owner.select().from(secrets).where(eq(secrets.key, 'API_KEY'));
@@ -662,7 +661,7 @@ test("a try the vault served, abandoned at its hold, then refused StaleFirst: to
   assert.ok(w.answers[0]!.served);
 });
 
-test("a try the vault served, abandoned at its hold, then not served (the key made a reference meanwhile): today's path writes it once, and its write names its own wrap, not the abandoned try's (WToday, OneWritePerRequest)", { skip: POSTGRES }, async () => {
+test("a try the vault served, abandoned at its hold, then not served (the key made a reference meanwhile): today's path writes it once, and its write names its own wrap, not the abandoned try's (WToday, OneWritePerRequest)", { skip: ANY }, async () => {
   const w = await world();
   await w.root.environments.create('market/prod');
   await w.root.secrets.set('market/prod', { SOURCE: 'fake-source' });
@@ -703,7 +702,7 @@ test("the versions a report names by id are read a thousand a statement: an offb
   assert.equal((await versionsOf(db.runtime, ids)).size, 0);
 });
 
-test("a page of many environments' key writes reads them a few hundred a statement, and lists the newest of them all: a project of more environments than SQLite's compound SELECT takes terms, or Postgres a statement parameters (review r3 of #490)", async () => {
+test("a page of many environments' key writes reads them a few hundred a statement, and lists the newest of them all: a project of more environments than Postgres takes a statement's parameters (review r3 of #490)", async () => {
   await resetDatabase(db.owner);
   const environments = Array.from({ length: 2 * READS_PER_STATEMENT + 100 }, () => randomUUID());
   const [first, last] = [environments[10]!, environments.at(-10)!];
@@ -744,7 +743,7 @@ test("a page of many environments' key writes reads them a few hundred a stateme
     if (typeof key === 'string' && /^\d+$/.test(key)) read = Math.max(read, Number(key) + 1);
     return Reflect.get(target, key, receiver);
   } });
-  const method = TEST_ENGINE === 'postgres' ? 'execute' : 'all';
+  const method = 'execute';
   const starts: { read: number; asking: number }[] = [];
   let asking = 0;
   const watched = new Proxy(db.runtime, { get: (target, key, receiver) => {
@@ -799,7 +798,7 @@ test("a page of many environments' key writes reads them a few hundred a stateme
   await run(db.owner, sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
 });
 
-test("a project's audit page whose 0.14 read fails asks no more of its key writes' statements, and fails once those asked have answered: a read beside them that fails stops them too (review r7 of #490)", { skip: POSTGRES }, async () => {
+test("a project's audit page whose 0.14 read fails asks no more of its key writes' statements, and fails once those asked have answered: a read beside them that fails stops them too (review r7 of #490)", { skip: ANY }, async () => {
   const w = await world();
   const [{ id: market }] = await run(db.owner, sql`SELECT id FROM projects WHERE slug = 'market'`) as [{ id: string }];
   // A project of 5,000 environments: its page's key writes, 20 statements of 250 reads.
@@ -875,7 +874,7 @@ test("a project's audit page whose 0.14 read fails asks no more of its key write
   assert.equal(running, 0, 'a statement was left running after the page failed');
 });
 
-test("a key write down the two-trip path, recorded in 0.15's log alone, is listed where 0.14's `secret.write` stood: the whole log, its project's, environment's and key's pages, Ada's, a reader of its environment's; none of another place's, another member's or the refusals' (T179, 0.16.0)", { skip: POSTGRES }, async () => {
+test("a key write down the two-trip path, recorded in 0.15's log alone, is listed where 0.14's `secret.write` stood: the whole log, its project's, environment's and key's pages, Ada's, a reader of its environment's; none of another place's, another member's or the refusals' (T179, 0.16.0)", { skip: ANY }, async () => {
   const w = await world();
   await w.root.environments.create('market/prod');
   const wrote = await w.write({ API_KEY: 'fake-new' });
@@ -928,7 +927,7 @@ test("a key write down the two-trip path, recorded in 0.15's log alone, is liste
   assert.deepEqual([edited?.actorId, edited?.forged], [ROOT, true]);
 });
 
-test("Ada a Viewer of market/dev, her write refused on the vault's read: answered as today's path answers it, status and body; the vault's record of it in place of today's deny entry, sealed, in two round trips, and nothing else in either log (PR 6)", { skip: POSTGRES }, async () => {
+test("Ada a Viewer of market/dev, her write refused on the vault's read: answered as today's path answers it, status and body; the vault's record of it in place of today's deny entry, sealed, in two round trips, and nothing else in either log (PR 6)", { skip: ANY }, async () => {
   const { fast, today } = await bothWays(async (w) => void (await w.root.access.set(`user:${ADA}`, { 'market/dev': 'viewer' })));
   assert.deepEqual(fast.answers, ['refused']);
   assert.equal(fast.result.status, 403, JSON.stringify(fast.result.body));
@@ -947,7 +946,7 @@ async function refusalRecords(): Promise<{ number: string; requestId: string; ob
   return rows.map((row) => ({ number: row.number, requestId: row.request_id, object: row.object, actor: row.actor, payload: JSON.parse(row.payload) as Record<string, unknown>, mac: Buffer.from(row.mac) }));
 }
 
-test("a refused write leaves every reader of the log as it was (the lead's condition on PR 6): Ada's use and the Owner's, the key's history, the member pages, the list of everyone, the log's verification; only the audit pages list it, where 0.14's deny entry stood (PR 6)", { skip: POSTGRES }, async () => {
+test("a refused write leaves every reader of the log as it was (the lead's condition on PR 6): Ada's use and the Owner's, the key's history, the member pages, the list of everyone, the log's verification; only the audit pages list it, where 0.14's deny entry stood (PR 6)", { skip: ANY }, async () => {
   const w = await world();
   await w.root.access.set(`user:${ADA}`, { 'market/dev': 'viewer' });
   await w.root.environments.create('market/prod');
@@ -1005,7 +1004,7 @@ test("a refused write leaves every reader of the log as it was (the lead's condi
   // (Sealed into the trees by a checkpointer and replayed: the test of that, below.)
 });
 
-test("a refused key write whose record committed but whose seal did not come in time: 503, in words that say no change was made, never a change's; the key as it was, and no 0.14 entry (review r2 of PR 6)", { skip: POSTGRES }, async () => {
+test("a refused key write whose record committed but whose seal did not come in time: 503, in words that say no change was made, never a change's; the key as it was, and no 0.14 entry (review r2 of PR 6)", { skip: ANY }, async () => {
   const sealing = stallingSeal();
   const w = await world({ sealer: async () => ({ sealThrough: sealing.sealThrough, heldOutside: nothingHeld }) });
   await w.root.access.set(`user:${ADA}`, { 'market/dev': 'viewer' });
@@ -1024,7 +1023,7 @@ test("a refused key write whose record committed but whose seal did not come in 
   assert.equal((await w.write({ API_KEY: 'fake-ada' })).status, 403);
 });
 
-test("a key write the router let through, refused on a later try's read, its ticket expired before its record: today's 0.14 deny entry, naming the write's operation as today's wrap refusal does, and no record (Fable's review of PR 6)", { skip: POSTGRES }, async () => {
+test("a key write the router let through, refused on a later try's read, its ticket expired before its record: today's 0.14 deny entry, naming the write's operation as today's wrap refusal does, and no record (Fable's review of PR 6)", { skip: ANY }, async () => {
   // The router's check passes on the first try's answer; the grant taken at its hold, the second try's read refuses.
   const w = await world();
   w.between(async () => void (await w.root.access.set(`user:${ADA}`, { 'market/dev': null })));
@@ -1039,7 +1038,7 @@ test("a key write the router let through, refused on a later try's read, its tic
   assert.deepEqual(await refusalRecords(), []);
 });
 
-test("two retries of one refusal's ticket at once, both finding no record: the second's insert waits for the first's, and both answer its number, one record written, never a duplicate key (review r1 of PR 6)", { skip: POSTGRES }, async () => {
+test("two retries of one refusal's ticket at once, both finding no record: the second's insert waits for the first's, and both answer its number, one record written, never a duplicate key (review r1 of PR 6)", { skip: ANY }, async () => {
   const w = await world();
   await w.root.access.set(`user:${ADA}`, { 'market/dev': 'viewer' });
   assert.equal((await w.write({ API_KEY: 'fake-ada' })).status, 403);
@@ -1082,7 +1081,7 @@ test("two retries of one refusal's ticket at once, both finding no record: the s
   assert.deepEqual((await refusalRecords()).map((each) => each.number), [record!.number]);
 });
 
-test("a refusal's record copied to another object, by a database writer, Ada's row put back to match: its MAC is over its own object, so the vault refuses the member it now stands for, and nothing is written; copied whole under another request id, it is forged in the audit list (PR 6, WritingRefuse)", { skip: POSTGRES }, async () => {
+test("a refusal's record copied to another object, by a database writer, Ada's row put back to match: its MAC is over its own object, so the vault refuses the member it now stands for, and nothing is written; copied whole under another request id, it is forged in the audit list (PR 6, WritingRefuse)", { skip: ANY }, async () => {
   const w = await world();
   // Ada refused once (no grant at market/dev): the record to copy.
   const [member] = await db.owner.select().from(principals).where(eq(principals.principal, `user:${ADA}`));
@@ -1110,7 +1109,7 @@ test("a refusal's record copied to another object, by a database writer, Ada's r
   assert.deepEqual(listed.map((entry) => entry.forged === true), [true, true, false]);
 });
 
-test("a refusal's record sealed by the checkpointer before it answers, as a change is (D165): the trees verify with it among them, and the log replays with no fault, every use decided as before (PR 6)", { skip: POSTGRES }, async () => {
+test("a refusal's record sealed by the checkpointer before it answers, as a change is (D165): the trees verify with it among them, and the log replays with no fault, every use decided as before (PR 6)", { skip: ANY }, async () => {
   const scratch = mkdtempSync(join(tmpdir(), 'coffre-refusals-'));
   const running: RunningCheckpointer[] = [];
   try {

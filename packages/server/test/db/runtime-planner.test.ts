@@ -6,7 +6,6 @@ import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 import { clearPlannerSettings } from '@coffre/db/migrate';
 
 import { TEST_OWNER_DATABASE_URL } from './connections.ts';
-import { postgresOnly } from './engine.ts';
 
 /** The URL of the suite's database, as another login. */
 function asLogin(login: string, password: string): string {
@@ -54,7 +53,6 @@ const setting = async (owner: PostgresClient, role: string) =>
 
 test(
   "0.15.0's planner settings are cleared from a login once, however they are spelled and however many migrations of other databases race to, and an administrator's own stay, generic plans on a login other than the hot one included",
-  postgresOnly('SQLite has no planner settings'),
   async () => {
     await withRoles(async (owner, [hot, spelled, own]) => {
       // As 0.15.0's migrations left the hot login; `false` as an administrator may have spelled it, beside generic plans of its own; and settings coffre never made.
@@ -83,7 +81,6 @@ test(
 
 test(
   'a login that only migrates, and may not alter the roles, leaves their settings and fails nothing',
-  postgresOnly('SQLite has no planner settings'),
   async () => {
     await withRoles(async (owner, [hot], { login, password }) => {
       await owner.unsafe(`ALTER ROLE ${hot!} SET jit = off`);
