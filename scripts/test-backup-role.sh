@@ -127,7 +127,7 @@ tree="$scratch/migrations-0018"
 cp -r packages/db/src/migrations/postgres "$tree"
 # Every migration from 0019 on goes: the journal's indexes must run without a gap.
 node -e 'const fs = require("fs"), path = require("path"), tree = process.argv[1], f = path.join(tree, "meta/_journal.json"), j = JSON.parse(fs.readFileSync(f, "utf8"));
-for (const e of j.entries.filter((e) => e.idx >= 19)) { fs.rmSync(path.join(tree, `${e.tag}.sql`)); fs.rmSync(path.join(tree, "meta", `${String(e.idx).padStart(4, "0")}_snapshot.json`)); }
+for (const e of j.entries.filter((e) => e.idx >= 19)) { fs.rmSync(path.join(tree, `${e.tag}.sql`)); fs.rmSync(path.join(tree, "meta", `${String(e.idx).padStart(4, "0")}_snapshot.json`), { force: true }); }
 j.entries = j.entries.filter((e) => e.idx < 19); fs.writeFileSync(f, JSON.stringify(j))' "$tree"
 as_superuser -c 'CREATE ROLE reporting NOLOGIN'
 for logins in migration_owner:local-owner-only,migration_owner:local-owner-only postgres:local-bootstrap-only,postgres:local-bootstrap-only \
