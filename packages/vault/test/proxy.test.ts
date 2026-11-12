@@ -18,7 +18,7 @@ import { RELEASE, versioned, type ProxyDefinition, type ProxyView, type SaveProx
 import { createDatabase } from '@coffre/db';
 import { postgresClient, postgresSession } from '@coffre/db/connect';
 import { gaveUp } from '@coffre/db/dialect';
-import { migrateDatabase, migrationsFolder } from '@coffre/db/migrate';
+import { migrationsFolder } from '@coffre/db/migrate';
 import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
@@ -596,9 +596,8 @@ test('items or names no change writes fail the seal like any forgery: the tab sh
   assert.equal((await w.save({ seal: forged.seal, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } }, other)).ok, false);
 });
 
-/** The three lists 0084 types (T278) as 0083 left them, and the ledger without 0084: 0.15.0's schema, for these. */
+/** The three lists 0084 types (T278) as 0083 left them: 0.15.0's schema, for these. */
 const BEFORE_0084 = [
-  `DELETE FROM drizzle.__drizzle_migrations WHERE created_at = ${JSON.parse(readFileSync(join(migrationsFolder(), 'meta/_journal.json'), 'utf8')).entries.find((entry: { tag: string }) => entry.tag === '0084_text_lists').when}`,
   `ALTER TABLE oauth_clients ALTER COLUMN redirect_uris TYPE text USING to_jsonb(redirect_uris)::text`,
   `ALTER TABLE oauth_clients ADD CONSTRAINT oauth_clients_redirect_uris_check CHECK (redirect_uris::jsonb IS NOT NULL)`,
   `ALTER TABLE passkeys ALTER COLUMN transports DROP DEFAULT`,
@@ -617,7 +616,13 @@ test('a reserved set sealed before 0084 verifies after it: the same names, in th
   const [old] = await rows<{ names: unknown }>(db.owner, sql`SELECT names FROM proxy_reserved`);
   assert.equal(typeof old!.names === 'string' ? old!.names : JSON.stringify(old!.names), JSON.stringify((before.row as ReservedInput).names), "0.15.0's row: the names as JSON");
 
-  await migrateDatabase(OWNER_URL);
+  // 0084 itself, on one session (its function is `pg_temp`'s): the migrator would apply the migrations after it again too.
+  const client = postgresClient(OWNER_URL, { max: 1 });
+  try {
+    for (const statement of readFileSync(join(migrationsFolder(), '0084_text_lists.sql'), 'utf8').split('--> statement-breakpoint')) await client.unsafe(statement);
+  } finally {
+    await client.end();
+  }
 
   const after = await readObject(db.owner, RESERVED_REF);
   assert.deepEqual(after, before);
