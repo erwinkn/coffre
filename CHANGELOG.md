@@ -46,6 +46,21 @@
   proxy's or an older server's, stays unconfirmed. `export`'s handle outlives its
   command: it says the handle lasts until its expiry (UTC) and gives the same
   command. Messages and help only.
+- **An `hmac()` signer signs a message of up to 12 MiB, streamed, never
+  held: SumSub's document upload.** SumSub signs `ts + method + path +
+  body`, and a document's body is the whole file, up to 10.1 MiB; a
+  message to sign was read whole as JSON, 1 MiB at most, and a 157 KB Kbis
+  was refused. Now a message goes raw too: `POST
+  /use/<project>/<env>?sign=<signer>` with `Content-Type:
+  application/octet-stream`, its bytes the body, fed to the HMAC as they
+  come. `credential(name).sign` and the workload SDK's send a message past
+  1 MiB this way on their own, and `coffre serve` streams it through. A
+  signer takes one if its `maxBytes` says so, up to 12 MiB (derived from
+  R27 in `docs/design/config.md`; a signer's default stays 64 KiB, a
+  verifier's 1 MiB at most). Everything is refused before a byte is read;
+  a workload's raw message declares its `Content-Digest`, which its proof
+  signs, and the signature answers only once the bytes match it and the
+  length. JSON past 1 MiB is a 413 that names the raw shape.
 - **`coffre run` and `coffre export --help` say that a person gets
   placeholders, not values.** Where the deployment has the credential proxy, a
   person's `run` and `export` write handles, which a request through

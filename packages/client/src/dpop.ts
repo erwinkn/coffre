@@ -183,6 +183,9 @@ export async function bodyDigest(body: Uint8Array | string): Promise<string> {
  */
 export const MAX_DIGESTED_BODY = 95 * 1024 * 1024;
 
+/** The longest message `sign` sends as JSON, base64url: what coffre reads whole. A longer one goes raw, the body itself. */
+export const JSON_MESSAGE_BYTES = 1024 * 1024;
+
 /** A body's `Content-Digest` (RFC 9530) from its SHA-256 in hex, as the SDK and `coffre serve` send it: `sha-256=:<base64>:`. */
 export function contentDigest(sha256: string): string {
   if (!SHA256_HEX.test(sha256)) throw new TypeError('a Content-Digest is made from a SHA-256 in hex');

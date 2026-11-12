@@ -393,6 +393,7 @@ test('sign, verify, presign and mint go to the environment, and read returns onl
   const { coffre, session } = await signedIn(t, {
     plan: { environment: 'market/prod', values: { TWILIO_SID: 'AC012' }, credentials: ['stripe'], tunnels: {} },
     upstream: (sent) => {
+      if (sent.query === 'sign=sumsub-key') return { status: 200, body: { signature: 'cmF3' } };
       const asked = JSON.parse(sent.body) as Record<string, unknown>;
       if ('sign' in asked) return { status: 200, body: { signature: 'c2ln' } };
       if ('verify' in asked) return { status: 200, body: { valid: true } };
@@ -415,6 +416,13 @@ test('sign, verify, presign and mint go to the environment, and read returns onl
   ]);
   assert.equal(await session.read('TWILIO_SID'), 'AC012');
   await assert.rejects(session.read('STRIPE_SECRET_KEY'), (error) => error instanceof CoffreError && error.reason === 'use_only');
+  // Past 1 MiB, a message goes raw: its bytes as the body, its digest declared and signed by the proof.
+  const message = new Uint8Array(1024 * 1024 + 1).fill(7);
+  const asked = coffre.forwarded.length;
+  await session.credential('sumsub-key').sign(message);
+  const raw = coffre.forwarded[asked]!;
+  const sha256 = createHash('sha256').update(message).digest();
+  assert.deepEqual([raw.path, raw.query, raw.headers['content-type'], raw.headers['content-digest'], raw.length, raw.sha256], ['/use/market/prod', 'sign=sumsub-key', 'application/octet-stream', `sha-256=:${sha256.toString('base64')}:`, String(message.length), sha256.toString('hex')]);
 });
 
 test('with several environments, URLs name the one chosen', async (t) => {

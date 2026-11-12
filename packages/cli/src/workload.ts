@@ -180,7 +180,18 @@ export async function forwarder(coffre: Workload, origin: string, address: Addre
       let again = false;
       if (method !== 'GET' && method !== 'HEAD') {
         const length = req.headers['content-length'];
-        if (headers.has('x-amz-content-sha256')) {
+        // A raw message to sign (`credential(name).sign` past 1 MiB: `POST /use/<a>/<b>?sign=`, octet-stream) is bound by the
+        // SHA-256 and the length it declares, which coffre holds its bytes to as they pass, and answers no signature
+        // otherwise: it streams too, never held here. Any other request, a `?sign=` in an upstream's query say, is read whole.
+        const rawSign = method === 'POST' && target.searchParams.has('sign') && /^\/use\/[^/]+\/[^/]+$/.test(target.pathname)
+          && (headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase() === 'application/octet-stream';
+        let raw = false;
+        try {
+          raw = rawSign && length !== undefined && declaredDigest(headers.get('content-digest') ?? '') !== null;
+        } catch {
+          // Malformed: read whole below, which says why.
+        }
+        if (headers.has('x-amz-content-sha256') || raw) {
           // An upload to an AWS-signed credential is bound by the digest it declares: it streams, of any size, with the
           // length it says, which coffre streams it by.
           if (length !== undefined) headers.set('content-length', length);
