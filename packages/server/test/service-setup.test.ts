@@ -7,9 +7,11 @@ import { and, asc, eq, inArray } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
+import { authMac } from '../src/auth-rows.ts';
+import { updateAuth } from '../src/db/queries.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { auditLog, projects } from './db/tables.ts';
+import { auditLog, credentials, principals, projects, serviceBindings } from './db/tables.ts';
 import { clientFor, issuesLogged, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // People who set up service accounts without running the instance (D97,
@@ -335,4 +337,91 @@ test('a person who loses access keeps no hold on the accounts they made', async 
   await assert.rejects(ada.members.remove(CI), { status: 403 });
   // The account stays, as it was, with whoever reaches it.
   assert.deepEqual((await bo.members.access(CI)).grants.map((grant) => grant.role), ['developer']);
+});
+
+/** How each service account in `client`'s list signs in, as the list says (`signsIn`): null where it says nothing. */
+async function signsIn(client: CoffreClient): Promise<Record<string, unknown>> {
+  const { members } = await client.members.list();
+  return Object.fromEntries(members.filter((member) => member.principalType === 'service').map((member) => [member.member, member.signsIn ?? null]));
+}
+
+/** The same, from the account's own lists, as the service accounts page counted them before the list said. */
+async function ownLists(member: string) {
+  const [{ tokens }, { bindings }] = await Promise.all([root.tokens.list(member), root.bindings.list(member)]);
+  const used = [...tokens, ...bindings].flatMap((one) => (one.lastUsedAt === null ? [] : [one.lastUsedAt])).sort();
+  return { tokens: tokens.length, bindings: bindings.map((binding) => binding.profile), lastUsedAt: used.at(-1) ?? null };
+}
+
+test("the list says how each account its caller manages signs in, as the account's own lists do, and nothing of the others", async () => {
+  // An Admin of market alone manages CI, which holds market alone, and sees token:mixed, which holds billing too: not theirs.
+  await root.members.add(CI);
+  await root.access.set(CI, { 'market/dev': 'developer' });
+  await root.members.add('token:mixed');
+  await root.access.set('token:mixed', { 'market/dev': 'viewer', 'billing/dev': 'viewer' });
+  const used = await root.tokens.issue(CI, { label: 'used', expiresInDays: 30 });
+  const revoked = await root.tokens.issue(CI, { label: 'revoked', expiresInDays: 30 });
+  const expired = await root.tokens.issue(CI, { label: 'expired', expiresInDays: 30 });
+  const { binding } = await root.bindings.create(CI, { profile: 'github', claims: CHECKS });
+  await root.bindings.create(CI, { profile: 'github', claims: { ...CHECKS, workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/main' } });
+  await root.tokens.issue('token:mixed', { label: 'mixed', expiresInDays: 30 });
+
+  assert.deepEqual(await signsIn(boss), { [CI]: await ownLists(CI), 'token:mixed': null });
+  assert.deepEqual(await signsIn(root), { [CI]: await ownLists(CI), 'token:mixed': await ownLists('token:mixed') });
+  assert.deepEqual((await signsIn(root))[CI], { tokens: 3, bindings: ['github', 'github'], lastUsedAt: null });
+
+  // One used, one revoked, one past its end, a binding removed: the list still says what the lists show.
+  await db.owner.update(credentials).set({ lastUsedAt: new Date('2026-11-01T10:00:00Z') }).where(eq(credentials.id, used.id));
+  await root.tokens.revoke(CI, revoked.id);
+  await updateAuth(deps.db, deps.chainKey, credentials, { id: expired.id }, { expiresAt: new Date(Date.now() - 1000) });
+  await root.bindings.remove(CI, binding.id);
+  assert.deepEqual((await signsIn(root))[CI], await ownLists(CI));
+  assert.deepEqual((await signsIn(boss))[CI], { tokens: 1, bindings: ['github'], lastUsedAt: '2026-11-01T10:00:00.000Z' });
+  // A project's list says nothing of it: no page shows it there.
+  assert.ok((await root.members.list('market')).members.every((member) => member.signsIn === undefined));
+});
+
+test("rows the account's own lists pass over, the list passes over too: one put back over its removal, one of another generation, one whose MAC fails", async () => {
+  await root.members.add(CI);
+  await root.access.set(CI, { 'market/dev': 'developer' });
+  await root.tokens.issue(CI, { label: 'kept', expiresInDays: 30 });
+  const forged = await root.tokens.issue(CI, { label: 'forged', expiresInDays: 30 });
+  const workflow = (name: string) => ({ ...CHECKS, workflow_ref: `acme/api/.github/workflows/${name}.yml@refs/heads/main` });
+  const kept = (await root.bindings.create(CI, { profile: 'github', claims: workflow('kept') })).binding;
+  const removed = (await root.bindings.create(CI, { profile: 'github', claims: workflow('removed') })).binding;
+  const moved = (await root.bindings.create(CI, { profile: 'github', claims: workflow('moved') })).binding;
+  const edited = (await root.bindings.create(CI, { profile: 'github', claims: workflow('edited') })).binding;
+  await root.bindings.remove(CI, removed.id);
+
+  // Signed again by the app's own key, so that only its tombstone or its generation stops each.
+  const signedAgain = async (id: string, changes: Partial<typeof serviceBindings.$inferSelect>) => {
+    const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id));
+    const next = { ...row!, ...changes };
+    await db.owner.update(serviceBindings).set({ ...changes, authMac: authMac(deps.chainKey, 'service_bindings', next) }).where(eq(serviceBindings.id, id));
+  };
+  await signedAgain(removed.id, { revokedAt: null, revokedBy: null });
+  const [{ generation }] = await db.owner.select({ generation: serviceBindings.generation }).from(serviceBindings).where(eq(serviceBindings.id, moved.id)) as [{ generation: number }];
+  await signedAgain(moved.id, { generation: generation + 1 });
+  // Edited behind the app's back, a field each MAC covers: it no longer holds.
+  await db.owner.update(serviceBindings).set({ issuer: 'https://issuer.evil.example' }).where(eq(serviceBindings.id, edited.id));
+  await db.owner.update(credentials).set({ expiresAt: new Date('2099-01-01T00:00:00Z') }).where(eq(credentials.id, forged.id));
+
+  assert.deepEqual((await root.bindings.list(CI)).bindings.map((binding) => binding.id), [kept.id]);
+  assert.deepEqual((await signsIn(root))[CI], { tokens: 1, bindings: ['github'], lastUsedAt: null });
+  assert.deepEqual((await signsIn(root))[CI], await ownLists(CI));
+});
+
+test('an account the vault found tampered with, or removed, says nothing of how it signs in, to an Owner or to whoever set it up', async () => {
+  await ada.members.add(CI);
+  await ada.access.set(CI, { 'market/dev': 'developer' });
+  await ada.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  await ada.members.add('token:ci-gone');
+  await ada.access.set('token:ci-gone', { 'market/dev': 'developer' });
+  assert.deepEqual(Object.keys(await signsIn(ada)), [CI, 'token:ci-gone']);
+  assert.ok(Object.values(await signsIn(ada)).every((said) => said !== null));
+
+  // Someone who owns the database says another person let it in, and the vault meets the row: a standing finding.
+  await db.owner.update(principals).set({ statusChangedBy: 'user:someone@acme.example' }).where(eq(principals.principal, CI));
+  assert.equal((await deps.vault.access(CI)).status, 'tampered');
+  await root.members.remove('token:ci-gone');
+  for (const client of [root, ada]) assert.deepEqual(Object.entries(await signsIn(client)).filter(([, said]) => said !== null), [], 'no account says how it signs in');
 });

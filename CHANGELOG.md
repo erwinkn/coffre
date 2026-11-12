@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **The service accounts page costs the same however many accounts there
+  are.** Its render asked each account it lists for its tokens and its
+  trust bindings: with 49 accounts, an Owner's render ran 155 statements
+  and 51 vault calls, not 11 and 3. `GET /members` now says, on each
+  service account the caller manages (`managed`), how it signs in:
+  `signsIn: { tokens, bindings, lastUsedAt }`, its live tokens as `GET
+  /members/:member/tokens` lists them, counted, the profile of each live
+  trust binding, and when one of them was last used. Nothing more of
+  either: a token's or a binding's own fields stay on the account's lists.
+  The full list alone says it (no `?path=`), and asks for it beside its
+  first reads, one statement for the tokens and one for the bindings
+  where the deployment trusts workloads, so the page now runs 9
+  statements, 3 round trips and 2 vault calls whatever its size. The
+  sessions page (`/account/sessions`) read every one of your credentials
+  twice, once for your sessions and once for your personal tokens; each
+  list now reads its own.
+
 - **`coffre run` and `coffre export --help` say that a person gets
   placeholders, not values.** Where the deployment has the credential proxy, a
   person's `run` and `export` write handles, which a request through

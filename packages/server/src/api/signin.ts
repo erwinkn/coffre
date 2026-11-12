@@ -376,9 +376,18 @@ function userCode(): string {
   return `${chars.slice(0, 4).join('')}-${chars.slice(4).join('')}`;
 }
 
+/** A person's sessions, which the sessions page lists; and the credentials a token list shows, every other kind. */
+const SESSION_KINDS = ['browser', 'cli'] as const satisfies readonly CredentialKind[];
+const TOKEN_KINDS = ['service', 'personal', 'handle', 'workload'] as const satisfies readonly CredentialKind[];
+
 /** Whether a credential is a member's token, a service account's or a person's, rather than a session. */
 function isToken(row: { kind: string }): boolean {
   return row.kind === 'service' || row.kind === 'personal' || row.kind === 'handle';
+}
+
+/** Whether a member's token list shows this credential (`tokenRows`): a token but what a trust binding issued, or a workload session. */
+export function listedAsToken(row: { kind: string; createdBy: unknown }): boolean {
+  return (isToken(row) && issuingBinding(row.createdBy) === null) || row.kind === 'workload';
 }
 
 type HeldCredential = NonNullable<Awaited<ReturnType<typeof members>>[number]>['credentials'][number];
@@ -390,7 +399,7 @@ type HeldCredential = NonNullable<Awaited<ReturnType<typeof members>>[number]>['
  */
 export function tokenRows(held: readonly HeldCredential[], known: readonly PlaceRow[]): TokenRow[] {
   return held
-    .filter((row) => (isToken(row) && issuingBinding(row.createdBy) === null) || row.kind === 'workload')
+    .filter(listedAsToken)
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
     .map((row) => ({
       id: row.id,
@@ -1925,10 +1934,9 @@ export class SigninService {
   // --- listing --------------------------------------------------------------
 
   async listSessions(ctx: Asker, currentCredentialId: string | null): Promise<SessionRow[]> {
-    const [self] = await members(this.#deps.db, this.#deps.chainKey, { member: ctx.caller.principal, standing: false }, new Date());
+    const [self] = await members(this.#deps.db, this.#deps.chainKey, { member: ctx.caller.principal, standing: false, kinds: SESSION_KINDS }, new Date());
     const lastSeen = (row: { lastUsedAt: Date | null; createdAt: Date }) => (row.lastUsedAt ?? row.createdAt).getTime();
     return (self?.credentials ?? [])
-      .filter((row) => row.kind === 'browser' || row.kind === 'cli')
       .sort((a, b) => lastSeen(b) - lastSeen(a))
       .map((row) => ({
         id: row.id,
@@ -1974,7 +1982,7 @@ export class SigninService {
       throw forbidden("only admins and owners of the whole instance may see other people's tokens");
     }
     const [[held], known] = await Promise.all([
-      members(this.#deps.db, this.#deps.chainKey, { member, standing: false }, new Date()),
+      members(this.#deps.db, this.#deps.chainKey, { member, standing: false, kinds: TOKEN_KINDS }, new Date()),
       // Every place: in a render, what whoever reaches them all read.
       projectsReached(ctx.caller) === null ? reachedPlaces({ db: this.#deps.db, caller: ctx.caller, render: ctx.render }) : places(this.#deps.db),
     ]);

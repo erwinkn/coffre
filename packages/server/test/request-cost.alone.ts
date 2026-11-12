@@ -216,6 +216,8 @@ let environmentCalls: (as: Persona) => Promise<PromiseSettledResult<unknown>[]>;
 /** Every other page's render, by its path, as its route's loaders read (`visits`). */
 let visit: (as: Persona | null, path: string, options?: VisitOptions) => Promise<void>;
 let pageTrips = 0;
+/** One more browser session of a persona, as signing in again in another browser makes one. */
+let signInAgain: (as: Persona) => Promise<void>;
 /** The proxy in front of the app's Postgres that pages' connections go through, counting their Syncs. */
 let relay: Awaited<ReturnType<typeof postgresProxy>>;
 
@@ -304,6 +306,10 @@ before(async () => {
     if (!('credential' in signed)) throw new Error(`${email} was not signed in`);
     sessions.set(persona, signed.credential.token);
   }
+  signInAgain = async (as) => {
+    const signed = await signinService.completeSignin({ provider: 'github', subject: as, emails: [as === 'owner' ? ROOT : READER], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Chrome on Linux' });
+    if (!('credential' in signed)) throw new Error(`${as} was not signed in again`);
+  };
   const scopes = { sealed: true };
   const render = async <T>(as: Persona, path: string, calls: (client: CoffreClient) => Promise<T>): Promise<T> => {
     const pool = new HyperdrivePool(relay.url, { groupReads: true });
@@ -584,11 +590,8 @@ const visits: Record<string, (client: CoffreClient, options: VisitOptions) => Pr
   }),
   '/service-accounts': page(async (client, shell) => {
     const known = await shell;
-    if (!(known.administers || known.me?.setsUpServices)) return;
-    const listed = await settle(client.members.list());
-    await Promise.all((listed?.members ?? []).filter((member) => member.principalType === 'service' && member.managed).flatMap((member) => [
-      settle(client.tokens.list(member.member)),
-    ]));
+    // The list says how each account signs in (`signsIn`): nothing asked of any one account.
+    if (known.administers || known.me?.setsUpServices) await settle(client.members.list());
   }),
   '/service-accounts/ci-web': page(async (client, shell, { reports }) => {
     const known = await shell;
@@ -670,20 +673,25 @@ const renders: Record<string, { request: () => Promise<unknown>; budget: PageCos
   "/projects/market/service-accounts, viewer": { request: () => visit('viewer', '/projects/market/service-accounts'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
   "/projects/market/settings, owner": { request: () => visit('owner', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
   "/projects/market/settings, viewer": { request: () => visit('viewer', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/users, owner": { request: () => visit('owner', '/users'), budget: { app: 8, trips: 3, vault: 1, vaultCalls: 2 } },
+  // The directory says how each service account signs in (`signsIn`), the service accounts page's: its live tokens, one
+  // statement beside its first reads, no trip (and their bindings, where a deployment trusts workloads, as this one does not).
+  "/users, owner": { request: () => visit('owner', '/users'), budget: { app: 9, trips: 3, vault: 1, vaultCalls: 2 } },
   "/users, viewer": { request: () => visit('viewer', '/users'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
   // Its report reads what they read under 0.15's log, as the projection lists them, and how far it does (T166), beside
   // its first reads: a statement, no trip. And what they wrote that 0.15's log records alone (T179, 0.16.0): one more
   // statement beside them, no trip; its keys and versions only when there are some.
   "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 18, trips: 6, vault: 1, vaultCalls: 2 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
   "/users/reader@acme.example, viewer": { request: () => visit('viewer', '/users/reader@acme.example'), budget: { app: 5, trips: 3, vault: 1, vaultCalls: 1 } },
-  "/service-accounts, owner": { request: () => visit('owner', '/service-accounts'), budget: { app: 11, trips: 4, vault: 2, vaultCalls: 3 } },
-  "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 14, trips: 5, vault: 4, vaultCalls: 5 } },
+  // The same directory, and nothing asked of any one account (T264): before, each account's token list, a vault call and
+  // three statements more each.
+  "/service-accounts, owner": { request: () => visit('owner', '/service-accounts'), budget: { app: 9, trips: 3, vault: 1, vaultCalls: 2 } },
+  "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 10, trips: 3, vault: 2, vaultCalls: 3 } },
   // Its report reads their reads too, and how far they are listed (T166), beside its first reads; and what they wrote
   // that 0.15's log records alone (T179, 0.16.0), one more statement beside them, no trip.
   "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 21, trips: 7, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
   "/service-accounts/ci-web, viewer": { request: () => visit('viewer', '/service-accounts/ci-web'), budget: { app: 10, trips: 5, vault: 4, vaultCalls: 4 } },
-  "/settings, owner": { request: () => visit('owner', '/settings'), budget: { app: 11, trips: 3, vault: 3, vaultCalls: 4 } },
+  // Its directory too, which counts the service accounts' tokens.
+  "/settings, owner": { request: () => visit('owner', '/settings'), budget: { app: 12, trips: 3, vault: 3, vaultCalls: 4 } },
   "/settings, viewer": { request: () => visit('viewer', '/settings'), budget: { app: 6, trips: 3, vault: 1, vaultCalls: 1 } },
   "/account, owner": { request: () => visit('owner', '/account'), budget: { app: 7, trips: 3, vault: 1, vaultCalls: 1 } },
   "/account, viewer": { request: () => visit('viewer', '/account'), budget: { app: 7, trips: 3, vault: 1, vaultCalls: 1 } },
@@ -781,12 +789,14 @@ test("a proxied call whose cache lapsed, after its service's access changed, ask
   assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
 });
 
-test('a request runs the same statements, and reads the same rows, however large the log, the members and the policy grow', POSTGRES, async () => {
+test('a request runs the same statements, and reads the same rows, however large the log, the members, their sessions and tokens, and the policy grow', POSTGRES, async () => {
   await warm();
   const small: Record<string, Cost> = {};
   for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
   const smallPages: Record<string, PageCost> = {};
   for (const [name, { request }] of Object.entries(renders)) smallPages[name] = await pageCost(request);
+  const sessionsPage = (as: Persona) => visit(as, '/account/sessions');
+  const sessionRows = { owner: (await cost(() => sessionsPage('owner'))).app.rows, viewer: (await cost(() => sessionsPage('viewer'))).app.rows };
 
   // The log grown by writes elsewhere, each an entry of the app's and one of the vault's.
   for (let i = 0; i < 150; i++) await root.secrets.set('market/busy', { [`KEY_${i % 20}`]: `fake-${i}` });
@@ -798,6 +808,17 @@ test('a request runs the same statements, and reads the same rows, however large
   for (let i = 0; i < 40; i++) await root.access.set(`user:${READER}`, { 'market/dev': i % 2 === 0 ? 'developer' : 'viewer' });
   // The policy changed, again and again: prod unprotected, then protected again.
   for (let i = 0; i < 40; i++) await root.environments.protect('market/prod', i % 2 === 1);
+  // What the sessions and service accounts pages list: each persona's sessions and personal tokens, and service
+  // accounts, each with a token, that both manage, as they manage ci-web.
+  for (let i = 0; i < 48; i++) {
+    const account = `token:grown-${i}`;
+    await root.members.add(account);
+    await root.access.set(account, { 'market/dev': 'viewer' });
+    await root.tokens.issue(account, { label: 'ci', expiresInDays: 1 });
+    for (const persona of ['owner', 'viewer'] as const) await signInAgain(persona);
+    await root.tokens.issue(`user:${ROOT}`, { label: `grown-${i}`, expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+    await reader.tokens.issue(`user:${READER}`, { label: `grown-${i}`, expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  }
 
   // Once first: a request whose caller's access, or the policy, changed since their last asks the vault again, once.
   await warm();
@@ -805,6 +826,9 @@ test('a request runs the same statements, and reads the same rows, however large
     assert.deepEqual(await cost(request), small[name], `${name} ran more statements or read more rows once the instance grew`);
   }
   // A page lists what there is, so its rows grow with the members and places it shows; its statements and round trips do not.
+  for (const as of ['owner', 'viewer'] as const) {
+    assert.equal((await cost(() => sessionsPage(as))).app.rows - sessionRows[as], 96, `${as}'s sessions page reads each of their 48 sessions and 48 personal tokens added once`);
+  }
   for (const [name, { request }] of Object.entries(renders)) {
     assert.deepEqual(await pageCost(request), smallPages[name], `${name} ran more statements or round trips once the instance grew`);
   }

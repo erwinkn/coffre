@@ -5,7 +5,7 @@ import { EVERYWHERE, scopeInWords, unscoped } from '@coffre/core/access';
 import { changeRole, directoryList, invite, removeMember, type InviteVars, type RoleVars } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { scopeComplete } from '../lib/validation';
-import { queries, waysFor } from '../lib/queries';
+import { queries } from '../lib/queries';
 import { useShell } from '../lib/use-shell';
 import { roleNameOf } from '../lib/roles';
 import { useRoles } from '../lib/use-roles';
@@ -198,33 +198,19 @@ const PLATFORM: Record<string, string> = {
 
 /**
  * What someone scanning service accounts wants of each: how it signs in, where
- * it reaches, and whether it is still in use. Access comes with the list; the
- * bindings and tokens are read per row, as its own page reads them.
+ * it reaches, and whether it is still in use. All of it comes with the list:
+ * how each account you manage signs in, counted (`signsIn`).
  */
 function ServiceCells({ principal, adding }: { principal: DirectoryPrincipal; adding: boolean }) {
-  const client = useCoffre();
-  const shell = useShell();
-  const member = memberOf(principal);
-  // As `loadServiceDirectory` read them, so these come from its cache; an account just added is yours.
-  const ways = waysFor(shell, principal.managed !== false);
-  // Not suspended: an account added here is shown at once, its facts once it is made, and not asked for before.
-  const { data: bindings } = useQuery({ ...queries.bindings(client, member, ways.workloads), enabled: !adding });
-  const { data: credentials } = useQuery({ ...queries.credentials(client, member, ways.tokens), enabled: !adding });
-
+  // An account added here is shown at once, how it signs in once the list is read again; one you do not manage, nothing.
+  const signsIn = adding ? undefined : (principal.signsIn ?? { tokens: 0, bindings: [], lastUsedAt: null });
   const platforms = new Map<string, number>();
-  const bindingList = bindings?.ok === true ? bindings.bindings : [];
-  for (const binding of bindingList) {
-    const platform = PLATFORM[binding.profile] ?? 'OIDC';
+  for (const profile of signsIn?.bindings ?? []) {
+    const platform = PLATFORM[profile] ?? 'OIDC';
     platforms.set(platform, (platforms.get(platform) ?? 0) + 1);
   }
-  const now = Date.now();
-  const tokenList = credentials?.ok === true ? credentials.tokens : [];
-  const activeTokens = tokenList.filter((token) => new Date(token.expiresAt).getTime() > now).length;
-  const lastUsed = [...bindingList, ...tokenList]
-    .map((credential) => credential.lastUsedAt)
-    .filter((at): at is string => at !== null)
-    .sort()
-    .at(-1);
+  const activeTokens = signsIn?.tokens ?? 0;
+  const lastUsed = signsIn?.lastUsedAt ?? null;
 
   const places = [
     ...new Set(
@@ -234,7 +220,7 @@ function ServiceCells({ principal, adding }: { principal: DirectoryPrincipal; ad
     ),
   ];
   const projects = new Set((principal.grants ?? []).map((grant) => grant.project));
-  const loaded = bindings !== undefined && credentials !== undefined;
+  const loaded = signsIn !== undefined;
 
   return (
     <>
@@ -269,7 +255,7 @@ function ServiceCells({ principal, adding }: { principal: DirectoryPrincipal; ad
         )}
       </td>
       <td className="col-used cell-muted" data-label="Last used">
-        {!loaded ? null : lastUsed === undefined ? 'Never' : <Timestamp iso={lastUsed} display="relative" />}
+        {!loaded ? null : lastUsed === null ? 'Never' : <Timestamp iso={lastUsed} display="relative" />}
       </td>
     </>
   );

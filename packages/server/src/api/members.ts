@@ -22,6 +22,7 @@ import {
   type Role,
   type Scope,
 } from '@coffre/core/access';
+import type { WorkloadProfile } from '@coffre/core/identity';
 import { isTombstone } from '@coffre/core/schemas';
 import type { Admitted } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
@@ -43,6 +44,7 @@ import {
   priorCredentials,
   missingMembers,
   places,
+  serviceSignIns,
   touchCredential,
   updateAuth,
   type MemberRow,
@@ -59,7 +61,7 @@ import type { ConnectedApp } from '../mcp/service.ts';
 import { keeps015 } from './changes.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
 import { referencesBy, type ReferenceView } from './references.ts';
-import { tokenRows, type TokenRow } from './signin.ts';
+import { listedAsToken, tokenRows, type TokenRow } from './signin.ts';
 import { accountOf, managedAccount, notManager, readScope, scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
 
 export type MemberGrant = {
@@ -110,6 +112,22 @@ export type Member = {
    */
   declared: boolean;
   grants: MemberGrant[];
+  /**
+   * How a service account the caller manages (`managed`) signs in, on the
+   * full list (no `?path=`): what its own lists, `GET
+   * /members/:member/tokens` and `/bindings`, would show, counted. Absent on
+   * everyone else.
+   */
+  signsIn?: SignsIn;
+};
+
+export type SignsIn = {
+  /** Its live tokens, as its token list shows them: bearer tokens and workload sessions. None where the deployment has no sign-in of its own. */
+  tokens: number;
+  /** The profile of each live trust binding, oldest first. None where the deployment trusts no workloads. */
+  bindings: WorkloadProfile[];
+  /** When one of them was last used; null for never. */
+  lastUsedAt: string | null;
 };
 
 /** A value someone saw that is still the current one: what to rotate. */
@@ -355,12 +373,15 @@ export async function listMembers(
 ): Promise<{ members: Member[]; removed: RemovedMember[]; reads?: ReadsListed }> {
   const { caller } = ctx;
   const administrator = administers(caller.role);
-  const [all, known, setting, owners] = await Promise.all([
-    directory(ctx, new Date(), { sessions: false }),
+  const now = new Date();
+  const [all, known, setting, owners, signIns] = await Promise.all([
+    directory(ctx, now, { sessions: false }),
     // Every place: in a render, what the caller reaches when they reach them all, as it read them.
     projectsReached(caller) === null ? reachedPlaces(ctx) : places(ctx.db),
     runsInstance(caller) ? null : serviceSettingFor(ctx.vault, caller),
     declaredOwners(ctx),
+    // How the service accounts sign in, for the full list alone: the service accounts page's, beside its first reads.
+    query.path === undefined ? serviceSignIns(ctx.db, ctx.chainKey, now, { tokens: ctx.signin !== null, bindings: ctx.workloads !== null }) : null,
   ]);
   if (!administrator && !canAnywhere(caller, 'grant.manage') && !setsUp(caller, setting, known)) {
     throw forbidden('only admins, owners, members with grant.manage on a project, and those who set up service accounts can list members');
@@ -381,6 +402,7 @@ export async function listMembers(
     ...target.environments.filter((environment) => path?.environment === undefined || environment.slug === path.environment).map((environment) => placeOf(target, environment)),
   ].some((place) => mayManageAccess(caller, place)));
 
+  const signsIn = signIns === null ? null : signsInBy(signIns);
   const members: Member[] = [];
   for (const listed of all) {
     if (listed.status === 'removed') continue;
@@ -412,6 +434,7 @@ export async function listMembers(
         ...roleShown(caller.policy, grant.role),
         expiresAt: grant.expiresAt,
       })),
+      ...(managed && signsIn !== null ? { signsIn: signsIn(member, listed.row!.generation) } : {}),
     });
   }
   members.sort((a, b) => a.principalType.localeCompare(b.principalType) || a.principalId.localeCompare(b.principalId));
@@ -433,6 +456,31 @@ export async function listMembers(
       toRotate: exposed.get(formatMember(member))!.exposed.length,
     })),
     ...(reads === null ? {} : { reads }),
+  };
+}
+
+/** Each service account's `signsIn`, by its member and generation, from every account's live tokens and bindings, grouped once. */
+function signsInBy({ credentials, bindings }: Awaited<ReturnType<typeof serviceSignIns>>): (member: string, generation: number) => SignsIn {
+  const byPrincipal = <T extends { principal: string }>(rows: readonly T[]) => {
+    const grouped = new Map<string, T[]>();
+    for (const row of rows) {
+      const held = grouped.get(row.principal);
+      if (held === undefined) grouped.set(row.principal, [row]);
+      else held.push(row);
+    }
+    return grouped;
+  };
+  const tokens = byPrincipal(credentials.filter(listedAsToken));
+  const bound = byPrincipal(bindings);
+  return (member, generation) => {
+    const live = (bound.get(member) ?? []).filter((row) => row.generation === generation);
+    const held = tokens.get(member) ?? [];
+    const used = [...held, ...live].flatMap((row) => (row.lastUsedAt === null ? [] : [row.lastUsedAt.getTime()]));
+    return {
+      tokens: held.length,
+      bindings: live.map((row) => row.profile as WorkloadProfile),
+      lastUsedAt: used.length === 0 ? null : new Date(Math.max(...used)).toISOString(),
+    };
   };
 }
 

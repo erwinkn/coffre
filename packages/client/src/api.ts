@@ -496,6 +496,11 @@ export type Api = {
           permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
           expiresAt: string | null;
         }[];
+        signsIn?: {
+          tokens: number;
+          bindings: ("aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel")[];
+          lastUsedAt: string | null;
+        };
       }[];
       removed: {
         principalType: "service" | "user";
@@ -2843,6 +2848,11 @@ export type Member = {
     permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     expiresAt: string | null;
   }[];
+  signsIn?: {
+    tokens: number;
+    bindings: ("aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel")[];
+    lastUsedAt: string | null;
+  };
 };
 
 export type MemberAccess = {

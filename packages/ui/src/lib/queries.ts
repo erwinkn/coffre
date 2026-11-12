@@ -107,7 +107,7 @@ function listDirectory(client: CoffreClient) {
   return uiResult(async () => {
     const { members, removed, reads } = await client.members.list();
     const principals: DirectoryPrincipal[] = members.map(
-      ({ principalType, principalId, instanceRole, scope, tampered, managed, declared, grants }) => ({
+      ({ principalType, principalId, instanceRole, scope, tampered, managed, declared, grants, signsIn }) => ({
         principalType,
         principalId,
         instanceRole,
@@ -116,6 +116,7 @@ function listDirectory(client: CoffreClient) {
         managed,
         declared,
         grants: grants.map(({ project, environment }) => ({ project, environment })),
+        ...(signsIn === undefined ? {} : { signsIn }),
       }),
     );
     // How far reads are listed, under 0.15's log, which the counts of what the removed saw are as of (T166).
@@ -731,29 +732,10 @@ export function waysFor(shell: Shell, managed: boolean): { tokens: boolean; work
   return { tokens: managed && shell.auth.signin !== null, workloads: managed && shell.features.workloads };
 }
 
-/**
- * The service accounts page: the directory, and each account's bindings and
- * tokens, read here as its own page reads them, so the list shows how each
- * signs in from the first paint and the browser asks for nothing that may be
- * refused (a deployment that trusts no workloads answers bindings with one).
- */
+/** The service accounts page: the directory, which says how each account you manage signs in (`signsIn`). */
 export async function loadServiceDirectory(queryClient: QueryClient, client: CoffreClient) {
   const shell = await loadShell(queryClient, client);
-  const directory = await queryClient.fetchQuery(queries.directory(client, listsServices(shell)));
-  if (!directory.ok) return directory;
-  await Promise.all(
-    directory.principals
-      .filter((principal) => principal.principalType === 'service')
-      .flatMap((principal) => {
-        const member = memberRef('service', principal.principalId);
-        const ways = waysFor(shell, principal.managed === true);
-        return [
-          queryClient.fetchQuery(queries.credentials(client, member, ways.tokens)),
-          queryClient.fetchQuery(queries.bindings(client, member, ways.workloads)),
-        ];
-      }),
-  );
-  return directory;
+  return queryClient.fetchQuery(queries.directory(client, listsServices(shell)));
 }
 
 /** Who a user or service account is to the instance, its pages' header: null to anyone who does not run it. */
@@ -874,8 +856,7 @@ export const affects = {
   ],
   /**
    * Someone let in: the directory, and whatever was read of them before
-   * they were there, which said there was no such member: a new service
-   * account's row asks how it signs in as soon as it shows.
+   * they were there, which said there was no such member.
    */
   admission: (member: string): QueryKey[] => [
     keys.directory,
@@ -902,8 +883,9 @@ export const affects = {
    * grant and environment read with what it holds.
    */
   roles: (): QueryKey[] => [keys.roles, keys.me, keys.projects, ['grants'], ['member-access'], ['secrets'], ['proxy']],
-  credentials: (member: string): QueryKey[] => [keys.credentials(member)],
-  bindings: (member: string): QueryKey[] => [keys.bindings(member)],
+  /** A member's tokens or a service's bindings changed: their lists, and the directory, which counts a service's (`signsIn`). */
+  credentials: (member: string): QueryKey[] => [keys.credentials(member), keys.directory],
+  bindings: (member: string): QueryKey[] => [keys.bindings(member), keys.directory],
   /** Unlinking an account also ends the sessions it signed in. */
   identities: (): QueryKey[] => [keys.identities, keys.sessions],
   sessions: (): QueryKey[] => [keys.sessions],
