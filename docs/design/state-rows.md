@@ -166,9 +166,11 @@ the chain is. The app hands them over in one call, `note`; section 3 says which 
   payload beside `operationId`, as a refusal's record has it today. So a request notes as many events as it has, the
   vault's own refusals inside it among them, and the projector fills `audit_events.request_id` from the payload for
   every kind of row. One id is derived: an event of no request that may be written twice (a finding of the beat) takes
-  `<system actor>/<what it is about>` (`systemEventId`: `system:vault/finding:4410`), so a second run writes nothing.
-  The actor `system:vault` is the vault's alone: `note` and `prepare` refuse it from the app, and the projector reads
-  an event's author from it.
+  the one form pinned for it, `system:vault/finding:<checkpoint|none>:<behind|late|broken>` (`findingEventId`): a
+  checkpointer stuck at 4410 is one `late` finding, `system:vault/finding:4410:late`, however many beats see it.
+- *Who decided an event is in its payload.* `author`, `app` or `vault`, which the vault sets under its MAC and the
+  projector reads. The actor cannot say it: a refusal the vault decides carries its caller as actor. The app never
+  sends `author`, and `note` and `prepare` refuse the actor `system:vault`, the vault's alone, from the app.
 
 **Each projection must beat its absence.**
 
@@ -316,7 +318,7 @@ fixed:
   them. Four ways to break that each close a wait cycle, a 1 s stall in Postgres: `revoke_credential`, which takes no
   issue lock, taking its object before the fence; a batch taking each key's lock as its turn comes; a statement of
   several `app_change` calls (a project's delete) taking each call's as it comes; and `use_batch` taking its
-  principal's lock before its keys, as it does today. An event the app commits with its changes (`log_event`, which
+  principal's lock before its keys, as it does today. An event the app commits with its changes (`log_events`, which
   shares the fence) comes after them in that statement: before them, the transaction would hold the fence when its
   change asks for the issue lock, while the checkpointer holds the issue lock and waits for the fence.
 - **A use reads ids before it locks.** The call names its credential, key and place; the member is on the
