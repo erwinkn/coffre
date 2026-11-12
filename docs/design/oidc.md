@@ -158,7 +158,8 @@ service's bindings are read. In order:
    - **So a flood scales with the deployment.** It can reach the limit times
      the number of locations or processes. What bounds the work behind each
      admitted request is the rest of this list: one query of at most 16
-     rows, one signature check, at most one key fetch.
+     rows, one signature check, at most one key fetch (asked twice when
+     the issuer did not answer the first; section 4).
    - **The limiter is required.** Configuring the exchange without it is a
      configuration error, never a route without limits.
 2. **Shape** (section 3).
@@ -269,17 +270,82 @@ it before saving. An issuer that moves its keys needs a new binding.
 
 **The cache keeps settled values only,** per isolate: never a pending fetch,
 key import or failure. Two first exchanges each fetch.
-- Key sets are kept ten minutes, for at most 64 URLs.
-- After an unknown `kid` or a failed fetch, that isolate waits a minute
-  before fetching that URL again, cold cache included. Until then such
-  tokens get a 503.
+- Key sets are fresh for ten minutes, for at most 64 URLs, then fetched
+  again.
+- After an unknown `kid`, or an answer that is not keys (a 404, a page that
+  is not JSON, a set with none), that isolate waits a minute before
+  fetching that URL again, cold cache included. Until then such tokens get
+  a 503 with `Retry-After: 60`. When the fetch for an unknown `kid` finds
+  the issuer unreachable, its ten seconds (below) replace the minute: a
+  rotation during a blip is asked about again as soon as the blip may
+  have passed. A 200's `Content-Type` is checked before
+  its body is read: a page that says HTML is that answer even if the
+  connection then breaks.
 - Each cold isolate has its own cache and cooldowns. Admission, approximate
   as section 2 says, is what bounds them together.
 
-**When the issuer is down,** the answer is a 503 with `Retry-After`. Fresh
-cached keys work until they expire. No copy of fetched keys is kept in the
-database: an issuer that can't serve its keys can rarely mint tokens. Keys
-uploaded with a binding are a different case, fetched never (section 8).
+**When the issuer does not answer** (the 5 s deadline, a network error, a
+408, 429 or 5xx), it is a blip more often than an outage: on 2026-11-11
+GitHub's JWKS timed out twice for one deploy job while it answered other
+hosts in 0.4 s.
+- With no set to fall back on (a cold isolate, or one past its stand-in),
+  the fetch is asked once more at once (on Node, on a new connection;
+  Workers' `fetch` says nothing of which it uses). Not after a 429, which
+  asks for time, nor once another exchange's failed fetch has paused the
+  URL meanwhile.
+- A set past its ten minutes stands in for the one the issuer could not
+  serve, for as long as its answer's `Cache-Control` lets it, counted from
+  coffre's fetch: its `max-age`, at most an hour, an hour if it says none, never past
+  fresh if it says `no-store`, `no-cache` or under ten minutes, or if
+  coffre cannot read it (a `max-age` twice, or not a number; a quoted
+  argument's `max-age=` is the argument's, not the header's). GitHub's
+  says `max-age=3600, must-revalidate`, and no `Age`, so a set coffre
+  fetched up to an hour ago stands in, which is no longer than GitHub lets
+  any cache serve it. (An `Age` is not subtracted: an issuer behind a CDN
+  that answers `Age: 3500` still gets its full `max-age`.) A key the set lacks is never taken from it: such a token gets the
+  503.
+- The isolate then waits ten seconds before fetching that URL again, and
+  the 503 says `Retry-After: 10`, which the CLI waits out and asks again,
+  twice, each time with a fresh ID token.
+- The 503's message names the issuer and says the fetch was coffre's:
+  `coffre could not fetch the signing keys of the issuer
+  https://token.actions.githubusercontent.com
+  (https://token.actions.githubusercontent.com/.well-known/jwks: timed out
+  after 5 s): its own request to the issuer failed, not the token or the
+  job that sent it; try again in 10 s`. Each failed fetch logs
+  `workload_keys_unfetched`, the one a retry then answers included
+  (`retrying: true`).
+- An answer that is not keys ends the stand-in: an issuer that publishes a
+  set with no keys, or moved them, is not one whose old keys outlive their
+  ten minutes.
+- Only a fetch the issuer did not answer lets a set stand in. The minute
+  after an unknown `kid` holds back fetches for unknown keys only: a set
+  that goes stale meanwhile is fetched again as any other, and the minute
+  stays on. A token whose key the old set has is not held up to a minute,
+  past the CLI's patience, by another exchange's made-up `kid`. The cache
+  keeps the two apart, a failed fetch's pause and an unknown `kid`'s
+  minute, so that neither ends or stretches the other.
+- A fetch that fails is told to the cache as it is then, not as it was when
+  the fetch began. Another exchange's answer that was not keys, which came
+  meanwhile, still ends the stand-in, and its minute stands. A set whose
+  hour ended during the fetch does not stand in. Times are the ones at which
+  the fetch ended: a fetch that timed out after 5 s waits its ten seconds
+  from then.
+- A pause already on stays, so that every `Retry-After` it was told stays
+  true: say exchange A's fetch times out at 10 s, pausing until 20 s, and
+  B's at 13 s; B is told 7 s, not 10, and A, back at 20 s, fetches. Only
+  an answer that is not keys replaces a timeout's ten seconds, since it
+  ends the stand-in.
+- A fetch that fails after another exchange's fetch of the URL was
+  answered takes that set, as new as its own would have been, and asks
+  no more. Say the set is stale, exchange A's fetch hangs, B's is
+  answered, and C fetches for an unknown `kid`, setting the minute; when
+  A's fetch times out, A's token verifies under B's set rather than get
+  that minute's 503.
+
+No copy of fetched keys is kept in the database: an issuer that can't serve
+its keys for an hour can rarely mint tokens. Keys uploaded with a binding
+are a different case, fetched never (section 8).
 
 ## 5. Threats
 

@@ -14,8 +14,11 @@ import type { Connect } from '../plugins.ts';
  * `nodeTransport()`, whose resolver admits only public addresses.
  */
 export type WorkloadTransport = {
-  /** GET a JSON document, or throw `FetchRefused` saying why. */
-  json(url: URL): Promise<unknown>;
+  /**
+   * GET a JSON document, or throw `FetchRefused` saying why. `cacheControl`, when given, is told the answer's
+   * `Cache-Control` header, or null: what the issuer says of how long its keys may be kept (`workloads/keys.ts`).
+   */
+  json(url: URL, cacheControl?: (value: string | null) => void): Promise<unknown>;
   /**
    * A request to a host an Owner typed in a web page, a UI route's upstream (docs/design/proxy-ui.md, section 5): on
    * Node, one that dials only public addresses (`publicFetch`); on Workers, the platform's, whose network reaches no
@@ -41,26 +44,51 @@ export const USER_AGENT = 'coffre';
 /**
  * A fetch that broke a limit, or failed: the message names the URL and why,
  * never a body. `status` is the one the host answered, when it answered.
+ * `transient` when the host did not answer in time, or said it could not
+ * answer now (408, 429, a 5xx): a moment later it may, where an answer it
+ * did give (a 404, a page that is not JSON, too many keys) stands.
  */
 export class FetchRefused extends Error {
   readonly status: number | null;
-  constructor(url: URL, why: string, options?: { cause?: unknown; status?: number }) {
+  readonly transient: boolean;
+  constructor(url: URL, why: string, options?: { cause?: unknown; status?: number; transient?: boolean }) {
     super(`${url.href}: ${why}`, options);
     this.name = 'FetchRefused';
     this.status = options?.status ?? null;
+    this.transient = options?.transient ?? false;
   }
 
   /** A host that answered anything but a 200. */
   static answered(url: URL, status: number): FetchRefused {
-    return new FetchRefused(url, `answered ${status}`, { status });
+    return new FetchRefused(url, `answered ${status}`, { status, transient: status === 408 || status === 429 || (status >= 500 && status <= 599) });
   }
+
+  /**
+   * A host that could not be reached, or stopped sending: `cause` the
+   * network's error, the deadline's included, said as such. Transient, but
+   * for an address the transport refuses to dial (`ENOTPUBLIC`), which no
+   * moment changes.
+   *
+   *   AbortSignal.timeout(5_000) fired        https://…/jwks: timed out after 5 s
+   *   ECONNRESET while reading the body       https://…/jwks: could not be read
+   */
+  static unreached(url: URL, cause: unknown, why: 'could not be fetched' | 'could not be read' = 'could not be fetched'): FetchRefused {
+    const said = timedOut(cause) ? `timed out after ${FETCH_DEADLINE_MS / 1000} s` : why;
+    return new FetchRefused(url, said, { cause, transient: (cause as { code?: unknown } | null)?.code !== 'ENOTPUBLIC' });
+  }
+}
+
+/** The deadline's abort: `TimeoutError` from fetch, an `AbortError` caused by one from Node's `http`. */
+function timedOut(error: unknown): boolean {
+  const name = (error as { name?: unknown } | null)?.name;
+  return name === 'TimeoutError' || (name === 'AbortError' && (error as { cause?: { name?: unknown } }).cause?.name === 'TimeoutError');
 }
 
 /** The standard `fetch`, as on Workers. */
 export function fetchTransport(fetchImpl: typeof fetch = fetch): WorkloadTransport {
   return {
     fetch: (url, init) => fetchImpl(url, init),
-    async json(url) {
+    async json(url, cacheControl) {
       let response: Response;
       try {
         response = await fetchImpl(url, {
@@ -69,13 +97,22 @@ export function fetchTransport(fetchImpl: typeof fetch = fetch): WorkloadTranspo
           headers: { accept: 'application/json', 'user-agent': USER_AGENT },
         });
       } catch (error) {
-        throw new FetchRefused(url, 'could not be fetched', { cause: error });
+        throw FetchRefused.unreached(url, error);
       }
       if (response.status !== 200) {
-        await response.body?.cancel();
+        // The status is the answer: a body that cannot even be cancelled does not make a 503 a refusal.
+        await response.body?.cancel().catch(() => {});
         throw FetchRefused.answered(url, response.status);
       }
-      return parsed(url, response.headers.get('content-type'), await capped(url, response.body));
+      try {
+        // Before the body: a 200 that is not JSON is a definite answer, whatever its body does next.
+        claimsJSON(url, response.headers.get('content-type'));
+      } catch (error) {
+        await response.body?.cancel().catch(() => {});
+        throw error;
+      }
+      cacheControl?.(response.headers.get('cache-control'));
+      return parsed(url, await capped(url, response.body));
     },
   };
 }
@@ -92,23 +129,27 @@ export async function capped(url: URL, body: ReadableStream<Uint8Array> | null):
       if (done) break;
       size += value.byteLength;
       if (size > MAX_BODY_BYTES) {
-        await reader.cancel();
+        await reader.cancel().catch(() => {});
         throw new FetchRefused(url, `is larger than ${MAX_BODY_BYTES} bytes`);
       }
       chunks.push(value);
     }
   } catch (error) {
     if (error instanceof FetchRefused) throw error;
-    throw new FetchRefused(url, 'could not be read', { cause: error });
+    throw FetchRefused.unreached(url, error, 'could not be read');
   }
   return Buffer.concat(chunks);
 }
 
-/** A body as JSON, from a response that says it is. */
-export function parsed(url: URL, contentType: string | null, body: Uint8Array): unknown {
+/** `FetchRefused` unless a response's `Content-Type` says JSON: checked before its body is read. */
+export function claimsJSON(url: URL, contentType: string | null): void {
   if (contentType === null || !/^application\/([a-z.+-]+\+)?json\b/i.test(contentType)) {
     throw new FetchRefused(url, 'is not JSON');
   }
+}
+
+/** A body as JSON, from a response that said it is (`claimsJSON`). */
+export function parsed(url: URL, body: Uint8Array): unknown {
   try {
     return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
   } catch {
