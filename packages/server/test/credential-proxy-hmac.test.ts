@@ -20,7 +20,7 @@ import { clientFor, LOG, usesLogged } from './api-fixture.ts';
 import { db, deps, DEV, entries, NO, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { auditLog } from '@coffre/db/schema';
 import { checkPlugins, type PluginContext, type UseAsked } from '../src/plugins.ts';
-import { credentialProxy, hmac, privateKey, type CredentialProxyOptions, type Encoding } from '../src/plugins/credential-proxy.ts';
+import { credentialProxy, form, hmac, privateKey, type CredentialProxyOptions, type Encoding } from '../src/plugins/credential-proxy.ts';
 
 const SECRETS = {
   YOUSIGN_WEBHOOK_SECRET: 'ys_whsec_0123456789abcdefABCDEF',
@@ -271,6 +271,23 @@ test('under proxy.editable too, a raw sign with no handle outside its body is re
   const message = Buffer.alloc(100 * 1024, 's');
   const signed = await signRaw(env.COFFRE_HANDLE!, 'sumsub-key', message, { 'content-length': String(message.length), 'content-digest': digestOf(message) });
   assert.deepEqual(await signed.json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, message) });
+});
+
+test("a project named as a form rule's credential: a raw sign at /use/<project>/<env> is refused before its body is read, and signs", async () => {
+  // `/use/market/dev` is also the stable URL of a credential `market`, whose form rule would read a body for the handle.
+  const proxy = credentialProxy({
+    credentials: { market: { upstream: 'https://forms.example/v1', inject: form('secret', '{SUMSUB_SECRET_KEY}') } },
+    signers: { 'sumsub-key': hmac('SUMSUB_SECRET_KEY', { encoding: 'hex', maxBytes: SUMSUB_BYTES }) },
+  });
+  const ask = (name: string, body: BodyInit, length: number) => proxy.routes!.fetch(new Request(`https://coffre.example/use/market/dev?sign=${name}`, {
+    method: 'POST', headers: { authorization: `Bearer coffre_use_${'h'.repeat(43)}`, 'content-type': 'application/octet-stream', 'content-length': String(length) }, body, duplex: 'half',
+  } as RequestInit), fake('SUMSUB_SECRET_KEY', SECRETS.SUMSUB_SECRET_KEY));
+  const body = stalled(64 * 1024);
+  const refused = await ask('nope', body.body, SUMSUB_BYTES);
+  assert.equal(refused.status, 404, await refused.text());
+  assert.equal(body.pulled(), 0, 'its body read');
+  const message = Buffer.alloc(100 * 1024, 'p');
+  assert.deepEqual(await (await ask('sumsub-key', message, message.length)).json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, message) });
 });
 
 test('a raw message longer or shorter than it declares, or other than its Content-Digest, is signed by nothing', async () => {

@@ -724,6 +724,10 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     return failure(400, 'the path is not valid percent-encoding');
   }
   const stable = proxy.credentials.get(place[0]!);
+  // A raw sign, `POST /use/<a>/<b>` whose body is the message (octet-stream): no handle is ever looked for in that body,
+  // and `signRaw` refuses before a byte of it is read (reviews r1 and r2 of #572). A workload's session or binding is
+  // the exception the URL makes for any POST there: `<a>`, a credential's name, makes it that credential's (below).
+  const rawSign = raw.length === 2 && request.method === 'POST' && isRaw(request);
   // Whether a name may be a handle's UI route for this request: under `proxy.editable`, of a handle's request (no session, no
   // service binding, whose calls `uiWorkloadForward` takes), and a name code lacks (R66).
   const uiServes = (name: string | undefined) => proxy.editable && coffre.useRoute !== undefined && !coffre.binding && sessionToken(request) === null
@@ -751,9 +755,8 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     // made for `<a>/<b>`; otherwise route `<a>` at `/<b>…` (section 6), the handle found outside the body or in it. A
     // made-for list this isolate keeps decides, no call made; else the route use reads both, the place itself and route
     // `<a>`, in its one call (C2b4), and the place's answer, nothing used, falls through to what the place's URL serves.
-    // Never a raw sign's (`POST /use/<a>/<b>`, octet-stream): its body is the message, which no route's item reads a handle
-    // from, and `signRaw` refuses before a byte of it is read (review r1 of #572).
-    if (!coded(proxy, place[0]!) && !(raw.length === 2 && request.method === 'POST' && isRaw(request))) {
+    // Never a raw sign's (`rawSign`): its body is the message, which no route's item reads a handle from.
+    if (!coded(proxy, place[0]!) && !rawSign) {
       const handle = await uiHandle(request, url);
       if (handle instanceof Response) return handle;
       if (handle !== null) {
@@ -785,7 +788,8 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     let refused: Response | null = null;
     // Each by its own path under its upstream, `rest`: `/use/bots/bot<handle>/getMe` is `/bot<handle>/getMe` to `bots`.
     const found = async (credential: Resolved, rest: readonly string[]) => {
-      const read = await peekField(request, credential);
+      // Never a raw sign's body: the handle it needs is its Bearer, outside the body.
+      const read = rawSign ? null : await peekField(request, credential);
       if (read instanceof Response) refused = read;
       else if (read !== null) peeked.set(credential, read);
       return handleIn(request, credential, url, within(credential, rest, url.search)?.relative ?? null, read instanceof Response ? [] : read?.fields.values);
