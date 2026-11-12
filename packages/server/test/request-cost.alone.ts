@@ -514,7 +514,7 @@ async function cost(request: () => Promise<unknown>): Promise<Cost> {
 /**
  * The bulk cap's period: a tenth of its window, at most a minute (the vault's default window, 15 minutes, which this
  * deployment keeps), aligned on the epoch. A key's first use in a new one moves its row of the cap's, one statement
- * more (`use_named_batch`'s `share`), whichever request comes first after the minute turns.
+ * more (`useNamedMany`'s "3, a key entering her cap's set"), whichever request comes first after the minute turns.
  */
 const CAP_PERIOD_MS = 60_000;
 
@@ -1006,7 +1006,7 @@ test("a reveal after the reader's access changed costs what any other does", asy
 /**
  * A reveal of an environment, the first use of its keys after the bulk
  * cap's period turned (`CAP_PERIOD_MS`): its keys' rows of the cap's moved
- * to the new period, one statement more (`use_batch`), once. The next
+ * to the new period, one statement more, once. The next
  * costs its budget.
  */
 test("a reveal's first use of its keys in a new period of the bulk cap moves their rows: one statement more, once", async () => {
