@@ -1,11 +1,25 @@
 import type { Client } from '@coffre/db';
 import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 
+let kept = false;
+
+/**
+ * The test pools opened from here on hold one connection each, kept until they end, idle or not: the growth sweep's
+ * (growth.sweep.ts), whose measure is a statement's run on a backend that ran it before, since a backend's first run
+ * of one reads the catalog too. A pool that closed a connection idle for a second, or spread its statements over ten,
+ * sent a path's next run of one to a backend new to it. One connection a request takes turns on, as each does on
+ * Workers' Hyperdrive.
+ */
+export function keepTestConnections(): void {
+  kept = true;
+}
+
 /** Bound broken connections and blocked SQL in tests, including the vault's pool; `allowExitOnIdle` closes it once idle. */
 export function testPostgresPool(connectionString: string, allowExitOnIdle = false): PostgresClient {
   return postgresClient(connectionString, {
     connect_timeout: 5,
-    idle_timeout: allowExitOnIdle ? 1 : 10,
+    idle_timeout: kept ? null : allowExitOnIdle ? 1 : 10,
+    ...(kept ? { max: 1 } : {}),
     connection: { statement_timeout: 10_000 },
   });
 }
