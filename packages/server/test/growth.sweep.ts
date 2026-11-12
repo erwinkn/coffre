@@ -6,9 +6,10 @@
 // the suite's (`pnpm test` runs `*.test.ts` and `*.alone.ts`).
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, hkdfSync, randomBytes, randomUUID } from 'node:crypto';
 
 import { deriveLogKey } from '@coffre/core/audit';
+import { macData, type LeafValue } from '@coffre/core/merkle';
 import { defineSignin, github } from '@coffre/core/identity';
 import { createDatabase } from '@coffre/db';
 import { postgresClient, type PostgresClient } from '@coffre/db/connect';
@@ -73,6 +74,17 @@ const ZERO16 = Buffer.alloc(16);
 const KEY_OBJECT = logObject('log', 'key');
 /** The most rotations a log takes in its life (`ROTATIONS_HELD`, @coffre/vault's log-store.ts). */
 const ROTATIONS = 246;
+
+/**
+ * The MAC of an entry of 0.15's log under the vault's key, as the checkpointer checks it before it seals one
+ * (`entryMac` in packages/vault/src/log-entry.ts, which this package cannot import; bench/uses.ts makes it so too): the
+ * key's 4-byte tag, then 12 bytes of HMAC over the tree's columns.
+ */
+function logMac(seed: Uint8Array): (tree: 'changes' | 'uses', columns: readonly LeafValue[]) => Buffer {
+  const tag = Buffer.from(hkdfSync('sha256', seed, new Uint8Array(0), 'coffre.log.tag.v1', 4));
+  const key = Buffer.from(hkdfSync('sha256', seed, new Uint8Array(0), 'coffre.log.mac.v1', 32));
+  return (tree, columns) => Buffer.concat([tag, createHmac('sha256', key).update(macData(tree, columns)).digest().subarray(0, 12)]);
+}
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
@@ -201,6 +213,19 @@ function throughAccess(id: string): CoffreClient {
  * checkpoint walks is what came since the last, and a request measured after reads no backlog the growth left.
  */
 async function caughtUp(): Promise<void> {
+  // 0.15's log sealed to its head, a window a tick (`WINDOW_MAX`), as a deployment's checkpointer seals what comes in
+  // every 500 ms: a measured tick reads what came since, and the trees' check what is above the newest pair, not the
+  // whole history as a backlog.
+  for (let round = 0, sealed = ''; round < 1_000; round += 1) {
+    await deps.vault.listReads();
+    const [newest] = await rowsOf<{ upto: string }>(db.owner, sql`SELECT coalesce(max(k.upto), 0)::text AS upto FROM log_checkpoints k`);
+    if (newest!.upto === sealed) break;
+    sealed = newest!.upto;
+  }
+  const [left] = await rowsOf<{ n: number }>(db.owner, sql`
+    SELECT ((SELECT count(*) FROM log_changes c WHERE c.number > k.upto) + (SELECT count(*) FROM log_uses u WHERE u.number > k.upto))::int AS n
+      FROM (SELECT coalesce(max(upto), 0) AS upto FROM log_checkpoints) k`);
+  assert.equal(left!.n, 0, "the checkpointer left 0.15's seeded log unsealed: a measured tick would read it all as a backlog");
   // The vault's checkpoints, each a walk of a stretch, until one signs the head; then the watch's beats and walks.
   for (let round = 0, signed = -1; round < 1_000; round += 1) {
     const checkpoint = await deps.vault.checkpoint();
@@ -218,9 +243,10 @@ async function caughtUp(): Promise<void> {
  * The history, `SIZE` long in each shape, oldest first, behind the instance's own entries: a long tail of another
  * member's reads in 0.14's log, a thousand to an `occurred_at`; the vault's findings about one member, 0.14's and
  * 0.15's; the access entries and refusals about someone no row names; 0.15's changes of other objects, and rotations of the log's
- * key; one member's reads, a day's; uses sharing one `at`, unsealed; someone's sign-ins, and an MCP client's reads of
- * shop, which their pages hide; and, newest, the scheduler's heartbeats, which an ordinary page and its own hide. Entries of 0.14's log are chained and MAC'd under their author's key; rows of 0.15's carry no MAC of the
- * vault's, which a page marks forged and a check refuses, reading them all the same.
+ * key; one member's reads, a day's; uses, a few to a millisecond; someone's sign-ins, and an MCP client's reads of
+ * shop, which their pages hide; and, newest, the scheduler's heartbeats, which an ordinary page and its own hide.
+ * Entries of 0.14's log are chained and MAC'd under their author's key, and 0.15's under the vault's, which its
+ * checkpointer seals (`caughtUp`), as a deployment's every 500 ms.
  */
 async function grow(): Promise<void> {
   const app = appLogKey(deps.chainKey);
@@ -236,12 +262,26 @@ async function grow(): Promise<void> {
   const now = Date.now();
   // The rotations of the log's key, as many as a log takes in its life (`ROTATIONS_HELD` in @coffre/vault: no more is
   // written through the vault's login), at both sizes; and as many changes of other objects as the size.
-  await withTriggersLifted(db.owner, 'log_changes', (tx) => rowsOf(tx, sql`
-    INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-    SELECT nextval('log_number'), ${now}::bigint + g, 'sweep:' || g, CASE WHEN g <= ${ROTATIONS} THEN ${KEY_OBJECT}::uuid ELSE gen_random_uuid() END, 'system:sweep',
-           CASE WHEN g <= ${ROTATIONS} THEN json_build_object('rotation', json_build_object('from', 'k' || g, 'to', 'k' || (g + 1), 'at', g::text))::text ELSE '{}' END,
-           ${ZERO16}::bytea, ${ZERO16}::bytea
-      FROM generate_series(1, ${ROTATIONS + SIZE}) g`));
+  const mac = logMac(deps.vault.signingKey);
+  const changes = Array.from({ length: ROTATIONS + SIZE }, (_, i) => {
+    const g = i + 1;
+    const row = {
+      at: now + g, requestId: `sweep:${g}`, object: g <= ROTATIONS ? KEY_OBJECT : randomUUID(),
+      payload: g <= ROTATIONS ? JSON.stringify({ rotation: { from: `k${g}`, to: `k${g + 1}`, at: String(g) } }) : '{}',
+    };
+    return { ...row, mac: mac('changes', [BigInt(row.at), row.requestId, row.object, 'system:sweep', row.payload, ZERO16]) };
+  });
+  await withTriggersLifted(db.owner, 'log_changes', async (tx) => {
+    for (let done = 0; done < changes.length; done += 5_000) {
+      const batch = changes.slice(done, done + 5_000);
+      await rowsOf(tx, sql`
+        INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+        SELECT nextval('log_number'), r.at, r.request_id, r.object, 'system:sweep', r.payload, ${ZERO16}::bytea, r.mac
+          FROM unnest(${sql.param(batch.map((c) => String(c.at)))}::bigint[], ${sql.param(batch.map((c) => c.requestId))}::text[],
+                      ${sql.param(batch.map((c) => c.object))}::uuid[], ${sql.param(batch.map((c) => c.payload))}::text[],
+                      ${sql.param(batch.map((c) => c.mac))}::bytea[]) AS r(at, request_id, object, payload, mac)`);
+    }
+  });
   const day = new Date(now).toISOString().slice(0, 10);
   await rowsOf(db.owner, sql`SELECT make_day(${day}::date)`);
   // One member's reads of market/dev's three keys, each at its version, and through market/prod's reference to its
@@ -273,10 +313,28 @@ async function grow(): Promise<void> {
         FROM generate_series(1, ${Math.min(SIZE, 1_000)}) g`);
     for (const leaver of LEAVERS) await rowsOf(db.owner, sql`INSERT INTO log_read_days (principal, day) VALUES (${`user:${leaver}`}, ${today - back}) ON CONFLICT DO NOTHING`);
   }
-  await rowsOf(db.owner, sql`
-    INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
-    SELECT nextval('log_number'), ${Date.now()}::bigint, g, ${place!.credential}::uuid, ${place!.secret}::uuid, 1, ${ZERO16}::bytea
-      FROM generate_series(1, ${SIZE}) g`);
+  // The uses, each at a time of its own, a few to a millisecond, as a deployment's come in, and above the floor the
+  // checkpointer reads its window from, so that it seals them (`caughtUp`); below the floor its next barrier sets, so
+  // that, sealed, no window above the newest pair reads them again. Uses sharing one `at` are T248's case, which
+  // packages/vault/test/log-store.test.ts holds `lowestAbove` to.
+  const [span] = await rowsOf<{ floor: string; ceiling: string }>(db.owner, sql`
+    SELECT (SELECT k.at_floor FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1)::text AS floor,
+           ((extract(epoch FROM clock_timestamp()) * 1000)::bigint - deadline_max())::text AS ceiling`);
+  const [floor, ceiling] = [Number(span!.floor), Number(span!.ceiling)];
+  assert.ok(ceiling - floor > 1, `no time between the checkpointer's floor (${floor}) and the next barrier's (${ceiling}) to stamp uses in`);
+  const uses = Array.from({ length: SIZE }, (_, i) => {
+    const row = { at: floor + 1 + Math.floor((i * (ceiling - floor - 1)) / SIZE), requestId: BigInt(i + 1) };
+    return { ...row, mac: mac('uses', [BigInt(row.at), row.requestId, place!.credential, place!.secret, 1, null]) };
+  });
+  for (const t of [uses[0]!.at, uses.at(-1)!.at]) await rowsOf(db.owner, sql`SELECT make_day(${new Date(t).toISOString().slice(0, 10)}::date)`);
+  for (let done = 0; done < uses.length; done += 5_000) {
+    const batch = uses.slice(done, done + 5_000);
+    await rowsOf(db.owner, sql`
+      INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
+      SELECT nextval('log_number'), r.at, r.request_id, ${place!.credential}::uuid, ${place!.secret}::uuid, 1, r.mac
+        FROM unnest(${sql.param(batch.map((u) => String(u.at)))}::bigint[], ${sql.param(batch.map((u) => String(u.requestId)))}::bigint[],
+                    ${sql.param(batch.map((u) => u.mac))}::bytea[]) AS r(at, request_id, mac)`);
+  }
   // Entries a page leaves out unless asked for detail, all of an actor's or a place's (Fable r1 of #559): someone who
   // only ever signed in; someone's reads of shop through MCP (its caller the actor, as `mcp/endpoint.ts` writes them), ; and the heartbeats.
   await appendMany(app, SIZE, () => ({ actor: SIGNER, action: 'sign_in', decision: 'allow', metadata: '{}' }));

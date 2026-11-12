@@ -16,7 +16,9 @@
 
 # SELECT st.*, g.* FROM (SELECT c.through AS s_through, c.pair AS s_pair, c.at AS s_at, c.mac AS s_mac, k.upto AS s_sealed, k.at AS s_sealed_at, c.only_
 #   from packages/server/src/db/reads.ts:248 (readsByStanding)
+097fe4b7b4cd GET /members/token%3Aci-web (owner)
 097fe4b7b4cd GET /members/user%3Aleaver%40acme.example (owner)
+097fe4b7b4cd GET /members/user%3Areader%40acme.example (owner)
 097fe4b7b4cd GET the removed member's report (owner)
 097fe4b7b4cd an offboarding (owner)
 
@@ -28,15 +30,6 @@
 #   from packages/server/src/db/queries.ts:3691 (auditActionCounts) < packages/server/src/api/audit.ts:431
 #   grows in some runs alone: its plan flips at 20,000 (271 -> 2,602 pages in one run, 271 -> 116 in another)
 10ca383ca09a GET /audit?actor=user%3Aadmin%40acme.example (owner)
-
-# SELECT * FROM (SELECT 'changes' AS tree, c.number AS n, c.at::text AS at, c.request_id, c.object::text AS object, c.actor, c.payload, c.seal, c.mac, N
-#   from packages/vault/src/log-store.ts:261 (postgresWindow) < packages/vault/src/log-store.ts:284
-19f0debdde07 the checkpointer's tick and projection with a replaced key (the keyring)
-19f0debdde07 the checkpointer's tick and the reads' projection
-
-# SELECT * FROM (SELECT 'changes' AS tree, c.number AS n, c.at::text AS at, c.request_id, c.object::text AS object, c.actor, c.payload, c.seal, c.mac, N
-#   from packages/vault/src/log-store.ts:261 (postgresWindow) < packages/vault/src/log-store.ts:284
-33ec1dc43056 GET /audit/trees (owner)
 
 # select count(*) from "audit_log" where ("audit_log"."seq" >= $1 and "audit_log"."seq" <= $2)
 #   from packages/db/src/log.ts:576 (missingEntry) < packages/server/src/api/audit.ts:1227, packages/vault/src/vault.ts:3693, packages/vault/src/vault.ts:5331
@@ -84,11 +77,6 @@
 # select "action", count(*) from "audit_log" where ("audit_log"."author" in ($1, $2) and "audit_log"."action" in ($3, $4, $5, $6, $7, $8, $9, $10, $11, 
 #   from packages/server/src/db/queries.ts:3691 (auditActionCounts) < packages/server/src/api/audit.ts:431
 80b29b9c5185 GET /audit?decision=deny (owner)
-
-# SELECT min(u.at)::text AS v FROM log_uses u WHERE u.at >= $1::bigint AND u.number > $2 AND u.number <= $3
-#   from packages/vault/src/log-store.ts:291 (lowestAbove)
-882ef0d4c748 the checkpointer's tick and projection with a replaced key (the keyring)
-882ef0d4c748 the checkpointer's tick and the reads' projection
 
 # select "subject_principal", (CASE WHEN jsonb_typeof("audit_log"."metadata"::jsonb -> 'change') = 'string' THEN "audit_log"."metadata"::jsonb ->> 'chan
 #   from packages/db/src/grants.ts:265 (tamperedMembers)

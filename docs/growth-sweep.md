@@ -71,12 +71,14 @@ on a fresh clone of the migrated template:
    access grants and refusals about someone no member row names; 0.15's changes
    of other objects and rotations of the log's key; one member's reads of the
    same four keys at their versions (one through a reference), a thousand a
-   day, over a day for each thousand; uses sharing one `at`, unsealed; someone
+   day, over a day for each thousand; uses, a few to a millisecond; someone
    who only ever signed in, and an MCP client's reads of the `shop` project,
    which their own pages hide; and, newest, the scheduler's heartbeats, which
    an ordinary audit page and the scheduler's own hide. Then the watch and the
    vault catch up with it, as a deployment's do between beats, so that what a
-   beat walks is what came since.
+   beat walks is what came since, and the checkpointer seals 0.15's log to its
+   head, as a deployment's does every 500 ms, so that its tick and the trees'
+   check read what came since the newest checkpoint, not the whole history.
 4. **Settled.** `VACUUM (ANALYZE)` of every table, then autovacuum off for each:
    no dead row, no missing statistic, and no autovacuum run in the middle of
    the measured rounds, which flipped plans and buffer counts by a few pages
@@ -136,8 +138,10 @@ as on a grown one, 18 after): only its later runs count. A path whose runs of
 a statement at either size were all first runs on their backends is not
 compared, and fails the sweep (`COLD`).
 
-Rows of 0.15's log carry no MAC of the vault's, so the checkpointer refuses
-at the first: it runs its reads first, which is what is measured, but a
-backlog it would drain stays where it is (`lowestAbove` and the
-checkpointer's window have tests of their own that drain one, in
-`packages/vault/test/log-store.test.ts`).
+The seeded rows of 0.15's log carry the vault's MAC, as a deployment's do, or
+the checkpointer would refuse the first and leave them all as a backlog above
+its newest checkpoint, which its tick and the trees' check would read whole
+(91 to 196 pages, and 62 to 389, until T288). A run that leaves any seeded
+row unsealed fails before it measures. A backlog to drain, and uses sharing
+one `at` (T248), have tests of their own, in
+`packages/vault/test/log-store.test.ts`.
