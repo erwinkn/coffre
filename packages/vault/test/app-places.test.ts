@@ -863,7 +863,8 @@ test("a break by a Developer in a protected environment after a writer marked it
   });
   assert.equal(made.ok ? 'made' : made.refusal.code, 'tampered');
   // So the reference is one 0.14 made there before the cutover: the vault's own `reference.create`, allowed, under its
-  // key, as `via`'s entry is, naming the legacy holder. The batch then reaches the per-reference decision, not a seal.
+  // key, as `via`'s entry is, naming the legacy holder. Both entries then seal, and the batch reaches the places check
+  // (`#placesHold`), which refuses it whole: it never reaches the per-reference reader rule.
   const [{ metadata }] = await rows<{ metadata: string }>(db.owner, sql`SELECT metadata FROM audit_log WHERE seq = ${BigInt(via.seq)}`) as [{ metadata: string }];
   const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{
     actor: ROOT, action: 'reference.create', decision: 'allow', projectId: w.project, environmentId: legacy,
@@ -876,7 +877,7 @@ test("a break by a Developer in a protected environment after a writer marked it
     createdSeq: BigInt(seq), createdBy: ROOT,
   });
   const batch = await vault.endReferences({ principal: dana, caller: 'person', reason: 'broken', items: [via, { reference: oldRef, seq }] });
-  // Refused as the protected reference alone is, past both seals: not `bad_claim`, an entry the vault never sealed.
+  // Refused as the protected reference alone is, by `#placesHold`: not `bad_claim`, an entry the vault never sealed.
   assert.equal(batch.ok ? 'ended' : batch.refusal.code, refused.ok ? 'ended' : refused.refusal.code);
   assert.equal(batch.ok ? 'ended' : batch.refusal.code, 'tampered');
   await run(db.owner, sql`UPDATE projects SET slug = ${slug} WHERE id = ${w.project}`);
