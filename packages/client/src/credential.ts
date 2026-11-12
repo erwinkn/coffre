@@ -12,6 +12,8 @@
  * `COFFRE_HANDLE`, the handle that stands in for the environment's values;
  * the proxy injects the key, and the app never holds it.
  */
+import { JSON_MESSAGE_BYTES } from './dpop.ts';
+
 export type ProxiedCredential = {
   /** The credential's URL on the proxy: `<url>/<path>` is `<upstream>/<path>`. */
   url: string;
@@ -45,9 +47,6 @@ export type ProxiedCredential = {
 };
 
 type Env = Record<string, string | undefined>;
-
-/** The longest message `sign` sends as JSON, base64url: what coffre reads whole. A longer one goes raw. */
-const JSON_MESSAGE_BYTES = 1024 * 1024;
 
 /** The credential `name`, as `coffre run` gave the app it; `env` and `fetcher` for tests and odd runtimes. */
 export function credential(

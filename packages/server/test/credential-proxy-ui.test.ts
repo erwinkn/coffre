@@ -621,6 +621,19 @@ test('a two-segment stable URL whose handle rides only in the body: the UI route
   assert.deepEqual([reached.at(-1)!.method, reached.at(-1)!.url], ['POST', '/login/token']);
 });
 
+test("an octet-stream POST to a two-segment URL, its handle outside the body: route `<a>` at `/<b>`, not a raw sign (Fable's review of #572)", ON_015, async () => {
+  await save({
+    dropbox: {
+      kind: 'route', name: 'dropbox', upstream: `${upstreamUrl}/dropbox`, inject: [{ kind: 'header', name: 'authorization', template: 'Bearer {OPENAI_API_KEY}' }],
+      allow: [{ methods: ['POST'], path: '/upload' }], limit: { perMinute: null, perDay: null }, placeholder: null, egress: null,
+    },
+  });
+  const token = await handle();
+  const answer = await route('/use/dropbox/upload', as(token, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: 'the file' }));
+  assert.equal(answer.status, 200, await answer.clone().text());
+  assert.deepEqual([reached.at(-1)!.method, reached.at(-1)!.url, reached.at(-1)!.headers.authorization, reached.at(-1)!.body], ['POST', '/dropbox/upload', `Bearer ${OPENAI}`, 'the file']);
+});
+
 test("a handle escaped as its slot's own encoding allows: a query's or a form's percent escapes, a JSON string's \\u escapes, found with no other sign of it (review r7 of #467)", ON_015, async () => {
   deploy(proxyOf(), NO_CACHE);
   const post = [{ methods: ['POST'], path: '/token' }];

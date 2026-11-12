@@ -28,7 +28,7 @@
  *     once if the gate asks for a fresh one;
  *   - logout on `close()`, and on SIGTERM.
  */
-import { base64url, bodyDigest, bodyLine, contentDigest, createProof, declaredDigest, generateProofKey, thumbprint, type ProofKey, type PublicJwk } from './dpop.ts';
+import { base64url, bodyDigest, bodyLine, contentDigest, createProof, declaredDigest, generateProofKey, JSON_MESSAGE_BYTES, thumbprint, type ProofKey, type PublicJwk } from './dpop.ts';
 import { CoffreError } from './index.ts';
 import type { Proof, ProofContext } from './workload-proofs.ts';
 
@@ -740,9 +740,6 @@ function retryAfter(response: Response, fallback: number): number {
 function backoff(tries: number): number {
   return Math.min(60_000, 1000 * 2 ** tries) * (0.75 + Math.random() / 2);
 }
-
-/** The longest message `sign` sends as JSON, base64url: what coffre reads whole. A longer one goes raw. */
-const JSON_MESSAGE_BYTES = 1024 * 1024;
 
 /** A message as coffre's `sign` and `verify` take it: a string's UTF-8, base64url. */
 const bytesOf = (message: string | Uint8Array) => base64url(typeof message === 'string' ? new TextEncoder().encode(message) : message);

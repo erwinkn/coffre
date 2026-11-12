@@ -755,9 +755,10 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     // made for `<a>/<b>`; otherwise route `<a>` at `/<b>…` (section 6), the handle found outside the body or in it. A
     // made-for list this isolate keeps decides, no call made; else the route use reads both, the place itself and route
     // `<a>`, in its one call (C2b4), and the place's answer, nothing used, falls through to what the place's URL serves.
-    // Never a raw sign's (`rawSign`): its body is the message, which no route's item reads a handle from.
-    if (!coded(proxy, place[0]!) && !rawSign) {
-      const handle = await uiHandle(request, url);
+    // A raw sign's handle (`rawSign`) is looked for outside its body alone: its body is the message, never read for one
+    // (reviews r1 and r2 of #572), and an octet-stream POST to route `<a>` at `/<b>` still reaches it (Fable's review).
+    if (!coded(proxy, place[0]!)) {
+      const handle = await uiHandle(request, url, !rawSign);
       if (handle instanceof Response) return handle;
       if (handle !== null) {
         const at = `${place[0]}/${place[1]}`;
@@ -864,14 +865,14 @@ function coded(proxy: Proxy, name: string): boolean {
 
 /**
  * The one handle a request carries for a UI route, before any item says where it rides: by its shape outside the body
- * (`handlesOutside`), else in the body, read from a copy (64 KiB at most), which leaves the request's own unread. Two
- * different handles: 400.
+ * (`handlesOutside`), else in the body, unless `inBody` is false, read from a copy (64 KiB at most), which leaves the
+ * request's own unread. Two different handles: 400.
  */
-async function uiHandle(request: Request, url: URL): Promise<string | null | Response> {
+async function uiHandle(request: Request, url: URL, inBody = true): Promise<string | null | Response> {
   const outside = handlesOutside(request, url);
   if (outside.size > 1) return failure(400, 'the request carries two different handles: a route takes one');
   if (outside.size === 1) return outside.values().next().value!;
-  if (request.body === null || request.method === 'GET' || request.method === 'HEAD') return null;
+  if (!inBody || request.body === null || request.method === 'GET' || request.method === 'HEAD') return null;
   const copy = request.clone();
   try {
     const bytes = await boundedBody(copy, MAX_FIELD_BODY);
@@ -2144,7 +2145,9 @@ async function sign(coffre: PluginContext, proxy: Proxy, path: string, who: User
 async function verify(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, verifier: Hmac, asked: { message?: unknown; signature?: unknown }): Promise<Response> {
   const message = messageOf(asked.message);
   if (message === null) return failure(400, 'verify a message given as base64url: the body as it came, byte for byte');
-  if (message.byteLength > longest(verifier)) return failure(413, `${name} checks a message of ${sized(longest(verifier))} at most: its hmac()'s maxBytes takes a longer one`);
+  // A signer's maxBytes may take a raw message; a message to verify is JSON's, 1 MiB at most (Fable's review of #572).
+  const most = Math.min(longest(verifier), MAX_MESSAGE_BYTES);
+  if (message.byteLength > most) return failure(413, `${name} checks a message of ${sized(most)} at most${most < MAX_MESSAGE_BYTES ? ": its hmac()'s maxBytes takes a longer one" : ''}`);
   if (typeof asked.signature !== 'string') return failure(400, 'verify a signature given as a string, as its header carried it');
   if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: name })) return failure(403, `this narrowed session may not verify with ${name}`, 'narrowed');
   const { secret, by } = await hmacSecret(coffre, proxy, path, who, name, verifier);
@@ -2220,20 +2223,23 @@ async function fed(body: ReadableStream<Uint8Array> | null, length: number, dige
   const declared = declaredBody(length, digest);
   if (body === null) return declared.end();
   const parts = partsOf(body);
-  try {
-    for (;;) {
-      const { done, value } = await parts.read();
-      const refused = value === undefined || value.length === 0 ? null : declared.take(value);
-      if (refused !== null) {
-        parts.cancel();
-        return refused;
-      }
-      if (value !== undefined && value.length > 0) feed(value);
-      if (done) return declared.end();
+  for (;;) {
+    let read: ReadableStreamReadResult<Uint8Array>;
+    // Only the read is the caller's to break: a throw past it is coffre's, a 500 (Fable's review of #572).
+    try {
+      read = await parts.read();
+    } catch {
+      parts.cancel();
+      return 'the body broke off before its end';
     }
-  } catch {
-    parts.cancel();
-    return 'the body broke off before its end';
+    const { done, value } = read;
+    const refused = value === undefined || value.length === 0 ? null : declared.take(value);
+    if (refused !== null) {
+      parts.cancel();
+      return refused;
+    }
+    if (value !== undefined && value.length > 0) feed(value);
+    if (done) return declared.end();
   }
 }
 

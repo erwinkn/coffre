@@ -68,15 +68,15 @@ function parts(bytes: Uint8Array, pause?: { at: number; until: Promise<unknown>;
   });
 }
 
-/** A raw sign of `MESSAGE` by sumsub-key, its digest declared, as `@coffre/client` sends it. */
-function sign(body: ReadableStream<Uint8Array>): Promise<Response> {
+/** A raw sign of `message` (`MESSAGE`) by sumsub-key, its digest declared, as `@coffre/client` sends it. */
+function sign(body: ReadableStream<Uint8Array>, message: Uint8Array = MESSAGE): Promise<Response> {
   return fetch(`${at}/use/market/dev?sign=sumsub-key`, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${HANDLE}`,
       'content-type': 'application/octet-stream',
-      'content-length': String(MESSAGE.length),
-      'content-digest': `sha-256=:${createHash('sha256').update(MESSAGE).digest('base64')}:`,
+      'content-length': String(message.length),
+      'content-digest': `sha-256=:${createHash('sha256').update(message).digest('base64')}:`,
     },
     body,
     duplex: 'half',
@@ -119,8 +119,10 @@ async function heapHeld(): Promise<number> {
 }
 
 test('the isolate holds none of a raw message as it signs it: 9 MiB in, its heap is as it was', { timeout: 60_000 }, async () => {
-  // A sign first: the isolate, and its inspector's target, start with its first request.
-  assert.equal((await sign(parts(MESSAGE))).status, 200);
+  // A sign first: the isolate, and its inspector's target, start with its first request. A short one, so that `before`
+  // holds no body-sized garbage a collection during the next sign could hide a held body behind (Fable's review of #572).
+  const warm = Buffer.from('warm');
+  assert.equal((await sign(parts(warm), warm)).status, 200);
   const before = await heapHeld();
   let resume!: () => void;
   let reached!: () => void;

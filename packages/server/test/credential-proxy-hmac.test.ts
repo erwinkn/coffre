@@ -224,6 +224,10 @@ test("SumSub's document upload, 10 MiB, signs raw as Node's createHmac signs it,
   const json = await route('/use/market/dev', { method: 'POST', headers: { authorization: `Bearer ${env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ sign: { credential: 'sumsub-key', message: message.subarray(0, 1024 * 1024 + 1).toString('base64url') } }) });
   assert.equal(json.status, 413);
   assert.match(((await json.json()) as { message: string }).message, /goes raw, its bytes as the body: POST \?sign=sumsub-key, Content-Type: application\/octet-stream/);
+  // A message to verify is JSON's, 1 MiB at most, whatever the signer's maxBytes takes (Fable's review of #572).
+  const long = message.subarray(0, 1024 * 1024 + 2000);
+  const verify = await route('/use/market/dev', { method: 'POST', headers: { authorization: `Bearer ${env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ verify: { credential: 'sumsub-key', message: long.toString('base64url'), signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, long) } }) });
+  assert.deepEqual([verify.status, ((await verify.json()) as { message: string }).message], [413, 'sumsub-key checks a message of 1 MiB at most']);
   // A signer whose maxBytes is the default signs 64 KiB raw, as it does as JSON.
   assert.equal(await used(env, 'iframe-token').sign(message.subarray(0, 1024 * 1024 + 1)).catch((error: Error) => error.message), 'coffre signed nothing: iframe-token signs a message of 64 KiB at most: its hmac()\'s maxBytes takes a longer one, up to 12 MiB');
 });

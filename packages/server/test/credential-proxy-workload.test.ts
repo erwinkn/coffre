@@ -472,10 +472,22 @@ test("a workload signs a 10 MiB message raw through the SDK, its proof binding t
   const url = `${ORIGIN}/use/market/prod?sign=sumsub-key`;
   const bytes = randomBytes(2 * 1024 * 1024);
   const digest = createHash('sha256').update(bytes).digest('hex');
+  /** How many parts coffre asked of the last body `raw` sent: nothing is pulled ahead (`highWaterMark` 0), so 0 is a body nobody read. */
+  let pulled = 0;
   /** `sent` streamed, its headers those given, its proof signing `signed` headers (those, unless told) and `line`. */
   const raw = async (sent: Uint8Array, headers: Record<string, string>, options: { signed?: Record<string, string>; line?: string } = {}) => {
     const proof = await createProof(held.key, { method: 'POST', url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: options.signed ?? headers, body: options.line ?? digest } });
-    const request = new Request(url, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...headers, 'content-length': String(sent.length), authorization: `DPoP ${held.token}`, dpop: proof }, body: chunked(sent), duplex: 'half' } as RequestInit);
+    pulled = 0;
+    const parts = chunked(sent).getReader();
+    const body = new ReadableStream<Uint8Array>({
+      async pull(out) {
+        pulled++;
+        const { done, value } = await parts.read();
+        if (done) out.close();
+        else out.enqueue(value);
+      },
+    }, { highWaterMark: 0 });
+    const request = new Request(url, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...headers, 'content-length': String(sent.length), authorization: `DPoP ${held.token}`, dpop: proof }, body, duplex: 'half' } as RequestInit);
     return read((await pluginRoute(request, runtime, IP))!);
   };
   const declared = { 'content-type': 'application/octet-stream', 'content-digest': contentDigest(digest) };
@@ -490,12 +502,15 @@ test("a workload signs a 10 MiB message raw through the SDK, its proof binding t
   const undeclared = await raw(bytes, { 'content-type': 'application/octet-stream' }, { line: await bodyDigest('') });
   assert.equal(undeclared.status, 400);
   assert.match(undeclared.body.message as string, /a workload's raw message declares its SHA-256, which its proof signs/);
+  assert.equal(pulled, 0, 'refused before its body is read');
   // The digest's header unsigned, or a digest other than the one signed.
   const unsigned = await raw(bytes, declared, { signed: { 'content-type': 'application/octet-stream' } });
   assert.deepEqual([unsigned.status, unsigned.body.message], [400, 'content-digest says what binds the body, so the proof signs it: name it in hdr']);
+  assert.equal(pulled, 0, 'refused before its body is read');
   const other = createHash('sha256').update('another document').digest('hex');
   const resigned = await raw(bytes, declared, { signed: { 'content-type': 'application/octet-stream', 'content-digest': contentDigest(other) }, line: other });
   assert.deepEqual([resigned.status, resigned.body.reason], [401, 'req']);
+  assert.equal(pulled, 0, 'refused before its body is read');
 });
 
 test('a body other than its Content-Digest says, short of its length, past it, or declaring it badly is refused, and the upstream never gets it whole', { timeout: 60_000 }, async () => {
@@ -646,6 +661,10 @@ test("a narrowed session is held to its constraints on the URL sent, and one lim
   assert.deepEqual([signed.status, signed.body.reason], [403, 'narrowed']);
   const verified = await use(child, 'POST', '/use', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verify: { credential: 'webhook', message: 'aGk', signature: 'sha256=00' } }) });
   assert.deepEqual([verified.status, verified.body.reason], [403, 'narrowed']);
+  // Raw too (Fable's review of #572).
+  const hi = createHash('sha256').update('hi').digest('hex');
+  const rawSigned = await use(child, 'POST', '/use?sign=sumsub-key', { headers: { 'content-type': 'application/octet-stream', 'content-length': '2', 'content-digest': contentDigest(hi) }, body: 'hi' });
+  assert.deepEqual([rawSigned.status, rawSigned.body.reason], [403, 'narrowed']);
   assert.equal(reached.length, 1);
 });
 
