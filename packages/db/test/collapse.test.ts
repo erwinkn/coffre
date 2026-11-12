@@ -37,7 +37,8 @@ async function database(name: string, template?: string): Promise<string> {
 /** A statement applied: the rows it inserted, updated or deleted, and the table it rewrote in place and its rows then. */
 type Applied = { statement: string; written: number; rewritten: string | null; held: number };
 /** The table a statement converts in place, each row's column to a new type (`ALTER TABLE t ALTER COLUMN c TYPE … USING …`). */
-const rewrites = (statement: string) => /^ALTER TABLE (?:ONLY )?"?(\w+)"? ALTER COLUMN "?\w+"? (?:SET DATA )?TYPE [^;]*\bUSING\b/i.exec(code(statement))?.[1] ?? null;
+const rewrites = (statement: string) =>
+  /^ALTER TABLE (?:IF EXISTS )?(?:ONLY )?(?:"?public"?\.)?"?(\w+)"? ALTER COLUMN "?\w+"? (?:SET DATA )?TYPE [^;]*\bUSING\b/i.exec(code(statement))?.[1] ?? null;
 
 /**
  * `migrations` applied as the migrator applies them, but for its ledger's rows: in one transaction, then the indexes
@@ -45,7 +46,7 @@ const rewrites = (statement: string) => /^ALTER TABLE (?:ONLY )?"?(\w+)"? ALTER 
  */
 async function apply(url: string, migrations: readonly string[]): Promise<Applied[]> {
   const client = postgresSession(url);
-  const WRITTEN = `SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0)::int8::text AS n FROM pg_stat_xact_all_tables`;
+  const WRITTEN = `SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0)::int8::text AS n FROM pg_stat_xact_user_tables`;
   const applied: Applied[] = [];
   try {
     await client.begin(async (tx) => {
@@ -264,7 +265,7 @@ test('on a 0.15.0 database with rows, the upgrade writes what the numbered migra
   await apply(stepped, (await numbered()).slice(release.length).map(({ sql }) => sql));
   const upgraded = await database('seeded_upgraded', `${PREFIX}_seeded`);
   const applied = await apply(upgraded, [assemble(collapsed.upgrade, collapsed.functions)]);
-  const writers = applied.filter(({ statement }) => /^(?:INSERT|UPDATE|DELETE|MERGE|WITH|COPY|DO|CALL)\s/i.test(code(statement)));
+  const writers = applied.filter(({ statement }) => /^(?:INSERT|UPDATE|DELETE|MERGE|WITH|COPY|DO|CALL|REFRESH|CREATE (?:UNLOGGED |TEMP(?:ORARY)? )?TABLE (?:IF NOT EXISTS )?[\w."]+ (?:\([^)]*\) )?AS)\s/i.test(code(statement)));
   assert.ok(writers.length > 0);
   for (const { statement, written } of writers) {
     if (WRITES_NOTHING.some(({ matches }) => matches.test(statement))) continue;

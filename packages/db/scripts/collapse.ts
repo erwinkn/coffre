@@ -116,9 +116,9 @@ function changed(before: Snapshot, after: Snapshot): string[] {
 
 /**
  * What may run what, by name, and when: a relation runs its triggers' and defaults' functions when written (`write`),
- * its policies' and its view's (functions and relations) when read (`read`), its checks' and indexes' functions when
- * written or rebuilt (`structure`), its partitions however it is touched (`all`), the tables its foreign keys cascade
- * to and the domains of its columns when written; a domain its checks' functions; a function every name its body holds
+ * its policies' and its view's (functions and relations) when read (`read`), its checks', indexes', generated columns'
+ * and its columns' domains' when written or rebuilt (`structure`), its partitions however it is touched (`all`), the
+ * tables its foreign keys cascade to when written; a domain its checks' functions; a function every name its body holds
  * (a function, a table, a view; words in its strings too, for what it runs by EXECUTE), however it is called. Collected
  * at every step, so it holds every edge the path ever had, and every function name (`functions`).
  */
@@ -128,12 +128,13 @@ type Runs = { edges: Map<string, Set<`${Kind} ${string}`>>; functions: Set<strin
 const RELATION_EDGES = `
   WITH used AS (
     SELECT coalesce(t.tgrelid, ad.adrelid, nullif(co.conrelid, 0), rw.ev_class, po.polrelid, ix.indrelid) AS rel,
-           CASE WHEN t.oid IS NOT NULL OR ad.oid IS NOT NULL THEN 'write' WHEN po.oid IS NOT NULL OR rw.oid IS NOT NULL THEN 'read' ELSE 'structure' END AS kind,
+           CASE WHEN t.oid IS NOT NULL OR (ad.oid IS NOT NULL AND ga.attgenerated = '') THEN 'write' WHEN po.oid IS NOT NULL OR rw.oid IS NOT NULL THEN 'read' ELSE 'structure' END AS kind,
            p.proname::text AS runs
       FROM pg_depend d
       JOIN pg_proc p ON d.refclassid = 'pg_proc'::regclass AND p.oid = d.refobjid AND p.pronamespace = 'public'::regnamespace
       LEFT JOIN pg_trigger t ON d.classid = 'pg_trigger'::regclass AND t.oid = d.objid
       LEFT JOIN pg_attrdef ad ON d.classid = 'pg_attrdef'::regclass AND ad.oid = d.objid
+      LEFT JOIN pg_attribute ga ON ga.attrelid = ad.adrelid AND ga.attnum = ad.adnum
       LEFT JOIN pg_constraint co ON d.classid = 'pg_constraint'::regclass AND co.oid = d.objid
       LEFT JOIN pg_rewrite rw ON d.classid = 'pg_rewrite'::regclass AND rw.oid = d.objid
       LEFT JOIN pg_policy po ON d.classid = 'pg_policy'::regclass AND po.oid = d.objid
@@ -147,7 +148,7 @@ const RELATION_EDGES = `
   SELECT co.contypid::regtype::text, 'all', p.proname::text FROM pg_depend d JOIN pg_proc p ON d.refclassid = 'pg_proc'::regclass AND p.oid = d.refobjid
     JOIN pg_constraint co ON d.classid = 'pg_constraint'::regclass AND co.oid = d.objid WHERE co.contypid <> 0
   UNION
-  SELECT a.attrelid::regclass::text, 'write', ty.oid::regtype::text FROM pg_attribute a JOIN pg_type ty ON ty.oid = a.atttypid
+  SELECT a.attrelid::regclass::text, 'structure', ty.oid::regtype::text FROM pg_attribute a JOIN pg_type ty ON ty.oid = a.atttypid
    WHERE ty.typtype = 'd' AND ty.typnamespace = 'public'::regnamespace AND a.attnum > 0 AND NOT a.attisdropped
   UNION
   SELECT i.inhparent::regclass::text, 'all', i.inhrelid::regclass::text FROM pg_inherits i
@@ -158,7 +159,9 @@ const RELATION_EDGES = `
 const uncommented = (sql: string) => sql.replace(/^\s*--[^\n]*$/gm, '');
 /** The words of a statement or a body, as names: lowercased, unquoted. */
 const words = (sql: string) => new Set(uncommented(sql).toLowerCase().match(/[a-z_][a-z0-9_$]*/g) ?? []);
-const named = (name: string) => name.replace(/^public\./, '').replaceAll('"', '');
+const named = (name: string) => name.replaceAll('"', '').replace(/^public\./, '');
+/** A relation's name as a statement spells it: quoted or not, with or without its schema. */
+const NAME = String.raw`((?:"[^"]+"|\w+)(?:\s*\.\s*(?:"[^"]+"|\w+))?)`;
 
 async function collectRuns(client: PostgresClient, runs: Runs, fns: Snapshot, ids: readonly string[]): Promise<void> {
   const add = (runner: string, kind: Kind, what: Iterable<string>) => {
@@ -193,11 +196,11 @@ function mayRun(statement: string, runs: Runs): Set<string> {
   const seeds: (readonly [string, keyof typeof FOLLOWS])[] = /^CREATE (?:UNIQUE )?INDEX\s/i.test(text)
     ? fns
     : /^ALTER TABLE\s/i.test(text)
-      ? [...fns, [named(/^ALTER TABLE (?:IF EXISTS )?(?:ONLY )?("?[\w.]+"?)/i.exec(text)?.[1]?.toLowerCase() ?? ''), 'structure']]
+      ? [...fns, [named(new RegExp(String.raw`^ALTER TABLE (?:IF EXISTS )?(?:ONLY )?${NAME}`, 'i').exec(text)?.[1]?.replace(/\s+/g, '').toLowerCase() ?? ''), 'structure']]
       : /^(?:INSERT|UPDATE|DELETE|MERGE|WITH|SELECT)\s/i.test(text)
         ? [
             ...all.map((word) => [word, 'read'] as const),
-            ...[...text.matchAll(/\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\s+(?:ONLY\s+)?("?[\w.]+"?)/gi)].map(([, target]) => [named(target!.toLowerCase()), 'full'] as const),
+            ...[...text.matchAll(new RegExp(String.raw`\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\s+(?:ONLY\s+)?${NAME}`, 'gi'))].map(([, target]) => [named(target!.replace(/\s+/g, '').toLowerCase()), 'full'] as const),
           ]
         : all.map((word) => [word, 'full'] as const);
   const ran = new Set<string>();
@@ -282,6 +285,7 @@ function placement({ start, steps, touched, end }: Replayed) {
   for (const [id, fn] of end) {
     if (!remade(id)) continue;
     const dropped = steps.findIndex((step) => !step.has(id));
+    if (dropped === -1) throw new Error(`${id} changes in a way CREATE OR REPLACE refuses, yet the numbered path never drops it`);
     placeAt.set(fn.name, Math.max(placeAt.get(fn.name)!, dropped));
   }
   return { placeAt, last, remade };
@@ -355,7 +359,8 @@ function refuseDiverged(where: readonly string[], list: readonly string[], repla
   };
   const refused: string[] = [];
   list.forEach((statement, index) => {
-    if (aboutFunctions(statement) || ownerGrant(statement) || inert(statement)) return;
+    // An online index is built after the transaction, by both paths, so with every function in its final form.
+    if (aboutFunctions(statement) || ownerGrant(statement) || inert(statement) || onlineIndex(statement) !== null) return;
     const numberedAt = index === 0 ? start : steps[index - 1]!;
     const diverged = new Set<string>();
     for (const id of new Set([...numberedAt.keys(), ...start.keys(), ...end.keys()])) {
