@@ -237,7 +237,7 @@ No allowed read and no page writes an event: a use's row is its record, and a li
 | A refusal the app decides (a route the caller may not use, an unknown environment) | The app's transaction under the head: 4 of the request's 9 round trips | `note`: 1 of 6 | 1 vault call; 3 round trips fewer |
 | A sign-in allowed, a token issued or exchanged | An `audit_log` entry beside the credential's change | The credential's change is the record | nothing |
 | A sign-in refused | The app's transaction under the head: 4 of 6 round trips | `note`: 1 of 3 | 1 vault call; 3 round trips fewer |
-| A finding, an alert | The beat's own transaction | `note`, from the beat | no request |
+| A finding | The beat's own transaction | An event the vault writes itself, in `beat` (below) | no request |
 
 So no audited read gains a vault call. The requests that gain one are those the app refuses on its own, and each
 trades four round trips under a global lock for one under none. Nothing cheaper is safe there: the entry cannot ride
@@ -252,12 +252,20 @@ round trip:
 1. The newest signed checkpoint: both trees' notes and their Ed25519 signatures, held to the pair the signer
    remembers outside the database (the checkpointer's Durable Object, written before the row). A database writer who
    serves an older checkpoint ends below that pair, and the check says `behind`. A witness, where one is configured,
-   is a second copy for a signer that lost its memory.
+   is a second copy for a signer that lost its memory. The signer remembers a pair before it writes its row, so for
+   the length of one write the database is honestly one pair below it. So the check asks the signer first and reads
+   after, and the signer answers with the pair the database must have reached: the one it remembers, or the one
+   before while that row's write is pending.
 2. The entries above it, each one's MAC. The checkpointer ticks every 500 ms, so they are a handful; the check reads
    at most 1,250 of them, with no setting of its own: `USES_IN_FLIGHT`, the keys one isolate has in flight at most
    (`packages/core/src/memory.ts`). That is more than two ticks at the database's measured ceiling of 1,040 uses a
    second (`docs/design/config.md`); no cap a second exists. Past that the page says the checkpointer is late, not
-   "verified".
+   "verified". It says `late` too when the checkpointer does not seal, by the signer's own word in the same answer
+   as the pair: whether its last tick ended well in the last 5 s (`sealing`, T169), no answer within 2 s counting as
+   no. A checkpointer dead for an hour with 10 unsealed uses under it is `late`, where the count alone said `ok`.
+   The check does not compare the age of the oldest unsealed entry instead: that sets the vault's clock at the use
+   against the database's, a dead checkpointer with nothing unsealed would pass until the next change answered
+   503, and the signer's word is one a database writer cannot alter.
 3. The frozen log's last row, against the change that anchored it at the upgrade (section 6).
 4. Handed in with the call: the rows shown and the cursor. Each row's MAC, the cursor's, and how far the cursor is
    behind the checkpoint, which the page shows as "listed through 14:05:03".
@@ -281,6 +289,81 @@ uses' rows, and is on no report: the report covers retention's window and states
 read has no reader, so the table is not built. The 5-minute beat keeps one job: it runs the same `check` when nobody
 is looking and raises a finding when it fails. A scheduled re-derivation of the projections does not earn its place:
 it would vouch for rows as they were when it ran, and a row deleted later is the recheck's to find, as today.
+
+### The watch after
+
+Today's watch (`plugins/audit-watch.ts`, `watch.ts`, the store's three files: about 900 lines) serves the old chain.
+Its beat appends `audit.heartbeat`, has the vault sign `audit_log` (`vault.checkpoint()`), walks the chain with the
+app's key and keeps the outcome in a store of the app's, outside the database. After the freeze the app signs nothing
+and nothing is appended, so little is left. Two names, kept apart from here on: **the watch's store** is that store of
+the app's (`AnchorStore`: `durableAnchor(env.ANCHOR)` or `fileAnchor(path)`); **the anchor** is the change the upgrade
+writes, naming the old chain's final entry (section 6).
+
+**The beat is the app's scheduled run, and makes one vault call.** `runScheduled` (Workers' cron, Node's timer, every
+5 minutes) reads the cursor's row and calls `beat`, a vault method P3 adds: the page's `check` with no rows, and,
+when its state is not `ok`, the finding, an event the vault writes itself (author `vault`, id `findingEventId`). A
+checkpointer stuck at 4410 is `system:vault/finding:4410:late`, written once however many beats see it, and each of
+those runs fails, which the scheduler reports. The call replaces the run's `vault.checkpoint()`. The app runs it, not
+the vault's own alarm: the cron exists anyway (spent tokens, removals), a checkpointer cannot report its own death,
+and a finding that cannot be written must fail a run the platform reports.
+
+- **No "finding cleared" event.** No outcome is stored, so no beat knows that one stood. A `late` is over when
+  checkpoints exist above its number, each with its time. A `behind` or a `broken` ends with an operator's act (a
+  restore, a forged row removed), and the next `ok` stands.
+- **New: a projector that stopped.** The beat fails its run, with no finding, when the cursor is more than two beats
+  of entries behind the checkpoint. The page already shows it ("listed through 14:05:03"); this is for when nobody
+  looks. Nothing is wrong with the log, so readiness stays green.
+
+**Readiness is the same check.** `/readyz`, past its doors (migrated, then upgraded, which a probe drives as it drove
+the cutover), reads the cursor's row with the read it already makes and calls `check` with no rows: green on `ok`,
+and the body is the state and its reason. No stored outcome and no heartbeat age. The cursor is handed in as the page
+hands it, so a cursor forged or put back shows without a visitor. A probe costs one vault call, one round trip, one
+ask of the signer and a handful of MACs, 1,250 at most; today's costs the store's read, a log read, the vault's
+`about`, an Ed25519 verification and the `sealing` call, which `check` now includes. Two things change for an
+operator: the body's `heartbeatAgeSeconds`, `checkpointed`, `broken` and `anchored` go (release notes), and a cron
+that stopped no longer turns `/readyz` red. It stops findings and upkeep, not the check, and the platform reports it.
+
+**"The log takes no writes" needs no probe write.** The heartbeat answered a queue that dropped entries while
+operations went on. 0.16 has no queue: an entry is written by the statement or the transaction of what it records,
+and nothing answers before it commits, a refusal included (a `note` that fails fails the request). A log that
+takes no writes refuses the operation. On a quiet instance the checkpointer is the probe: every tick's barrier
+raises the floor's row (`close_one`), entries or not, so `sealing` says the database took a write in the last 5 s,
+where the heartbeat said 5 minutes.
+
+**The watch's store keeps one reader in 0.16, and goes in 0.17.** After the upgrade it catches nothing the signer's
+pair does not: it holds checkpoints of `audit_log` alone, the app's key vouches for no new entry, and the frozen
+log's end is the anchor, a change under the pair. As a second copy for a signer that lost its memory it is what a
+witness is. But 0.16 must read it once: the upgrade's step starts from the newest checkpoint it holds (section 6). So
+in 0.16 the three files, the `ANCHOR` binding and its Durable Object class stay as they are, read by the upgrade's
+door and written by nobody, and `auditWatch({ anchor })` keeps its option and loses its hooks (the beat, readiness,
+`walkOn`, `verified`, `reseal`, `acceptLoss`). A deployment's config does not change at the upgrade. 0.17 deletes the
+store, the binding and the class as a contraction; on Workers that needs a `deleted_classes` migration, which
+`coffre update` writes.
+
+**Loss acceptance goes.** `acceptLoss` moves the watch's store past entries of `audit_log` that a restore or a cut
+lost. A frozen log has no tail to lose: every backup taken after the upgrade holds all of it. So `coffre audit
+accept-loss`, `POST /audit/loss` and the two entry kinds are deleted, and old entries of those kinds stay listed. The
+live chains' own case is unchanged: after a restore the signer's memory is ahead of the database, and resetting it is
+the operator's step (`docs/restore.md`). The upgrade's door needs no acceptance either (section 6).
+
+**Landing order.** One fact fixes it: the anchor is the last row of `audit_log` only once nothing appends to it. So
+`check`'s third item, the page's and readiness's use of `check`, and the projector reading the old log from the
+anchor alone become true in the PR that removes the last appender.
+
+1. **P3, first PR: `check`'s vault half**, with `beat`, against K1's pinned types, called by nothing. Any time
+   after K1.
+2. **V1.** It leaves `vault.checkpoint()` and the old beat alone, so `/readyz` and the watch's tests stay green, and
+   P1's interim projector keeps the 5-minute checkpoints it reads.
+3. **A1's sites.** The app's entries become events. The old beat and its checkpoints are then the only appenders.
+4. **P3, second PR: the swap.** `runScheduled` calls `beat`, `/readyz` and the page call `check`, the old beat, the
+   heartbeat, `vault.checkpoint()`, loss acceptance and the projector's interim reading go, and conformance's
+   readiness check is rewritten (a stopped checkpointer, a deleted checkpoint). It needs 2 and 3.
+5. **A1's freeze**, directly on it: INSERT revoked, the head and `appendAudit` deleted.
+
+The swap is not part of V1's PR. In production the old beat only has to run until the upgrade, and 0.15.0's own does.
+No answer here moves a lock or a re-check: the finding is an event (the fence shared, no object lock, a transaction
+of its own), `check` takes no lock, and the upgrade's step runs behind the door with no flow in flight. `Audit.tla`'s
+scenarios go with the old beat (section 5).
 
 **Two use statements, one rule.** `use_credential` is 1,157 lines because its statement exists four times: with or
 without the seal seeks, with or without a reference and forks; 648 lines are those copies. The target is two
@@ -446,6 +529,7 @@ table, prepared: 0.143 ms against 0.132 ms at 100k changes, 0.196 ms against 0.1
 | Indexes | all 30 on `audit_log` (33 until #576); 18 on `log_changes` (`sign_in`, `issue_revoke`, `written`, `admitted`, `refused_write`, `refused_add`, each with its `_actor`, `_environment` and `_object` variants); 10 on `log_reads`; `secrets_lookup_idx`; 4 on `secret_references`; `credentials_enrollment_roots_idx` |
 | `log_reads` and its family | 4 tables, 6 functions (182), 955 source lines, 430 test |
 | The 0.14 chain's upkeep | heartbeats and checkpoints every 5 minutes, `Audit.tla` and 6 scenarios (910, the 7 to 11 minute `Tampering` run among them); `Audit.lean` stays for the verifier |
+| The watch | `plugins/audit-watch.ts` (418) and most of `watch.ts` (200), their test (621), `vault.checkpoint()`, `coffre audit accept-loss` and its route; in 0.17 the store's three files (298), its test (138), the `ANCHOR` binding and its Durable Object class |
 | `use_credential`'s copies, last release's overloads | 1,157 lines to about 700 to 750, two statements and not one (section 3); `sign_in/35`, `issue_token/28`, `change_bindings/53` (111) |
 | Functions restated whole in migrations | 30,607 of the 33,140 lines of migration SQL, 19,347 of them `use_credential` 22 times |
 | Drizzle snapshots | 328,176 lines; the migrator reads only the journal |
@@ -463,8 +547,9 @@ tests and the `Reads.tla` scenario. Lost: its table, triggers and migration, whi
 ## 6. The upgrade from 0.15.0
 
 1. **Stop.** Run `coffre verify log` on 0.15.0: the full walk of the old chain, in steps, green. Take the app off its
-   route, let one 5-minute beat pass so that the chain ends in a checkpoint its anchor holds, then back up. The beat
-   is the Worker's cron, which fires with the route gone; 0.15.0 has no command or route that runs it on demand.
+   route, let one 5-minute beat pass so that the chain ends in a checkpoint the watch's store holds, then back up
+   and go on to step 2 without waiting. The beat is the Worker's cron, which fires with the route gone; 0.15.0 has no
+   command or route that runs it on demand.
 2. **`coffre migrate`**, as the owner, one migration. It refuses a database that is not a cut-over 0.15.0 (no cutover
    change in `log_changes`, or a schema past 0049 that is not 0.16's). In SQL it creates the tables; fills `settings`
    and `log_keys` from the newest entries, unsealed; drops the indexes, triggers, functions and tables of section 5;
@@ -472,10 +557,12 @@ tests and the `Reads.tla` scenario. Lost: its table, triggers and migration, whi
    functions it calls are gone or changed, and a row it writes directly has no seal, which the vault refuses.
 3. **Deploy 0.16.**
 4. **The vault's step**, on its first call, while the app answers 503 `upgrading` at its one door. It is the same
-   size whatever the log holds. It checks the old chain from the newest checkpoint the anchor holds to its last
-   entry, as 0.15.0's own check does between beats: the app its entries' MACs, the vault its own, and the hashes
-   that link them. That is one beat's entries, 10,000 a call at most. It writes the change that names the chain's
-   final seq and hash, the **anchor** the old log answers to from then on. It checks the settings' and keys' rows
+   size whatever the log holds. The vault cannot read the watch's store, so the app reads it at the door and hands
+   the checkpoint it holds in on the call that runs the step; the vault verifies its own signature on it and
+   requires the log to hold that entry at that hash. It checks the old chain from there to its last entry, as
+   0.15.0's own check does between beats: the app its entries' MACs, the vault its own, and the hashes that link
+   them. That is one beat's entries, 10,000 a call at most. It writes the change that names the chain's final seq
+   and hash, the **anchor** the old log answers to from then on. It checks the settings' and keys' rows
    against the signed entries they came from and writes each one's first change and seal. It signs the cursor at
    the anchor, writes the change that marks the upgrade done, and the door opens.
 
@@ -490,6 +577,18 @@ a cache that one job rebuilds, and the filter is one predicate: listing heartbea
 does not wait for the walk. Until it reaches the first entry, the audit page says how far back it lists and the
 offboarding report says `behind`.
 
+One case is assumed away: a log in which an Owner accepted a loss under 0.15.0 (`audit.loss_accepted`) has a break
+in its hashes at the accepted range, and the backward walk stops there with a finding. A count of that action on
+each deployment says whether any has one. If one does, P1's walk has to go on below an accepted range from the log's
+own rows, as 0.15.0's beat does; that is not designed here.
+
+**With no checkpoint in the watch's store, the step starts from the log's own.** That is a deployment that never
+added the watch (0.15.0 only warns), a store that was lost, or one an operator emptied. The step then starts from the
+newest checkpoint entry `audit_log` itself holds, its signature verified, and the anchor's payload says which it was
+(`held`: `outside` or `log`, a field to add to K1's `AnchorPayload`). Nothing outside the database bounds a cut then
+but the 0.15 cutover's change, which names the old chain's position at the cutover: the exposure such a deployment
+already has on 0.15.0. A record the app's key did not seal refuses the door, as it fails a beat today.
+
 **What a database writer can do in the gap.** Before the anchor: cut entries off the end of the old chain, back to
 the newest checkpoint held outside the database at most. Those are the last beat's entries, of the kinds 0.15.0
 writes to the old log alone (sign-ins, refusals, token issues), and 0.15.0 has the same window between two beats;
@@ -500,8 +599,13 @@ is the recheck's to find, and the rows the page shows carry MACs of their own.
 **If the step dies halfway, it is rerun.** Each write is one change with a request id made from what it seals
 (`upgrade-0.16:settings`), compared-and-set on a null seal, so the next call skips what is done and goes on. It only
 adds changes and fills null seals. Restore is for a step that refuses: the old chain's tail does not verify, or a row
-disagrees with its entry. The door then says which, and the operator restores the backup, or accepts the loss with the
-existing `coffre audit accept-loss`.
+disagrees with its entry. The door then says which, and the operator restores step 1's backup, which loses nothing:
+the app was off its route. One catch: 0.15.0's cron went on between that backup and the migration, so the watch's
+store may hold a checkpoint the restored log lacks, by a beat or two of heartbeats and checkpoints. The step refuses
+that as the cut it looks like. The operator, who knows what was restored, empties the store (the file moved aside,
+the Durable Object's storage cleared), and the step starts from the log's own newest checkpoint and records `held:
+log`. No command accepts a loss: the door answers 503 to the route `coffre audit accept-loss` calls, and nothing
+writes the store it moved.
 
 **How long.** The migration creates and drops, and the vault's step reads one beat's entries and writes a handful of
 changes: seconds, whatever the log holds. The walk runs behind the open door. Its SQL equivalent took 6 s for 440,000
@@ -532,11 +636,11 @@ the collapse. Days are working days for one agent under the fast gate. Net lines
 | V2a | Two use statements for four, the access rule one inlined SQL function, same reads. `use_credential`, `use_route`, `vault/use.ts` | E4 | no | yes | 3 | -400 to -450 |
 | P1 | The projector and its four tables; every change, event and use, and the old log backward from its anchor; `coffre audit rebuild`. Adds, because nothing can be deleted until pages can read it. | E4 | no, `Reads.tla` with it | yes | 4 | +900 |
 | P2 | Pages read the projection: `GET /audit`, the report, MCP. Deletes `log_reads`, the three-log merge, 18 + 11 + 10 indexes | P1 | no | yes | 3 | -2,300 |
-| P3 | The page's check, flat: one `check` call a visit (6 statements, 4 round trips), the beat runs the same; the full walk in steps behind a Verify button and `coffre verify`, which also holds each listed read inside retention to the report's summary, the floor taken from the sealed retention change (`reads_from` has no MAC); the page's walk of 0.14's chain deleted | P2 | no | no | 2 | -300 |
+| P3 | Two PRs (section 3, "The watch after"). First the page's check, flat: one `check` call a visit (6 statements, 4 round trips), and `beat`, the same with no rows plus the finding; the full walk in steps behind a Verify button and `coffre verify`, which also holds each listed read inside retention to the report's summary, the floor taken from the sealed retention change (`reads_from` has no MAC); the page's walk of 0.14's chain deleted. Then the swap, after V1 and A1's sites: the scheduled run and `/readyz` on it, the old beat, the heartbeat, `vault.checkpoint()` and loss acceptance deleted | P2; the swap V1, A1's sites | no | no | 3.5 | -1,400 |
 | T1 | Three `text[]` columns, `log_config` dropped | #564 | no | yes | 1 | -50 |
 | A0 | Models: the head becomes the change lock (section 3), the policy revision a digest of newest change numbers | now | it is the model | no | 2 | 0 |
 | V1 | The vault's entries go to the chain only; `settings`, `log_keys`; the vault's upgrade step (one beat's tail, the anchor); `note` for events, and a refused read written by the call that refused it | P2 | `SealedObjects` with it | yes | 4 | -300 |
-| A1 | The app's entries go to the chain; `audit_chain_head`, the reads under it and the policy revision deleted, `lockLogHead` replaced by the change lock, no re-check moved; `audit_log` frozen; sign-in in 5 round trips | P2, A0 | A0 | yes | 4 | -700 |
+| A1 | The app's entries go to the chain; `audit_chain_head`, the reads under it and the policy revision deleted, `lockLogHead` replaced by the change lock, no re-check moved; sign-in in 5 round trips; then `audit_log` frozen, directly on P3's swap | P2, A0; the freeze P3's swap | A0 | yes | 4 | -700 |
 | V2b | `audit_log` reads out of the use and change functions; the cap from its row; old overloads dropped | V1, V2a | `HotPathOne`, small | yes | 1.5 | -300 |
 | L1 | Per-object locks; the fence is the checkpointer's alone (D201). Its model is a draft PR stacked on A0, started in week one | V2b, A1 | yes | yes | 4 | +100 |
 | U1 | `scripts/upgrade-check.sh`, its 0.15.0 pages compared without heartbeats and checkpoints | V1, A1 | no | no | 2 | +500 |
@@ -549,7 +653,8 @@ first (K1): `note` and the row it writes, `settings` and `log_keys`, the upgrade
 inputs of a projection row and of the cursor. V: V0, V2a, V1, V2b, L1. P: P1, P2, P3. A: T1, A0, A1, U1, S1. C1 and
 C2 close. V1 and A1 are built beside P1 and P2 and land after P2: once entries go to the chain only, a page still
 reading `audit_log` loses them. V2b lands after V1, whose rows it reads; L1 after A1, which freezes `audit_log`,
-whose insert trigger still takes the fence exclusive.
+whose insert trigger still takes the fence exclusive. The freeze waits for P3's swap, which removes the last
+appender (the old beat) and is built beside A1's sites, so the path does not grow.
 **Pairs that collide:** V1 and A1 both need `note` in the vault's contract (`packages/core/src/vault.ts`), which the
 contract PR lands first. P2 and P3 both edit `server/src/api/audit.ts` and run in sequence, as do E4 and V0 in `vault.ts`.
 Every schema PR appends to `schema.ts` and the journal, one-line conflicts.
@@ -559,7 +664,8 @@ Every schema PR appends to `schema.ts` and the journal, one-line conflicts.
 model-first PRs were where the risk is, and both are written. A0 found that the fence cannot stand in for the head,
 so the 14 protections keep a lock of their own and A1 moves none of them. L1's found the order above and the hold's
 shared locks, before V2b's and A1's code.
-On Node, the projector and the beat run on timers in the vault's process, where Workers use a Durable Object alarm.
+On Node, the projector runs on a timer in the vault's process, where Workers use a Durable Object alarm. The beat
+is the app's scheduled run on both.
 
 ## 8. Decided
 
