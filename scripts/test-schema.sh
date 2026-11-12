@@ -84,7 +84,7 @@ held() {
     exit 1
 }
 
-# OldWritesFence (formal/Migration015.tla): 0.14's writes take the 0.15 fence,
+# OldWritesFence (0026's trigger): 0.14's writes take the 0.15 fence,
 # its reads and sign-ins never (a token.exchange issues a credential nobody
 # holds yet: 0026, ExchangeOnlyIssues): with the fence held, a revoke's entry
 # waits, a read's does not.
@@ -127,7 +127,7 @@ if wait "$revoke" || ! grep -q 'lock timeout' "$scratch/fenced"; then
 fi
 let_go
 
-# RowFirst and ChangeHeadFirst (formal/Migration015.tla), the order row, head,
+# RowFirst and ChangeHeadFirst, the order row, head,
 # fence: with 0.14's vault holding a
 # member's queue and row, then taking the head and the fence (its revoke's
 # entry), a change to that member waits for it and passes, rather than

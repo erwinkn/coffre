@@ -56,7 +56,6 @@ export const VAULT_METHODS = [
   'revokeCredential',
   'issueToken',
   'changeBindings',
-  'cutover',
   'verifyTrees',
   'verifyReads',
   'vouch',

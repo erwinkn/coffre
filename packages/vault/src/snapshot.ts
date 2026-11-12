@@ -84,7 +84,7 @@ export type Asked = {
   /**
    * Each environment read with what 0.15's log holds it to, and the asked
    * principals' grants' too, whose projects their grants are read with
-   * (T159): asked once 0.15's log is cut over, before which no row is sealed.
+   * (T159).
    */
   seals?: boolean;
   references?: readonly bigint[];

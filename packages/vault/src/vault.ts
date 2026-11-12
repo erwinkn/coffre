@@ -45,7 +45,7 @@ import {
   readScope,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { openPair, type LogEntry, type PairNotes, type StoredPair } from '@coffre/core/merkle';
+import type { LogEntry, PairNotes } from '@coffre/core/merkle';
 import { checkContext, ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { shownMember } from '@coffre/core/schemas';
 import {
@@ -106,8 +106,6 @@ import {
   type IssueTokenInput,
   type ChangeBindingsInput,
   type ChangeBindingsOutcome,
-  type CutoverInput,
-  type CutoverOutcome,
   type ChangeBindingsRefusal,
   type IssueTokenOutcome,
   type IssueTokenRefusal,
@@ -180,17 +178,16 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, lockNotAvailable, SNAPSHOT } from '@coffre/db/dialect';
 import { changeName, everyProjectConversion, findingMetadata, newestAccess, newestChangeNames, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
-import { appendEntries, COUNTED_AT_ONCE, countWindow, HeadBusy, holdFence, holdIssues, isMovedChange, laterHead, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestWindow, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, COUNTED_AT_ONCE, countWindow, HeadBusy, holdIssues, isMovedChange, laterHead, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestWindow, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { KeyAccounting } from './accounting.ts';
 import { addRefusal, callRefusal, openRefusal, refusalRow, writeRefusal } from './refusal.ts';
 import { ADMIT_KINDS, admitStanding, callAdmit, decideAdmit, holdAdmit, openTicket, OWNERS_ONLY, parseAdmitInputs, scopeSlugs, sealTicket, SETS_UP_ONLY, TICKET_MS, validateAdmitRead, type AdmitAsked, type AdmitTicket } from './admit.ts';
 import { admitChange, Changes, changesHold, heldByLog, heldFrom, keptFrom, keptObjects, macsOf, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
-import { CutoverRefused, cutoverPayload, cutoverRow, genesisCalls, Moved as VouchMoved, planCutover } from './cutover.ts';
 import { bindingsCall, changeBindings, checkBinding, checkChangeBindings, checkIssue, givenPins, issueCall, issueToken, readPins, revokeCredential, signIn, SIGN_IN_TRIES, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
 import { bindingObject, credentialObject } from './objects.ts';
-import { proveIn, type SealThrough } from './checkpointer.ts';
+import type { SealThrough } from './checkpointer.ts';
 import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import {
@@ -201,11 +198,11 @@ import {
 import { roleChanges, type StoredRole } from './role-rows.ts';
 import { frozenHoldings, notCleared, proxyView, reservedProblem, routeRefusal, type ResolvedKey } from './proxy.ts';
 import { TICK_MS } from './log-checkpointer.ts';
-import { authentic, changeEntry, changeHolds, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
+import { changeEntry, changeHolds, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
 import { logStore } from './log-store.ts';
 import { checkReads, cursorVouched, readVouched, type ReadRow } from './reads.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
-import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
+import { replayFault, type Replayed } from './replay.ts';
 import { principalObject } from './objects.ts';
 import { memberMac, rowKey, sameGrants, sealed, standing } from './rows.ts';
 import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
@@ -300,14 +297,6 @@ export type PreparedVault = {
   limited: boolean;
   /** Whether this process made every role's row what the log's roles object says, sealed, or found it so (`#syncRoles`). */
   rolesSynced: boolean;
-  /** Whether 0.15's log is cut over from 0.14, as this process found it (`cutover`): until then, nothing of 0.15's runs. */
-  cutover: boolean;
-  /**
-   * Whether this process found 0.15's log's cutover written, sealed or not
-   * yet (`#settled`): from then on every environment row is sealed, and the
-   * vault checks each one it decides on (`#placeFault`).
-   */
-  marked: boolean;
   /** How far the chain is rehashed, by any call of this process: its head must still be there. */
   verified: Position;
   /** What member rows are sealed under now; rows.ts. */
@@ -345,8 +334,6 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     log015: log015(config.signingKeys, options.sealThrough, options.heldOutside, options.sealing),
     limited: false,
     rolesSynced: false,
-    cutover: false,
-    marked: false,
     verifier: null,
     uses: new UseCache(useLimits(options.uses), { callsEndWithRequest: options.callsEndWithRequest === true, throttled: options.throttled !== false }),
     verified: START,
@@ -497,14 +484,6 @@ const SERVICE = /^token:/;
 /** Who acts for the vault itself, as when it makes an Owner its deployment names. */
 const VAULT_ACTOR = 'system:vault';
 
-/** The cutover's own entry in 0.14's log (`cutover`): the head its change in 0.15's names, or, denied, why it did not cut over. */
-const CUTOVER = 'log.cutover';
-
-/** Genesis changes a statement: eleven parameters each, well within Postgres's 65,535 a statement. */
-const GENESIS_BATCH = 2000;
-
-const NOT_CUT_OVER = "0.15's log is not cut over from 0.14 yet: the app asks the vault to (`cutover`) before anything else";
-
 // A KEK's check: a known value, the size of a data key, wrapped under it in
 // a context no secret has (the nil UUID), and kept in a `key.check` entry
 // (@coffre/core/kek). Opening it again tells the vault its KEK is the one
@@ -517,8 +496,8 @@ const KEY_CHECK_SAMPLE = 3;
 /** The vault's first entry under a new key, which the keys it replaced count only before (`#settle`). */
 const KEY_ROTATE = 'key.rotate';
 
-/** Why a tampered member is not started over under 0.15's log (`#startOver`). */
-const START_OVER_015 = "this member's record failed the vault's integrity check, and 0.15's log changes no member whose row it does not hold: a reseal makes it the log's again";
+/** Why a tampered member is not removed: the log changes no member whose row it does not hold. */
+const START_OVER = "this member's record failed the vault's integrity check, and 0.15's log changes no member whose row it does not hold: a reseal makes it the log's again";
 
 /** A new member row, before the decision seals it (`#seal`). */
 const UNSEALED = { accessSeq: 0n, mac: Buffer.alloc(32) };
@@ -551,9 +530,8 @@ function placeOf(grant: store.Place) {
   return { projectId: grant.projectId ?? null, environmentId: grant.environmentId ?? null, environmentSlug: grant.environmentSlug ?? null };
 }
 
-/** Why a change to a tampered member is refused: under 0.14's log, removal starts them over; under 0.15's, only a reseal (`START_OVER_015`). */
-const TAMPERED_SUBJECT = "this member's record failed the vault's integrity check: remove them to start over";
-const TAMPERED_SUBJECT_015 = "this member's record failed the vault's integrity check: a reseal makes it the log's again";
+/** Why a change to a tampered member is refused: only a reseal makes their row the log's again (`START_OVER`). */
+const TAMPERED_SUBJECT = "this member's record failed the vault's integrity check: a reseal makes it the log's again";
 
 /** Why a decision on a place whose row is not as 0.15's log holds it is refused (T159): the row, not the member, is at fault. */
 const TAMPERED_PLACE = "an environment it is about failed the vault's integrity check: its row is not as the log holds it";
@@ -761,9 +739,6 @@ type StartReads = {
   rotation?: Promise<StoredEntry | undefined>;
   newest?: Promise<StoredEntry | undefined>;
   first?: Promise<bigint | undefined>;
-  /** The cutover's change, null for none (the cutover mark's, and `#cutoverSealed`'s), and the newest checkpoint, its seal's (the Owners' declaration's). */
-  cutover?: Promise<bigint | null>;
-  checkpoint?: Promise<StoredPair | null>;
   /** `#convert`'s: who holds a grant on every project of 0.4. */
   holders?: Promise<string[]>;
   /** `#limit`'s: the policy as 0.15's log holds it. */
@@ -843,10 +818,8 @@ class VaultService implements Vault {
   #usePath(): UsePath {
     const { log015, uses: cache } = this.#prepared;
     if (this.#hot === undefined) throw new Error("0.15's uses need the hot path's login: configure the vault's hotDatabase");
-    // An isolate's first uses read the cutover's marker (`#cutOverYet`) within their admission, as any call holds a connection.
-    const ready = this.#prepared.cutover ? undefined : () => this.#cutOverYet();
     return {
-      db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, macKeys: log015.macs, keks: this.#config.keks, cache, ...(ready === undefined ? {} : { ready }),
+      db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, macKeys: log015.macs, keks: this.#config.keks, cache,
       oldWrite: (principal, old, through, starts) => this.#oldWrite(principal, old, through, starts),
     };
   }
@@ -854,10 +827,9 @@ class VaultService implements Vault {
   /**
    * Whether 0.14's newest access entry about `principal` that carries the
    * vault's MAC, at or below `through`, is past `old`, what the principal's
-   * newest change accounts for (Migration015.tla's UsesSeeOldWrites, of the
-   * newest authentic write): asked by a use whose probe found `through` in
-   * the vault's name past it, which, but for a write the cutover refused to
-   * let land, is one forged there. Read from `through` down, never above: the
+   * newest change accounts for (UsesSeeOldWrites, of the newest authentic
+   * write): asked by a use whose probe found `through` in the vault's name
+   * past it, which, 0.14 writing no more, is one forged there. Read from `through` down, never above: the
    * use's statement committed before this reads, and a change's entry since
    * is none it decided on (review r1). Each forged one is passed over; past
    * `LOOK_BACK` of them, the use is refused as if it were not. It writes
@@ -891,7 +863,7 @@ class VaultService implements Vault {
       ...rest,
       principals,
       head,
-      seals: this.#checksSeals(),
+      seals: true,
       // A read waits for the head in one of a few places in line, or is refused at once; a code's names in one (`reserveProxy`).
       ...(queue === undefined ? {} : { waiters: queue.waiters, line: queue.line }),
       ...(released === undefined ? {} : { released: { ...released, windowMs: this.#config.bulkLimit.windowMs, clockOffsetMs: this.#prepared.options.clockOffset(), cap: this.#config.bulkLimit.count } }),
@@ -921,8 +893,6 @@ class VaultService implements Vault {
 
   /** `#decide`, once the vault is settled. */
   async #decideNow<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, how: How<T> = {}): Promise<Outcome<T>> {
-    // Every decision of 0.15's log's after its cutover, whichever path it comes by (`#declare`, `#convert`, `#limit`).
-    await this.#cutOverYet();
     const reports: NewEntry[] = [];
     // A read's call is due from its first decision, unless its caller set when.
     const due = how.reads === true ? { ...how, deadline: how.deadline ?? Date.now() + CALL_DEADLINE_MS } : how;
@@ -1002,7 +972,7 @@ class VaultService implements Vault {
         // Last: the fence, which they take exclusive (0.14's append took it already, OldWritesFence), is held from
         // here to the commit, so as few round trips as can be. The append comes first, and its trigger took the issue
         // lock before the fence (0026): a change taking the fence before the issue lock would wait in a circle with the
-        // barrier, which takes them in that order (Migration015.tla, IssueBeforeFence).
+        // barrier, which takes them in that order (WriteLocks.tla, IssueBeforeFence).
         // With the COMMIT, under its Sync: their numbers answer after it.
         const numbers = await d.changes.commit(tx, at, written);
         return { result, numbers };
@@ -1067,41 +1037,28 @@ class VaultService implements Vault {
 
   /**
    * Whether `row`, with these grants, is the row the vault last wrote: its
-   * MAC holds, and it is the newest the log says. Before 0.15's cutover,
-   * 0.14's log says it: the row names the newest access entry about the
-   * member. A genuine row put back from before a later change passes the
-   * first and fails the second. Entries in the vault's name that fail their
-   * MAC are passed over, and reported: otherwise whoever can insert a row
-   * could lock any member out. Once the cutover is written, 0.15's log says
-   * it, as a use checks it (`#onLog`). `logs`, each member's as read with
-   * the rows (`#sweep`, `#rotate`), else the snapshot's, else read here.
+   * MAC holds, and it is the newest 0.15's log says, as a use checks it
+   * (`#onLog`). A genuine row put back from before a later change passes the
+   * first and fails the second. `logs`, each member's as read with the rows
+   * (`#sweep`, `#rotate`), else the snapshot's, else read here.
    */
   async #integrity(
     db: Queryable, principal: string, row: Member | undefined, grants: readonly GrantRow[], reports: NewEntry[], reads?: Snapshot,
     logs?: ReadonlyMap<string, MemberLog>,
   ): Promise<Fault | null> {
-    // Read first under 0.15's log, which its 0.4 MAC's finding names too (`#report`): the read `#onLog` makes anyway.
-    const log = this.#checksSeals() ? await this.#memberLog(db, principal, reads, logs) : null;
+    // Read first, which its 0.4 MAC's finding names too (`#report`): the read `#onLog` makes anyway.
+    const log = await this.#memberLog(db, principal, reads, logs);
     if (row !== undefined && !this.#sealed(row, grants)) {
-      this.#report(reports, principal, 'mac', row.mac.toString('hex'), null, log === null ? undefined : weighedOf(log));
+      this.#report(reports, principal, 'mac', row.mac.toString('hex'), null, weighedOf(log));
       return 'mac';
     }
-    if (log !== null) return this.#onLog(db, principal, row, grants, reports, reads, log);
-    const newest = await this.#newestAccess(db, principal, reports, reads);
-    // No row, and no entry of the vault's own: someone never admitted. No
-    // row, but one: one deleted, unless it was admitted since the row was
-    // read. Too many forged to see past: neither a row nor the lack of one holds.
-    const seq = typeof newest !== 'string' ? newest.seq : newest === 'unreached' ? undefined : null;
-    if (row === undefined ? seq === null : seq === row.accessSeq) return null;
-    if (row === undefined && (await store.member(db, principal)) !== undefined) throw new Retry();
-    this.#report(reports, principal, 'stale', `${row?.accessSeq ?? 'none'}<${seq ?? newest}`);
-    return 'stale';
+    return this.#onLog(db, principal, row, grants, reports, reads, log);
   }
 
   /**
-   * `#integrity` once 0.15's cutover is written (T179 PR 2;
-   * docs/design/two-trips.md, "Compatibility"): the member's row as 0.15's
-   * log holds it (Migration015.tla's MemberHolds), not a walk back through
+   * `#integrity`'s check of the log (T179 PR 2; docs/design/two-trips.md,
+   * "Compatibility"): the member's row as 0.15's log holds it (MemberHolds),
+   * not a walk back through
    * 0.14's entries, which one statement cannot make (`write_request`, PR 3).
    * A use's check (`checkSeals`, `checkedOf`) is the same, the newest
    * change's MAC included (T190, `changeHolds`, which this one calls too):
@@ -1163,22 +1120,6 @@ class VaultService implements Vault {
   }
 
   /**
-   * Whether the vault checks the rows it decides on against 0.15's log: the
-   * environments' (T159) and the members' (T179 PR 2, `#onLog`), under it,
-   * once its cutover is written, which seals every row. Every read of them
-   * asks their seals then (`seals`).
-   */
-  /** Why a change to, or an issue for, a tampered member is refused, and what recovers them under this log. */
-  #tamperedSubject(): string {
-    return this.#checksSeals() ? TAMPERED_SUBJECT_015 : TAMPERED_SUBJECT;
-  }
-
-  #checksSeals(): boolean {
-    const { cutover, marked } = this.#prepared;
-    return cutover || marked;
-  }
-
-  /**
    * Why environment `id`'s row, as a decision read it, is not as 0.15's log
    * holds it (T159; R53, every decision input sealed): its seal is not the
    * vault's over its object (`tampered`: re-parented, renamed, its tombstone
@@ -1188,10 +1129,10 @@ class VaultService implements Vault {
    * written to match a row put back). A live
    * object in a project whose slug is a tombstone is `tampered` too: a
    * project's deletion under 0.15's log deletes each of its environments, as
-   * the cutover sealed them, so only a writer leaves one so (review r2). Each
-   * is reported, once, as a change refused on it is (`#notLogged`), the row's
-   * and not any member's. Null when it is as the log holds it, and for a row
-   * read without its seals: under 0.14's log alone, or before the cutover.
+   * 0.15's cutover sealed them, so only a writer leaves one so (review r2).
+   * Each is reported, once, as a change refused on it is (`#notLogged`), the
+   * row's and not any member's. Null when it is as the log holds it, and for
+   * a row read without its seals.
    */
   #placeFault(id: string, row: EnvironmentRow, reports: NewEntry[]): 'tampered' | 'stale' | null {
     const read = row.sealed;
@@ -1218,7 +1159,6 @@ class VaultService implements Vault {
    * Each row from `rows` when there, else read, with its seals.
    */
   async #heldGrants(db: Queryable, grants: readonly GrantRow[], reports: NewEntry[], rows?: ReadonlyMap<string, EnvironmentRow>): Promise<GrantRow[]> {
-    if (!this.#checksSeals()) return [...grants];
     const ids = [...new Set(grants.flatMap((grant) => (grant.environmentId === null ? [] : [grant.environmentId])))];
     const missing = ids.filter((id) => !rows?.has(id));
     const read = missing.length === 0 ? new Map<string, EnvironmentRow>() : await store.environmentsById(db, missing, { seals: true });
@@ -1350,7 +1290,6 @@ class VaultService implements Vault {
    * next, as 0.14's rule held it past the access entry that change wrote.
    */
   async #weigh(tx: Transaction, entries: readonly NewEntry[]): Promise<void> {
-    if (!this.#checksSeals()) return;
     const unweighed = entries.filter((entry) => REPORTED.has(entry) && entry.subjectPrincipal != null && (entry.code === 'mac' || entry.code === 'stale') && entry.metadata === '{}');
     if (unweighed.length === 0) return;
     const names = await newestChangeNames(tx, [...new Set(unweighed.map((entry) => entry.subjectPrincipal!))]);
@@ -1388,12 +1327,6 @@ class VaultService implements Vault {
     const start = this.#start();
     if (start === null) return null;
     if (prepared.since === null) await this.#settle(start);
-    // Under 0.15's log, nothing of its own before the cutover (`cutover`): the conversion and the Owners it names, and
-    // the bulk cap, after it, as decisions of 0.15's log.
-    if (prepared.superseded === null && !prepared.cutover && !prepared.marked) {
-      if ((await (start.cutover ?? store.cutoverNumber(this.#db))) === null) return prepared.superseded;
-      prepared.marked = true;
-    }
     // A log with no entry of the vault's holds nothing to convert, and stays empty until someone acts.
     if (prepared.superseded === null && prepared.since !== null && !prepared.converted) await this.#convert(start);
     if (prepared.superseded === null && !prepared.limited) await this.#limit(start);
@@ -1420,17 +1353,13 @@ class VaultService implements Vault {
     const prepared = this.#prepared;
     const settle = prepared.since === null;
     const convert = !prepared.converted;
-    // The cutover mark's, until the cutover or the mark; the Owners' declaration's, until the conversion lands.
-    const cutover = !prepared.cutover && (!prepared.marked || convert);
     const limit = !prepared.limited;
     const sync = !prepared.rolesSynced;
-    if (!settle && !convert && !cutover && !limit && !sync) return null;
+    if (!settle && !convert && !limit && !sync) return null;
     const asked: StartReads = {
       rotation: settle ? store.latestRotation(db) : undefined,
       newest: settle ? store.vaultPage(db, undefined, 1).then(([entry]) => entry) : undefined,
       first: settle ? store.firstVaultEntryUnder(db, prepared.logKey.keyId) : undefined,
-      cutover: cutover ? store.cutoverNumber(db) : undefined,
-      checkpoint: cutover && convert ? logStore(db).newest() : undefined,
       holders: convert ? store.everyProjectHolders(db) : undefined,
       policy: limit ? store.readObject(db, POLICY_REF as Ref & { kind: 'policy' }) : undefined,
       roles: sync ? store.roleRows(db) : undefined,
@@ -1467,8 +1396,7 @@ class VaultService implements Vault {
     for (const principal of holders) {
       await this.#decideNow([principal], (d) => this.#replaceEveryProject(d, principal));
     }
-    // A conversion decided reads the cutover's seal again, as it did; none, and the Owners' declaration takes the start's.
-    this.#prepared.converted = await this.#declare(this.#config.owners.map((email) => `user:${email}`), holders.length === 0 ? start : undefined);
+    this.#prepared.converted = await this.#declare(this.#config.owners.map((email) => `user:${email}`));
   }
 
   /**
@@ -1674,13 +1602,8 @@ class VaultService implements Vault {
       const [newest] = await store.vaultPage(tx, undefined, 1);
       if (newest?.keyId !== from || (await store.allMembers(tx)).length !== rows.size) throw new Retry();
       const held = await store.grants(tx);
-      // A process's first call settles its key before it learns the cutover (`#settled`): learnt here, since a row
-      // must be held to the log that holds it. Since 0.16.0, a member added down the two-trip path and changed no
-      // further has no 0.14 access entry, which 0.14's rule reads as stale: left under the old key, refused after
-      // (review r1 of #490). The cutover is never undone, so a retry finds it the same.
-      if (!this.#checksSeals() && (await store.cutOver(tx))) this.#prepared.marked = true;
-      // Once 0.15's log holds the rows, each one's seals, all in one read (`#onLog`).
-      const logs = this.#checksSeals() ? await store.memberLogs(tx, [...rows.keys()]) : undefined;
+      // Each row's seals, all in one read (`#onLog`).
+      const logs = await store.memberLogs(tx, [...rows.keys()]);
       for (const row of rows.values()) {
         const grants = held.filter((grant) => grant.principal === row.principal);
         // A row that fails is reported, and left under the key it was sealed with, which fails it from now on.
@@ -1754,7 +1677,7 @@ class VaultService implements Vault {
    * this one, which writes nothing more. Checked under the head's lock, so
    * that an instance still running with the replaced KEK, as during a
    * deploy, cannot write after the rotation. Its entries say they are 0.15's
-   * (`log015`): once cut over, the log refuses a write without it.
+   * (`log015`).
    */
   async #append(
     tx: Transaction,
@@ -1802,10 +1725,9 @@ class VaultService implements Vault {
     const items = loaded.versions.map((version) => ({ ...version, secret: { ...version.secret } }));
     validateItems(items, 'wrapped');
     const sealed = await this.#referencesAt(vias);
-    // Settled first, as a decision is: a new process learns here whether the log is cut over, and so whether a fork's row
-    // is held to its seal (review r1).
+    // Settled first, as a decision is (review r1).
     await this.#settled();
-    const forks = await store.environmentsById(this.#db, throughs.flatMap((through) => (through === null ? [] : [through])), { seals: this.#checksSeals() });
+    const forks = await store.environmentsById(this.#db, throughs.flatMap((through) => (through === null ? [] : [through])), { seals: true });
     // A fork whose row is not as 0.15's log holds it is no place to read through (T159), reported.
     const forkReports: NewEntry[] = [];
     for (const [id, fork] of forks) if (this.#placeFault(id, fork, forkReports) !== null) forks.delete(id);
@@ -2361,7 +2283,7 @@ class VaultService implements Vault {
       const environments = await store.environmentsById(d.tx, items.flatMap((item) => {
         const source = sources.get(item.source.secretId);
         return source === undefined ? [item.holder.environmentId] : [item.holder.environmentId, source.environmentId];
-      }), { seals: this.#checksSeals() });
+      }), { seals: true });
       // Each as 0.15's log holds its row (T159).
       this.#placesHold(environments, environments.keys(), d.reports);
       const codes = items.map((item): RefusalCode | null => {
@@ -2443,7 +2365,7 @@ class VaultService implements Vault {
       // Under the log's head: two ends of one reference at once, the second finds the first; and the actor's standing stands.
       const actor = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports, d.reads), input);
       // Ending is allowed in a deleted place: deleting one ends the references into and out of it.
-      const environments = await store.environmentsById(d.tx, seals.map((seal) => seal.holder.environmentId), { seals: this.#checksSeals() });
+      const environments = await store.environmentsById(d.tx, seals.map((seal) => seal.holder.environmentId), { seals: true });
       // Each as 0.15's log holds its row (T159).
       this.#placesHold(environments, environments.keys(), d.reports);
       // Who may end each: write where it is held; for a break, managing the source's project's access too; abandoning,
@@ -2592,11 +2514,9 @@ class VaultService implements Vault {
    * again (`#makeOwner`). One whose row the log never admitted stays as it is,
    * and is asked about again at each of their requests. Whether it ran.
    */
-  async #declare(principals: readonly string[], start?: StartReads): Promise<boolean> {
-    // Under 0.15's log, no Owner made before the cutover: nothing of the log's precedes its change (AnchorHolds).
-    if (!(await this.#cutOverNow(start))) return false;
+  async #declare(principals: readonly string[]): Promise<boolean> {
     // Their rows, grants and the policy in one statement, as `access` reads one member's (T206).
-    const reads = await snapshot(this.#db, { principals, members: true, seals: this.#checksSeals() });
+    const reads = await snapshot(this.#db, { principals, members: true, seals: true });
     const at = this.#at(reads);
     const due: string[] = [];
     for (const principal of principals) {
@@ -2638,31 +2558,25 @@ class VaultService implements Vault {
     const row = d.members.get(principal);
     const subject = await this.#standing(d.tx, principal, row, d.at, d.reports, d.reads);
     if (subject.status === 'active' && ownsInstance(subject.live)) return false;
-    const tampered = subject.status === 'tampered';
-    // Under 0.15's log, no start over (`#startOver`): reported, and left as it is until a reseal.
-    if (tampered && (this.#checksSeals() || (await this.#logged(d.tx, principal)) === undefined)) return false;
+    // A tampered member is reported, and left as it is until a reseal: the log changes no member whose row it does not hold.
+    if (subject.status === 'tampered') return false;
     const correlation = { operationId: randomUUID() };
     const owner = { role: 'owner' as const, scope: EVERYWHERE };
     d.grants.set(principal, [...subject.stored]);
     d.touched.add(principal);
-    if (tampered) await this.#startOver(d, VAULT_ACTOR, principal, row, subject.fault!, correlation, (code, message) => new Refused(refusal(code, message ?? REFUSAL_MESSAGES[code]), []));
-    // Started over, their row is one 0.15's log does not hold, and changes nothing there: adoption or a reseal does
-    // (plan PR 9). Otherwise, the change the writes below make.
-    if (!tampered) {
-      const op = row === undefined ? 'member.add' : row.status === 'removed' ? 'member.restore' : 'member.role';
-      d.changes.stage(memberRef(principal), { op, ...asStored(owner.role, owner.scope) }, VAULT_ACTOR);
-    }
-    if (row === undefined && !tampered) {
+    const op = row === undefined ? 'member.add' : row.status === 'removed' ? 'member.restore' : 'member.role';
+    d.changes.stage(memberRef(principal), { op, ...asStored(owner.role, owner.scope) }, VAULT_ACTOR);
+    if (row === undefined) {
       d.log.push(accessEntry(VAULT_ACTOR, 'member.add', principal, 'allow', correlation, { ...owner, reason }));
       d.writes.push((at) => store.insertMember(d.tx, {
         principal, status: 'active', ...owner, generation: 0, createdAt: at, createdBy: VAULT_ACTOR, statusChangedAt: at, statusChangedBy: VAULT_ACTOR, ...UNSEALED,
       }));
-    } else if (tampered || row?.status === 'removed') {
-      // Coming back keeps the generation a removal, or the start over, moved on to.
+    } else if (row.status === 'removed') {
+      // Coming back keeps the generation a removal moved on to.
       d.log.push(accessEntry(VAULT_ACTOR, 'member.restore', principal, 'allow', correlation, { ...owner, reason }));
       d.writes.push((at) => store.updateMember(d.tx, principal, { status: 'active', ...owner, statusChangedAt: at, statusChangedBy: VAULT_ACTOR }));
     } else {
-      d.log.push(accessEntry(VAULT_ACTOR, 'member.role', principal, 'allow', correlation, { ...owner, previousRole: row!.role, previousScope: row!.scope, reason }));
+      d.log.push(accessEntry(VAULT_ACTOR, 'member.role', principal, 'allow', correlation, { ...owner, previousRole: row.role, previousScope: row.scope, reason }));
       d.writes.push(() => store.updateMember(d.tx, principal, owner));
     }
     return true;
@@ -2678,8 +2592,8 @@ class VaultService implements Vault {
   async #standing(db: Queryable, principal: string, row: Member | undefined, at: number, reports: NewEntry[], reads?: Snapshot): Promise<Standing> {
     const none = NOTHING;
     const grants = row === undefined ? [] : reads?.grants.get(principal) ?? (await store.grants(db, principal));
-    const log = this.#checksSeals() ? await this.#memberLog(db, principal, reads) : undefined;
-    const fault = await this.#integrity(db, principal, row, grants, reports, reads, log === undefined ? undefined : new Map([[principal, log]]));
+    const log = await this.#memberLog(db, principal, reads);
+    const fault = await this.#integrity(db, principal, row, grants, reports, reads, new Map([[principal, log]]));
     if (fault !== null) return { principal, status: 'tampered', live: none, all: none, fault, stored: grants, log };
     if (!PRINCIPAL.test(principal)) return { principal, status: 'unknown', live: none, all: none, fault, stored: grants, log };
     if (row?.status !== 'active') return { principal, status: row?.status ?? 'unknown', live: none, all: none, fault, stored: grants, log };
@@ -2735,7 +2649,7 @@ class VaultService implements Vault {
   /** `access`, as the rows are now. */
   async #read(principal: string, superseded: string | null): Promise<Access> {
     const read = async (db: Queryable, reports: NewEntry[]) => {
-      const reads = await snapshot(db, { principals: [principal], members: true, seals: this.#checksSeals() });
+      const reads = await snapshot(db, { principals: [principal], members: true, seals: true });
       const [row, held, at] = [reads.members.get(principal), reads.grants.get(principal)!, this.#at(reads)];
       const fault = await this.#integrity(db, principal, row, held, reports, reads);
       // Their grants but those on a place whose row is not as 0.15's log holds it, which hold nothing (T159).
@@ -2772,19 +2686,9 @@ class VaultService implements Vault {
   async #sweep(db: Queryable, reports: NewEntry[]): Promise<void> {
     const rows = await store.allMembers(db);
     const held = await store.grants(db);
-    if (this.#checksSeals()) {
-      // Once 0.15's log holds the rows: each one's seals and newest access entry in one read, as `#onLog` checks them.
-      const logs = await store.memberLogs(db, rows.map((row) => row.principal));
-      for (const row of rows) await this.#integrity(db, row.principal, row, held.filter((grant) => grant.principal === row.principal), reports, undefined, logs);
-      return;
-    }
-    const newest = await store.newestAccessEntries(db);
-    for (const row of rows) {
-      const grants = held.filter((grant) => grant.principal === row.principal);
-      const entry = newest.get(row.principal);
-      const holds = entry !== undefined && this.#authentic(entry) && this.#sealed(row, grants) && entry.seq === row.accessSeq;
-      if (!holds) await this.#integrity(db, row.principal, row, grants, reports);
-    }
+    // Each one's seals and newest access entry in one read, as `#onLog` checks them.
+    const logs = await store.memberLogs(db, rows.map((row) => row.principal));
+    for (const row of rows) await this.#integrity(db, row.principal, row, held.filter((grant) => grant.principal === row.principal), reports, undefined, logs);
   }
 
   // --- changing access ----------------------------------------------------------
@@ -2834,7 +2738,7 @@ class VaultService implements Vault {
         }
       }
       const named = changes.flatMap((change) => (change.environmentId === null ? [] : [change.environmentId]));
-      const known = await store.places(d.tx, changes.map((change) => change.projectId!), named, { seals: this.#checksSeals() });
+      const known = await store.places(d.tx, changes.map((change) => change.projectId!), named, { seals: true });
       // Each environment by its project and slug as 0.15's log holds its row (T159): what a grant there is weighed on.
       this.#placesHold(known.environments, named, d.reports);
       const where: Place[] = changes.map(({ projectId, environmentId, role }) => {
@@ -2861,7 +2765,7 @@ class VaultService implements Vault {
 
       const row = d.members.get(principal);
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports, d.reads);
-      if (subject.status === 'tampered') throw refused('tampered', this.#tamperedSubject());
+      if (subject.status === 'tampered') throw refused('tampered', TAMPERED_SUBJECT);
       // A service account admitted with its first grants, as `admit` would: all of it, or none.
       const admitted = input.admit === true && row?.status !== 'active' ? await this.#admitWith(d, acting, principal, row, input) : undefined;
       if (admitted === undefined && row?.status === 'removed') throw refused('removed');
@@ -2977,7 +2881,7 @@ class VaultService implements Vault {
       }
       const row = d.members.get(principal);
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports, d.reads);
-      if (subject.status === 'tampered') throw refused('tampered', this.#tamperedSubject());
+      if (subject.status === 'tampered') throw refused('tampered', TAMPERED_SUBJECT);
       d.touched.add(principal);
       d.grants.set(principal, [...subject.stored]);
 
@@ -3028,7 +2932,6 @@ class VaultService implements Vault {
    */
   async #livePlaces(d: Decision): Promise<Awaited<ReturnType<typeof store.liveProjects>>> {
     const projects = await store.liveProjects(d.tx);
-    if (!this.#checksSeals()) return projects;
     const rows = await store.environmentsById(d.tx, 'all', { seals: true });
     const held = [...rows].filter(([id, row]) => this.#placeFault(id, row, d.reports) === null && !row.deleted);
     return projects.map((project) => ({
@@ -3097,7 +3000,7 @@ class VaultService implements Vault {
       if (this.#listed(principal)) throw refused('not_allowed', declaredOwner(principal));
       if (subject.status === 'tampered') {
         if (!runsInstance(holder)) throw refused('not_allowed', 'only admins and owners of the whole instance may remove a member whose record failed its check');
-        return this.#startOver(d, actor, principal, row, subject.fault!, input, refused);
+        throw refused('tampered', START_OVER);
       }
       if (!runsInstance(holder)) {
         // A service account its manager removes: they reach everything it holds (`managesService`).
@@ -3155,10 +3058,10 @@ class VaultService implements Vault {
     // Every place it holds a grant on, lapsed ones too, as 0.15's log holds its row (T159): one that is not holds nothing,
     // and so would leave the account easier to manage, not harder. Refused instead.
     const ids = subject.stored.flatMap((grant) => (grant.environmentId === null ? [] : [grant.environmentId]));
-    // The decision's own read of them, their grants' places among it once 0.15's log is cut over (`asked.seals`); else read.
+    // The decision's own read of them, their grants' places among it (`asked.seals`); else read.
     const missing = ids.filter((id) => !reads.environments.has(id));
-    const slugs = missing.length === 0 ? reads.environments : new Map([...reads.environments, ...await store.environmentsById(db, missing, { seals: this.#checksSeals() })]);
-    if (this.#checksSeals() && ids.some((id) => !slugs.has(id))) throw new Refused(refusal('tampered', TAMPERED_PLACE), []);
+    const slugs = missing.length === 0 ? reads.environments : new Map([...reads.environments, ...await store.environmentsById(db, missing, { seals: true })]);
+    if (ids.some((id) => !slugs.has(id))) throw new Refused(refusal('tampered', TAMPERED_PLACE), []);
     this.#placesHold(slugs, ids, reports);
     return {
       grants: subject.live.grants.map((grant) => ({
@@ -3230,7 +3133,7 @@ class VaultService implements Vault {
     if (edits === null) return { policy: CLOSED_POLICY, edits: NO_EDITS, readable: false, seq: null };
     const rows = entry === reads?.newestPolicy
       ? reads.environments
-      : await store.environmentsById(db, edits.protected.map((place) => place.environmentId), { seals: this.#checksSeals() });
+      : await store.environmentsById(db, edits.protected.map((place) => place.environmentId), { seals: true });
     return { policy: this.#livePolicy(rows, edits, at, reports), edits, readable: true, seq: (entry as StoredEntry).seq };
   }
 
@@ -3321,7 +3224,7 @@ class VaultService implements Vault {
         if (!(await store.projectLive(d.tx, change.projectId))) throw refused('invalid', 'no such project');
         at.projectId = change.projectId;
         // Each a live environment of the project, or none yet: a fork's id, protected before its row is written.
-        const found = await store.environmentsById(d.tx, change.environmentIds, { seals: this.#checksSeals() });
+        const found = await store.environmentsById(d.tx, change.environmentIds, { seals: true });
         // Each as 0.15's log holds its row (T159, review r1): its project and whether it was deleted decide what changes, and
         // a tombstone set around the log would keep a protection's end from its object. One the log has never held (no
         // seal, no change) is 0.14's alone, which the change path takes as such.
@@ -3354,7 +3257,7 @@ class VaultService implements Vault {
       }
       // The policy now, and the newest change, which it is as of: this one's, when it changed anything.
       const answer = {
-        policy: this.#livePolicy(await store.environmentsById(d.tx, next.protected.map((place) => place.environmentId), { seals: this.#checksSeals() }), next, d.at, d.reports),
+        policy: this.#livePolicy(await store.environmentsById(d.tx, next.protected.map((place) => place.environmentId), { seals: true }), next, d.at, d.reports),
         seq: newest === null ? null : Number(newest),
       };
       if (!readable || JSON.stringify(next) !== JSON.stringify(edits)) {
@@ -3412,60 +3315,6 @@ class VaultService implements Vault {
       if (JSON.stringify(settings) !== JSON.stringify(previous)) d.log.push(entry('allow', { ...settings, previous }));
       return { settings };
     });
-  }
-
-  /**
-   * Remove a member whose row failed its check, from what the log says of
-   * them rather than what the row does: their grants go, whatever they were,
-   * and their generation moves past both the row's and the log's, so no
-   * session or token from any earlier membership comes back with a row put
-   * back. Admitted again, they start from nothing, as any removed member.
-   *
-   * Under 0.15's log, refused: the log changes no member whose row it does
-   * not hold (`Changes`), and a row rewritten here without a change of its
-   * own would fail every check of it after (`#onLog`). The member holds
-   * nothing meanwhile; a reseal makes their row the log's again (plan PR 9).
-   */
-  async #startOver(
-    d: Decision,
-    actor: string,
-    principal: string,
-    row: Member | undefined,
-    fault: Fault,
-    correlation: Correlation,
-    refused: (code: RefusalCode, message?: string) => Refused,
-  ): Promise<{ revoked: Grant[]; generation: number }> {
-    if (this.#checksSeals()) throw refused('tampered', START_OVER_015);
-    const logged = await this.#logged(d.tx, principal);
-    if (logged === undefined) throw refused('not_a_member', 'the log never admitted them: their row was written around the vault');
-    const generation = Math.max(row?.generation ?? 0, logged.generation) + 1;
-    d.log.push(accessEntry(actor, 'member.remove', principal, 'allow', correlation, { revoked: 0, generation, tampered: fault }));
-    d.touched.add(principal);
-    d.writes.push(async (at) => {
-      await store.deleteGrants(d.tx, principal);
-      d.grants.set(principal, []);
-      const fresh = {
-        status: 'removed' as const,
-        role: 'member' as const,
-        scope: EVERYWHERE,
-        generation,
-        createdAt: logged.createdAt,
-        createdBy: logged.createdBy,
-        statusChangedAt: at,
-        statusChangedBy: actor,
-      };
-      if (row === undefined) await store.insertMember(d.tx, { principal, ...fresh, ...UNSEALED });
-      else await store.updateMember(d.tx, principal, fresh);
-    });
-    return { revoked: [], generation };
-  }
-
-  /** `principal` as the log says they are: their authenticated access entries, replayed. */
-  async #logged(db: Queryable, principal: string): Promise<LoggedMember | undefined> {
-    const state: Replayed = { members: new Map(), held: new Map() };
-    const entries = (await store.accessEntriesAbout(db, principal, 100_000)).filter((entry) => this.#authentic(entry));
-    for (const entry of entries.reverse()) apply(state, entry);
-    return state.members.get(principal);
   }
 
   // --- the KEKs ----------------------------------------------------------------
@@ -3882,242 +3731,6 @@ class VaultService implements Vault {
   }
 
   /**
-   * 0.15's cutover from 0.14 (cutover.ts; plan PR 9; formal/Migration015.tla).
-   * Done once: the marker read with no lock first, so that each isolate's
-   * start stalls nothing once it is. Without `input`, where 0.14's chain is
-   * verified from, for the app to check its own entries from there.
-   *
-   * With it: 0.14's chain walked on from its newest checkpoint, outside any
-   * transaction (VerifyChain); then one transaction, under every member's
-   * row, 0.14's head, the issue lock shared and the fence (RowFirst,
-   * CutoverHeadLock, CutoverIssueFirst, CutoverFence), the marker read again
-   * (Marker), the rest of the chain to the head, what the app checked still
-   * the chain's and nothing of the app's since (VouchedHeld), every row read
-   * and checked (`planCutover`), the places 0.14 deleted made as 0.15 leaves
-   * them, each object's genesis, its own 0.14 entry, `log.cutover`, and the
-   * cutover's change naming it. Answers once that change is sealed (R51).
-   */
-  async cutover(input?: CutoverInput | null): Promise<CutoverOutcome> {
-    const log015 = this.#prepared.log015;
-    const prepared = this.#prepared;
-    if (prepared.cutover || (await this.#cutoverSealed())) {
-      prepared.cutover = true;
-      return { ok: true, done: true };
-    }
-    if (prepared.since === null && prepared.superseded === null) await this.#settle();
-    if (prepared.superseded !== null) return { ok: false, refused: 'refused', why: prepared.superseded };
-    const from = await this.#resume(this.#db, 'newest');
-    if (!from.ok) return this.#cutoverRefused(`0.14's chain does not verify at entry ${from.failedAtSeq}: ${from.reason}`);
-    const mark = { seq: from.at.seq.toString(), hash: from.at.hash.toString('hex') };
-    // Over RPC or a socket, no input arrives as null.
-    if (input == null) return { ok: true, done: false, from: mark };
-    // The app checked its entries from where this walk starts, or another checkpoint came since: it checks again.
-    if (input.checked?.from?.seq !== mark.seq || input.checked.from.hash !== mark.hash) return { ok: false, refused: 'moved', why: "0.14's newest checkpoint is not the one the app checked from" };
-    // 0.14's chain whole, outside any transaction (VerifyChain): the prefix its newest checkpoint signed, rehashed from the
-    // first entry, which must come to the hash it signed (an entry edited, deleted or moved before it does not: review
-    // r4), each entry there MAC'd when that checkpoint was signed; then the entries since, by the vault's MACs. Once a
-    // cutover: hashes alone, no MAC, no tally.
-    const signed = await relink(this.#db, START, from.at.seq, Infinity);
-    if (!signed.ok) return this.#cutoverRefused(`0.14's chain does not verify at entry ${signed.failedAtSeq}: ${signed.reason}`);
-    if (signed.at.seq !== from.at.seq || !signed.at.hash.equals(from.at.hash)) return this.#cutoverRefused(`0.14's chain up to entry ${from.at.seq} is not the prefix its newest checkpoint signed`);
-    const walked = await this.#walkOn(from, Infinity);
-    if (!walked.ok) return this.#cutoverRefused(`0.14's chain does not verify at entry ${walked.failedAtSeq}: ${walked.reason}`);
-    const reports: NewEntry[] = [];
-    let number: bigint;
-    try {
-      number = await this.#db.transaction((tx) => this.#cutOver(tx, input, walked, reports));
-    } catch (error) {
-      if (error instanceof VouchMoved || error instanceof Retry) return { ok: false, refused: 'moved', why: error instanceof VouchMoved ? error.message : 'a member was admitted meanwhile' };
-      if (error instanceof CutoverRefused) return this.#cutoverRefused(error.message);
-      throw error;
-    }
-    this.#reported(reports);
-    // Done once sealed (R51), whichever vault's change it is: one found under the locks too.
-    await log015.sealThrough(number);
-    prepared.cutover = true;
-    return { ok: true, done: true };
-  }
-
-  /** The cutover's transaction (`cutover`): its change's number, another vault's if it cut over first. */
-  async #cutOver(tx: Transaction, input: CutoverInput, walked: Walked, reports: NewEntry[]): Promise<bigint> {
-    const log015 = this.#prepared.log015;
-    const { logKeys } = this.#prepared;
-    await store.boundLockWaits(tx, LOCK_WAIT_MS);
-    const principals = (await store.allMembers(tx)).map((row) => row.principal);
-    const rows = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
-    const head = await lockLogHead(tx);
-    await holdFence(tx);
-    const found = await store.cutoverNumber(tx);
-    if (found !== null) return found;
-    if ((await store.allMembers(tx)).length !== rows.size) throw new Retry();
-    // 0.14's chain, to the head it holds: what the walk read still there, and the rest by the vault's MACs.
-    if (!(await carries(tx, headOf(walked.at)))) throw new CutoverRefused(`the log up to entry ${walked.at.seq} changed while the vault walked it`);
-    const walk = new Walk(walked.tally, walked.digest);
-    const rest = await rehash(tx, logKeys, walked.at, walk, {});
-    if (!rest.ok) throw new CutoverRefused(`0.14's chain does not verify at entry ${rest.failedAtSeq}: ${rest.reason}`);
-    const unsigned = await this.#checkpointFault(tx, walk.checkpoints);
-    if (unsigned !== null) throw new CutoverRefused(`0.14's chain does not verify at entry ${unsigned.failedAtSeq}: ${unsigned.reason}`);
-    if (rest.at.seq !== head.nextSeq - 1n || !rest.at.hash.equals(head.headHash)) throw new CutoverRefused("0.14's chain head does not name its last entry");
-    // What the app checked by its MACs is the chain's, and it wrote nothing since: what it vouched for stands (VouchedHeld).
-    const to = { seq: Number(input.checked.to.seq), hash: input.checked.to.hash };
-    if (!Number.isSafeInteger(to.seq) || to.seq < -1 || BigInt(to.seq) > rest.at.seq || !(await carries(tx, to))) throw new VouchMoved("the chain the app checked is not 0.14's now");
-    if (await store.appEntriesAfter(tx, BigInt(to.seq))) throw new VouchMoved('the app wrote to 0.14\'s log since it vouched for its rows');
-
-    const at = await this.#now(tx);
-    const { edits, readable, seq: policySeq } = await this.#policyAt(tx, reports, at);
-    if (!readable) throw new CutoverRefused("0.14's newest policy is not the vault's: its roles and protection are not known");
-    const logged = await store.loggedObjects(tx);
-    const held = new Map<string, GrantRow[]>();
-    for (const grant of await store.grants(tx)) held.set(grant.principal, [...(held.get(grant.principal) ?? []), grant]);
-    const seals = await store.memberSeals(tx);
-    // Each member's newest access entry, all in one read: a row whose MAC holds and names it, the vault's, is as 0.14's
-    // `#integrity` takes it; any other is checked by it, one read each, and reported.
-    const newest = await store.newestAccessEntries(tx);
-    const members = [];
-    for (const member of rows.values()) {
-      const grants = held.get(member.principal) ?? [];
-      const seal = seals.get(member.principal) ?? null;
-      // A member 0.15's log holds already is its log's: not checked as 0.14's again.
-      const fresh = seal === null && !logged.has(objectKey(memberRef(member.principal)));
-      const entry = newest.get(member.principal);
-      const plain = entry !== undefined && entry.seq === member.accessSeq && this.#authentic(entry) && this.#sealed(member, grants);
-      members.push({ member, grants, seal, genuine: !fresh || plain || (await this.#integrity(tx, member.principal, member, grants, reports)) === null });
-    }
-    const secrets = await store.everySecret(tx);
-    const references = await this.#referencesMade(tx, secrets);
-    const plan = planCutover({
-      logged,
-      config: await store.configRows(tx),
-      members,
-      edits,
-      policySeq,
-      bulk: this.#config.bulkLimit,
-      projects: await store.everyProject(tx),
-      environments: await store.everyEnvironment(tx),
-      secrets,
-      references,
-      input,
-      credentials: await store.credentialsAt(tx, input.credentials.map((columns) => columns.id)),
-      bindings: await store.bindingsAt(tx, input.bindings.map((columns) => columns.id)),
-      connections: await store.connectionsAt(tx, input.connections.map((columns) => columns.id)),
-    });
-    // Reported as a change refused on them would be (`#notLogged`), once: a member's by their check (`#integrity`).
-    for (const { ref, fault } of plan.skipped) if (ref.kind !== 'principal') this.#report(reports, null, fault === 'tampered' ? 'mac' : 'stale', `log.${ref.kind}:${ref.id}`);
-
-    await store.endReferenceRows(tx, plan.ends, at);
-    await store.cutoverPlaces(tx, at, plan.rename, plan.archive);
-    // Its own entry last, the head its change names (the anchor): the trigger's issue lock and fence held already.
-    const appended = await this.#append(tx, [...reports, {
-      actor: VAULT_ACTOR, action: CUTOVER, decision: 'allow',
-      metadata: JSON.stringify({ from: { seq: walked.from.at.seq.toString(), hash: walked.from.at.hash.toString('hex') }, sealed: plan.genesis.length + plan.bindings.length, skipped: plan.skipped.length }),
-    }]);
-    const calls = genesisCalls(log015, plan.genesis, at);
-    for (let i = 0; i < calls.length; i += GENESIS_BATCH) {
-      const numbers = await store.changeInputs(tx, calls.slice(i, i + GENESIS_BATCH));
-      if (numbers.some((n) => n === null)) throw new VouchMoved('an object\'s row moved under the cutover\'s locks');
-    }
-    for (const call of genesisCalls(log015, plan.bindings, at)) {
-      if ((await store.sealBinding(tx, call)) === null) throw new VouchMoved(`the binding ${call.ref.id}'s row moved under the cutover's locks`);
-    }
-    const anchor = { seq: appended.nextSeq - 1n, hash: appended.headHash };
-    return store.logCutover(tx, cutoverRow(log015, at, cutoverPayload(anchor, walked.from.at)));
-  }
-
-  /**
-   * Each key's newest reference row's `reference.create`, by its number:
-   * whether it is the vault's, by its MAC, about that row, holder and
-   * source; and whether an authentic `reference.end` ended it.
-   */
-  async #referencesMade(db: Queryable, secrets: readonly store.SecretRead[]): Promise<Map<string, { authentic: boolean; ended: boolean }>> {
-    const rows = secrets.flatMap((secret) => (secret.reference === null ? [] : [{ secret, reference: secret.reference }]));
-    const made = await store.entriesAt(db, rows.map(({ reference }) => reference.createdSeq));
-    // An entry of these the vault's MAC does not hold is damaged history, read under the cutover's locks: refused, never
-    // taken for no end (a reference 0.14 holds ended would be sealed live: review r4) nor for no reference.
-    const damaged = (entry: StoredEntry) => {
-      throw new CutoverRefused(`0.14's ${entry.action} at entry ${entry.seq} does not carry the vault's MAC: its history is damaged`);
-    };
-    const ends = await store.referenceEnds(db, rows.map(({ reference }) => reference.createdSeq));
-    for (const entry of ends) if (!this.#authentic(entry)) damaged(entry);
-    const ended = new Set(ends.map((entry) => entry.relatedSeq!.toString()));
-    return new Map(rows.map(({ secret, reference }) => {
-      const entry = made.get(reference.createdSeq);
-      const created = entry !== undefined && entry.author === 'vault' && entry.action === 'reference.create' && entry.decision === 'allow';
-      if (created && !this.#authentic(entry)) damaged(entry);
-      const sealed = !created ? null : sealedReference(entry, reference.id);
-      // The holder where the vault made it: a row moved around it, its id and reference row kept, would read the source
-      // from another place, where 0.14's read through it is refused.
-      const authentic = sealed !== null && sealed.holder.secretId === secret.id && sealed.holder.projectId === secret.projectId
-        && sealed.holder.environmentId === secret.environmentId && sealed.source.secretId === reference.source;
-      return [reference.createdSeq.toString(), { authentic, ended: ended.has(reference.createdSeq.toString()) }];
-    }));
-  }
-
-  /** A cutover refused, recorded once a process (`log.cutover`, denied), and answered. */
-  async #cutoverRefused(why: string): Promise<CutoverOutcome> {
-    const reports: NewEntry[] = [];
-    const key = `cutover|${why}`;
-    if (!this.#prepared.reported.has(key)) {
-      const entry: NewEntry = { actor: VAULT_ACTOR, action: CUTOVER, decision: 'deny', code: 'log_broken', metadata: JSON.stringify({ reason: why }) };
-      REPORTED.set(entry, key);
-      reports.push(entry);
-    }
-    if (reports.length > 0) await this.#db.transaction((tx) => this.#append(tx, reports));
-    this.#reported(reports);
-    return { ok: false, refused: 'refused', why };
-  }
-
-  /**
-   * Under 0.15's log, that it is cut over from 0.14 (`cutover`): nothing of
-   * 0.15's is decided, changed or used before, so that the cutover's change
-   * precedes every other (AnchorHolds) and nothing decides on rows it has
-   * not sealed. The marker read once, with no lock, until it is there.
-   */
-  async #cutOverYet(): Promise<void> {
-    if (!(await this.#cutOverNow())) throw new Error(NOT_CUT_OVER);
-  }
-
-  /** Whether the vault may serve 0.15's log: cut over, its change sealed (`#cutoverSealed`). */
-  async #cutOverNow(start?: StartReads): Promise<boolean> {
-    const prepared = this.#prepared;
-    if (prepared.cutover) return true;
-    if (!(await this.#cutoverSealed(start))) return false;
-    prepared.cutover = true;
-    return true;
-  }
-
-  /**
-   * Whether the log is cut over, its change sealed: the marker read with no
-   * lock, then, found, its seal waited for (R51), as the vault that wrote it
-   * waits before it answers. Committed and not sealed yet, as when that vault
-   * waits or failed before its seal, it serves nothing until it is. Sealed
-   * long ago, as it is but in a deployment's first moments, a pair this
-   * vault's key signed past it says so (T169): an isolate's first calls, its
-   * uses among them, ask no checkpointer, which may be the one thing that
-   * does not answer.
-   */
-  async #cutoverSealed(start?: StartReads): Promise<boolean> {
-    const number = await (start?.cutover ?? store.cutoverNumber(this.#db));
-    if (number === null) return false;
-    if (!(await this.#signedPast(number, start))) await this.#prepared.log015.sealThrough(number);
-    return true;
-  }
-
-  /**
-   * Whether the database's newest checkpoint is a pair this vault's key signed in whose changes tree change `number`
-   * is proved, as its seal proves it: a pair covering its number may cover a gap a writer moved the change into
-   * (review r1). Anything short of that goes to the seal, which alarms on what it refuses.
-   */
-  async #signedPast(number: bigint, start?: StartReads): Promise<boolean> {
-    const store = logStore(this.#db);
-    const newest = await (start?.checkpoint ?? store.newest());
-    if (newest === null || newest.upto < number) return false;
-    const pair = await openPair(newest.notes, (await this.#verifierKeys()).current.verifiers);
-    if (pair === null || pair.upto !== newest.upto) return false;
-    const proof = await proveIn(store, number, { pair, notes: newest.notes }, { tree: 'changes' }).catch(() => null);
-    return proof !== null;
-  }
-
-  /**
    * The app's changes, sealed (`prepareChanges`, plan PR 4b): no lock,
    * nothing written, and one read, each object's newest change with its MAC
    * checked (T190), and for an unarchive what its key's log last sealed
@@ -4130,10 +3743,6 @@ class VaultService implements Vault {
   async prepare(input: PrepareInput): Promise<Outcome<Prepared>> {
     const log015 = this.#prepared.log015;
     if (typeof input?.actor !== 'string' || input.actor.length === 0 || !Array.isArray(input.changes)) throw new Error('prepare takes an actor and the changes the app will write');
-    // Before the cutover, a change of 0.14's rows alone, which logs nothing (`prepareChanges`): what the app key's
-    // rotation makes as it signs sessions out, which the app's door finishes before it cuts over (review r3). One that
-    // makes an object, or changes one the log holds, waits for the cutover.
-    if (input.changes.some((change) => change.before === null || change.before.seal !== null)) await this.#cutOverYet();
     try {
       // Each object's newest change, its MAC checked (T190), in one statement: `app_change` holds the row to that
       // change's seal, which SQL compares and cannot authenticate. An unarchive reads the write its archive ended too.
@@ -4194,7 +3803,6 @@ class VaultService implements Vault {
     const { log015 } = this.#prepared;
     if (!this.#serveWrites()) return unserved('vault');
     validateWriteKeys(input);
-    if (!(await this.#cutOverNow())) return unserved('vault');
     if ((await this.#kekMismatch(Date.now() + CALL_DEADLINE_MS)) !== null) return unserved('kek');
     const at = Date.now() + this.#prepared.options.clockOffset();
     const read = await callWrite(this.#db, {
@@ -4263,7 +3871,7 @@ class VaultService implements Vault {
     const unserved = (why: string): AdmitReadOutcome => ({ served: false, why });
     const { log015 } = this.#prepared;
     validateAdmitRead(input);
-    if ((await this.#settled()) !== null || !(await this.#cutOverNow())) return unserved('vault');
+    if ((await this.#settled()) !== null) return unserved('vault');
     const at = Date.now() + this.#prepared.options.clockOffset();
     const asked: AdmitAsked = { principal: input.principal, ...(input.role === undefined ? {} : { role: input.role }), ...(input.scope === undefined ? {} : { scope: input.scope }) };
     const slugs = scopeSlugs(asked);
@@ -4388,7 +3996,6 @@ class VaultService implements Vault {
    */
   async signIn(input: SignInInput): Promise<SignInOutcome> {
     const log015 = this.#prepared.log015;
-    await this.#cutOverYet();
     const at = Date.now() + this.#prepared.options.clockOffset();
     // The proof, verified here on the sealed binding (D148): what the credential is held to comes of the token, not the app.
     const proven = await this.#proven(log015, input, at);
@@ -4442,7 +4049,6 @@ class VaultService implements Vault {
    */
   async revokeCredential(input: RevokeCredentialInput): Promise<RevokeCredentialOutcome> {
     const log015 = this.#prepared.log015;
-    await this.#cutOverYet();
     const notLogged = async (error: NotLogged) => {
       const reports: NewEntry[] = [];
       this.#notLogged(reports, error);
@@ -4539,7 +4145,6 @@ class VaultService implements Vault {
   async issueToken(input: IssueTokenInput): Promise<IssueTokenOutcome> {
     const log015 = this.#prepared.log015;
     await this.#settled();
-    await this.#cutOverYet();
     const scope = checkIssue(input);
     for (let tries = 0; ; tries += 1) {
       const outcome = await this.#issueOnce(log015, input, scope);
@@ -4586,7 +4191,7 @@ class VaultService implements Vault {
     const reports: NewEntry[] = [];
     // The members, their grants, the policy, the setting and the places in one statement; the credential beside it.
     const [reads, via] = await Promise.all([
-      snapshot(this.#db, { principals: [...new Set([actor, principal])], members: true, settings: input.service, environments: environmentIds, seals: this.#checksSeals() }),
+      snapshot(this.#db, { principals: [...new Set([actor, principal])], members: true, settings: input.service, environments: environmentIds, seals: true }),
       input.via === null ? Promise.resolve(null) : store.issuingCredential(this.#db, input.via, macsOf(log015)),
     ]);
     // The settings from the snapshot's newest entry; the pages before it read only when it fails its check.
@@ -4636,7 +4241,7 @@ class VaultService implements Vault {
     const subject = principal === actor ? acting : await this.#standing(this.#db, principal, principalRow, at, reports, reads);
     if (subject.status !== 'active' || principalRow === undefined || principalRow.generation !== input.generation) {
       // A service account whose row the log does not hold is no gone account: say which, as a grant to it would.
-      if (principal !== actor && subject.status === 'tampered') return refuse('refused', this.#tamperedSubject());
+      if (principal !== actor && subject.status === 'tampered') return refuse('refused', TAMPERED_SUBJECT);
       return refuse(principal === actor ? 'ended' : 'gone');
     }
     if (scope.some((grant) => grant.environmentId != null && faulty.has(grant.environmentId))) return refuse('refused', TAMPERED_PLACE);
@@ -4692,7 +4297,6 @@ class VaultService implements Vault {
   async changeBindings(input: ChangeBindingsInput): Promise<ChangeBindingsOutcome> {
     const log015 = this.#prepared.log015;
     await this.#settled();
-    await this.#cutOverYet();
     checkChangeBindings(input);
     const { actor, make } = input;
     let read: IssueRead | null = null;
@@ -5062,7 +4666,7 @@ class VaultService implements Vault {
     // deciding in another, the first call's decision waited behind 780 calls' reads, and the last answered after 15 s.
     // So the read and the decision take one turn, and only one call waits for the head, in the code's one place in line;
     // the others, refused that place at once (`HeadBusy`), try again after a pause, and read the names it wrote.
-    const reads = (await this.#settled()) === null && (await this.#cutOverNow());
+    const reads = (await this.#settled()) === null;
     const first = reads ? (tx: Transaction) => this.#reservedAlready(tx, keys, wanted) : undefined;
     // One bound for the call: each attempt's lock waits within what is left of it (review r14 of #467), a call that
     // took the place late never waiting the whole bound again. A no-op attempt, every call of a deploy's herd but one,
@@ -5401,7 +5005,7 @@ class VaultService implements Vault {
       const at = await this.#now(tx);
       const accounting = walk.accounting.result(at);
       if (!accounting.ok) return accounting;
-      const [rows, held, fast] = await Promise.all([store.allMembers(tx), store.grants(tx), this.#checksSeals() ? store.fastAdded(tx) : new Set<string>()]);
+      const [rows, held, fast] = await Promise.all([store.allMembers(tx), store.grants(tx), store.fastAdded(tx)]);
       const fault = fast.size === 0
         ? this.#unsealed(rows, held, walk.newestAccess) ?? walk.replayFault ?? replayFault(walk.replayed, rows, held, at)
         : await this.#partlyReplayed(tx, walk, rows, held, fast, at);
@@ -5511,9 +5115,6 @@ class VaultService implements Vault {
 }
 
 type Broken = Extract<LogVerification, { ok: false }>;
-
-/** 0.14's chain as the cutover walked it from its newest checkpoint, outside any transaction (`#walkOn`). */
-type Walked = { from: Resumed; tally: Tally; digest: string; at: Position };
 
 /**
  * Where a walk of the log resumes: the checkpoint's entry (null for the

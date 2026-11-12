@@ -22,7 +22,6 @@ import { migrated } from '@coffre/db/schema-version';
 import { auditHead, pruneSpentTokens } from './db/queries.ts';
 import { anchorIsOwn } from './anchor.ts';
 import { finishRotation, keyStateNow, rotateStep, type KeyState } from './key-rotation.ts';
-import { CUTTING_OVER_NOW, cutoverReady, HOLD_MS, type CutoverHeld } from './cutover.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import { logged } from './logged.ts';
@@ -161,36 +160,8 @@ async function door(runtime: CoffreRuntime): Promise<((request: Request) => Resp
   if (!(await schemaReady(runtime))) return migrating;
   const held = await keyReady(runtime);
   if (held !== null) return held.kind === 'rotating' || held.kind === 'stalled' ? rotating : held.kind === 'refused' ? wrongKey : unreachable;
-  // Under 0.15's log, cut over from 0.14 before anything else: the first request does it, and waits.
-  const cut = await cutoverReady(runtime);
-  return cut === null ? null : cuttingOver(cut);
+  return null;
 }
-
-/**
- * The answer while 0.15's log is not cut over from 0.14 (cutover.ts): a
- * request of this isolate is cutting over, or the cutover was refused,
- * failed, or met 0.14 writing meanwhile, which the server's log says once.
- * A request tries again once the hold lapses. A question that did not
- * answer says only that: an instance made on 0.15, asking of its own
- * cutover's seal, moves nothing (T170).
- */
-function cuttingOver(held: CutoverHeld): (request: Request) => Response {
-  cutoverRefused(held.why);
-  return () => errorResponse(new ApiError('unavailable', held.failed ? UNCHECKED : CUTTING_OVER), { 'retry-after': String(HOLD_MS / 1000) });
-}
-
-/** Why the cutover holds the door, said in the server's log once, and again if it changes: from a request or readiness alike. */
-function cutoverRefused(why: string): void {
-  if (why === CUTTING_OVER_NOW || refusals.get(cuts) === why) return;
-  refusals.set(cuts, why);
-  console.error({ event: 'cutover_refused', reason: why }, "coffre serves nothing until 0.15's log is cut over from 0.14");
-}
-
-const cuts = {};
-
-const CUTTING_OVER = "coffre is moving its audit log to 0.15's, and serves once it has: the server's log says what holds it back";
-
-const UNCHECKED = "coffre could not check that its audit log is cut over to 0.15's, and serves once it can: the server's log says why";
 
 /**
  * Whether the database has every migration this version ships. Each
@@ -374,13 +345,6 @@ async function ready(runtime: CoffreRuntime): Promise<{ ok: boolean } & Record<s
   });
   if (held === 'error') return { ok: false, appKey: 'error' };
   if (held !== null) return { ok: false, ...(held.kind === 'rotating' || held.kind === 'stalled' ? { rotating: true } : held.kind === 'refused' ? { appKey: false } : {}) };
-  // Under 0.15's log, cut over from 0.14: a deploy that waits on readiness takes it there.
-  const cut = await cutoverReady(runtime);
-  if (cut !== null) {
-    // A deploy that polls readiness alone reads why in the server's log (review r9).
-    cutoverRefused(cut.why);
-    return { ok: false, cutover: false };
-  }
   // Under 0.15's log a change answers once sealed (R51): whether the checkpointer seals, red within seconds of a stall
   // and green again once it ticks (T169).
   const unsealed = await unsealing(runtime);
@@ -431,13 +395,6 @@ export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
     throw new Error(
       held.kind === 'rotating' || held.kind === 'stalled' ? `${ROTATING}: the scheduled job runs once it has` : held.kind === 'refused' ? held.reason : "coffre's database cannot be reached",
     );
-  }
-  // Under 0.15's log, cut over from 0.14 first, as a request's door and readiness have it: on Node, the job runs as the
-  // server starts, before any request, and the vault decides nothing until then.
-  const cut = await cutoverReady(runtime);
-  if (cut !== null) {
-    cutoverRefused(cut.why);
-    throw new Error(`the scheduled job runs once 0.15's log is cut over: ${cut.why}`);
   }
   const watch = watchOf(runtime);
   if (watch === null) unwatched(runtime);

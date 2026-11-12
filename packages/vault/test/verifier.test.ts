@@ -27,7 +27,7 @@ import { DAY_MS, dayOf } from '../src/retention.ts';
 import { newRequestId } from '../src/use.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
-import { cutOver, emptyDatabase, openTestDatabase, places, rows, run, speaking, type TestDatabase } from './database.ts';
+import { emptyDatabase, openTestDatabase, places, rows, run, speaking, type TestDatabase } from './database.ts';
 import { credentials, logCheckpoints, secretVersions } from '@coffre/db/schema';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
@@ -89,7 +89,6 @@ async function instance() {
     return cp.sealThrough(number, deadline);
   };
   const opened = await openLocalVault(db.vault, config, { sealThrough, heldOutside }, async () => {}, hot);
-  await cutOver(opened, db.vault);
   const vault = speaking(opened);
   const keys: ChangeKeys = { seals: [sealKey(seed)], mac: logMacKey(seed) };
   const where = await places(db.owner);

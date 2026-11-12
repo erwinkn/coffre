@@ -249,8 +249,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
   }
 
   /**
-   * The door open: requests answered, not held. The first after a start cuts 0.15's log over from 0.14, and the
-   * others answer 503 meanwhile, with Retry-After, as a deployment's clients see; a check's requests come after.
+   * The door open: requests answered, not held. Until then they answer 503, with Retry-After, as a deployment's
+   * clients see; a check's requests come after.
    */
   const doorOpen = () => until(`${origin}/api/me answered, not held`, async () => (await fetch(`${origin}/api/me`)).status !== 503, 60, alive);
 

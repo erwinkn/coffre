@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { PairNotes } from '@coffre/core/merkle';
-import type { ObjectChange, SecretRef, Through, Vault, WrappedKey } from '@coffre/core/vault';
+import type { ObjectChange, SecretRef, Through, WrappedKey } from '@coffre/core/vault';
 import { createDatabase, type Database, type Queryable } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { appChanges, forgetLogHeads } from '@coffre/db/log';
@@ -14,7 +14,6 @@ import type { Sealed, SealThrough } from '../src/checkpointer.ts';
 import { sealKey } from '../src/inputs.ts';
 import { openLocalVault as openRawVault, spoken, type SpokenVault as RawLocalVault } from '../src/local.ts';
 import { logMacKey } from '../src/log-entry.ts';
-import { cutOver as cutOverYet } from '../src/store.ts';
 import { auditChainHead, auditLog, credentials, dismissedKeys, environments, grants, logChanges, logConfig, passkeys, policy, principals, projects, proxyDefinitions, proxyReserved, roles, secretReferences, secrets, secretVersions, serviceBindings, spentIdTokens, vaultReleases } from '@coffre/db/schema';
 
 /**
@@ -74,55 +73,50 @@ export const nothingHeld = async (): Promise<PairNotes[]> => [];
 
 /**
  * `openLocalVault`, spoken to as the app does (`speaking`), its changes
- * sealed at once (`sealed`), cut over from 0.14 as it opens (`cutOver`), as
- * the app has it before anything else.
+ * sealed at once (`sealed`). The first since the database was emptied seals
+ * the places a test wrote before it (`sealPlaces`), as the app would have
+ * made them under its keys.
  */
 export async function openLocalVault(...[db, config, options, close]: Parameters<typeof openRawVault>): Promise<LocalVault> {
   const vault = spoken(await openRawVault(db, config, { sealThrough: sealed, heldOutside: nothingHeld, ...options }, close));
-  if (vault.cutover !== undefined) {
-    placeKeys = { seals: config.signingKeys.map((key) => sealKey(key)), mac: logMacKey(config.signingKeys[0]!) };
-    await cutOver(vault, db);
-  }
+  const first = placeKeys === null;
+  placeKeys = { seals: config.signingKeys.map((key) => sealKey(key)), mac: logMacKey(config.signingKeys[0]!) };
+  if (first && suiteOwner !== null) await sealPlaces(suiteOwner, await unsealedPlaces(suiteOwner));
   return speaking(vault);
 }
 
 /**
- * The keys the vault this process opened last under 0.15's log seals with
- * (`openLocalVault`): what the fixtures seal the places they write with
- * once the log is cut over (`sealPlaces`). The vault checks every
+ * The keys the vault this process opened last seals with (`openLocalVault`):
+ * what the fixtures seal the places they write with (`sealPlaces`); null
+ * until the first since the database was emptied. The vault checks every
  * environment row it decides on against the log (T159).
  */
 let placeKeys: ChangeKeys | null = null;
 
+/** The suite's database as its owner (`openTestDatabase`), which seals places as the app's login would. */
+let suiteOwner: Database | null = null;
+
+/** The plain environments a test wrote with no seal and no change of 0.15's log: written before any vault opened. */
+async function unsealedPlaces(owner: Database): Promise<{ id: string; projectId: string; slug: string; parentId: string | null }[]> {
+  const found = await rows<{ id: string; project_id: string; slug: string; parent_id: string | null }>(owner, sql`SELECT e.id, e.project_id, e.slug, e.parent_id
+    FROM environments e WHERE e.seal IS NULL AND e.owner IS NULL AND e.archived_at IS NULL AND e.protected IS NULL
+      AND NOT EXISTS (SELECT 1 FROM log_changes l WHERE l.object = log_object('environment', e.id::text))`);
+  return found.map((row) => ({ id: row.id, projectId: row.project_id, slug: row.slug, parentId: row.parent_id }));
+}
+
 /**
  * New environments' rows, written by a test, sealed as the app's creation
  * of each seals it (`Vault.prepare`, then `app_change` in a transaction of
- * its own): under 0.15's log, once it is cut over. Before, the cutover's
- * genesis seals them.
+ * its own), once a vault has opened.
  */
 export async function sealPlaces(owner: Database, made: readonly { id: string; projectId: string; slug: string; parentId?: string | null }[]): Promise<void> {
-  if (placeKeys === null || !(await cutOverYet(owner))) return;
+  if (placeKeys === null || made.length === 0) return;
   const changes: ObjectChange[] = made.map(({ id, projectId, slug, parentId = null }) => ({
     kind: 'environment', id, before: null, after: { id, projectId, slug, owner: null, parentId, protected: null, archived: false, projectArchived: false },
   }));
   const calls = prepareChanges(placeKeys, Date.now(), 'user:root@acme.example', changes, new Map());
   const numbers = await owner.transaction((tx) => appChanges(tx, calls));
   assert.ok(numbers.every((number) => number !== null && number > 0n), 'a new environment is sealed as the app makes one');
-}
-
-/**
- * The cutover (plan PR 9), as the app asks for it, vouching for nothing of
- * its own: the vault's tests have no app key, so no credential or binding
- * the app made, and no place it deleted. The chain checked to its head.
- */
-export async function cutOver(vault: Pick<Vault, 'cutover'>, db: Queryable): Promise<void> {
-  const asked = await vault.cutover!();
-  if (asked.ok && asked.done) return;
-  assert.ok(asked.ok, `the cutover is refused: ${asked.ok ? '' : asked.why}`);
-  const [head] = await rows<{ next_seq: string | number; head_hash: Buffer | Uint8Array }>(db, sql`SELECT next_seq, head_hash FROM audit_chain_head`);
-  const to = { seq: (BigInt(head!.next_seq) - 1n).toString(), hash: Buffer.from(head!.head_hash).toString('hex') };
-  const outcome = await vault.cutover!({ checked: { from: asked.from, to }, credentials: [], bindings: [], connections: [], deleted: [] });
-  assert.ok(outcome.ok && outcome.done, `the cutover is refused: ${outcome.ok ? '' : outcome.why}`);
 }
 
 export type TestDatabase = {
@@ -156,6 +150,7 @@ export async function openTestDatabase({ connections: pools }: { connections?: n
     await Promise.all(closing.map((close) => close()));
   };
   const owner = await open(OWNER_URL, undefined, opened);
+  suiteOwner = owner;
   return {
     owner,
     vault: await open(VAULT_URL, undefined, opened),
@@ -249,6 +244,8 @@ export async function emptyReads(owner: Database): Promise<void> {
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
   await endLeftOpen(owner);
+  // A new instance: the next vault opened decides the keys its places are sealed with.
+  placeKeys = null;
   await owner.delete(secretReferences);
   await withLogUnlocked(owner, async (db) => {
     await db.update(auditLog).set({ relatedSeq: null });
@@ -257,7 +254,7 @@ export async function emptyDatabase(owner: Database): Promise<void> {
   await owner.update(auditChainHead).set({ nextSeq: 0n, headHash: Buffer.alloc(32) });
   // Kept from the log, and gone with it.
   await owner.delete(vaultReleases);
-  // 0.15's log, which only the cutover and the change path write.
+  // 0.15's log, which only the change path writes.
   await owner.delete(logChanges);
   await owner.delete(logConfig);
   await owner.delete(policy);
@@ -283,14 +280,14 @@ export async function emptyDatabase(owner: Database): Promise<void> {
 }
 
 /**
- * An environment renamed or archived as the app does it: under 0.15's log,
- * cut over, its change sealed (`Vault.prepare`) and written beside the row
- * in one transaction (`app_change`); otherwise the row alone.
+ * An environment renamed or archived as the app does it: its change sealed
+ * (`Vault.prepare`) and written beside the row in one transaction
+ * (`app_change`); before a vault has opened, the row alone.
  */
 export async function changePlace(owner: Database, id: string, set: { slug?: string; archived?: boolean }): Promise<void> {
   const write = (db: Queryable) => run(db, sql`UPDATE environments SET slug = coalesce(${set.slug ?? null}, slug),
     archived_at = ${set.archived === undefined ? sql`archived_at` : set.archived ? sql`${new Date()}` : sql`NULL`} WHERE id = ${id}`);
-  if (placeKeys === null || !(await cutOverYet(owner))) return write(owner);
+  if (placeKeys === null) return write(owner);
   const [row] = await rows<{ project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: boolean | null; archived: boolean; project_archived: boolean; seal: Buffer | Uint8Array | null }>(owner,
     sql`SELECT e.project_id, e.slug, e.owner, e.parent_id, e.protected, e.archived_at IS NOT NULL AS archived, p.archived_at IS NOT NULL AS project_archived, e.seal
       FROM environments e JOIN projects p ON p.id = e.project_id WHERE e.id = ${id}`);

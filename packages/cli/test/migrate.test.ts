@@ -482,6 +482,38 @@ test('a database a coffre before 0.4.0 made is refused, with what to do instead,
   assert.equal(await applied(url), 1);
 });
 
+test('a database a release before 0.15.0 made, or a 0.15.0 whose vault has not cut its log over, is refused, and nothing changes', needsCluster, async () => {
+  const url = await fresh('setup_migrate_uncut');
+  const dir = deploymentFolder(pinnedAt(cliVersion()));
+  // 0.14.5's schema: the migrations before 0.15.0's last.
+  const before = KNOWN[KNOWN.indexOf('0049_reads') - 1]!;
+  await migrateThrough(url, before);
+  const old = await migrateIn(dir, url);
+  assert.equal(old.code, 1);
+  assert.match(old.output, /the database was made by a coffre before 0\.15\.0, which this version does not upgrade from: upgrade it to 0\.15\.0 and start it once/);
+  assert.equal(await applied(url), KNOWN.indexOf(before) + 1);
+  // 0.15.0's schema, its vault never started: no cutover change in its log.
+  await migrateThrough(url, '0049_reads');
+  const uncut = await migrateIn(dir, url);
+  assert.equal(uncut.code, 1);
+  assert.match(uncut.output, /the database's audit log is not moved to 0\.15's yet, which 0\.15\.0's vault does at its first start: start 0\.15\.0 once/);
+  await assert.rejects(migrateDatabase(url), /the database's audit log is not moved to 0\.15's yet/);
+  assert.equal(await applied(url), KNOWN.indexOf('0049_reads') + 1);
+});
+
+test("a 0.15.0 database whose vault cut its log over migrates to this version", needsCluster, async () => {
+  const url = await fresh('setup_migrate_cut');
+  await migrateThrough(url, '0049_reads');
+  // The change 0.15.0's vault writes at its first start, as its log holds it (0041's `log_cutover`).
+  await asSuperuser('setup_migrate_cut', (client) => client.unsafe(
+    `INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+      VALUES (1, 0, 'cutover', log_object('log', 'cutover'), 'system:vault', '{"op":"cutover"}', NULL, '\\x${'00'.repeat(16)}')`,
+  ));
+  const run = await migrateIn(deploymentFolder(pinnedAt(cliVersion())), url);
+  assert.equal(run.code, 0, run.output);
+  assert.equal(await applied(url), KNOWN.length);
+});
+
 test("a database that applied 0022's text from before 0.16.0, which gave the hot login generic plans, migrates on; any other text there is refused", needsCluster, async () => {
   const url = await fresh('setup_migrate_rewritten');
   await migrateDatabase(url);

@@ -28,7 +28,7 @@ import { credentialObject, environmentObject, secretObject } from '../src/object
 import * as store from '../src/store.ts';
 import { newRequestId } from '../src/use.ts';
 import { variableMemory } from './audit-tree.ts';
-import { cutOver, emptyDatabase, openTestDatabase, places, rows, run, sealed, speaking, type LocalVault, type TestDatabase } from './database.ts';
+import { emptyDatabase, openTestDatabase, places, rows, run, sealed, speaking, type LocalVault, type TestDatabase } from './database.ts';
 import { checkpointFence, credentials, secretVersions } from '@coffre/db/schema';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
@@ -103,7 +103,6 @@ async function vaultUnder(config: VaultConfig, memory: Memory & { record: string
 async function underOldKey(config: VaultConfig) {
   const memory = variableMemory();
   const old = await vaultUnder(config, memory);
-  await cutOver(old.vault, db.vault);
   const where = await places(db.owner);
   const genesis = async (keys: ChangeKeys, cp: Checkpointer, ref: Ref, input: Input) => {
     const [number] = await db.vault.transaction((tx) => store.changeInputs(tx, [genesisCall(keys, ref, input, Date.now(), 'system:cutover')]));

@@ -11,8 +11,8 @@ import { expect } from '../report.ts';
 import { quoted, tables } from './storage.ts';
 
 const ZEROS = "decode(repeat('00', 32), 'hex')";
-// Marked as a writer under 0.15's log marks it (`log015`), so that the cutover's refusal of 0.14's writes, which comes
-// first, leaves it to the privilege checks.
+// Marked as a writer under 0.15's log marks it (`log015`), so that a release that still refuses 0.14's writes (0.15.0,
+// migration 0047's trigger), which comes first, leaves it to the privilege checks.
 const appendAs = (author: string) => `INSERT INTO audit_log
   (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash, log015)
   VALUES (9000000000, '${author}', '${author}:0', 0, 'system:conformance', 'probe', 'allow', ${ZEROS}, ${ZEROS}, ${ZEROS}, true)`;

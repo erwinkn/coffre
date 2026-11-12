@@ -43,7 +43,7 @@ import { credentialProxy, header, hmac } from '../src/plugins/credential-proxy.t
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, cutOverAtOpen, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testAnchor, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testAnchor, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { inBulkPeriod, pastBulkTurn } from './window-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
@@ -243,8 +243,6 @@ before(async () => {
     // cost, the same whenever it runs, however long the file has run.
     deployment: defineDeployment({ audit: { repeatsWithinSeconds: 0 } }),
   }, { sealThrough: sealedNow, heldOutside: nothingHeld }));
-  // Cut over from 0.14 first, as the app's door has it (cutover.ts), and as an upgraded instance runs.
-  await cutOverAtOpen(opened, db.owner);
   // Every call the app makes of the vault: on Workers, each its own invocation and connection.
   const vault = new Proxy(opened as unknown as FixtureDeps['vault'], {
     get(target, key) {

@@ -19,15 +19,29 @@
 (*            fence;                                                       *)
 (*   revoke   the credential revoked (`revoke_credential`, 0034): 0.14's   *)
 (*            head, the row, the fence;                                    *)
+(*   policy   a policy change (`holdIssues`; T149): 0.14's head, the issue *)
+(*            lock exclusive, the fence;                                   *)
+(*   signin   a sign-in that ends the account's earlier sessions: 0.14's   *)
+(*            head, then its entries' trigger: the issue lock shared, the  *)
+(*            fence;                                                       *)
 (*   use      a use: the fence shared.                                     *)
 (*                                                                         *)
-(* The protection (scripts/formal.sh turns it off):                        *)
+(* The protections (scripts/formal.sh turns each off):                     *)
 (*   TouchFirst  the write updates its credential's row before the hold,   *)
 (*               as the issuer and the revoke take it: row, issue lock,    *)
 (*               fence. Without, it holds the issue lock and the fence and *)
 (*               waits for the row, which the issuer holds shared, queued  *)
 (*               for the issue lock behind the barrier, which waits for    *)
 (*               the write's issue lock: a cycle (review r1 of #469).      *)
+(*   The issue lock before the fence, everywhere (T123, T149; checked in   *)
+(*   Migration015.tla until 0.15's cutover was deleted, T273): without     *)
+(*   one of these, a flow holds one of the two and waits for the other,    *)
+(*   which the barrier, or the write, holds while it waits for the first.  *)
+(*   BarrierIssueFirst  the barrier takes the issue lock, then the fence.  *)
+(*   PolicyIssueFirst   a policy change takes the issue lock before the    *)
+(*                      fence.                                             *)
+(*   IssueBeforeFence   a sign-in's trigger takes the issue lock before    *)
+(*                      the fence.                                         *)
 (*                                                                         *)
 (* A member add's (T179 PR 5, Flow = "add"; Writing.tla's AWrite, which    *)
 (* holds none): its first statement locks the members' rows (`lockMembers`:*)
@@ -47,9 +61,9 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
-CONSTANTS TouchFirst, Flow, MembersFirst
+CONSTANTS TouchFirst, Flow, MembersFirst, BarrierIssueFirst, PolicyIssueFirst, IssueBeforeFence
 
-Procs == IF Flow = "write" THEN {"write", "issue", "barrier", "revoke", "use"}
+Procs == IF Flow = "write" THEN {"write", "issue", "barrier", "revoke", "policy", "signin", "use"}
                            ELSE {"add", "demote", "issue", "barrier", "revoke", "use"}
 
 \* Each one's locks, in the order it takes them: a lock and its mode, S(hared) or X (exclusive).
@@ -63,8 +77,16 @@ Plan(p) ==
       [] p = "demote" -> << <<"member", "X">>, <<"head", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
       [] p = "issue" /\ Flow = "add" -> << <<"member", "S">>, <<"cred", "S">>, <<"issue", "S">> >>
       [] p = "issue" /\ Flow = "write" -> << <<"cred", "S">>, <<"issue", "S">> >>
-      [] p = "barrier" -> << <<"issue", "X">>, <<"fence", "X">> >>
+      [] p = "barrier" ->
+            IF BarrierIssueFirst THEN << <<"issue", "X">>, <<"fence", "X">> >>
+                                 ELSE << <<"fence", "X">>, <<"issue", "X">> >>
       [] p = "revoke" -> << <<"head", "X">>, <<"cred", "X">>, <<"fence", "X">> >>
+      [] p = "policy" ->
+            IF PolicyIssueFirst THEN << <<"head", "X">>, <<"issue", "X">>, <<"fence", "X">> >>
+                                ELSE << <<"head", "X">>, <<"fence", "X">>, <<"issue", "X">> >>
+      [] p = "signin" ->
+            IF IssueBeforeFence THEN << <<"head", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
+                                ELSE << <<"head", "X">>, <<"fence", "X">>, <<"issue", "S">> >>
       [] p = "use" -> << <<"fence", "S">> >>
 
 Locks == {"member", "head", "cred", "issue", "fence"}

@@ -41,13 +41,11 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
 - Four more hold the workload-access design before it is built
   ([below](#workload-access)): `formal/Workload.tla` and the three
   `formal/Workload*.tla` beside it.
-- Five hold 0.15's rewrite of the vault and the audit log, the spec its
-  code follows ([below](#015-the-hot-path-sealing-and-the-cutover)):
+- Four hold 0.15's rewrite of the vault and the audit log, the spec its
+  code follows ([below](#015-the-hot-path-and-sealing)):
   - [`formal/HotPathOne.tla`](../formal/HotPathOne.tla): uses, changes,
     sealed inputs, covers, the deadline and the bulk cap;
   - [`formal/Seal.tla`](../formal/Seal.tla): sealing into two Merkle trees;
-  - [`formal/Migration015.tla`](../formal/Migration015.tla): the cutover
-    from 0.14;
   - [`formal/Reads.tla`](../formal/Reads.tla): the projection of the uses
     that the audit pages read ([below](#readstla));
   - [`formal/Rotation.tla`](../formal/Rotation.tla): the log across a
@@ -1524,7 +1522,7 @@ anchor, outside the database, is sealed again by compare-and-set before
 | `TunnelShort` | The same, with as long to answer as between checks | 4.2 million |
 | `AppKeyRotation` | Two starts under the new key step a rotation of two rows at once, while an instance under the old key writes a row, and someone who holds it writes rows and an entry under it | 146 thousand |
 
-## 0.15: the hot path, sealing and the cutover
+## 0.15: the hot path and sealing
 
 0.15 rewrites the vault, its access decisions and the audit log (R35). Under
 R45 the spec comes first: these three models are written before the code,
@@ -1851,7 +1849,6 @@ its seal's; otherwise it decides, and serves the text it read.
 | an unarchive restores the object the holder's log last sealed, its rows held to it (RestoreFromLog) | `AllowedAsOld`: the holder archived, its reference ended, the row's end cleared by a writer, and the unarchive seals it live |
 | ... still the log's newest sealed one at the commit (RestorePinned) | `AllowedAsOld`: an end between the unarchive's prepare and its commit, its row's end cleared: the rows as read, sealed live |
 | an end on an archived holder whose kept object reads through the reference logs that object ended (EndWhileArchived) | `AllowedAsOld`: the row's end cleared, the kept object restored live; `HonestUnarchive`: with no writer, the unarchive after an end refused |
-| a key archived before the cutover is given the object its rows make, then deleted again, by the cutover (GenesisKeepsArchived; SealedObjectsCutover, T144) | `HonestUnarchiveServes`: with no writer, its unarchive logs nothing and leaves a row no seal covers, refused to every use |
 
 That the replay decides each use as live did is not this model's: a use not
 refused here reads its seals' objects, so the two agree by construction.
@@ -1872,95 +1869,6 @@ Nor an environment made or deleted: a new one is made in a live project only
 archival (`environmentObject`, `environment.delete`), both held by the same
 tests and by the replay's `applyOp`.
 
-### Migration015.tla
-
-The cutover from 0.14 (the plan's PR 9).
-
-**The model.** One object (a member and its grants) with:
-- 0.14's row (its MAC and `access_seq`) and chain;
-- an old isolate still serving 0.14 uses and writes after the deploy;
-- two 0.15 vault starts, at once or one after the other;
-- a 0.15 use and a 0.15 change, both checking the member (MemberHolds: the
-  row's seal its object's and its newest change's, and UsesSeeOldWrites'
-  Accounted); a change of a member that fails it is refused and writes
-  nothing. That refusal is stated, not proved: the content is one value,
-  so a change that kept a tampered member's other grants looks like one
-  that wrote them anew, and removing the branch breaks no invariant; the
-  vault's tests hold it (`vault.test.ts`, the 0.15 start-over and refused
-  cases). The vault's own 0.15 decisions weigh a member by this check, not
-  by 0.14's walk back through its access entries (T179 PR 2, vault.ts's
-  `#onLog`). Decisions read the row, its seals and its access in one Sync
-  under the row's lock; reads (`#read`, `#issuerRead`, `#sweep`) in one
-  snapshot, as NewUseRun reads them together. `#anOwner` (another Owner,
-  for the last-Owner check and `#declare`) reads that Owner's row, grants
-  and log in three statements under the head but not the row's lock: a
-  vault write to it needs the head, and a write around the vault cannot
-  forge a seal and MAC that pass. Either only removes
-  interleavings from the use's, so the use's invariants and removals cover
-  them, with no action of their own. The model's newest seal is always the
-  vault's: no action edits a 0.15 entry in place. The code's decisions check
-  that (the newest change's MAC, before its seal and `old` are trusted), and
-  so does a use (T190; HotPathOne.tla's ChangeMacChecked, which models the
-  edit in place);
-- in Migration015Issue (T123), sign-ins: 0.14's `token.exchange`, which the
-  trigger lets by; a 0.15 sign-in (0.14's head, then the issue lock); one
-  that also revokes the account's earlier sessions (its trigger: the issue
-  lock, then the fence); and the checkpointer's barrier (the issue lock
-  exclusive, then the fence). The order everywhere: row, head, issue lock,
-  fence;
-- in its Tamper and Drops scenarios, a writer who puts rows back, forges a
-  0.14 entry, drops 0.14's newest entry, or clears a marker;
-- in Migration015Deleted (T130), the place a use is in: 0.14 may delete its
-  project before the cutover (an authentic `project.delete`, the project's
-  slug a tombstone, its environments' not), and a writer renames either
-  slug, either way. The cutover seals the place in its own entry and gives a
-  deleted project's environment its tombstone;
-- in Migration015AppTamper (T160), the object is the app's row (a
-  credential, a binding), which the app checks under its key before the
-  cutover's locks (`vouched`, with the head it checked against), and a
-  writer puts a row there;
-- in Migration015EntryLess (PR 9b), the app's row again, changed by 0.15
-  with no 0.14 entry (T149's revoke, an unbind's ends), while 0.14's use of
-  it checks it under the head, then commits: two steps.
-
-Once the cutover is there, 0.14's writes are refused (PR 9b): its append
-fails, and the write with it. The plan's alternative, adopting each late
-write at every checkpointer tick, was modelled until then (git history).
-
-A row 0.14 would not accept gets no genesis (its object stays unsealed,
-`stale` to every use), rather than refusing the cutover: only a broken
-chain or a deletion the chain and the slugs disagree on refuse it.
-
-| protection | turned off, TLC finds |
-|---|---|
-| the cutover under the 0.15 fence (and 0.14's head) | `OneCutover` |
-| the cutover marker | `OneCutover` |
-| the cutover checks each row as 0.14's `#integrity` does (VerifyRows) | `NewLogFollowsOld`, `AllowedOnlyWhenGranted` |
-| 0.14's chain verified up to the anchor | `AnchorHolds` |
-| 0.15 changes also advance 0.14's fence (DualFence) | `NothingAllowedAfterAnswer` |
-| a trigger takes the 0.15 fence for each 0.14 access change (OldWritesFence), or refuses it once the cutover is there (OldWritesRefused): each covers for the other | `NothingAllowedAfterAnswer` |
-| 0.14's writes refused once the cutover is there (OldWritesRefused, PR 9b) | `OldWritesBeforeAnchor`: a late write lands past the anchor, which no 0.15 change seals |
-| a 0.15 change that writes no 0.14 entry takes 0.14's head all the same (EntryLessHead; Migration015EntryLess, PR 9b), while 0.14's isolates may serve beside it, which they still may beside 0.16.0 (an upgrade from 0.14.5's rollout, or a rollback to it): the two-trip write and add take it as a lock too | `NothingAllowedAfterAnswer`: a revoke commits and answers between 0.14's check of the row and its commit |
-| 0.14's head before the 0.15 fence (ChangeHeadFirst) | `NoWaitCycle` |
-| the object's member row before 0.14's head (RowFirst): 0.14 takes rows before its head, so the order is row, head, fence | `NoWaitCycle` |
-| a 0.15 use reads the object's newest authentic 0.14 access entry (UsesSeeOldWrites), or 0.14's late writes are refused: each covers for the other, the refusal being a trigger the database's owner can drop | `AllowedOnlyWhenGranted`: a row put back over a late write |
-| a row marker in place of that read (Migration015Marker, the trigger's refusal dropped) | `AllowedOnlyWhenGranted`, and it fails as soon as the writer clears it |
-| whatever takes the fence in a transaction that may issue too takes the issue lock first (IssueBeforeFence: the trigger, `app_change`) | `NoWaitCycle`: a sign-in holding the fence waits for the issue lock, which the barrier holds while it waits for the fence |
-| the barrier takes the issue lock before the fence (BarrierIssueFirst) | `NoWaitCycle` |
-| a policy change takes the issue lock exclusive after 0.14's head and before the fence (PolicyIssueFirst; Migration015Policy, T149) | `NoWaitCycle`: it holds the fence and waits for the issue lock, which the barrier holds while it waits for the fence |
-| the cutover takes the issue lock, shared, before the fence (CutoverIssueFirst; Migration015Issue, T132): its own 0.14 entry, `log.cutover`, is one the trigger fences | `NoWaitCycle`: it holds the fence and its entry's trigger waits for the issue lock, which the barrier holds while it waits for the fence (the checkpointer ticks whether a vault has cut over or not) |
-| a place is deleted as 0.14's chain says, a mismatch with its slugs refusing the cutover (DeletedFromChain; Migration015Deleted, T130) | `NoneInDeleted`: a deleted project renamed back is sealed live and a use there allowed; `PlaceFollowsOld`: a live one tombstoned is sealed deleted |
-| an app's row is sealed only as the app vouched for it, and only if 0.14's chain has not moved past the head it checked against (VouchedHeld; Migration015AppTamper, T160) | `AllowedOnlyWhenGranted`: a writer puts the vouched row back over a revoke that came after the app read it |
-| 0.14's `token.exchange`, which the trigger no longer fences, writes no decision input (ExchangeOnlyIssues; the suites hold the code to it: `decisionInputs`) | `ExchangeChangesNoInput`; `NothingAllowedAfterAnswer` with the refusal off too |
-
-`BarrierAvoidsHead` holds in Migration015Issue: the barrier never holds 0.14's
-head or waits for it. The vault's own changes never issue: `change_input`
-takes no issue lock, but the trigger of the 0.14 entry each appends first
-takes it before the fence, and they are in no cycle with the barrier.
-
-**Not modelled:** 0.14 uses after the cutover. They stay in 0.14's own chain,
-which the cutover anchors.
-
 ### Lifecycle.tla
 
 The vault owns a credential's life (T149, D146 to D148;
@@ -1976,7 +1884,7 @@ change takes the right from the issuer's role), `LifecycleBind` (Ada binds
 svc's CI through the vault, an issue that commits a binding, while she is
 demoted; a run signs in through it; a bind that replaces another, which
 takes the ended rows exclusive and then, under the issue lock shared, the
-fence, is the lock pattern `Migration015.tla`'s `Mixed` checks free of wait
+fence, is the lock pattern WriteLocks.tla's `signin` checks free of wait
 cycles), `LifecycleSignIn` (two runs through one binding at once, while
 the account is removed, or a credential revoked),
 `LifecycleReplay` (one ID token
@@ -2223,11 +2131,8 @@ unbound binding's row).
 **Not modelled:** the connection's refresh-token rotation and last use,
 which write its row but no column of its object, and which a use, taking no
 row's lock, never waits on; its expiry, decided at the request's time as a
-credential's; what the app checks before the use beyond it standing (an
-access token's MAC, the connection's scopes, a binding's freezes); and the
-cutover, which seals the connections 0.14 left as it seals credentials and
-bindings, an app object it vouched for (`Migration015.tla`'s AppObject and
-VouchedHeld).
+credential's; and what the app checks before the use beyond it standing (an
+access token's MAC, the connection's scopes, a binding's freezes).
 
 ### Reads.tla
 
@@ -2654,8 +2559,8 @@ Owner's credential after the hold, and why the change names the caller the
 app checked, by id, and never resolves the token again (`ActorFromRead`).
 Its rows come after the fence, as `app_change`
 already updates a key's row after it; every statement that locks a key's
-row holds 0.14's head first, so this adds no wait Migration015's
-`NoWaitCycle` would have to check. Its credential's last use, when due,
+row holds 0.14's head first, so this adds no wait for a `NoWaitCycle` to
+check. Its credential's last use, when due,
 is an UPDATE of the credential's row, which `issue_token` takes shared
 before the issue lock: the write makes it before the hold, after 0.14's
 head, the order WriteLocks.tla checks (below). An add's write takes its rows, in
@@ -2685,20 +2590,29 @@ waiting exclusive one. Postgres breaks such a cycle only after
 `deadlock_timeout` (1 s), by reordering the queue or failing one, the fence
 held exclusive meanwhile and every use waiting on it.
 
-**The model.** Five transactions, each its locks in order, a lock and its
+**The model.** Seven transactions, each its locks in order, a lock and its
 mode: the key write (0.14's head; its credential's row, the last-use
 UPDATE; `hold_inputs`' issue lock shared, then the fence exclusive), an
 issue on that credential (`issue_token`: the credential's row shared, then
 the issue lock shared), the checkpointer's barrier (the issue lock
 exclusive, then the fence), a revoke of the credential (`revoke_credential`:
-0.14's head, the row, the fence) and a use (the fence shared). Each asks
+0.14's head, the row, the fence), a policy change (0.14's head, the issue
+lock exclusive, the fence), a sign-in that ends the account's earlier
+sessions (0.14's head, then its entries' trigger: the issue lock shared, the
+fence) and a use (the fence shared). Each asks
 for its next lock at the end of that lock's queue, is granted it once no
 holder and no request ahead of it conflicts, and commits with them all.
-`NoWaitCycle`: nobody waits, through others, for itself. 4,612 states.
+`NoWaitCycle`: nobody waits, through others, for itself. 104,928 states.
 
 | protection | turned off, TLC finds |
 |---|---|
 | the write updates its credential's row before the hold, as the issue and the revoke take it: row, issue lock, fence (TouchFirst) | `NoWaitCycle`: the write holds the issue lock and the fence and waits for the row, which the issue holds shared, queued for the issue lock behind the barrier, which waits for the write's issue lock (review r1 of #469, which saw it stall a write and a use 908 ms) |
+| the barrier takes the issue lock exclusive before the fence (BarrierIssueFirst) | `NoWaitCycle`: the barrier holds the fence and waits for the issue lock, which the write holds shared while it waits for the fence |
+| a policy change takes the issue lock exclusive after 0.14's head and before the fence (PolicyIssueFirst, T149) | `NoWaitCycle`: it holds the fence and waits for the issue lock, which the barrier holds while it waits for the fence |
+| a sign-in that ends the account's earlier sessions takes the issue lock before the fence (IssueBeforeFence, T123: its entries' trigger, `app_change`) | `NoWaitCycle`: it holds the fence and waits for the issue lock, which the barrier holds while it waits for the fence |
+
+Until 0.16.0, `Migration015.tla` checked these three orders beside 0.15's
+cutover from 0.14; the cutover's deletion (T273) moved them here.
 
 **A member add's** (PR 5, `AddLocks.cfg`, `Flow = "add"`): it locks the
 members' rows (`lockMembers`) and 0.14's head, then `admit_hold` takes the
@@ -3050,10 +2964,10 @@ releases:
 
 Between `coffre migrate` and the deploy, and again after a rollback, 0.15.0's
 vault serves on 0.16's schema: its TypeScript knows only the whole object,
-while its SQL, `change_input` included, is the migration's. So does 0.14.5's,
-on a one-step upgrade to 0.16 ([deploy.md](deploy.md#from-0145-to-016)),
-which knows neither and grants roles it writes no row of: the foreign key
-waits for 0.17, which only a 0.16 precedes.
+while its SQL, `change_input` included, is the migration's (0.14.5's never
+does: 0.16 upgrades from 0.15.0 alone, [deploy.md](deploy.md#from-014-to-016)).
+It grants roles it writes no row of: the foreign key waits for 0.17, which
+only a 0.16 precedes.
 
 **The model.** Two roles, one shipped (`dev`, which 0.15.0 left edited) and
 one an Owner makes (`c`); no row of either at first, as the migration makes
@@ -3210,7 +3124,7 @@ Two things cut the cost of a run, and `Formal model` is still the one job
     - `hotpath-bulk` (the bulk cap's main scenario);
     - `hotpath-phases` (its keys' phases, and beside the previous release's statement, T204);
     - `hotpath-skew` (its slack and clock-skew scenarios);
-    - `seal` (Seal and Migration015);
+    - `seal` (Seal);
     - `seal-plugin` (SealPlugin, SealCore and SealStall);
     - `seal-retention` (SealRetention, SealRetentionCrash and Rotation's
       eleven, about 3.5 minutes of it here before the last three);
