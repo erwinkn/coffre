@@ -440,7 +440,7 @@ export type UseRow = {
   /**
    * What each newest change a probe read carries besides its object and its seal (the input's `*_last`): the columns
    * its MAC covers, and the MAC, which the vault checks before it holds a row to that seal (T190, `lastsHeld`). An
-   * input whose probe found no change has none. Null when the call probed nothing (the cached forms).
+   * input whose probe found no change has none. Null when the call probed nothing: the isolate's seals were still the log's.
    */
   changes: Partial<Record<Probed, ChangeColumns>> | null;
 } & Slot<'e1'> & Slot<'e2'> & Slot<'e3'> & Slot<'e4'>;
@@ -806,7 +806,7 @@ function ready(path: UsePath, input: Asked, request: UseRequest, names: Names | 
   const way = input.way ?? 'credential';
   const purpose = purposeCode(request);
   const key = `${input.credential ?? ''}\n${input.secretId ?? ''}\n${input.place ?? ''}`;
-  // The seals a probe of these ids read, for the cached form: a use by ids only. A named call always probes, so that
+  // The seals a probe of these ids read, which spare the next call its probes: a use by ids only. A named call always probes, so that
   // its work is the same whatever the key and whatever this isolate kept of earlier uses (D153; review r12); a route
   // use too, which names its route.
   const known = input.credential === null || names !== undefined || input.route !== undefined ? undefined : cache.seals.get(key);
@@ -883,7 +883,7 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
   if (view.changed) cache.seals.delete(key);
   const checked = checkedOf(path.sealKeys, view.view, request, view.accounted || forged, made.seals);
   const code = decidedOn(checked, request, row);
-  // The seals a probe read, kept for the next use's cached form: by ids alone. A named call never runs the cached form
+  // The seals a probe read, kept so that the next use need not probe: by ids alone. A named call never passes seals
   // (above), which an earlier use's seals would choose for a key held and never for one not (Fable's review, r12). Only
   // seals whose changes' MACs held (CacheVerified, T190): one kept unchecked, every use would trust while the log's
   // newest change stays the same, probing nothing. Kept, they need no check again: they are the isolate's own memory,
@@ -1104,7 +1104,7 @@ async function namedManySeated(path: UsePath, input: NamedManyInput): Promise<Na
   const gateAsked: Asked = { ...asked, ...none, requestId: newUseRequestId() };
   const gate = ready(path, gateAsked, requestOf(gateAsked, names(null)), names(null), false, seals);
   // Each key's use as asked, and its call: by the ids the isolate maps it to, which the statement takes only when they
-  // are its name's now and its value is sealed, as a use by ids is made (the cached form, its cover); else by its name.
+  // are its name's now and its value is sealed, as a use by ids is made (the isolate's seals, its cover); else by its name.
   const keyAsked = new Map<string, Asked>();
   const keyReady = new Map<string, { made: Ready; byIds: boolean }>();
   const callFor = (key: string): NamedBatchCall => {

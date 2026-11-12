@@ -556,17 +556,17 @@ test('a use on a server whose bytes are written `escape` is decided as on any: t
 test('a session\'s first call does its planning\'s cold work before it takes the fence (T131)', async () => {
   const w = await world();
   const id = await w.key();
-  // The indexes the four statements' plans choose among, which a session opens when it first plans them: its cold work,
+  // The indexes the statement's plan chooses among, which a session opens when it first plans it: its cold work,
   // tens of milliseconds on a new connection, which no use may do holding the fence a barrier waits for.
   const opened = ['bulk_cap_pkey', 'checkpoint_fence_pkey', 'credentials_token_hash_key', 'environments_pkey', 'grants_on_project',
     'log_config_pkey', 'principals_pkey', 'secret_versions_pkey', 'secrets_pkey'];
   const fence = postgresSession(OWNER_URL);
-  // Whether a fresh session's first call, cut short at the fence, has parsed the four statements and opened those indexes.
+  // Whether a fresh session's first call, cut short at the fence, has parsed the statement and opened those indexes.
   const beforeFence = async (planned: boolean) => {
     const fresh = postgresSession(OWNER_URL);
     try {
       await fresh.unsafe(`SET lock_timeout = '200ms'`);
-      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0082', false)`);
+      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0085', false)`);
       const at = Date.now();
       await assert.rejects(
         fresh.unsafe(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6)`, [w.credentialId, id, newRequestId(), String(at), randomBytes(16), String(at + 3000)]),
@@ -583,13 +583,13 @@ test('a session\'s first call does its planning\'s cold work before it takes the
   try {
     await fence.unsafe('BEGIN');
     await fence.unsafe('SELECT pg_advisory_xact_lock(1668244070, 0)');
-    // The call never held the fence, and yet it has planned each of the four statements: their dry runs, before it.
-    assert.deepEqual(await beforeFence(false), { parsed: 4, indexes: opened });
-    // Told its statements are planned, the same call does none of that before the fence: it would all be under it.
+    // The call never held the fence, and yet it has planned its statement (one since 0085, V2a): its dry run, before it.
+    assert.deepEqual(await beforeFence(false), { parsed: 1, indexes: opened });
+    // Told its statement is planned, the same call does none of that before the fence: it would all be under it.
     assert.deepEqual(await beforeFence(true), { parsed: 0, indexes: [] });
     await fence.unsafe('ROLLBACK');
     // Under the fence, a call plans warm (about 2 ms) until the plan cache settles on a plan, by a session's sixth call
-    // of a form (docs/design/planner-defaults.md). A fresh session's first call is answered, and says the plans are made.
+    // (docs/design/planner-defaults.md). A fresh session's first call is answered, and says the plans are made.
     const fresh = postgresSession(OWNER_URL);
     try {
       const again = Date.now();
@@ -597,7 +597,7 @@ test('a session\'s first call does its planning\'s cold work before it takes the
         [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
       assert.equal(answer!.use.state, null);
       const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-      assert.equal(setting!.planned, '0082');
+      assert.equal(setting!.planned, '0085');
     } finally {
       await fresh.end();
     }
