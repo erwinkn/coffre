@@ -55,6 +55,9 @@ Workers or two Node processes:
   member, and who holds what. It decides every read and write of a key, and
   nothing else can.
 
+Node is untested in 0.16.0: a Node deployment stays on 0.15.0 until
+0.16.1 brings Node back, on Postgres.
+
 Both use one Postgres database, each through its own login, and both write
 to one audit log. Say Ada runs `coffre run market/prod -- ./deploy`. The app
 checks her session and asks the vault for the data keys of
