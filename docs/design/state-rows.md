@@ -209,7 +209,7 @@ column into typed ones later changes no seal while the object is the same, so it
 |---|---|---|---|
 | Use, one key by name | 1, 1, 1 | 1, 1, 1 | The statement is half as long and reads no `audit_log` (V2a, V2b). |
 | Key write, one key | 7, 2, 2 (`writeKeys`, `waitSealed`) | 7, 2, 2 | The head lock's statement becomes the change lock's, which every change takes, the two-trip write among them (A0, `WriteTakesChangeLock`). The budget is 7. |
-| Sign-in, browser | 10, 8, 3 (`access`, `prepare`, `waitSealed`) | 8, 5, 3 | The two reads of the head and the `audit_log` insert go. The transaction asks its reads together and leaves its writes to the commit, as a key write does (A1). |
+| Sign-in, browser | 11, 8, 3 measured (`access`, `prepare`, `waitSealed`) | 9, 5, 3 | The two reads of the head and the `audit_log` insert go. The transaction asks its reads together and leaves its writes to the commit, as a key write does (A1). |
 | Audit page, one visit | 24, 26, 3 at a seeded log, more as the log grows | 6, 4, 2 | The flat check below (P2, P3). |
 | Secrets list | 4, 4, 1 | 4, 4, 1 | The vault's statement reads rows by key; today it spends 3.1 ms planning its reads of `audit_log`. |
 | `GET /api/me` | 2, 2, 0 | 2, 2, 0 | The credential's statement drops its read of the newest `policy.change`. |
