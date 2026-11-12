@@ -4,12 +4,13 @@ import { FetchRefused, type WorkloadTransport } from './transport.ts';
 
 /**
  * Issuers' keys, as this isolate (or process) last fetched them. Settled
- * values only: a key set and when it came, or when a fetch last failed,
- * never a fetch under way. Two first exchanges in one isolate each fetch,
- * rather than one waiting on the other's request, which Cloudflare cancels
- * as hung once the first ends (AGENTS.md, "What an isolate keeps").
+ * values only: a key set and when it came, when a fetch last failed (none
+ * since the last that worked), and when a token last named a key the set
+ * lacked; never a fetch under way. Two first exchanges in one isolate each
+ * fetch, rather than one waiting on the other's request, which Cloudflare
+ * cancels as hung once the first ends (AGENTS.md, "What an isolate keeps").
  */
-type Entry = { keys: JSONWebKeySet | null; fetchedAt: number; failedAt: number | null };
+type Entry = { keys: JSONWebKeySet | null; fetchedAt: number; failedAt: number | null; missedAt: number | null };
 
 /** A key set is used for ten minutes, then fetched again. */
 export const KEYS_FRESH_MS = 10 * 60 * 1000;
@@ -41,6 +42,7 @@ export const KEYS_STALE_MS = 60 * 60 * 1000;
  * After a failed fetch, or a key the set lacks, this long before that URL is
  * fetched again, while a set still verifies meanwhile: the fetch an exchange
  * would wait on, up to `FETCH_DEADLINE_MS`, is made once a minute at most.
+ * After a key the set lacks, at most until the set is due anyway.
  */
 export const KEYS_COOLDOWN_MS = 60 * 1000;
 /**
@@ -93,13 +95,13 @@ async function fetchKeys(transport: WorkloadTransport, url: string): Promise<JSO
     if (!Array.isArray(keys) || keys.length === 0) throw new FetchRefused(new URL(url), 'holds no keys');
     if (keys.length > MAX_KEYS) throw new FetchRefused(new URL(url), `holds more than ${MAX_KEYS} keys`);
     const set = { keys: keys.filter((key) => typeof key === 'object' && key !== null && (key as { use?: unknown }).use !== 'enc') } as JSONWebKeySet;
-    remember(url, { keys: set, fetchedAt: Date.now(), failedAt: null });
+    remember(url, { keys: set, fetchedAt: Date.now(), failedAt: null, missedAt: null });
     return set;
   } catch (error) {
     const now = Date.now();
     // The entry as it is now: another exchange may have fetched meanwhile.
     const latest = entries.get(url);
-    const entry = { keys: latest?.keys ?? null, fetchedAt: latest?.fetchedAt ?? 0, failedAt: now };
+    const entry = { ...(latest ?? { keys: null, fetchedAt: 0, missedAt: null }), failedAt: now };
     remember(url, entry);
     const message = `the issuer's keys could not be fetched: ${(error as Error).message}`;
     if (kept(entry, now) !== null) console.warn(`verifying with the issuer's keys fetched ${Math.round((now - entry.fetchedAt) / 60_000)} min ago: ${message}`);
@@ -121,14 +123,20 @@ function kept(entry: Entry | undefined, now: number): JSONWebKeySet | null {
 
 /**
  * How long before `url` is fetched again, in ms: none once its cooldown has
- * run out. The long cooldown while a set is kept, the short one from when
- * none is, which may come first: a set an hour old at 10:00, its fetch failed
- * at 09:59:59, may be fetched again at 10:00:04, not 10:00:59.
+ * run out. After a failed fetch, the long cooldown while a set is kept, the
+ * short one from when none is, which may come first: a set an hour old at
+ * 10:00, its fetch failed at 09:59:59, may be fetched again at 10:00:04, not
+ * 10:00:59. After a key the set lacked, the long one, or until the set is
+ * due, which a missed key never delays: a set fetched at 09:00, a key missed
+ * at 09:09:30, is fetched again at 09:10.
  */
 function cooldownLeft(entry: Entry | undefined, now: number): number {
-  if (entry?.failedAt == null) return 0;
-  const staleAt = entry.keys === null ? 0 : entry.fetchedAt + KEYS_STALE_MS;
-  const next = Math.min(entry.failedAt + KEYS_COOLDOWN_MS, Math.max(staleAt, entry.failedAt + KEYS_COLD_COOLDOWN_MS));
+  let next = 0;
+  if (entry?.failedAt != null) {
+    const staleAt = entry.keys === null ? 0 : entry.fetchedAt + KEYS_STALE_MS;
+    next = Math.min(entry.failedAt + KEYS_COOLDOWN_MS, Math.max(staleAt, entry.failedAt + KEYS_COLD_COOLDOWN_MS));
+  }
+  if (entry?.missedAt != null) next = Math.max(next, Math.min(entry.missedAt + KEYS_COOLDOWN_MS, entry.fetchedAt + KEYS_FRESH_MS));
   return Math.max(0, next - now);
 }
 
@@ -174,7 +182,9 @@ export async function verifyWithKeys(
     } else {
       // A fetch after a failed one counts as failed until it settles, so that
       // the exchanges meanwhile use the set kept, or are answered at once,
-      // rather than each fetch too: one attempt in flight per cooldown.
+      // rather than each fetch too: one attempt in flight per cooldown. Only
+      // after a failure, which was said: due after a key missed, or simply
+      // due, the exchanges meanwhile each fetch, as a cold isolate's do.
       if (entry?.failedAt != null) remember(url, { ...entry, failedAt: now });
       try {
         keys = await fetchKeys(transport, url);
@@ -196,14 +206,14 @@ export async function verifyWithKeys(
     const at = Date.now();
     entry = entries.get(url);
     if (fetched || cooldownLeft(entry, at) > 0) {
-      if (fetched) remember(url, { ...(entry ?? { keys, fetchedAt: at }), failedAt: at });
+      if (fetched) remember(url, { ...(entry ?? { keys, fetchedAt: at, failedAt: null }), missedAt: at });
       throw unavailable(KEY_ABSENT, entries.get(url), at);
     }
     // The issuer may have rotated: fetch once, and wait a minute before the next.
-    remember(url, { ...(entry ?? { keys: null, fetchedAt: 0 }), failedAt: at });
+    remember(url, { ...(entry ?? { keys: null, fetchedAt: 0, failedAt: null }), missedAt: at });
     const fresh = await fetchKeys(transport, url);
     const after = Date.now();
-    remember(url, { keys: fresh, fetchedAt: after, failedAt: after });
+    remember(url, { keys: fresh, fetchedAt: after, failedAt: null, missedAt: after });
     try {
       return await verifyWorkloadToken(token, fresh, expected);
     } catch (refetched) {

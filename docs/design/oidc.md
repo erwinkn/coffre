@@ -272,9 +272,11 @@ key import or failure. Two first exchanges each fetch.
 - Key sets are kept ten minutes, for at most 64 URLs, then fetched again.
 - After an unknown `kid` or a failed fetch, that isolate waits a minute
   before fetching that URL again, or 5 s when it holds no set that can
-  verify (below). Until then a token its keys lack gets a 503. A fetch
-  after a failed one counts as failed until it settles, so the exchanges
-  meanwhile neither wait on it nor fetch beside it.
+  verify (below). Until then a token its keys lack gets a 503. The minute
+  after an unknown `kid` ends early when the set is due: it never keeps a
+  set past its ten minutes. A fetch after a failed one counts as failed
+  until it settles, so the exchanges meanwhile neither wait on it nor fetch
+  beside it.
 - Each cold isolate has its own cache and cooldowns. Admission, approximate
   as section 2 says, is what bounds them together.
 

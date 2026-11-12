@@ -30,7 +30,7 @@ const [known, rotated, unknown] = [key('known'), key('rotated'), key('unknown')]
 /**
  * What the issuer publishes, how many times it was asked, whether it answers,
  * whether it answers only once its deadline has run out (the clock moved on),
- * and a fetch held until the test lets it fail.
+ * and a fetch held until the test lets it go on, to answer or fail as the rest says.
  */
 let published: Key[];
 let fetches: number;
@@ -44,7 +44,6 @@ const transport: WorkloadTransport = {
       const until = held;
       held = null;
       await until;
-      throw new FetchRefused(url, 'timed out');
     }
     if (slow) mock.timers.setTime(Date.now() + FETCH_DEADLINE_MS);
     if (down) throw new FetchRefused(url, 'could not be fetched');
@@ -275,4 +274,31 @@ test('stale, a fetch after a failed one under way: the exchanges meanwhile verif
   });
   // The failure before, and the probe's: none for the exchange beside it.
   assert.equal(said.length, 2);
+});
+
+test('a key missed, its minute over, leaves nothing behind: at ten minutes the exchanges beside the refresh fetch for themselves, never verify with the set past its ten minutes', async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  published = [known, rotated];
+  assert.deepEqual(await verify(rotated, 1000), { outcome: VERIFIED, fetches: 1 });
+  // The issuer withdraws `known`, and the set kept, fetched a second in, is due at ten minutes.
+  published = [rotated];
+  const said = await warnings(async () => {
+    let answer!: () => void;
+    held = new Promise((resolve) => (answer = resolve));
+    const refresh = verify(known, 1000 + KEYS_FRESH_MS);
+    assert.deepEqual(await verify(known, 2000 + KEYS_FRESH_MS), { outcome: `unavailable ${KEYS_COOLDOWN_MS / 1000}`, fetches: 1 });
+    answer();
+    assert.equal((await refresh).outcome, `unavailable ${KEYS_COOLDOWN_MS / 1000}`);
+  });
+  assert.deepEqual(said, []);
+});
+
+test('a key missed, its fetch never settling (cancelled): the set is still fetched when it is due, not used past its ten minutes', async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  held = new Promise(() => {});
+  void verify(unknown, KEYS_FRESH_MS - 1000);
+  // Its fetch comes once the token's signature has been checked against the set it lacks a key of.
+  while (held !== null) await new Promise((resolve) => setImmediate(resolve));
+  published = [rotated];
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1000), { outcome: `unavailable ${KEYS_COOLDOWN_MS / 1000}`, fetches: 1 });
 });
