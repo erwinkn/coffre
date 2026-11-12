@@ -2059,7 +2059,7 @@ export type NamedUseOutcome =
     served: true; route: 'name'; secretId: string | null; outcome: UseOutcome | { ok: true; plain: string; versionId: string }; app: string | null; standing: Access;
     /** The place the use was at, by its slugs as the vault read them: the one named, or the handle's own. */
     place: { project: string; environment: string } | null;
-    /** The same place by its ids, as the vault's own rows read it, on either engine: where a refusal is logged. */
+    /** The same place by its ids, as the vault's own rows read it: where a refusal is logged. */
     at: { projectId: string; environmentId: string } | null;
   };
 

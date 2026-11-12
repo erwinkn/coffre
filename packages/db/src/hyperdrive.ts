@@ -3,14 +3,14 @@ import { plainRead } from './postgres-js/index.ts';
 import { postgresClient, textTypes, type PostgresClient } from './postgres.ts';
 
 /** Postgres through a Hyperdrive binding: `postgres(env.HYPERDRIVE)`. */
-export type PostgresDatabase = { readonly engine: 'postgres'; readonly hyperdrive: { readonly connectionString: string } };
+export type PostgresDatabase = { readonly hyperdrive: { readonly connectionString: string } };
 
 /** Postgres through Hyperdrive, the one database a Worker runs on, the app's and the vault's. */
 export function postgres(hyperdrive: { readonly connectionString: string }): PostgresDatabase {
   if (typeof hyperdrive?.connectionString !== 'string') {
     throw new Error('postgres() was given no Hyperdrive binding: one the code names (HYPERDRIVE, VAULT_HYPERDRIVE, HOT_HYPERDRIVE) is missing from its wrangler.jsonc, or bound under another name');
   }
-  return { engine: 'postgres', hyperdrive };
+  return { hyperdrive };
 }
 
 /** A statement asked of the pool, sent at its turn once awaited or `execute`d, as postgres.js sends one. */
