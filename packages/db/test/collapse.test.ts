@@ -34,11 +34,8 @@ async function database(name: string, template?: string): Promise<string> {
   return urlOf(`${PREFIX}_${name}`);
 }
 
-/** A statement applied: the rows it inserted, updated or deleted, and the table it rewrote in place and its rows then. */
-type Applied = { statement: string; written: number; rewritten: string | null; held: number };
-/** The table a statement converts in place, each row's column to a new type (`ALTER TABLE t ALTER COLUMN c TYPE … USING …`). */
-const rewrites = (statement: string) =>
-  /^ALTER TABLE (?:IF EXISTS )?(?:ONLY )?(?:"?public"?\.)?"?(\w+)"? ALTER COLUMN "?\w+"? (?:SET DATA )?TYPE [^;]*\bUSING\b/i.exec(code(statement))?.[1] ?? null;
+/** A statement applied: the rows it inserted, updated or deleted, and the tables it rewrote and their rows then. */
+type Applied = { statement: string; written: number; rewritten: { table: string; held: number }[] };
 
 /**
  * `migrations` applied as the migrator applies them, but for its ledger's rows: in one transaction, then the indexes
@@ -47,19 +44,29 @@ const rewrites = (statement: string) =>
 async function apply(url: string, migrations: readonly string[]): Promise<Applied[]> {
   const client = postgresSession(url);
   const WRITTEN = `SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0)::int8::text AS n FROM pg_stat_xact_user_tables`;
+  // A table rewritten (a column converted, a volatile default added) gets a new file: Postgres says which, not the SQL.
+  const FILES = `SELECT relname::text AS name, relfilenode::text AS file FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'`;
   const applied: Applied[] = [];
   try {
     await client.begin(async (tx) => {
       await tx.unsafe(LEDGER);
+      const files = async () => new Map((await tx.unsafe<{ name: string; file: string }[]>(FILES)).map(({ name, file }) => [name, file]));
+      let was = await files();
       for (const sql of migrations) {
         for (const statement of statements(sql)) {
           if (onlineIndex(statement) !== null) continue;
-          const rewritten = rewrites(statement);
-          const [held] = rewritten === null ? [] : await tx.unsafe<{ n: string }[]>(`SELECT count(*)::text AS n FROM ${quoteIdentifier(rewritten)}`);
           const [before] = await tx.unsafe<{ n: string }[]>(WRITTEN);
           await tx.unsafe(statement);
           const [after] = await tx.unsafe<{ n: string }[]>(WRITTEN);
-          applied.push({ statement, written: Number(after!.n) - Number(before!.n), rewritten, held: Number(held?.n ?? 0) });
+          const now = await files();
+          const rewritten: Applied['rewritten'] = [];
+          for (const [table, file] of now) {
+            if (!was.has(table) || was.get(table) === file) continue;
+            const [held] = await tx.unsafe<{ n: string }[]>(`SELECT count(*)::text AS n FROM ${quoteIdentifier(table)}`);
+            rewritten.push({ table, held: Number(held!.n) });
+          }
+          was = now;
+          applied.push({ statement, written: Number(after!.n) - Number(before!.n), rewritten });
         }
       }
     });
@@ -73,7 +80,9 @@ async function apply(url: string, migrations: readonly string[]): Promise<Applie
 }
 
 /** A statement without its comment lines. */
-const code = (statement: string) => statement.replace(/^\s*--[^\n]*\n/gm, '').trim();
+const code = (statement: string) => statement.replace(/^\s*--[^\n]*(?:\n|$)/gm, '').trim();
+/** A statement that writes no rows of its own: CREATE TABLE … AS and a materialized view do, so they are none of these. */
+const DDL = /^(?:CREATE\s(?!(?:UNLOGGED |TEMP(?:ORARY)? )?TABLE\b[^;]*?\bAS\s+\(?\s*(?:SELECT|WITH|VALUES|TABLE|EXECUTE)\b|MATERIALIZED\s)|(?:ALTER|DROP|GRANT|REVOKE|COMMENT|SET|RESET)\s)/i;
 
 /** One line per object, sorted; a table partitioned by day has days named by the date the database was made. */
 const CATALOG = `
@@ -186,9 +195,9 @@ const same = (left: readonly string[], right: readonly string[]) => assert.deepE
 /**
  * Rows a 0.15.0 database holds that the upgrade's statements read: the reads it placed, its bulk policy, and its
  * clients' redirects (a list, and one only a forger writes, which 0084 converts to none). Each statement of the
- * upgrade that writes rows must write some from them (or `WRITES_NOTHING` say why it writes none), and each that
- * converts a table 0.15.0 has must meet rows there, so a backfill added later fails this test until the seed gives it
- * rows.
+ * upgrade but DDL must write rows from them (or `WRITES_NOTHING` say why it writes none), and each that rewrites a
+ * table 0.15.0 has must meet rows there, so a backfill or a conversion added later fails this test until the seed
+ * gives it rows.
  */
 const SEED = `
   INSERT INTO log_config (name, value, seal) VALUES ('policy', '{"kind":"policy","bulk":{"count":50,"windowMs":60000}}', '\\x000102030405060708090a0b0c0d0e0f');
@@ -265,14 +274,17 @@ test('on a 0.15.0 database with rows, the upgrade writes what the numbered migra
   await apply(stepped, (await numbered()).slice(release.length).map(({ sql }) => sql));
   const upgraded = await database('seeded_upgraded', `${PREFIX}_seeded`);
   const applied = await apply(upgraded, [assemble(collapsed.upgrade, collapsed.functions)]);
-  const writers = applied.filter(({ statement }) => /^(?:INSERT|UPDATE|DELETE|MERGE|WITH|COPY|DO|CALL|REFRESH|CREATE (?:UNLOGGED |TEMP(?:ORARY)? )?TABLE (?:IF NOT EXISTS )?[\w."]+ (?:\([^)]*\) )?AS)\s/i.test(code(statement)));
+  // Every statement but DDL may write rows: an unknown kind is held to the seed too.
+  const writers = applied.filter(({ statement }) => code(statement) !== '' && !DDL.test(code(statement)));
   assert.ok(writers.length > 0);
   for (const { statement, written } of writers) {
     if (WRITES_NOTHING.some(({ matches }) => matches.test(statement))) continue;
     assert.ok(written > 0, `the seed gives this statement no rows to write; seed what it reads:\n${code(statement).slice(0, 300)}`);
   }
-  for (const { statement, rewritten, held } of applied) {
-    if (rewritten !== null && atRelease.has(rewritten)) assert.ok(held > 0, `the seed gives ${rewritten} no rows for this statement to convert:\n${code(statement).slice(0, 300)}`);
+  for (const { statement, rewritten } of applied) {
+    for (const { table, held } of rewritten) {
+      if (atRelease.has(table)) assert.ok(held > 0, `the seed gives ${table} no rows for this statement to rewrite:\n${code(statement).slice(0, 300)}`);
+    }
   }
   same(await state(stepped, { timed: true }), await state(upgraded, { timed: true }));
 });

@@ -160,8 +160,6 @@ const uncommented = (sql: string) => sql.replace(/^\s*--[^\n]*$/gm, '');
 /** The words of a statement or a body, as names: lowercased, unquoted. */
 const words = (sql: string) => new Set(uncommented(sql).toLowerCase().match(/[a-z_][a-z0-9_$]*/g) ?? []);
 const named = (name: string) => name.replaceAll('"', '').replace(/^public\./, '');
-/** A relation's name as a statement spells it: quoted or not, with or without its schema. */
-const NAME = String.raw`((?:"[^"]+"|\w+)(?:\s*\.\s*(?:"[^"]+"|\w+))?)`;
 
 async function collectRuns(client: PostgresClient, runs: Runs, fns: Snapshot, ids: readonly string[]): Promise<void> {
   const add = (runner: string, kind: Kind, what: Iterable<string>) => {
@@ -183,25 +181,40 @@ async function collectRuns(client: PostgresClient, runs: Runs, fns: Snapshot, id
 /** The edges each way of touching a relation follows; a function, once reached, is run whole. */
 const FOLLOWS: Record<'full' | 'read' | 'structure', readonly Kind[]> = { full: ['write', 'read', 'structure', 'all'], read: ['read', 'all'], structure: ['structure', 'all'] };
 
+/** A statement Postgres can plan, whose plan names every relation it writes (`writes`). */
+const PLANNED = /^(?:INSERT|UPDATE|DELETE|MERGE|WITH|SELECT|VALUES|TABLE)\s/i;
+
+/** The relations a statement writes, as its plan names them, or undefined when Postgres cannot plan it. */
+async function writes(client: PostgresClient, statement: string): Promise<string[] | undefined> {
+  if (!PLANNED.test(bare(uncommented(statement)))) return undefined;
+  const plan = await client.unsafe<{ 'QUERY PLAN': unknown }[]>(`EXPLAIN (VERBOSE, FORMAT JSON) ${statement}`).catch(() => undefined);
+  if (plan === undefined) return undefined;
+  type Node = { 'Node Type'?: string; 'Relation Name'?: string; Schema?: string; 'Target Tables'?: Node[]; Plans?: Node[]; Plan?: Node };
+  const out: string[] = [];
+  const walk = (node: Node) => {
+    if (node['Node Type'] === 'ModifyTable') for (const target of [node, ...(node['Target Tables'] ?? [])]) out.push(named(`${target.Schema}.${target['Relation Name']}`));
+    for (const child of [...(node.Plans ?? []), ...(node.Plan === undefined ? [] : [node.Plan])]) walk(child);
+  };
+  for (const node of plan[0]!['QUERY PLAN'] as Node[]) walk(node);
+  return out;
+}
+
 /**
- * The functions a statement may run, through `runs`: a DML statement writes the relations it names after INSERT INTO,
- * UPDATE, DELETE FROM or MERGE INTO, and reads every other; an index runs the functions it names, over the rows; an
- * ALTER TABLE those it names, and its table's checks and indexes, which a rewrite runs again; anything else is taken
- * to write every name it holds.
+ * The functions a statement may run, through `runs`, from the names it holds (in its strings too, for a DO block's
+ * EXECUTE), so each kind errs on the side of running more: an index runs the functions it names, over the rows; an
+ * ALTER TABLE those it names and every name's checks, indexes, generated columns and domains, which a rewrite runs
+ * again; a statement Postgres planned reads every name and writes the relations its plan writes (`written`);
+ * anything else is taken to write every name it holds.
  */
-function mayRun(statement: string, runs: Runs): Set<string> {
+function mayRun(statement: string, runs: Runs, written: readonly string[] | undefined): Set<string> {
   const text = bare(uncommented(statement));
   const all = [...words(text)];
-  const fns = all.filter((word) => runs.functions.has(word)).map((word) => [word, 'full'] as const);
   const seeds: (readonly [string, keyof typeof FOLLOWS])[] = /^CREATE (?:UNIQUE )?INDEX\s/i.test(text)
-    ? fns
+    ? all.filter((word) => runs.functions.has(word)).map((word) => [word, 'full'] as const)
     : /^ALTER TABLE\s/i.test(text)
-      ? [...fns, [named(new RegExp(String.raw`^ALTER TABLE (?:IF EXISTS )?(?:ONLY )?${NAME}`, 'i').exec(text)?.[1]?.replace(/\s+/g, '').toLowerCase() ?? ''), 'structure']]
-      : /^(?:INSERT|UPDATE|DELETE|MERGE|WITH|SELECT)\s/i.test(text)
-        ? [
-            ...all.map((word) => [word, 'read'] as const),
-            ...[...text.matchAll(new RegExp(String.raw`\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\s+(?:ONLY\s+)?${NAME}`, 'gi'))].map(([, target]) => [named(target!.replace(/\s+/g, '').toLowerCase()), 'full'] as const),
-          ]
+      ? all.map((word) => [word, 'structure'] as const)
+      : written !== undefined
+        ? [...all.map((word) => [word, 'read'] as const), ...written.map((name) => [name, 'full'] as const)]
         : all.map((word) => [word, 'full'] as const);
   const ran = new Set<string>();
   const seen = new Set<string>();
@@ -220,7 +233,7 @@ function mayRun(statement: string, runs: Runs): Set<string> {
   return ran;
 }
 
-type Replayed = { start: Snapshot; steps: Snapshot[]; touched: string[][]; end: Snapshot; runs: Runs };
+type Replayed = { start: Snapshot; steps: Snapshot[]; touched: string[][]; end: Snapshot; runs: Runs; written: (string[] | undefined)[] };
 
 /**
  * `list` run one at a time, autocommitted, a CONCURRENTLY index built plainly: the functions after each statement,
@@ -239,7 +252,9 @@ async function replay(client: PostgresClient, where: readonly string[], list: re
   let before = first;
   const steps: Snapshot[] = [];
   const touched: string[][] = [];
+  const written: (string[] | undefined)[] = [];
   for (const [index, statement] of list.entries()) {
+    if (collect) written.push(await writes(client, statement));
     const online = onlineIndex(statement);
     await client.unsafe(online === null ? statement : `CREATE ${online.unique ? 'UNIQUE ' : ''}INDEX ${quoteIdentifier(online.name)} ON ${quoteIdentifier(online.table)} ${online.body}`);
     const after = await snapshot(client);
@@ -254,7 +269,7 @@ async function replay(client: PostgresClient, where: readonly string[], list: re
     steps.push(after.fns);
     before = after;
   }
-  return { start: first.fns, steps, touched, end: before.fns, runs };
+  return { start: first.fns, steps, touched, end: before.fns, runs, written };
 }
 
 const everyone = (grantees: string[] | null) => grantees ?? ['PUBLIC'];
@@ -336,8 +351,8 @@ function collapse(where: readonly string[], list: readonly string[], replayed: R
 }
 
 /** Statements that run no function, whatever rows the database holds. */
-const INERT = /^(?:CREATE (?:OR REPLACE )?(?:TRIGGER|POLICY|VIEW|SCHEMA|SEQUENCE|TYPE|STATISTICS)\s|COMMENT ON\s|GRANT\s|REVOKE\s|DROP\s|ALTER (?:POLICY|TYPE|SEQUENCE)\s|ALTER (?:TABLE|INDEX|VIEW) \S+ RENAME\s)/i;
-const inert = (statement: string) => INERT.test(bare(statement)) || (/^CREATE TABLE\s/i.test(bare(statement)) && !/\bAS\s+(?:SELECT|WITH|VALUES|TABLE)\b/i.test(statement));
+const INERT = /^(?:CREATE (?:OR REPLACE )?(?:TRIGGER|POLICY|VIEW|SCHEMA|SEQUENCE|TYPE|STATISTICS)\s|COMMENT ON\s|GRANT\s|REVOKE\s|DROP\s|ALTER (?:POLICY|SEQUENCE)\s|ALTER (?:TABLE|INDEX|VIEW) \S+ RENAME\s)/i;
+const inert = (statement: string) => INERT.test(bare(statement)) || (/^CREATE TABLE\s/i.test(bare(statement)) && !/\bAS\b/i.test(uncommented(statement)));
 
 /**
  * The collapse moves functions, not the statements that run them: a function is written in its final form where the
@@ -349,7 +364,7 @@ const inert = (statement: string) => INERT.test(bare(statement)) || (/^CREATE TA
  * mechanical: a person writes it.
  */
 function refuseDiverged(where: readonly string[], list: readonly string[], replayed: Replayed): void {
-  const { start, steps, end, runs } = replayed;
+  const { start, steps, end, runs, written } = replayed;
   const { placeAt, last } = placement(replayed);
   const form = (fn: Fn | undefined) => (fn === undefined ? 'none' : `${fn.digest} ${fn.owner}`);
   const collapsedAt = (index: number, id: string) => {
@@ -368,7 +383,7 @@ function refuseDiverged(where: readonly string[], list: readonly string[], repla
       if (form(numberedAt.get(id)) !== form(collapsedAt(index, id))) diverged.add(fn.name);
     }
     if (diverged.size === 0) return;
-    const hit = [...mayRun(statement, runs)].filter((name) => diverged.has(name)).sort();
+    const hit = [...mayRun(statement, runs, written[index])].filter((name) => diverged.has(name)).sort();
     if (hit.length > 0) refused.push(`${where[index]} may run ${hit.join(', ')}, in another form than the numbered path ran there`);
   });
   if (refused.length > 0) throw new Error(`the upgrade cannot keep these statements as they are:\n${refused.join('\n')}`);
