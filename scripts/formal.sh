@@ -603,7 +603,7 @@ REMOVALS=(
   # Today's commit not holding to the policy the caller was loaded with (`policyStill`): a roles change after its
   # decision does not stop it (review r3 of #469).
   "WritingFallBack TodayPolicyHeld TodayPolicyStandsAtCommit"
-  # The policy that commit holds to is a digest of seals (T272), the roles', the policy row's and the environment's
+  # The policy that commit holds to is a digest of numbers (T272; each its object's newest change's), the roles', the policy row's and the environment's
   # protection, where 0.15 held one number: a digest that leaves one out lets that change past. The two-trip hold
   # reads the protection too.
   'WritingDigest TodayUnheld={"protected"} TodayPolicyStandsAtCommit'

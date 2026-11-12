@@ -3211,7 +3211,7 @@ nothing.
 | `vault.ts:1686`, `#rotate` | the vault's row key moved | the change lock, after every member's row, until the rotation is a change of `log_keys` |
 | `context.ts:273`, `audited` | every transaction of the app's | the change lock first, when its work changes rows; one that only logs becomes an event (`note`) and takes none |
 | `secrets.ts:1074`, `vault.ts:4345` (`laterHead`) | the two-trip key write, the member add | the change lock, kept (WriteLocks.tla) |
-| SQL: `app_change`, `change_input`, `change_bindings`, `revoke_credential` | a change's last statement, or its only one | the change lock where each took the head: held already by a change of several statements, taken there by a change of one. `change_bindings` took it only to end something (an unbind, a bind that replaces a binding): a bind that only makes one takes neither the head nor the fence, ordered by the account's and the actor's rows and by what it compares, and stays so |
+| SQL: `app_change`, `change_input`, `change_bindings`, `revoke_credential` | a change's last statement, or its only one | the change lock where each took the head: held already by a change of several statements, taken there by a change of one. `change_bindings` took it in every call but one: a bind that only makes a binding takes neither the head nor the fence, ordered by the account's and the actor's rows and by what it compares, and stays so. An unbind, a bind that replaces a binding and a sweep keep the lock, the sweep that only closes bindings too, which takes no fence but writes their rows |
 | `vault.ts:5102`, `reserveProxy` (`#decide` with `CODE_QUEUE`) | the code's proxy names reserved, a change when it adds one: a read before any lock answers every call but the first, and one call at a time waits for the head, in a line of one place (`lockLogHeadQueued`, `HeadBusy`) | the change lock, behind the same read and the same line of one place |
 | `key-rotation.ts:153` | a step of the app key's rotation, which signs 0.14's entries again | 0.14's head while that chain is written; AppKey.tla is as it was |
 | `vault.ts:3715`, `checkpoint` | a checkpoint of 0.14's chain | ends with the chain's last append; Audit.tla is as it was |
@@ -3257,9 +3257,11 @@ from one that never moved, as 0.15's seq did: both answer 409
 
 Writing.tla's `WritingDigest` holds today's commit to each number
 (`TodayUnheld`, one run per object left out) and to the log
-(`TodayPolicyOnLog`, with that writer), and Lifecycle.tla's issue and revoke
-hold to the roles under the issue lock (`IssuePolicyHeld`,
-`RevokePolicyHeld`).
+(`TodayPolicyOnLog`, with that writer). Lifecycle.tla's issue holds to the
+roles under the issue lock (`IssuePolicyHeld`) and its revoke under the fence
+(`RevokePolicyHeld`). Its runs have no such writer and compare what is true
+of the roles; the statements they stand for compare the roles' number, never
+their seal.
 
 **What still says "head".** Bulk.tla (the bulk limit of 0.14's read),
 Audit.tla (0.14's chain and its checkpoints) and AppKey.tla (the app key's

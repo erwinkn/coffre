@@ -66,10 +66,14 @@ CONSTANTS
     RevokeTakesFence,
     \* A revoke goes ahead only while the policy its right was weighed on
     \* is still the one in force, read under the fence, which every policy
-    \* change takes too. What it compares is seals: those of the rows its
-    \* decision read (the roles' here), as the app's `policyStill` does
-    \* under the change lock (0.16; before it, one number for all of them,
-    \* the seq of the newest `policy.change`).
+    \* change takes too. What it compares is numbers: that of the newest
+    \* change, in the log, of each object its decision read (the roles
+    \* here), as the app's `policyStill` does under the change lock (0.16;
+    \* before it, one number for all of them, the seq of the newest
+    \* `policy.change`). Never the seal a row stores, which a row put back
+    \* brings back with it (Writing.tla's TodayPolicyOnLog). This model has
+    \* no such writer: its check reads what is true of the roles (Manages,
+    \* Narrowed), and the number is Writing.tla's to hold.
     RevokePolicyHeld,
     \* An issue or a sign-in never takes the fence: the issue lock, shared
     \* (0026, IssueOwnLock; T123, R58).
@@ -84,10 +88,11 @@ CONSTANTS
     \* An issue checks the policy it was weighed on only once it holds the
     \* issue lock shared, and is numbered under it; a policy change takes
     \* it exclusive, so the two are ordered (as `policyStill` under the
-    \* change lock; review r3). The policy it was weighed on is the seals
-    \* of the rows the read answered, the roles' here, which the statement
-    \* compares to the rows as they are. Without it, the check comes before
-    \* the lock.
+    \* change lock; review r3). The policy it was weighed on is the number
+    \* of the newest change, in the log, of each object the read answered
+    \* from, the roles here, which the statement compares to the log as it
+    \* is; never the rows' seals, as for a revoke. Without it, the check
+    \* comes before the lock.
     IssuePolicyHeld,
     \* A policy change takes the issue lock before the fence, as the
     \* checkpointer's barrier does (HotPathOne's BarrierIssueFirst): it
