@@ -23,7 +23,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { localVault, spoken } from '@coffre/vault/node';
 
 import { REFUSAL_UNSEALED_MESSAGE } from '../src/api/errors.ts';
-import { clientFor, entryOf, hotDatabaseUrl, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, stallingSeal, testDeps, testVault } from './api-fixture.ts';
+import { clientFor, entryOf, hotDatabaseUrl, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, stallingSeal, testDeps, testVault } from './api-fixture.ts';
 import { openVaultDatabase } from './db/engine.ts';
 import { steppedUp } from './passkey-rows.ts';
 import { credentials, principals } from '@coffre/db/schema';
@@ -32,7 +32,6 @@ const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const BOB = 'bob@acme.example';
 const NEW = 'user:new@acme.example';
-const ANY = LOG === '0.15' ? false : "0.15's log only";
 
 const db = await openTestDatabase();
 test.after(async () => {
@@ -49,7 +48,7 @@ const run = (on: Queryable, query: ReturnType<typeof sql>) => rowsOf(on, query);
 async function world({ fast = true, past = 0n, sealThrough = sealedNow }: { fast?: boolean; past?: bigint; sealThrough?: typeof sealedNow } = {}) {
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
-  const vault = testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough, heldOutside: nothingHeld });
+  const vault = testVault([ROOT], {}, { kek }, {}, { sealThrough, heldOutside: nothingHeld });
   const deps = testDeps(db.runtime, [ROOT], { vault });
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
@@ -137,7 +136,7 @@ async function since<T>(work: () => Promise<T>): Promise<{ result: T; entries: s
   return { result, entries: entries.map((entry) => `${entry.author} ${entry.action} ${entry.decision} ${entry.actor}`), changes: changes.map((change) => ({ actor: change.actor, payload: JSON.parse(change.payload) as Record<string, unknown> })) };
 }
 
-test("a first add the vault decided on its read commits in its write, no app statement, its change naming the caller and the read it was decided on, and no 0.14 entry (0.16.0), answered as today's path answers it", { skip: ANY }, async () => {
+test("a first add the vault decided on its read commits in its write, no app statement, its change naming the caller and the read it was decided on, and no 0.14 entry (0.16.0), answered as today's path answers it", async () => {
   const fast = await world();
   const made = await since(() => fast.add());
   assert.equal(made.result.status, 200, JSON.stringify(made.result.body));
@@ -176,10 +175,10 @@ test("numbers past 2^53 (Bob's newest access entry, his rows' newest changes): h
   const added = await w.add();
   assert.equal(added.status, 200, JSON.stringify(added.body));
   // The two-trip path served it.
-  if (LOG === '0.15') assert.deepEqual(served(w.answers), ['served']);
+  assert.deepEqual(served(w.answers), ['served']);
   assert.deepEqual(await memberRow(NEW), { role: 'developer', createdBy: `user:${BOB}` });
 });
-test('a service account and a person with no role are added the same way, each in one try', { skip: ANY }, async () => {
+test('a service account and a person with no role are added the same way, each in one try', async () => {
   const w = await world();
   for (const [member, body] of [['token:ci', {}], ['user:plain@acme.example', {}], ['user:everywhere@acme.example', { role: 'auditor' }]] as const) {
     const added = await w.add(body, member);
@@ -190,7 +189,7 @@ test('a service account and a person with no role are added the same way, each i
   assert.ok((await w.root.audit.verify()).ok);
 });
 
-test('Bob demoted between the read and the write: the hold fails, the read again refuses him, and today\'s path answers 403, nothing added (WritingAdd, dem)', { skip: ANY }, async () => {
+test('Bob demoted between the read and the write: the hold fails, the read again refuses him, and today\'s path answers 403, nothing added (WritingAdd, dem)', async () => {
   const w = await world();
   w.between(async () => void (await w.root.members.add(`user:${BOB}`, { role: 'member' })));
   const added = await w.add();
@@ -199,7 +198,7 @@ test('Bob demoted between the read and the write: the hold fails, the read again
   assert.equal(await memberRow(NEW), undefined);
 });
 
-test("Bob's session revoked between the read and the write: the hold fails, and the read again answers 401, nothing added (PR 5: the add's read holds the adder's session)", { skip: ANY }, async () => {
+test("Bob's session revoked between the read and the write: the hold fails, and the read again answers 401, nothing added (PR 5: the add's read holds the adder's session)", async () => {
   const w = await world();
   w.between(() => w.signOut());
   const added = await w.add();
@@ -208,7 +207,7 @@ test("Bob's session revoked between the read and the write: the hold fails, and 
   assert.equal(await memberRow(NEW), undefined);
 });
 
-test("the head held and every place in the reads' line taken when the write comes: it waits for the head, as today's add does, and adds in one try (Fable's review of #474)", { skip: ANY }, async () => {
+test("the head held and every place in the reads' line taken when the write comes: it waits for the head, as today's add does, and adds in one try (Fable's review of #474)", async () => {
   const w = await world();
   let release = () => {};
   let holding: Promise<void> = Promise.resolve();
@@ -234,7 +233,7 @@ test("the head held and every place in the reads' line taken when the write come
   assert.deepEqual(await memberRow(NEW), { role: 'developer', createdBy: `user:${BOB}` });
 });
 
-test('the roles redefined between the read and the write: the hold fails, and the add goes again on the roles as they are (WritingAdd, pol)', { skip: ANY }, async () => {
+test('the roles redefined between the read and the write: the hold fails, and the add goes again on the roles as they are (WritingAdd, pol)', async () => {
   const w = await world();
   w.between(async () => void (await w.root.roles.set('auditor', { name: 'Auditor', description: '', permissions: ['secret.read', 'secret.use'], protected: [] })));
   const added = await w.add();
@@ -243,7 +242,7 @@ test('the roles redefined between the read and the write: the hold fails, and th
   assert.deepEqual(await memberRow(NEW), { role: 'developer', createdBy: `user:${BOB}` });
 });
 
-test('another add of the same member between the read and the write: the hold fails, and the add finds a member, today\'s path answering as for one (AddsFlip)', { skip: ANY }, async () => {
+test('another add of the same member between the read and the write: the hold fails, and the add finds a member, today\'s path answering as for one (AddsFlip)', async () => {
   const w = await world();
   w.between(async () => void (await w.root.members.add(NEW, { role: 'auditor' })));
   const added = await w.add();
@@ -257,7 +256,7 @@ test('another add of the same member between the read and the write: the hold fa
   assert.deepEqual([Number(count), Number(adds)], [1, 0]);
 });
 
-test('a hold that keeps failing gives up after three tries: 409 `changed`, asked again in a second, nothing added (EveryRequestEnds)', { skip: ANY }, async () => {
+test('a hold that keeps failing gives up after three tries: 409 `changed`, asked again in a second, nothing added (EveryRequestEnds)', async () => {
   const w = await world();
   const churn = async () => {
     await w.root.roles.set(`role-${w.answers.length}`, { name: `Role ${w.answers.length}`, description: '', permissions: ['secret.read', 'secret.use'], protected: [] });
@@ -272,7 +271,7 @@ test('a hold that keeps failing gives up after three tries: 409 `changed`, asked
   assert.equal(await memberRow(NEW), undefined);
 });
 
-test("Bob removed and restored as an admin between the read and the write, his session's row not yet revoked: the read again finds it of his earlier membership, 401, nothing added (WritingRejoin; review r1 of #474)", { skip: ANY }, async () => {
+test("Bob removed and restored as an admin between the read and the write, his session's row not yet revoked: the read again finds it of his earlier membership, 401, nothing added (WritingRejoin; review r1 of #474)", async () => {
   const w = await world();
   // The vault's removal alone: the app's sweep, which revokes the session's row, has not run yet.
   w.between(async () => {
@@ -292,7 +291,7 @@ test("Bob removed and restored as an admin between the read and the write, his s
   assert.equal(await memberRow(NEW), undefined);
 });
 
-test("Bob's member row edited in a column only its 0.4 MAC covers (`created_by`): the read refuses it, and today's path answers it as ever, 401, nothing added (review r1 of #474)", { skip: ANY }, async () => {
+test("Bob's member row edited in a column only its 0.4 MAC covers (`created_by`): the read refuses it, and today's path answers it as ever, 401, nothing added (review r1 of #474)", async () => {
   const attempt = async (fast: boolean) => {
     const w = await world({ fast });
     await db.owner.update(principals).set({ createdBy: 'user:someone@acme.example' }).where(eq(principals.principal, `user:${BOB}`));
@@ -307,7 +306,7 @@ test("Bob's member row edited in a column only its 0.4 MAC covers (`created_by`)
   assert.deepEqual({ ...fast, served: [] }, { ...today, served: [] });
 });
 
-test("a member added down the two-trip path and changed no further, then the vault's key rotated: the rotation seals their row again under the new key, as it does everyone's, and they are served (review r1 of #490)", { skip: ANY }, async () => {
+test("a member added down the two-trip path and changed no further, then the vault's key rotated: the rotation seals their row again under the new key, as it does everyone's, and they are served (review r1 of #490)", async () => {
   const w = await world();
   const added = await w.add();
   assert.equal(added.status, 200, JSON.stringify(added.body));
@@ -319,7 +318,7 @@ test("a member added down the two-trip path and changed no further, then the vau
       database: await openVaultDatabase(), hotDatabase: hotDatabaseUrl(), owners: [ROOT],
       kek: { id: 'test-kek-2', key: randomBytes(32).toString('base64') }, previousKeks: [{ id: 'test-kek-1', key: w.kek.toString('base64') }],
     },
-    { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
+    { sealThrough: sealedNow, heldOutside: nothingHeld },
   ));
   const access = await rotated.access(NEW);
   assert.deepEqual([access.status, access.role], ['active', 'developer'], JSON.stringify(access));
@@ -328,12 +327,12 @@ test("a member added down the two-trip path and changed no further, then the vau
   assert.ok(verified.ok, JSON.stringify(verified));
 });
 
-test("a ticket another vault read, written by one whose config names the member an Owner: that vault leaves the add to today's path, nothing written (review r1 of #474)", { skip: ANY }, async () => {
+test("a ticket another vault read, written by one whose config names the member an Owner: that vault leaves the add to today's path, nothing written (review r1 of #474)", async () => {
   const w = await world();
   // A cold isolate of the deployment after a rollout that names new@ an Owner: its own config, the same keys.
   const rolled = spoken(await localVault(
     { database: await openVaultDatabase(), hotDatabase: hotDatabaseUrl(), kek: { id: 'test-kek-1', key: w.kek.toString('base64') }, owners: ['new@acme.example'] },
-    { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
+    { sealThrough: sealedNow, heldOutside: nothingHeld },
   ));
   // Asserted outside the callback: inside it, a failed assertion would be the route's 500, which nothing checks.
   let written: unknown;
@@ -354,7 +353,7 @@ test("a ticket another vault read, written by one whose config names the member 
   assert.deepEqual(await memberRow(NEW), { role: 'owner', createdBy: 'system:vault' });
 });
 
-test("Bob's token hash copied onto the Owner's session: the vault reads the Owner, and the app's check of the row's MAC refuses it before anything is written (WritingAdd, sub; round 6)", { skip: ANY }, async () => {
+test("Bob's token hash copied onto the Owner's session: the vault reads the Owner, and the app's check of the row's MAC refuses it before anything is written (WritingAdd, sub; round 6)", async () => {
   const w = await world();
   const owner = await w.session('root', ROOT);
   const [bob] = await db.owner.select({ tokenHash: credentials.tokenHash }).from(credentials).where(eq(credentials.id, w.bob.id));
@@ -367,7 +366,7 @@ test("Bob's token hash copied onto the Owner's session: the vault reads the Owne
   assert.equal(await memberRow(NEW), undefined);
 });
 
-test("Bob's token hash copied onto a Developer's session: the vault reads the Developer and refuses, and the app's check of the row's MAC answers 401 before the refusal is recorded: no record names the Developer (WritingRefuse, RefusalAfterAuth; review r1 of PR 6)", { skip: ANY }, async () => {
+test("Bob's token hash copied onto a Developer's session: the vault reads the Developer and refuses, and the app's check of the row's MAC answers 401 before the refusal is recorded: no record names the Developer (WritingRefuse, RefusalAfterAuth; review r1 of PR 6)", async () => {
   const w = await world();
   const carol = 'carol@acme.example';
   await w.root.members.add(`user:${carol}`, { role: 'developer' });
@@ -383,7 +382,7 @@ test("Bob's token hash copied onto a Developer's session: the vault reads the De
   assert.equal(await memberRow(NEW), undefined);
 });
 
-test("a refused first add whose record committed but whose seal did not come in time: 503, in words that say no change was made, never a change's; the member not added, and no 0.14 entry (review r2 of PR 6)", { skip: ANY }, async () => {
+test("a refused first add whose record committed but whose seal did not come in time: 503, in words that say no change was made, never a change's; the member not added, and no 0.14 entry (review r2 of PR 6)", async () => {
   const sealing = stallingSeal();
   const w = await world({ sealThrough: sealing.sealThrough });
   sealing.stalled = true;
@@ -400,7 +399,7 @@ test("a refused first add whose record committed but whose seal did not come in 
   assert.equal((await w.add({ role: 'owner' })).status, 403);
 });
 
-test("Bob's session revoked and its row put back, live: the vault's read refuses it on the log's newest change, 401, never down today's path (dbw)", { skip: ANY }, async () => {
+test("Bob's session revoked and its row put back, live: the vault's read refuses it on the log's newest change, 401, never down today's path (dbw)", async () => {
   const w = await world();
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, w.bob.id));
   await w.signOut();
@@ -411,7 +410,7 @@ test("Bob's session revoked and its row put back, live: the vault's read refuses
   assert.equal(await memberRow(NEW), undefined);
 });
 
-test("Bob demoted, then his row put back and its seal written into the demotion's change: the change's MAC fails, the add goes down today's path, which refuses it too (WritingForge, T190)", { skip: ANY }, async () => {
+test("Bob demoted, then his row put back and its seal written into the demotion's change: the change's MAC fails, the add goes down today's path, which refuses it too (WritingForge, T190)", async () => {
   const w = await world();
   const [member] = await db.owner.select().from(principals).where(eq(principals.principal, `user:${BOB}`));
   await w.root.members.add(`user:${BOB}`, { role: 'member' });
@@ -423,7 +422,7 @@ test("Bob demoted, then his row put back and its seal written into the demotion'
   assert.equal(await memberRow(NEW), undefined);
 });
 
-test("a refusal is answered as today's path answers it, status and body: one who runs no instance, an Owner asked by an admin, refused on the vault's read and recorded by it in place of 0.14's deny entry (PR 6); a project no slug names, today's path's still", { skip: ANY }, async () => {
+test("a refusal is answered as today's path answers it, status and body: one who runs no instance, an Owner asked by an admin, refused on the vault's read and recorded by it in place of 0.14's deny entry (PR 6); a project no slug names, today's path's still", async () => {
   // What the fast attempt answers by: the vault's refusal and its record, or today's path.
   const cases: [string, (w: Awaited<ReturnType<typeof world>>) => Promise<void>, Record<string, unknown>, string | null][] = [
     ['Bob no admin', async (w) => void (await w.root.members.add(`user:${BOB}`, { role: 'developer' })), { role: 'developer' }, 'app member.add deny'],
@@ -464,7 +463,7 @@ test("a refusal is answered as today's path answers it, status and body: one who
   }
 });
 
-test('a change that names a read goes only in a transaction that held it: `change_input_strict` refuses it otherwise', { skip: ANY }, async () => {
+test('a change that names a read goes only in a transaction that held it: `change_input_strict` refuses it otherwise', async () => {
   await world();
   await assert.rejects(
     db.owner.transaction(async (tx) => {
@@ -474,7 +473,7 @@ test('a change that names a read goes only in a transaction that held it: `chang
   );
 });
 
-test("a ticket is the vault's own: one edited, its role or its time, is refused and writes nothing; the one the vault made writes", { skip: ANY }, async () => {
+test("a ticket is the vault's own: one edited, its role or its time, is refused and writes nothing; the one the vault made writes", async () => {
   const w = await world();
   const answer = await w.runtime.vault.admitRead!({
     tokenHash: (await db.owner.select({ tokenHash: credentials.tokenHash }).from(credentials).where(eq(credentials.id, w.bob.id)))[0]!.tokenHash.toString('base64'),
@@ -496,7 +495,7 @@ test("a ticket is the vault's own: one edited, its role or its time, is refused 
   assert.deepEqual(await memberRow(NEW), { role: 'developer', createdBy: `user:${BOB}` });
 });
 
-test("the read moves with every part an add's decision weighs, its numbers too: what each adversary of Writing.tla's add changes changes its digest (ReadHeld, ReadByNumber)", { skip: ANY }, async () => {
+test("the read moves with every part an add's decision weighs, its numbers too: what each adversary of Writing.tla's add changes changes its digest (ReadHeld, ReadByNumber)", async () => {
   const w = await world();
   const [bob] = await db.owner.select({ tokenHash: credentials.tokenHash }).from(credentials).where(eq(credentials.id, w.bob.id));
   const read = async () => {
@@ -526,7 +525,7 @@ test("the read moves with every part an add's decision weighs, its numbers too: 
   }
 });
 
-test("a first add down the two-trip path, recorded in 0.15's log alone, is listed on the instance's page where 0.14's `member.add` stood; the log verifies through a later change down today's path, and not with the row forged; its row deleted, the member is missing (T179, 0.16.0)", { skip: ANY }, async () => {
+test("a first add down the two-trip path, recorded in 0.15's log alone, is listed on the instance's page where 0.14's `member.add` stood; the log verifies through a later change down today's path, and not with the row forged; its row deleted, the member is missing (T179, 0.16.0)", async () => {
   const w = await world();
   const added = await w.add();
   assert.equal(added.status, 200, JSON.stringify(added.body));
@@ -559,7 +558,7 @@ test("a first add down the two-trip path, recorded in 0.15's log alone, is liste
   assert.deepEqual(await missingMembers(db.runtime), [NEW]);
 });
 
-test("a member added down the two-trip path, then removed down today's path: 0.14's replay stops at a removal of someone it never saw added, and the log still verifies, every row held to 0.15's log instead; a row deleted around the vault after it is found (T179, 0.16.0)", { skip: ANY }, async () => {
+test("a member added down the two-trip path, then removed down today's path: 0.14's replay stops at a removal of someone it never saw added, and the log still verifies, every row held to 0.15's log instead; a row deleted around the vault after it is found (T179, 0.16.0)", async () => {
   const w = await world();
   const added = await w.add();
   assert.equal(added.status, 200, JSON.stringify(added.body));
@@ -577,7 +576,7 @@ test("a member added down the two-trip path, then removed down today's path: 0.1
   assert.deepEqual([missing.ok, missing.ok ? null : missing.author, missing.ok ? null : missing.reason], [false, 'vault', "the store's carol@acme.example is older than the log's last change to them: it was put back"], JSON.stringify(missing));
 });
 
-test("a member added down the two-trip path alone, with no 0.14 entry of them, whose row is deleted around the vault is missing by their add's change in 0.15's log (T179, 0.16.0)", { skip: ANY }, async () => {
+test("a member added down the two-trip path alone, with no 0.14 entry of them, whose row is deleted around the vault is missing by their add's change in 0.15's log (T179, 0.16.0)", async () => {
   const w = await world();
   const added = await w.add();
   assert.equal(added.status, 200, JSON.stringify(added.body));

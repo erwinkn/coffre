@@ -8,7 +8,7 @@ import type { Database } from '@coffre/db';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 
 import { auditLog, environments, projects, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
-import { clientFor, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const LEAD = 'user:lead@acme.example';
@@ -175,36 +175,6 @@ test('deleting a project erases its values, revokes its grants, hides it and fre
   assert.ok(history.some((row) => row.action === 'project.delete'));
   assert.ok(history.every((row) => row.project === `market~deleted-${today()}`));
 
-  assert.equal((await root.audit.verify()).ok, true);
-});
-
-// Its setup archives the project around the app (D41 refuses it through the API), which 0.15's log refuses: each of the
-// project's environments then holds an archival no change sealed (0029, `projectArchived`).
-test('deleting a project ends the references into it and out of it, and its preview names them', { skip: LOG_014_ONLY }, async () => {
-  await seedMarket();
-  await root.environments.create('web/prod', { name: 'Production' });
-  await root.secrets.set('web/prod', { OTHER: 'web-other' });
-  // web reads market's key; market reads web's.
-  await root.secrets.set('web/prod', { API_KEY: { ref: 'market/prod/API_KEY' } });
-  await root.secrets.set('market/dev', { OTHER: { ref: 'web/prod/OTHER' } });
-  // Archiving market is refused while web reads it (D41); archived before that rule, as data from then is:
-  await assert.rejects(root.projects.update('market', { archived: true }), { status: 409 });
-  await db.owner.update(projects).set({ archivedAt: new Date() }).where(eq(projects.slug, 'market'));
-
-  const { deletion: planned } = await root.projects.previewDelete('market');
-  assert.deepEqual(planned.references, [
-    { holder: 'web/prod/API_KEY', source: 'market/prod/API_KEY' },
-    { holder: 'market/dev/OTHER', source: 'web/prod/OTHER' },
-  ]);
-  const { deletion } = await root.projects.delete('market');
-  assert.equal(deletion.references.length, 2);
-  assert.deepEqual((await root.references.list('web')).references, []);
-  const ended = await db.owner.select({ action: auditLog.action }).from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'reference.end'), eq(auditLog.decision, 'allow')));
-  assert.equal(ended.length, 2);
-  // web's key no longer reads what was market's; its own value is untouched.
-  await assert.rejects(root.secrets.reveal('web/prod/API_KEY'));
-  assert.equal((await root.secrets.reveal('web/prod/OTHER')).values.OTHER, 'web-other');
   assert.equal((await root.audit.verify()).ok, true);
 });
 
@@ -594,9 +564,8 @@ test('the vault grants nothing on a deleted place, and still revokes there', asy
   await seedMarket();
   const version = await currentVersion('prod', 'API_KEY');
   await db.owner.update(projects).set({ slug: `market~deleted-${today()}` }).where(eq(projects.id, version.projectId));
-  // Under 0.15's log a project's deletion deletes its environments too: a project's tombstone alone is a writer's, and its
+  // A project's deletion deletes its environments too: a project's tombstone alone is a writer's, and its
   // environments' rows are not as the log holds them (T159).
-  const there = LOG === '0.15' ? 'tampered' : 'deleted';
   const change = (role: 'viewer' | null, environmentId: string | null) => deps.vault.setAccess({
     actor: `user:${ROOT}`, principal: CI, requestId: 'r', operationId: crypto.randomUUID(),
     changes: [{ projectId: version.projectId, environmentId, role, expiresAt: null }],
@@ -604,10 +573,9 @@ test('the vault grants nothing on a deleted place, and still revokes there', asy
   const onProject = await change('viewer', null);
   assert.equal(onProject.ok ? null : onProject.refusal.code, 'deleted');
   const onEnvironment = await change('viewer', version.environmentId);
-  assert.equal(onEnvironment.ok ? null : onEnvironment.refusal.code, there);
+  assert.equal(onEnvironment.ok ? null : onEnvironment.refusal.code, 'tampered');
   const revoked = await change(null, version.environmentId);
-  if (LOG === '0.15') assert.equal(revoked.ok ? null : revoked.refusal.code, 'tampered');
-  else assert.deepEqual(revoked.ok ? revoked.changes : revoked.refusal, ['revoked']);
+  assert.equal(revoked.ok ? null : revoked.refusal.code, 'tampered');
 });
 
 test('the vault refuses a deleted place as deleted, its erased versions included', async () => {
@@ -622,12 +590,11 @@ test('the vault refuses a deleted place as deleted, its erased versions included
 test('a tombstone is refused by the rule, not by its emptied keys: values left in it, and a grant still on it, open nothing', async () => {
   await seedMarket();
   const version = await currentVersion('prod', 'API_KEY');
-  // As if the erase had missed it: the slug says deleted, the value and the developer's grant are still there. Under 0.15's
-  // log, where a project's deletion deletes its environments too, a project's tombstone alone is a writer's: its
+  // As if the erase had missed it: the slug says deleted, the value and the developer's grant are still there. A project's
+  // deletion deletes its environments too, so a project's tombstone alone is a writer's: its
   // environments' rows are not as the log holds them, a grant on one holds nothing, and a decision there is refused (T159).
   await db.owner.update(projects).set({ slug: `market~deleted-${today()}` }).where(eq(projects.id, version.projectId));
-  const there = LOG === '0.15' ? 'tampered' : 'deleted';
-  assert.equal((await deps.vault.access(DEV)).grants.length, LOG === '0.15' ? 1 : 2);
+  assert.equal((await deps.vault.access(DEV)).grants.length, 1);
 
   for (const principal of [DEV, `user:${ROOT}`]) {
     const outcome = await unwrapAs(principal, version.id);
@@ -643,10 +610,5 @@ test('a tombstone is refused by the rule, not by its emptied keys: values left i
       key: randomBytes(32).toString('base64'),
     }],
   });
-  assert.equal(wrapped.ok ? null : wrapped.refusal.code, there);
-  if (LOG === '0.15') return;
-  const refusals = await db.owner.select({ action: auditLog.action }).from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.decision, 'deny'), eq(auditLog.code, 'deleted')))
-    .orderBy(asc(auditLog.seq));
-  assert.deepEqual(refusals.map((row) => row.action), ['secret.read', 'secret.read', 'key.wrap']);
+  assert.equal(wrapped.ok ? null : wrapped.refusal.code, 'tampered');
 });

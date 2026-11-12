@@ -15,7 +15,6 @@ import type { Database } from '@coffre/db';
 import { desc, eq, Placeholder, sql } from 'drizzle-orm';
 
 import { allowed, audited } from '../src/api/context.ts';
-import { authMac } from '../src/auth-rows.ts';
 import { resolveConfig } from '../src/config.ts';
 import { insertSession, sessionStatement } from '../src/db/workloads.ts';
 import { checkPlugins, pluginRoute, bindingRoute, WorkloadRefused, type PluginContext, type WorkloadUse } from '../src/plugins.ts';
@@ -23,7 +22,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, decisionInputs, holdSomething, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, signInsLogged, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, decisionInputs, holdSomething, openTestDatabase, resetDatabase, signInsLogged, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, environments, logChanges, secrets, serviceBindings } from '@coffre/db/schema';
 import { answer, type Pages } from './start-fixture.ts';
 
@@ -260,26 +259,19 @@ test("a GitHub run's token, its audience naming the key, buys a session bound to
   const row = await sessionRow({ token: made.body.token as string, key });
   assert.equal(row.kind, 'workload');
   assert.equal(row.jkt, await thumbprint(key.jwk));
-  if (LOG === '0.14') {
-    const [entry] = await entries('token.exchange');
-    assert.equal(entry!.kind, 'workload');
-    assert.equal(entry!.proof, 'oidc');
-    assert.equal(entry!.jkt, row.jkt);
-  } else {
-    // With 0.15's log, the vault makes it (T149), and its change records the sign-in (D147): its proof, key and hard end.
-    const [signedIn] = await signInsLogged(db.owner);
-    assert.deepEqual(signedIn!.record.signIn, {
-      binding: (await db.owner.select({ id: serviceBindings.id }).from(serviceBindings))[0]!.id, proof: 'oidc', issuer: GITHUB, run: signedIn!.run,
-      jkt: row.jkt, notAfter: row.notAfter!.getTime(),
-    });
-    assert.equal(signedIn!.record.caller, 'workload');
-    assert.deepEqual(await entries('token.exchange'), []);
-  }
-  // The audit list shows it as 0.14's entry put it, under either log (T156): a workload's, by its proof, key and hard end.
+  // The vault makes it (T149), and its change records the sign-in (D147): its proof, key and hard end.
+  const [signedIn] = await signInsLogged(db.owner);
+  assert.deepEqual(signedIn!.record.signIn, {
+    binding: (await db.owner.select({ id: serviceBindings.id }).from(serviceBindings))[0]!.id, proof: 'oidc', issuer: GITHUB, run: signedIn!.run,
+    jkt: row.jkt, notAfter: row.notAfter!.getTime(),
+  });
+  assert.equal(signedIn!.record.caller, 'workload');
+  assert.deepEqual(await entries('token.exchange'), []);
+  // The audit list shows it as a `token.exchange` entry (T156): a workload's, by its proof, key and hard end.
   const [shown] = (await clientFor(deps, ROOT).audit.list({ sealed: '1' })).entries.filter((entry) => entry.action === 'token.exchange');
   assert.deepEqual(
     [shown!.log, shown!.metadata.kind, shown!.metadata.proof, shown!.metadata.jkt, shown!.metadata.notAfter, shown!.metadata.expiresAt],
-    [LOG, 'workload', 'oidc', row.jkt, row.notAfter!.toISOString(), row.expiresAt.toISOString()],
+    ['0.15', 'workload', 'oidc', row.jkt, row.notAfter!.toISOString(), row.expiresAt.toISOString()],
   );
   assert.equal(shown!.run!.claims.repository, (await signInsLogged(db.owner))[0]!.run.repository);
 
@@ -311,9 +303,7 @@ test("a key-naming token is useless to any other key: its audience names the key
   assert.deepEqual([plain.status, plain.body.reason], [401, 'audience']);
 });
 
-test("a binding made on another public URL takes no token for this one, and shadows none made here (PR 3b, review r1)", {
-  skip: LOG === '0.15' ? false : "0.14's bindings carry no origin",
-}, async () => {
+test("a binding made on another public URL takes no token for this one, and shadows none made here (PR 3b, review r1)", async () => {
   const elsewhere = makeRuntime({ publicUrl: 'https://old.acme.example' });
   const claims = { sub: POD.sub, 'kubernetes.io.serviceaccount.uid': POD['kubernetes.io'].serviceaccount.uid };
   const old = await elsewhere.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'kubernetes', issuer: CLUSTER, claims: claims as never, label: 'old', replaces: [], policy: {} }, { dryRun: false });
@@ -632,39 +622,6 @@ test("a binding's sources hold a session to its addresses, at the exchange and o
 
 // --- renewal and logout -------------------------------------------------------
 
-test("renewal moves a session's expiry on, by its key; a late or a lost renewal revives nothing", { skip: LOG_014_ONLY }, async () => {
-  await bindGithub();
-  const held = await githubSession();
-  const row = await sessionRow(held);
-  // Near its end, as if its process had stalled.
-  const near = new Date(Date.now() + 30_000);
-  const { authMac: _, ...fields } = { ...row, expiresAt: near };
-  await db.owner.update(credentials).set({ expiresAt: near, authMac: authMac(deps.chainKey, 'credentials', fields) }).where(eq(credentials.id, row.id));
-  const renewed = await call(held, 'POST', '/api/auth/workload/renew');
-  assert.equal(renewed.status, 200, JSON.stringify(renewed.body));
-  assert.ok(Date.parse(renewed.body.expiresAt as string) > Date.now() + 59 * 60_000);
-  assert.equal(renewed.headers.get('dpop-nonce'), await gate.nonce());
-  assert.ok(Math.abs((await sessionRow(held)).expiresAt.getTime() - Date.parse(renewed.body.expiresAt as string)) < 2);
-
-  // A renewal another beat to it updates nothing: the row is not as it read it.
-  const stale = await sessionRow(held);
-  const binding = (await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, stale.createdBy.slice('binding:'.length))))[0]!;
-  await runtime.workloads!.renew({ row: stale, binding }, { requestId: randomUUID(), sourceIp: IP });
-  await assert.rejects(runtime.workloads!.renew({ row: stale, binding }, { requestId: randomUUID(), sourceIp: IP }), { reason: 'expired' });
-
-  // Within seconds of its expiry, the count on the database's clock may already call it dead: renewal moves nothing.
-  const current = await sessionRow(held);
-  const late = new Date(Date.now() + 2_000);
-  const { authMac: __, ...lateFields } = { ...current, expiresAt: late };
-  await db.owner.update(credentials).set({ expiresAt: late, authMac: authMac(deps.chainKey, 'credentials', lateFields) }).where(eq(credentials.id, current.id));
-  const refused = await call(held, 'POST', '/api/auth/workload/renew');
-  assert.deepEqual([refused.status, refused.body.reason], [401, 'expired']);
-  assert.equal((await sessionRow(held)).expiresAt.getTime(), late.getTime(), 'unchanged');
-  await sleep(late.getTime() - Date.now() + 200);
-  assert.equal((await call(held, 'POST', '/api/auth/workload/renew')).status, 401, 'dead stays dead');
-  assert.equal((await me(held)).status, 401);
-});
-
 test('logout revokes the session, with its key', async () => {
   await bindGithub();
   const held = await githubSession();
@@ -674,17 +631,12 @@ test('logout revokes the session, with its key', async () => {
   const out = await call(held, 'POST', '/api/auth/logout');
   assert.equal(out.status, 200, JSON.stringify(out.body));
   assert.equal((await me(held)).status, 401);
-  if (LOG === '0.14') {
-    const [entry] = await entries('sign_out');
-    assert.equal(entry!.kind, 'workload');
-  } else {
-    // With 0.15's log, the vault ends it (T149), and its change records the sign-out (D147).
-    const revokes = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).flatMap(({ payload }) => {
-      const { revoke } = JSON.parse(payload) as { revoke?: { reason: string; kind: string } };
-      return revoke === undefined ? [] : [revoke];
-    });
-    assert.deepEqual(revokes.map(({ reason, kind }) => [reason, kind]), [['sign_out', 'workload']]);
-  }
+  // The vault ends it (T149), and its change records the sign-out (D147).
+  const revokes = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).flatMap(({ payload }) => {
+    const { revoke } = JSON.parse(payload) as { revoke?: { reason: string; kind: string } };
+    return revoke === undefined ? [] : [revoke];
+  });
+  assert.deepEqual(revokes.map(({ reason, kind }) => [reason, kind]), [['sign_out', 'workload']]);
 });
 
 // --- the strict instance ------------------------------------------------------
@@ -966,17 +918,8 @@ test("a Cloudflare call uses its service's values: the vault's read names no cre
   assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
   const used = await seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } });
   assert.equal(used.values.STRIPE_SECRET_KEY, 'sk_live_1');
-  // With 0.15's log, the use is the record, the binding its way in (T147), its kind in the purpose's bits above 512.
-  if (LOG === '0.15') {
-    assert.deepEqual((await usesLogged(db.owner)).map((use) => [use.credential, Math.floor(use.purpose / 512)]), [[binding, 2]]);
-    return;
-  }
-  // The read, then the use the app gave the vault to append beside it, under the same head: the app appends nothing.
-  const [logged, opened] = await newest('vault', 2);
-  assert.deepEqual([opened!.action, opened!.decision, logged!.action], ['secret.read', 'allow', 'credential.use']);
-  assert.equal(opened!.metadata.credentialId, undefined, 'the vault is told no credential: the binding has no credentials row');
-  assert.equal(logged!.metadata.credentialId, `binding:${binding}`, 'the use names the binding the call came through');
-  assert.equal((await newest('app')).find((entry) => entry.action === 'credential.use'), undefined);
+  // The use is the record, the binding its way in (T147), its kind in the purpose's bits above 512.
+  assert.deepEqual((await usesLogged(db.owner)).map((use) => [use.credential, Math.floor(use.purpose / 512)]), [[binding, 2]]);
 });
 
 test('a Cloudflare binding unbound after its call was checked releases nothing: the read is withheld, as for a revoked session', async () => {
@@ -988,89 +931,6 @@ test('a Cloudflare binding unbound after its call was checked releases nothing: 
   // Checked; then unbound before the vault is asked.
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, binding);
   await assert.rejects(seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } }), { status: 401 });
-  // With 0.15's log, the use itself reads the binding ended (T147, WaysIn.tla's WayReadInUse): nothing released.
-  if (LOG === '0.15') return assert.equal((await newest('vault')).find((entry) => entry.action === 'secret.read'), undefined);
-  // The vault released, and logged it with the use it was given: a use records the release, as the read does. The
-  // app withheld the value, and logged that, naming the binding, the same operation's entry after it.
-  assert.deepEqual((await newest('vault', 2)).map((entry) => `${entry.action} ${entry.decision}`), ['credential.use allow', 'secret.read allow']);
-  const [withheld] = await newest('app', 1);
-  assert.deepEqual([withheld!.decision, withheld!.metadata.reason, withheld!.metadata.credentialId], ['deny', 'credential_ended', `binding:${binding}`]);
-});
-
-/**
- * An unbind that commits while the use waits for the log's head, which the
- * unbind holds: the vault, once it has the head, decides in a statement of
- * its own, and the app checks the binding in another after the vault has
- * released, never in the statement that waited. Under READ COMMITTED, a
- * statement that waited for a row lock reads only that row again: a check
- * of another table in it would see the binding as it stood before the wait.
- * The models (formal/Credentials.tla) take a statement as one step, and
- * cannot see that; this does.
- */
-test('a Cloudflare binding unbound while its use waits for the head releases nothing', LOG === '0.15'
-  ? { skip: "0.15's use takes no head, and decides on the binding's object, which an unbind changes under the fence (WaysIn.tla, WaysInUnbind)" }
-  : {}, async () => {
-  const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
-  runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
-  await marketProd();
-  const binding = await bind('cloudflare', null, {});
-  assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
-  const ctx = { caller: { principal: { type: 'user', id: ROOT } }, requestId: randomUUID(), sourceIp: null } as never;
-  let commit!: () => void;
-  const committing = new Promise<void>((resolve) => (commit = resolve));
-  let holding!: () => void;
-  const held = new Promise<void>((resolve) => (holding = resolve));
-  // The unbind's tombstone, under the head, not yet committed.
-  const unbinding = audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (_tx, log) => {
-    log.push(allowed(ctx, 'token.unbind', { metadata: { bindingId: binding } }));
-    holding();
-    await committing;
-  });
-  await held;
-  const using = seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } });
-  // Until the use waits for the head, in this database (a row lock's wait names a transaction, not a database), then the unbind commits.
-  const waiting = async () => (await deps.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`))[0]!.n;
-  for (let tries = 0; (await waiting()) === 0; tries++) {
-    assert.ok(tries < 200, 'the use never waited for the head');
-    await sleep(10);
-  }
-  commit();
-  await unbinding;
-  await assert.rejects(using, { status: 401 });
-});
-
-test('a vault older than 0.14.5, which names no use back, and a use too long for it, leave the app to log the use under the head', { skip: LOG === '0.15' ? "0.15's use is its own record, through a binding too (T147)" : false }, async () => {
-  const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
-  // An older vault takes no record of the use: it ignores it, and names nothing back.
-  const older = new Proxy(deps.vault, {
-    get: (target, key) => key === 'unwrap'
-      ? async (input: Parameters<typeof target.unwrap>[0]) => target.unwrap({ ...input, use: undefined })
-      : Reflect.get(target, key, target),
-  });
-  await marketProd();
-  await bind('cloudflare', null, {});
-  for (const [vault, logged] of [[older, { credential: 'stripe' }], [deps.vault, { credential: 'stripe', note: 'x'.repeat(20_000) }]] as const) {
-    runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]), vault });
-    assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
-    const used = await seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged });
-    assert.equal(used.values.STRIPE_SECRET_KEY, 'sk_live_1');
-    assert.equal((await newest('vault', 1))[0]!.action, 'secret.read', 'the vault appended no use');
-    assert.equal((await newest('app', 1))[0]!.action, 'credential.use', 'the app did');
-  }
-});
-
-// 0.14's: a binding's end, with 0.15's log, is its change in the log, which its uses decide on (WaysIn.tla, T147), as its
-// sign-ins do (0037): no 0.14 tombstone is read, and a row and its log restored together stand together.
-test('a Cloudflare binding with a tombstone, though its row was never revoked, releases nothing', { skip: LOG === '0.15' ? "0.15's uses decide on the binding's object, no tombstone of 0.14's" : false }, async () => {
-  const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
-  runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
-  await marketProd();
-  const binding = await bind('cloudflare', null, {});
-  assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
-  // A tombstone alone, as an unbind whose row update a restored backup lost.
-  const ctx = { caller: { principal: { type: 'user', id: ROOT } }, requestId: randomUUID(), sourceIp: null } as never;
-  await audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (_tx, log) => {
-    log.push(allowed(ctx, 'token.unbind', { metadata: { bindingId: binding } }));
-  });
-  await assert.rejects(seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } }), { status: 401 });
+  // The use itself reads the binding ended (T147, WaysIn.tla's WayReadInUse): nothing released.
+  assert.equal((await newest('vault')).find((entry) => entry.action === 'secret.read'), undefined);
 });

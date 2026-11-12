@@ -29,7 +29,6 @@ import {
   contextFor,
   holdSomething,
   issuesLogged,
-  LOG,
   openTestDatabase,
   resetDatabase,
   revokesLogged,
@@ -540,14 +539,12 @@ test('signing out revokes that credential only, once, and is audited', async () 
   assert.equal(revoked.revokedBy, DEV);
 
   const rows = await auditRows();
-  // With 0.15's log, the vault ends it (T149), and its change records the sign-out (D147), as 0.14's entry does.
+  // The vault ends it (T149), and its change records the sign-out (D147).
   assert.deepEqual(rows.map((row) => `${row.action} ${row.decision} ${row.actorId}`), [
     `account.link allow ${DEV}`,
     `sign_in allow ${DEV}`,
     `sign_in allow ${DEV}`,
-    ...(LOG === '0.14' ? [`sign_out allow ${DEV}`] : []),
   ]);
-  if (LOG === '0.14') assert.deepEqual(rows[3].metadata, { targetCredentialId: ended.credential.id, kind: 'browser' });
   assert.deepEqual(await revokesLogged(db.owner), [{ actor: `user:${DEV}`, reason: 'sign_out', targetCredentialId: ended.credential.id }]);
 });
 
@@ -556,12 +553,12 @@ test('sign-ins stay in the log, and the audit list shows them only when asked', 
   await signin.completeSignin(profile('github', '9001', ['stranger@example.com']), meta());
   await signin.signOut(kept.credential.token, { requestId: randomUUID(), sourceIp: IP });
 
-  // Asked as every client of this release asks it (`sealed`): with 0.15's log, the sign-out is the vault's change (T149,
-  // D147), which the page lists in 0.14's entry's place, and counts where it hides it (T164).
+  // Asked as every client of this release asks it (`sealed`): the sign-out is the vault's change (T149, D147), which the
+  // page lists in the place of an app entry, and counts where it hides it (T164).
   const audit = clientFor(deps, ROOT).audit;
   const all = (await audit.list({ detail: '1', sealed: '1' })).entries;
   assert.deepEqual(all.slice(0, 4).map((entry) => `${entry.log} ${entry.action} ${entry.decision} ${entry.detail}`), [
-    `${LOG} sign_out allow true`,
+    '0.15 sign_out allow true',
     '0.14 sign_in deny true',
     '0.14 sign_in allow true',
     '0.14 account.link allow true',
@@ -618,46 +615,27 @@ test('people revoke their own credentials; only owners revoke anyone else\'s', a
   );
 
   const rows = (await auditRows()).slice(setup);
-  // Each refusal is 0.14's entry; with 0.15's log, each revoke is the vault's change (T149), naming whose credential of what kind (D147).
-  const allowed = (actor: string) => (LOG === '0.14' ? [['token.revoke', 'allow', actor, null]] : []);
+  // Each refusal is the app's entry; each revoke is the vault's change (T149), naming whose credential of what kind (D147).
   assert.deepEqual(
     rows.map((row) => [row.action, row.decision, row.actorId, row.metadata.reason ?? null]),
     [
       ['token.revoke', 'deny', DEV, 'requires_instance_admin'],
       ['token.revoke', 'deny', DEV, 'requires_instance_admin'],
-      ...allowed(DEV),
       ['token.revoke', 'deny', DEV, 'unknown_credential'],
       ['token.revoke', 'deny', DEV, 'unknown_credential'],
-      ...allowed(LEAD),
-      ...allowed(ROOT),
     ],
   );
-  if (LOG === '0.14') {
-    assert.deepEqual(rows[5].metadata, {
-      targetCredentialId: devSession.credential.id,
-      kind: 'browser',
-      principalType: 'user',
-      principalId: DEV,
-    });
-    assert.deepEqual(rows[6].metadata, {
-      targetCredentialId: token.id,
-      kind: 'service',
-      principalType: 'service',
-      principalId: SERVICE,
-    });
-  } else {
-    assert.deepEqual(await revokesLogged(db.owner), [
-      { actor: `user:${DEV}`, reason: 'revoke', targetCredentialId: devOther.credential.id },
-      { actor: `user:${LEAD}`, reason: 'revoke', targetCredentialId: devSession.credential.id },
-      { actor: `user:${ROOT}`, reason: 'revoke', targetCredentialId: token.id },
-    ]);
-  }
-  // The audit page shows each as 0.14's entry put it, under either log: with 0.15's log, the change in its place (T164).
+  assert.deepEqual(await revokesLogged(db.owner), [
+    { actor: `user:${DEV}`, reason: 'revoke', targetCredentialId: devOther.credential.id },
+    { actor: `user:${LEAD}`, reason: 'revoke', targetCredentialId: devSession.credential.id },
+    { actor: `user:${ROOT}`, reason: 'revoke', targetCredentialId: token.id },
+  ]);
+  // The audit page shows each as an app entry would, the change in its place (T164).
   const shown = (await clientFor(deps, ROOT).audit.list({ detail: '1', sealed: '1', decision: 'allow' })).entries.filter((entry) => entry.action === 'token.revoke');
   assert.deepEqual(shown.reverse().map(({ log, actorId, metadata }) => [log, actorId, metadata.targetCredentialId, metadata.kind, metadata.principalType, metadata.principalId]), [
-    [LOG, DEV, devOther.credential.id, 'browser', 'user', DEV],
-    [LOG, LEAD, devSession.credential.id, 'browser', 'user', DEV],
-    [LOG, ROOT, token.id, 'service', 'service', SERVICE],
+    ['0.15', DEV, devOther.credential.id, 'browser', 'user', DEV],
+    ['0.15', LEAD, devSession.credential.id, 'browser', 'user', DEV],
+    ['0.15', ROOT, token.id, 'service', 'service', SERVICE],
   ]);
 });
 
@@ -847,7 +825,7 @@ test('owners issue service tokens that verify as the service', async () => {
   assert.equal(row.createdBy, LEAD);
   assert.equal(row.label, 'deploys');
 
-  // As the log has them, 0.14's entry: with 0.15's log, the vault issues them (T149), and its changes record who issued which (D147).
+  // The vault issues them (T149), and its changes record who issued which (D147).
   const created = {
     kind: 'service',
     principalType: 'service',
@@ -857,22 +835,13 @@ test('owners issue service tokens that verify as the service', async () => {
     expiresAt: issued.expiresAt,
     scope: [{ projectId: reads, environmentId: null, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] }, sensitive: false }],
   };
-  if (LOG === '0.15') {
-    assert.deepEqual((await issuesLogged(db.owner)).map(({ actor, kind, targetCredentialId }) => [actor, kind, targetCredentialId]), [
-      [`user:${LEAD}`, 'service', issued.id],
-      [`user:${ROOT}`, 'service', byRoot.id],
-    ]);
-  } else {
-    const rows = await auditRows();
-    assert.deepEqual(rows.map((r) => `${r.action} ${r.decision} ${r.actorId}`), [
-      `token.create allow ${LEAD}`,
-      `token.create allow ${ROOT}`,
-    ]);
-    assert.deepEqual(rows[0].metadata, created);
-  }
-  // The audit page shows it as 0.14's entry put it, under either log: with 0.15's log, the change in its place (T164).
+  assert.deepEqual((await issuesLogged(db.owner)).map(({ actor, kind, targetCredentialId }) => [actor, kind, targetCredentialId]), [
+    [`user:${LEAD}`, 'service', issued.id],
+    [`user:${ROOT}`, 'service', byRoot.id],
+  ]);
+  // The audit page shows it as an app entry would, the change in its place (T164).
   const shown = (await clientFor(deps, ROOT).audit.list({ detail: '1', sealed: '1' })).entries.filter((entry) => entry.action === 'token.create');
-  assert.deepEqual(shown.map((entry) => [entry.log, entry.actorId, entry.detail]), [[LOG, ROOT, true], [LOG, LEAD, true]]);
+  assert.deepEqual(shown.map((entry) => [entry.log, entry.actorId, entry.detail]), [['0.15', ROOT, true], ['0.15', LEAD, true]]);
   assert.deepEqual(Object.fromEntries(Object.keys(created).map((name) => [name, shown[1]!.metadata[name]])), created);
 
   // A service's tokens do not show up as anyone's sessions.
@@ -1222,11 +1191,11 @@ test('everything the sign-in service writes keeps the audit chain intact', async
 
   const verified = await verifyAudit(await contextFor(deps, ROOT));
   assert.equal(verified.ok, true);
-  // Every entry, the vault's for the members set up here included; ten of them the app's, or seven with 0.15's log, whose
-  // token issue, revoke and sign-out are the vault's changes (T149).
+  // Every entry, the vault's for the members set up here included; seven of them the app's, the token
+  // issue, revoke and sign-out being the vault's changes (T149).
   const [{ n }] = await db.owner.select({ n: count() }).from(auditLog);
   if (verified.ok) assert.equal(verified.entries, n);
-  assert.equal((await auditRows()).length, LOG === '0.14' ? 10 : 7);
+  assert.equal((await auditRows()).length, 7);
 });
 
 // --- through the API --------------------------------------------------------------

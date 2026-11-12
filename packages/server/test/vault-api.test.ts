@@ -24,7 +24,6 @@ import {
   testDeps,
   waitUntil,
   testVault,
-  START_OVER_014,
   type FixtureDeps,
 } from './api-fixture.ts';
 import { appLogKey } from '../src/db/audit.ts';
@@ -260,29 +259,6 @@ test('a removed member stays out despite a live session, until the vault admits 
   assert.equal((await reveal()).status, 404);
   await root.access.set(`user:${DEV}`, { 'market/dev': 'viewer' });
   assert.equal((await reveal()).status, 200);
-});
-
-test('a grant forged in the database lists as stored until the vault meets it, which marks its member', { skip: START_OVER_014 }, async () => {
-  // Someone who owns the database gives the developer the whole project.
-  const [{ id: projectId }] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
-  await db.owner.insert(grants).values({
-    principal: `user:${DEV}`, projectId, environmentId: null, role: 'owner', expiresAt: null, grantedAt: 0, grantedBy: `user:${ROOT}`,
-  });
-  const listed = async () => {
-    const { tampered, grants } = (await root.members.list()).members.find((entry) => entry.member === `user:${DEV}`)!;
-    return { tampered, roles: grants.map((grant) => grant.role).sort() };
-  };
-
-  // A list is a display: it shows the rows as stored, the forged grant among them.
-  assert.deepEqual(await listed(), { tampered: false, roles: ['developer', 'owner'] });
-  // The scheduled checkpoint checks every row, and finds it: the list says so, and the vault refuses them.
-  assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, quiet), true);
-  assert.deepEqual(await listed(), { tampered: true, roles: [] });
-  await assert.rejects(developer.secrets.reveal('market/dev/API_KEY'), { status: 404, code: 'not_available' });
-  // An owner removes them, which starts them over, and the mark goes with it.
-  await root.members.remove(`user:${DEV}`);
-  await root.members.add(`user:${DEV}`);
-  assert.deepEqual(await listed(), { tampered: false, roles: [] });
 });
 
 // --- logs -----------------------------------------------------------------------

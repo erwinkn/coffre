@@ -8,21 +8,18 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
-import { ROLES } from '@coffre/core/access';
 import { defineSignin, generateToken, github, hashToken, signin, tokenHint } from '@coffre/core/identity';
-import { unsealedCredentials } from '@coffre/db/grants';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 
 import { authMac } from '../src/auth-rows.ts';
-import { CredentialUncheckable, SigninService } from '../src/api/signin.ts';
+import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
 import { processLimits } from '../src/workloads/limits.ts';
-import { sealScopes } from '../src/api/services.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { auditLog, credentials, environments, logChanges, secrets, secretVersions, serviceBindings, principals } from '@coffre/db/schema';
-import { clientFor, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -292,13 +289,9 @@ test('the scope is listed wherever tokens are, and logged by id when made', asyn
   // Offboarding Ada lists what she issued, with what each reaches.
   const report = await root.members.get(ADA);
   assert.deepEqual(report.issuedTokens.map((token) => [token.id, token.scope]), [[issued.id, { 'market/dev': 'viewer' }]]);
-  const [entry] = await db.owner
-    .select({ metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow')));
-  // With 0.15's log, the vault issues it (T149): its change records the scope it seals, the entry none (D147).
+  // The vault issues it (T149): its change records the scope it seals (D147).
   const [change] = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).filter(({ payload }) => (JSON.parse(payload) as { issue?: unknown }).issue !== undefined);
-  const logged = LOG === '0.14' ? (JSON.parse(entry!.metadata) as { scope: unknown }).scope : (JSON.parse(change!.payload) as { scope: unknown }).scope;
+  const logged = (JSON.parse(change!.payload) as { scope: unknown }).scope;
   const [dev] = await db.owner.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(eq(environments.slug, 'dev'));
   // With what viewer held when it was issued, both columns: a role widened later widens no credential.
   assert.deepEqual(logged, [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] }, sensitive: false }]);
@@ -343,36 +336,6 @@ async function legacyToken(principal: string): Promise<{ token: string; id: stri
   return { token, id: row.id };
 }
 
-// A 0.4 token, planted in the database: its row no change of 0.15's log sealed, `stale` to a use until the cutover (plan PR 9).
-test("two processes sealing 0.4's tokens at once seal each once, and each token reaches what its account held", { skip: LOG_014_ONLY }, async () => {
-  const tokens = await Promise.all(Array.from({ length: 6 }, () => legacyToken(CI)));
-  // Each its own process, as two isolates or two Node servers starting together.
-  const counts = await Promise.all([sealScopes(deps.db, deps.chainKey, deps.vault), sealScopes(deps.db, deps.chainKey, deps.vault)]);
-  assert.equal(counts[0] + counts[1], tokens.length, `sealed once each, not ${counts.join(' and ')}`);
-  assert.deepEqual(await unsealedCredentials(db.owner, new Date()), []);
-  for (const { token } of tokens) assert.equal(await reads(token, 'dev'), 'dev-key', 'its MAC checks, its scope the account\'s');
-  await root.access.set(CI, { 'market/prod': 'viewer' });
-  for (const { token } of tokens) assert.equal(await reads(token, 'prod'), 403);
-});
-
-// A 0.4 token, planted in the database: its row no change of 0.15's log sealed, `stale` to a use until the cutover (plan PR 9).
-test('a vault that cannot answer seals nothing: the credential is uncheckable, never sealed empty or in part, and the next check seals it', { skip: LOG_014_ONLY }, async () => {
-  const { token, id } = await legacyToken(CI);
-  const access = deps.vault.access.bind(deps.vault);
-  let down = true;
-  deps.vault.access = async (principal) => {
-    if (down) throw new Error('the vault is down');
-    return access(principal);
-  };
-  await assert.rejects(runtime.signin!.verify(token), CredentialUncheckable);
-  const unsealed = async () => (await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.id, id)))[0]!.scope;
-  assert.equal(await unsealed(), null);
-  assert.equal(await reads(token, 'dev'), 503, 'unavailable, not let through');
-  down = false;
-  assert.equal(await reads(token, 'dev'), 'dev-key');
-  assert.notEqual(await unsealed(), null);
-});
-
 test('on Workers, where each request builds its runtime, the isolate seals once: a later request reads no unsealed rows, and asks the vault of no other account', async () => {
   const issued = await ada.tokens.issue(CI, { expiresInDays: 30 });
   await ada.members.add('token:ci-old');
@@ -412,111 +375,10 @@ test('on Workers, where each request builds its runtime, the isolate seals once:
   assert.notEqual(await scope(second.id), null);
 });
 
-// A 0.4 token, planted in the database: its row no change of 0.15's log sealed, `stale` to a use until the cutover (plan PR 9).
-test('a token 0.4 makes after this process sealed is sealed on its first use, with the answer its check already asked of the vault, and widened by nothing after', { skip: LOG_014_ONLY }, async () => {
-  const issued = await ada.tokens.issue(CI, { expiresInDays: 30 });
-  assert.equal(await reads(issued.token, 'dev'), 'dev-key', 'the first check seals what there is');
-  const straggler = await legacyToken(CI);
-  const asked: string[] = [];
-  const access = deps.vault.access.bind(deps.vault);
-  deps.vault.access = async (principal) => {
-    asked.push(principal);
-    return access(principal);
-  };
-  assert.equal(await reads(straggler.token, 'dev'), 'dev-key');
-  assert.deepEqual(asked.slice(0, 1), [CI], 'its own check, once, before the request reads anything');
-  const scope = async (id: string) => (await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.id, id)))[0]!.scope;
-  assert.equal(await scope(straggler.id), await scope(issued.id), "the account's grants, as a token issued now reaches them");
-  const seals = await db.owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog).where(eq(auditLog.action, 'token.seal'));
-  assert.deepEqual(seals.map((entry) => [entry.actor, JSON.parse(entry.metadata) as unknown]), [[
-    'system:app',
-    { principalType: 'service', principalId: 'ci-web', tokens: [straggler.id], bindings: [], scope: JSON.parse((await scope(issued.id))!) as unknown },
-  ]]);
-  // Widened after, it reaches no more than it did; as one sealed with the rest would.
-  await root.access.set(CI, { 'market/prod': 'viewer' });
-  assert.equal(await reads(straggler.token, 'prod'), 403);
-  assert.equal(await reads(straggler.token, 'dev'), 'dev-key');
-});
-
 test("a token's dry run says what it would reach, checked as issuing it is, and issues and logs nothing", async () => {
   assert.deepEqual(await ada.tokens.preview(CI, { expiresInDays: 30 }), { scope: { 'market/dev': 'developer' }, withheld: [] });
   assert.deepEqual(await ada.tokens.preview(CI, { expiresInDays: 30, scope: { 'market/dev': 'viewer' } }), { scope: { 'market/dev': 'viewer' }, withheld: [] });
   await assert.rejects(ada.tokens.preview(CI, { expiresInDays: 30, scope: { 'market/prod': 'viewer' } }), { status: 403 });
   assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, CI)), []);
   assert.deepEqual(await db.owner.select().from(auditLog).where(eq(auditLog.action, 'token.create')).then((rows) => rows.filter((row) => row.decision === 'allow')), []);
-});
-
-// A 0.4 token, planted in the database: its row no change of 0.15's log sealed, `stale` to a use until the cutover (plan PR 9).
-test("0.4's tokens and bindings keep exactly what they reached: sealed with the account's grants once, as coffre migrate lists them, and widened by nothing after", { skip: LOG_014_ONLY }, async () => {
-  // A token 0.4 issued: no scope, its MAC over 0.4's tuple.
-  const token = generateToken('service');
-  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
-  const row = {
-    id: randomUUID(),
-    kind: 'service',
-    tokenHash: hashToken(token),
-    generation: member!.generation,
-    tokenHint: tokenHint(token),
-    principal: CI,
-    identityId: null,
-    label: '0.4',
-    createdBy: 'ada@acme.example',
-    expiresAt: new Date(Date.now() + 86_400_000),
-    revokedAt: null,
-    passkeyId: null,
-    confirmedAt: null,
-  };
-  await db.owner.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) });
-  // A binding 0.4 made, and one it removed, which stays as it is.
-  const binding = (id: string, revokedAt: Date | null) => ({
-    id,
-    principal: CI,
-    generation: member!.generation,
-    profile: 'custom',
-    issuer: 'https://ci.acme.example',
-    jwksUri: 'https://ci.acme.example/keys',
-    claims: JSON.stringify({ sub: id }),
-    revokedAt,
-  });
-  const [bound, removed] = [binding(randomUUID(), null), binding(randomUUID(), new Date())];
-  for (const each of [bound, removed]) {
-    await db.owner.insert(serviceBindings).values({ ...each, label: null, createdBy: 'ada@acme.example', authMac: authMac(deps.chainKey, 'service_bindings', each) });
-  }
-  const listed = await unsealedCredentials(db.owner, new Date());
-  assert.deepEqual(listed, [
-    { kind: 'binding', id: bound.id, principal: CI, createdBy: 'ada@acme.example', scope: null },
-    { kind: 'token', id: row.id, principal: CI, createdBy: 'ada@acme.example', scope: null },
-  ]);
-
-  // The first credential this process checks seals it, before anything else.
-  await root.access.set(CI, { 'market/prod': 'viewer' });
-  assert.equal(await reads(token, 'prod'), 'prod-key', "the account's grants when it is sealed, as 0.4 read them");
-  const sealed = [
-    ...await db.owner.select({ id: credentials.id, scope: credentials.scope }).from(credentials).where(inArray(credentials.id, listed.map((each) => each.id))),
-    ...await db.owner.select({ id: serviceBindings.id, scope: serviceBindings.scope }).from(serviceBindings).where(inArray(serviceBindings.id, listed.map((each) => each.id))),
-  ];
-  assert.equal(sealed.length, listed.length, 'what migrate listed is what was sealed');
-  assert.equal(new Set(sealed.map((each) => each.scope)).size, 1, "both with the account's grants");
-  assert.ok(sealed.every((each) => each.scope !== null));
-  assert.deepEqual((await root.bindings.list(CI)).bindings.map((each) => [each.id, each.scope]), [[bound.id, { 'market/dev': 'developer', 'market/prod': 'viewer' }]]);
-  assert.equal((await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, removed.id)))[0]!.scope, null, 'a removed binding is left as it is');
-  assert.deepEqual(await unsealedCredentials(db.owner, new Date()), []);
-  assert.equal(await sealScopes(deps.db, deps.chainKey, deps.vault), 0, 'once');
-  // Logged, by the app, naming each row it sealed and what they reach.
-  const seals = await db.owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog).where(eq(auditLog.action, 'token.seal'));
-  assert.deepEqual(seals.map((entry) => [entry.actor, JSON.parse(entry.metadata) as unknown]), [[
-    'system:app',
-    { principalType: 'service', principalId: 'ci-web', tokens: [row.id], bindings: [bound.id], scope: JSON.parse(sealed[0]!.scope!) as unknown },
-  ]]);
-
-  // Widened after, it reaches no more than it did.
-  await root.projects.create('billing', { name: 'Billing' });
-  await root.environments.create('billing/dev', { name: 'dev' });
-  await root.access.set(CI, { 'billing/dev': 'viewer' });
-  const me = bearer(token);
-  await assert.rejects(me.secrets.list('billing/dev'), { status: 403 });
-  assert.deepEqual((await root.tokens.list(CI)).tokens.find((each) => each.id === row.id)?.scope, {
-    'market/dev': 'developer',
-    'market/prod': 'viewer',
-  });
 });

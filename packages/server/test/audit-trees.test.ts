@@ -1,6 +1,6 @@
-// GET /audit/trees: 0.15's log as the vault's verifier finds it (docs/design/0.15-plan.md, PR 8), for whoever reads the
-// whole log. With 0.14's log alone there is nothing more to check; with 0.15's, the app's writes are changes sealed by
-// a checkpointer that runs here, and a checkpoint the database's writer forges is named.
+// GET /audit/trees: the log as the vault's verifier finds it (docs/design/0.15-plan.md, PR 8), for whoever reads the
+// whole log. The app's writes are changes sealed by a checkpointer that runs here, and a checkpoint the database's
+// writer forges is named.
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -41,16 +41,9 @@ async function sealedInstance() {
     intervalMs: 60_000,
   });
   running.push(checkpointer);
-  const vault = testVault(['root@acme.example'], {}, { kek }, {}, { log: '0.15', sealThrough: checkpointer.sealThrough, heldOutside: checkpointer.heldOutside });
+  const vault = testVault(['root@acme.example'], {}, { kek }, {}, { sealThrough: checkpointer.sealThrough, heldOutside: checkpointer.heldOutside });
   return testDeps(db.runtime, ['root@acme.example'], { vault });
 }
-
-test("GET /audit/trees: nothing to check with 0.14's log alone", async () => {
-  const deps = testDeps(db.runtime, ['root@acme.example'], { vault: testVault(['root@acme.example'], {}, { kek: randomBytes(32) }, {}, { log: '0.14' }) });
-  const root = clientFor(deps, 'root@acme.example');
-  await root.me();
-  assert.deepEqual(await root.audit.verifyTrees(), { kept: false });
-});
 
 test("GET /audit/trees: 0.15's log verified from its newest checkpoint, then a forged checkpoint named; only for whoever reads the whole log", async () => {
   const deps = await sealedInstance();

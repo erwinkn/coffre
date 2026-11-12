@@ -16,7 +16,7 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { eq } from 'drizzle-orm';
 
 import { replayStored } from '@coffre/vault/node';
-import { clientFor, LOG, refusedIn, testVault, outcomes } from './api-fixture.ts';
+import { clientFor, refusedIn, testVault, outcomes } from './api-fixture.ts';
 import { withTriggersLifted } from './db/engine.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { secretVersions } from '@coffre/db/schema';
@@ -185,17 +185,10 @@ test('a person reads every value of an environment but its sensitive ones, which
       message: 'not available: no such key, or no access to it',
     });
   }
-  // The vault refused each read of one, and logged it, by the person and the version. Under 0.15's log, a "no" is
-  // decided before the use, which writes nothing (D153): the app's entry of the request logs it, by the person.
-  if (LOG === '0.14') {
-    const refused = (await entries('secret.read')).filter((entry) => entry.author === 'vault' && entry.decision === 'deny');
-    assert.deepEqual(refused.map((entry) => [entry.actor, entry.code]), [[`user:${DEV}`, 'sensitive'], [`user:${DEV}`, 'sensitive'], [`user:${ROOT}`, 'sensitive']]);
-    assert.ok(refused.every((entry) => entry.secretVersionId !== null));
-  } else {
-    const refused = (await entries('secret.read')).filter((entry) => entry.author !== 'vault' && entry.decision === 'deny');
-    assert.deepEqual(refused.map((entry) => [entry.actor, entry.metadata.reason]), [[`user:${DEV}`, 'sensitive'], [`user:${DEV}`, 'sensitive'], [`user:${ROOT}`, 'sensitive']]);
-    assert.deepEqual([...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null), []);
-  }
+  // A "no" is decided before the use, which writes nothing (D153): the app's entry of the request logs it, by the person.
+  const refused = (await entries('secret.read')).filter((entry) => entry.author !== 'vault' && entry.decision === 'deny');
+  assert.deepEqual(refused.map((entry) => [entry.actor, entry.metadata.reason]), [[`user:${DEV}`, 'sensitive'], [`user:${DEV}`, 'sensitive'], [`user:${ROOT}`, 'sensitive']]);
+  assert.deepEqual([...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null), []);
 
   const read = await ci.secrets.reveal('market/dev');
   assert.deepEqual(read.values, { API_KEY, DB_PASSWORD, REGION: 'eu-west-3', WEBHOOK });

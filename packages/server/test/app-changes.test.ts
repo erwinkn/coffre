@@ -1,8 +1,7 @@
 // 0.15's change path for the app's own rows, as the API drives it (docs/design/0.15-plan.md, "As built: PR 4b"):
 // each write that makes or ends a credential is a change of 0.15's log, prepared by the vault before the app's
 // transaction and committed in it, beside the row, and answers once sealed (R51). The vault's tests hold `prepare`
-// and `app_change` themselves (packages/vault/test/app-changes.test.ts); these, the app's wiring. 0.15's log is on
-// here whatever COFFRE_TEST_LOG says.
+// and `app_change` themselves (packages/vault/test/app-changes.test.ts); these, the app's wiring.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -40,7 +39,7 @@ after(async () => {
 
 beforeEach(async () => {
   await resetDatabase(db.owner);
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, undefined, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, undefined, {}, { sealThrough: sealedNow, heldOutside: nothingHeld }) });
   signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: SIGNIN });
   deps.signin = signin;
   root = clientFor(deps, ROOT);

@@ -61,7 +61,7 @@ function configure(): ResolvedVaultConfig {
 /** A vault keeping 0.15's log, the test issuer, and a service account that views a project. */
 async function world() {
   const issuer = testIssuer();
-  const vault = await openLocalVault(db.vault, configure(), { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const vault = await openLocalVault(db.vault, configure(), { sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: CI })).ok);

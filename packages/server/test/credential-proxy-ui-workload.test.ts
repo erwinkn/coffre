@@ -35,12 +35,11 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, holdSomething, LOG, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { credentials } from '@coffre/db/schema';
+import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { credentials, environments } from '@coffre/db/schema';
 import { answer, type Pages } from './start-fixture.ts';
 import { pinnedGates } from './window-fixture.ts';
 
-const ON_015 = { skip: LOG === '0.14' ? "proxy definitions are 0.15's log's objects" : false };
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const LIN = 'lin@acme.example';
@@ -218,7 +217,7 @@ async function run(query: SQL): Promise<void> {
   await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
 }
 
-test("a session's UI route: by its stable URL and its place's, sent by the decided item, its key injected, one vault call a use", ON_015, async () => {
+test("a session's UI route: by its stable URL and its place's, sent by the decided item, its key injected, one vault call a use", async () => {
   await save({ openai: uiRoute('openai', '/openai') });
   await bind();
   const held = await session();
@@ -254,7 +253,7 @@ test("a session's UI route: by its stable URL and its place's, sent by the decid
   assert.equal(reached.at(-1)!.url, '/stripe/v1/balance');
 });
 
-test("a Cloudflare call's UI route is its binding's, at the one environment it reaches, and at its place's URL", ON_015, async () => {
+test("a Cloudflare call's UI route is its binding's, at the one environment it reaches, and at its place's URL", async () => {
   await save({ openai: uiRoute('openai', '/openai') });
   await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'cloudflare', issuer: null, claims: {} as never, label: 'edge', replaces: [], policy: {} }, { dryRun: false });
   for (const path of ['/use/openai/v1/models/a', '/use/market/prod/openai/v1/models/b']) {
@@ -266,7 +265,7 @@ test("a Cloudflare call's UI route is its binding's, at the one environment it r
   assert.deepEqual(reached.map((one) => one.url), ['/openai/v1/models/a', '/openai/v1/models/b']);
 });
 
-test("past 1 MiB, a Cloudflare call's body streams through a UI route nothing of which signs its hash; a SigV4 route, or a session's proof, needs the hash declared (review r1)", ON_015, async () => {
+test("past 1 MiB, a Cloudflare call's body streams through a UI route nothing of which signs its hash; a SigV4 route, or a session's proof, needs the hash declared (review r1)", async () => {
   const s3: ProxyDefinition = { ...uiRoute('files', '/s3'), inject: [{ kind: 'sigv4', accessKeyId: '{OPENAI_API_KEY}', secretAccessKey: '{OTHER_KEY}', sessionToken: null, region: 'eu-west-3', service: 's3' }] } as ProxyDefinition;
   await save({ openai: uiRoute('openai', '/openai'), files: s3 });
   await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'cloudflare', issuer: null, claims: {} as never, label: 'edge', replaces: [], policy: {} }, { dryRun: false });
@@ -288,7 +287,7 @@ test("past 1 MiB, a Cloudflare call's body streams through a UI route nothing of
   assert.equal(reached.length, before);
 });
 
-test("a UI route's limit is counted on a cold isolate before the gate, from the vault's item; a raised one refuses one request more at most", ON_015, async () => {
+test("a UI route's limit is counted on a cold isolate before the gate, from the vault's item; a raised one refuses one request more at most", async () => {
   await save({ openai: uiRoute('openai', '/openai', { limit: { perMinute: 2, perDay: null } }) });
   await bind();
   const held = await session();
@@ -306,7 +305,7 @@ test("a UI route's limit is counted on a cold isolate before the gate, from the 
   assert.equal(statuses.at(-1), 200, statuses.join(','));
 });
 
-test("BoundToDefinition: kept values go where the item they were decided on says, as another session's use brings a newer copy", ON_015, async () => {
+test("BoundToDefinition: kept values go where the item they were decided on says, as another session's use brings a newer copy", async () => {
   runtime = makeRuntime(true);
   await save({ openai: uiRoute('openai', '/v7') });
   await bind();
@@ -323,7 +322,7 @@ test("BoundToDefinition: kept values go where the item they were decided on says
   assert.deepEqual(reached.map((one) => one.url), ['/v7/v1/models/1', '/v8/v1/models/2', '/v7/v1/models/3']);
 });
 
-test("kept values answer to their own item's allow list alone, not to a newer copy another session's use brought", ON_015, async () => {
+test("kept values answer to their own item's allow list alone, not to a newer copy another session's use brought", async () => {
   // Version 7 allows /v1/**, version 8 /v2/**, both /health/**. A keeps 7's values; B's use brings 8's copy. A's requests are
   // held to 7 alone: /v1 goes, /v2 is refused, never both refused nor both let through to the kept check (review r1 of #477).
   runtime = makeRuntime(true);
@@ -345,7 +344,7 @@ test("kept values answer to their own item's allow list alone, not to a newer co
   assert.deepEqual(reached.map((one) => one.url), ['/openai/v1/models/1', '/openai/health/live', '/openai/v1/models/2', '/openai/v2/models/4']);
 });
 
-test('the session revoked stops the next request whatever the value cache holds', ON_015, async () => {
+test('the session revoked stops the next request whatever the value cache holds', async () => {
   runtime = makeRuntime(true);
   await save({ openai: uiRoute('openai', '/openai') });
   await bind();
@@ -356,7 +355,7 @@ test('the session revoked stops the next request whatever the value cache holds'
   assert.equal(reached.length, 1);
 });
 
-test("an inject-kind edit between the copy and the answer: a body the decided item takes otherwise is 503 moved, nothing sent", ON_015, async () => {
+test("an inject-kind edit between the copy and the answer: a body the decided item takes otherwise is 503 moved, nothing sent", async () => {
   const s3: ProxyDefinition = { ...uiRoute('files', '/s3'), inject: [{ kind: 'sigv4', accessKeyId: '{OPENAI_API_KEY}', secretAccessKey: '{OTHER_KEY}', sessionToken: null, region: 'eu-west-3', service: 's3' }] } as ProxyDefinition;
   await save({ files: s3 });
   await bind();
@@ -375,7 +374,7 @@ test("an inject-kind edit between the copy and the answer: a body the decided it
   assert.equal(reached.length, before);
 });
 
-test('a JSON route reached by a body that streams under its Content-Digest is read whole, its key in the field, the digest still checked', ON_015, async () => {
+test('a JSON route reached by a body that streams under its Content-Digest is read whole, its key in the field, the digest still checked', async () => {
   await save({ hooks: { ...uiRoute('hooks', '/hooks'), inject: [{ kind: 'json', name: 'api_key', template: '{OPENAI_API_KEY}' }] } as ProxyDefinition });
   await bind();
   const held = await session();
@@ -392,7 +391,7 @@ test('a JSON route reached by a body that streams under its Content-Digest is re
   assert.equal(reached.length, 1);
 });
 
-test('EditorStillHolds: a route whose editor no longer reads its key answers the workload 403 route_not_cleared, nothing sent', ON_015, async () => {
+test('EditorStillHolds: a route whose editor no longer reads its key answers the workload 403 route_not_cleared, nothing sent', async () => {
   const root = clientFor(deps, ROOT);
   await root.members.add(`user:${LIN}`);
   await root.roles.set('router', { name: 'Router', description: 'routes keys', permissions: ['secret.read', 'secret.use', 'proxy.edit'], protected: ['secret.use'] });
@@ -407,7 +406,7 @@ test('EditorStillHolds: a route whose editor no longer reads its key answers the
   assert.equal(reached.length, 1);
 });
 
-test("a workload's plan names its environment's UI routes, giving values only as it reads them; one forged item answers 503", ON_015, async () => {
+test("a workload's plan names its environment's UI routes, giving values only as it reads them; one forged item answers 503", async () => {
   await save({ openai: uiRoute('openai', '/openai') });
   await bind();
   const held = await session();
@@ -439,7 +438,7 @@ const AWS_SECRET = 'real/prod+secret/key0123456789ABCDEFGHI';
 /** `POST <path>` with `body` as JSON, the proof signing it: a sign, verify or presign. */
 const compute = (held: Session, body: unknown, path = '/use') => use(held, 'POST', path, { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
-test("a workload signs, verifies and presigns with items saved in the UI: the signer's limit counted before the gate from the vault's item, one use a sign (C2b2)", ON_015, async () => {
+test("a workload signs, verifies and presigns with items saved in the UI: the signer's limit counted before the gate from the vault's item, one use a sign (C2b2)", async () => {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   await clientFor(deps, ROOT).secrets.set('market/prod', { HOOK_SECRET: HOOK, DFNS_PEM: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), AWS_ACCESS_KEY_ID: AWS_ID, AWS_SECRET_ACCESS_KEY: AWS_SECRET });
   await save({
@@ -512,7 +511,7 @@ test("a workload signs, verifies and presigns with items saved in the UI: the si
   assert.equal(reached.length, 0, 'nothing went upstream');
 });
 
-test("an Owner saves another kind under a kept HMAC signer's name: the kept signs still count against the item's limit (review r2 of #480)", ON_015, async () => {
+test("an Owner saves another kind under a kept HMAC signer's name: the kept signs still count against the item's limit (review r2 of #480)", async () => {
   // A keeps an HMAC signer's values, 3 a minute. The name becomes a verifier with the same limit, and B's verify brings
   // its copy to this isolate. A's kept values still sign, for R, by the signer they were decided on: each
   // sign is counted against the limit the item at the name has now, never let through uncounted for the verifier's kind.
@@ -535,7 +534,7 @@ test("an Owner saves another kind under a kept HMAC signer's name: the kept sign
   assert.deepEqual([past.status, past.body.reason], [429, 'limit'], JSON.stringify(past.body));
 });
 
-test("a Cloudflare call signs with a UI signer as its binding, at the one environment it reaches (C2b2)", ON_015, async () => {
+test("a Cloudflare call signs with a UI signer as its binding, at the one environment it reaches (C2b2)", async () => {
   await clientFor(deps, ROOT).secrets.set('market/prod', { HOOK_SECRET: HOOK });
   await save({ hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'HOOK_SECRET', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT } });
   await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'cloudflare', issuer: null, claims: {} as never, label: 'edge', replaces: [], policy: {} }, { dryRun: false });
@@ -546,7 +545,7 @@ test("a Cloudflare call signs with a UI signer as its binding, at the one enviro
   }
 });
 
-test("a session's UI route with a path rule: the segment its SDK wrote, whatever it holds, gets the value; one vault call warm", ON_015, async () => {
+test("a session's UI route with a path rule: the segment its SDK wrote, whatever it holds, gets the value; one vault call warm", async () => {
   // Telegram's shape: the token in `/bot<token>/…`, here OPENAI_API_KEY's value, which goes as it is.
   await save({ telegram: uiRoute('telegram', '/tg', { inject: [{ kind: 'path', template: 'bot{OPENAI_API_KEY}' }], allow: [{ methods: ['POST'], path: '/*/sendMessage' }, { methods: ['GET'], path: '/file/*/**' }] }) });
   await bind();
@@ -566,7 +565,7 @@ test("a session's UI route with a path rule: the segment its SDK wrote, whatever
   assert.equal(reached.length, before);
 });
 
-test("a session's tunnel to a database saved in the Proxy tab: dialled by the decided item, ended within a recheck of an edit to it, and not of another's (C2b3)", { ...ON_015, timeout: 30_000 }, async () => {
+test("a session's tunnel to a database saved in the Proxy tab: dialled by the decided item, ended within a recheck of an edit to it, and not of another's (C2b3)", { timeout: 30_000 }, async () => {
   runtime = makeRuntime(false, 2);
   await clientFor(deps, ROOT).secrets.set('market/prod', { DATABASE_URL: 'postgres://app:pw@127.0.0.1:5432/app?sslmode=disable' });
   const database = (hosts: string[]): ProxyDefinition => ({ kind: 'tunnel', name: 'db', key: 'DATABASE_URL', hosts, network: null });

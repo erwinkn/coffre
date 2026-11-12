@@ -262,7 +262,7 @@ before(async () => {
   app = await relay(TEST_RUNTIME_DATABASE_URL);
   appPool = postgresClient(app.url, { max: 10 });
   // Its throttle off: one vault answers every cell, its locks held and statements slowed `late` on purpose, which would have it refuse a later cell's setup (config.md, Q1, step 2).
-  deps = testDeps(createDatabase(appPool), [ROOT], { vault: testVault([ROOT], { hotDatabase: hot.url }, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, throttled: false }) });
+  deps = testDeps(createDatabase(appPool), [ROOT], { vault: testVault([ROOT], { hotDatabase: hot.url }, { kek }, {}, { sealThrough: sealedNow, heldOutside: nothingHeld, throttled: false }) });
   // Each call the app makes of the vault, by name: its sequence says the route a request took (`routeOf`).
   for (const method of ['useNamed', 'useNamedMany', 'use', 'useMany', 'access', 'unwrap'] as const) {
     const call = deps.vault[method] as ((...args: unknown[]) => Promise<unknown>) | undefined;

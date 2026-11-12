@@ -13,17 +13,15 @@ import { generateToken, github, hashToken, signin, tokenHint, type BindingClaims
 import { and, asc, desc, eq } from 'drizzle-orm';
 
 import { coffreRoute } from '../src/app.ts';
-import { unsealedCredentials } from '@coffre/db/grants';
 
 import { authMac } from '../src/auth-rows.ts';
-import { sealScopes } from '../src/api/services.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditLog, credentials, environments, logChanges, secretReferences, secrets, secretVersions, serviceBindings, principals } from '@coffre/db/schema';
-import { clientFor, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -201,15 +199,12 @@ test("an Owner's token reads the sensitive values, of the instance or of the pro
   assert.deepEqual(issued.withheld, ['backend/dev']);
   assert.equal(await read(issued.token, 'billing/dev/BILLING_KEY'), 'bk_0123456789');
   assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
-  // A token's record says, place by place, whether it reads them: 0.14's entry, or with 0.15's log the vault's change (T149, D147).
-  const entries = await db.owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog)
-    .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'allow'))).orderBy(asc(auditLog.seq));
+  // A token's record says, place by place, whether it reads them: the vault's change (T149, D147).
   const changes = (await db.owner.select({ payload: logChanges.payload }).from(logChanges).orderBy(asc(logChanges.number)))
     .map(({ payload }) => JSON.parse(payload) as { issue?: { by: string }; scope: { sensitive: boolean }[] })
     .flatMap((change) => (change.issue === undefined ? [] : [{ actor: change.issue.by, scope: change.scope }]));
-  const made = [...entries.map(({ actor, metadata }) => ({ actor, scope: (JSON.parse(metadata) as { scope: { sensitive: boolean }[] }).scope })), ...changes];
   const reading = (entry: { scope: { sensitive: boolean }[] }) => entry.scope.map((grant) => grant.sensitive).sort();
-  assert.deepEqual(made.map((entry) => [entry.actor, reading(entry)]), [
+  assert.deepEqual(changes.map((entry) => [entry.actor, reading(entry)]), [
     [`user:${ROOT}`, [true, true]],
     [`user:${OWEN}`, [true, true]],
     [`user:${BO}`, [false, true]],
@@ -409,48 +404,6 @@ test('the vault decides it too, whatever the app asks: a service reads a sensiti
   const denied = await db.owner.select({ actor: auditLog.actor, code: auditLog.code }).from(auditLog)
     .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'deny')));
   assert.deepEqual(denied, Array(3).fill({ actor: CI, code: 'not_owner_issued' }));
-});
-
-// Its tokens of 0.10 are planted in the database: rows no change of 0.15's log sealed, refused by a use until the cutover (plan PR 9).
-test('tokens and bindings issued before 0.11 are sealed once by who issued them: an Owner of the project keeps reading its sensitive values, anyone else does not', { skip: LOG_014_ONLY }, async () => {
-  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
-  const [dev] = await db.owner.select({ projectId: environments.projectId, id: environments.id }).from(environments).where(eq(environments.slug, 'dev'));
-  // As 0.10 stored a scope: each place's role and what it held, nothing said of sensitive values.
-  const scope = JSON.stringify([{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
-  const legacy = async (createdBy: string, stored = scope) => {
-    const token = generateToken('service');
-    const row = {
-      id: randomUUID(), kind: 'service', tokenHash: hashToken(token), generation: member!.generation, tokenHint: tokenHint(token),
-      principal: CI, identityId: null, label: '0.10', createdBy, expiresAt: new Date(Date.now() + 86_400_000), revokedAt: null, scope: stored, passkeyId: null, confirmedAt: null,
-    };
-    await db.owner.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) });
-    return { id: row.id, token };
-  };
-  const [owners, theirs] = [await legacy(ROOT), await legacy(ADA)];
-  const binding = { id: randomUUID(), principal: CI, generation: member!.generation, profile: 'github', issuer: ISSUER, jwksUri: KEYS, claims: JSON.stringify(DEPLOY), revokedAt: null, scope };
-  await db.owner.insert(serviceBindings).values({ ...binding, label: null, createdBy: OWEN, authMac: authMac(deps.chainKey, 'service_bindings', binding) });
-
-  // The first credential this configuration checks seals them all, before it reads anything.
-  assert.equal(await read(owners.token, 'backend/dev/STRIPE_SECRET_KEY'), STRIPE);
-  assert.equal(await read(theirs.token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
-  assert.equal(await read(theirs.token, 'backend/dev/API_URL'), 'https://api.dev.acme.example');
-  assert.equal(await read(await exchanged(), 'backend/dev/STRIPE_SECRET_KEY'), STRIPE, 'bound by an Owner of backend');
-  assert.deepEqual(await stored(credentials, owners.id), [{ role: 'viewer', sensitive: true }]);
-  assert.deepEqual(await stored(credentials, theirs.id), [{ role: 'viewer', sensitive: false }]);
-  assert.deepEqual(await stored(serviceBindings, binding.id), [{ role: 'viewer', sensitive: true }]);
-  // One sealed while its account held nothing names no place: it is sealed, and never sealed again, nor listed.
-  await legacy(ROOT, '[]');
-  assert.deepEqual(await unsealedCredentials(db.owner, new Date()), []);
-  assert.equal(await sealScopes(deps.db, deps.chainKey, deps.vault), 0);
-  // Logged by the app, one entry per scope it wrote, naming the rows it sealed with it.
-  const seals = await db.owner.select({ actor: auditLog.actor, metadata: auditLog.metadata }).from(auditLog).where(eq(auditLog.action, 'token.seal')).orderBy(asc(auditLog.seq));
-  assert.deepEqual(seals.map((entry) => {
-    const { tokens, bindings, scope: sealed } = JSON.parse(entry.metadata) as { tokens: string[]; bindings: string[]; scope: { sensitive: boolean }[] };
-    return [entry.actor, [...tokens, ...bindings].sort(), sealed.map((grant) => grant.sensitive)];
-  }), [
-    ['system:app', [binding.id, owners.id].sort(), [true]],
-    ['system:app', [theirs.id], [false]],
-  ]);
 });
 
 test('an Owner demoted while their older token is sealed seals it reading nothing sensitive: the seal is weighed as the vault answered, committed only while still so', async () => {

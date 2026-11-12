@@ -13,7 +13,7 @@ import { appendAudit, appLogKey, CHAIN_WALK } from '../src/db/audit.ts';
 import { latestCheckpoint } from '../src/db/queries.ts';
 import { SCHEDULE_MINUTES } from '../src/schedule.ts';
 import { acceptLoss, auditReadiness, HEARTBEAT_STALE_AFTER_SECONDS, walkAuditBacklog, writeAuditHeartbeat, type HeartbeatLogger } from './watch-fixture.ts';
-import { LOG, openTestDatabase, resetDatabase, testAnchor, testVault } from './api-fixture.ts';
+import { openTestDatabase, resetDatabase, testAnchor, testVault } from './api-fixture.ts';
 import { auditChainHead, auditLog } from '@coffre/db/schema';
 import { withLogUnlocked } from './db/engine.ts';
 import { answering } from './db/postgres-pool.ts';
@@ -79,9 +79,9 @@ async function truncate(from: bigint) {
 test('a beat is an app entry the vault checkpoints, and the anchor keeps that checkpoint, verified', async () => {
   assert.equal(await beat(), true);
   const logged = await entries();
-  // The first beat finds the store empty, walks the log whole, and says so. Under 0.15's log, the vault's first call
+  // The first beat finds the store empty, walks the log whole, and says so. The vault's first call
   // cuts it over first (its own entry), which lets it name its Owner at once.
-  const started = LOG === '0.15' ? [['vault', 'log.cutover'], ['vault', 'member.add']] : [];
+  const started = [['vault', 'log.cutover'], ['vault', 'member.add']];
   assert.deepEqual(logged.map((row) => [row.author, row.action]), [['app', 'audit.heartbeat'], ...started, ['vault', 'audit.checkpoint'], ['app', 'audit.reanchor']]);
   const { checkpoint, verified, finding } = await anchored();
   const { seq, hash, signedAt, keyId, signature } = (await latestCheckpoint(db.owner))!;
@@ -117,11 +117,11 @@ test('a cut tail is red at once, and the beats find it until the entries are bac
   const readiness = await ready();
   assert.deepEqual([readiness.ok, readiness.checkpointed, readiness.broken], [false, false, true]);
   // The vault finds it first here, its own newest checkpoint cut; a vault that signs the shorter log, the app's walk.
-  // Under 0.15's log, where the vault named its Owner before its first checkpoint, the cut takes the app's own beat
+  // The vault named its Owner before its first checkpoint, so the cut takes the app's own beat
   // too, and its append finds it first: the log rewound under it.
   assert.equal(await beat(vault, warned().log), false);
   const found = await anchored();
-  assert.deepEqual([found.finding?.by, found.checkpoint], [LOG === '0.15' ? 'app' : 'vault', checkpoint], 'the anchor moved back');
+  assert.deepEqual([found.finding?.by, found.checkpoint], ['app', checkpoint], 'the anchor moved back');
   // Requests go on: the log grows past the cut, with another entry where the anchored one was.
   assert.equal(await beat(vault, warned().log), false);
   assert.equal((await ready()).ok, false);

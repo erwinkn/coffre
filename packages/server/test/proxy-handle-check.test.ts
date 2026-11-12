@@ -1,12 +1,11 @@
-// A plugin's check of a handle (`PluginContext.handle`) with 0.15's uses (T135): the vault asked about its person, as
+// A plugin's check of a handle (`PluginContext.handle`) with the vault's uses (T135): the vault asked about its person, as
 // ever, and in a fetch, handed to the use of the same handle that follows, which then asks nothing again. Someone
 // removed meanwhile, their credentials not swept yet, is refused: by the credential proxy's stable URL for a handle of
 // two environments, which names neither, cached or not; by a plugin that only asks whether a handle stands; and by one
 // that uses another person's handle after it. And `use`'s answer lists every key the environment holds unless the
 // plugin asks for its keys `only`; a plain value used long after the check, on access as it is then. Someone removed
 // and admitted again before the sweep is refused their earlier membership's handle, on the answer the app kept: by the
-// use itself on 0.15's log (T145), by `credentialStill` on 0.14's. The same on 0.14's log, which hands
-// nothing on. Someone whose grant was revoked since their answer was kept learns nothing of the keys made since,
+// use itself (T145). Someone whose grant was revoked since their answer was kept learns nothing of the keys made since,
 // even when the vault is too busy to use them (review r2): their read asks the vault again before it answers.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,7 +20,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { checkPlugins, pluginRoute, type CoffrePlugin } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, contextFor, LOG, openTestDatabase, refusedIn, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, refusedIn, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { credentials as credentialRows, checkpointFence } from '@coffre/db/schema';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -95,7 +94,7 @@ before(async () => {
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek: randomBytes(32) }, {}, LOG === '0.15' ? { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld } : { log: '0.14' }) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek: randomBytes(32) }, {}) });
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault: deps.vault,
@@ -199,7 +198,7 @@ test("a plain value used after the handle's check is used on the person's access
   try {
     // A key's one "no" (D153), its reason in the app's entry.
     const answer = await fetched('/probe/later', fifth);
-    assert.deepEqual([answer.status, await answer.json(), await refusedIn(db.owner)], [404, { error: 'not_available' }, LOG === '0.15' ? 'no_grant' : 'missing_secret_use']);
+    assert.deepEqual([answer.status, await answer.json(), await refusedIn(db.owner)], [404, { error: 'not_available' }, 'no_grant']);
   } finally {
     between = async () => undefined;
   }
@@ -219,7 +218,7 @@ test('removed and admitted again before the sweep, a handle of the earlier membe
 });
 
 
-test("revoked since their answer was kept, someone learns nothing of a key made since, even when the vault is too busy to use it (review r2)", { skip: LOG === '0.15' ? false : "0.14's reads go through the vault's unwrap" }, async () => {
+test("revoked since their answer was kept, someone learns nothing of a key made since, even when the vault is too busy to use it (review r2)", async () => {
   // Two people, each with an answer kept, one through the API and one through the proxy: each path starts from its own.
   const token = (await runtime.signin!.issuePersonalToken(await contextFor(deps, SEVENTH), { label: 'script', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } })).token;
   const reveal = (path: string) => fetchApi(new Request(`${ORIGIN}/api/reveals`, {

@@ -8,6 +8,7 @@ import { propertySettings } from '../../../scripts/property-settings.ts';
 import { MAX_PARENTS, world } from '../../../scripts/properties/domain.ts';
 import { openTestDatabase, resetDatabase, testVault, type TestVault } from './api-fixture.ts';
 import { dismissedKeys, environments, projects, proxyDefinitions, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
+import { AppChanges, environmentChange } from '../src/api/changes.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { inheritedRows, resolveKeys } from '../src/api/inheritance.ts';
 import { missingKeys } from '../src/api/missing.ts';
@@ -54,9 +55,9 @@ let sealed = false;
 before(async () => {
   database = await openTestDatabase();
   await resetDatabase(database.owner);
-  // 0.14's log, whatever the suite's: the places are written as rows around the vault, which 0.15's decides nothing on
-  // (T159), and what is held here is the app's resolution of them, not the vault's log.
-  vault = testVault([ROOT], {}, { kek: Buffer.alloc(32, 31) }, {}, { log: '0.14' });
+  // The places are written as rows around the app, each environment sealed as the app makes one (`write`): what is held
+  // here is the app's resolution of them, not the vault's log.
+  vault = testVault([ROOT], {}, { kek: Buffer.alloc(32, 31) });
 });
 after(async () => { await database.close(); });
 
@@ -150,7 +151,14 @@ async function write(scene: Scene, app: Scene): Promise<void> {
   // The vault open first: its rows are the app's, around it.
   await vault.about();
   await db.insert(projects).values(scene.projects.map((project) => ({ id: project.id, slug: project.slug, name: project.slug })));
-  await db.insert(environments).values(app.envs.map((env) => ({ id: env.id, projectId: env.projectId, slug: env.slug, name: env.slug, parentId: env.parentId, owner: env.owner })));
+  await db.insert(environments).values(app.envs.map((env) => ({ id: env.id, projectId: env.projectId, slug: env.slug, name: env.slug, parentId: env.parentId, owner: env.owner, protected: false })));
+  // Each sealed as the app's creation of it seals it (`createEnvironment`): the vault checks every environment it decides
+  // on, a reference's included, against its log (T159).
+  const made = await AppChanges.prepare(vault, `user:${ROOT}`, app.envs.map((env) => environmentChange(undefined, {
+    id: env.id, projectId: env.projectId, slug: env.slug, owner: env.owner, parentId: env.parentId, protected: false, archived: false, projectArchived: false,
+  })));
+  await db.transaction((tx) => made!.commit(tx));
+  await made!.sealed(db);
   const rows = scene.rows;
   if (rows.length > 0) {
     const projectOf = new Map(scene.envs.map((env) => [env.id, env.projectId]));

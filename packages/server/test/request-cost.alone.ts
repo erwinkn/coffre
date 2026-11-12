@@ -17,12 +17,12 @@ import * as gs from '@hegeldev/hegel/generators';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { bodyDigest, createProof, generateProofKey, thumbprint } from '@coffre/client/dpop';
-import { generateToken, github, hashToken, signin, tokenHint, type Gate } from '@coffre/core/identity';
+import { github, hashToken, signin, type Gate } from '@coffre/core/identity';
 import { createDatabase, type Client } from '@coffre/db';
 import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import { appendEntries, type NewEntry } from '@coffre/db/log';
-import { ACCESS_ACTIONS } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, useOfCode } from '@coffre/core/vault';
 import { localVault, spoken } from '@coffre/vault/node';
 import { desc, eq, gt, sql, type SQL } from 'drizzle-orm';
 
@@ -30,10 +30,9 @@ import { Accesses } from '../src/accesses.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
 import {
-  distinctSecretCounts, environmentSecrets, insertBinding, liveKeysIn, lock, memberStanding, originsOf, places, resolvePath, secretFolderOf, secretHeads, secretsInFolder,
+  distinctSecretCounts, environmentSecrets, liveKeysIn, lock, originsOf, places, resolvePath, secretFolderOf, secretHeads, secretsInFolder,
   HIDDEN_COUNTED, sealedHidden, sealedPage, sealedReach, secretObjects, holdingSensitive, type ChangePoint,
 } from '../src/db/queries.ts';
-import { insertSession } from '../src/db/workloads.ts';
 import { readsByStanding, readsPage, readsStanding } from '../src/db/reads.ts';
 import { fetchApi, pageClient } from '../src/fetch-api.ts';
 import { sessionCookieName } from '../src/auth.ts';
@@ -44,9 +43,10 @@ import { credentialProxy, header, hmac } from '../src/plugins/credential-proxy.t
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testAnchor, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, cutOverAtOpen, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testAnchor, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { answer, type Pages } from './start-fixture.ts';
-import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
+import { inBulkPeriod, pastBulkTurn } from './window-fixture.ts';
+import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { withLogUnlocked } from './db/engine.ts';
@@ -176,6 +176,8 @@ type Cost = { app: Count; vault: Count; vaultCalls: number };
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let app: CountingPool;
 let vaultPool: CountingPool;
+/** The vault's uses' own login (`hotDatabase`): its statements count as the vault's. */
+let hotPool: PostgresClient;
 let vaultCalls = 0;
 let root: CoffreClient;
 let reader: CoffreClient;
@@ -234,9 +236,15 @@ before(async () => {
   vaultPool = new CountingPool(testPostgresPool(TEST_VAULT_DATABASE_URL));
   const opened = spoken(await localVault({
     database: createDatabase(vaultPool.client),
+    hotDatabase: createDatabase(vaultPool.watch(hotPool = testPostgresPool(TEST_HOT_DATABASE_URL))),
     kek: { id: 'test-kek-1', key: randomBytes(32).toString('base64') },
     owners: [ROOT],
-  }, { log: '0.14' }));
+    // Every use logged, none a repeat its key's last rides (60 s by default): what a budget holds is a use's whole
+    // cost, the same whenever it runs, however long the file has run.
+    deployment: defineDeployment({ audit: { repeatsWithinSeconds: 0 } }),
+  }, { sealThrough: sealedNow, heldOutside: nothingHeld }));
+  // Cut over from 0.14 first, as the app's door has it (cutover.ts), and as an upgraded instance runs.
+  await cutOverAtOpen(opened, db.owner);
   // Every call the app makes of the vault: on Workers, each its own invocation and connection.
   const vault = new Proxy(opened as unknown as FixtureDeps['vault'], {
     get(target, key) {
@@ -257,7 +265,13 @@ before(async () => {
   append = async (count, entry = () => ({ actor: 'system:load', action: 'secret.read', decision: 'allow', metadata: '{}' })) => {
     for (let done = 0; done < count; done += 1000) {
       const entries = Array.from({ length: Math.min(1000, count - done) }, (_, i) => entry(done + i));
-      await db.owner.transaction((tx) => appendEntries(tx, appLogKey(base.chainKey), entries));
+      // Writes of 0.14's among them (a sign-in, a token made) as an upgraded instance's log holds them: the trigger that
+      // refuses them once 0.15 cut over lifted while they go in. Reads it lets through.
+      await db.owner.transaction(async (tx) => {
+        await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_refuse_old`);
+        await appendEntries(tx, appLogKey(base.chainKey), entries);
+        await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_refuse_old`);
+      });
     }
   };
   // The vault's answers kept between requests, as a configuration keeps them (`Accesses`).
@@ -373,9 +387,9 @@ before(async () => {
   };
   const claims = { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/market/.github/workflows/build.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' };
   const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
-  const idToken = () => {
+  const idToken = (aud = ORIGIN, of = claims) => {
     const now = Math.floor(Date.now() / 1000);
-    const input = `${part({ alg: 'RS256', kid: 'rs-1', typ: 'JWT' })}.${part({ iss: ISSUER, aud: ORIGIN, sub: 'repo:acme/market:ref:refs/heads/main', iat: now - 5, exp: now + 295, jti: randomUUID(), run_id: '7001', ...claims })}`;
+    const input = `${part({ alg: 'RS256', kid: 'rs-1', typ: 'JWT' })}.${part({ iss: ISSUER, aud, sub: 'repo:acme/market:ref:refs/heads/main', iat: now - 5, exp: now + 295, jti: randomUUID(), run_id: '7001', ...of })}`;
     return `${input}.${signWith('sha256', Buffer.from(input), privateKey).toString('base64url')}`;
   };
   const workloadsAuth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits({ perSource: 1000 }) } }).resolve(ORIGIN);
@@ -401,31 +415,30 @@ before(async () => {
   };
   await buyCi();
 
-  // A workload's key-bound session of the service, as `/api/auth/workload` makes one, and a plugin that asks for it as the proxy does.
-  const standing = (await memberStanding(deps.db, SERVICE))!;
-  const bindingId = randomUUID();
-  await insertBinding(deps.db, deps.chainKey, {
-    id: bindingId, principal: SERVICE, generation: standing.generation, profile: 'kubernetes', issuer: 'https://cluster.acme.example', jwksUri: 'https://cluster.acme.example/keys',
-    jwks: null, claims: '{"sub":"x"}', scope: null, policy: '{}', label: null, createdBy: ROOT,
-  });
-  const dev = (await places(deps.db)).find((project) => project.slug === 'market')!.environments.find((environment) => environment.slug === 'dev')!.id;
-  const key = await generateProofKey();
-  const token = generateToken('workload');
-  const now = Date.now();
-  await insertSession(deps.db, deps.chainKey, {
-    id: randomUUID(), kind: 'workload', tokenHash: hashToken(token), tokenHint: tokenHint(token), generation: standing.generation, principal: SERVICE, identityId: null,
-    label: null, createdBy: `binding:${bindingId}`, expiresAt: new Date(now + 3_600_000), revokedAt: null, scope: null,
-    places: JSON.stringify([{ environmentId: dev, personal: false }]), jkt: await thumbprint(key.jwk), notAfter: new Date(now + 86_400_000),
-    ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null,
-  });
   const gate: Gate = { nonce: async () => 'g1.cost', admit: async () => ({ ok: true, nonce: 'g1.cost' }) };
+  // A workload's key-bound session of the service, from `/api/auth/workload` as a CI run's SDK asks for one: its ID
+  // token's audience names the proof key, and the vault signs it in (T149). Then a plugin that asks for it as the proxy does.
+  // Its binding has a policy, as a binding whose runs hold sessions does, and trusts another workflow than the CI run's,
+  // whose sign-in it would otherwise add a candidate to.
+  const deploy = { ...claims, workflow_ref: 'acme/market/.github/workflows/deploy.yml@refs/heads/main' };
+  const deploying = await workloads.bind(await contextFor(deps, ROOT), 'ci-web', { profile: 'github', issuer: null, claims: deploy, label: 'deploy', replaces: [], policy: {} }, { dryRun: false });
+  if (!('binding' in deploying)) throw new Error('the session binding was not made');
+  const key = await generateProofKey();
+  const token = await (async () => {
+    const url = `${ORIGIN}/api/auth/workload`;
+    const jwt = idToken(`${ORIGIN}#jkt=${await thumbprint(key.jwk)}`, deploy);
+    const request = new Request(url, { method: 'POST', headers: { 'content-type': 'application/json', dpop: await createProof(key, { method: 'POST', url }) }, body: JSON.stringify({ service: SERVICE, proof: { oidc: jwt } }) });
+    const answered = await answer(request, { ...trusting, gates: () => gate }, {} as Pages, '203.0.113.9');
+    if (answered.status !== 200) throw new Error(`the workload's sign-in was refused: ${await answered.text()}`);
+    return ((await answered.json()) as { token: string }).token;
+  })();
   // Its last use, written once in five minutes after the answer: waited for, so it lands on its own request's count.
   const background: Promise<unknown>[] = [];
   // The credential proxy itself, its upstream an egress that answers at once: the request costs only what coffre does.
   const credentials = { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}'), egress: { fetch: async () => new Response(null, { status: 204 }) } } };
   const verifiers = { webhook: hmac('WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) };
-  // The proxy's cache keeps an answer 60 s and asks the vault again in the last 15: that one request costs 4 statements
-  // and 7 of the vault's, not 1. A Cloudflare call's answer is kept 60 s whatever `proxy.cacheValues` says (a binding has no
+  // The proxy's cache keeps an answer 60 s and asks the vault again in the last 15: that one request costs 2 statements
+  // and 1 of the vault's, as a cold one does, not 1 and none. A Cloudflare call's answer is kept 60 s whatever `proxy.cacheValues` says (a binding has no
   // session to outlast it), so a request warmed at second 44 of an entry's life and measured at 45, as a loaded runner
   // does after a long test, was that request. Each `warm` renews the proxy: its entries are then as old as the gap
   // between the warm-up and the measurement.
@@ -466,10 +479,9 @@ before(async () => {
   verify = () => verifying(proxied)();
   coldVerify = verifying(forgetful);
   coldWorkload = through(forgetful);
-  await insertBinding(deps.db, deps.chainKey, {
-    id: randomUUID(), principal: SERVICE, generation: standing.generation, profile: 'cloudflare', issuer: 'urn:coffre:cloudflare', jwksUri: 'urn:coffre:cloudflare',
-    jwks: null, claims: '{}', scope: null, policy: '{}', label: null, createdBy: ROOT,
-  });
+  // Its Cloudflare binding, which the vault makes as for any other.
+  const edge = await workloads.bind(await contextFor(deps, ROOT), 'ci-web', { profile: 'cloudflare', issuer: null, claims: {} as never, label: 'edge', replaces: [] }, { dryRun: false });
+  if (!('binding' in edge)) throw new Error('the Cloudflare binding was not made');
   bound = async () => {
     const answered = await bindingRoute(new Request(`${ORIGIN}/use/market/dev/stripe/v1/charges`, { method: 'POST', body: 'amount=2000' }), proxied, SERVICE);
     if (answered?.status !== 204) throw new Error(`the binding's call was refused: ${await answered?.text()}`);
@@ -479,7 +491,7 @@ before(async () => {
 
 after(async () => {
   await resetDatabase(db.owner);
-  await Promise.all([app.end(), vaultPool.end(), db.close(), relay.close()]);
+  await Promise.all([app.end(), vaultPool.end(), hotPool.end(), db.close(), relay.close()]);
 });
 
 /**
@@ -501,36 +513,53 @@ async function cost(request: () => Promise<unknown>): Promise<Cost> {
 }
 
 /**
+ * The bulk cap's periods: a tenth of its window, at most a minute (the vault's default window, 15 minutes, which this
+ * deployment keeps), each principal's key starting its own at a phase of its own (`phaseOf`, T204). A key's first use
+ * in a new one moves its row of the cap's, one statement more (`useNamedMany`'s "3, a key entering her cap's set"),
+ * whichever request comes first after that key's period turns. The requests' callers: the reader, and ci-web's token,
+ * which its CI runs and its workloads use too. Every key they reveal is market/dev's.
+ */
+const CAPPED = [`user:${READER}`, SERVICE];
+const PERIOD_ROOM_MS = 2_000;
+
+/**
+ * What `request` costs once its keys' rows of the cap's are their periods': run once, then measured, both within
+ * every key's period (`inBulkPeriod`). What a hot request costs any other time; the first after a key's period turned
+ * is a test of its own ("a reveal's first use of its keys in a new period").
+ */
+async function repeated(request: () => Promise<unknown>): Promise<Cost> {
+  await inBulkPeriod(PERIOD_ROOM_MS, db.owner, CAPPED, 'market/dev');
+  await request();
+  return cost(request);
+}
+
+/**
  * Each hot request, and what it costs warm: its statements on the app's
  * connection and the vault's, and the vault's calls. A workload's request
  * at the proxy: one statement, and nothing of the vault's.
  *
- * A reveal: the credential, with the newest policy change; the path; the
- * environment's rows; once the vault has released, the credential and its
- * member again (`credentialStill`). One vault call, its `unwrap`, decided
- * on the vault's answer about the reader kept from their last request,
- * which it checks (`Accesses`): the versions, then BEGIN, its lock
- * timeout, the reader's row locked, the head locked with everything the
- * decision reads, the entries and the head in one statement, COMMIT.
+ * A reveal, under 0.15's log: no statement of the app's, and one vault
+ * call, whose statements on the vault's hot login check the credential,
+ * decide, log the use and open the values. A key by name, one
+ * (`use_credential`); every key of an environment, two (`use_named_batch`,
+ * which lists and resolves them, then `use_batch` for those it resolved);
+ * a CI run's seven keys by name, which the isolate maps to their ids, one.
+ * Measured within one period of the bulk cap (`repeated`).
  *
- * A CI run's sign-in: its service's bindings on the issuer, with whether
- * the token was spent and the newest policy change; the vault's `access`;
- * then BEGIN, the head, the member, binding and rate in one read, the token
- * spent with the credential issued and the binding stamped in one
- * statement, the head again with the clock and the last entry, the entry
- * and the head, COMMIT. Six of its statements hold the head. Its list and
- * its reveal cost a service token's, and one statement more: its binding's
- * standing (`standingBinding`).
+ * A CI run's sign-in: one statement of the app's, and the vault's
+ * `signIn`, one (`sign_in`), which spends the token, issues the credential
+ * and logs it. Its reveal costs a service token's, and one statement of
+ * the app's more: its binding's standing (`standingBinding`).
  */
 const requests: Record<string, { request: () => Promise<unknown>; budget: { app: number; vault: number; vaultCalls: number } }> = {
-  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
-  'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
-  'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 4, vault: 7, vaultCalls: 1 } },
+  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 0, vault: 1, vaultCalls: 1 } },
+  'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 0, vault: 2, vaultCalls: 1 } },
+  'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 0, vault: 2, vaultCalls: 1 } },
   // Only shown: its credential and what the vault's rows say of its caller in one statement, its places in another, and no vault call.
   "a request's check of its caller": { request: () => reader.me(), budget: { app: 2, vault: 0, vaultCalls: 0 } },
-  "a CI run's sign-in": { request: () => exchange(), budget: { app: 8, vault: 1, vaultCalls: 1 } },
+  "a CI run's sign-in": { request: () => exchange(), budget: { app: 1, vault: 1, vaultCalls: 1 } },
   "a CI run's list": { request: () => ci.secrets.list('market/dev'), budget: { app: 4, vault: 1, vaultCalls: 1 } },
-  "a CI run's reveal of seven keys": { request: () => ci.secrets.reveal('market/dev', SEVEN), budget: { app: 5, vault: 7, vaultCalls: 1 } },
+  "a CI run's reveal of seven keys": { request: () => ci.secrets.reveal('market/dev', SEVEN), budget: { app: 1, vault: 1, vaultCalls: 1 } },
   // Section 5.3's one statement: the session, its member, binding and ancestors; the vault is not asked, its
   // decision warm in the proxy's cache.
   "a workload's request at the proxy": { request: () => workload(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
@@ -677,7 +706,9 @@ const renders: Record<string, { request: () => Promise<unknown>; budget: PageCos
   // Its report reads what they read under 0.15's log, as the projection lists them, and how far it does (T166), beside
   // its first reads: a statement, no trip. And what they wrote that 0.15's log records alone (T179, 0.16.0): one more
   // statement beside them, no trip; its keys and versions only when there are some.
-  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 18, trips: 6, vault: 1, vaultCalls: 2 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
+  // One vault call more than 0.14's log made, and one trip less: the report's reads and uses, which only 0.15's log holds,
+  // asked of the vault. T276: P2 moves that report onto the projection, and W393 brings the calls back down.
+  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 17, trips: 5, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
   "/users/reader@acme.example, viewer": { request: () => visit('viewer', '/users/reader@acme.example'), budget: { app: 5, trips: 3, vault: 1, vaultCalls: 1 } },
   // The same directory, and nothing asked of any one account (T264): before, each account's token list, a vault call and
   // three statements more each.
@@ -685,7 +716,8 @@ const renders: Record<string, { request: () => Promise<unknown>; budget: PageCos
   "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 10, trips: 3, vault: 2, vaultCalls: 3 } },
   // Its report reads their reads too, and how far they are listed (T166), beside its first reads; and what they wrote
   // that 0.15's log records alone (T179, 0.16.0), one more statement beside them, no trip.
-  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 21, trips: 7, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
+  // As the member's page: one vault call more than 0.14's log made, for the report's reads and uses (T276, W393).
+  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 20, trips: 6, vault: 3, vaultCalls: 4 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
   "/service-accounts/ci-web, viewer": { request: () => visit('viewer', '/service-accounts/ci-web'), budget: { app: 10, trips: 5, vault: 4, vaultCalls: 4 } },
   // Its directory too, which counts the service accounts' tokens.
   "/settings, owner": { request: () => visit('owner', '/settings'), budget: { app: 12, trips: 3, vault: 3, vaultCalls: 4 } },
@@ -737,26 +769,24 @@ test("a page's read that fails fails the reads sent with it, once, and each of i
 test('each hot request runs exactly its budget of statements, on as many connections', async () => {
   await warm();
   for (const [name, { request, budget }] of Object.entries(requests)) {
-    const spent = await cost(request);
+    const spent = await repeated(request);
     assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, budget, name);
   }
 });
 
 /**
  * A workload's request at a proxy whose cache has lapsed, on an isolate
- * that has served one before: the session's statement, the path and the
- * environment's rows, the vault's unwrap, on the answer about the service
- * kept from its last request, which appends the proxy's `credential.use`
- * beside its read, under the head it holds for it; then the credential
- * still, with no lock. The app takes the head not at all: before 0.14.5 it
- * did, for its own entry, for six statements more, which every append in
- * the instance waited for.
+ * that has served one before: two statements of the app's, a credential's
+ * row and `app_read` (the path and the environment's rows in one read),
+ * and one vault call, whose one statement (`use_credential`)
+ * decides the proxy's use, logs it and opens the value. The app takes the
+ * head not at all.
  */
 test("a workload's request at a proxy whose cache lapsed runs its budget, and the app takes no lock", async () => {
   await coldWorkload();
   const held = { ...app.held };
   const spent = await cost(coldWorkload);
-  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
+  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 2, vault: 1, vaultCalls: 1 });
   assert.equal(app.held.statements - held.statements, 0, 'no statement of the app\'s in a transaction, and so none under the head');
 });
 
@@ -764,32 +794,33 @@ test("a workload's request at a proxy whose cache lapsed runs its budget, and th
 test("a workload's verify at a proxy whose cache lapsed runs a proxied request's budget", async () => {
   await coldVerify();
   const spent = await cost(coldVerify);
-  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
+  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 2, vault: 1, vaultCalls: 1 });
 });
 
 /**
  * The same through the proxy, its service's access changed since the
- * proxy's last read: the read on the kept answer, refused by the vault,
- * goes again, asking, through the session it already checked.
+ * proxy's last read: under 0.15's log the app keeps no answer of the
+ * vault's to go stale, and the use decides on the vault's rows as they
+ * are. One call, as any other, logged as one use.
  */
-test("a proxied call whose cache lapsed, after its service's access changed, asks the vault again, once", async () => {
+test("a proxied call whose cache lapsed, after its service's access changed, asks the vault once, as any other", async () => {
   await coldWorkload();
   await root.access.set(SERVICE, { 'market/dev': 'developer' });
-  const [{ seq: since }] = await db.owner.select({ seq: auditLog.seq }).from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
+  const before = (await usesLogged(db.owner)).length;
   const changed = await cost(coldWorkload);
-  // Logged as one read that asked: the vault's read and the proxy's use, and no refusal.
-  const logged = await db.owner.select({ action: auditLog.action, decision: auditLog.decision }).from(auditLog).where(gt(auditLog.seq, since!)).orderBy(auditLog.seq);
-  assert.deepEqual(logged.map((entry) => `${entry.action} ${entry.decision}`), ['secret.read allow', 'credential.use allow']);
+  const logged = (await usesLogged(db.owner)).slice(before);
+  assert.deepEqual(logged.map((use) => useOfCode(use.purpose)?.purpose), ['use']);
   const after = await cost(coldWorkload);
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
-  assert.equal(changed.vaultCalls, 3);
-  assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
+  for (const spent of [changed, after]) {
+    assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 2, vault: 1, vaultCalls: 1 });
+  }
 });
 
 test('a request runs the same statements, and reads the same rows, however large the log, the members, their sessions and tokens, and the policy grow', async () => {
   await warm();
   const small: Record<string, Cost> = {};
-  for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
+  for (const [name, { request }] of Object.entries(requests)) small[name] = await repeated(request);
   const smallPages: Record<string, PageCost> = {};
   for (const [name, { request }] of Object.entries(renders)) smallPages[name] = await pageCost(request);
   const sessionsPage = (as: Persona) => visit(as, '/account/sessions');
@@ -817,10 +848,10 @@ test('a request runs the same statements, and reads the same rows, however large
     await reader.tokens.issue(`user:${READER}`, { label: `grown-${i}`, expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   }
 
-  // Once first: a request whose caller's access, or the policy, changed since their last asks the vault again, once.
+  // Warm again first: the growth changed the policy and lapsed the proxy's cache, which settle before the measure.
   await warm();
   for (const [name, { request }] of Object.entries(requests)) {
-    assert.deepEqual(await cost(request), small[name], `${name} ran more statements or read more rows once the instance grew`);
+    assert.deepEqual(await repeated(request), small[name], `${name} ran more statements or read more rows once the instance grew`);
   }
   // A page lists what there is, so its rows grow with the members and places it shows; its statements and round trips do not.
   for (const as of ['owner', 'viewer'] as const) {
@@ -855,9 +886,11 @@ test("each hot request's statements read as many pages however long the log grow
       await db.owner.transaction(async (tx) => {
         // Planned for thousands of times the rows it makes, a part would compile them first (JIT), longer than it runs.
         await tx.execute(sql`SET LOCAL jit = off`);
-        await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_releases`);
+        // And 0.14's access changes among the copies, as an upgraded instance's log holds them below its cutover: the
+        // trigger that refuses them after it is off too.
+        await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_releases, DISABLE TRIGGER audit_log_refuse_old`);
         await tx.execute(more(Math.min(5000, left)));
-        await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_releases`);
+        await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_releases, ENABLE TRIGGER audit_log_refuse_old`);
       });
     }
     assert.deepEqual(await releases(), released, 'the copies released no key later than the log did');
@@ -945,7 +978,7 @@ test("each hot request's statements read as many pages however long the log grow
       if (before === null || after === null) {
         // Only a write that cannot run twice, which writes the rows it is given.
         assert.equal(before, after, `${name}: ${text} ran again once, not twice`);
-        assert.match(text, /^\s*(with appended as \(insert|insert)/i, `${name}: ${text} could not run again`);
+        assert.match(text, /^\s*(with appended as \(insert|insert|select use_)/i, `${name}: ${text} could not run again`);
         continue;
       }
       assert.ok(after <= 2 * before + 16, `${name}: ${text} read ${after} pages once the log grew tenfold, ${before} before:\n${plan}`);
@@ -954,19 +987,38 @@ test("each hot request's statements read as many pages however long the log grow
 });
 
 /**
- * A reveal decided on a kept answer about its reader that is no longer the
- * vault's, their role changed since: the vault refuses it, reading and
- * logging nothing, and the request goes again, asking. Three calls, once:
- * the next is one again.
+ * A reveal after the reader's role changed: under 0.15's log the app keeps
+ * no answer of the vault's about them to go stale, and the use decides on
+ * the vault's rows as they are. One call, one statement, as any other.
  */
-test("a reveal after the reader's access changed asks the vault again, once", async () => {
+test("a reveal after the reader's access changed costs what any other does", async () => {
   await reader.secrets.reveal('market/dev/API_KEY');
   await root.access.set(`user:${READER}`, { 'market/dev': 'developer' });
-  const changed = await cost(() => reader.secrets.reveal('market/dev/API_KEY'));
-  const after = await cost(() => reader.secrets.reveal('market/dev/API_KEY'));
+  const revealed = (into: unknown[]) => async () => into.push(await reader.secrets.reveal('market/dev/API_KEY'));
+  const answers: unknown[] = [];
+  const changed = await cost(revealed(answers));
+  const after = await cost(revealed(answers));
+  // Each a reveal that answered, not one refused early.
+  for (const answer of answers) assert.match(JSON.stringify(answer), /fake-api-key/);
   await root.access.set(`user:${READER}`, { 'market/dev': 'viewer' });
-  assert.deepEqual({ app: changed.app.statements, vaultCalls: changed.vaultCalls }, { app: 7, vaultCalls: 3 });
-  assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
+  for (const spent of [changed, after]) {
+    assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 0, vault: 1, vaultCalls: 1 });
+  }
+});
+
+/**
+ * A reveal of an environment, the first use of its keys after one of their
+ * periods of the bulk cap turned (`pastBulkTurn`): that key's row of the
+ * cap's moves to the new period, one statement more, once. The next costs
+ * its budget.
+ */
+test("a reveal's first use of its keys in a new period of the bulk cap moves their rows: one statement more, once", async () => {
+  await reader.secrets.reveal('market/dev');
+  await pastBulkTurn(PERIOD_ROOM_MS, db.owner, [`user:${READER}`], 'market/dev');
+  const first = await cost(() => reader.secrets.reveal('market/dev'));
+  const next = await cost(() => reader.secrets.reveal('market/dev'));
+  assert.deepEqual({ app: first.app.statements, vault: first.vault.statements, vaultCalls: first.vaultCalls }, { app: 0, vault: 3, vaultCalls: 1 });
+  assert.deepEqual({ app: next.app.statements, vault: next.vault.statements, vaultCalls: next.vaultCalls }, requests['a reveal of an environment']!.budget);
 });
 
 test("a caller's check reads nothing of a project they reach nothing in", async () => {
@@ -997,7 +1049,7 @@ const growthSettings = propertySettings(4, 10);
 test(`a request costs the same after any growth of the instance, seed ${growthSettings.seed}`, async () => {
   await warm();
   const small: Record<string, Cost> = {};
-  for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
+  for (const [name, { request }] of Object.entries(requests)) small[name] = await repeated(request);
   const smallPages: Record<string, PageCost> = {};
   for (const [name, { request }] of Object.entries(renders)) smallPages[name] = await pageCost(request);
   // Places made so far: names from a counter, since the instance keeps what every case made. So Hegel's replay of a
@@ -1067,10 +1119,10 @@ test(`a request costs the same after any growth of the instance, seed ${growthSe
           break;
       }
     }
-    // Once first, as above: a caller whose access, or the policy, changed asks the vault again, once.
+    // Warm again first, as above.
     await warm();
     for (const [name, { request }] of Object.entries(requests)) {
-      const spent = await cost(request);
+      const spent = await repeated(request);
       const why = `${name} ran more statements or read more rows once the instance grew by ${JSON.stringify(steps)}: ${JSON.stringify(spent)}, not ${JSON.stringify(small[name])}`;
       if (JSON.stringify(spent) !== JSON.stringify(small[name])) console.error(why);
       assert.deepEqual(spent, small[name], why);
@@ -1275,10 +1327,10 @@ test("a read of an environment's keys reads as many pages however many keys the 
   // market/busy's reference made long ago, and a key of shop's repointed 5,000 times since: newer rows of another
   // holder's, which a lookup of market/busy's newest that walks the references by `created_seq` reads one by one (review
   // r1 of #502). Their entries in the log, at seqs before any other, copy its oldest, as the log's growth above does.
-  await db.owner.execute(sql`
+  await withLogUnlocked(db.owner, (owner) => owner.execute(sql`
     INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash, metadata)
     SELECT e.seq - g, e.author, e.key_id, e.occurred_at, e.actor, e.action, e.decision, e.prev_hash, e.mac, e.hash, e.metadata
-    FROM (SELECT * FROM audit_log ORDER BY seq LIMIT 1) e CROSS JOIN generate_series(1, 5001) g`);
+    FROM (SELECT * FROM audit_log ORDER BY seq LIMIT 1) e CROSS JOIN generate_series(1, 5001) g`));
   await db.owner.execute(sql`
     UPDATE secret_references SET created_seq = (SELECT min(seq) FROM audit_log)
     WHERE secret_id = (SELECT id FROM secrets WHERE environment_id = ${ids.busy!} AND key = 'COST_REFERS')`);
@@ -1610,8 +1662,14 @@ test("the project list and a render's shell count no deleted place's keys in thi
  * all around them in time. Planted as rows, as only their reads are
  * measured, and gone again after.
  */
+/** Where the changes planted below are numbered from: past those the fixture's requests made, and below T239's (`changes`). */
+const PLANTED = 10_000_000n;
+
 test("the audit pages' records of 0.15's log read as many pages however many other changes the log holds", async () => {
   const counted = createDatabase(app.client);
+  // Numbered past the changes the fixture's own requests made, which are newer than any planted here: `n` is the
+  // number a planted change takes.
+  const n = (number: number) => PLANTED + BigInt(number);
   const ADA = 'user:ada@acme.example';
   // A page of the instance's, as before 0.16: its sign-ins, and with the detail its token records, and its first adds.
   const page = (filter: Omit<Parameters<typeof sealedPage>[1], 'instance' | 'written'>) => sealedPage(counted, { instance: true, written: null, ...filter });
@@ -1627,11 +1685,11 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
   let reached: ChangePoint | null = null;
   const tokens = Array.from({ length: 20 }, () => randomUUID());
   // A stretch of Ada's time, 100 of her records, which a page that hides them counts; and a point in it, an older page's.
-  const stretch = { from: { at: 150_100 }, before: { at: 150_200, number: 150_201n } };
+  const stretch = { from: { at: 150_100 }, before: { at: 150_200, number: n(150_201) } };
   const reads: Record<string, () => Promise<unknown>> = {
     "every service's sign-ins": () => page({ detail: false, limit: 100 }),
     "a service's sign-ins": () => page({ actors: ['token:planted'], detail: false, limit: 100 }),
-    "an older page of a service's": () => page({ actors: ['token:planted'], detail: false, before: { at: 100_150, number: 100_150n }, limit: 100 }),
+    "an older page of a service's": () => page({ actors: ['token:planted'], detail: false, before: { at: 100_150, number: n(100_150) }, limit: 100 }),
     "every member's records": () => page({ detail: true, limit: 100 }),
     "a person's records": () => page({ actors: [ADA], detail: true, limit: 100 }),
     "a person's older page, below a time": () => page({ actors: [ADA], detail: true, before: stretch.before, limit: 100 }),
@@ -1712,7 +1770,7 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
    */
   const plant = (from: number, count: number, actor: string, kind: keyof typeof payloads, options: { object?: SQL; at?: number } = {}) => db.owner.execute(sql`
     INSERT INTO log_changes (number, at, request_id, object, actor, payload, mac)
-    SELECT ${from} + g, ${options.at ?? from} + g, 'planted-' || (${from} + g), ${options.object ?? sql`gen_random_uuid()`}, ${actor}, ${payloads[kind](actor)},
+    SELECT ${PLANTED} + ${from} + g, ${options.at ?? from} + g, 'planted-' || (${from} + g), ${options.object ?? sql`gen_random_uuid()`}, ${actor}, ${payloads[kind](actor)},
       decode(repeat('00', 16), 'hex')
     FROM generate_series(1, ${count}) g`);
   /**
@@ -1817,13 +1875,13 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     // And they read what was planted: a page of the service's, the older page below it; Ada's newest, and those
     // below her stretch, passing over renewals and a binding's revokes; her stretch's count; each credential's origin.
     assert.deepEqual((await page({ actors: ['token:planted'], detail: false, limit: 100 })).rows.length, 100);
-    assert.deepEqual((await page({ actors: ['token:planted'], detail: false, before: { at: 100_150, number: 100_150n }, limit: 100 })).rows.map(({ number }) => number).slice(0, 2), [100_149n, 100_148n]);
-    assert.deepEqual((await page({ actors: [ADA], detail: true, limit: 2 })).rows.map(({ number }) => number), [650_000n, 649_999n]);
-    assert.deepEqual((await page({ actors: [ADA], detail: true, before: stretch.before, limit: 2 })).rows.map(({ number }) => number), [150_200n, 150_199n]);
+    assert.deepEqual((await page({ actors: ['token:planted'], detail: false, before: { at: 100_150, number: n(100_150) }, limit: 100 })).rows.map(({ number }) => number).slice(0, 2), [n(100_149), n(100_148)]);
+    assert.deepEqual((await page({ actors: [ADA], detail: true, limit: 2 })).rows.map(({ number }) => number), [n(650_000), n(649_999)]);
+    assert.deepEqual((await page({ actors: [ADA], detail: true, before: stretch.before, limit: 2 })).rows.map(({ number }) => number), [n(150_200), n(150_199)]);
     // The newest of the instance's records: the newest first add planted (T179, 0.16.0); of its token records, the
-    // service's runs' newest sign-out.
-    assert.deepEqual((await page({ detail: true, limit: 1 })).rows.map(({ number }) => number), [1_400_000n]);
-    assert.deepEqual((await page({ actors: ['token:planted'], detail: true, limit: 1 })).rows.map(({ number }) => number), [1_000_000n]);
+    // service's runs' newest sign-out. Below the fixture's own, made at this run's time, long after any planted.
+    assert.deepEqual((await page({ detail: true, before: { at: 1_000_000_000 }, limit: 1 })).rows.map(({ number }) => number), [n(1_400_000)]);
+    assert.deepEqual((await page({ actors: ['token:planted'], detail: true, limit: 1 })).rows.map(({ number }) => number), [n(1_000_000)]);
     // The service's first page, counted: its runs' newest sign-outs, as many as a page counts, and none of its sign-ins
     // below them. Not counted: its sign-ins at once.
     const first = await root.audit.list({ actor: 'token:planted', sealed: '1', hidden: '1', limit: 50 });
@@ -1838,29 +1896,29 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
       [{ action: 'token.create', count: 100 + 1_500 + 50_000 }, { action: 'token.revoke', count: 100 }],
     );
     // A page counts as far as it reaches: the newest `HIDDEN_COUNTED` below her stretch, the 200 there and 800 older.
-    assert.deepEqual(reached, { at: 140_701, number: 800_701n });
+    assert.deepEqual(reached, { at: 140_701, number: n(800_701) });
     assert.deepEqual(
       (await sealedHidden(counted, { actors: [ADA], from: reached!, before: stretch.before })).sort((a, b) => (a.action < b.action ? -1 : 1)),
       [{ action: 'token.create', count: 900 }, { action: 'token.revoke', count: 100 }],
     );
     // The key writes: Ada's newest at envA, of the key among them, past the other's since; the key's own, the other's
     // newest, and hers alone; hers at envC, planted last, the newest of hers on the project's page.
-    assert.deepEqual((await writes({ environmentIds: [envA] }, [ADA])).rows.map(({ number }) => number).slice(0, 2), [1_200_200n, 1_200_199n]);
-    assert.deepEqual((await writes({ secretId: key })).rows.map(({ number }) => number).slice(0, 2), [1_560_000n, 1_559_999n]);
+    assert.deepEqual((await writes({ environmentIds: [envA] }, [ADA])).rows.map(({ number }) => number).slice(0, 2), [n(1_200_200), n(1_200_199)]);
+    assert.deepEqual((await writes({ secretId: key })).rows.map(({ number }) => number).slice(0, 2), [n(1_560_000), n(1_559_999)]);
     assert.equal((await writes({ secretId: key })).rows.length, 100);
-    assert.deepEqual((await writes({ secretId: key }, [ADA])).rows.map(({ number }) => number).slice(0, 2), [1_200_200n, 1_200_199n]);
+    assert.deepEqual((await writes({ secretId: key }, [ADA])).rows.map(({ number }) => number).slice(0, 2), [n(1_200_200), n(1_200_199)]);
     assert.equal((await writes({ secretId: key }, [ADA])).rows.length, 100);
     const both = (await writes({ environmentIds: [envA] }, [ADA, THIRD])).rows;
-    assert.deepEqual([both.length, both[0]?.number, both.at(-1)?.number], [100, 1_200_200n, 1_200_101n]);
-    assert.deepEqual((await writes({ environmentIds: [envC] }, [ADA])).rows.map(({ number }) => number).slice(0, 1), [1_510_000n]);
-    assert.deepEqual((await writes({ environmentIds: [envA, envC] }, [ADA])).rows.map(({ number }) => number).slice(0, 1), [1_510_000n]);
-    assert.deepEqual((await writes({ environmentIds: [envA, envC] })).rows.map(({ number }) => number).slice(0, 1), [1_560_000n]);
+    assert.deepEqual([both.length, both[0]?.number, both.at(-1)?.number], [100, n(1_200_200), n(1_200_101)]);
+    assert.deepEqual((await writes({ environmentIds: [envC] }, [ADA])).rows.map(({ number }) => number).slice(0, 1), [n(1_510_000)]);
+    assert.deepEqual((await writes({ environmentIds: [envA, envC] }, [ADA])).rows.map(({ number }) => number).slice(0, 1), [n(1_510_000)]);
+    assert.deepEqual((await writes({ environmentIds: [envA, envC] })).rows.map(({ number }) => number).slice(0, 1), [n(1_560_000)]);
     // The refusals: Ada's newest at envA, past others' there since; every one's newest, hers at envC; the adds'.
-    assert.deepEqual((await refusals({ environmentIds: [envA] }, [ADA])).rows.map(({ number }) => number).slice(0, 2), [1_240_100n, 1_240_099n]);
+    assert.deepEqual((await refusals({ environmentIds: [envA] }, [ADA])).rows.map(({ number }) => number).slice(0, 2), [n(1_240_100), n(1_240_099)]);
     assert.equal((await refusals({ environmentIds: [envA] }, [ADA])).rows.length, 100);
-    assert.deepEqual((await refusals({ environmentIds: [envA] })).rows.map(({ number }) => number).slice(0, 1), [1_710_000n]);
-    assert.deepEqual((await refusals({ all: true })).rows.map(({ number }) => number).slice(0, 1), [1_760_000n]);
-    assert.deepEqual((await refusals(null, undefined, true)).rows.map(({ number }) => number).slice(0, 1), [1_810_000n]);
+    assert.deepEqual((await refusals({ environmentIds: [envA] })).rows.map(({ number }) => number).slice(0, 1), [n(1_710_000)]);
+    assert.deepEqual((await refusals({ all: true })).rows.map(({ number }) => number).slice(0, 1), [n(1_760_000)]);
+    assert.deepEqual((await refusals(null, undefined, true)).rows.map(({ number }) => number).slice(0, 1), [n(1_810_000)]);
     assert.deepEqual((await refusals(null, [ADA], true)).rows, []);
     const origins = await originsOf(counted, [...credentials, ...tokens]);
     assert.deepEqual(credentials.map((id) => origins.get(id)?.kind), credentials.map(() => 'signIn'));

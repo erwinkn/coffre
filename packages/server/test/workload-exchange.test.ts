@@ -28,7 +28,7 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
-import { clientFor, contextFor, entryOf, decisionInputs, holdSomething, LOG, openTestDatabase, resetDatabase, revokesLogged, signInsLogged, speaking, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, entryOf, decisionInputs, holdSomething, openTestDatabase, resetDatabase, revokesLogged, signInsLogged, speaking, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { keeps015 } from '../src/api/changes.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
@@ -213,17 +213,13 @@ test("a run's token buys a five-minute credential of the service, logged with it
   assert.ok(lifetime > 4 * 60_000 && lifetime <= 5 * 60_000 + 1000, `lives five minutes, not ${lifetime} ms`);
   assert.equal(await caller(body.token!), `service:${SERVICE}`);
 
-  // Its record: 0.14's entry; with 0.15's log, its change, which says who, through what, for which run (D147), and when (its `at`).
+  // Its record: the vault's change, which says who, through what, for which run (D147), and when (its `at`).
   const [signedIn] = await signInsLogged(db.owner);
   assert.equal(signedIn!.actor, MEMBER);
   assert.equal(signedIn!.run.run_id, '7001');
-  if (LOG === '0.14') {
-    assert.deepEqual(Object.keys(signedIn!.record).sort(), ['bindingId', 'credentialId', 'expiresAt', 'generation', 'issuer', 'run']);
-  } else {
-    assert.deepEqual(Object.keys(signedIn!.record).sort(), ['caller', 'expiresAt', 'generation', 'op', 'principal', 'ref', 'scope', 'signIn']);
-    assert.deepEqual(signedIn!.record.signIn, { binding: bound, issuer: ISSUER, proof: 'oidc', run: signedIn!.run });
-    assert.deepEqual(await appEntries('token.exchange'), [], 'no 0.14 entry of its own');
-  }
+  assert.deepEqual(Object.keys(signedIn!.record).sort(), ['caller', 'expiresAt', 'generation', 'op', 'principal', 'ref', 'scope', 'signIn']);
+  assert.deepEqual(signedIn!.record.signIn, { binding: bound, issuer: ISSUER, proof: 'oidc', run: signedIn!.run });
+  assert.deepEqual(await appEntries('token.exchange'), [], 'no entry of its own');
   // The service's token list is for tokens people keep.
   assert.deepEqual((await runtime.signin!.listTokens(await contextFor(deps, ROOT), { type: 'service', id: SERVICE })), []);
   const [binding] = await db.owner.select().from(serviceBindings);
@@ -272,49 +268,6 @@ test("a run's credential reaches what both its binding's scope and the account h
     runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY, scope: { 'market/dev': 'viewer' }, label: null, replaces: [] }, { dryRun: true }),
     { status: 403 },
   );
-});
-
-test('a binding 0.4 makes after the app sealed is sealed by its first exchange, and a run credential of one by its first check: an account widened after reaches neither', {
-  skip: LOG === '0.15' ? "0.15's vault signs in through no binding it did not seal (PR 3a): one 0.4 made is bound again" : false,
-}, async () => {
-  const root = clientFor(deps, ROOT);
-  await root.projects.create('market', { name: 'Market' });
-  for (const environment of ['dev', 'prod']) {
-    await root.environments.create(`market/${environment}`, { name: environment });
-    await root.secrets.set(`market/${environment}`, { API_KEY: `${environment}-key` });
-  }
-  await root.access.set(MEMBER, { 'market/dev': 'developer' });
-  // The app checks a credential, and so seals what there is, before 0.4 makes one.
-  assert.equal(await caller((await trade(token(rsa))).body.token!), `service:${SERVICE}`);
-  /** Put `id` back as 0.4 would have made it: no scope, its MAC over 0.4's tuple. */
-  const unseal = async (id: string) => {
-    const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id));
-    const { authMac: _, ...fields } = { ...row!, scope: null };
-    await db.owner.update(serviceBindings).set({ scope: null, authMac: authMac(deps.chainKey, 'service_bindings', fields) }).where(eq(serviceBindings.id, id));
-  };
-  const scope = async () => (await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, bound)))[0]!.scope;
-  const seals = async () => (await appEntries('token.seal')).map((entry) => entry.metadata.bindings);
-  const reveal = async (credential: string, path: string) =>
-    (await answer(new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' }, body: JSON.stringify({ path }) }), runtime, ui, IP)).status;
-
-  await unseal(bound);
-  const first = (await trade(token(rsa))).body.token!;
-  assert.notEqual(await scope(), null, 'sealed as it exchanged, before the run used its credential');
-  assert.deepEqual(await seals(), [[bound]]);
-  // With 0.15's log, the vault made it all the same, once sealed: every sign-in through a binding goes there.
-  if (LOG === '0.15') assert.equal((await signInsLogged(db.owner)).at(-1)!.record.signIn !== undefined, true);
-  // A run's credential whose binding carries no scope, as one 0.4's binding issued: its first check seals the binding.
-  await unseal(bound);
-  assert.equal(await reveal(first, 'market/dev'), 200);
-  assert.notEqual(await scope(), null);
-  assert.deepEqual(await seals(), [[bound], [bound]]);
-
-  await root.access.set(MEMBER, { 'market/prod': 'viewer' });
-  const later = (await trade(token(rsa))).body.token!;
-  for (const credential of [first, later]) {
-    assert.equal(await reveal(credential, 'market/prod'), 403, "the account's later grant reaches no run");
-    assert.equal(await reveal(credential, 'market/dev'), 200);
-  }
 });
 
 test("a binding's scope of the wrong shape is refused before its issuer is asked anything", async () => {
@@ -620,8 +573,8 @@ test('removing a binding revokes only what is live: its expired history costs no
     const counting = { ...deps, db: createDatabase(counted(pool, seen)) };
     const read = (table: string) => seen.filter((statement) => new RegExp(`from "${table}"`, 'i').test(statement.text)).reduce((n, statement) => n + statement.rows, 0);
     await createRuntime(config, counting.db, deps.vault, transport).workloads!.unbind(await contextFor(counting, ROOT), SERVICE, binding!.id);
-    // With 0.15's log, the vault's one statement ends the binding and the run under way (PR 3a): the app writes none.
-    assert.equal(seen.filter((statement) => /^update "credentials"/i.test(statement.text)).length, LOG === '0.15' ? 0 : 1, 'the run under way, not the thousand over');
+    // The vault's one statement ends the binding and the run under way (PR 3a): the app writes none.
+    assert.equal(seen.filter((statement) => /^update "credentials"/i.test(statement.text)).length, 0, 'the run under way, not the thousand over');
     assert.equal((await db.owner.select().from(credentials).where(isNotNull(credentials.revokedAt))).length, 1, 'the run under way, not the thousand over');
     assert.ok(read('credentials') <= 2, `read ${read('credentials')} credential rows`);
     assert.equal(await caller(body.token!), 401);
@@ -633,9 +586,7 @@ test('removing a binding revokes only what is live: its expired history costs no
   }
 });
 
-test("a binding made on another public URL is still the vault's to end, with what it issued, and takes no token for this one (PR 3b: its row keeps the origin its seal covers)", {
-  skip: LOG === '0.15' ? false : "0.14's bindings carry no origin",
-}, async () => {
+test("a binding made on another public URL is still the vault's to end, with what it issued, and takes no token for this one (PR 3b: its row keeps the origin its seal covers)", async () => {
   const { body } = await trade(token(rsa));
   assert.ok(body.token, JSON.stringify(body));
   const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
@@ -682,29 +633,17 @@ test("a revocation is its caller's act: the credential it ends is its target, ne
   const revocations = (await appEntries('token.revoke')).map(({ actor, decision, metadata }) => ({
     actor, decision, credentialId: metadata.credentialId, targetCredentialId: metadata.targetCredentialId,
   }));
-  if (LOG === '0.14') {
-    assert.deepEqual(revocations, [
-      { actor: MEMBER, decision: 'deny', credentialId: a.id, targetCredentialId: nobody },
-      { actor: MEMBER, decision: 'allow', credentialId: a.id, targetCredentialId: b.id },
-      { actor: `user:${ROOT}`, decision: 'allow', credentialId: undefined, targetCredentialId: c.id },
-    ]);
-    // On the audit page: A's run for A's two, and no run for the admin's.
-    const { entries } = await clientFor(deps, ROOT).audit.list({ detail: '1' });
-    const shown = entries.filter((entry) => entry.action === 'token.revoke').sort((x, y) => x.seq - y.seq).map((entry) => entry.run?.claims.run_id ?? null);
-    assert.deepEqual(shown, ['7001', '7001', null]);
-  } else {
-    // With 0.15's log, the refusal is 0.14's entry still; each revoke, the vault's change, naming the credential it came in on (T164 shows them).
-    assert.deepEqual(revocations, [{ actor: MEMBER, decision: 'deny', credentialId: a.id, targetCredentialId: nobody }]);
-    assert.deepEqual(await revokesLogged(db.owner), [
-      { actor: MEMBER, reason: 'revoke', targetCredentialId: b.id },
-      { actor: `user:${ROOT}`, reason: 'revoke', targetCredentialId: c.id },
-    ]);
-    const vias = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).flatMap(({ payload }) => {
-      const { revoke } = JSON.parse(payload) as { revoke?: { via: string | null } };
-      return revoke === undefined ? [] : [revoke.via];
-    });
-    assert.deepEqual(vias, [a.id, null]);
-  }
+  // The refusal is the app's entry; each revoke, the vault's change, naming the credential it came in on (T164 shows them).
+  assert.deepEqual(revocations, [{ actor: MEMBER, decision: 'deny', credentialId: a.id, targetCredentialId: nobody }]);
+  assert.deepEqual(await revokesLogged(db.owner), [
+    { actor: MEMBER, reason: 'revoke', targetCredentialId: b.id },
+    { actor: `user:${ROOT}`, reason: 'revoke', targetCredentialId: c.id },
+  ]);
+  const vias = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).flatMap(({ payload }) => {
+    const { revoke } = JSON.parse(payload) as { revoke?: { via: string | null } };
+    return revoke === undefined ? [] : [revoke.via];
+  });
+  assert.deepEqual(vias, [a.id, null]);
 });
 
 test('a key the issuer rotated in is fetched once; while the issuer cannot be reached, a 503, and cached keys still work', async () => {
@@ -1013,40 +952,38 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
   const caused = (await db.owner.select({ author: auditLog.author, action: auditLog.action, decision: auditLog.decision, metadata: auditLog.metadata })
     .from(auditLog).where(eq(auditLog.actor, MEMBER)).orderBy(asc(auditLog.seq)))
     .map((entry) => ({ ...entry, credentialId: (JSON.parse(entry.metadata) as { credentialId?: string }).credentialId }));
-  // Under 0.15's log, the read is a use, and names the credential as its own column: the vault's read is no entry here.
-  assert.deepEqual(caused.map(({ author, action, decision }) => `${author} ${action} ${decision}`),
-    LOG === '0.15' ? ['app secret.read deny'] : ['app token.exchange allow', 'vault secret.read allow', 'app secret.read deny']);
+  // The read is a use, and names the credential as its own column: the vault's read is no entry here.
+  assert.deepEqual(caused.map(({ author, action, decision }) => `${author} ${action} ${decision}`), ['app secret.read deny']);
   assert.ok(caused.every((entry) => entry.credentialId === credentialId));
-  if (LOG === '0.15') assert.deepEqual((await usesLogged(db.owner)).map((use) => use.credential), [credentialId]);
+  assert.deepEqual((await usesLogged(db.owner)).map((use) => use.credential), [credentialId]);
 
   // Whoever owns the database deletes the credential's row: the log still leads from the read to its run.
   await db.owner.delete(credentials).where(eq(credentials.id, credentialId));
   await deps.vault.listReads();
   const { entries } = await root.audit.list({ detail: '1', sealed: '1' });
-  // Its sign-in, 0.14's `token.exchange` entry or, with 0.15's log, its change (D147), which the page lists in that
-  // entry's place (T156); and every read it shows, the refused one included, with the run.
+  // Its sign-in, the vault's change (D147), which the page lists as a `token.exchange` entry (T156); and every read it shows, the refused one included, with the run.
   const signedIn = entries.find((entry) => entry.action === 'token.exchange')!;
-  assert.equal(signedIn.log, LOG);
-  assert.deepEqual(signedIn.run, { exchangeSeq: signedIn.seq, log: LOG, claims: exchange!.run });
+  assert.equal(signedIn.log, '0.15');
+  assert.deepEqual(signedIn.run, { exchangeSeq: signedIn.seq, log: '0.15', claims: exchange!.run });
   assert.equal(signedIn.run!.claims.run_id, '7001');
-  // Under 0.15's log the allowed read is its use, listed where 0.14's entry stood (T166), by the service, as the
-  // credential's sign-in names it though its row is gone.
+  // The allowed read is the vault's use, listed as a `secret.read` entry (T166), by the service, as the credential's
+  // sign-in names it though its row is gone.
   const reads = entries.filter((entry) => entry.action === 'secret.read');
   assert.equal(reads.length, 2);
   for (const shown of reads) assert.deepEqual(shown.run, signedIn.run);
   assert.deepEqual(reads.map((read) => [read.log, read.decision, read.actorId, read.key]),
-    [['0.14', 'deny', SERVICE, null], [LOG, 'allow', SERVICE, 'API_KEY']]);
+    [['0.14', 'deny', SERVICE, null], ['0.15', 'allow', SERVICE, 'API_KEY']]);
   // An entry no exchanged credential wrote has no run.
   assert.equal(entries.find((entry) => entry.action === 'secret.write')!.run, null);
 });
 
 /**
- * A run's sign-in on the audit pages, under either log (T156): 0.14's `token.exchange` entry, or 0.15's change, which
- * is its record (D147), listed in that entry's place with what it said: the service, the binding, the generation, the
+ * A run's sign-in on the audit pages (T156): the vault's change, which is its record (D147), listed as a
+ * `token.exchange` entry with what it said: the service, the binding, the generation, the
  * issuer, the credential and its end, the run, and when. On every list of the instance's entries, and the service's;
  * on none of a place's, nor of refusals: a refused sign-in is logged by neither (the server's log says why).
  */
-test("a run's sign-in is on the audit list as 0.14's entry put it, under either log; a refused one, under neither", async () => {
+test("a run's sign-in is on the audit list as a `token.exchange` entry; a refused one, not", async () => {
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   const before = Date.now();
@@ -1063,10 +1000,10 @@ test("a run's sign-in is on the audit list as 0.14's entry put it, under either 
     const [entry] = shown;
     assert.deepEqual(
       { log: entry!.log, author: entry!.author, actorType: entry!.actorType, actorId: entry!.actorId, decision: entry!.decision, detail: entry!.detail, project: entry!.project },
-      { log: LOG, author: LOG === '0.15' ? 'vault' : 'app', actorType: 'service', actorId: SERVICE, decision: 'allow', detail: false, project: null },
+      { log: '0.15', author: 'vault', actorType: 'service', actorId: SERVICE, decision: 'allow', detail: false, project: null },
     );
     assert.deepEqual(Object.fromEntries(Object.keys(expected).map((name) => [name, entry!.metadata[name]])), expected);
-    assert.deepEqual(entry!.run, { exchangeSeq: entry!.seq, log: LOG, claims: logged!.run });
+    assert.deepEqual(entry!.run, { exchangeSeq: entry!.seq, log: '0.15', claims: logged!.run });
     const at = Date.parse(entry!.occurredAt);
     assert.ok(at >= before - 1000 && at <= after + 1000, `${entry!.occurredAt} is when it signed in`);
   }
@@ -1136,7 +1073,7 @@ test('pages of the audit list tile both logs: every entry once, newest first, an
  * `at`), as everything else on the page is by when it happened: one that asked later but waited less is the newer,
  * on the first page (review r2 of W258). Here the first, numbered first, says it asked after the second.
  */
-test("sign-ins are listed newest first by when they were asked, not by the number a wait gave them", { skip: LOG === '0.15' ? false : "0.14's sign-ins are entries, numbered and timed under its head" }, async () => {
+test("sign-ins are listed newest first by when they were asked, not by the number a wait gave them", async () => {
   for (let i = 0; i < 2; i++) assert.equal((await trade(token(rsa))).status, 200);
   const [first, second] = await db.owner.select({ number: logChanges.number, at: logChanges.at }).from(logChanges)
     .where(sql`${logChanges.payload} LIKE '%"signIn":{%'`).orderBy(asc(logChanges.number));
@@ -1171,7 +1108,7 @@ test("a change the sign-ins' index holds that is no sign-in is passed over, and 
     before = page.next ?? undefined;
     pages++;
   } while (before !== undefined && pages < 10);
-  assert.deepEqual(seen, [`${LOG} token.exchange`]);
+  assert.deepEqual(seen, ['0.15 token.exchange']);
   assert.ok(pages >= 2, 'the planted row took a page of its own, which showed nothing');
 });
 
@@ -1270,9 +1207,7 @@ test("uploaded keys are checked when bound: public keys alone, of the two algori
   await assert.rejects(bindWith({ keys: [rsa.jwk] }, ' kapsule'), { status: 400 });
 });
 
-test("with 0.15's log, replacing keys asks each binding's change on its own: one that moved is asked again, those done stand (PR 3a, review r1)", {
-  skip: LOG === '0.15' ? false : "0.14's replacement is one transaction",
-}, async (t) => {
+test("replacing keys asks each binding's change on its own: one that moved is asked again, those done stand (PR 3a, review r1)", async (t) => {
   const first = await bindCluster([rsa]);
   const other = await bindCluster([rsa], { sub: 'system:serviceaccount:ci:migrate' });
   assert.ok('binding' in first && 'binding' in other);
@@ -1291,9 +1226,7 @@ test("with 0.15's log, replacing keys asks each binding's change on its own: one
   assert.equal((await db.owner.select().from(serviceBindings)).filter((row) => row.revokedAt === null && row.issuer === first.binding.issuer).length, 2);
 });
 
-test("with 0.15's log, a binding made on the issuer while keys are replaced is no part of it: a conflict, not a success that leaves it on the old keys (PR 3a, review r2)", {
-  skip: LOG === '0.15' ? false : "0.14's replacement is one transaction",
-}, async (t) => {
+test("a binding made on the issuer while keys are replaced is no part of it: a conflict, not a success that leaves it on the old keys (PR 3a, review r2)", async (t) => {
   const first = await bindCluster([rsa]);
   assert.ok('binding' in first);
   const change = deps.vault.changeBindings!.bind(deps.vault);
@@ -1307,9 +1240,7 @@ test("with 0.15's log, a binding made on the issuer while keys are replaced is n
   await assert.rejects(replaceKeys([rsa, ec]), { status: 409, message: /changed while their keys were replaced/ });
 });
 
-test("with 0.15's log, a replacement of keys that stopped part way is finished by asking again with the same keys (PR 3a, review r3)", {
-  skip: LOG === '0.15' ? false : "0.14's replacement is one transaction",
-}, async (t) => {
+test("a replacement of keys that stopped part way is finished by asking again with the same keys (PR 3a, review r3)", async (t) => {
   const first = await bindCluster([rsa]);
   const other = await bindCluster([rsa], { sub: 'system:serviceaccount:ci:migrate' });
   assert.ok('binding' in first && 'binding' in other);
@@ -1330,9 +1261,7 @@ test("with 0.15's log, a replacement of keys that stopped part way is finished b
   assert.ok(live.every((row) => row.jwks !== null && row.jwksUri !== first.binding.jwksUri), 'both on the new keys');
 });
 
-test("with 0.15's log, a row a writer broke is no wedge: a credential whose MAC fails ends with its binding, and a binding row whose MAC fails stops no other bind (PR 3a, Fable)", {
-  skip: LOG === '0.15' ? false : "0.14's app reads past such rows, in its transaction",
-}, async () => {
+test("a row a writer broke is no wedge: a credential whose MAC fails ends with its binding, and a binding row whose MAC fails stops no other bind (PR 3a, Fable)", async () => {
   const id = (await db.owner.select().from(serviceBindings))[0]!.id;
   const { body } = await trade(token(rsa));
   assert.ok(body.token);
@@ -1489,9 +1418,7 @@ test('no limit counts every address together: 301 exchanges in a minute, from 30
   assert.deepEqual(new Set(answers.map(({ status, body }) => `${status} ${body.reason}`)), new Set(['401 malformed']));
 });
 
-test("one binding's sign-ins share its row: one goes through while another holds it, and waits only for an unbind's lock (W331)", {
-  skip: LOG === '0.15' ? false : "0.14's sign-ins take its head, one at a time",
-}, async () => {
+test("one binding's sign-ins share its row: one goes through while another holds it, and waits only for an unbind's lock (W331)", async () => {
   /** The binding's row held in a transaction of the owner's, `mode`, until `release`; the hold once it has the row. */
   const hold = async (mode: 'KEY SHARE' | 'UPDATE') => {
     let release!: () => void;
@@ -1539,9 +1466,7 @@ test('sign-ins racing an unbind of their binding: every credential it issued end
   for (const { status, body } of outcomes) if (status === 200) assert.equal(await caller(body.token!), 401);
 });
 
-test("a binding's last use is stamped at most once a minute, whatever its sign-ins (W331, D177)", {
-  skip: LOG === '0.15' ? false : "0.14's sign-ins stamp it under its head, every one",
-}, async () => {
+test("a binding's last use is stamped at most once a minute, whatever its sign-ins (W331, D177)", async () => {
   const lastUsed = async () => (await db.owner.select({ at: serviceBindings.lastUsedAt }).from(serviceBindings).where(eq(serviceBindings.id, bound)))[0]!.at;
   assert.equal((await trade(token(rsa))).status, 200);
   const first = await lastUsed();
@@ -1576,7 +1501,7 @@ async function bindingState(id: string): Promise<{ live: number; closed: boolean
 }
 
 test(`a binding with more live credentials than one call revokes (${UNBIND_BATCH}) is removed in batches: closed first, every credential revoked, then ended (W331)`, {
-  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 600_000,
+  timeout: 600_000,
 }, async () => {
   limits = processLimits();
   // Past what one Node vault message carries (about 15,000), as a binding signing in at 1,000 a second has in 30 s.
@@ -1640,7 +1565,7 @@ test("a Worker's requests share the isolate's vault, for its caches, and each co
 });
 
 test("on Workers, a removal past what one request revokes answers 202 with what is left, its binding closed; the client asks again until it is done (W331)", {
-  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+  timeout: 300_000,
 }, async () => {
   limits = processLimits();
   const count = 5 * WORKERS_BATCH + 7;
@@ -1666,7 +1591,7 @@ test("on Workers, a removal past what one request revokes answers 202 with what 
 });
 
 test("a removal left under way is finished by the scheduled run, as the system, each change naming whom it continues (W331)", {
-  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+  timeout: 300_000,
 }, async () => {
   limits = processLimits();
   const count = 3 * WORKERS_BATCH;
@@ -1697,7 +1622,7 @@ test("a removal left under way is finished by the scheduled run, as the system, 
 });
 
 test("on Workers, a replacement of keys of more bindings than a request replaces is asked again until every one is on the new keys, runs signing in on those not yet replaced (reviews r8, r9)", {
-  skip: LOG === '0.15' ? false : "0.14's replacement is one transaction", timeout: 300_000,
+  timeout: 300_000,
 }, async () => {
   limits = processLimits();
   const jobs = Array.from({ length: 5 }, (_, n) => ({ sub: `system:serviceaccount:ci:job-${n}` }));
@@ -1732,7 +1657,7 @@ test("on Workers, a replacement of keys of more bindings than a request replaces
 });
 
 test("on Workers, a replacement answers once its first call has made the new binding, as it closes the old one: the scheduled run ends that (reviews r8, r9)", {
-  skip: LOG === '0.15' ? false : "0.14's bind is one transaction under its head", timeout: 300_000,
+  timeout: 300_000,
 }, async () => {
   limits = processLimits();
   const tokens = await signIns(3 * WORKERS_BATCH);
@@ -1759,7 +1684,7 @@ test("on Workers, a replacement answers once its first call has made the new bin
 });
 
 test("a service at the cap replaces one binding in another's place, its old one closed and not yet ended, and then another: the cap counts open bindings (review r10)", {
-  skip: LOG === '0.15' ? false : "0.14's bind is one transaction under its head", timeout: 300_000,
+  timeout: 300_000,
 }, async () => {
   limits = processLimits();
   const others: string[] = [];
@@ -1777,7 +1702,7 @@ test("a service at the cap replaces one binding in another's place, its old one 
 });
 
 test("a removal asked again once the scheduled run has finished it is done, not unknown: answered once its end is sealed (review r9)", {
-  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+  timeout: 300_000,
 }, async () => {
   limits = processLimits();
   await signIns(3 * WORKERS_BATCH);
@@ -1798,9 +1723,7 @@ test("a removal asked again once the scheduled run has finished it is done, not 
   assert.equal((await asWorker(new Request(`https://coffre.test/api/members/${encodeURIComponent(MEMBER)}/bindings/${other}`, { method: 'DELETE' }))).status, 404);
 });
 
-test("the scheduled run reads a removal again when another remover moved it, and one the vault refuses stops no other (Fable on #520)", {
-  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head",
-}, async (t) => {
+test("the scheduled run reads a removal again when another remover moved it, and one the vault refuses stops no other (Fable on #520)", async (t) => {
   limits = processLimits();
   const other = await bind({ ...DEPLOY, ref: 'refs/heads/other', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/other' });
   await signIns(3);
@@ -1831,9 +1754,7 @@ test("the scheduled run reads a removal again when another remover moved it, and
   await assert.rejects(runScheduled(runtime), new RegExp(`removal could not be gone on with: ${malformed}: its close names no remover`));
 });
 
-test("a removal the scheduled run cannot read again after a move is its failure alone: the next one ends all the same (review r13)", {
-  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head",
-}, async (t) => {
+test("a removal the scheduled run cannot read again after a move is its failure alone: the next one ends all the same (review r13)", async (t) => {
   limits = processLimits();
   const other = await bind({ ...DEPLOY, ref: 'refs/heads/other', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/other' });
   await signIns(3);
@@ -1887,7 +1808,7 @@ test("a removal reads what is live on the database's clock, which the end names 
 });
 
 test(`a binding change's request counts its vault calls: after its removal's last, it makes ${AFTER_REMOVAL_CALLS} (W331, removal.ts)`, {
-  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+  timeout: 300_000,
 }, async () => {
   limits = processLimits();
   const after = async (request: Request) => {
@@ -1919,7 +1840,7 @@ test(`a binding change's request counts its vault calls: after its removal's las
 });
 
 test('a removal that fails midway leaves its binding closed, signing nobody in, and run again ends it (W331)', {
-  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+  timeout: 300_000,
 }, async () => {
   limits = processLimits();
   const tokens = await signIns(3 * UNBIND_BATCH);
@@ -1946,7 +1867,7 @@ test('a removal that fails midway leaves its binding closed, signing nobody in, 
 });
 
 test('a removal ends a binding that runs keep signing in through: closed, it stops taking them, rather than being moved forever (W331)', {
-  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+  timeout: 300_000,
 }, async () => {
   limits = processLimits();
   await signIns(2 * UNBIND_BATCH);
@@ -1974,9 +1895,7 @@ test('a removal ends a binding that runs keep signing in through: closed, it sto
   assert.ok(refused.length > 0 && refused.every((why) => why === '401 no_match'), refused.slice(0, 5).join(', '));
 });
 
-test('a bind that ends nothing, moved by another bind, is asked again as it was, closing nothing (W331)', {
-  skip: LOG === '0.15' ? false : "0.14's bind is one transaction under its head",
-}, async (t) => {
+test('a bind that ends nothing, moved by another bind, is asked again as it was, closing nothing (W331)', async (t) => {
   const change = deps.vault.changeBindings!.bind(deps.vault);
   const asked: boolean[] = [];
   t.mock.method(deps.vault as Required<Vault>, 'changeBindings', async (input: Parameters<typeof change>[0]) => {
@@ -1990,7 +1909,7 @@ test('a bind that ends nothing, moved by another bind, is asked again as it was,
 
 
 test('a removal cuts its batches by bytes too: credentials reaching a hundred places go a few hundred a call, each call well inside a vault message (review r4)', {
-  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+  timeout: 300_000,
 }, async () => {
   limits = processLimits();
   // The account holds a hundred projects more, which a binding made now reaches, and each credential it issues names.
@@ -2084,7 +2003,7 @@ test("a removal's batch read walks live credentials only, soonest to end, past t
 });
 
 test("a binding a removal closed shadows no other: a run another binding takes signs in through it while the removal is under way (review r6)", {
-  skip: LOG === '0.15' ? false : "0.14's unbind is one transaction under its head", timeout: 300_000,
+  timeout: 300_000,
 }, async () => {
   limits = processLimits();
   // A second binding, made later, that takes the same runs: the older wins while both are live.

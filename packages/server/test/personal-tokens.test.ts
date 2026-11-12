@@ -17,7 +17,7 @@ import { HIDDEN_COUNTED } from '../src/db/queries.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { auditLog, credentials, logChanges } from '@coffre/db/schema';
-import { aroundNextUseByIds, clientFor, contextFor, issuesLogged, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { aroundNextUseByIds, clientFor, contextFor, issuesLogged, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -175,33 +175,20 @@ test('a token weighs its person as they are at each request: narrowed, it narrow
 
 /**
  * Run `meanwhile` once, as the vault is next asked for values: after the
- * request's credential was checked, before the vault decides. 0.14's unwrap
- * decides on the member, not the credential: only the app's check after the
- * release stands between the value and a credential that ended meanwhile
- * (Revoking). 0.15's use decides on the credential itself, as its own
- * statement reads it, its generation included, and no check follows it
- * (Revoking015Folded).
+ * request's credential was checked, before the vault decides. The use decides
+ * on the credential itself, as its own statement reads it, its generation
+ * included, and no check follows it (Revoking015Folded).
  */
 function beforeNextRelease(meanwhile: () => Promise<unknown>): void {
-  if (LOG === '0.15') {
-    aroundNextUseByIds(deps.vault, { before: meanwhile });
-    return;
-  }
-  const unwrap = deps.vault.unwrap;
-  deps.vault.unwrap = async (...args) => {
-    deps.vault.unwrap = unwrap;
-    await meanwhile();
-    return unwrap(...args);
-  };
+  aroundNextUseByIds(deps.vault, { before: meanwhile });
 }
 
-test('a token revoked while its read is under way gets nothing: 0.14\'s read checks it again once the vault has released, 0.15\'s use decides on it (formal/Credentials.tla)', async () => {
+test('a token revoked while its read is under way gets nothing: the use decides on it (formal/Credentials.tla)', async () => {
   const issued = await ada.tokens.issue(ADA, { label: 'script', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   beforeNextRelease(() => root.tokens.revoke(ADA, issued.id));
   assert.equal(await reads(issued.token, 'dev'), 401);
-  // 0.14: the vault's release is in the log, and after it, the app's refusal: withheld, not handed to a revoked token.
-  // 0.15: the use, refused, is its own record (`usesLogged`).
-  assert.deepEqual(await refusals('secret.read'), LOG === '0.15' ? [] : ['credential_ended']);
+  // The use, refused, is its own record (`usesLogged`).
+  assert.deepEqual(await refusals('secret.read'), []);
   // Removed and added again meanwhile: the vault finds her active, but at a generation the token was not issued at.
   const again = await ada.tokens.issue(ADA, { label: 'again', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   beforeNextRelease(async () => {
@@ -213,7 +200,7 @@ test('a token revoked while its read is under way gets nothing: 0.14\'s read che
   assert.equal((await ada.secrets.reveal('market/dev')).values.API_KEY, 'dev-key');
 });
 
-test("0.15: a token revoked once its use has decided ends after that read, which stands: the log orders the use before the revoke (Revoking015Folded)", { skip: LOG === '0.15' ? false : "0.14's read checks the token again after the vault's release" }, async () => {
+test("a token revoked once its use has decided ends after that read, which stands: the log orders the use before the revoke (Revoking015Folded)", async () => {
   const issued = await ada.tokens.issue(ADA, { label: 'script', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   aroundNextUseByIds(deps.vault, { after: () => root.tokens.revoke(ADA, issued.id) });
   assert.equal(await reads(issued.token, 'dev'), 'dev-key');
@@ -268,32 +255,21 @@ test('every entry made with a personal token names its person and the token, the
     .where(and(eq(auditLog.actor, ADA)))
     .orderBy(asc(auditLog.seq));
   const made = written.filter((row) => JSON.parse(row.metadata).credentialId === issued.id).map((row) => `${row.author} ${row.action}`);
-  // The read, under 0.15's log, is a use, its credential the token's: no entry here.
-  // Under 0.15's log the write goes down the two-trip path, which since 0.16.0 writes no 0.14 entry (T179):
+  // The read is a use, its credential the token's: no entry here.
+  // The write goes down the two-trip path, which since 0.16.0 writes no 0.14 entry (T179):
   // its record is the key's change in 0.15's log, which names her and the token it was decided for.
-  const fast = LOG === '0.15';
-  for (const action of [...(fast ? [] : ['app secret.write', 'vault key.wrap']), ...(LOG === '0.14' ? ['vault secret.read'] : [])]) assert.ok(made.includes(action), action);
-  if (fast) {
-    assert.deepEqual(made.filter((action) => action === 'app secret.write' || action === 'vault key.wrap'), []);
-    const changes = await db.owner.select({ actor: logChanges.actor, payload: logChanges.payload }).from(logChanges)
-      .where(sql`${logChanges.payload} LIKE ${'{"digest":%"inputs":"%'} AND ${logChanges.payload} LIKE ${'%"op":"secret.write"%'}`);
-    assert.deepEqual(changes.map(({ actor, payload }) => [actor, (JSON.parse(payload) as { request: { credential: string } }).request.credential]), [[ADA, issued.id]]);
-  }
-  if (LOG === '0.15') assert.deepEqual((await usesLogged(db.owner)).map((use) => use.credential), [issued.id]);
+  assert.deepEqual(made.filter((action) => action === 'app secret.write' || action === 'vault key.wrap'), []);
+  const changes = await db.owner.select({ actor: logChanges.actor, payload: logChanges.payload }).from(logChanges)
+    .where(sql`${logChanges.payload} LIKE ${'{"digest":%"inputs":"%'} AND ${logChanges.payload} LIKE ${'%"op":"secret.write"%'}`);
+  assert.deepEqual(changes.map(({ actor, payload }) => [actor, (JSON.parse(payload) as { request: { credential: string } }).request.credential]), [[ADA, issued.id]]);
+  assert.deepEqual((await usesLogged(db.owner)).map((use) => use.credential), [issued.id]);
 
-  // With 0.15's log, the vault issues it (T149), and its change records it (D147): the page lists it in 0.14's entry's
-  // place, and the token's label beside what it made, read from either (T164).
-  if (LOG === '0.15') {
-    assert.deepEqual((await issuesLogged(db.owner)).map(({ kind, label, targetCredentialId }) => [kind, label, targetCredentialId]), [['personal', 'cursor-agent', issued.id]]);
-  }
+  // The vault issues it (T149), and its change records it (D147): the page lists the change, and the token's label
+  // beside what it made (T164).
+  assert.deepEqual((await issuesLogged(db.owner)).map(({ kind, label, targetCredentialId }) => [kind, label, targetCredentialId]), [['personal', 'cursor-agent', issued.id]]);
   const { entries } = await root.audit.list({ actor: ADA, detail: '1', sealed: '1' });
   const create = entries.find((entry) => entry.action === 'token.create')!;
-  assert.deepEqual([create.log, create.metadata.kind, create.metadata.label, create.metadata.targetCredentialId, create.token], [LOG, 'personal', 'cursor-agent', issued.id, null]);
-  // The audit page reads 0.15's uses from plan PR 8: until then, the read it shows is 0.14's entry.
-  if (LOG === '0.14') {
-    const read = entries.find((entry) => entry.action === 'secret.read')!;
-    assert.deepEqual([read.actorId, read.token], ['ada@acme.example', { id: issued.id, label: 'cursor-agent' }]);
-  }
+  assert.deepEqual([create.log, create.metadata.kind, create.metadata.label, create.metadata.targetCredentialId, create.token], ['0.15', 'personal', 'cursor-agent', issued.id, null]);
   const write = entries.find((entry) => entry.action === 'secret.write')!;
   assert.deepEqual(write.token, { id: issued.id, label: 'cursor-agent' });
 });
@@ -307,8 +283,7 @@ test("a token of a person's own, asked on a request made before they were remove
   await assert.rejects(signin.issuePersonalToken(before, input), { code: 'forbidden', message: 'that session has ended' });
   await assert.rejects(signin.issueHandle({ ...before, personalToken: null }, { label: 'run', expiresInMinutes: 60, paths: ['market/dev'] }), { code: 'forbidden', message: 'that session has ended' });
   assert.deepEqual(await refusals('token.create'), ['session_ended', 'session_ended']);
-  if (LOG !== '0.15') return;
-  // With 0.15's log, a session of hers that ends once the request was checked, before the vault writes the token.
+  // A session of hers that ends once the request was checked, before the vault writes the token.
   const started = await signin.startDevice({ clientLabel: 'laptop', sourceIp: null });
   await signin.decideDevice(await contextFor(deps, 'ada@acme.example'), started.userCode, true);
   const polled = await signin.pollDevice(started.deviceCode, { requestId: 'device', sourceIp: null });
@@ -419,18 +394,17 @@ test("a personal token's label is shown wherever it goes, so it holds no control
   }
   const issued = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   await signin.signOut(issued.token, { requestId: 'logout', sourceIp: null });
-  // With 0.15's log, the vault ends it (T149), and its change, which the page lists in 0.14's entry's place (T164), names
-  // the token it ends.
-  if (LOG === '0.15') assert.deepEqual(await revokesLogged(db.owner), [{ actor: ADA, reason: 'sign_out', targetCredentialId: issued.id }]);
+  // The vault ends it (T149), and its change, which the page lists (T164), names the token it ends.
+  assert.deepEqual(await revokesLogged(db.owner), [{ actor: ADA, reason: 'sign_out', targetCredentialId: issued.id }]);
   const { entries } = await root.audit.list({ actor: ADA, detail: '1', sealed: '1' });
   const out = entries.find((entry) => entry.action === 'sign_out')!;
-  assert.deepEqual([out.log, out.metadata.targetCredentialId, out.metadata.kind, out.token], [LOG, issued.id, 'personal', { id: issued.id, label: 'agent' }]);
+  assert.deepEqual([out.log, out.metadata.targetCredentialId, out.metadata.kind, out.token], ['0.15', issued.id, 'personal', { id: issued.id, label: 'agent' }]);
 });
 
 /**
- * A person's tokens on the audit pages, a page at a time, under either log (T164): their issues, revokes and
+ * A person's tokens on the audit pages, a page at a time (T164): their issues, revokes and
  * sign-outs, which 0.15's log records in place of 0.14's detail entries, are left out and counted, each on the page
- * of its own time, between the entries the pages show, as 0.14's entries are, never all on the first, though 0.15's
+ * of its own time, between the entries the pages show, never all on the first, though 0.15's
  * log holds no sign-in of a person's to page by. Asked for, they are listed among the rest. Pages tile both logs:
  * every entry on one, every hidden one counted on one.
  */
@@ -474,13 +448,13 @@ test("a person's token issues, revokes and sign-outs are counted on the page of 
   assert.deepEqual(activity.map((page) => page.entries.map((entry) => `${entry.action} ${entry.log}`)), [['secret.write 0.14'], ['secret.write 0.14'], ['secret.write 0.14'], []]);
   assert.deepEqual(activity.map(tokens), [{}, { 'token.create': 1, 'token.revoke': 1, sign_out: 1 }, { 'token.create': 1 }, {}]);
 
-  // Asked for, each is listed, as 0.14's entry put it.
+  // Asked for, each is listed.
   const listed = (await root.audit.list({ actor: ADA, detail: '1', sealed: '1', limit: 500 })).entries.filter((entry) => TOKENS.has(entry.action));
   assert.deepEqual(listed.map((entry) => [entry.log, entry.action, entry.actorId, entry.metadata.targetCredentialId, entry.detail]), [
-    [LOG, 'sign_out', 'ada@acme.example', first.id, true],
-    [LOG, 'token.revoke', 'ada@acme.example', second.id, true],
-    [LOG, 'token.create', 'ada@acme.example', second.id, true],
-    [LOG, 'token.create', 'ada@acme.example', first.id, true],
+    ['0.15', 'sign_out', 'ada@acme.example', first.id, true],
+    ['0.15', 'token.revoke', 'ada@acme.example', second.id, true],
+    ['0.15', 'token.create', 'ada@acme.example', second.id, true],
+    ['0.15', 'token.create', 'ada@acme.example', first.id, true],
   ]);
 
   const named = (entries: Page['entries']) => entries.map((entry) => `${entry.log}:${entry.seq}`);

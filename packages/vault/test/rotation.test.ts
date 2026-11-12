@@ -94,7 +94,7 @@ async function vaultUnder(config: VaultConfig, memory: Memory & { record: string
   const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: resolved.signingKeys, memory, record: (alarm) => void alarms.push(alarm.message) });
   const sealThrough: SealThrough = (number, deadline) => cp.sealThrough(number, deadline);
   const heldOutside = async () => (memory.record === null ? [] : [decodePair(memory.record)!]);
-  const vault = speaking(await openLocalVault(db.vault, resolved, { log: '0.15', sealThrough, heldOutside }, async () => {}, hot));
+  const vault = speaking(await openLocalVault(db.vault, resolved, { sealThrough, heldOutside }, async () => {}, hot));
   const keys: ChangeKeys = { seals: resolved.signingKeys.map((seed) => sealKey(seed)), mac: logMacKey(resolved.signingKeys[0]!) };
   return { config: resolved, cp, vault, keys, memory, alarms };
 }
@@ -243,7 +243,7 @@ test('before the rotation, both keys write: the old key\'s entries count below i
   // The new config's isolates serve before the checkpointer starts under it: a use under each key, in the window.
   // Its first call holds the cutover to its seal, the old key's: answered as sealed (`sealed`), with no checkpointer.
   const resolved = { ...resolveVaultConfig(rotation.after), keks };
-  const early = speaking(await openLocalVault(db.vault, resolved, { log: '0.15', sealThrough: sealed, heldOutside: async () => [] }, async () => {}, hot));
+  const early = speaking(await openLocalVault(db.vault, resolved, { sealThrough: sealed, heldOutside: async () => [] }, async () => {}, hot));
   assert.ok((await w.use(early, one)).ok);
   assert.ok((await w.use(w.old.vault, two)).ok);
   // The rotation under way, before the new key's checkpointer writes it: the newest pair under the old key checks clean.
@@ -387,7 +387,7 @@ test('a backlog sealed a part at a time across the rotation: a pair under the ne
   const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: resolved.signingKeys, memory: w.memory, windowMax: 2 });
   const [moved] = await rotations();
   const vault = speaking(await openLocalVault(db.vault, resolved, {
-    log: '0.15', sealThrough: (number, deadline) => cp.sealThrough(number, deadline), heldOutside: async () => (w.memory.record === null ? [] : [decodePair(w.memory.record)!]),
+    sealThrough: (number, deadline) => cp.sealThrough(number, deadline), heldOutside: async () => (w.memory.record === null ? [] : [decodePair(w.memory.record)!]),
   }, async () => {}, hot));
   const first = await cp.tick();
   assert.deepEqual(first.failures, []);

@@ -16,7 +16,7 @@ import { credential } from '@coffre/client/credential';
 import { defineDeployment } from '@coffre/core/deployment';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { clientFor, LOG, usesLogged } from './api-fixture.ts';
+import { clientFor, usesLogged } from './api-fixture.ts';
 import { db, deps, DEV, entries, NO, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { auditLog } from '@coffre/db/schema';
 import { checkPlugins, type PluginContext, type UseAsked } from '../src/plugins.ts';
@@ -148,7 +148,7 @@ test('an HMAC signer signs as Node does and checks its own signatures; a verifie
   // An environment that holds no secret for it: the one "no" of a key (D153), which names nothing, its reason in the app's entry.
   const bare = await run(['market/bare']);
   const absent = (await route('/use/market/bare', { method: 'POST', headers: { authorization: `Bearer ${bare.env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ verify: { credential: 'yousign', message: 'aGk', signature: 'sha256=00' } }) }));
-  assert.deepEqual([absent.status, await absent.json(), await refusedFor()], [404, NO, LOG === '0.15' ? 'missing' : 'unknown_secret']);
+  assert.deepEqual([absent.status, await absent.json(), await refusedFor()], [404, NO, 'missing']);
   // An empty secret, which WebCrypto takes for no key: said, never a 500.
   const empty = await run(['market/empty']);
   for (const asked of [{ verify: { credential: 'yousign', message: 'aGk', signature: 'sha256=00' } }, { sign: { credential: 'iframe-token', message: 'aGk' } }]) {
@@ -322,9 +322,8 @@ test('a raw message longer or shorter than it declares, or other than its Conten
 
 test("verifies and HMAC signatures are logged once a minute per handle and name, as a credential's requests are, the vault asked once", async () => {
   const { env } = await run();
-  const reads = (await entries('secret.read')).length;
-  // How the vault opens a value: 0.14's unwrap, or 0.15's use, one a key, by name for a handle's one key (T145).
-  const methods = LOG === '0.15' ? ['use', 'useNamed'] as const : ['unwrap'] as const;
+  // How the vault opens a value: a use, one a key, by name for a handle's one key (T145).
+  const methods = ['use', 'useNamed'] as const;
   const kept = methods.map((method) => (deps.vault[method] as (...args: unknown[]) => Promise<unknown>).bind(deps.vault));
   let opened = 0;
   for (const [i, method] of methods.entries()) {
@@ -341,14 +340,8 @@ test("verifies and HMAC signatures are logged once a minute per handle and name,
   } finally {
     for (const [i, method] of methods.entries()) (deps.vault as unknown as Record<string, unknown>)[method] = kept[i];
   }
-  if (LOG === '0.15') {
-    // 0.15's record: a use of each key, its row slim (R53), naming neither the name nor that it signs.
-    assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 2);
-    return;
-  }
-  const uses = (await entries('credential.use')).filter((entry) => entry.metadata.hmac === true);
-  assert.deepEqual(uses.map((entry) => [entry.metadata.credential, entry.metadata.purpose]).sort(), [['iframe-token', 'use'], ['yousign', 'use']]);
-  assert.equal((await entries('secret.read')).length, reads + 2);
+  // The record: a use of each key, its row slim (R53), naming neither the name nor that it signs.
+  assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 2);
 });
 
 test('no byte of a secret leaves coffre: not in an answer, an entry of the log, or the console, whatever is asked', async () => {

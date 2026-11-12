@@ -29,14 +29,13 @@ import { frozenAllows, frozenHoldings, frozenOwns, proxyLookup, type ProxyLevel 
 import type { Reader } from '../src/decide.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { newestChange, readObject } from '../src/store.ts';
-import { emptyDatabase, LOG, locksHere, newEnvironment, newProject, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, rows, run, sealed, sealPlaces, VAULT_URL, type LocalVault, type TestDatabase } from './database.ts';
+import { emptyDatabase, locksHere, newEnvironment, newProject, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, rows, run, sealed, sealPlaces, VAULT_URL, type LocalVault, type TestDatabase } from './database.ts';
 import { environments, proxyDefinitions } from '@coffre/db/schema';
 
 const ROOT = 'user:root@acme.example';
 const NOBODY: FrozenHoldings = { role: 'member', scope: { projects: 'all', environments: 'all' }, instance: { normal: [], protected: [] }, grants: [] };
 const ADA = 'user:ada@acme.example';
 const CI = 'token:ci';
-const ON_015 = { skip: LOG === '0.14' ? "proxy definitions are 0.15's log's objects" : false };
 
 let db: TestDatabase;
 before(async () => {
@@ -60,7 +59,7 @@ function route(name: string, host = 'api.openai.com', key = 'OPENAI_API_KEY'): P
 /** A vault keeping 0.15's log, a project with `dev`, Ada a Developer there. */
 async function world(options: Parameters<typeof openLocalVault>[2] = {}) {
   const config = configure();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld, ...options });
+  const vault = await openLocalVault(db.vault, config, { sealThrough: sealed, heldOutside: nothingHeld, ...options });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   const dev = await newEnvironment(db.owner, project);
@@ -187,7 +186,7 @@ test('a save freezes its editor\'s grants, not the places it saw: a fork made la
 
 // --- a save ----------------------------------------------------------------------------------------------------------
 
-test('an Owner saves a route: the row holds it with its index and seal, the log a change and an entry, and the replay agrees', ON_015, async () => {
+test('an Owner saves a route: the row holds it with its index and seal, the log a change and an entry, and the replay agrees', async () => {
   const w = await world();
   const before = await w.view();
   assert.deepEqual(before, { environmentId: w.dev, seal: null, state: 'ok', items: [], reserved: [], reservedState: 'ok', inheritedNotCleared: {} });
@@ -215,7 +214,7 @@ test('an Owner saves a route: the row holds it with its index and seal, the log 
   assert.equal(await count(sql`SELECT count(*) AS n FROM log_changes`), changes);
 });
 
-test('a page behind another save is refused, 409 proxy_changed, and changes nothing; on top of the newest it saves', ON_015, async () => {
+test('a page behind another save is refused, 409 proxy_changed, and changes nothing; on top of the newest it saves', async () => {
   const w = await world();
   const first = saved(await w.save({ seal: null, items: { openai: route('openai') } }));
   refusedWith(await w.save({ seal: null, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } }), 'proxy_changed');
@@ -230,7 +229,7 @@ test('a page behind another save is refused, 409 proxy_changed, and changes noth
   assert.deepEqual((await replayStored(db.owner, w.config.signingKeys)).faults, []);
 });
 
-test('who saves: a person holding proxy.edit, on a session; a Developer, a token, or a person on a scoped credential, refused', ON_015, async () => {
+test('who saves: a person holding proxy.edit, on a session; a Developer, a token, or a person on a scoped credential, refused', async () => {
   const w = await world();
   refusedWith(await w.save({ actor: ADA, seal: null, items: { openai: route('openai') } }), 'no_grant', /proxy\.edit/);
   refusedWith(await w.save({ actor: CI, caller: 'bearer', seal: null, items: { openai: route('openai') } }), 'not_allowed', /person/);
@@ -260,7 +259,7 @@ test('who saves: a person holding proxy.edit, on a session; a Developer, a token
   assert.equal(await count(sql`SELECT count(*) AS n FROM audit_log WHERE action = 'proxy.save' AND decision = 'deny'`), 4);
 });
 
-test('what a save refuses before it reads: a definition the rules refuse, an item under another name, 257 items, a personal config', ON_015, async () => {
+test('what a save refuses before it reads: a definition the rules refuse, an item under another name, 257 items, a personal config', async () => {
   const w = await world();
   refusedWith(await w.save({ seal: null, items: { openai: { ...route('openai'), upstream: 'https://169.254.169.254' } as ProxyDefinition } }), 'invalid', /private/);
   refusedWith(await w.save({ seal: null, items: { maps: route('openai') } }), 'invalid', /own name/);
@@ -280,7 +279,7 @@ test('what a save refuses before it reads: a definition the rules refuse, an ite
 
 // --- forged rows fail closed (R64) -----------------------------------------------------------------------------------
 
-test('a row a writer edits, moves an item in, puts back or deletes shows tampered or stale, with no item; only an Owner replaces it whole', ON_015, async () => {
+test('a row a writer edits, moves an item in, puts back or deletes shows tampered or stale, with no item; only an Owner replaces it whole', async () => {
   const w = await world();
   const first = saved(await w.save({ seal: null, items: { a: route('a'), b: route('b', 'eu.api.openai.com') } }));
   const genuine = (await stored(w.dev))!;
@@ -327,7 +326,7 @@ test('a row a writer edits, moves an item in, puts back or deletes shows tampere
   assert.deepEqual(await audits(), [['c']]);
 });
 
-test("a row planted where no change was made is stale, and its environment's first save starts from none", ON_015, async () => {
+test("a row planted where no change was made is stale, and its environment's first save starts from none", async () => {
   const w = await world();
   const items = { a: item(route('a', 'evil.example')) };
   await run(db.owner, sql`INSERT INTO proxy_definitions (environment_id, items, digests, seal) VALUES (${w.dev}, ${JSON.stringify(items)}::jsonb, ${indexBytes(items)}, ${randomBytes(16)})`);
@@ -339,7 +338,7 @@ test("a row planted where no change was made is stale, and its environment's fir
 
 // --- forks: a lookup by name through the chain (decision 6) ---------------------------------------------------------
 
-test('a lookup walks the fork chain nearest first: a fork of a fork is served by its grandparent; a fork whose own item a writer deleted is tampered, never its parent\'s', ON_015, async () => {
+test('a lookup walks the fork chain nearest first: a fork of a fork is served by its grandparent; a fork whose own item a writer deleted is tampered, never its parent\'s', async () => {
   const w = await world();
   const child = await fork(w.project, w.dev);
   const grandchild = await fork(w.project, child);
@@ -374,7 +373,7 @@ test('a lookup walks the fork chain nearest first: a fork of a fork is served by
 
 // --- code's reserved names (section 6) ------------------------------------------------------------------------------
 
-test("code reserves its names: each UI item of one deleted, whole in its entry; a save of one refused; only an instance Owner releases it", ON_015, async () => {
+test("code reserves its names: each UI item of one deleted, whole in its entry; a save of one refused; only an instance Owner releases it", async () => {
   const w = await world();
   const other = await newEnvironment(db.owner, w.project);
   const dev = saved(await w.save({ seal: null, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY'), openai: route('openai') } }));
@@ -408,7 +407,7 @@ test("code reserves its names: each UI item of one deleted, whole in its entry; 
   assert.deepEqual((await replayStored(db.owner, w.config.signingKeys)).faults, []);
 });
 
-test("names code reserved already are found so without the head, which every isolate's first requests would queue on, and every use behind them; a name to add waits for it (#467's bench)", ON_015, async () => {
+test("names code reserved already are found so without the head, which every isolate's first requests would queue on, and every use behind them; a name to add waits for it (#467's bench)", async () => {
   const w = await world();
   assert.ok((await w.vault.reserveProxy({ names: ['maps', 'stripe'] })).ok);
   const holder = postgresSession(OWNER_URL);
@@ -431,7 +430,7 @@ test("names code reserved already are found so without the head, which every iso
   }
 });
 
-test("a deploy's herd of first requests, each finding its code's name missing, waits for the head in one place, not one each, and reads the name the one wrote (#467's bench)", ON_015, async () => {
+test("a deploy's herd of first requests, each finding its code's name missing, waits for the head in one place, not one each, and reads the name the one wrote (#467's bench)", async () => {
   const w = await world();
   const holder = postgresSession(OWNER_URL);
   // The code's place in line, and every lock a session of this database waits for.
@@ -458,7 +457,7 @@ test("a deploy's herd of first requests, each finding its code's name missing, w
   }
 });
 
-test("a reservation waits for the head within one bound, however late it took the code's place (review r14 of #467)", ON_015, async () => {
+test("a reservation waits for the head within one bound, however late it took the code's place (review r14 of #467)", async () => {
   const w = await world({ codeWaitMs: 1_000 });
   const holder = postgresSession(OWNER_URL);
   const PLACE = 0x636f6670;
@@ -484,7 +483,7 @@ test("a reservation waits for the head within one bound, however late it took th
   }
 });
 
-test("a reservation's wait for the head ends within its bound, however many changes hold the head in turn (review r16 of #467)", ON_015, async () => {
+test("a reservation's wait for the head ends within its bound, however many changes hold the head in turn (review r16 of #467)", async () => {
   const w = await world({ codeWaitMs: 1_000 });
   // Two changes, as appends: each locks the head's row and writes a new version of it.
   const first = postgresSession(OWNER_URL);
@@ -527,7 +526,7 @@ test("a reservation's wait for the head ends within its bound, however many chan
   }
 });
 
-test("names reserved already are found so while another transaction is open on the vault's database, which a read waits for not (review r15 of #467)", ON_015, async () => {
+test("names reserved already are found so while another transaction is open on the vault's database, which a read waits for not (review r15 of #467)", async () => {
   const w = await world({ codeWaitMs: 1_000 });
   assert.ok((await w.vault.reserveProxy({ names: ['maps', 'stripe'] })).ok);
   let end!: () => void;
@@ -548,7 +547,7 @@ test("names reserved already are found so while another transaction is open on t
   }
 });
 
-test('the reserved set forged around the vault refuses every save: fail closed (R64)', ON_015, async () => {
+test('the reserved set forged around the vault refuses every save: fail closed (R64)', async () => {
   const w = await world();
   assert.ok((await w.vault.reserveProxy({ names: ['maps'] })).ok);
   await run(db.owner, sql`UPDATE proxy_reserved SET names = '{}'`);
@@ -563,7 +562,7 @@ test('the reserved set forged around the vault refuses every save: fail closed (
   }
 });
 
-test('a released name put back with its old seal, the log\'s newest seal forged to match, is no name reserved: code\'s reservation decides under the head and refuses (T190)', ON_015, async () => {
+test('a released name put back with its old seal, the log\'s newest seal forged to match, is no name reserved: code\'s reservation decides under the head and refuses (T190)', async () => {
   const w = await world();
   assert.ok((await w.vault.reserveProxy({ names: ['maps'] })).ok);
   const [before] = await rows<{ names: string[]; seal: Uint8Array }>(db.owner, sql`SELECT names, seal FROM proxy_reserved`);
@@ -578,7 +577,7 @@ test('a released name put back with its old seal, the log\'s newest seal forged 
   assert.equal(await count(sql`SELECT count(*) AS n FROM log_changes`), changes);
 });
 
-test('items or names no change writes fail the seal like any forgery: the tab shows tampered, and code\'s reservation passes them by', ON_015, async () => {
+test('items or names no change writes fail the seal like any forgery: the tab shows tampered, and code\'s reservation passes them by', async () => {
   const w = await world();
   const other = await newEnvironment(db.owner, w.project);
   const dev = saved(await w.save({ seal: null, items: { openai: route('openai') } }));
@@ -610,7 +609,7 @@ const BEFORE_0084 = [
   `ALTER TABLE proxy_reserved ADD CONSTRAINT proxy_reserved_names_check CHECK (jsonb_typeof(names) = 'array')`,
 ];
 
-test('a reserved set sealed before 0084 verifies after it: the same names, in the same order, under the same seal (T278)', ON_015, async () => {
+test('a reserved set sealed before 0084 verifies after it: the same names, in the same order, under the same seal (T278)', async () => {
   const w = await world();
   assert.ok((await w.vault.reserveProxy({ names: ['stripe', 'maps', 'openai'] })).ok);
   const before = await readObject(db.owner, RESERVED_REF);
@@ -624,7 +623,7 @@ test('a reserved set sealed before 0084 verifies after it: the same names, in th
   assert.deepEqual(after, before);
   assert.ok(sealOf(w.keys[0]!, RESERVED_REF, after.row!).equals(after.seal!), "the vault's seal over the object the row makes");
   // A vault opened on the migrated schema reads the set intact, and code's reservation of the same names changes nothing.
-  const fresh = await openLocalVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const fresh = await openLocalVault(db.vault, w.config, { sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await fresh.proxy({ projectId: w.project, environmentId: w.dev })).reservedState, 'ok');
   const changes = await count(sql`SELECT count(*) AS n FROM log_changes`);
   assert.ok((await fresh.reserveProxy({ names: ['stripe', 'maps', 'openai'] })).ok);
@@ -633,9 +632,9 @@ test('a reserved set sealed before 0084 verifies after it: the same names, in th
 
 // --- the version gate (section 3, "One version at a time") ----------------------------------------------------------
 
-test('in this process, a call on another release answers this one and runs nothing: no read, no entry; on this release it runs', ON_015, async () => {
+test('in this process, a call on another release answers this one and runs nothing: no read, no entry; on this release it runs', async () => {
   const w = await world();
-  const entry = await openEntry(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const entry = await openEntry(db.vault, w.config, { sealThrough: sealed, heldOutside: nothingHeld });
   const entries = await count(sql`SELECT count(*) AS n FROM audit_log`);
   const changes = await count(sql`SELECT count(*) AS n FROM log_changes`);
   for (const [method, args] of [['about', []], ['access', [ROOT]], ['useNamed', [{ tokenHash: 'x' }]], ['saveProxy', [{ actor: ROOT, caller: 'person', projectId: w.project, environmentId: w.dev, seal: null, items: { openai: route('openai') } }]]] as const) {
@@ -651,7 +650,7 @@ test('in this process, a call on another release answers this one and runs nothi
   await assert.rejects(versioned(entry, '0.0.1').about(), (error: Error & { code?: string }) => error.code === 'deploying');
 });
 
-test('in this process, a call on another release runs no statement at all, the hot path\'s included', ON_015, async () => {
+test('in this process, a call on another release runs no statement at all, the hot path\'s included', async () => {
   const w = await world();
   let statements = 0;
   const clients: { end(): Promise<void> }[] = [];
@@ -672,7 +671,7 @@ test('in this process, a call on another release runs no statement at all, the h
   const vault = counted(VAULT_URL);
   const hot = counted(OWNER_URL.replace('coffre_owner:local-dev-only', 'coffre_vault_hot:local-hot-only'));
   try {
-    const entry = await openEntry(vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld }, async () => {}, hot);
+    const entry = await openEntry(vault, w.config, { sealThrough: sealed, heldOutside: nothingHeld }, async () => {}, hot);
     statements = 0;
     await entry.call('0.0.1', 'useNamed', [{ tokenHash: 'x' }]);
     await entry.call('0.0.1', 'about', []);

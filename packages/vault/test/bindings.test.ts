@@ -51,7 +51,7 @@ function configure(): ResolvedVaultConfig {
 /** A vault keeping 0.15's log; an Owner, an Admin who is no Owner, and a service account that views a project. */
 async function world() {
   const config = configure();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const vault = await openLocalVault(db.vault, config, { sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'admin' })).ok);
@@ -131,7 +131,7 @@ async function watchedVault(w: World, before: () => Promise<void> = async () => 
       return value.bind(target);
     },
   });
-  const vault = await openLocalVault(late as never, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const vault = await openLocalVault(late as never, w.config, { sealThrough: sealed, heldOutside: nothingHeld });
   return { vault, reads: () => reads };
 }
 
@@ -211,7 +211,7 @@ test("a binding ended, put back, its end's seal column written to match only onc
       return value.bind(target);
     },
   });
-  const vault = await openLocalVault(late as never, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const vault = await openLocalVault(late as never, w.config, { sealThrough: sealed, heldOutside: nothingHeld });
   const signedIn = (await db.owner.select().from(credentialsTable)).length;
   // Held by the end's MAC alone, the sign-in went on to `sign_in`, whose comparison the forged column then passed: a
   // credential through an ended binding. The binding's seal, as the vault proved it, is held to the checked change's.

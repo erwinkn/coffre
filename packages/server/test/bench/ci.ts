@@ -11,17 +11,16 @@
 // time its statements spent in the database beyond the round trip:
 // waiting on locks, almost all of it, and which statements waited. With 5
 // to 15 runs a level, its p99 is its slowest run.
-// With `--log 0.15`, the vault keeps 0.15's log: the sign-in's credential is a change of it, which a Node
-// checkpointer seals before the sign-in answers (R51; docs/design/0.15-plan.md, "As built: PR 4b"), over its own
-// connection, near; and each vault call has the hot path's login too, so that a job's reveal is 0.15's uses, as a
-// deployment's is (T145: without it, 0.14's unwrap queued on the log's head).
+// The sign-in's credential is a change of the vault's log, which a Node checkpointer seals before the sign-in answers
+// (R51; docs/design/0.15-plan.md, "As built: PR 4b"), over its own connection, near; and each vault call has the hot
+// path's login too, so that a job's reveal is a use, as a deployment's is (T145).
 // With `--uses <rate>`, uses run beside, that many a second, each one `use_credential` call through a relay of its
 // own (uses.ts), and it reports their latency and refusals for each level, `0` jobs a level of uses alone (`--idle`
 // seconds): what a sign-in costs the hot path (R58). `--signin-only` leaves each job's list and reveal out.
 // With `--proxy <rate>` instead, the uses beside are the whole app's `/use`, the credential proxy on 100 people's
-// handles (proxy-uses.ts, PR 5b): 0.14's unwrap or, with `--log 0.15`, 0.15's use. `--proxy-cache <s>` is the proxy's
+// handles (proxy-uses.ts, PR 5b): each request a use. `--proxy-cache <s>` is the proxy's
 // values' lifetime, `proxy.revokedWithinSeconds` (0, the default here: none kept, every request opens its key); `--proxy-stable` sends each to the stable URL;
-// `--proxy-names <n>` caps 0.15's vault's map of names at n a thread, its handles picked at random (0: every request cold).
+// `--proxy-names <n>` caps the vault's map of names at n a thread, its handles picked at random (0: every request cold).
 // `--proxy-pair` gives the proxy's credential two keys, `API_KEY` and `API_SECRET` in one header: each `/use` a request of
 // several keys, the vault's named batch (T165, PR 2); `--proxy-unnamed` hides that batch from the app, as a vault older
 // than it: the app reads the keys, then uses them by ids (T167), the path before.
@@ -38,10 +37,9 @@
 // own, a new backend whose first call plans the statement (T131): reported apart from the others. `--window` is
 // the cap's window in minutes (1 by default; its rows move on every tenth of it), its count a million.
 // `--issue` makes each job a service token's issue by the Owner instead (T149, PR 2), the vault weighing it: what a burst
-// of issues costs beside the uses. `--legacy` hides from the app that the vault issues tokens and signs in (`about()`
-// says neither): the app's own transactions under 0.14's head, as before T149, to compare with.
-// `--bindings <n>` spreads a level's jobs over n bindings of the one service, each a workflow of its own (with 0.15's
-// log, a binding's sign-ins share its row, W331).
+// of issues costs beside the uses.
+// `--bindings <n>` spreads a level's jobs over n bindings of the one service, each a workflow of its own (a binding's
+// sign-ins share its row, W331).
 // `--unbind <n>`, after the levels, signs n runs in through one binding, then removes it while the uses beside run: what
 // a removal in batches (W331, `UNBIND_BATCH` a call, each holding the fence) costs the hot path, reported as the uses of
 // its own phase, `unbind`, beside `--jobs 0`'s, which holds none.
@@ -50,7 +48,7 @@
 // Not part of the suite. On a migrated scratch database, as `pnpm test` makes:
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
-//     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15] [--uses 1000 | --proxy 1000] [--use-pool 100] [--idle 5]
+//     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--uses 1000 | --proxy 1000] [--use-pool 100] [--idle 5]
 //     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--proxy-cache 60] [--proxy-stable] [--proxy-names 0] [--proxy-fork] [--proxy-pair] [--proxy-unnamed] [--proxy-ui] [--proxy-path]
 //     [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope] [--days 365]
 import { generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
@@ -94,7 +92,6 @@ const { values } = parseArgs({
     rtt: { type: 'string', default: '20' },
     rounds: { type: 'string', default: '5' },
     jobs: { type: 'string', default: '1,3,10' },
-    log: { type: 'string', default: '0.14' },
     uses: { type: 'string', default: '0' },
     idle: { type: 'string', default: '5' },
     warm: { type: 'string', default: '3' },
@@ -105,7 +102,6 @@ const { values } = parseArgs({
     window: { type: 'string', default: '1' },
     'signin-only': { type: 'boolean', default: false },
     issue: { type: 'boolean', default: false },
-    legacy: { type: 'boolean', default: false },
     proxy: { type: 'string', default: '0' },
     threads: { type: 'string', default: '4' },
     'proxy-cache': { type: 'string', default: '0' },
@@ -232,7 +228,7 @@ const db = await openTestDatabase();
 const [farApp, farVault, farHot] = await Promise.all([
   farPostgres(TEST_RUNTIME_DATABASE_URL, RTT), farPostgres(TEST_VAULT_DATABASE_URL, RTT), farPostgres(TEST_HOT_DATABASE_URL, RTT),
 ]);
-const idle: { vault: SpokenVault; pool: TimedPool; hot: TimedPool | null }[] = [];
+const idle: { vault: SpokenVault; pool: TimedPool; hot: TimedPool }[] = [];
 const checkpointerPool = postgresClient(TEST_VAULT_DATABASE_URL, { max: 4 });
 const memory = mkdtempSync(join(tmpdir(), 'coffre-ci-bench-'));
 let checkpointer: RunningCheckpointer | null = null;
@@ -243,14 +239,12 @@ let uiUpstream: Server | null = null;
 try {
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
-  if (values.log === '0.15') {
-    await db.owner.execute(sql`DELETE FROM log_checkpoints`);
-    await db.owner.execute(sql`DELETE FROM log_tiles`);
-    await db.owner.execute(sql`DELETE FROM log_uses`);
-    await db.owner.execute(sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 3000}`);
-    checkpointer = await runCheckpointer({ database: createDatabase(checkpointerPool), signingKeys: [derivedSigningKey(kek)], memory: join(memory, 'memory') });
-  }
-  const log = checkpointer === null ? { log: '0.14' as const } : { log: '0.15' as const, sealThrough: checkpointer.sealThrough, heldOutside: checkpointer.heldOutside };
+  await db.owner.execute(sql`DELETE FROM log_checkpoints`);
+  await db.owner.execute(sql`DELETE FROM log_tiles`);
+  await db.owner.execute(sql`DELETE FROM log_uses`);
+  await db.owner.execute(sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 3000}`);
+  checkpointer = await runCheckpointer({ database: createDatabase(checkpointerPool), signingKeys: [derivedSigningKey(kek)], memory: join(memory, 'memory') });
+  const log = { sealThrough: checkpointer.sealThrough, heldOutside: checkpointer.heldOutside };
   const deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], { bulkLimit: BULK }, { kek }, {}, log) });
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'rs-1', alg: 'RS256', use: 'sig' };
@@ -280,27 +274,23 @@ try {
       if (name === 'about' && about !== null) return about;
       const instance = idle.pop() ?? await (async () => {
         const pool = new TimedPool(new HyperdrivePool(farVault.url), 'vault');
-        const hot = values.log === '0.15' ? new TimedPool(new HyperdrivePool(farHot.url), 'vault') : null;
+        const hot = new TimedPool(new HyperdrivePool(farHot.url), 'vault');
         const vault = spoken(await localVault({
-          database: createDatabase(pool.client), ...(hot === null ? {} : { hotDatabase: createDatabase(hot.client) }),
+          database: createDatabase(pool.client), hotDatabase: createDatabase(hot.client),
           kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], bulkLimit: BULK,
         }, log));
         return { pool, hot, vault };
       })();
       instance.pool.cost = cost;
-      if (instance.hot !== null) instance.hot.cost = cost;
+      instance.hot.cost = cost;
       cost.vaultCalls += 1;
       try {
-        let answered = await (instance.vault[name as keyof Vault] as (...args: unknown[]) => Promise<unknown>)(...args);
-        if (name === 'about' && values.legacy) {
-          const { credentials: _, issues: __, binds: ___, ...before } = answered as Record<string, unknown>;
-          answered = before;
-        }
+        const answered = await (instance.vault[name as keyof Vault] as (...args: unknown[]) => Promise<unknown>)(...args);
         if (name === 'about') about = answered;
         return answered;
       } finally {
         instance.pool.cost = newCost();
-        if (instance.hot !== null) instance.hot.cost = newCost();
+        instance.hot.cost = newCost();
         idle.push(instance);
       }
     },
@@ -384,7 +374,7 @@ try {
   };
 
   console.log(`rtt ${RTT} ms, ${ROUNDS} rounds a level, each job: ${ISSUE
-    ? `a service token's issue to ${MEMBER} by ${ROOT}${values.legacy ? ', as the app issued it before T149' : ''}`
+    ? `a service token's issue to ${MEMBER} by ${ROOT}`
     : `sign-in${SIGNIN_ONLY ? '' : `, list, reveal of ${SEVEN.length} keys`}, all as ${MEMBER}`}`);
   // Warm: the issuer's keys fetched, the vault's isolates settled, as after the first run of the day. None for levels of
   // uses alone (`--jobs 0`), which make no job.
@@ -436,7 +426,7 @@ try {
       handles.push(((await made.json()) as { token: string }).token);
     }
     const load: ProxyLoad = {
-      log: values.log === '0.15' ? '0.15' : '0.14', urls: { app: TEST_RUNTIME_DATABASE_URL, vault: TEST_VAULT_DATABASE_URL, hot: TEST_HOT_DATABASE_URL }, rtt: RTT, rate: PROXY,
+      urls: { app: TEST_RUNTIME_DATABASE_URL, vault: TEST_VAULT_DATABASE_URL, hot: TEST_HOT_DATABASE_URL }, rtt: RTT, rate: PROXY,
       pools: { app: Number(values['use-pool']), vault: 8, hot: 16 }, handles, path: place, value: `${SEVEN[0]!.toLowerCase()}-value`, kek: kek.toString('base64'), owner: ROOT, chainKey: deps.chainKey.toString('base64'), origin: ORIGIN,
       cacheSeconds: Number(values['proxy-cache']),
       stable: values['proxy-stable'],
@@ -553,7 +543,7 @@ try {
       worker.postMessage({ report: true });
       return new Promise<ProxyPhase[]>((resolve) => worker.on('message', (message: { phases?: ProxyPhase[] }) => message.phases && resolve(message.phases)));
     }));
-    console.log(`/use, ${PROXY}/s beside over ${proxies.length} threads, the whole app on ${values.log}'s log (ms; refused: any answer but the upstream's 200, and errors):`);
+    console.log(`/use, ${PROXY}/s beside over ${proxies.length} threads, the whole app (ms; refused: any answer but the upstream's 200, and errors):`);
     for (const name of reports[0]!.map(({ phase }) => phase)) {
       const each = reports.map((phases) => phases.find(({ phase }) => phase === name)!);
       const sorted = each.flatMap(({ latencies }) => latencies).sort((a, b) => a - b);

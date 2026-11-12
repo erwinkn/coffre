@@ -194,8 +194,8 @@ test("a vault on 0.15's log, the default, refuses a configuration without what i
     await assert.rejects(localVault({ database: db.vault, checkpointer: { memory: '/nowhere' }, ...keys }), /set hotDatabase .*coffre_vault_hot/);
     await assert.rejects(localVault({ database: db.vault, hotDatabase: db.vault, ...keys }), /set checkpointer: \{ memory \}/);
     // Below the deployment's entries, the vault itself: sealed and verified through a checkpointer, or not at all (T151).
-    await assert.rejects(prepareVault(resolveVaultConfig(keys), { log: '0.15' }), /sealThrough/);
-    await assert.rejects(prepareVault(resolveVaultConfig(keys), { log: '0.15', sealThrough: sealed }), /heldOutside/);
+    await assert.rejects(prepareVault(resolveVaultConfig(keys), {}), /sealThrough/);
+    await assert.rejects(prepareVault(resolveVaultConfig(keys), { sealThrough: sealed }), /heldOutside/);
   } finally {
     await db.close();
   }

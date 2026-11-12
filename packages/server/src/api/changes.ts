@@ -32,7 +32,7 @@ import { ApiError, vaultRefused } from './errors.ts';
  * 3. **After its commit:** the vault answers once the newest is sealed.
  *
  * Row and entry commit together or not at all, as the app's rows and its
- * 0.14 entries do. With 0.14's log, the default, none of this runs.
+ * 0.14 entries do.
  */
 
 /** The actor of the app's own changes, made for no one's request: a key rotation's revokes, an unknown token signed out. */

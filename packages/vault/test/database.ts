@@ -63,15 +63,6 @@ function said(input: unknown): unknown {
 export type LocalVault = SpeakingVault<RawLocalVault>;
 
 /**
- * Which log the suite's vaults keep (`VaultOptions.log`): 0.15's, the
- * default, unless `COFFRE_TEST_LOG` says 0.14, which runs every vault test
- * on 0.14's alone, as CI does beside it until 0.16 removes it (0.15's plan:
- * each PR runs the suite on both settings). Its changes answer once
- * committed here: no checkpointer runs (`sealed`).
- */
-export const LOG = process.env.COFFRE_TEST_LOG === '0.14' ? '0.14' : '0.15';
-
-/**
  * A checkpointer that seals everything at once: what a change waits on,
  * under 0.15's log, in a test with no tree. The vault answers nothing of
  * what it is given back.
@@ -82,13 +73,13 @@ export const sealed: SealThrough = async () => ({}) as Sealed;
 export const nothingHeld = async (): Promise<PairNotes[]> => [];
 
 /**
- * `openLocalVault`, spoken to as the app does (`speaking`), keeping the
- * suite's log (`LOG`): under 0.15's, cut over from 0.14 as it opens
- * (`cutOver`), as the app has it before anything else.
+ * `openLocalVault`, spoken to as the app does (`speaking`), its changes
+ * sealed at once (`sealed`), cut over from 0.14 as it opens (`cutOver`), as
+ * the app has it before anything else.
  */
 export async function openLocalVault(...[db, config, options, close]: Parameters<typeof openRawVault>): Promise<LocalVault> {
-  const vault = spoken(await openRawVault(db, config, { ...(LOG === '0.15' ? { log: LOG, sealThrough: sealed, heldOutside: nothingHeld } : { log: LOG }), ...options }, close));
-  if (vault.cutover !== undefined && (options?.log ?? LOG) === '0.15') {
+  const vault = spoken(await openRawVault(db, config, { sealThrough: sealed, heldOutside: nothingHeld, ...options }, close));
+  if (vault.cutover !== undefined) {
     placeKeys = { seals: config.signingKeys.map((key) => sealKey(key)), mac: logMacKey(config.signingKeys[0]!) };
     await cutOver(vault, db);
   }
@@ -107,7 +98,7 @@ let placeKeys: ChangeKeys | null = null;
  * New environments' rows, written by a test, sealed as the app's creation
  * of each seals it (`Vault.prepare`, then `app_change` in a transaction of
  * its own): under 0.15's log, once it is cut over. Before, the cutover's
- * genesis seals them; under 0.14's alone, nothing does.
+ * genesis seals them.
  */
 export async function sealPlaces(owner: Database, made: readonly { id: string; projectId: string; slug: string; parentId?: string | null }[]): Promise<void> {
   if (placeKeys === null || !(await cutOverYet(owner))) return;
@@ -183,20 +174,6 @@ export async function openTestDatabase({ connections: pools }: { connections?: n
 }
 
 /**
- * Options that run a test under 0.14's log alone (`LOG`), saying why 0.15's
- * answers otherwise, beside whatever else skips it.
- */
-export function log014Only(reason: string, options: { skip?: string | false } = {}): { skip: string | false } {
-  return { skip: options.skip || (LOG === '0.15' ? `0.14's log only: ${reason}` : false) };
-}
-
-/** A grant on every project of 0.4, converted by the vault of 0.5: rows from long before 0.15's cutover, which 0.15's log never holds. */
-export const CONVERSION = "a grant on every project of 0.4 is converted on rows 0.14's log holds, before 0.15's cutover";
-
-/** A tampered member started over: 0.15's log refuses a change on top of a row it does not hold, and a reseal makes it the log's again (plan PR 9). */
-export const START_OVER = "0.15's log changes no tampered member until a reseal makes its row the log's again (plan PR 9), never 0.14's start over";
-
-/**
  * `work`, as the owner, with the audit log's append-only triggers lifted,
  * as someone who rewrites it would: disabled for one transaction.
  */
@@ -212,20 +189,6 @@ export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' 
     await tx.execute(sql.raw(`ALTER TABLE ${table} ENABLE TRIGGER USER`));
     return result;
   });
-}
-
-/**
- * `work`, with 0.14's writes let through after the cutover (`audit_log_refuse_old`, 0047): a late write of 0.14's, as
- * only someone who lifts the trigger could leave since PR 9b, for a test of rows 0.14's log alone holds. Lifted for every
- * connection until `work` ends.
- */
-export async function withOldWrites<T>(owner: Database, work: () => Promise<T>): Promise<T> {
-  await run(owner, sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_refuse_old`);
-  try {
-    return await work();
-  } finally {
-    await run(owner, sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_refuse_old`);
-  }
 }
 
 /** Rows of a raw query. */

@@ -12,7 +12,7 @@ import { encrypt, freshDek } from '@coffre/core/envelope';
 import { deletedWithProject, tombstoneOf } from '@coffre/core/schemas';
 import type { EnvironmentColumns, ObjectChange, SecretColumns, UseInput, UseOutcome, Via, VersionColumns } from '@coffre/core/vault';
 import { type Queryable, type Transaction } from '@coffre/db';
-import { appChanges, isStaleChange } from '@coffre/db/log';
+import { appChanges, appendEntries, isStaleChange } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
 import { keptObjects, loggedChange, NotLogged, prepareChanges, type ChangeKeys } from '../src/changes.ts';
@@ -20,9 +20,10 @@ import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, type Ref } from '../src/inputs.ts';
 import { grants, loggedChanges, loggedChangesQuery, member } from '../src/store.ts';
 import { logMacKey } from '../src/log-entry.ts';
+import { vaultLogKey } from '../src/log.ts';
 import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { environmentObject, principalObject, secretObject } from '../src/objects.ts';
-import { openTestDatabase, rows, run, sealed, nothingHeld, withLogUnlocked, withOldWrites, withTriggersLifted, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, sealed, nothingHeld, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, emptyLog, isolate, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 import { environments, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 
@@ -848,45 +849,40 @@ test("a break by a Developer in a protected environment after a writer marked it
   assert.ok((await vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'role', role: 'developer', definition: { ...ROLES.developer, protected: ['secret.use'] } } })).ok);
   assert.ok((await vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'protect', projectId: w.project, environmentIds: [w.dev], protected: true } })).ok);
   assert.ok(!(await vault.endReferences({ principal: dana, caller: 'person', reason: 'broken', items: [via] })).ok, 'refused while nothing is edited');
-  // Nor beside a reference held in an environment 0.14's log alone holds, which 0.14's reader alone decides (review r12).
-  const legacy = randomUUID();
-  await db.owner.insert(environments).values({ id: legacy, projectId: w.project, slug: 'legacy', name: 'legacy', protected: false });
-  const old = randomUUID();
-  const oldRef = randomUUID();
-  // Made by an isolate still on 0.14's log, as its environment was: 0.15's vault decides on no row its log does not hold
-  // (T159), and since PR 9b nothing of 0.14's writes after the cutover, so such a holder is one a writer let through.
-  const { vault: older } = await isolate({ log: '0.14' });
-  const made = await withOldWrites(db.owner, () => older.reference({
-    principal: ROOT, caller: 'person', items: [{ id: oldRef, holder: { projectId: w.project, environmentId: legacy, secretId: old, path: 'p/legacy/OLD' }, source: { secretId: source } }],
-  }));
-  assert.ok(made.ok, JSON.stringify(made));
-  await db.owner.insert(secrets).values({ id: old, projectId: w.project, environmentId: legacy, key: 'OLD' });
-  await db.owner.insert(secretReferences).values({
-    id: oldRef, projectId: w.project, environmentId: legacy, secretId: old, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
-    createdSeq: BigInt(made.seqs[0]!), createdBy: ROOT,
-  });
   const [{ slug }] = await rows<{ slug: string }>(db.owner, sql`SELECT slug FROM projects WHERE id = ${w.project}`) as [{ slug: string }];
   await run(db.owner, sql`UPDATE projects SET slug = ${`${slug}~deleted`} WHERE id = ${w.project}`);
   const refused = await vault.endReferences({ principal: dana, caller: 'person', reason: 'broken', items: [via] });
   assert.ok(!refused.ok, JSON.stringify(refused));
-  const batch = await vault.endReferences({ principal: dana, caller: 'person', reason: 'broken', items: [via, { reference: oldRef, seq: made.seqs[0]! }] });
-  assert.ok(!batch.ok, JSON.stringify(batch));
+  // Nor beside a reference held in an environment the log does not hold, a writer's rows (T159, review r12).
+  const legacy = randomUUID();
+  await db.owner.insert(environments).values({ id: legacy, projectId: w.project, slug: 'legacy', name: 'legacy', protected: false });
+  const [old, oldRef] = [randomUUID(), randomUUID()];
+  // The vault makes none there (its row is not as the log holds it): it refuses as tampered.
+  const made = await vault.reference({
+    principal: ROOT, caller: 'person', items: [{ id: oldRef, holder: { projectId: w.project, environmentId: legacy, secretId: old, path: 'p/legacy/OLD' }, source: { secretId: source } }],
+  });
+  assert.equal(made.ok ? 'made' : made.refusal.code, 'tampered');
+  // So the reference is one 0.14 made there before the cutover: the vault's own `reference.create`, allowed, under its
+  // key, as `via`'s entry is, naming the legacy holder. Both entries then seal, and the batch reaches the places check
+  // (`#placesHold`), which refuses it whole: it never reaches the per-reference reader rule.
+  const [{ metadata }] = await rows<{ metadata: string }>(db.owner, sql`SELECT metadata FROM audit_log WHERE seq = ${BigInt(via.seq)}`) as [{ metadata: string }];
+  const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{
+    actor: ROOT, action: 'reference.create', decision: 'allow', projectId: w.project, environmentId: legacy,
+    metadata: JSON.stringify({ ...JSON.parse(metadata), reference: oldRef, subject: 'p/legacy/OLD', secretId: old }),
+  }], undefined, undefined, [], true));
+  const seq = Number(appended.seqStart);
+  await db.owner.insert(secrets).values({ id: old, projectId: w.project, environmentId: legacy, key: 'OLD' });
+  await db.owner.insert(secretReferences).values({
+    id: oldRef, projectId: w.project, environmentId: legacy, secretId: old, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
+    createdSeq: BigInt(seq), createdBy: ROOT,
+  });
+  const batch = await vault.endReferences({ principal: dana, caller: 'person', reason: 'broken', items: [via, { reference: oldRef, seq }] });
+  // Refused as the protected reference alone is, by `#placesHold`: not `bad_claim`, an entry the vault never sealed.
+  assert.equal(batch.ok ? 'ended' : batch.refusal.code, refused.ok ? 'ended' : refused.refusal.code);
+  assert.equal(batch.ok ? 'ended' : batch.refusal.code, 'tampered');
   await run(db.owner, sql`UPDATE projects SET slug = ${slug} WHERE id = ${w.project}`);
   assert.deepEqual((await endedAt(holder)).map((at) => at !== null), [false]);
   assert.ok((await vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'role', role: 'developer', definition: null } })).ok);
-});
-
-test("with 0.14's log, a reference's end is 0.14's entry alone, which the cut-over log refuses whole: no row's end, no change (T125, PR 9b)", async () => {
-  const w = await world();
-  const source = await w.key();
-  const vault = await deciding();
-  const { holder, via } = await reference(w, vault, source);
-  const { vault: old } = await isolate({ log: '0.14' });
-  const before = await rows(db.owner, sql`SELECT number FROM log_changes`);
-  await assert.rejects(old.endReferences({ principal: ROOT, caller: 'person', reason: 'broken', items: [via] }),
-    (error: Error & { cause?: Error }) => /is cut over from 0\.14/.test(`${error.message} ${error.cause?.message ?? ''}`));
-  assert.deepEqual(await endedAt(holder), [null]);
-  assert.equal((await rows(db.owner, sql`SELECT number FROM log_changes`)).length, before.length);
 });
 
 /** A project archived or restored as the app does it (`patchProject`): its row, and `project.archive` on each of its live environments. */

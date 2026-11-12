@@ -11,7 +11,7 @@ import type { AddressInfo } from 'node:net';
 import { createClient } from '@coffre/client';
 import { defineDeployment } from '@coffre/core/deployment';
 
-import { clientFor, LOG, usesLogged } from './api-fixture.ts';
+import { clientFor, usesLogged } from './api-fixture.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { auditLog } from '@coffre/db/schema';
 import { coffreRoute } from '../src/app.ts';
@@ -418,7 +418,7 @@ test('a value that makes a segment a server reads as none is a 409, though no do
   assert.equal(reached.length, 0);
 });
 
-test("the token is in no log line, no audit entry and no refusal; 0.14's use names the host alone", async () => {
+test("the token is in no log line, no audit entry and no refusal", async () => {
   const { handle } = await run();
   const { said } = await logs(async () => {
     for (const [method, url] of [['POST', 'sendMessage'], ['GET', 'echo'], ['GET', 'moved'], ['GET', 'away'], ['POST', 'a/b']]) await (await route(`/use/telegram/bot${handle}/${url}`, { method })).text();
@@ -427,13 +427,8 @@ test("the token is in no log line, no audit entry and no refusal; 0.14's use nam
   assert.ok(reached.length >= 4);
   // Every audit entry, whatever its action.
   assert.ok(free(JSON.stringify(await db.owner.select().from(auditLog), (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value))));
-  // 0.15's use row is slim (R53): it names no host or URL at all. 0.14's names the host.
-  if (LOG === '0.15') assert.ok((await usesLogged(db.owner)).length > 0);
-  else {
-    const used = (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'telegram');
-    assert.ok(used.length > 0);
-    for (const entry of used) assert.equal(entry.metadata.host, new URL(upstreamUrl).host);
-  }
+  // The use row is slim (R53): it names no host or URL at all.
+  assert.ok((await usesLogged(db.owner)).length > 0);
 });
 
 test("a plain key's segment holds what the app put, the value it holds, which the rule sets again; the handle rides in the header", async () => {
