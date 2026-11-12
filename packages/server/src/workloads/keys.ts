@@ -119,10 +119,17 @@ function kept(entry: Entry | undefined, now: number): JSONWebKeySet | null {
   return entry?.keys != null && now - entry.fetchedAt < KEYS_STALE_MS ? entry.keys : null;
 }
 
-/** How long before `url` is fetched again, in ms: none once its cooldown has run out. */
+/**
+ * How long before `url` is fetched again, in ms: none once its cooldown has
+ * run out. The long cooldown while a set is kept, the short one from when
+ * none is, which may come first: a set an hour old at 10:00, its fetch failed
+ * at 09:59:59, may be fetched again at 10:00:04, not 10:00:59.
+ */
 function cooldownLeft(entry: Entry | undefined, now: number): number {
   if (entry?.failedAt == null) return 0;
-  return Math.max(0, entry.failedAt + (kept(entry, now) === null ? KEYS_COLD_COOLDOWN_MS : KEYS_COOLDOWN_MS) - now);
+  const staleAt = entry.keys === null ? 0 : entry.fetchedAt + KEYS_STALE_MS;
+  const next = Math.min(entry.failedAt + KEYS_COOLDOWN_MS, Math.max(staleAt, entry.failedAt + KEYS_COLD_COOLDOWN_MS));
+  return Math.max(0, next - now);
 }
 
 function unavailable(message: string, entry: Entry | undefined, now: number, cause?: unknown): IssuerUnavailable {

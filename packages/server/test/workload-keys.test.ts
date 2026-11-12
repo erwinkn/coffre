@@ -187,6 +187,21 @@ test('stale past the bound: an hour from its fetch, the set kept no longer stand
   });
 });
 
+test('stale, a moment before the bound: the Retry-After is when a fetch may be made, the short cooldown once the set goes stale', async () => {
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  down = true;
+  await warnings(async () => {
+    // A key the set lacks, a second before the hour: the set goes stale within the long cooldown, and the short one then decides.
+    assert.deepEqual(await verify(rotated, KEYS_STALE_MS - 1000), { outcome: `unavailable ${KEYS_COLD_COOLDOWN_MS / 1000}`, fetches: 1 });
+    assert.deepEqual(await verify(known, KEYS_STALE_MS - 1000 + 500), { outcome: VERIFIED, fetches: 0 });
+    assert.deepEqual(await verify(rotated, KEYS_STALE_MS + 2000), { outcome: `unavailable ${KEYS_COLD_COOLDOWN_MS / 1000 - 3}`, fetches: 0 });
+    // As it said: a fetch then.
+    down = false;
+    published = [known, rotated];
+    assert.deepEqual(await verify(rotated, KEYS_STALE_MS - 1000 + KEYS_COLD_COOLDOWN_MS), { outcome: VERIFIED, fetches: 1 });
+  });
+});
+
 test('cold, the issuer unreachable: unavailable, asking to come back as soon as a fetch may be made again, which the CLI waits for', async () => {
   down = true;
   const said = await warnings(async () => {
