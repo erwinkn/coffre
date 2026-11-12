@@ -307,9 +307,9 @@ anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
   for another three. Each first builds the example's app with its own Vite, as it
   deploys; Workers then runs `app/dist/server/wrangler.json`, which wrangler does not
   bundle again, behind an entry of the harness's own that reads an unread request
-  body (locally, wrangler fails the next request otherwise; coffre never waits on one). Workers needs Postgres and makes its own
-  `coffre_conformance_<hex>` database, dropped after; Node runs on SQLite in a temp
-  dir, the built app under srvx, as its `pnpm start`. Each holds the build's client
+  body (locally, wrangler fails the next request otherwise; coffre never waits on one); Node runs
+  the built app under srvx, as its `pnpm start`. Each needs Postgres and makes its own
+  `coffre_conformance_<hex>` database, dropped after. Each holds the build's client
   files to holding no server code (`packages/conformance/src/bundle.ts`): a deployment's
   own build no longer checks. A check that fails prints what it saw, then the processes'
   output.
@@ -363,7 +363,7 @@ anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
   gofmt, `go vet`, its unit tests, then its acceptance tests on Terraform
   and OpenTofu 1.11 against a coffre that
   `packages/conformance/scripts/terraform-fixture.ts` boots, the Node example
-  on SQLite on ports 3482 and 3483 (`scripts/terraform-provider.sh`; `--unit`
+  on Postgres on ports 3482 and 3483 (`scripts/terraform-provider.sh`; `--unit`
   for the first three alone). Go and both CLIs are pinned by version and
   SHA-256 and downloaded once. A change to a route the provider calls (the
   secrets list and write, `POST /api/auth/oidc`) runs it in the same pull

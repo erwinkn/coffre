@@ -29,6 +29,9 @@ export interface Socket {
   end(data: Uint8Array): unknown;
   destroy(): unknown;
   setKeepAlive?(enable: boolean, delay: number): unknown;
+  /** Node's: whether the socket holds the process open. Workerd's sockets have neither. */
+  ref?(): unknown;
+  unref?(): unknown;
 }
 
 /** Where a socket connects: a host and port, TLS to follow or not (workerd asks so up front), or a Unix socket's path. */

@@ -62,7 +62,8 @@ export interface Events {
 }
 
 interface Timer {
-  start(): void;
+  /** With `unref`, the timer alone holds no Node process open. */
+  start(unref?: boolean): void;
   cancel(): void;
 }
 
@@ -84,7 +85,20 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   const sent = new Queue<Query>();
   const id = uid++;
   const backend: Backend = { pid: null, secret: null };
-  const idleTimer = timer(end, options.idle_timeout);
+  const idleTimeout = timer(end, options.idle_timeout);
+  // Coffre: idle in the pool from `start` to `cancel`, closed once idle_timeout passes, and holding no Node process
+  // open meanwhile, socket or timer, as node-postgres's `allowExitOnIdle`: a server that closed its listener, or a
+  // script done with its queries, exits at once, not idle_timeout later. Upstream's idle sockets held it open.
+  const idleTimer: Timer = {
+    start() {
+      idleTimeout.start(true);
+      socket?.unref?.();
+    },
+    cancel() {
+      idleTimeout.cancel();
+      socket?.ref?.();
+    },
+  };
   const lifeTimer = timer(end, options.max_lifetime);
   const connectTimer = timer(connectTimedOut, options.connect_timeout);
 
@@ -361,7 +375,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
 
   function connected(): void {
     try {
-      lifeTimer.start();
+      // Coffre: unref'd too, as `idleTimer`: a busy connection's socket holds the process open, an idle one's nothing.
+      lifeTimer.start(true);
       socket!.on('data', data);
       if (keep_alive) socket!.setKeepAlive?.(true, 1000 * keep_alive);
       write(StartupMessage());
@@ -884,12 +899,14 @@ function timer(fn: () => unknown, seconds: number | null | undefined | (() => nu
         handle = null;
       }
     },
-    start() {
+    start(unref) {
       if (handle) clearTimeout(handle);
       handle = setTimeout(() => {
         fn();
         handle = null;
       }, s * 1000);
+      // Node's timers have `unref`; workerd's are numbers.
+      if (unref) (handle as { unref?: () => unknown }).unref?.();
     },
   };
 }

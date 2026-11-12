@@ -5,7 +5,8 @@
 //	TF_ACC=1 go test ./internal/acceptance -args -terraform=<path> -tofu=<path>
 //
 // The coffre is packages/conformance/scripts/terraform-fixture.ts: the Node
-// example on SQLite, on ports of its own, seeded through the API.
+// example on a database of its own on the local Postgres, on ports of its
+// own, seeded through the API.
 package acceptance
 
 import (

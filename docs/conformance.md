@@ -18,22 +18,21 @@ the database like anyone who could reach them.
 From a deployment, a devDependency since `coffre init`:
 
 ```sh
-pnpm conformance                   # Node: the server and its vault process, on SQLite in a temp dir
 pnpm conformance \
   --postgres postgres://owner:…@127.0.0.1:5432 \
   --runtime postgres://coffre_runtime:…@127.0.0.1:5432 \
   --vault-runtime postgres://coffre_vault_runtime:…@127.0.0.1:5432 \
   --hot-runtime postgres://coffre_vault_hot:…@127.0.0.1:5432
-                                   # Workers: both, under wrangler dev
 ```
 
-On Workers, `--postgres` is a login that may create databases: the run makes
+On Workers it runs both Workers under wrangler dev; on Node, the server and
+its vault process. `--postgres` is a login that may create databases: the run makes
 one of its own, `coffre_conformance_<random>`, migrates it and drops it
 after. `--runtime` is the same server as `coffre_runtime`, the login the app
 runs as, `--vault-runtime` as `coffre_vault_runtime`, the vault's, and
-`--hot-runtime` as `coffre_vault_hot`, its hot path's, which the vault's
-second Hyperdrive binding, `HOT_HYPERDRIVE`, connects as. Node passes the
-same SQLite file for its `HOT_DATABASE_URL`. All are local; nothing is
+`--hot-runtime` as `coffre_vault_hot`, its hot path's: on Workers the vault's
+second Hyperdrive binding, `HOT_HYPERDRIVE`, connects as it, and on Node the
+vault's `HOT_DATABASE_URL`. All are local; nothing is
 deployed.
 
 coffre takes `--port` (3082), the stand-in IdP the next port, and wrangler's
@@ -177,8 +176,8 @@ In order, since each builds on the ones before:
 | keys behind writes | Every `secret.write`, `secret.restore` and `secret.loosen` names, by `related_seq`, the vault's `key.wrap` (a new value) or `key.rewrap` (a restore, a mark, a loosening) for the same member, request, operation, secret and version; and no value read is logged by the app, only by the vault |
 | no audit, no value | With a trigger refusing `secret.read` appends, a reveal gets 500 `internal_error`, the injected cause appears in the process output, and no value leaves; it works again once the log does |
 | canary scan | No value in any answer to any GET route, or any page, as each of the people, signed in or removed; nor in the database, in any column of any table; nor the processes' output |
-| app login, vault login | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant. Postgres only: SQLite has no logins |
-| hot login | `--hot-runtime` logs in as `coffre_vault_hot`, with its lock timeout of 1 s and statement timeout of 2 s, may write members as the vault's login may, and is refused all the vault's login is. It checks the URL it was given, not which config the vault binds: until the vault can say whom its hot pool logs in as, a `HOT_HYPERDRIVE` pointing at the vault's config passes. Postgres only |
+| app login, vault login | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant |
+| hot login | `--hot-runtime` logs in as `coffre_vault_hot`, with its lock timeout of 1 s and statement timeout of 2 s, may write members as the vault's login may, and is refused all the vault's login is. It checks the URL it was given, not which config the vault binds: until the vault can say whom its hot pool logs in as, a `HOT_HYPERDRIVE` pointing at the vault's config (on Node, a `HOT_DATABASE_URL` naming the vault's login) passes |
 | access authorship | Admission, grant, revoke, removal and re-admission leave only vault entries |
 | no audit, no access | A refused append commits no grant, removal or admission |
 | full verification | Verification from the newest checkpoint, and the walk from the first entry a stretch a request, each reach the actual head and count every entry; the audit page is sent with its verification result |
@@ -196,8 +195,7 @@ All table inspection and tampering goes through the one database. There
 is no vault file or Durable Object to discover. On Postgres, the canary scan
 reads every public table as the owner, including binary columns as bytes.
 Every run plants a binary canary to prove the table reader sees bytes.
-Missing shared tables fail. On SQLite it also scans the database file and
-its write-ahead log; a missing file fails. Workers also tests both restricted logins and the author policies.
+Missing shared tables fail. Each run also tests the restricted logins and the author policies.
 
 A read has one entry, the vault's, committed before any key leaves, so there
 is no second record of it to disagree. A write the app prepares again leaves

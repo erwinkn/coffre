@@ -52,6 +52,10 @@ jobs:
           version=$(node -p 'JSON.parse(require("fs").readFileSync("packages/cli/package.json")).version')
           # unpinned: this revision's own packed CLI, a file here; it depends on nothing, so npm fetches no package.
           npm install --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/coffre-action-consumer" "$RUNNER_TEMP/coffre-action-consumer/coffre-cli-$version.tgz"
+      - name: Start Postgres, the deployment's database
+        run: |
+          ./scripts/ensure-postgres.sh
+          node --conditions=coffre:source scripts/ensure-database.mjs coffre
       - name: Boot and seed a real coffre deployment
         run: |
           node --conditions=coffre:source packages/conformance/scripts/action-test.ts serve "$RUNNER_TEMP/coffre-action-ready" > "$RUNNER_TEMP/coffre-action-fixture.log" 2>&1 &

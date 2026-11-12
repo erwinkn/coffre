@@ -2,11 +2,11 @@
 // in as the environment its wrangler.jsonc or .env would give it, with
 // GitHub's URLs pointed at a stand-in IdP running in this process.
 //
-//   workers  two Workers under `wrangler dev`, on a Postgres database of
-//            their own, created for the run and dropped after, each through
-//            its own login
-//   node     the app's build under srvx and its vault process, on one SQLite
-//            file in a temp dir
+//   workers  two Workers under `wrangler dev`
+//   node     the app's build under srvx and its vault process
+//
+// Either on a Postgres database of its own, created for the run and dropped
+// after, each component through its own login.
 //
 // Ports: coffre on `port`, the IdP on the next, wrangler's inspector on the
 // one after.
@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { postgres, sqlite, using, type Sql } from './database.ts';
+import { postgres, using, type Sql } from './database.ts';
 import { KEYS } from './fixtures.ts';
 import { drainingConfig, LOCAL_RATE_LIMIT } from './draining.ts';
 import { DevIdp } from './idp/index.ts';
@@ -31,13 +31,13 @@ export type Settings = { PASSKEYS?: 'off' | 'optional' | 'required'; PUBLIC_URL?
 
 export type HarnessOptions = {
   port: number;
-  /** Postgres as a login that may create databases; workers only. */
+  /** Postgres as a login that may create databases. */
   postgres?: string;
-  /** The same server as coffre_runtime, the login the app runs as; workers only. */
+  /** The same server as coffre_runtime, the login the app runs as. */
   runtime?: string;
-  /** The same server as coffre_vault_runtime, the login the vault runs as; workers only. */
+  /** The same server as coffre_vault_runtime, the login the vault runs as. */
   vaultRuntime?: string;
-  /** The same server as coffre_vault_hot, the login 0.15's uses run as; workers only. */
+  /** The same server as coffre_vault_hot, the login 0.15's uses run as. */
   hotRuntime?: string;
 };
 
@@ -125,9 +125,9 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     );
     if (busy) throw new Failure(`port ${taken} is taken; pass --port for a free run of three`);
   }
-  if (kind === 'workers' && [options.postgres, options.runtime, options.vaultRuntime, options.hotRuntime].includes(undefined)) {
+  if ([options.postgres, options.runtime, options.vaultRuntime, options.hotRuntime].includes(undefined)) {
     throw new Failure(
-      'workers run on Postgres: pass --postgres <owner URL>, --runtime <coffre_runtime URL>, --vault-runtime <coffre_vault_runtime URL> ' +
+      'a deployment runs on Postgres: pass --postgres <owner URL>, --runtime <coffre_runtime URL>, --vault-runtime <coffre_vault_runtime URL> ' +
         'and --hot-runtime <coffre_vault_hot URL>',
     );
   }
@@ -271,21 +271,30 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     throw error;
   }
 
-  async function startWorkers(): Promise<Deployment> {
+  /**
+   * The run's own database, made and migrated, as each login reaches it: migrated as the deployment's pipeline does
+   * before it deploys, by its own CLI's `coffre migrate`, in its folder, the owner's URL piped in.
+   */
+  async function ownDatabase() {
     const name = `coffre_conformance_${randomBytes(4).toString('hex')}`;
     const owner = withDatabase(options.postgres!, name);
-    const runtime = withDatabase(options.runtime!, name);
-    const vaultRuntime = withDatabase(options.vaultRuntime!, name);
-    const hotRuntime = withDatabase(options.hotRuntime!, name);
     await using(postgres(withDatabase(options.postgres!, 'postgres')), (sql) => sql.exec(`CREATE DATABASE ${name}`));
     cleanup = () =>
       using(postgres(withDatabase(options.postgres!, 'postgres')), (sql) =>
         sql.exec(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`),
       );
-    // As the deployment's pipeline does before it deploys: its own CLI's
-    // `coffre migrate`, in its folder, the owner's URL piped in.
-    // A fresh log has no heartbeat: only the scheduled job can make /readyz pass.
     await run(process.execPath, [deploymentCli(dir), 'migrate', '--yes'], {}, `${owner}\n`);
+    return {
+      owner,
+      runtime: withDatabase(options.runtime!, name),
+      vaultRuntime: withDatabase(options.vaultRuntime!, name),
+      hotRuntime: withDatabase(options.hotRuntime!, name),
+    };
+  }
+
+  async function startWorkers(): Promise<Deployment> {
+    // A fresh log has no heartbeat: only the scheduled job can make /readyz pass.
+    const { owner, runtime, vaultRuntime, hotRuntime } = await ownDatabase();
     // The app as it deploys: its Start app, built by its own Vite, which wrangler runs unbundled.
     await run(bin('vite'), ['build', 'app']);
     const state = join(scratch, 'state');
@@ -363,16 +372,14 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
   }
 
   async function startNode(): Promise<Deployment> {
-    const database = join(scratch, 'coffre.db');
+    const { owner, runtime, vaultRuntime, hotRuntime } = await ownDatabase();
     const socket = join(scratch, 'vault.sock');
-    await run(bin('coffre-server'), ['migrate', `file:${database}`]);
     const startVault = async () => {
       rmSync(socket, { force: true });
       const started = start('vault', process.execPath, ['src/vault.ts'], {
         VAULT_SOCKET: socket,
-        DATABASE_URL: `file:${database}`,
-        // SQLite has no logins: the hot path's database is the same file.
-        HOT_DATABASE_URL: `file:${database}`,
+        DATABASE_URL: vaultRuntime,
+        HOT_DATABASE_URL: hotRuntime,
         // Kept across a restart, as a deployment keeps it: the checkpointer goes on from the pair it signed.
         CHECKPOINTER_MEMORY: join(scratch, 'checkpointer-memory'),
         VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
@@ -390,7 +397,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       start('server', bin('srvx'), ['--prod', '--host=127.0.0.1', 'app/dist/server/server.js'], {
         PORT: String(port),
         PUBLIC_URL: origin,
-        DATABASE_URL: `file:${database}`,
+        DATABASE_URL: runtime,
         VAULT_SOCKET: socket,
         AUDIT_ANCHOR: join(scratch, 'anchor.json'),
         APP_KEY: KEYS.APP_KEY,
@@ -440,11 +447,11 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         }
       },
       serving: () => ({ vault: vault.child.pid!, server: server.child.pid! }),
-      database: async () => sqlite(database),
-      runtime: null,
-      vaultRuntime: null,
-      hotRuntime: null,
-      databaseFile: database,
+      database: () => postgres(owner),
+      runtime: () => postgres(runtime),
+      vaultRuntime: () => postgres(vaultRuntime),
+      hotRuntime: () => postgres(hotRuntime),
+      databaseFile: null,
       clientDir: join(dir, 'app/dist/client'),
       output,
       mark,

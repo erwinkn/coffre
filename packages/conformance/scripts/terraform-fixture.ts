@@ -1,8 +1,8 @@
 // The coffre the Terraform provider's acceptance tests write to
 // (terraform-provider/, docs/design/terraform-provider.md, section 8): a
 // deployment booted as `pnpm conformance:node` boots it, the Node example
-// on SQLite in a temp directory, on ports of its own, seeded through the
-// API. It prints one line, `TERRAFORM_FIXTURE <json>`, with the origin and
+// on a database of its own on the local Postgres (`scripts/ensure-database.mjs`
+// makes its logins), on ports of its own, seeded through the API. It prints one line, `TERRAFORM_FIXTURE <json>`, with the origin and
 // the credentials the tests use, and runs until its stdin closes.
 //
 //   node --conditions=coffre:source packages/conformance/scripts/terraform-fixture.ts examples/node --port 3482
@@ -29,7 +29,14 @@ const TERRAFORM = 'token:terraform-infra';
 /** What each Terraform credential holds: `infra/prod` and its fork, never `market/prod`. */
 const SCOPE = { 'infra/prod': 'contributor', 'infra/prod-eu': 'contributor' };
 
-const deployment = await boot('node', resolve(positionals[0]!), { port });
+const local = (login: string) => `postgresql://${login}@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/postgres`;
+const deployment = await boot('node', resolve(positionals[0]!), {
+  port,
+  postgres: local('coffre_owner:local-dev-only'),
+  runtime: local('coffre_runtime:local-runtime-only'),
+  vaultRuntime: local('coffre_vault_runtime:local-vault-only'),
+  hotRuntime: local('coffre_vault_hot:local-hot-only'),
+});
 let stopping = false;
 const stop = async () => {
   if (stopping) return;

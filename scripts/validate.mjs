@@ -103,8 +103,8 @@ const STEPS = [
   { name: 'formal', job: 'formal', needs: formalModel, run: ['./scripts/formal.sh --workers 4 --heap 4g'], full: true },
   { name: 'proofs', job: 'proofs', needs: (f) => leanInputs(f) || manifests(f), run: ['pnpm formal:lean'] },
   { name: 'workers', job: 'workers', build: true, postgres: true, browser: true, needs: packages, run: [`pnpm conformance:workers --browser ${BROWSER}`] },
-  { name: 'node', job: 'node', build: true, browser: true, needs: packages, run: [`pnpm conformance:node --browser ${BROWSER}`] },
-  { name: 'terraform', job: 'terraform', build: true, needs: (f) => packages(f) || f.startsWith('terraform-provider/'), run: ['pnpm test:terraform'] },
+  { name: 'node', job: 'node', build: true, postgres: true, browser: true, needs: packages, run: [`pnpm conformance:node --browser ${BROWSER}`] },
+  { name: 'terraform', job: 'terraform', build: true, postgres: true, needs: (f) => packages(f) || f.startsWith('terraform-provider/'), run: ['pnpm test:terraform'] },
   // The consumer script starts Postgres itself (ensure-postgres.sh), so it gets this run's.
   { name: 'consumer', job: 'consumer', build: true, postgres: true, needs: (f) => packages(f) || f === 'scripts/client-smoke.cjs', run: ['pnpm test:consumer'] },
   { name: 'compat', job: 'compat', postgres: true, needs: (f) => workspace(f) || anyOf('scripts/compat', 'docker-compose.yml')(f) || manifests(f), run: ['pnpm test:compat'] },

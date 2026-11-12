@@ -423,7 +423,7 @@ jobs:
           pnpm conformance:node --browser /usr/bin/google-chrome
 
   # The Terraform provider (terraform-provider/, docs/design/terraform-provider.md, section 8): Go and both CLIs
-  # pinned by version and SHA-256 in the script, its acceptance tests against a local coffre, the Node example on SQLite.
+  # pinned by version and SHA-256 in the script, its acceptance tests against a local coffre, the Node example on Postgres.
   terraform:
     name: Terraform provider
     runs-on: ubuntu-24.04

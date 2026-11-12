@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **`coffre-conformance node` checks a Node deployment on Postgres, as
+  `workers` does.** It now takes the same four logins, `--postgres`,
+  `--runtime`, `--vault-runtime` and `--hot-runtime`, and refuses to boot
+  without them; it ran the deployment on a SQLite file before. It makes a
+  database of its own for the run and drops it after.
+- **A Node process with nothing left to do exits at once, whatever its
+  pool holds.** An idle connection, and its idle and lifetime timers, no
+  longer hold it open: a stopped Node server lingered until its pool's
+  10 s idle timeout closed them. A statement in flight, a transaction's
+  or a reserved connection, and a connection being opened still hold it,
+  as before.
 - **The service accounts page costs the same however many accounts there
   are.** Its render asked each account it lists for its tokens and its
   trust bindings: with 49 accounts, an Owner's render ran 155 statements
@@ -18,7 +29,6 @@
   sessions page (`/account/sessions`) read every one of your credentials
   twice, once for your sessions and once for your personal tokens; each
   list now reads its own.
-
 - **`coffre run` and `coffre export --help` say that a person gets
   placeholders, not values.** Where the deployment has the credential proxy, a
   person's `run` and `export` write handles, which a request through

@@ -65,8 +65,8 @@ trap finish EXIT
 
 rm -rf "$work/tarballs" "$work/cli" "$work/client" "$work/coffre-workers" "$work/coffre-node"
 
-# The Workers deployment runs on the local Postgres, in a database the
-# conformance run makes and drops; the logins it runs as must exist.
+# Each deployment runs on the local Postgres, in a database the conformance
+# run makes and drops; the logins it runs as must exist.
 "$root/scripts/ensure-postgres.sh"
 node --conditions=coffre:source "$root/scripts/ensure-database.mjs" coffre
 postgres=postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
@@ -169,9 +169,5 @@ for kind in "${kinds[@]}"; do
     fi
 
     echo "==> conformance of coffre-$kind"
-    if [[ "$kind" == workers ]]; then
-        pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime" --hot-runtime "$hot_runtime" --port "$port"
-    else
-        pnpm --dir "$project" conformance --port "$port"
-    fi
+    pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime" --hot-runtime "$hot_runtime" --port "$port"
 done
