@@ -328,7 +328,7 @@ export async function changePlace(owner: Database, id: string, set: { slug?: str
   const write = (db: Queryable) => run(db, sql`UPDATE environments SET slug = coalesce(${set.slug ?? null}, slug),
     archived_at = ${set.archived === undefined ? sql`archived_at` : set.archived ? sql`${new Date()}` : sql`NULL`} WHERE id = ${id}`);
   if (placeKeys === null || !(await cutOverYet(owner))) return write(owner);
-  const [row] = await rows<{ project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: boolean | number | null; archived: boolean | number; project_archived: boolean | number; seal: Buffer | Uint8Array | null }>(owner,
+  const [row] = await rows<{ project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: boolean | null; archived: boolean; project_archived: boolean; seal: Buffer | Uint8Array | null }>(owner,
     sql`SELECT e.project_id, e.slug, e.owner, e.parent_id, e.protected, e.archived_at IS NOT NULL AS archived, p.archived_at IS NOT NULL AS project_archived, e.seal
       FROM environments e JOIN projects p ON p.id = e.project_id WHERE e.id = ${id}`);
   assert.ok(row !== undefined, `no environment ${id}`);

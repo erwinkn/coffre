@@ -60,7 +60,7 @@ async function write(changes: ObjectChange[], rowsOf: (tx: Transaction) => Promi
 /** A key as the app reads it (the server's `secretObjects`): its columns, whether archived, and its seal. */
 async function readKey(id: string): Promise<{ columns: SecretColumns; archived: boolean; seal: string | null }> {
   const [row] = await rows<{
-    project_id: string; environment_id: string; archived: boolean | number; seal: Buffer | null; version: string | null; sensitive: boolean | number | null; plaintext: string | null;
+    project_id: string; environment_id: string; archived: boolean; seal: Buffer | null; version: string | null; sensitive: boolean | null; plaintext: string | null;
     kek_provider: string | null; kek_id: string | null; kek_version: string | null; wrapped_dek: Buffer | null; source: string | null; reference: string | null;
   }>(db.owner, sql`
     SELECT s.project_id, s.environment_id, s.archived_at IS NOT NULL AS archived, s.seal, s.current_version_id AS version, v.sensitive, v.plaintext,
@@ -81,7 +81,7 @@ async function readKey(id: string): Promise<{ columns: SecretColumns; archived: 
 }
 
 async function readEnvironment(id: string): Promise<{ columns: EnvironmentColumns; seal: string | null }> {
-  const [row] = await rows<{ project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: boolean | number | null; archived: boolean | number; project_archived: boolean | number; seal: Buffer | null }>(db.owner,
+  const [row] = await rows<{ project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: boolean | null; archived: boolean; project_archived: boolean; seal: Buffer | null }>(db.owner,
     sql`SELECT e.project_id, e.slug, e.owner, e.parent_id, e.protected, e.archived_at IS NOT NULL AS archived, p.archived_at IS NOT NULL AS project_archived, e.seal
       FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ${id}`);
   assert.ok(row !== undefined);
@@ -139,7 +139,7 @@ const codeOf = (outcome: UseOutcome) => (outcome.ok ? null : 'code' in outcome ?
 async function replayAgrees(): Promise<void> {
   const changes = await rows<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | null }>(db.owner,
     sql`SELECT number, at, object, payload, seal FROM log_changes WHERE object <> ${CUTOVER_OBJECT}`);
-  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null; phased: boolean | number | null }>(db.owner,
+  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null; phased: boolean | null }>(db.owner,
     sql`SELECT number, at, credential, secret, purpose, place, phased FROM log_uses`);
   const entries: Logged[] = [
     ...changes.map((row) => {

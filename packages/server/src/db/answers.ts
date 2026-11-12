@@ -53,13 +53,13 @@ export function answerOf(principal: string, answer: unknown): Shown {
   const at = Number(raw.at);
   const member = raw.member === null ? undefined : {
     status: raw.member.status,
-    ...storedRole({ owner: raw.member.owner === true || raw.member.owner === 1, role: raw.member.role, scope: raw.member.scope }),
+    ...storedRole({ owner: raw.member.owner, role: raw.member.role, scope: raw.member.scope }),
     generation: Number(raw.member.generation),
     statusChangedAt: Number(raw.member.statusChangedAt),
     statusChangedBy: raw.member.statusChangedBy,
   };
   const grants = raw.grants.map((grant) => ({ ...grant, expiresAt: grant.expiresAt === null ? null : Number(grant.expiresAt), grantedAt: Number(grant.grantedAt) }));
-  const environments = new Map(raw.environments.map(({ id, slug, deleted }) => [id, { slug, deleted: Boolean(deleted) }]));
+  const environments = new Map(raw.environments.map(({ id, slug, deleted }) => [id, { slug, deleted }]));
   const { policy } = policyFrom(raw.policy, environments, at);
   return {
     access: answerFrom(principal, member, grants, at, false, policy),
@@ -99,11 +99,11 @@ type Int = number | string;
 
 type Raw = {
   at: Int;
-  member: { status: 'active' | 'removed'; owner: boolean | number; role: string | null; scope: string | null; generation: Int; statusChangedAt: Int; statusChangedBy: string } | null;
+  member: { status: 'active' | 'removed'; owner: boolean; role: string | null; scope: string | null; generation: Int; statusChangedAt: Int; statusChangedBy: string } | null;
   grants: { projectId: string | null; environmentId: string | null; role: string; expiresAt: Int | null; grantedAt: Int; grantedBy: string }[];
   policySeq: Int | null;
   policy: string | null;
-  environments: { id: string; slug: string; deleted: boolean | number }[];
+  environments: { id: string; slug: string; deleted: boolean }[];
   settings: string | null;
 };
 

@@ -152,11 +152,11 @@ function snapshotOf(asked: Asked, raw: Raw): Snapshot {
     newestSettings: asked.settings !== true ? undefined : raw.settings == null ? null : entryOf(raw.settings),
     environments: new Map<string, EnvironmentRow>([...gone.map(([id, last]) => [id, store.goneEnvironment(id, last)] as const), ...raw.environments.map(({ id, projectId, slug, owner, parentId, deleted, archived, ...sealed }) => [id, {
       projectId, slug, owner, parentId,
-      deleted: Boolean(deleted),
-      archived: Boolean(archived),
+      deleted,
+      archived,
       ...(asked.seals === true ? {
         sealed: store.environmentSeal(
-          { id, projectId, slug, owner, parentId, protected: sealed.protected == null ? null : Boolean(sealed.protected), archived: Boolean(sealed.ownArchived), projectArchived: Boolean(sealed.projectArchived) },
+          { id, projectId, slug, owner, parentId, protected: sealed.protected ?? null, archived: Boolean(sealed.ownArchived), projectArchived: Boolean(sealed.projectArchived) },
           hex(sealed.seal),
           sealed.newest ?? null,
         ),
@@ -190,7 +190,7 @@ type Raw = {
   last: { seq: Int; hash: string } | null;
   rotation: RawEntry | null;
   members: {
-    principal: string; status: 'active' | 'removed'; owner: boolean | number; role: string | null; scope: string | null; generation: Int;
+    principal: string; status: 'active' | 'removed'; owner: boolean; role: string | null; scope: string | null; generation: Int;
     createdAt: Int; createdBy: string; statusChangedAt: Int; statusChangedBy: string; accessSeq: Int; mac: string;
   }[];
   grants: { principal: string; projectId: string | null; environmentId: string | null; environmentSlug: string | null; role: string; expiresAt: Int | null; grantedAt: Int; grantedBy: string }[];
@@ -198,9 +198,9 @@ type Raw = {
   policy: RawEntry | null;
   settings?: RawEntry | null;
   environments: {
-    id: string; projectId: string; slug: string; owner: string | null; parentId: string | null; deleted: boolean | number; archived: boolean | number;
+    id: string; projectId: string; slug: string; owner: string | null; parentId: string | null; deleted: boolean; archived: boolean;
     /** With `asked.seals`: the object's own columns, the row's seal, as hex, and its newest change, whole (`newestChangeJson`). */
-    protected?: boolean | number | null; ownArchived?: boolean | number; projectArchived?: boolean | number; seal?: string | null; newest?: NewestColumns | null;
+    protected?: boolean | null; ownArchived?: boolean; projectArchived?: boolean; seal?: string | null; newest?: NewestColumns | null;
   }[];
   /** With `asked.seals`: each asked principal's row's seal and its newest change (`MemberLog`). */
   memberLogs?: {
@@ -238,7 +238,7 @@ function grantOf(raw: Raw['grants'][number]): GrantRow {
 function memberOf({ owner, ...raw }: Raw['members'][number]): Member {
   return store.memberOf({
     ...raw,
-    owner: owner === true || owner === 1,
+    owner,
     generation: Number(raw.generation),
     createdAt: Number(raw.createdAt),
     statusChangedAt: Number(raw.statusChangedAt),

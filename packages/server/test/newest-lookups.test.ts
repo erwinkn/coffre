@@ -157,7 +157,7 @@ const LOOKUPS: Lookup[] = [
     indexes: ['audit_log_unbind_idx'],
     ask: async (app) => {
       const [none, other] = await Promise.all(['binding:none', 'binding:other'].map(async (id) => {
-        const [row] = await rowsOf<{ t: boolean | number }>(app, sql`SELECT ${hasTombstone(app, id)} AS t`);
+        const [row] = await rowsOf<{ t: boolean }>(app, sql`SELECT ${hasTombstone(id)} AS t`);
         return Boolean(row!.t);
       }));
       assert.deepEqual([none, other], [false, true]);

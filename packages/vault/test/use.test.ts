@@ -387,8 +387,8 @@ test("T204, review r1: a log of the previous release's uses and 0074's replays a
   // that period too (review r2).
   const first = heard(await use(ask(w, a)));
   assert.ok(first.ok && first.number !== null);
-  const [entry] = await rows<{ phased: boolean | number | null }>(db.owner, sql`SELECT phased FROM log_uses WHERE number = ${BigInt(first.number)}`);
-  assert.ok(entry!.phased === true || entry!.phased === 1, '0074 says its statement phased the key');
+  const [entry] = await rows<{ phased: boolean | null }>(db.owner, sql`SELECT phased FROM log_uses WHERE number = ${BigInt(first.number)}`);
+  assert.ok(entry!.phased === true, '0074 says its statement phased the key');
   await run(db.owner, sql`UPDATE log_uses SET at = ${T + phaseOf(w.principal, a, 60_000)}, phased = NULL WHERE number = ${BigInt(first.number)}`);
   await run(db.owner, sql`UPDATE bulk_cap SET last = ${T} WHERE principal = ${w.principal} AND secret = ${a}`);
   // B, decided by 0074's: A does not count, and the replay, which moves A on unphased, agrees.

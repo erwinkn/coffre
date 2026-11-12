@@ -824,7 +824,7 @@ export async function environmentObjects(db: Queryable, by: { ids: readonly stri
     .leftJoin(projects, eq(projects.id, environments.projectId))
     .where('ids' in by ? inArray(environments.id, [...new Set(by.ids)]) : eq(environments.projectId, by.projectId));
   return new Map(rows.map(({ archivedAt, projectArchived, seal, ...row }) => [row.id, {
-    columns: { ...row, protected: row.protected ?? null, archived: archivedAt !== null, projectArchived: Boolean(projectArchived) },
+    columns: { ...row, protected: row.protected ?? null, archived: archivedAt !== null, projectArchived },
     seal: seal ?? null,
   }]));
 }
@@ -1046,7 +1046,7 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
   // Postgres could walk the vault's back past every read about them since (T245, R48).
   const changed = keyedBy(auditLog.subjectPrincipal, auditLog.seq, 'desc', sql`ARRAY[${principals.principal}]`);
   const query = sql`
-    SELECT ${m.status} AS status, ${m.owner} AS owner, ${m.role} AS member_role, ${m.scope} AS scope, ${m.statusChangedBy} AS status_changed_by,
+    SELECT ${principals.status} AS status, ${principals.owner} AS owner, ${principals.role} AS member_role, ${principals.scope} AS scope, ${principals.statusChangedBy} AS status_changed_by,
       ${found.legacy} AS found_seq, ${found.named} AS found_named,
       (SELECT CAST(${auditLog.seq} AS text) FROM ${auditLog} WHERE ${accessAllowed()} AND ${changed.where}
         ORDER BY ${sql.join(changed.orderBy, sql`, `)} LIMIT 1) AS changed_seq,
@@ -1066,7 +1066,7 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
     ) x ON x.principal = ${principals.principal}
     WHERE ${principals.principal} = ${principal}`;
   type Row = {
-    status: string; owner: boolean | number; member_role: string | null; scope: string | null; status_changed_by: string;
+    status: string; owner: boolean; member_role: string | null; scope: string | null; status_changed_by: string;
     found_seq: string | null; found_named: number | string; changed_seq: string | null;
     kind: 'grant' | 'project' | null; project_id: string | null; project_slug: string | null;
     environment_id: string | null; environment_slug: string | null; role: string | null; expires_at: string | number | null;
@@ -1078,7 +1078,7 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
   return {
     member: {
       status: first.status as 'active' | 'removed',
-      ...storedRole({ owner: first.owner === true || first.owner === 1, role: first.member_role, scope: first.scope }),
+      ...storedRole({ owner: first.owner, role: first.member_role, scope: first.scope }),
       tampered: findingStands({ legacy: big(first.found_seq), access: big(first.changed_seq), named: Number(first.found_named) === 1 }),
       admittedBy: first.status_changed_by,
     },
@@ -2779,7 +2779,7 @@ export async function secretHeads(db: Queryable, environmentId: string, by: { ke
     currentVersionId: secrets.currentVersionId,
     archivedAt: secrets.archivedAt,
     // How its current value is held, which a write that says nothing keeps the strictness of (`Sensitivity`).
-    plain: sql<boolean | number | null>`${secretVersions.plaintext} IS NOT NULL`,
+    plain: sql<boolean | null>`${secretVersions.plaintext} IS NOT NULL`,
     sensitive: secretVersions.sensitive,
   }).from(secrets).leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId)).where(and(
     inEnvironment(environmentId),
@@ -2972,7 +2972,7 @@ export type ParentRow = { id: string; slug: string; archived: boolean; deleted: 
  */
 export async function parentsOf(db: Queryable, environmentId: string): Promise<ParentRow[] | null> {
   // One level past the most there may be, so that a chain too long, or a loop, shows.
-  const chain = await dialect.rowsOf<{ id: string; slug: string; archived: boolean | number; parent_id: string | null }>(db, sql`
+  const chain = await dialect.rowsOf<{ id: string; slug: string; archived: boolean; parent_id: string | null }>(db, sql`
     WITH RECURSIVE chain (id, slug, archived, parent_id, depth) AS (
       SELECT id, slug, archived_at IS NOT NULL, parent_id, 0 FROM environments WHERE id = ${environmentId}
       UNION ALL
@@ -2988,7 +2988,7 @@ export async function parentsOf(db: Queryable, environmentId: string): Promise<P
   for (const row of above) {
     if (seen.has(row.id) || parents.length === MAX_PARENTS) return null;
     seen.add(row.id);
-    parents.push({ id: row.id, slug: row.slug, archived: Boolean(row.archived), deleted: isTombstone(row.slug) });
+    parents.push({ id: row.id, slug: row.slug, archived: row.archived, deleted: isTombstone(row.slug) });
   }
   // A parent named and not found: the chain was cut around the app.
   const last = chain.at(-1)!;

@@ -59,7 +59,7 @@ export function tombstone(slug: SQLWrapper): SQL {
   return sql`${slug} LIKE ${`%${TOMBSTONE}%`}`;
 }
 
-/** A condition read as a boolean. */
+/** A condition read as a boolean; NULL reads as false. */
 export function truth(condition: SQL): SQL<boolean> {
   return condition.mapWith((value) => value === true);
 }
