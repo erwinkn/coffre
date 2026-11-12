@@ -20,14 +20,15 @@ type Entry = {
 
 /**
  * No fetch of the URL before `until`; until then a token no usable key
- * verifies is told `why`. `standIn` when the issuer did not answer: then,
+ * verifies is told `why`, said of its own issuer: bindings to several
+ * issuers may share one URL, its keys and its quiets. `standIn` when the issuer did not answer: then,
  * and only then, a set past fresh verifies meanwhile, up to `keptUntil`.
  * The quiet after a key the set lacked, or after an answer that was not
  * keys, lets no stale set stand in. `absent` for the minute after a key the
  * set lacked: `why` is then true only of a token whose key the set lacks,
  * and the quiet holds back no refresh of a set past fresh.
  */
-type Quiet = { until: number; why: string; standIn: boolean; absent?: true };
+type Quiet = { until: number; why: (issuer: string) => string; standIn: boolean; absent?: true };
 
 /**
  * The time the cache goes by: the caller's `now` (tests set it), moved on by
@@ -174,14 +175,15 @@ async function fetchKeys(
         return entry.keys!;
       }
       const at = clock();
-      const why =
-        `coffre could not fetch the signing keys of the issuer ${issuer} (${(error as Error).message}): ` +
+      const message = (error as Error).message;
+      const why = (of: string) =>
+        `coffre could not fetch the signing keys of the issuer ${of} (${message}): ` +
         'its own request to the issuer failed, not the token or the job that sent it';
       const failed: Quiet = { until: at + (transient ? KEYS_UNREACHED_MS : KEYS_COOLDOWN_MS), why, standIn: transient };
       const other = entry?.quiet != null && entry.quiet !== own && at < entry.quiet.until ? entry.quiet : null;
       const pause = other === null ? failed : stronger(failed, other);
       remember(url, { keys: entry?.keys ?? null, fetchedAt: entry?.fetchedAt ?? 0, keptUntil, quiet: pause });
-      throw new IssuerUnavailable(why, secondsLeft(pause, at), { cause: error, transient: pause.standIn });
+      throw new IssuerUnavailable(why(issuer), secondsLeft(pause, at), { cause: error, transient: pause.standIn });
     }
   }
 }
@@ -215,19 +217,19 @@ function secondsLeft(pause: Quiet, at: number): number {
   return Math.max(1, Math.ceil((pause.until - at) / 1000));
 }
 
-/** `IssuerUnavailable` for a quiet: its reason, and the seconds it has left. */
-function quieted(pause: Quiet, at: number): IssuerUnavailable {
-  return new IssuerUnavailable(pause.why, secondsLeft(pause, at), { transient: pause.standIn });
+/** `IssuerUnavailable` for a quiet: its reason, said of `issuer`, and the seconds it has left. */
+function quieted(pause: Quiet, at: number, issuer: string): IssuerUnavailable {
+  return new IssuerUnavailable(pause.why(issuer), secondsLeft(pause, at), { transient: pause.standIn });
 }
 
 /** Why a token is refused whose key a set lacks that coffre fetched a moment ago. */
-function absentWhy(url: string, issuer: string): string {
-  return `the token's key is not among the signing keys ${issuer} publishes, which coffre fetched from ${url} a moment ago`;
+function absentWhy(url: string): (issuer: string) => string {
+  return (issuer) => `the token's key is not among the signing keys ${issuer} publishes, which coffre fetched from ${url} a moment ago`;
 }
 
 /** No fetch of `url` for `KEYS_COOLDOWN_MS` from `at`, after a key its set lacked. */
-function pauseFor(url: string, at: number, issuer: string): Quiet {
-  const pause: Quiet = { until: at + KEYS_COOLDOWN_MS, why: absentWhy(url, issuer), standIn: false, absent: true };
+function pauseFor(url: string, at: number): Quiet {
+  const pause: Quiet = { until: at + KEYS_COOLDOWN_MS, why: absentWhy(url), standIn: false, absent: true };
   remember(url, { ...(entries.get(url) ?? { keys: null, fetchedAt: 0, keptUntil: 0 }), quiet: pause });
   return pause;
 }
@@ -280,7 +282,7 @@ export async function verifyWithKeys(
     // keeps it on (review r5 of #565): a token whose key the old set has is not held up to a minute, past the CLI's patience.
     const pause = quiet(url, now);
     if (pause !== null && !pause.absent) {
-      standIn = quieted(pause, now);
+      standIn = quieted(pause, now, expected.issuer);
       const set = pause.standIn ? kept(url, now) : null;
       if (set === null) throw standIn;
       keys = set;
@@ -300,19 +302,19 @@ export async function verifyWithKeys(
     return await verifyWorkloadToken(token, keys, expected);
   } catch (error) {
     if (!absentKey(error)) throw error;
-    if (fetched) throw quieted(pauseFor(url, clock(), expected.issuer), clock());
+    if (fetched) throw quieted(pauseFor(url, clock()), clock(), expected.issuer);
     if (standIn !== null) throw standIn;
     const pause = quiet(url, clock());
-    if (pause !== null) throw quieted(pause, clock());
+    if (pause !== null) throw quieted(pause, clock(), expected.issuer);
   }
   // The issuer may have rotated: fetch once, and wait a minute before the next, whatever it finds. Paused first, so that
   // a token naming another unknown key meanwhile fetches nothing.
-  const pause = pauseFor(url, clock(), expected.issuer);
+  const pause = pauseFor(url, clock());
   const rotated = await fetchKeys(transport, url, expected.issuer, clock, { retry: true, own: pause });
   try {
     return await verifyWorkloadToken(token, rotated, expected);
   } catch (error) {
-    if (absentKey(error)) throw quieted(pause, clock());
+    if (absentKey(error)) throw quieted(pause, clock(), expected.issuer);
     throw error;
   }
 }

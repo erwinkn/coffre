@@ -322,6 +322,18 @@ test('cold, a fetch that times out is asked again once, at once; failing twice, 
   assert.deepEqual(await verify(known, KEYS_UNREACHED_MS + 1000), { outcome: VERIFIED, fetches: 1 });
 });
 
+test("a quiet one issuer's failure set on a URL another issuer shares tells that other's tokens of their own issuer (review r6 of #565)", async () => {
+  timeouts = 2;
+  assert.deepEqual(await verify(known), { outcome: 'unavailable 10', fetches: 2 });
+  const other = 'https://issuer.acme.example';
+  const quiet = (await verifyWithKeys(transport, KEYS, token(known, 1000), { issuer: other, audience: AUDIENCE, now: new Date(T0 + 1000) }).then(
+    () => assert.fail('verified while quiet'),
+    (error: unknown) => error,
+  )) as IssuerUnavailable;
+  assert.deepEqual([fetches, quiet.retryAfter], [2, 9]);
+  assert.ok(quiet.message.startsWith(`coffre could not fetch the signing keys of the issuer ${other} (`), quiet.message);
+});
+
 test('what a fetch finds, and the quiet after one that failed, are dated once its seconds are spent, not when the exchange began (review r5 of #565)', async () => {
   // Cold, GitHub takes 5 s to answer: the set is fresh for ten minutes from then.
   scripted = [
