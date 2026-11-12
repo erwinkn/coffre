@@ -302,7 +302,7 @@ export class WorkloadRefused extends CoffreError {
 /**
  * What a workload caller stands on, kept beside it by the context of the
  * request it was made for: `use` takes back only those, so one kept from
- * an earlier request, checked before a revocation or a freeze, is no one.
+ * an earlier request, checked before a revocation, is no one.
  */
 type Standing = { kind: 'session'; session: StandingSession; credential: string | null } | { kind: 'binding'; binding: BindingRow; policy: BindingPolicy; policySeq: bigint | null; credential: string | null };
 type Standings = WeakMap<WorkloadUse, Standing>;

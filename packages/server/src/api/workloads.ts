@@ -1903,6 +1903,8 @@ function signInRefusal(refused: Exclude<SignInRefusal, 'proof'>, words: Record<E
     case 'expired': return new ExchangeRefused('expired', words.expired);
     // Made before the vault sealed bindings, or changed around it: a manager binds it again (PR 3a).
     case 'unsealed': return new ExchangeRefused('unsealed', 'this binding is none the vault sealed, made before it sealed them or changed since: bind it again');
+    // A code this app does not know, from a vault of another release (its answer is SQL's JSON, cast): a failure, never a sign-in.
+    default: throw new Error(`the vault refused a sign-in for a reason this app does not know: ${String(refused)}`);
   }
 }
 

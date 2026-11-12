@@ -973,7 +973,10 @@ workload's own.
   it, revoking it, untrusting its binding, and removing its member, which
   is the vault's step and then the app's sweep. A target is frozen while
   its newest `workload.freeze` or `workload.unfreeze` entry is a freeze
-  (8.2), and a lift is one more entry.
+  (8.2), and a lift is one more entry. Freezes are the design's alone:
+  nothing writes one yet (`/freezes` answers "not built"), and the code's
+  statement reads none (T268). The protections below that name a freeze
+  are what the change that builds them must bring back.
 - **The tunnel** is opened under the statement. It carries bytes while its
   last good check is less than `Recheck` old: a recheck that has not
   answered by its deadline counts as no. Its rechecks run the statement.

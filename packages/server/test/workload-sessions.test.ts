@@ -840,7 +840,9 @@ function probe(seen: { caller?: WorkloadUse; context?: PluginContext }) {
         const [, , place, credential] = url.pathname.split('/');
         try {
           const body = new Uint8Array(await request.arrayBuffer());
-          const caller = await coffre.workload(request, { place: place === '-' ? null : place!, credential: credential ?? null, body: await bodyDigest(body) });
+          // What a plugin might add to what it asks, past its type: a test's, in a header.
+          const extra = JSON.parse(request.headers.get('x-extra') ?? '{}') as Record<string, unknown>;
+          const caller = await coffre.workload(request, { ...extra, place: place === '-' ? null : place!, credential: credential ?? null, body: await bodyDigest(body) } as never);
           if (caller === null) return Response.json({ caller: null });
           seen.caller = caller;
           return Response.json({ caller: seen.caller }, { headers: { 'dpop-nonce': seen.caller.nonce ?? '' } });
@@ -857,16 +859,16 @@ test("PluginContext.workload: the caller of a forwarded request, its content sig
   const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
   runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
   const place = await marketProd();
-  await bindGithub();
+  await bind('github', null, DEPLOY, { sources: ['203.0.113.0/24'] });
   const held = await githubSession();
   const row = await sessionRow(held);
   assert.deepEqual(held.answer.body.places, ['market/prod']);
-  const forward = async (path: string, init: { body: string; headers?: Record<string, string>; signed?: { headers: Record<string, string>; body: string } }) => {
+  const forward = async (path: string, init: { body: string; headers?: Record<string, string>; signed?: { headers: Record<string, string>; body: string }; sourceIp?: string }) => {
     const url = `${ORIGIN}${path}`;
     const headers = { 'content-type': 'application/json', ...init.headers };
     const proof = await createProof(held.key, { method: 'POST', url, token: held.token, nonce: await gate.nonce(), content: init.signed ?? { headers, body: await bodyDigest(init.body) } });
     const request = new Request(url, { method: 'POST', headers: { ...headers, authorization: `DPoP ${held.token}`, dpop: proof }, body: init.body });
-    return read((await pluginRoute(request, runtime, IP))!);
+    return read((await pluginRoute(request, runtime, init.sourceIp ?? IP))!);
   };
   // A request that carries no session is no workload's: the proxy takes it as a handle's.
   assert.deepEqual((await read((await pluginRoute(new Request(`${ORIGIN}/use/-/stripe/v1/charges`, { method: 'POST' }), runtime, IP))!)).body, { caller: null });
@@ -880,6 +882,14 @@ test("PluginContext.workload: the caller of a forwarded request, its content sig
   // A body changed on the way is refused.
   const changed = await forward(`/use/-/stripe/v1/charges`, { body: '{"amount":9000}', signed: { headers: { 'content-type': 'application/json' }, body: await bodyDigest('{"amount":2000}') } });
   assert.deepEqual([changed.status, changed.body.reason], [401, 'req']);
+  // From outside its binding's sources, refused; nothing a plugin adds to its ask (an `ending`, which skips them) turns them off.
+  const outside = { body: '{}', sourceIp: '198.51.100.7' };
+  const refused = await forward(`/use/-/stripe/v1/charges`, outside);
+  assert.deepEqual([refused.status, refused.body.reason], [401, 'source']);
+  const smuggled = await forward(`/use/-/stripe/v1/charges`, { ...outside, headers: { 'x-extra': '{"ending":true}' } });
+  assert.deepEqual([smuggled.status, smuggled.body.reason], [401, 'source']);
+  // From inside them, it goes on.
+  assert.equal((await forward(`/use/-/openai/v1/chat`, { body: '{}' })).status, 200);
   // `use` takes the caller coffre made for this request, and no lookalike a plugin built, nor one an earlier request's context made.
   const earlier = { caller: seen.caller!, context: seen.context! };
   await assert.rejects(earlier.context.use({ ...earlier.caller }, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: {} }), { status: 401 });

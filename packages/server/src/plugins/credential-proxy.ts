@@ -620,7 +620,7 @@ type Group = {
 
 /** How long a group's check of the vault may take before it counts as a no: the vault has that long to answer. */
 const RECHECK_DEADLINE_MS = 10_000;
-/** How long a workload's tunnel runs past a freeze or a revocation at most (section 8.2): its statement is asked again within it. */
+/** How long a workload's tunnel runs past a revocation at most (section 8.2): its statement is asked again within it. */
 const WORKLOAD_RECHECK_MS = 15_000;
 
 /** What the plugin holds across requests: its code's items, and this isolate's tunnel groups and caches. */
@@ -1538,9 +1538,9 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
  * asked for no password: the signed upgrade authenticated it (section 9.3).
  * It carries bytes while its last good check is less than R old (the
  * deployment's `proxy.revokedWithinSeconds`), 15 s at most (section 8.2):
- * every two thirds of that, section 5.3's statement again, revocation and
- * every freeze included, with a third of it to answer; so a freeze or a
- * revocation ends it within one. The vault's decision afresh too, which a
+ * every two thirds of that, section 5.3's statement again, revocation
+ * included, with a third of it to answer; so a revocation ends it within
+ * one. The vault's decision afresh too, which a
  * lost grant changes, as a handle's tunnel asks it (`proxyTimes`): within R.
  */
 async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, name: string, tunnel: Tunnel): Promise<Response | SocketSession> {
@@ -1851,7 +1851,7 @@ async function compute(request: Request, coffre: PluginContext, proxy: Proxy, pa
   } catch {
     asked = null;
   }
-  // What it asks for, and the credential or signer it uses, which a workload's `credential:` freeze and limits name.
+  // What it asks for, and the credential or signer it uses, which a workload's limits name.
   const operation = asked?.presign !== undefined ? 'presign' : asked?.sign !== undefined ? 'sign' : asked?.verify !== undefined ? 'verify' : null;
   if (asked === null || operation === null) {
     return failure(400, `send { presign: { credential, path, method, expiresIn } }, { sign: { credential, message } } or { verify: { credential, message, signature } } as JSON`);
@@ -2876,7 +2876,7 @@ async function refused<T>(asking: Promise<T>): Promise<T | Response> {
  * credential's `limit`, counted by the gate in the same call; and the
  * values, opened for the session, or remembered for `cacheMs`: the
  * session itself is checked on every request, so a
- * revocation or a freeze stops the next one, warm or not.
+ * revocation stops the next one, warm or not.
  */
 async function workloadForward(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null, credential: Resolved, rest: string[], search: string): Promise<Response | null> {
   const token = sessionToken(request);

@@ -1890,8 +1890,7 @@ export async function reveal(
    * app (docs/design/credential-proxy.md), with `logged` in the app's own
    * entry of it, `credential.use`. A key the environment does not hold is
    * left out, not refused: the proxy says which it needs. `environmentId`,
-   * a workload's: the environment its request was checked for, freezes and
-   * all; a path that resolves to another (renamed meanwhile) is refused
+   * a workload's: the environment its request was checked for; a path that resolves to another (renamed meanwhile) is refused
    * before anything is logged or opened.
    */
   use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown>; environmentId?: string; ahead?: ReadAhead | null; only?: boolean; decided?: Decided | DecidedMany },
