@@ -167,6 +167,8 @@ the chain is. The app hands them over in one call, `note`; section 3 says which 
   vault's own refusals inside it among them, and the projector fills `audit_events.request_id` from the payload for
   every kind of row. One id is derived: an event of no request that may be written twice (a finding of the beat) takes
   `<system actor>/<what it is about>` (`systemEventId`: `system:vault/finding:4410`), so a second run writes nothing.
+  The actor `system:vault` is the vault's alone: `note` and `prepare` refuse it from the app, and the projector reads
+  an event's author from it.
 
 **Each projection must beat its absence.**
 
@@ -314,7 +316,9 @@ fixed:
   them. Four ways to break that each close a wait cycle, a 1 s stall in Postgres: `revoke_credential`, which takes no
   issue lock, taking its object before the fence; a batch taking each key's lock as its turn comes; a statement of
   several `app_change` calls (a project's delete) taking each call's as it comes; and `use_batch` taking its
-  principal's lock before its keys, as it does today.
+  principal's lock before its keys, as it does today. An event the app commits with its changes (`log_event`, which
+  shares the fence) comes after them in that statement: before them, the transaction would hold the fence when its
+  change asks for the issue lock, while the checkpointer holds the issue lock and waits for the fence.
 - **A use reads ids before it locks.** The call names its credential, key and place; the member is on the
   credential's row, a reference's source on the reference's. The function reads those ids with no lock, takes the
   locks, then runs its statement. A key made a reference in between names an object the call did not lock: the
