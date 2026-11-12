@@ -71,10 +71,11 @@ on a fresh clone of the migrated template:
    access grants and refusals about someone no member row names; 0.15's changes
    of other objects and rotations of the log's key; one member's reads of the
    same four keys at their versions (one through a reference), a thousand a
-   day, over a day for each thousand; uses, a few to a millisecond; someone
-   who only ever signed in, and an MCP client's reads of the `shop` project,
-   which their own pages hide; and, newest, the scheduler's heartbeats, which
-   an ordinary audit page and the scheduler's own hide. Then the watch and the
+   day, over a day for each thousand; uses, spread between the
+   checkpointer's floor and its next barrier; someone who only ever signed
+   in, and an MCP client's reads of the `shop` project, which their own pages
+   hide; and, newest, the scheduler's heartbeats, which an ordinary audit
+   page and the scheduler's own hide. Then the watch and the
    vault catch up with it, as a deployment's do between beats, so that what a
    beat walks is what came since, and the checkpointer seals 0.15's log to its
    head, as a deployment's does every 500 ms, so that its tick and the trees'
@@ -142,6 +143,8 @@ The seeded rows of 0.15's log carry the vault's MAC, as a deployment's do, or
 the checkpointer would refuse the first and leave them all as a backlog above
 its newest checkpoint, which its tick and the trees' check would read whole
 (91 to 196 pages, and 62 to 389, until T288). A run that leaves any seeded
-row unsealed fails before it measures. A backlog to drain, and uses sharing
-one `at` (T248), have tests of their own, in
-`packages/vault/test/log-store.test.ts`.
+row unsealed fails before it measures. A backlog to drain has tests of its
+own, in `packages/vault/test/log-store.test.ts`. Uses sharing one `at` are
+T248's case, a todo test there (it runs, but its failure does not fail the
+suite), and no test holds the trees' check to its pages over a large backlog
+of uses.

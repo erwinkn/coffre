@@ -243,8 +243,9 @@ async function caughtUp(): Promise<void> {
  * The history, `SIZE` long in each shape, oldest first, behind the instance's own entries: a long tail of another
  * member's reads in 0.14's log, a thousand to an `occurred_at`; the vault's findings about one member, 0.14's and
  * 0.15's; the access entries and refusals about someone no row names; 0.15's changes of other objects, and rotations of the log's
- * key; one member's reads, a day's; uses, a few to a millisecond; someone's sign-ins, and an MCP client's reads of
- * shop, which their pages hide; and, newest, the scheduler's heartbeats, which an ordinary page and its own hide.
+ * key; one member's reads, a day's; uses, spread between the checkpointer's floor and its next barrier; someone's
+ * sign-ins, and an MCP client's reads of shop, which their pages hide; and, newest, the scheduler's heartbeats, which
+ * an ordinary page and its own hide.
  * Entries of 0.14's log are chained and MAC'd under their author's key, and 0.15's under the vault's, which its
  * checkpointer seals (`caughtUp`), as a deployment's every 500 ms.
  */
@@ -313,13 +314,14 @@ async function grow(): Promise<void> {
         FROM generate_series(1, ${Math.min(SIZE, 1_000)}) g`);
     for (const leaver of LEAVERS) await rowsOf(db.owner, sql`INSERT INTO log_read_days (principal, day) VALUES (${`user:${leaver}`}, ${today - back}) ON CONFLICT DO NOTHING`);
   }
-  // The uses, each at a time of its own, a few to a millisecond, as a deployment's come in, and above the floor the
-  // checkpointer reads its window from, so that it seals them (`caughtUp`); below the floor its next barrier sets, so
-  // that, sealed, no window above the newest pair reads them again. Uses sharing one `at` are T248's case, which
-  // packages/vault/test/log-store.test.ts holds `lowestAbove` to.
-  const [span] = await rowsOf<{ floor: string; ceiling: string }>(db.owner, sql`
+  // The uses, spread evenly above the floor the checkpointer reads its window from, so that it seals them
+  // (`caughtUp`), and below the floor its next barrier sets, so that, sealed, no window above the newest pair reads
+  // them again. How many share a millisecond depends on how long the seeding above took, so on the machine. Uses
+  // sharing one `at` are T248's case, a todo test in packages/vault/test/log-store.test.ts.
+  const [span] = await rowsOf<{ floor: string | null; ceiling: string }>(db.owner, sql`
     SELECT (SELECT k.at_floor FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1)::text AS floor,
            ((extract(epoch FROM clock_timestamp()) * 1000)::bigint - deadline_max())::text AS ceiling`);
+  assert.ok(span!.floor !== null, 'no checkpoint to read the floor from: the reveals and listReads() above make one');
   const [floor, ceiling] = [Number(span!.floor), Number(span!.ceiling)];
   assert.ok(ceiling - floor > 1, `no time between the checkpointer's floor (${floor}) and the next barrier's (${ceiling}) to stamp uses in`);
   const uses = Array.from({ length: SIZE }, (_, i) => {
