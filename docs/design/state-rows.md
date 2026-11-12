@@ -91,14 +91,15 @@ read by primary key. **Projections** are caches the vault's projector rebuilds f
 -- STATE
 CREATE TABLE settings (                 -- the instance's settings, one sealed row; read by key at sign-in and in /api/me
   name text PRIMARY KEY CHECK (name = 'instance'),
-  service_accounts text NOT NULL,       -- who sets up service accounts themselves
-  service_account_projects uuid[] NOT NULL DEFAULT '{}',
-  seal bytea NOT NULL CHECK (octet_length(seal) = 16)
+  -- who sets up service accounts themselves: two filters, each a kind ('all', 'only', 'except') and its list
+  service_accounts_projects text NOT NULL,     service_accounts_project_ids uuid[] NOT NULL DEFAULT '{}',
+  service_accounts_environments text NOT NULL, service_accounts_environment_slugs text[] NOT NULL DEFAULT '{}',
+  seal bytea CHECK (octet_length(seal) = 16)   -- null only from the migration to the vault's upgrade step (section 6)
 );
 CREATE TABLE log_keys (                 -- every key the app or the vault has written under; read by key at sign-in, issue, bind
-  holder text NOT NULL CHECK (holder IN ('app', 'vault')), key_id text NOT NULL,
+  holder text NOT NULL CHECK (holder IN ('app', 'vault')), key_id text NOT NULL,   -- key_id: '<holder>:<16 hex>'
   retired boolean NOT NULL DEFAULT false,                 -- one key per holder is in force
-  seal bytea NOT NULL CHECK (octet_length(seal) = 16),
+  seal bytea CHECK (octet_length(seal) = 16),             -- null as the settings'
   PRIMARY KEY (holder, key_id)
 );
 ALTER TABLE principals DROP COLUMN access_seq, DROP COLUMN mac;   -- 0.14's pointer into audit_log and its row MAC
@@ -147,8 +148,23 @@ CREATE TABLE audit_cursor (             -- how far the projector has gone, one r
 page stops reading the chain. The projector classifies each entry once, in TypeScript, from the payload whose MAC it
 has checked. There is no table of object heads (section 4). And entries that change no object need a home, or
 `audit_log` cannot freeze: a refusal, a refused sign-in, a finding. They go in `log_changes` as refused writes
-already do, with the object `hash('event', request id)` and no seal, signed by the vault as everything in the chain
-is. The app hands them over in one call, `note`; section 3 says which requests gain that call.
+already do, with an object of their own, `log_object('event', id)`, and no seal, signed by the vault as everything in
+the chain is. The app hands them over in one call, `note`; section 3 says which requests gain that call.
+
+**As pinned by the contract (K1, #581),** where it departs from the first drafts of this section:
+
+- *The settings' scope is two filters.* Today's setting is a `Scope`: projects by id and environments by slug, each
+  all, only or except. One `text` and one `uuid[]` held the first alone. `{ projects: 'all', environments: { except:
+  ['prod'] } }` is the row `'all'`, `{}`, `'except'`, `{prod}`; a list is empty exactly when its kind is `all`.
+- *Both new seals are nullable.* The migration fills the rows from the old log's entries, which it cannot seal; the
+  vault's upgrade step seals each with its first change, compared-and-set on the null seal (`genesisCall`, which V0
+  keeps for it). No reader accepts a row with no seal.
+- *`note` takes an `audit_log` entry's fields by today's names:* action, allowed, code, actor, subject, the four
+  places, credential, request id, detail, and `operationId` and `sourceIp`, which `audit_events` has columns for.
+- *One event per id.* #581 takes the app's request id as the event's id, so a request notes one event. A change's row
+  never carries that id (the vault draws or derives its own, `writeRequestId`), so a request can change an object and
+  note an event. Open with K1: giving an event an id of its own too, with the request's id in the payload as a
+  refusal's record has it today, for the requests and the beats that note several.
 
 **Each projection must beat its absence.**
 
