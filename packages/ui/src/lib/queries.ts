@@ -1,6 +1,6 @@
 import { CoffreError, type AuthInfo, type CoffreClient, type Member } from '@coffre/client';
 import { EVERYWHERE, INSTANCE_ROLES, MAX_SERVICE_TOKEN_DAYS } from '@coffre/core/access';
-import { QueryClient, queryOptions, type FetchQueryOptions, type QueryKey } from '@tanstack/react-query';
+import { infiniteQueryOptions, QueryClient, queryOptions, type FetchQueryOptions, type QueryKey } from '@tanstack/react-query';
 
 import { deriveUiCapabilities } from './capabilities.ts';
 import { memberRef, statusOf, uiResult } from './coffre.ts';
@@ -20,6 +20,7 @@ import type { DirectoryPrincipal, GrantRow, Me, ProjectSummary } from '../shared
  * cached read: the server authorizes every call, so a stale screen can offer
  * an action the server then refuses, never grant one. The audit log is the
  * exception, read fresh on every visit: its whole point is to be current.
+ * A member's actions log is not asked again on focus, though (`actionsLog`).
  * The chain's verification is read once a visit like the rest, and again
  * after any change made here.
  */
@@ -136,6 +137,7 @@ export type SettingsTab = (typeof SETTINGS_TABS)[number];
 export type SettingsSearch = { tab?: SettingsTab; roles?: 'global' };
 
 export const AUDIT_PAGE_SIZE = 200;
+const ACTIONS_PAGE_SIZE = 50;
 
 export const queries = {
   /**
@@ -368,6 +370,26 @@ export const queries = {
             sealed: '1',
           }),
         ),
+    }),
+
+  /**
+   * One member's entries of the log, newest first, older pages on request.
+   * Read fresh on every visit, but not again when the window regains focus: a
+   * page of an append-only log does not change, and every page the reader
+   * loaded would be asked again, one request after another. Entries written
+   * meanwhile show on the next visit, or after a change made here. A
+   * reconnect still asks again: it is how a page that failed offline recovers.
+   */
+  actionsLog: (client: CoffreClient, member: string) =>
+    infiniteQueryOptions({
+      queryKey: [...keys.audit, 'actor', member],
+      staleTime: 0,
+      refetchOnWindowFocus: false,
+      initialPageParam: undefined as string | undefined,
+      queryFn: ({ pageParam }) =>
+        uiResult(() => client.audit.list({ actor: member, limit: ACTIONS_PAGE_SIZE, sealed: '1', before: pageParam })),
+      // A page lists fewer entries where they name many secrets, and says where it stopped in each log: its `next`.
+      getNextPageParam: (page) => (page.ok ? page.next ?? undefined : undefined),
     }),
 
   /**

@@ -1,12 +1,10 @@
 import { useInfiniteQuery } from '@tanstack/react-query';
-import { uiResult, useCoffre } from '../lib/coffre';
-import { keys } from '../lib/queries';
+import { useCoffre } from '../lib/coffre';
+import { queries } from '../lib/queries';
 import { describe, lines, runLabel } from '../lib/audit-sentences';
 import { Sentence } from './audit-sentence';
 import { EmptyState, Notice, Spinner, Timestamp } from './ui';
 import { Activity, Clock, ShieldCheck, SlashCircle } from './icons';
-
-const PAGE_SIZE = 50;
 
 /**
  * How far a page's reads are listed, when that says something: 0.15's log
@@ -59,15 +57,7 @@ export function ReadsLag({ reads, omitted }: { reads: { through: string | null; 
  */
 export function ActionsLog({ member }: { member: string }) {
   const client = useCoffre();
-  const log = useInfiniteQuery({
-    queryKey: [...keys.audit, 'actor', member],
-    staleTime: 0,
-    initialPageParam: undefined as string | undefined,
-    queryFn: ({ pageParam }) =>
-      uiResult(() => client.audit.list({ actor: member, limit: PAGE_SIZE, sealed: '1', before: pageParam })),
-    // A page lists fewer entries where they name many secrets, and says where it stopped in each log: its `next`.
-    getNextPageParam: (page) => (page.ok ? page.next ?? undefined : undefined),
-  });
+  const log = useInfiniteQuery(queries.actionsLog(client, member));
 
   if (log.isPending) {
     return (
