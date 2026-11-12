@@ -29,7 +29,9 @@ path. A comment above each statement's lines gives its text and, written in
 by hand, where the code asks it (`#   from <file>:<line>`): most statements
 leave the database layer from a queue, whose stack no longer names the code
 that asked them. The sweep exits 1 when a statement grows that the list
-does not name; one it names is printed, marked `(known)`, and passes. So:
+does not name, or that only the larger run ran (`NEW`: a branch the history's
+size took, a window past its limit or a prune, whatever its pages); one it
+names is printed, marked `(known)`, and passes. So:
 
 - a change that makes a statement grow fails the sweep, the statement marked
   `NOT KNOWN`;
@@ -37,7 +39,9 @@ does not name; one it names is printed, marked `(known)`, and passes. So:
   line whose statement grew no more, and passes;
 - `--write-known` rewrites the list with what grew in that run, keeping the
   comments of each statement it already listed; a new one's reads
-  `from ?` until someone fills it in.
+  `from ?` until someone fills it in. A statement whose plan flips between
+  runs, growing in one and flat in the next (two today, their lines say
+  which), drops out of a list written from a flat run: put its lines back.
 
 The list is a burn-down: once it is empty, every runtime statement is flat in
 history, and the timeout goes on.
@@ -76,7 +80,9 @@ on a fresh clone of the migrated template:
    the measured rounds, which flipped plans and buffer counts by a few pages
    from run to run in the cost tests before (T200, T209, T225).
 5. **Every request path, three times**: every GET route of the API (from the
-   client's route table, its parameters filled), as an Owner and as a viewer;
+   client's route table, its parameters filled, and the query a route needs:
+   a real CLI sign-in's code, `?from=start` for the reads' check), as an Owner
+   and as a viewer;
    the audit page under each filter, as an Owner, a viewer and an auditor of
    one project; each member's page; a sign-in, reveals, a key write, an access
    change, a heartbeat, readiness, the vault's checkpoint, the checkpointer's
@@ -89,10 +95,22 @@ on a fresh clone of the migrated template:
    (`keepTestConnections`), as a request takes turns on one through
    Hyperdrive.
 
+   Not measured: the optional plugins' routes (workload bindings and lookups,
+   enrollments, freezes, MCP's authorizations, approvals and apps), which the
+   test deployment does not add, so that they answer 404 or 501 before any
+   read; and the writes the list above does not name (tokens, bindings, roles,
+   settings, environments and projects), which run in the instance's seed
+   alone. The sweep holds each GET route an Owner asks to a 2xx, but those
+   plugins' to the status `UNREACHED` names, fails when the client's route
+   table has a GET route its pattern does not read, and fails when any path
+   throws: a route that stopped short would answer the same at both sizes,
+   its reads unmeasured.
+
 [`scripts/growth-sweep.mjs`](../scripts/growth-sweep.mjs) then reads both
 logs. A statement is its path and its text with its literals left out, and
 each list of parameters one (an `IN` as long as a page's rows is one
-statement however long). By path, so that a statement many paths run, a
+statement however long, and so is a run of `UNION ALL` arms alike, one a row).
+By path, so that a statement many paths run, a
 member's access say, is measured in each, and one path's walk is not hidden
 under another's larger, flat run of it. Its cost is the most pages (shared
 buffers hit or read) one run of it read in its path, and how many times it

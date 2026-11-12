@@ -4,7 +4,8 @@
 // database is another, and a query identifier hashes its tables' OIDs), with its literals left out, read so many
 // pages (shared buffers hit or read) at most per run, so many times: one that reads more at the larger size, or runs
 // more often, is one whose cost grows with history. Prints each that grows, and whether the list of known growers
-// names it, and exits 1 when one it does not name grows, or when the runs cannot be compared.
+// names it, and exits 1 when one it does not name grows (or runs at the larger size alone), or when the runs cannot be
+// compared.
 //
 //   node scripts/growth-sweep.mjs <small.log> <large.log> <small.outcomes.json> <large.outcomes.json> [--known <list>] [--write-known <list>]
 import { createHash } from 'node:crypto';
@@ -43,7 +44,7 @@ function logged(text) {
     while (i + 1 < lines.length && lines[i + 1].startsWith('\t')) body.push(lines[++i].slice(1));
     let plan = null;
     try {
-      plan = JSON.parse(body.join('\n').replace(/"Query Identifier": (-?\d+)/, '"Query Identifier": "$1"'));
+      plan = JSON.parse(body.join('\n'));
     } catch {
       plan = null;
     }
@@ -55,11 +56,14 @@ function logged(text) {
 /**
  * A statement's text as the two runs share it: its spaces collapsed, its strings and numbers left out, and each list of
  * parameters (`$1`, or `$3, $4, $5` for an `IN` of three) one `$?`, so that an `IN` as long as a page's rows is one
- * statement however long, and its runs after the first on a backend are warm ones (review r3 of #559).
+ * statement however long, and its runs after the first on a backend are warm ones (review r3 of #559). A run of
+ * `UNION ALL` arms alike once so cut is one arm too: a list of rows built as a `SELECT … UNION ALL SELECT …`, one arm a
+ * row (the audit's reads, `log-store.ts`), is as long as its page, which differs between the two sizes.
  */
 export function shapeOf(text) {
-  return text.replace(/\s+/g, ' ').trim().replace(/'(?:[^']|'')*'/g, "'?'").replace(/\$\d+(?:\s*,\s*\$\d+)*/g, '$?')
+  const shape = text.replace(/\s+/g, ' ').trim().replace(/'(?:[^']|'')*'/g, "'?'").replace(/\$\d+(?:\s*,\s*\$\d+)*/g, '$?')
     .replace(/(?<![\w$.])\d+(?:\.\d+)?(?![\w.])/g, '?');
+  return shape.split(' UNION ALL ').filter((arm, i, arms) => i === 0 || arm !== arms[i - 1]).join(' UNION ALL ');
 }
 
 /**
@@ -101,8 +105,9 @@ export function statementsOf(plans) {
 /**
  * Each statement that grows from `small` to `large`: reads at least twice the pages and eight more (a flat
  * statement gains an index level at most, a page for each index it steps down, and its rows), or runs at least twice
- * as often (a statement asked once for each entry of a history). One the larger run alone ran is listed too: a path
- * that took another branch there, whose statements the smaller never measured. One without a warm run at either size is
+ * as often (a statement asked once for each entry of a history). One the larger run alone ran is listed too, `new`: a
+ * path that took another branch there (a window past its limit, a prune), whose statements the smaller never measured,
+ * which the list of known growers names as it names one that grew. One without a warm run at either size is
  * `unwarmed`'s, not compared here.
  */
 export function growing(small, large) {
@@ -119,6 +124,11 @@ export function growing(small, large) {
     if (pages || runs) grown.push({ id, why: pages ? 'pages' : 'runs', before, after: at });
   }
   return grown.sort((a, b) => b.after.pages - a.after.pages);
+}
+
+/** The growers (`growing`) `known` does not name, all of them with no list: each fails the sweep. */
+export function unknownOf(grown, known) {
+  return known === null ? grown : grown.filter(({ after }) => !known.has(`${idOf(after.shape)} ${after.path}`));
 }
 
 /** The statements `small` ran that `large` did not: a path that stopped short at the larger size, its plans never logged. */
@@ -210,7 +220,9 @@ function report(grown, notes, known) {
     const id = idOf(after.shape);
     const listed = known === null ? '' : known.has(`${id} ${after.path}`) ? '  (known)' : '  NOT KNOWN';
     const was = before === null ? 'not run' : `${before.pages} pages, ${before.runs} runs`;
-    console.log(`${why === 'new' ? 'NEW  ' : 'GROWS'} ${was} -> ${after.pages} pages, ${after.runs} runs${why === 'new' ? '' : listed}`);
+    // A statement new at the larger size may have no warm run there: its pages are then its first run's, the catalog's too.
+    const now = after.warm ? `${after.pages} pages` : `${after.cold} pages, cold`;
+    console.log(`${why === 'new' ? 'NEW  ' : 'GROWS'} ${was} -> ${now}, ${after.runs} runs${listed}`);
     console.log(`      ${id} ${after.path}`);
     for (const line of (notes.get(id) ?? []).filter((one) => one.startsWith('#   from'))) console.log(`      ${line.slice(4)}`);
     console.log(`      ${after.text.slice(0, 240)}`);
@@ -239,17 +251,17 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const known = knownFile === undefined ? null : knownOf(knownText);
   const notes = notesOf(knownText);
   const grown = growing(small, large);
-  const flagged = grown.filter(({ why }) => why !== 'new');
-  const unknown = known === null ? flagged : flagged.filter(({ after }) => !known.has(`${idOf(after.shape)} ${after.path}`));
-  console.log(`${large.size} statements of paths measured; ${flagged.length} grow with history (${unknown.length} not known), ${grown.length - flagged.length} ran at the larger size alone`);
+  const unknown = unknownOf(grown, known);
+  const fresh = grown.filter(({ why }) => why === 'new').length;
+  console.log(`${large.size} statements of paths measured; ${grown.length - fresh} grow with history, ${fresh} ran at the larger size alone (${unknown.length} not known)`);
   report(grown, notes, known);
   if (known !== null) {
-    const still = new Set(flagged.map(({ after }) => `${idOf(after.shape)} ${after.path}`));
+    const still = new Set(grown.map(({ after }) => `${idOf(after.shape)} ${after.path}`));
     for (const line of [...known].filter((one) => !still.has(one))) console.log(`FLAT  ${line}: known to grow, but grew no more here; delete its line once a run on main agrees`);
   }
   if (writeFile !== undefined) {
-    writeFileSync(writeFile, listOf(flagged, notes));
-    console.log(`wrote the ${flagged.length} statements that grew to ${writeFile}`);
+    writeFileSync(writeFile, listOf(grown, notes));
+    console.log(`wrote the ${grown.length} statements that grew or are new to ${writeFile}`);
   }
   // A sweep is clean only if both runs went the same way to the end: a statement too slow at the larger size, cut by a
   // timeout, leaves no plan behind, and would otherwise read as none that grew (review r1 of #559).

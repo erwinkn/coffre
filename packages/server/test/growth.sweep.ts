@@ -80,6 +80,8 @@ let signinService: SigninService;
 /** 0.15's hot path's pool, kept as the others are (`keepTestConnections`), and how many statements it has run. */
 let hot: PostgresClient;
 let hotRan = 0;
+/** A CLI sign-in waiting for its approval, whose page `GET /device-logins/:code` reads. */
+let deviceCode = '';
 
 /** Turns auto_explain on for the runtime logins in this database alone, before any of them connects. */
 async function explainRuntime(): Promise<void> {
@@ -87,15 +89,12 @@ async function explainRuntime(): Promise<void> {
   const database = new URL(TEST_OWNER_DATABASE_URL).pathname.slice(1);
   const settings: Record<string, string> = {
     session_preload_libraries: 'auto_explain',
-    compute_query_id: 'on',
     'auto_explain.log_min_duration': '0',
     'auto_explain.log_analyze': 'on',
     'auto_explain.log_buffers': 'on',
     'auto_explain.log_timing': 'off',
     'auto_explain.log_format': 'json',
     'auto_explain.log_nested_statements': 'on',
-    // The plan's query identifier, which the comparison groups by.
-    'auto_explain.log_verbose': 'on',
   };
   try {
     for (const login of LOGINS) {
@@ -151,6 +150,7 @@ before(async () => {
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
   await root.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 });
   await root.environments.protect('market/prod');
+  deviceCode = (await signinService.startDevice({ clientLabel: 'laptop', sourceIp: null })).userCode;
   // Real uses and reads, a few, then sealed and projected, so that the pages and the checkpointer have their own.
   for (const member of [READER, ...LEAVERS]) for (let i = 0; i < 3; i += 1) await throughAccess(member).secrets.reveal('market/dev');
   assert.ok(hotRan > 0, "the seed's reveals ran no statement on the hot path: they planted no 0.15 use");
@@ -285,13 +285,37 @@ async function grow(): Promise<void> {
   await appendMany(app, SIZE, () => ({ actor: SCHEDULER, action: 'audit.heartbeat', decision: 'allow', metadata: '{}' }));
 }
 
-/** The API's routes read as GET, from the client's own list of them, each with its parameters filled. */
-function getRoutes(): string[] {
+/** The query a GET route cannot answer without: with none, it answers 400 before it reads anything. */
+const QUERIES: Record<string, string> = { '/references': '?path=market%2Fdev', '/audit/reads': '?from=start' };
+
+/**
+ * The GET routes the sweep reaches no further than their refusal, by what an owner's request answers: the optional
+ * plugins' (workloads, MCP), which the test deployment does not add, so that their statements are not measured
+ * (docs/growth-sweep.md). Any other answering otherwise than 2xx fails the sweep: a route no longer reached, its reads
+ * no longer measured, would pass the comparison, the same at both sizes.
+ */
+const UNREACHED: Record<string, number> = {
+  '/members/:member/bindings': 404, '/members/:member/bindings/:id/enrollments': 501, '/workloads/lookup': 404, '/workloads/repositories': 404,
+  '/freezes': 501, '/oauth/authorizations': 404, '/approvals/:id': 404, '/apps': 404,
+};
+
+/** The API's routes read as GET, from the client's own list of them: each route, and its path, its parameters filled. */
+function getRoutes(): { route: string; path: string; name: string }[] {
   const api = readFileSync(fileURLToPath(new URL('../../client/src/api.ts', import.meta.url)), 'utf8');
   const values: Record<string, string> = {
-    project: 'market', environment: 'dev', key: 'API_KEY', member: `user:${READER}`, id: '00000000-0000-4000-8000-000000000000', code: 'ABCD-EFGH', role: 'developer', folder: 'none',
+    project: 'market', environment: 'dev', key: 'API_KEY', member: `user:${READER}`, id: '00000000-0000-4000-8000-000000000000', code: deviceCode, role: 'developer', folder: 'none',
   };
-  return [...api.matchAll(/^ {2}"GET (\/[^"]*)": \{/gm)].map((found) => found[1]!.replace(/:(\w+)/g, (_, name: string) => encodeURIComponent(values[name] ?? 'none')));
+  const routes = [...api.matchAll(/^ {2}"GET (\/[^"]*)": \{/gm)].map((found) => found[1]!);
+  // Every GET the file names, however it is laid out: one the pattern above misses is a route the sweep drops at both sizes.
+  assert.equal(routes.length, api.match(/"GET \//g)?.length, 'every GET route of the client read');
+  const filled = (route: string, value: (name: string) => string) => route.replace(/:(\w+)/g, (_, name: string) => value(name)) + (QUERIES[route] ?? '');
+  // Named with `:code` for the device login's code, which each size draws anew: by its value, its statements would be
+  // one path's at the smaller size and another's at the larger, each gone from one and new at the other.
+  return routes.map((route) => ({
+    route,
+    path: filled(route, (name) => encodeURIComponent(values[name] ?? 'none')),
+    name: filled(route, (name) => (name === 'code' ? ':code' : encodeURIComponent(values[name] ?? 'none'))),
+  }));
 }
 
 /** One request to the API as `as`, its status whatever it is: a path that answers 4xx still ran its statements. */
@@ -323,8 +347,8 @@ function paths(): Path[] {
   const reader = throughAccess(READER);
   const members = [ROOT, READER, TAMPERED, LEAVER].map((member) => `user:${member}`).concat(SERVICE);
   return [
-    ...getRoutes().map((path) => ({ name: `GET ${path} (owner)`, run: () => get(ROOT, path) })),
-    ...getRoutes().map((path) => ({ name: `GET ${path} (viewer)`, run: () => get(READER, path) })),
+    ...getRoutes().map(({ path, name }) => ({ name: `GET ${name} (owner)`, run: () => get(ROOT, path) })),
+    ...getRoutes().map(({ path, name }) => ({ name: `GET ${name} (viewer)`, run: () => get(READER, path) })),
     ...PAGES.map((query) => ({ name: `GET /audit${query} (owner)`, run: () => get(ROOT, `/audit${query}`) })),
     ...PAGES.map((query) => ({ name: `GET /audit${query} (viewer)`, run: () => get(READER, `/audit${query}`) })),
     // Every page of a reader of one place is a place's page (`within`), which may walk back the log past everyone's
@@ -393,7 +417,8 @@ test(`the request paths, warm, then measured twice, at ${SIZE.toLocaleString('en
         const answered = await run(index);
         answer(name, typeof answered === 'number' ? String(answered) : 'ok');
       } catch (error) {
-        answer(name, `failed: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`);
+        // Its digits left out: a message naming a seq or a count differs between the sizes when the failure does not.
+        answer(name, `failed: ${(error instanceof Error ? error.message.slice(0, 120) : String(error)).replace(/[0-9a-f-]{36}|\d+/gi, '#')}`);
       }
     }
   }
@@ -403,6 +428,12 @@ test(`the request paths, warm, then measured twice, at ${SIZE.toLocaleString('en
   // In a file: the test runner relays a run's output in chunks, and a long line comes back cut by its stderr's.
   if (process.env.COFFRE_SWEEP_OUTCOMES !== undefined) writeFileSync(process.env.COFFRE_SWEEP_OUTCOMES, JSON.stringify(outcomes));
   assert.ok(Object.keys(outcomes).length > 0);
+  // A path that failed left the statement it failed on, and every one after, unmeasured at both sizes.
+  assert.deepEqual(Object.entries(outcomes).filter(([, outcome]) => outcome.includes('failed:')), [], 'no path fails');
+  // Each GET route reached as far as an owner reaches it, but the plugins' (`UNREACHED`).
+  const astray = getRoutes().map(({ route, name }) => [route, outcomes[`GET ${name} (owner)`]] as const)
+    .filter(([route, outcome]) => !(UNREACHED[route] === undefined ? /^2\d\d$/.test(outcome ?? '') : outcome === String(UNREACHED[route])));
+  assert.deepEqual(astray, [], 'every GET route answers an owner as UNREACHED says');
   // The hot path's reads measured: a reveal that failed at both sizes would answer alike at both, and pass the comparison.
   for (const name of ['a reveal (viewer)', 'a reveal of one key (viewer)']) assert.equal(outcomes[name], 'ok', `${name}: ${outcomes[name]}`);
   // A scoped reader's pages measured: answered 403, they would read nothing past their caller's.

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { growing, idOf, knownOf, listOf, notesOf, plansOf, shapeOf, statementsOf, unparsed, unwarmed, vanished } from './growth-sweep.mjs';
+import { growing, idOf, knownOf, listOf, notesOf, plansOf, shapeOf, statementsOf, unknownOf, unparsed, unwarmed, vanished } from './growth-sweep.mjs';
 
 /** A server log as auto_explain writes it: each `[statement, pages, backend = 7]` a plan, after its path's mark. */
 function logOf(paths) {
@@ -60,6 +60,8 @@ test('a warm run grows though its first run on a backend read more', () => {
 
 test("an IN of parameters is one statement however long, so that a path's later runs of it are warm", () => {
   assert.equal(shapeOf('SELECT seq FROM audit_log WHERE seq IN ($1, $2, $3) AND actor = $4'), shapeOf('SELECT seq FROM audit_log WHERE seq IN ($1) AND actor = $2'));
+  const rows = (n) => `SELECT a.i FROM (SELECT 0 AS i, CAST($1 AS uuid) AS object${Array.from({ length: n - 1 }, (_, k) => ` UNION ALL SELECT ${k + 1}, CAST($${k + 2} AS uuid)`).join('')}) AS a`;
+  assert.equal(shapeOf(rows(3)), shapeOf(rows(40)));
   const small = { 'GET /audit': [['SELECT * FROM audit_log WHERE seq IN ($1, $2)', 5], ['SELECT * FROM audit_log WHERE seq IN ($1, $2, $3)', 5]] };
   const [before] = [small].map((paths) => statementsOf(plansOf(logOf(paths))));
   assert.deepEqual([...before.values()].map(({ warm, runs }) => [warm, runs]), [[true, 2]]);
@@ -90,4 +92,18 @@ test('the list of known growers names each statement of each path that grew, and
   assert.equal(listOf(grown, notesOf(written)), written);
   // Deleting a path's line leaves the other, whatever the comments and spaces around it.
   assert.deepEqual([...knownOf(`# a comment\n\n${id}   GET /members   # fixed elsewhere\n`)], [`${id} GET /members`]);
+});
+
+test('a statement the larger size alone ran fails the sweep, however few its pages, until the list names it', () => {
+  const PRUNE = 'SELECT min(at) FROM log_uses WHERE number > $1';
+  const small = { tick: [[ACCESS, 3], [ACCESS, 3]] };
+  const large = { tick: [[ACCESS, 3], [ACCESS, 3], [PRUNE, 3], [PRUNE, 3]] };
+  const [before, after] = [small, large].map((paths) => statementsOf(plansOf(logOf(paths))));
+  const grown = growing(before, after);
+  assert.deepEqual(grown.map(({ why, after }) => [why, after.path, after.pages]), [['new', 'tick', 3]]);
+  assert.deepEqual(unknownOf(grown, null), grown);
+  assert.deepEqual(unknownOf(grown, knownOf('')), grown);
+  const list = listOf(grown, new Map());
+  assert.ok(list.includes(`${idOf(shapeOf(PRUNE))} tick`));
+  assert.deepEqual(unknownOf(grown, knownOf(list)), []);
 });

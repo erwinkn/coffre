@@ -340,10 +340,11 @@ anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
   gives an invocation 10 ms of CPU; `request-cost.alone.ts` holds a request's
   statements and rows to the same however the instance grows.
 - `pnpm sweep:growth [--size <n>] [--out <dir>] [--write-known]` runs every
-  request path on a history of each shape `--size` long (2,000), then ten times
-  that, and lists each runtime statement that read twice the pages at the
-  larger (`docs/growth-sweep.md`). It fails on one that
-  `scripts/growth-sweep-known.txt` does not list: a change that fixes one
+  GET route, the audit page's filters and the main writes and background jobs
+  (`docs/growth-sweep.md` lists what it leaves out) on a history of each shape
+  `--size` long (2,000), then ten times that, and lists each runtime statement
+  that read twice the pages at the larger, or ran there alone. It fails on one
+  that `scripts/growth-sweep-known.txt` does not list: a change that fixes one
   deletes its lines. On a Postgres of your own only (`COMPOSE_PROJECT_NAME`,
   `COFFRE_POSTGRES_PORT`), since it logs every plan; neither `pnpm test` nor
   `pnpm validate` runs it.

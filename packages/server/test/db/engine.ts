@@ -30,7 +30,9 @@ let vaultPool: { end(): Promise<void> } | null = null;
 
 /** Ends `openVaultDatabase`'s pool, for a process whose pools keep their connections (`keepTestConnections`). */
 export async function closeVaultDatabase(): Promise<void> {
-  await vaultPool?.end();
+  const pool = vaultPool;
+  [vaultDatabase, vaultPool] = [null, null];
+  await pool?.end();
 }
 
 /**
