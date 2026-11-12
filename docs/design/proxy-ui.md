@@ -143,7 +143,7 @@ CREATE TABLE proxy_definitions (
 );                                 -- (not `index`: a keyword SQLite refuses as a column name)
 CREATE TABLE proxy_reserved (    -- one row: the instance's
   id     smallint PRIMARY KEY CHECK (id = 1),
-  names  jsonb NOT NULL,           -- every name code has reserved, the whole set
+  names  text[] NOT NULL,          -- every name code has reserved, the whole set
   seal   bytea NOT NULL
 );
 GRANT SELECT ON proxy_definitions, proxy_reserved TO coffre_vault, coffre_backup;

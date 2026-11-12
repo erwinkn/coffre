@@ -8,7 +8,8 @@
 -- `tupleOf`). A passkey's transports are under no MAC.
 --
 -- ALTER ... USING takes no subquery: a function of this session's converts each value, the strings of a JSON array in
--- its order. Anything else, which only a forger writes, becomes no strings, and its seal or MAC refuses it as before.
+-- its order. Only a forger writes anything else: a non-string element is dropped and a non-array becomes no strings,
+-- and a seal or MAC refuses what is left unless it is the set it covers.
 CREATE FUNCTION pg_temp.coffre_text_list(value jsonb) RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
     SELECT CASE WHEN jsonb_typeof(value) = 'array'
         THEN ARRAY(SELECT e #>> '{}' FROM jsonb_array_elements(value) WITH ORDINALITY AS t(e, i) WHERE jsonb_typeof(e) = 'string' ORDER BY i)
