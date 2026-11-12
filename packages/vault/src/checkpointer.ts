@@ -1224,11 +1224,11 @@ export class Checkpointer {
 }
 
 /**
- * Entry `number`'s inclusion proof against the pair `head`, checked before it is handed out; null if not sealed. The
- * checkpointer's (`prove`, a change's seal), and the vault's, which proves the cutover's change from its database
- * alone (T169): a pair covering a number may cover the gap a writer moved an entry into, so the entry is proved.
+ * Entry `number`'s inclusion proof against the pair `head`, checked before it is handed out; null if not sealed
+ * (`prove`, a change's seal): a pair covering a number may cover the gap a writer moved an entry into, so the entry is
+ * proved.
  */
-export async function proveIn(store: Pick<CheckpointStore, 'locate' | 'tiles'>, number: bigint, { pair, notes }: { pair: Pair; notes: PairNotes }, options: Locating = {}): Promise<InclusionProof | null> {
+async function proveIn(store: Pick<CheckpointStore, 'locate' | 'tiles'>, number: bigint, { pair, notes }: { pair: Pair; notes: PairNotes }, options: Locating = {}): Promise<InclusionProof | null> {
   if (number > pair.upto) return null;
   const found = await store.locate(number, options);
   if (found === null) return null;

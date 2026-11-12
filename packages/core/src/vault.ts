@@ -896,9 +896,9 @@ export type PrepareInput = {
 /**
  * A change sealed, for the app's transaction to commit (`app_change`): its
  * entry's fields, the seal it moves the row from and to, and its MAC, bytes
- * in base64. A row the vault never sealed is the log's to leave alone until
- * the cutover: its call (`requestId` null) only checks, under the fence,
- * that the log has no change of its object either.
+ * in base64. A row the vault never sealed, 0.14's, which 0.15.0's cutover
+ * left so, is the log's to leave alone: its call (`requestId` null) only
+ * checks, under the fence, that the log has no change of its object either.
  */
 export type PreparedChange = {
   kind: ObjectChange['kind'];

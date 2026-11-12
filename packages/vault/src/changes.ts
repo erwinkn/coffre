@@ -40,14 +40,13 @@ import { isStale, laterInputs, loggedChanges, newestChange, readObject, type Cha
  * any of this; `change_input` takes the same, then the fence: row, head,
  * fence (RowFirst and ChangeHeadFirst; WriteLocks.tla holds the issue lock's place).
  *
- * An object that has a row but no seal, and no change in the log, is one
- * from before the cutover (plan PR 9): 0.14's log is its record, and the
- * cutover's genesis seals it as 0.14 left it. A decision changes it as
- * 0.14 does, and logs nothing of it here. So are the roles with no row
- * yet, whose edits 0.14's policy holds until the cutover. The roles' and
- * the policy's rows are written only sealed, by `change_input`: one with
- * no seal was planted, and is refused. Any other object with neither row
- * nor change is new: only an op that makes it applies.
+ * An object that has a row but no seal, and no change in the log, is
+ * 0.14's, which 0.15.0's cutover (plan PR 9) left unsealed: 0.14's log is
+ * its record. A decision changes it as 0.14 did, and logs nothing of it
+ * here. The roles' and the policy's rows are written only sealed, by
+ * `change_input`: one with no seal was planted, and is refused. Any other
+ * object with neither row nor change is new, the roles and the policy
+ * included: only an op that makes it applies.
  */
 
 /** Why an object a decision would change is not the log's: its seal is not the vault's over it, or not its newest change's. */

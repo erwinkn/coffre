@@ -26,16 +26,13 @@ export function snapshotQuery(asked: Asked): SQL {
   const references = sql`${sql.param((asked.references ?? []).map(String))}::bigint[]`;
   const tomb = `%${TOMBSTONE}%`;
   const released = asked.released;
-  const seals = asked.seals === true;
-  // The places read: those asked, the environments each personal config among them is a config of, with `seals` those
-  // the asked principals' grants are on (whose projects their grants are read with), and what the newest policy
+  // The places read: those asked, the environments each personal config among them is a config of, those the asked
+  // principals' grants are on (whose projects their grants are read with), and what the newest policy
   // protects, by the ids its JSON names (one that is no UUID names nothing).
   const placeIds = sql`ARRAY(
           SELECT unnest(${environments})
-          UNION SELECT parent_id FROM environments WHERE id = ANY(${environments}) AND owner IS NOT NULL${asked.seals === true
-            ? sql`
-          UNION SELECT environment_id FROM grants WHERE principal = ANY(${principals}) AND environment_id IS NOT NULL`
-            : sql``}
+          UNION SELECT parent_id FROM environments WHERE id = ANY(${environments}) AND owner IS NOT NULL
+          UNION SELECT environment_id FROM grants WHERE principal = ANY(${principals}) AND environment_id IS NOT NULL
           UNION SELECT (place #>> '{}')::uuid FROM policy, jsonb_path_query(policy.metadata::jsonb, '$.policy.protected[*].environmentId') AS place
           WHERE (place #>> '{}') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
         )`;
@@ -78,8 +75,7 @@ export function snapshotQuery(asked: Asked): SQL {
           ORDER BY subject_principal DESC, seq DESC LIMIT 1
         ) e
       ),
-      'policy', (SELECT ${ENTRY} FROM policy e),${seals
-        ? sql`
+      'policy', (SELECT ${ENTRY} FROM policy e),
       -- What 0.15's log holds each asked member's row to (T179 PR 2, \`memberLogs\`): the row's seal, and its object's newest
       -- change, whole, whose MAC the vault checks and whose payload names the 0.14 entry it accounts for. One probe each.
       'memberLogs', (
@@ -91,8 +87,7 @@ export function snapshotQuery(asked: Asked): SQL {
         LEFT JOIN LATERAL (
           SELECT x.* FROM log_changes x WHERE ${MEMBER_CHANGE.where} ORDER BY ${MEMBER_CHANGE.order} LIMIT 1
         ) l ON true
-      ),`
-        : sql``}
+      ),
       'settings', ${asked.settings === true
         ? sql`(SELECT ${ENTRY} FROM audit_log e WHERE author = 'vault' AND action = 'settings.change' AND decision = 'allow' ORDER BY seq DESC LIMIT 1)`
         : sql`NULL`},
@@ -100,19 +95,16 @@ export function snapshotQuery(asked: Asked): SQL {
         SELECT coalesce(json_agg(json_build_object(
           'id', env.id, 'projectId', env.project_id, 'slug', env.slug, 'owner', env.owner, 'parentId', env.parent_id,
           'deleted', env.slug LIKE ${tomb} OR project.slug LIKE ${tomb},
-          'archived', env.archived_at IS NOT NULL OR project.archived_at IS NOT NULL${seals
-            ? sql`,
+          'archived', env.archived_at IS NOT NULL OR project.archived_at IS NOT NULL,
           -- What 0.15's log holds the row to (T159): its object's own columns, its seal, and its newest change, whole, its
           -- MAC to check (T190, review r3), one probe of its object's changes, newest first (log_changes_object_idx).
           'protected', env.protected, 'ownArchived', env.archived_at IS NOT NULL, 'projectArchived', project.archived_at IS NOT NULL,
           'seal', encode(env.seal, 'hex'),
-          'newest', ${newestChangeJson(sql`log_object('environment', env.id::text)`)}`
-            : sql``})), '[]')
+          'newest', ${newestChangeJson(sql`log_object('environment', env.id::text)`)})), '[]')
         FROM environments env JOIN projects project ON project.id = env.project_id
         -- One list of ids, each found by the primary key.
         WHERE env.id = ANY(${placeIds})
-      ),${seals
-        ? sql`
+      ),
       -- Of those ids, each the log holds a change of but no row (or no project's) answers to: deleted outright around it,
       -- with its newest change's seal (T159, review r5). One probe of its object's changes each.
       'gone', (
@@ -123,8 +115,7 @@ export function snapshotQuery(asked: Asked): SQL {
           OFFSET 0
         ) g
         CROSS JOIN LATERAL (SELECT l.seal FROM log_changes l WHERE ${PLACE_CHANGE.where} ORDER BY ${PLACE_CHANGE.order} LIMIT 1) l
-      ),`
-        : sql``}
+      ),
       'ended', (
         SELECT coalesce(json_agg(related_seq::text), '[]') FROM audit_log
         WHERE author = 'vault' AND action = 'reference.end' AND decision = 'allow' AND related_seq = ANY(${references})

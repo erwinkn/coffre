@@ -697,7 +697,10 @@ const UPGRADES_FROM = '0049_reads';
  * together).
  */
 async function requireCutOver(expected: readonly ExpectedMigration[], done: number, migrator: Migrator): Promise<void> {
-  const release = expected.findIndex((entry) => entry.tag === UPGRADES_FROM) + 1;
+  const at = expected.findIndex((entry) => entry.tag === UPGRADES_FROM);
+  // A journal without 0.15.0's last migration would wave every database through: refused instead.
+  if (at < 0) throw new Error(`the migrations have no ${UPGRADES_FROM}, 0.15.0's last: this version cannot tell which databases it upgrades`);
+  const release = at + 1;
   if (done === 0 || done > release) return;
   if (done < release) {
     throw new Error(

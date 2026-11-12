@@ -401,7 +401,7 @@ export const auditLog = pgTable(
     mac: bytea().notNull(),
     hash: bytea().notNull(),
     // Set on every entry a writer under 0.15's log appends, and covered by no MAC: once the cutover was there, an
-    // allowed write without it was 0.14's code, which migration 0047's trigger refused until 0083 dropped it
+    // allowed write without it was 0.14's code, which migration 0047's trigger refused until 0085 dropped it
     // (docs/design/0.15-plan.md, "As built: PR 9b"). Gone with 0.14's appends in 0.16.
     log015: boolean('log015'),
   },

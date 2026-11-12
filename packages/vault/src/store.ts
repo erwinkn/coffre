@@ -277,9 +277,12 @@ export type EnvironmentRow = {
   parentId: string | null;
   deleted: boolean;
   archived: boolean;
-  /** Read when asked (`seals`): what 0.15's log holds the row to. */
+  /** What 0.15's log holds the row to: on every row read from the database (`ReadEnvironment`); none on one built from the log's own objects. */
   sealed?: EnvironmentSeal;
 };
+
+/** An environment's row as read from the database, with what 0.15's log holds it to, which the vault checks before it decides on it. */
+export type ReadEnvironment = EnvironmentRow & { sealed: EnvironmentSeal };
 
 /**
  * What 0.15's log holds an environment's row to (T159): the row's object
@@ -294,19 +297,11 @@ export type EnvironmentSeal = { object: EnvironmentInput; seal: Buffer | null; n
  * Each of these environments that exists, by id, with its project, its
  * slug, what grants on one slug in every project match, and whether it was
  * deleted, alone or with its project: then no key under it opens, or is
- * wrapped, whatever grant would cover it; `all`, every one. With `seals`,
- * what 0.15's log holds each to as well, in the same statement.
+ * wrapped, whatever grant would cover it; `all`, every one. And what 0.15's
+ * log holds each to, in the same statement.
  */
-export async function environmentsById(
-  db: Queryable,
-  ids: readonly string[] | 'all',
-  { seals = false }: { seals?: boolean } = {},
-): Promise<Map<string, EnvironmentRow>> {
+export async function environmentsById(db: Queryable, ids: readonly string[] | 'all'): Promise<Map<string, ReadEnvironment>> {
   if (ids !== 'all' && ids.length === 0) return new Map();
-  return environmentRows(db, ids, seals);
-}
-
-async function environmentRows(db: Queryable, ids: readonly string[] | 'all', seals: boolean): Promise<Map<string, EnvironmentRow>> {
   const columns = {
     id: environments.id,
     projectId: environments.projectId,
@@ -317,8 +312,6 @@ async function environmentRows(db: Queryable, ids: readonly string[] | 'all', se
     deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!),
     // Only what names a fork asks it: nothing is decided on it.
     archived: truth(or(isNotNull(environments.archivedAt), isNotNull(projects.archivedAt))!),
-  };
-  const sealColumns = {
     protected: environments.protected,
     ownArchived: truth(isNotNull(environments.archivedAt)),
     projectArchived: truth(isNotNull(projects.archivedAt)),
@@ -327,23 +320,21 @@ async function environmentRows(db: Queryable, ids: readonly string[] | 'all', se
     newest: sql<NewestColumns | string | null>`${newestChangeJson(sql`log_object('environment', ${environments.id}::text)`)}`,
   };
   const rows = (await db
-    .select(seals ? { ...columns, ...sealColumns } : columns)
+    .select(columns)
     .from(environments)
     .innerJoin(projects, eq(projects.id, environments.projectId))
-    .where(ids === 'all' ? undefined : inArray(environments.id, [...new Set(ids)]))) as (Omit<EnvironmentRow, 'sealed'> & { id: string } & Partial<SealedColumns>)[];
+    .where(ids === 'all' ? undefined : inArray(environments.id, [...new Set(ids)]))) as (Omit<EnvironmentRow, 'sealed'> & { id: string } & SealedColumns)[];
   // An id asked with no row, which the log holds a change of: deleted outright around it (review r5). A statement more,
   // only when a row is missing.
-  const rowless = seals && ids !== 'all' ? [...new Set(ids)].filter((id) => !rows.some((row) => row.id === id)) : [];
+  const rowless = ids !== 'all' ? [...new Set(ids)].filter((id) => !rows.some((row) => row.id === id)) : [];
   const gone = await loggedEnvironments(db, rowless);
-  return new Map<string, EnvironmentRow>([...[...gone].map(([id, last]) => [id, goneEnvironment(id, last)] as const), ...rows.map(({ id, protected: guarded, ownArchived, projectArchived, seal, newest: last, ...environment }) => [id, {
+  return new Map<string, ReadEnvironment>([...[...gone].map(([id, last]) => [id, goneEnvironment(id, last)] as const), ...rows.map(({ id, protected: guarded, ownArchived, projectArchived, seal, newest: last, ...environment }) => [id, {
     ...environment,
-    ...(seals ? {
-      sealed: environmentSeal(
-        { id, projectId: environment.projectId, slug: environment.slug, owner: environment.owner, parentId: environment.parentId, protected: guarded ?? null, archived: Boolean(ownArchived), projectArchived: Boolean(projectArchived) },
-        seal ?? null,
-        last ?? null,
-      ),
-    } : {}),
+    sealed: environmentSeal(
+      { id, projectId: environment.projectId, slug: environment.slug, owner: environment.owner, parentId: environment.parentId, protected: guarded ?? null, archived: Boolean(ownArchived), projectArchived: Boolean(projectArchived) },
+      seal,
+      last,
+    ),
   }] as const)]);
 }
 
@@ -352,7 +343,7 @@ async function environmentRows(db: Queryable, ids: readonly string[] | 'all', se
  * as a row whose seal is none, which no check passes (`#placeFault`), so that every decision on it fails closed as on
  * any other row the log does not hold, a protection on it kept (review r5). Its other columns name nothing.
  */
-export function goneEnvironment(id: string, newest: Buffer | null): EnvironmentRow {
+export function goneEnvironment(id: string, newest: Buffer | null): ReadEnvironment {
   const columns = { id, projectId: '', slug: '', owner: null, parentId: null, protected: null, archived: false, projectArchived: false };
   return { projectId: '', slug: '', owner: null, parentId: null, deleted: false, archived: false, sealed: { object: environmentObject(columns), seal: null, newest, change: null } };
 }
@@ -371,7 +362,7 @@ async function loggedEnvironments(db: Queryable, ids: readonly string[]): Promis
   return new Map(rows.map((row) => [row.id, bytes(row.seal)]));
 }
 
-/** The columns `environmentsById` reads with `seals`, as the drivers answer them. */
+/** The columns `environmentsById` reads of what the log holds a row to, as the drivers answer them. */
 type SealedColumns = { protected: boolean | null; ownArchived: boolean; projectArchived: boolean; seal: Buffer | Uint8Array | null; newest: NewestColumns | string | null };
 
 /** An environment's row as 0.15's log holds it to (`EnvironmentSeal`), from its columns, its seal and its newest change as read. */
@@ -534,13 +525,12 @@ export async function places(
   db: Queryable,
   projectIds: readonly string[],
   environmentIds: readonly string[],
-  { seals = false }: { seals?: boolean } = {},
-): Promise<{ projects: Set<string>; environments: Map<string, EnvironmentRow>; deleted: Set<string> }> {
+): Promise<{ projects: Set<string>; environments: Map<string, ReadEnvironment>; deleted: Set<string> }> {
   const [foundProjects, foundEnvironments] = await Promise.all([
     projectIds.length === 0
       ? []
       : db.select({ id: projects.id, deleted: truth(tombstone(projects.slug)) }).from(projects).where(inArray(projects.id, [...projectIds])),
-    environmentsById(db, environmentIds, { seals }),
+    environmentsById(db, environmentIds),
   ]);
   return {
     projects: new Set(foundProjects.map((row) => row.id)),

@@ -210,7 +210,7 @@ const LOOKUPS: Lookup[] = [
     ask: async (vault) => {
       assert.notEqual((await memberLogs(vault, ['user:u1'])).get('user:u1')?.newest, null);
       assert.notEqual((await newestChangeNames(vault, ['user:u1'])).get('user:u1'), 'none');
-      assert.notEqual((await snapshot(vault, { principals: ['user:u1'], seals: true })).memberLogs.get('user:u1')?.newest, null);
+      assert.notEqual((await snapshot(vault, { principals: ['user:u1'] })).memberLogs.get('user:u1')?.newest, null);
     },
   },
   {
