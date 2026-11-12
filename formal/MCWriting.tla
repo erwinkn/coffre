@@ -51,6 +51,13 @@ ForgeProcs == {"w1", "bob", "end", "rev", "dem", "fsg", "ck"}
 \* session revoked there does not (TodayStandsAtCommit, EXPECTED broken).
 FallBackProcs == {"w1", "shp", "rol", "end", "ck"}
 
+\* Ada writes key k while it is made a reference, the roles redefined and env
+\* protected: the policy today's commit holds to is the seals of all it
+\* read of it (T272), so either change after the front door stops the write
+\* (TodayUnheld leaves one seal out of the digest); and the two-trip path's
+\* hold reads the protection as it reads the rest.
+DigestProcs == {"w1", "shp", "rol", "prv", "ck"}
+
 \* Ada writes key k while her grant is taken away and given back and her
 \* session revoked: a try the vault served whose hold fails, then a refusal
 \* (review r2 of #469). Before PR 6 the refusal went down today's path, which

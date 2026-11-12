@@ -161,7 +161,7 @@ ReferencingGrants == {[who |-> "olga", at |-> "*"]}
 (* The last Owner: two Owners each leave, step down, or take the other's
    role, while an Admin of the whole instance, who is no Owner, tries to
    demote or remove either. Each leaving or stepping down locks only their
-   own row, so only the head puts one after the other: one of them must find
+   own row, so only the change lock puts one after the other: one of them must find
    no Owner left, and refuse. *)
 
 OwnersMembers == {"ada", "olga", "omar"}
@@ -200,7 +200,7 @@ DeclareGrants == {}
 (* Regenerating: a fork regenerates the key it inherits while, in the parent,
    an owner renames that key or writes it, and a value is typed in the fork
    itself. The regenerate is listed before the vault wraps and commits under
-   the head: what it replaces must be what "k1" resolves to there. *)
+   the change lock: what it replaces must be what "k1" resolves to there. *)
 
 RegeneratingMembers == {"olga"}
 RegeneratingRank == [m \in RegeneratingMembers |-> AllRanks[m]]
