@@ -973,7 +973,12 @@ workload's own.
   it, revoking it, untrusting its binding, and removing its member, which
   is the vault's step and then the app's sweep. A target is frozen while
   its newest `workload.freeze` or `workload.unfreeze` entry is a freeze
-  (8.2), and a lift is one more entry.
+  (8.2), and a lift is one more entry. Freezes are the design's alone:
+  nothing writes one yet (`/freezes` answers "not built"), and the code's
+  statement reads none (T268). The protections below that name a freeze
+  are what the change that builds them must bring back, with the
+  `WorkloadFreezing` scenario T268 deleted, the only one that lifts a
+  freeze: until then `Unfreeze` runs in no scenario.
 - **The tunnel** is opened under the statement. It carries bytes while its
   last good check is less than `Recheck` old: a recheck that has not
   answered by its deadline counts as no. Its rechecks run the statement.
@@ -1130,7 +1135,6 @@ reference as a copy, and so is any copy or reference of that one.
 |---|---|---|
 | `WorkloadReplay` | A sends two requests and B one. Eve replays, tampers with, forges and swaps them, and A's gate restarts or rotates | 30 thousand |
 | `WorkloadEnding` | A uses its session, renews it and holds a tunnel open. Omar freezes any target over it, revokes it, untrusts its binding or removes the service, and the clock runs to its `not_after` | 175 thousand |
-| `WorkloadFreezing` | A uses its session and reads through it, while Omar freezes it, its instance or its credential, and Olga lifts either, in any order | 4 thousand |
 | `WorkloadNarrow` | A narrows its session to refunds for an agent, which uses every path, reads and renews. Omar revokes or freezes the parent, or it expires, unrenewed, before the child | 6 thousand |
 | `WorkloadCapacity` | Two instances enroll on one code of one replica, renew, restart and log out, and a third enrolls. The clock runs, and CI promotes the next code, with or without `--now` | 471 thousand |
 | `WorkloadMinting` | Omar (an Owner), Vic (a Viewer who manages the service) or CI mints a code, while Olga demotes Omar. A thief in the app or in a child mints or promotes, and an instance enrolls on what was minted | 9 thousand |

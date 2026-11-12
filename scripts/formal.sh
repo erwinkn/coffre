@@ -178,7 +178,6 @@ REMOVALS=(
   "WorkloadEnding TunnelRecheckSeesFreezes FreezeBound"
   "WorkloadEnding GenerationInStatement RevokeBound"
   "WorkloadEnding RenewCappedAtNotAfter NotAfter"
-  "WorkloadFreezing LiveCheckBeforeCache FreezeBound"
   "WorkloadNarrow AncestorsChecked NarrowSubset"
   "WorkloadNarrow AncestorExpiryChecked NarrowSubset"
   "WorkloadNarrow TargetResolvedBeforeConstraints+EncodedSegmentsRefused NarrowSubset"

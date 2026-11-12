@@ -3,10 +3,10 @@
 // coffre, its proof signing the request whole. Only the headers it signs go
 // upstream; a query, header or body changed on the way is refused; a
 // streamed SigV4 upload is bound by its declared hash, and an unsigned one
-// only where the binding says so; a revocation or a freeze stops the next
-// request whatever the value cache holds; limits answer 429 and alert once
-// a window; a narrowed session is held to its constraints on the URL sent;
-// a tunnel ends within a recheck of a freeze.
+// only where the binding says so; a revocation stops the next request
+// whatever the value cache holds; limits answer 429 and alert once a
+// window; a narrowed session is held to its constraints on the URL sent;
+// a tunnel ends within a recheck of a revocation.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';
@@ -24,7 +24,6 @@ import type { Database } from '@coffre/db';
 import { eq } from 'drizzle-orm';
 import { WebSocket } from 'ws';
 
-import { allowed, audited } from '../src/api/context.ts';
 import { resolveConfig } from '../src/config.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import type { Gates } from '../src/gate.ts';
@@ -230,17 +229,6 @@ async function use(held: Session, method: string, path: string, init: { headers?
   });
   const request = new Request(url, { method, headers: { ...headers, ...init.added, authorization: `DPoP ${held.token}`, dpop: proof }, ...(init.body === undefined ? {} : { body: init.body }) });
   return read((await pluginRoute(request, runtime, IP))!);
-}
-
-async function freeze(target: string, action: 'workload.freeze' | 'workload.unfreeze' = 'workload.freeze') {
-  const ctx = { caller: { principal: { type: 'user', id: ROOT } }, requestId: randomUUID(), sourceIp: null } as never;
-  await audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (_tx, log) => {
-    log.push(allowed(ctx, action, { metadata: { target } }));
-  });
-}
-
-async function prodId(): Promise<string> {
-  return (await db.owner.select().from(environments).where(eq(environments.slug, 'prod')))[0]!.id;
 }
 
 async function entries(action: string) {
@@ -590,7 +578,7 @@ test('a body other than its Content-Digest says, short of its length, past it, o
   assert.match(huge.body.message as string, /up to 95 MiB, under the 100 MB a Cloudflare zone takes/);
 });
 
-test('a revocation or a freeze stops the next request, though the values are warm in the cache', async () => {
+test('a revocation stops the next request, though the values are warm in the cache', async () => {
   await bind();
   const held = await session();
   const charge = () => use(held, 'POST', '/use/stripe/v1/charges', { body: 'amount=1' });
@@ -598,20 +586,12 @@ test('a revocation or a freeze stops the next request, though the values are war
   const cold = vaultCalls;
   assert.equal((await charge()).status, 200);
   assert.equal(vaultCalls, cold, 'warm: the values come from the cache, no vault call');
-  // A freeze of the credential, of the session, of the instance: each refuses the very next request.
-  for (const target of [`credential:${await prodId()}/stripe`, `session:${(await sessionRow(held)).id}`, 'instance']) {
-    await freeze(target);
-    const frozen = await charge();
-    assert.deepEqual([frozen.status, frozen.body.reason], [403, 'frozen'], target);
-    await freeze(target, 'workload.unfreeze');
-    assert.equal((await charge()).status, 200, `${target} lifted`);
-  }
   // Logout revokes the session: the cache still holds its values, and serves nothing.
   const url = `${ORIGIN}/api/auth/logout`;
   const out = await answer(new Request(url, { method: 'POST', headers: { authorization: `DPoP ${held.token}`, dpop: await createProof(held.key, { method: 'POST', url, token: held.token, nonce: await gates(MEMBER).nonce() }) } }), runtime, ui, IP);
   assert.equal(out.status, 200);
   assert.equal((await charge()).status, 401);
-  assert.equal(reached.length, 5);
+  assert.equal(reached.length, 2);
 });
 
 async function sessionRow(held: Session) {
@@ -791,7 +771,7 @@ test("a code workload tunnel's admission answered after a whole bound is let in,
   }
 });
 
-test('a workload tunnel ends within one recheck of a freeze, and stands while nothing changes', { timeout: 30_000 }, async () => {
+test('a workload tunnel ends within one recheck of a revocation, and stands while nothing changes', { timeout: 30_000 }, async () => {
   runtime = makeRuntime({ revokedWithinSeconds: 1.5 });
   await bind();
   const held = await session();
@@ -825,12 +805,12 @@ test('a workload tunnel ends within one recheck of a freeze, and stands while no
     await once(login, 'close');
     const bytes = Buffer.concat(said);
     assert.ok(!(bytes[0] === 0x52 && bytes.readInt32BE(5) === 3), 'no password asked');
-    await freeze('token:api-prod');
-    const frozenAt = Date.now();
+    await clientFor(deps, ROOT).tokens.revoke(MEMBER, (await sessionRow(held)).id);
+    const revokedAt = Date.now();
     const at = await closed;
-    assert.ok(at - frozenAt <= 1500 + 300, `ended ${at - frozenAt} ms after the freeze`);
-    // Frozen, a new one is refused at once.
-    await assert.rejects(open(held), /403/);
+    assert.ok(at - revokedAt <= 1500 + 300, `ended ${at - revokedAt} ms after the revocation`);
+    // Revoked, a new one is refused at once.
+    await assert.rejects(open(held), /401/);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));

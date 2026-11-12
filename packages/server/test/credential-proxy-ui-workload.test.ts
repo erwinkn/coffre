@@ -6,7 +6,7 @@
 // list, and whether it takes the body as it came (503 `moved`). (A `narrow` child's constraints are weighed on the URL
 // the decided item's upstream makes too; no test makes one here: 0.15's log refuses a child planted around the app, and
 // `/api/auth/workload/narrow` answers 501 until its PR.)
-// A revocation or a freeze stops the next request whatever the value cache holds. 0.15's log.
+// A revocation stops the next request whatever the value cache holds. 0.15's log.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, randomUUID, sign as signWith, verify as verifyWith, type KeyObject } from 'node:crypto';
@@ -24,7 +24,6 @@ import type { ProxyDefinition, Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { eq, sql, type SQL } from 'drizzle-orm';
 
-import { allowed, audited } from '../src/api/context.ts';
 import { resolveConfig } from '../src/config.ts';
 import type { Gates } from '../src/gate.ts';
 import { upgrade } from '../src/node-sockets.ts';
@@ -37,7 +36,7 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, holdSomething, LOG, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { credentials, environments } from './db/tables.ts';
+import { credentials } from './db/tables.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { pinnedGates } from './window-fixture.ts';
 
@@ -215,10 +214,6 @@ function since(from: Map<string, number>): Record<string, number> {
   return Object.fromEntries([...calls].flatMap(([name, n]) => (n - (from.get(name) ?? 0) === 0 ? [] : [[name, n - (from.get(name) ?? 0)]])));
 }
 
-async function prodId(): Promise<string> {
-  return (await db.owner.select().from(environments).where(eq(environments.slug, 'prod')))[0]!.id;
-}
-
 async function run(query: SQL): Promise<void> {
   await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
 }
@@ -350,41 +345,15 @@ test("kept values answer to their own item's allow list alone, not to a newer co
   assert.deepEqual(reached.map((one) => one.url), ['/openai/v1/models/1', '/openai/health/live', '/openai/v1/models/2', '/openai/v2/models/4']);
 });
 
-test("a freeze stops warm requests at the place's URL too, a session's and a binding's: the credential frozen is the route, not the project", ON_015, async () => {
-  runtime = makeRuntime(true);
-  await save({ openai: uiRoute('openai', '/openai') });
-  await bind();
-  await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'cloudflare', issuer: null, claims: {} as never, label: 'edge', replaces: [], policy: {} }, { dryRun: false });
-  const held = await session();
-  const viaBinding = async (path: string) => read((await bindingRoute(new Request(`${ORIGIN}${path}`), runtime, MEMBER))!);
-  assert.equal((await use(held, 'GET', '/use/market/prod/openai/v1/models/1')).status, 200);
-  assert.equal((await viaBinding('/use/market/prod/openai/v1/models/2')).status, 200);
-  const ctx = { caller: { principal: { type: 'user', id: ROOT } }, requestId: randomUUID(), sourceIp: null } as never;
-  const target = `credential:${await prodId()}/openai`;
-  await audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (_tx, log) => void log.push(allowed(ctx, 'workload.freeze', { metadata: { target } })));
-  const frozen = await use(held, 'GET', '/use/market/prod/openai/v1/models/3');
-  assert.deepEqual([frozen.status, frozen.body.reason], [403, 'frozen']);
-  const bound = await viaBinding('/use/market/prod/openai/v1/models/4');
-  assert.deepEqual([bound.status, bound.body.reason], [403, 'frozen']);
-  assert.equal(reached.length, 2, 'nothing more sent');
-});
-
-test('a freeze, or the session revoked, stops the next request whatever the value cache holds', ON_015, async () => {
+test('the session revoked stops the next request whatever the value cache holds', ON_015, async () => {
   runtime = makeRuntime(true);
   await save({ openai: uiRoute('openai', '/openai') });
   await bind();
   const held = await session();
   assert.equal((await use(held, 'GET', '/use/openai/v1/models/1')).status, 200);
-  const ctx = { caller: { principal: { type: 'user', id: ROOT } }, requestId: randomUUID(), sourceIp: null } as never;
-  const target = `credential:${await prodId()}/openai`;
-  await audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (_tx, log) => void log.push(allowed(ctx, 'workload.freeze', { metadata: { target } })));
-  const frozen = await use(held, 'GET', '/use/openai/v1/models/2');
-  assert.deepEqual([frozen.status, frozen.body.reason], [403, 'frozen']);
-  await audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (_tx, log) => void log.push(allowed(ctx, 'workload.unfreeze', { metadata: { target } })));
-  assert.equal((await use(held, 'GET', '/use/openai/v1/models/3')).status, 200);
   await db.owner.update(credentials).set({ revokedAt: new Date() }).where(eq(credentials.tokenHash, hashToken(held.token)));
-  assert.equal((await use(held, 'GET', '/use/openai/v1/models/4')).status, 401);
-  assert.equal(reached.length, 2);
+  assert.equal((await use(held, 'GET', '/use/openai/v1/models/2')).status, 401);
+  assert.equal(reached.length, 1);
 });
 
 test("an inject-kind edit between the copy and the answer: a body the decided item takes otherwise is 503 moved, nothing sent", ON_015, async () => {

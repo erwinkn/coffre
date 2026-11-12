@@ -233,14 +233,6 @@ async function sessionRow(held: Session) {
   return row!;
 }
 
-/** A freeze or a lift, as PR 4's routes will append it: the newest allowed entry naming the target decides. */
-async function freeze(target: string, action: 'workload.freeze' | 'workload.unfreeze' = 'workload.freeze') {
-  const ctx = { caller: { principal: { type: 'user', id: ROOT } }, requestId: randomUUID(), sourceIp: null } as never;
-  await audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (_tx, log) => {
-    log.push(allowed(ctx, action, { metadata: { target } }));
-  });
-}
-
 async function entries(action: string) {
   const rows = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog).where(eq(auditLog.action, action));
   return rows.map((row) => JSON.parse(row.metadata) as Record<string, unknown>);
@@ -540,26 +532,11 @@ test("a session issues no credential and changes no one's access, in any mode: a
   assert.equal((await call(held, 'GET', `/api/members/${MEMBER}/tokens`)).status, 200);
 });
 
-test('revocation, freezes and removal of the member each end a session at its next request', async () => {
+test('revocation and removal of the member each end a session at its next request', async () => {
   await bindGithub();
   const [held, other] = [await githubSession(), await githubSession()];
   const row = await sessionRow(held);
   assert.equal((await me(held)).status, 200);
-
-  // Frozen: the instance, the service, the binding, the session; each lifted again.
-  for (const target of ['instance', MEMBER, `binding:${row.createdBy.slice('binding:'.length)}`, `session:${row.id}`]) {
-    await freeze(target);
-    const frozen = await me(held);
-    assert.deepEqual([frozen.status, frozen.body.reason], [403, 'frozen'], target);
-    await freeze(target, 'workload.unfreeze');
-    assert.equal((await me(held)).status, 200, `${target} lifted`);
-  }
-  // A frozen service makes no session either.
-  await freeze(MEMBER);
-  const key = await generateProofKey();
-  const refused = await signIn({ oidc: await githubToken(key) }, key);
-  assert.deepEqual([refused.status, refused.body.reason], [401, 'frozen']);
-  await freeze(MEMBER, 'workload.unfreeze');
 
   // Listed with the service's tokens, and revoked by a manager of the service there.
   const listed = await clientFor(deps, ROOT).tokens.list(MEMBER);
@@ -572,21 +549,9 @@ test('revocation, freezes and removal of the member each end a session at its ne
   assert.equal((await me(other)).status, 401);
 });
 
-test('a frozen session still renews: lifting the freeze restores it, with nothing to sign in again', async () => {
-  await bindGithub();
-  const held = await githubSession();
-  await freeze(MEMBER);
-  assert.equal((await me(held)).body.reason, 'frozen');
-  const renewed = await call(held, 'POST', '/api/auth/workload/renew');
-  assert.equal(renewed.status, 200, JSON.stringify(renewed.body));
-  assert.equal((await me(held)).body.reason, 'frozen', 'still stopped from use');
-  await freeze(MEMBER, 'workload.unfreeze');
-  assert.equal((await me(held)).status, 200);
-});
-
 test("the per-request statement reads its rows through their indexes, however many credentials there are", async () => {
   const { sql: text, params } = sessionStatement(db.owner).toSQL();
-  const values: Record<string, unknown> = { tokenHash: Buffer.alloc(32, 1), place: null, credential: 'stripe' };
+  const values: Record<string, unknown> = { tokenHash: Buffer.alloc(32, 1), place: null };
   const literal = (value: unknown): string => {
     const named = value instanceof Placeholder ? values[value.name] : value;
     if (named === null || named === undefined) return 'NULL';
@@ -595,7 +560,7 @@ test("the per-request statement reads its rows through their indexes, however ma
   };
   const inlined = text.replace(/\$(\d+)/g, (_, n: string) => literal(params[Number(n) - 1]));
   // A log with history, the app's and the vault's, analyzed: on an empty one every index is one page, and the
-  // planner may as well walk the app's or the vault's newest entries back (`audit_log_app_idx`, T245) as look up a freeze.
+  // planner may as well walk the app's or the vault's newest entries back (`audit_log_app_idx`, T245) as look up a tombstone.
   await db.owner.execute(sql`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
     SELECT coalesce((SELECT max(seq) FROM audit_log), 0) + n, CASE WHEN n % 2 = 0 THEN 'app' ELSE 'vault' END, 'k', 0, 'system:coffre', 'audit.heartbeat', 'allow', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex')
     FROM generate_series(1, 20000) n`);
@@ -610,10 +575,9 @@ test("the per-request statement reads its rows through their indexes, however ma
   assert.doesNotMatch(lines, /Seq Scan on credentials/, lines);
   assert.match(lines, /Bitmap Index Scan on credentials_token_hash_key/, lines);
   assert.match(lines, /Bitmap Index Scan on credentials_pkey/, lines);
-  // Nor of the log, which only grows: each freeze and the tombstone through an index, the freeze by `(target, seq)` (T245).
+  // Nor of the log, which only grows: the tombstone and the newest policy change each through an index (T245).
   assert.doesNotMatch(lines, /Seq Scan on audit_log/, lines);
   assert.doesNotMatch(lines, /Backward using audit_log_(app|vault)_idx/, lines);
-  assert.match(lines, /audit_log_frozen_idx/, lines);
 });
 
 test('a session whose binding is removed, or whose row is changed around the app, is no session', async () => {
@@ -895,16 +859,16 @@ test("PluginContext.workload: the caller of a forwarded request, its content sig
   const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
   runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
   const place = await marketProd();
-  await bindGithub();
+  await bind('github', null, DEPLOY, { sources: ['203.0.113.0/24'] });
   const held = await githubSession();
   const row = await sessionRow(held);
   assert.deepEqual(held.answer.body.places, ['market/prod']);
-  const forward = async (path: string, init: { body: string; headers?: Record<string, string>; signed?: { headers: Record<string, string>; body: string } }) => {
+  const forward = async (path: string, init: { body: string; headers?: Record<string, string>; signed?: { headers: Record<string, string>; body: string }; sourceIp?: string }) => {
     const url = `${ORIGIN}${path}`;
     const headers = { 'content-type': 'application/json', ...init.headers };
     const proof = await createProof(held.key, { method: 'POST', url, token: held.token, nonce: await gate.nonce(), content: init.signed ?? { headers, body: await bodyDigest(init.body) } });
     const request = new Request(url, { method: 'POST', headers: { ...headers, authorization: `DPoP ${held.token}`, dpop: proof }, body: init.body });
-    return read((await pluginRoute(request, runtime, IP))!);
+    return read((await pluginRoute(request, runtime, init.sourceIp ?? IP))!);
   };
   // A request that carries no session is no workload's: the proxy takes it as a handle's.
   assert.deepEqual((await read((await pluginRoute(new Request(`${ORIGIN}/use/-/stripe/v1/charges`, { method: 'POST' }), runtime, IP))!)).body, { caller: null });
@@ -918,10 +882,13 @@ test("PluginContext.workload: the caller of a forwarded request, its content sig
   // A body changed on the way is refused.
   const changed = await forward(`/use/-/stripe/v1/charges`, { body: '{"amount":9000}', signed: { headers: { 'content-type': 'application/json' }, body: await bodyDigest('{"amount":2000}') } });
   assert.deepEqual([changed.status, changed.body.reason], [401, 'req']);
-  // The credential it uses, frozen, is refused for it alone; nothing a plugin adds to its ask turns the freeze off.
-  await freeze(`credential:${place}/stripe`);
-  assert.equal((await forward(`/use/-/stripe/v1/charges`, { body: '{}' })).body.reason, 'frozen');
-  assert.equal((await forward(`/use/-/stripe/v1/charges`, { body: '{}', headers: { 'x-extra': '{"freezes":false,"ending":true}' } })).body.reason, 'frozen');
+  // From outside its binding's sources, refused; nothing a plugin adds to its ask (an `ending`, which skips them) turns them off.
+  const outside = { body: '{}', sourceIp: '198.51.100.7' };
+  const refused = await forward(`/use/-/stripe/v1/charges`, outside);
+  assert.deepEqual([refused.status, refused.body.reason], [401, 'source']);
+  const smuggled = await forward(`/use/-/stripe/v1/charges`, { ...outside, headers: { 'x-extra': '{"ending":true}' } });
+  assert.deepEqual([smuggled.status, smuggled.body.reason], [401, 'source']);
+  // From inside them, it goes on.
   assert.equal((await forward(`/use/-/openai/v1/chat`, { body: '{}' })).status, 200);
   // `use` takes the caller coffre made for this request, and no lookalike a plugin built, nor one an earlier request's context made.
   const earlier = { caller: seen.caller!, context: seen.context! };
@@ -964,10 +931,7 @@ test("a narrowed session's row stands only while every ancestor does, and reache
   const api = await me(child);
   assert.deepEqual([api.status, api.body.reason], [403, 'narrowed']);
   assert.equal((await call(child, 'POST', '/api/auth/workload/renew')).body.reason, 'narrowed');
-  // Its parent frozen, or ended: the child ends with it.
-  await freeze(`session:${root.id}`);
-  assert.equal((await use()).body.reason, 'frozen');
-  await freeze(`session:${root.id}`, 'workload.unfreeze');
+  // Its parent ended: the child ends with it.
   assert.equal((await call(parent, 'POST', '/api/auth/logout')).status, 200);
   assert.equal((await use()).status, 401);
 });
@@ -983,13 +947,7 @@ test("bindingRoute: a Cloudflare call is its service's, through its cloudflare b
   assert.equal(used.status, 200, JSON.stringify(used.body));
   const caller = used.body.caller as Record<string, unknown>;
   assert.deepEqual([caller.credentialId, caller.profile, caller.hdr, caller.nonce, caller.place], [`binding:${binding}`, 'cloudflare', null, null, place]);
-  await freeze(`credential:${place}/stripe`);
-  assert.equal((await read((await bindingRoute(request(), runtime, MEMBER))!)).body.reason, 'frozen', 'the credential it uses, in the one place it reaches');
-  await freeze(`credential:${place}/stripe`, 'workload.unfreeze');
   await assert.rejects(seen.context!.handle('coffre_use_x'), { reason: 'binding' });
-  await freeze(`binding:${binding}`);
-  assert.equal((await read((await bindingRoute(request(), runtime, MEMBER))!)).body.reason, 'frozen');
-  await freeze(`binding:${binding}`, 'workload.unfreeze');
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, binding);
   assert.equal((await read((await bindingRoute(request(), runtime, MEMBER))!)).status, 401);
 });

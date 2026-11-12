@@ -15,7 +15,6 @@ import { sql } from 'drizzle-orm';
 import { policySeqAndSettings } from '../src/db/answers.ts';
 import { auditPage, hasTombstone, latestCheckpoint, latestTallied, memberAccess, missingMembers, originsOf, talliedAfter } from '../src/db/queries.ts';
 import { newestAppEntry, newestMove, wroteUnder } from '../src/db/rotation.ts';
-import { frozenTargets } from '../src/db/workloads.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { emptyLog, openTestDatabase, withLogUnlocked, withTriggersLifted } from './db/engine.ts';
 
@@ -50,7 +49,6 @@ type Lookup = {
 };
 
 const ZERO = Buffer.alloc(32);
-const FREEZE = JSON.stringify({ target: 'instance' });
 /** A change's seal and its MAC, both 16 bytes: no MAC of the vault's, which the reads here do not check. */
 const SEAL = Buffer.alloc(16);
 const CREDENTIAL = '00000000-0000-4000-8000-0000000000c1';
@@ -89,14 +87,6 @@ const LOOKUPS: Lookup[] = [
       assert.equal((await latestTallied(app))?.entry, newest);
       assert.deepEqual((await talliedAfter(app, newest - 1n, 32)).map(({ entry }) => entry), [newest]);
     },
-  },
-  {
-    // A target's freezes, most of the app's entries, then a long tail of others (`sign_in`'s, the functions' test).
-    name: 'frozenTargets',
-    run: { author: 'app', action: 'workload.freeze', metadata: FREEZE },
-    tail: [{ author: 'app', action: 'secret.read', metadata: FREEZE }],
-    indexes: ['audit_log_frozen_idx'],
-    ask: async (app) => assert.deepEqual(await frozenTargets(app, ['instance', 'binding:none']), ['instance']),
   },
   {
     // A member's newest access entry, then a long run of reads about them (the member page's, beside their grants).

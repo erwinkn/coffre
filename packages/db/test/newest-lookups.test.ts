@@ -48,9 +48,6 @@ const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   'packages/server/src/db/rotation.ts#newestMove': { by: SERVER, as: 'newestMove' },
   'packages/db/src/log.ts#firstEntryUnder': { by: VAULT, as: 'firstVaultEntryUnder' },
   'packages/server/src/db/rotation.ts#newestAppEntry': { by: SERVER, as: 'newestAppEntry' },
-  // A workload's session's freezes: the statement `sign_in` reads (`audit_log_frozen_idx`), a column its target, which
-  // the vault's test holds as the functions' `freeze`.
-  'packages/server/src/db/workloads.ts#frozen': { by: SERVER, as: 'frozenTargets' },
   'packages/server/src/db/queries.ts#memberAccess': { by: SERVER, as: 'memberAccess' },
   // Whether a member no row names has an access entry: as an `EXISTS`, a scan past every refusal about them (review r8).
   'packages/server/src/db/queries.ts#missingMembers': { by: SERVER, as: 'missingMembers' },
