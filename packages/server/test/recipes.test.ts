@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import type { CoffreClient } from '@coffre/client';
 import { and, asc, eq, gte } from 'drizzle-orm';
 
-import { auditChainHead, auditLog, secrets, secretVersions } from './db/tables.ts';
+import { auditChainHead, auditLog, secrets, secretVersions } from '@coffre/db/schema';
 import { withTriggersLifted } from './db/engine.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps, outcomes } from './api-fixture.ts';
 

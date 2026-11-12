@@ -11,7 +11,7 @@ import { eq, gte, sql } from 'drizzle-orm';
 import { actorOf, actorParts, appendAudit, appLogKey } from '../../src/db/audit.ts';
 import { auditHead, auditRange } from '../../src/db/queries.ts';
 import { emptyLog, openTestDatabase, withLogUnlocked } from './engine.ts';
-import { auditChainHead, auditLog } from './tables.ts';
+import { auditChainHead, auditLog } from '@coffre/db/schema';
 
 const CHAIN_KEY = randomBytes(32);
 const KEYS = { keys: [appLogKey(CHAIN_KEY)] };

@@ -16,7 +16,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { HIDDEN_COUNTED } from '../src/db/queries.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { auditLog, credentials, logChanges } from './db/tables.ts';
+import { auditLog, credentials, logChanges } from '@coffre/db/schema';
 import { aroundNextUseByIds, clientFor, contextFor, issuesLogged, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';

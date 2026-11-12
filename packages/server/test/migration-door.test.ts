@@ -12,7 +12,7 @@ import type { CoffreRuntime } from '../src/runtime.ts';
 import { admitSocket } from '../src/socket-admission.ts';
 import { LOG, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { appendAudit } from '../src/db/audit.ts';
-import { auditLog } from './db/tables.ts';
+import { auditLog } from '@coffre/db/schema';
 
 const ORIGIN = 'https://coffre.test';
 

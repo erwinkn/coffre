@@ -7,7 +7,7 @@ import { and, asc, eq } from 'drizzle-orm';
 
 import { listMembers } from '../src/api/members.ts';
 import { memberAccess } from '../src/db/queries.ts';
-import { auditLog, principals } from './db/tables.ts';
+import { auditLog, principals } from '@coffre/db/schema';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, START_OVER_014, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // A person's instance role and its scope, which project grants add to:

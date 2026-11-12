@@ -18,7 +18,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { lockLogHead } from '@coffre/db/log';
-import { auditLog } from './db/tables.ts';
+import { auditLog, credentials } from '@coffre/db/schema';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -418,7 +418,6 @@ test('a protected environment deleted protects nothing: a Developer gives a serv
 
 /** What a credential's row keeps of its scope, as stored. */
 async function storedScopeOf(id: string): Promise<{ role: string; permissions?: { normal: string[]; protected: string[] } }[]> {
-  const { credentials } = await import('./db/tables.ts');
   return JSON.parse((await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.id, id)))[0]!.scope!) as never;
 }
 

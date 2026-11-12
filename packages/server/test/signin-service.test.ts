@@ -14,7 +14,7 @@ import {
   deviceLogins,
   identities,
   principals,
-} from './db/tables.ts';
+} from '@coffre/db/schema';
 import { authMac } from '../src/auth-rows.ts';
 import { verifyAudit } from '../src/api/audit.ts';
 import {

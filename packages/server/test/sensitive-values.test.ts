@@ -19,7 +19,7 @@ import { replayStored } from '@coffre/vault/node';
 import { clientFor, LOG, refusedIn, testVault, outcomes } from './api-fixture.ts';
 import { withTriggersLifted } from './db/engine.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
-import { secretVersions } from './db/tables.ts';
+import { secretVersions } from '@coffre/db/schema';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { basic, credentialProxy, header } from '../src/plugins/credential-proxy.ts';

@@ -5,7 +5,7 @@ import { createHmac } from 'node:crypto';
 import { deriveKey, generateToken, github, hashToken, signin, tokenHint } from '@coffre/core/identity';
 import { eq } from 'drizzle-orm';
 
-import { credentials, enrollmentCodes, serviceBindings } from './db/tables.ts';
+import { credentials, enrollmentCodes, serviceBindings } from '@coffre/db/schema';
 import { authMac, checkAuthRow } from '../src/auth-rows.ts';
 import { serveApi } from '../src/api/router.ts';
 import { routes } from '../src/api/routes.ts';

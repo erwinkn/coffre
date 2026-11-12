@@ -7,7 +7,7 @@ import { eq, inArray, sql } from 'drizzle-orm';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { MAX_PARENTS, world } from '../../../scripts/properties/domain.ts';
 import { openTestDatabase, resetDatabase, testVault, type TestVault } from './api-fixture.ts';
-import { dismissedKeys, environments, projects, proxyDefinitions, secretReferences, secrets, secretVersions } from './db/tables.ts';
+import { dismissedKeys, environments, projects, proxyDefinitions, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 import type { ApiContext } from '../src/api/context.ts';
 import { inheritedRows, resolveKeys } from '../src/api/inheritance.ts';
 import { missingKeys } from '../src/api/missing.ts';

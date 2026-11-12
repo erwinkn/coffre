@@ -22,7 +22,7 @@ import { eq } from 'drizzle-orm';
 
 import { clientFor, contextFor, issuesLogged, LOG, usesLogged } from './api-fixture.ts';
 import { browserFor, callRaw, connect, db, deps, DEV, entries, fromPage, NO, refusedFor, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
-import { credentials, environments } from './db/tables.ts';
+import { credentials, environments } from '@coffre/db/schema';
 import { coffreRoute } from '../src/app.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { checkPlugins } from '../src/plugins.ts';

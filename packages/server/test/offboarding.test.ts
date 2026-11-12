@@ -7,7 +7,7 @@ import { defineSignin, generateToken, github, hashToken } from '@coffre/core/ide
 import { appendEntries } from '@coffre/db/log';
 import { eq, isNull } from 'drizzle-orm';
 
-import { auditLog, credentials, identities, secrets } from './db/tables.ts';
+import { auditLog, credentials, identities, secrets } from '@coffre/db/schema';
 import { CredentialUncheckable, SigninService } from '../src/api/signin.ts';
 import { authenticateRequest } from '../src/auth.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';

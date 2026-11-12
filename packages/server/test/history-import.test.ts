@@ -5,7 +5,7 @@ import { planImport, type CoffreClient } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
 import { and, asc, count, eq } from 'drizzle-orm';
 
-import { auditLog, secrets, secretVersions } from './db/tables.ts';
+import { auditLog, secrets, secretVersions } from '@coffre/db/schema';
 import { serveApi } from '../src/api/router.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps, outcomes } from './api-fixture.ts';
 

@@ -29,7 +29,7 @@ import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { USES_AT_ONCE } from '../src/api/keys.ts';
 import { aroundNextUseByIds, clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, environments, bulkCap, logCheckpoints, checkpointFence, logTiles, logUses } from './db/tables.ts';
+import { auditLog, environments, bulkCap, logCheckpoints, checkpointFence, logTiles, logUses } from '@coffre/db/schema';
 import { openVaultDatabase } from './db/engine.ts';
 import { answer, type Pages } from './start-fixture.ts';
 

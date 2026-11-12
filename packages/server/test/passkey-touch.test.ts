@@ -12,7 +12,7 @@ import { eq } from 'drizzle-orm';
 
 import { FRESH_MS } from '../src/api/fresh-routes.ts';
 import { clientFor } from './api-fixture.ts';
-import { credentials, deviceLogins, mcpApprovals, mcpConnections } from './db/tables.ts';
+import { credentials, deviceLogins, mcpApprovals, mcpConnections } from '@coffre/db/schema';
 import { browserFor, callRaw, CLAUDE_CODE, db, deps, DEV, entries, fromPage, ORIGIN, RESOURCE, route, runtime, useMcp } from './mcp-fixture.ts';
 import { addPasskey, touchFor, type Touch } from './passkey-rows.ts';
 

@@ -11,7 +11,7 @@ import * as schema from '@coffre/db/schema';
 import { and, asc, desc, eq, is, Table } from 'drizzle-orm';
 
 import { auditRange } from '../src/db/queries.ts';
-import { auditChainHead, auditLog } from './db/tables.ts';
+import { auditChainHead, auditLog, grants, projects } from '@coffre/db/schema';
 import { serveApi } from '../src/api/router.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
@@ -29,7 +29,6 @@ import {
 } from './api-fixture.ts';
 import { appLogKey } from '../src/db/audit.ts';
 import { withLogUnlocked } from './db/engine.ts';
-import { grants, projects } from '@coffre/db/schema';
 
 /**
  * The vault as the last line: each test here gets past the app somehow (a

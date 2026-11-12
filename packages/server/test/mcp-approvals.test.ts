@@ -13,7 +13,7 @@ import { decideApproval } from '../src/db/queries.ts';
 import { callDigest } from '../src/mcp/approvals.ts';
 import { TOOL_BY_NAME } from '../src/mcp/tools.ts';
 import { clientFor, holdSomething, LOG } from './api-fixture.ts';
-import { auditLog, credentials, mcpApprovals, mcpConnections } from './db/tables.ts';
+import { auditLog, credentials, mcpApprovals, mcpConnections } from '@coffre/db/schema';
 import { browserFor, callRaw, client, connect, db, deps, DEV, documents, entries, fetched, fromPage, type Result, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 
 const OTHER = 'other@acme.example';

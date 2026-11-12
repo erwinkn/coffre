@@ -21,7 +21,7 @@ import { processLimits } from '../src/workloads/limits.ts';
 import { clientFor, entryOf, contextFor, hotDatabaseUrl, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
-import { auditLog, credentials as credentialRows, environments, bulkCap, checkpointFence, logUses, grants } from './db/tables.ts';
+import { auditLog, credentials as credentialRows, environments, bulkCap, checkpointFence, logUses, grants } from '@coffre/db/schema';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';

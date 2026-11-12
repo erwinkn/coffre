@@ -14,7 +14,7 @@ import { eq } from 'drizzle-orm';
 
 import { clientFor } from './api-fixture.ts';
 import { callRaw, connect, db, deps, DEV, entries, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
-import { auditLog, environments } from './db/tables.ts';
+import { auditLog, environments } from '@coffre/db/schema';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy } from '../src/plugins/credential-proxy.ts';

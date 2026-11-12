@@ -16,7 +16,7 @@ import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 
 import { contextFor, openTestDatabase, refusedIn, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { auditLog } from './db/tables.ts';
+import { auditLog } from '@coffre/db/schema';
 
 export const ORIGIN = 'https://secrets.acme.example';
 export const RESOURCE = `${ORIGIN}/mcp`;

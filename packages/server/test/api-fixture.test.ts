@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
 import test, { after, before } from 'node:test';
 import { openTestDatabase, resetDatabase, waitUntil } from './api-fixture.ts';
-import { environments } from './db/tables.ts';
+import { environments } from '@coffre/db/schema';
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 before(async () => { db = await openTestDatabase(); });

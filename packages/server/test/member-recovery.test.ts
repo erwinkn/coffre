@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { eq } from 'drizzle-orm';
 
 import { clientFor, openTestDatabase, resetDatabase, START_OVER_014, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { grants, principals } from './db/tables.ts';
+import { grants, principals } from '@coffre/db/schema';
 
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';

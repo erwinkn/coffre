@@ -12,7 +12,7 @@ import { eq } from 'drizzle-orm';
 import { authMac } from '../src/auth-rows.ts';
 import type { SigninService } from '../src/api/signin.ts';
 import { memberStanding } from '../src/db/queries.ts';
-import { credentials, deviceLogins, mcpConnections, passkeys } from './db/tables.ts';
+import { credentials, deviceLogins, mcpConnections, passkeys } from '@coffre/db/schema';
 
 async function generationOf(owner: Database, email: string): Promise<number> {
   return (await memberStanding(owner, `user:${email}`))!.generation;

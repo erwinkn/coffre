@@ -19,7 +19,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { coffreRoute } from '../src/app.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, credentials, deviceLogins, identities, passkeys, principals } from './db/tables.ts';
+import { auditLog, credentials, deviceLogins, identities, passkeys, principals } from '@coffre/db/schema';
 import * as rows from './passkey-rows.ts';
 import { assertion, Browser, enroll, me, ORIGIN, provider, register, signinDeployment, touch } from './signin-browser.ts';
 

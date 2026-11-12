@@ -44,7 +44,7 @@ import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, contextFor, hotDatabaseUrl, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
-import { checkpointFence } from './db/tables.ts';
+import { checkpointFence } from '@coffre/db/schema';
 import { drainBackgroundTasks } from './background-tasks.ts';
 
 const ORIGIN = 'https://secrets.acme.example';

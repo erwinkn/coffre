@@ -14,7 +14,7 @@ import { FRESH_MS } from '../src/api/fresh-routes.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { serveApi } from '../src/api/router.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { credentials, passkeys } from './db/tables.ts';
+import { credentials, passkeys } from '@coffre/db/schema';
 import * as rows from './passkey-rows.ts';
 import { assertion, Browser, enroll, ORIGIN, register, signinDeployment } from './signin-browser.ts';
 

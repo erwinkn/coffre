@@ -21,7 +21,7 @@ import { sealScopes } from '../src/api/services.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { auditLog, credentials, environments, logChanges, secrets, secretVersions, serviceBindings, principals } from './db/tables.ts';
+import { auditLog, credentials, environments, logChanges, secrets, secretVersions, serviceBindings, principals } from '@coffre/db/schema';
 import { clientFor, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';

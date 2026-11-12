@@ -13,7 +13,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { environmentSecrets, findCredential, resolvePath } from '../src/db/queries.ts';
 import { readAhead } from '../src/db/read-ahead.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { environments, projects, secrets } from './db/tables.ts';
+import { environments, projects, secrets } from '@coffre/db/schema';
 
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';

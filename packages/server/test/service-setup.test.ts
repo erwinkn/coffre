@@ -11,7 +11,7 @@ import { authMac } from '../src/auth-rows.ts';
 import { updateAuth } from '../src/db/queries.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { auditLog, credentials, principals, projects, serviceBindings } from './db/tables.ts';
+import { auditLog, credentials, principals, projects, serviceBindings } from '@coffre/db/schema';
 import { clientFor, issuesLogged, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // People who set up service accounts without running the instance (D97,

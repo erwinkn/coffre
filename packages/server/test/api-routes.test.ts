@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { asc, eq } from 'drizzle-orm';
 
-import { auditLog } from './db/tables.ts';
+import { auditLog } from '@coffre/db/schema';
 import { serveApi } from '../src/api/router.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, outcomes } from './api-fixture.ts';
 

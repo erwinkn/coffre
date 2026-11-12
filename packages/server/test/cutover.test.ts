@@ -20,7 +20,7 @@ import { CUTTING_OVER_NOW, cutoverReady, type CutoverKnown } from '../src/cutove
 import { finishRotation, rotateStep } from '../src/key-rotation.ts';
 import { resolvePath } from '../src/db/queries.ts';
 import { createRuntime } from '../src/runtime.ts';
-import { auditLog, credentials, environments, identities, logChanges, checkpointFence, projects, secrets, grants, principals } from './db/tables.ts';
+import { auditLog, credentials, environments, identities, logChanges, checkpointFence, projects, secrets, grants, principals } from '@coffre/db/schema';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
 import { withLogUnlocked } from './db/engine.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps, type TestVault } from './api-fixture.ts';

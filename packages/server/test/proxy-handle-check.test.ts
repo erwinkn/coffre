@@ -22,7 +22,7 @@ import { checkPlugins, pluginRoute, type CoffrePlugin } from '../src/plugins.ts'
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, contextFor, LOG, openTestDatabase, refusedIn, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
-import { credentials as credentialRows, checkpointFence } from './db/tables.ts';
+import { credentials as credentialRows, checkpointFence } from '@coffre/db/schema';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';

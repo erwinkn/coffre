@@ -24,7 +24,7 @@ import { READS_BEHIND_MS, readsListed } from '../src/api/audit.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { bulkCap, logCheckpoints, logReadDays, logReadPlaceDays, logReads, logReadsCursor, logTiles, logUses, secrets } from './db/tables.ts';
+import { bulkCap, logCheckpoints, logReadDays, logReadPlaceDays, logReads, logReadsCursor, logTiles, logUses, secrets } from '@coffre/db/schema';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { openVaultDatabase } from './db/engine.ts';
 

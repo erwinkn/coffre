@@ -71,7 +71,7 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
 import { contextFor, EDITS_ROLES, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { environments as storedEnvironments, projects as storedProjects } from './db/tables.ts';
+import { environments as storedEnvironments, projects as storedProjects } from '@coffre/db/schema';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'user:admin@acme.example';

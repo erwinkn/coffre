@@ -11,7 +11,7 @@ import { and, eq, ne } from 'drizzle-orm';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, watchUses, type FixtureDeps } from './api-fixture.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
-import { auditLog, principals, grants, credentials as storedCredentials, identities, environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets, secretReferences, secretVersions } from './db/tables.ts';
+import { auditLog, principals, grants, credentials as storedCredentials, identities, environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets, secretReferences, secretVersions } from '@coffre/db/schema';
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';

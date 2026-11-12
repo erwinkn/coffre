@@ -12,7 +12,7 @@ import { serveApi } from '../src/api/router.ts';
 import { decodeHeaderValue } from '../src/mcp/endpoint.ts';
 import { TOOL_BY_NAME, type Tool } from '../src/mcp/tools.ts';
 import { clientFor, contextFor } from './api-fixture.ts';
-import { auditLog } from './db/tables.ts';
+import { auditLog } from '@coffre/db/schema';
 import { callRaw, CLAUDE_CODE, client, connect, db, deps, DEV, entries, envelope, ORIGIN, raw, type Result, ROOT, route, sent, useMcp } from './mcp-fixture.ts';
 
 useMcp(async () => {

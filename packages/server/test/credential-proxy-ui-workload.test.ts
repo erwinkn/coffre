@@ -36,7 +36,7 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, holdSomething, LOG, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { credentials } from './db/tables.ts';
+import { credentials } from '@coffre/db/schema';
 import { answer, type Pages } from './start-fixture.ts';
 import { pinnedGates } from './window-fixture.ts';
 

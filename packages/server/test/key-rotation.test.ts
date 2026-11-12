@@ -40,7 +40,7 @@ import {
   mcpConnections,
   oauthClients,
   serviceBindings,
-} from './db/tables.ts';
+} from '@coffre/db/schema';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
