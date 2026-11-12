@@ -140,6 +140,7 @@ CREATE TABLE audit_cursor (             -- how far the projector has gone, one r
   through bigint NOT NULL, pair bigint NOT NULL, at bigint NOT NULL,   -- the chains: listed through this checkpoint
   old_from bigint NOT NULL, old_hash bytea NOT NULL,                   -- the frozen log: listed down to this seq, and
                                                                        -- the hash the entry below it must have
+  reads_from bigint NOT NULL DEFAULT 0,  -- retention: no summary entry for a read timed below it; outside the MAC
   mac bytea NOT NULL CHECK (octet_length(mac) = 16)
 );
 ```
@@ -268,6 +269,13 @@ budget, with its pages held flat by the sweep (S1). Section 4 lists what it catc
 request each, as `verifyWhole` and `verifyReads` do today: 10,000 entries of the old chain, or one checkpoint's range
 of the new one, re-derived and held to its signed root and to the projection's rows. Each step is far inside the 5 s
 timeout, so nothing has to run outside its reach. Its cost follows the log, and nothing runs it unasked.
+
+The walk also holds the report's summary to the list: each listed read inside retention needs an entry of
+`audit_member_keys` for its member, key and version, at its time or later. It takes retention's floor from the sealed
+retention change, never from `audit_cursor.reads_from`. That column has no MAC, and a writer who raises it makes the
+projector skip entries; a verify that trusted it would excuse them all (`formal/Reads.tla`, `FloorSealed`, on P1). A
+read in the frozen log timed before the newest dropped day keeps its row on the page, since retention drops only the
+uses' rows, and is on no report: the report covers retention's window and states the date it starts (D161).
 
 **No `log_verified`, and the beat writes nothing.** With a check on every visit, the row the first draft had the page
 read has no reader, so the table is not built. The 5-minute beat keeps one job: it runs the same `check` when nobody
@@ -513,7 +521,7 @@ the collapse. Days are working days for one agent under the fast gate. Net lines
 | V2a | One use statement, same reads. `use_credential`, `use_route`, `vault/use.ts` | E4 | no | yes | 3 | -700 |
 | P1 | The projector and its four tables; every change, event and use, and the old log backward from its anchor; `coffre audit rebuild`. Adds, because nothing can be deleted until pages can read it. | E4 | no, `Reads.tla` with it | yes | 4 | +900 |
 | P2 | Pages read the projection: `GET /audit`, the report, MCP. Deletes `log_reads`, the three-log merge, 18 + 11 + 10 indexes | P1 | no | yes | 3 | -2,300 |
-| P3 | The page's check, flat: one `check` call a visit (6 statements, 4 round trips), the beat runs the same; the full walk in steps behind a Verify button and `coffre verify`; the page's walk of 0.14's chain deleted | P2 | no | no | 2 | -300 |
+| P3 | The page's check, flat: one `check` call a visit (6 statements, 4 round trips), the beat runs the same; the full walk in steps behind a Verify button and `coffre verify`, which also holds each listed read inside retention to the report's summary, the floor taken from the sealed retention change (`reads_from` has no MAC); the page's walk of 0.14's chain deleted | P2 | no | no | 2 | -300 |
 | T1 | Three `text[]` columns, `log_config` dropped | #564 | no | yes | 1 | -50 |
 | A0 | Models: the head becomes the change lock (section 3), the policy revision a digest of newest change numbers | now | it is the model | no | 2 | 0 |
 | V1 | The vault's entries go to the chain only; `settings`, `log_keys`; the vault's upgrade step (one beat's tail, the anchor); `note` for events, and a refused read written by the call that refused it | P2 | `SealedObjects` with it | yes | 4 | -300 |
