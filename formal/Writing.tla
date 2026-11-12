@@ -117,6 +117,15 @@
 (* (WriteLocks.tla checks its locks), which only adds order: the revoke    *)
 (* here is the stronger adversary.                                         *)
 (*                                                                         *)
+(* Since L1 (T282) the fence is the checkpointer's alone: a hold's         *)
+(* statement shares it, and takes instead the lock of each object it read, *)
+(* shared, and of each it writes, exclusive, in key order, before it reads *)
+(* again (HotPathOne.tla, WriteLocks.tla). `held` stands for those: a      *)
+(* change of anything the request read waits for its COMMIT, the session's *)
+(* revoke among them, whichever locks it takes besides. What no longer     *)
+(* waits for a hold is what changes no object: a refusal's record          *)
+(* (Refuse).                                                               *)
+(*                                                                         *)
 (* Objects have seals: a counter per object, its newest change's number    *)
 (* in the log, moved by each change. A row stores its seal too; a database *)
 (* writer may put a row back (R64), which its column then cannot tell.     *)
@@ -203,8 +212,9 @@ CONSTANTS
     \* The decision weighs the read and nothing else. Without, it takes the
     \* roles from its isolate's cache, as they were when the isolate began.
     DecideOnRead,
-    \* The write's hold runs once its statement holds the fence. Without, it
-    \* runs under the change lock, and the statement then waits for the fence.
+    \* The write's hold runs once its statement holds the fence (since L1:
+    \* the locks of what it read and writes). Without, it runs under the
+    \* change lock, and the statement then waits for them.
     HoldAfterFence,
     \* The read takes each object's number from the log's newest change of
     \* it. Without, from the seal its row stores.
@@ -755,8 +765,9 @@ AToday(p) ==
 
 \* The vault's second statement (`log_refusal`): the refusal, MAC'd by the
 \* Worker, a row of the log's changes numbered under the fence shared, as a
-\* use is (it waits for a change's hold to its COMMIT, `held`, and holds up
-\* no use), of the request's own object, so no object's newest change moves
+\* use is (since L1 a hold shares the fence too, so the record may be
+\* numbered inside one; it holds up no use), of the request's own object, so
+\* no object's newest change moves
 \* and no reader that decides takes it (docs/design/two-trips.md, "A
 \* refusal's record"). One round trip. It names the request's number (a
 \* key write's: an add's read numbers nothing) and the credential the read
@@ -765,7 +776,6 @@ AToday(p) ==
 \* then the answer: today's status and body, and no 0.14 entry.
 Refuse(p) ==
     /\ pc[p] = "r.refuse"
-    /\ held = None
     /\ trips' = [trips EXCEPT ![p] = @ + 1]
     /\ refusals' = refusals \cup {[p |-> p, kind |-> Kind(p), n |-> next, t |-> tries[p],
                                    replay |-> IF Kind(p) = "write" THEN l[p].asked.replay ELSE FALSE,

@@ -349,6 +349,18 @@ REMOVALS=(
   "HotPathOneIssue BarrierWaitsIssues CheckpointsHold"
   "HotPathOneIssue IssueNumberUnderLock CheckpointsHold"
   "HotPathOneIssue NamedAfterIssue ReplayAgrees"
+  # Object locks (L1, T282; HotPathOneObjects: two keys, two changers side by side). A use that takes none of its locks,
+  # a change that does not take its object's, either letting them go before its commit: a use numbered above a change
+  # of what it reads that it did not see. A use that leaves the member unlocked, whom the call does not name: the same,
+  # of the member. A change that does not share the fence: the barrier closes its number before it commits.
+  "HotPathOneObjects UseLocks TotalOrder"
+  "HotPathOneObjects ChangeLocks TotalOrder"
+  "HotPathOneObjects LockToCommit TotalOrder"
+  "HotPathOneObjects Unlocked={\"member\"} TotalOrder"
+  "HotPathOneObjects ChangeSharesFence CheckpointsHold"
+  # A key made a reference between the call's read of its ids and its locks (HotPathOneLinks): the use reads the source
+  # unlocked, beside a change of it.
+  "HotPathOneLinks LockedAsRead TotalOrder"
   # Liveness, under weak fairness (HotPathOneLive's PROPERTIES).
   "HotPathOneLive WorkerHonoursDeadline UseAnswered"
   "HotPathOneLive ChangeRereads ChangeAnswered"
@@ -576,8 +588,9 @@ REMOVALS=(
   # fence and waits for an issue's shared hold on its credential, that issue queued behind the barrier, which waits
   # for the write's issue lock.
   "WriteLocks TouchFirst NoWaitCycle"
-  # The key write without the change lock (T272): it holds the fence and waits for the key's row, which another change
-  # of that key holds, under the lock, while it waits for the fence. So the two-trip write keeps the lock.
+  # The key write without the change lock (T272): it holds the key's lock (before L1, the fence) and waits for the key's
+  # row, which another change of that key holds, under the lock, while it waits for the key's lock. So the two-trip
+  # write keeps the lock, with object locks as without.
   "WriteLocks WriteTakesChangeLock NoWaitCycle"
   # A member add taking the change lock before the members' rows (AddLocks, T179 PR 5): a demotion holds the row and
   # waits for the lock, which the add holds while it waits for the row.
@@ -587,6 +600,15 @@ REMOVALS=(
   "ChangeLocks ChangeLockFirst NoWaitCycle"
   "ChangeLocks IssueBeforeFence NoWaitCycle"
   "ChangeLocks BarrierIssueFirst NoWaitCycle"
+  # Object locks (ObjectLocks, L1, T282): the fence shared, then each object's lock in key order, all before the first
+  # read or write, then a use's principal's lock. A change taking its objects before the fence waits for it behind the
+  # barrier, which waits for a use that waits for the object; a batch taking each key's lock as its turn comes, or a
+  # change each call's, holds one and waits for the other, held by one that waits for the first; a batch taking its
+  # principal's lock before its objects holds it against a use that holds the objects a change waits for.
+  "ObjectLocks FenceBeforeObjects NoWaitCycle"
+  "ObjectLocks UsesInKeyOrder NoWaitCycle"
+  "ObjectLocks ChangesInKeyOrder NoWaitCycle"
+  "ObjectLocks PrincipalLast NoWaitCycle"
   # A finding about a member weighed by 0.14's rule (Findings.tla, T179 PR 4a): under 0.16 no access entry follows a
   # change, and a change above the finding settles nothing.
   "Findings WeighsChanges Settles"
@@ -714,6 +736,8 @@ EXPECTED=(
   # unsealed, which BarrierChecksFloor cannot see; a late barrier of a checkpointer given up on (T169) can put it back
   # as well (HotPathOne.tla).
   "HotPathOneStall CheckpointsHold"
+  # Not a gap but what L1 is for: a use reads beside a change in flight, of an object it does not read (HotPathOne.tla).
+  "HotPathOneObjects NeverSideBySide"
   # Postgres's clock stepping back: a use may sit past its checkpoint's ceiling, which the verifier's bounded read
   # misses, and alarms on: fail closed (HotPathOne.tla's CeilingHolds).
   "HotPathOneChunksClock CeilingHolds"

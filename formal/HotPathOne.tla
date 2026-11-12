@@ -6,35 +6,48 @@
 (*                                                                         *)
 (* A use is one call, `use_credential`, a plpgsql function, one            *)
 (* transaction (autocommit):                                               *)
-(*   it takes the fence lock (an advisory lock) shared, and refuses an     *)
-(*   `at` below the floor;                                                 *)
+(*   it reads, before any lock, the ids of the objects it will read: its   *)
+(*   credential's member, its key's environment and, if the key is a       *)
+(*   reference, its source (the call names only the credential, the key    *)
+(*   and the place);                                                       *)
+(*   it takes the fence lock (an advisory lock) shared, then each of those *)
+(*   objects' locks (L1, T282: an advisory lock an object), shared, in key *)
+(*   order, and refuses an `at` below the floor;                           *)
 (*   statement A reads the principal's bulk row for its key and, if the    *)
 (*   key must enter the cap's set, takes the principal's lock exclusive,   *)
 (*   or, if it is in the set and must be moved on, shared (T127);          *)
 (*   statement B, a snapshot of its own after every lock: past its         *)
-(*   deadline it writes nothing (`late`); else it reads every decision     *)
-(*   input, the seals of their newest changes, applies the cap's rule and  *)
-(*   inserts the use's entry, numbered from a sequence (or, a repeat on a  *)
-(*   cover, writes nothing);                                               *)
+(*   deadline it writes nothing (`late`); if its rows name an object the   *)
+(*   call did not lock, it writes nothing either (`moved`, and the vault   *)
+(*   asks again); else it reads every decision input, the seals of their   *)
+(*   newest changes, applies the cap's rule and inserts the use's entry,   *)
+(*   numbered from a sequence (or, a repeat on a cover, writes nothing);   *)
 (*   it commits, which lets the locks go.                                  *)
 (* The Worker decides on what statement B read, and the value leaves only  *)
 (* after the commit and before the use's deadline. The entry is the        *)
 (* request, not the outcome: the outcome is recomputed from the log.       *)
 (*                                                                         *)
 (* A change (one input revoked or restored) is one call too: the vault     *)
-(* reads the row outside the lock; then the lock exclusive, the write if   *)
-(* the row is still the one it read, its entry numbered from the same      *)
-(* sequence, the commit; then it answers. The checkpointer's barrier takes *)
-(* the lock exclusive for one statement: it raises the floor of `at` to    *)
-(* its clock less D and closes every number handed out so far. The next    *)
-(* checkpoint reads that window, its uses through the `at` index from the  *)
-(* floor the previous barrier set, and signs it.                           *)
+(* reads the row outside any lock; then the fence shared and the lock of   *)
+(* the object it writes, exclusive, the write if the row is still the one  *)
+(* it read, its entry numbered from the same sequence, the commit; then it *)
+(* answers. The checkpointer's barrier takes the fence exclusive for one   *)
+(* statement, as it alone does: it raises the floor of `at` to its clock   *)
+(* less D and closes every number handed out so far. The next checkpoint   *)
+(* reads that window, its uses through the `at` index from the floor the   *)
+(* previous barrier set, and signs it.                                     *)
 (*                                                                         *)
-(* The claim at the core: since uses hold the lock shared and changes      *)
-(* exclusive, and each takes its number under the lock and keeps the lock  *)
-(* until its commit is visible, no use overlaps a change, so the number    *)
-(* alone orders every use against every change (TotalOrder). Nothing is    *)
-(* left for a revision counter to do.                                      *)
+(* The claim at the core: since a use holds the lock of each object it     *)
+(* reads shared and a change the lock of the one it writes exclusive, and  *)
+(* each takes its number under its locks and keeps them until its commit   *)
+(* is visible, no use overlaps a change of what it reads, so the number    *)
+(* alone orders every use against every change of what it reads            *)
+(* (TotalOrder). Nothing is left for a revision counter to do. Until L1    *)
+(* the fence was that lock for every object at once, every change taking   *)
+(* it exclusive: a change of one key made every use wait. Changes are      *)
+(* ordered against each other by the change lock (Coffre.tla,              *)
+(* WriteLocks.tla), which this module leaves out: its changers may run     *)
+(* side by side, on two objects, and nothing here relies on their order.   *)
 (*                                                                         *)
 (* A statement is several steps here where something can come between     *)
 (* them in Postgres: it takes its snapshot when it starts, then waits for  *)
@@ -154,26 +167,39 @@
 (*                                                                         *)
 (* The protections, each a constant, so that TLC can show each necessary   *)
 (* (scripts/formal.sh):                                                    *)
-(*   UseLocks              a use takes the lock shared;                    *)
-(*   StatementSnapshot     its reads take their snapshot after the lock:   *)
+(*   UseLocks              a use takes its locks shared: the fence, and    *)
+(*                         the lock of each object it reads;               *)
+(*   Unlocked = {}         ... of every one: an object it reads unlocked   *)
+(*                         (the member, whom the call does not name) is    *)
+(*                         one a change may write under it;                *)
+(*   LockedAsRead          ... and a use whose rows name an object it did  *)
+(*                         not lock (its key made a reference since the    *)
+(*                         call read the ids) writes nothing, and never    *)
+(*                         takes a lock after its first read;              *)
+(*   StatementSnapshot     its reads take their snapshot after its locks:  *)
 (*                         a statement of its own inside the function,     *)
 (*                         FALSE for a bare CTE, `WITH l AS (SELECT        *)
 (*                         pg_advisory_xact_lock_shared(…)) …`, whose one  *)
-(*                         snapshot predates the wait;                     *)
+(*                         snapshot predates the wait (and for a row's     *)
+(*                         lock, FOR SHARE, which a statement takes after  *)
+(*                         its snapshot);                                  *)
 (*   UseNumberUnderLock    a use's number is taken under the lock, not     *)
 (*                         passed in (`use_credential(nextval(…), …)`);    *)
-(*   ChangeLocks           a change takes the lock exclusive;              *)
+(*   ChangeLocks           a change takes the lock of the object it        *)
+(*                         writes, exclusive;                              *)
+(*   ChangeSharesFence     ... and the fence, shared, so that the barrier  *)
+(*                         waits for its number;                           *)
 (*   ChangeNumberUnderLock a change's number is taken under the lock, not  *)
 (*                         in a read before it;                            *)
-(*   LockToCommit          the lock goes with the commit (an xact lock),   *)
-(*                         not at the end of the statement before it (a    *)
-(*                         session lock unlocked in the function);         *)
+(*   LockToCommit          the locks go with the commit (xact locks), not  *)
+(*                         at the end of the statement before it (session  *)
+(*                         locks unlocked in the function);                *)
 (*   CommitBeforeAnswer    a change answers only once committed;           *)
 (*   ReleaseAfterCommit    a use's value leaves only once its entry has    *)
 (*                         committed;                                      *)
 (*   SyncCommit            a commit returns once flushed                   *)
 (*                         (synchronous_commit on);                        *)
-(*   CheckpointLocks       the barrier closes its numbers under the lock   *)
+(*   CheckpointLocks       the barrier closes its numbers under the fence  *)
 (*                         exclusive;                                      *)
 (*   CoverChecksChanges    a covered use writes nothing only if no change  *)
 (*                         was numbered after its cover;                   *)
@@ -385,7 +411,15 @@ CONSTANTS
     AheadSlack, CapFromPolicy, CapSealed, ChangeMacChecked, CacheVerified, ChangeChecksMac, ChangePinsChecked, ChangePinsWhole,
     Issuers,         \* the sign-ins, each issuing one new credential: {} for none
     IssueOwnLock, IssueNumberUnderLock, BarrierWaitsIssues, BarrierIssueFirst, NamedAfterIssue,
-    DecideBeforeLock
+    DecideBeforeLock,
+    ReadSets,        \* the sets of inputs a use may read, each a key's and its caller's objects: {} for all of them
+    Extra,           \* the inputs a use reads only while its key is a reference (its source): {} for none
+    Unlocked,        \* the inputs a use reads without their lock: {} (a removal sets some)
+    ChangeSharesFence, LockedAsRead
+
+ASSUME /\ ReadSets \subseteq SUBSET Inputs /\ Extra \subseteq Inputs /\ Unlocked \subseteq Inputs
+       /\ Extra = {} \/ "secret" \in Inputs
+       /\ \A R \in ReadSets : "policy" \in Inputs => "policy" \in R
 
 None == "none"
 Change == "change"
@@ -394,12 +428,12 @@ NoTime == -1000   \* a key never asked for
 VARIABLES
     log,       \* the committed entries; `durable` once flushed
     nextSeq,   \* the sequence's next value
-    holder,    \* the changer holding the lock exclusive, or None
-    shared,    \* the uses holding it shared
+    holder,    \* the fence held exclusive: the barrier, or None
+    shared,    \* the uses holding their locks, the fence and their objects', shared
     plock,     \* the principal's lock: the use holding it exclusive (ex), or None, and those holding it shared (sh)
     u,         \* each use's state
     c,         \* each changer's state
-    answered,  \* how many changes had committed when the last change answered
+    answered,  \* of each input: how many of its changes had committed when the last of them answered
     released,  \* the values that left: the use, its key, its at and deadline, the time
     cp,        \* the checkpointer: a window closed and not yet signed
     lastUpto,  \* where the last checkpoint ended
@@ -433,17 +467,28 @@ NoPlock == [ex |-> None, sh |-> {}]
 PlockWithout(x) == [ex |-> IF plock.ex = x THEN None ELSE plock.ex, sh |-> plock.sh \ {x}]
 
 -----------------------------------------------------------------------------
-(* What a statement sees. `Committed`, the number of changes committed, orders it against the   *)
-(* changes (TotalOrder). Each input's row is what its newest committed change wrote, unless a     *)
-(* database writer put back an earlier one; the seal of the input's newest change is read from    *)
-(* the log in the same statement.                                                                 *)
+(* What a statement sees. `SeenIn`, the number of changes of each input committed, orders it      *)
+(* against the changes of what it reads (TotalOrder). Each input's row is what its newest         *)
+(* committed change wrote, unless a database writer put back an earlier one; the seal of the      *)
+(* input's newest change is read from the log in the same statement.                              *)
 ChangesIn(L) == {e \in L : e.kind = "change"}
 \* An issue is a row of the change table too (`credential.issue`), of an object no input names.
 IssuesIn(L) == {e \in L : e.kind = "issue"}
 \* Whether issuer i's credential is in L: committed, or below a number.
 IssuedIn(L, i) == \E e \in IssuesIn(L) : e.id = i
 UsesIn(L) == {e \in L : e.kind = "use"}
-Committed == Cardinality(ChangesIn(log))
+\* How many changes of each input L holds: what a statement has seen of each object.
+SeenIn(L) == [i \in Inputs |-> Cardinality({e \in ChangesIn(L) : e.input = i})]
+NoSeen == [i \in Inputs |-> 0]
+
+\* The objects a use reads (L1). Each use is of one key by one caller: it reads that key's and that caller's objects,
+\* one of ReadSets (all the inputs, with none given), and, while the key is a reference, its source's too (Extra). The
+\* key's row says which: here, the newest change of the secret, whose entry records the link it leaves (none: plain).
+ReadSetsOr == IF ReadSets = {} THEN {Inputs} ELSE ReadSets
+LinkIn(L) ==
+    LET cs == {e \in ChangesIn(L) : e.input = "secret"}
+    IN cs /= {} /\ (CHOOSE e \in cs : \A d \in cs : d.seq <= e.seq).link
+ReadsWith(base, linked) == base \cup (IF linked /\ "secret" \in base THEN Extra ELSE {})
 
 \* An input's value as the newest change to it in L left it (all start allowing; the policy at
 \* BulkCount).
@@ -484,11 +529,12 @@ NewestChange ==
 \* seal it records (`forged`: none to hold the row to), then allowed only if every row allows.
 \* Without StaleFirst, what the rows say is checked first, and a row put back that refuses shows as
 \* a plain refusal.
-Stale(read, newest, forged) == \E i \in Inputs \ Unsealed : read[i] /= newest[i] \/ (ChangeMacChecked /\ i \in forged)
-Content(read) == \A i \in Inputs \ {"policy"} : read[i]
-Code(read, newest, forged) ==
-    IF Stale(read, newest, forged) /\ (StaleFirst \/ Content(read)) THEN "stale"
-    ELSE IF Content(read) THEN "allow" ELSE "refused"
+\* Of the objects R the use reads.
+Stale(R, read, newest, forged) == \E i \in R \ Unsealed : read[i] /= newest[i] \/ (ChangeMacChecked /\ i \in forged)
+Content(R, read) == \A i \in R \ {"policy"} : read[i]
+Code(R, read, newest, forged) ==
+    IF Stale(R, read, newest, forged) /\ (StaleFirst \/ Content(R, read)) THEN "stale"
+    ELSE IF Content(R, read) THEN "allow" ELSE "refused"
 
 AllTrue == [i \in Inputs |-> TRUE]
 NoCover == [seq |-> 0, id |-> None]
@@ -497,7 +543,7 @@ NoCache == [on |-> FALSE, seals |-> AllTrue, change |-> NoChange]
 Credentials == {None} \cup Issuers
 \* The truth, for the invariants: whether the log allows the use's caller, as its changes left every
 \* input and, for a new credential, once its issue is in.
-Stands(f) == Content(Newest) /\ (f = None \/ IssuedIn(log, f))
+Stands(R, f) == Content(R, Newest) /\ (f = None \/ IssuedIn(log, f))
 \* No step, invariant or constant names one use over another, nor one key, and no CHOOSE breaks a
 \* tie between them (each picks an entry by its number, which NumbersUnique holds unique): a scenario
 \* whose uses and keys are model values checks each set of states alike but for those names once
@@ -579,40 +625,46 @@ BulkReplay(G) == ReplayFrom({e \in UsesIn(G) : e.key /= None}, [k \in Keys |-> N
 
 \* What the log says of a use entry: every input as the changes numbered below it left it, and
 \* the cap's decision as the replay makes it.
-InputsAllowed(seq) == \A i \in Inputs \ {"policy"} : ReplayValue({d \in log : d.seq < seq}, i)
+\* The objects the replay reads for it: the ones the use read, and its key's source if and only if the log, below
+\* the use's number, says the key is a reference.
+ReplayReads(e) == ReadsWith(e.reads \ Extra, LinkIn({d \in log : d.seq < e.seq}))
+InputsAllowed(e) == \A i \in ReplayReads(e) \ {"policy"} : ReplayValue({d \in log : d.seq < e.seq}, i)
 ReplayAllows(e) ==
-    /\ InputsAllowed(e.seq)
+    /\ InputsAllowed(e)
     /\ e.fresh /= None => IssuedIn({d \in log : d.seq < e.seq}, e.fresh)
     /\ e.key = None \/ <<e.seq, TRUE>> \in BulkReplay(log).decided
 
-\* Entries: a use's is its request (number, key, at, deadline) with ghosts: the changes it saw, its
-\* decision and code, when decided, the cap's decision, the changes answered when it committed. A
+\* Entries: a use's is its request (number, key, at, deadline) with ghosts: the objects it read, the
+\* changes of each it saw, its decision and code, when decided, the cap's decision, the changes answered when it committed. A
 \* change's: its number, its input, the value it leaves (under its MAC), the seal its row records
 \* (`seal`: the same, unless a writer wrote another), its id. Both: flushed yet.
 UseEntry(x, durable) ==
     [seq |-> u[x].seq, kind |-> "use", id |-> x, seen |-> u[x].seen, allow |-> u[x].allow, code |-> u[x].code,
      answeredAt |-> answered, key |-> u[x].key, at |-> u[x].at, deadline |-> u[x].deadline, decidedAt |-> u[x].decidedAt,
      admitted |-> u[x].admitted, input |-> None, value |-> FALSE, seal |-> FALSE, made |-> <<>>, fresh |-> u[x].fresh, durable |-> durable,
-     phased |-> Phased(x)]
-ChangeEntry(seq, input, value, made, durable) ==
-    [seq |-> seq, kind |-> "change", id |-> Change, seen |-> 0, allow |-> FALSE, code |-> None, answeredAt |-> 0,
+     phased |-> Phased(x), reads |-> u[x].reads, link |-> FALSE]
+ChangeEntry(seq, input, value, link, made, durable) ==
+    [seq |-> seq, kind |-> "change", id |-> Change, seen |-> NoSeen, allow |-> FALSE, code |-> None, answeredAt |-> NoSeen,
      key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE,
-     input |-> input, value |-> value, seal |-> value, made |-> made, fresh |-> None, durable |-> durable, phased |-> FALSE]
+     input |-> input, value |-> value, seal |-> value, made |-> made, fresh |-> None, durable |-> durable, phased |-> FALSE,
+     reads |-> {}, link |-> link]
 \* An issue's: its number, its issuer (whose credential it makes).
 IssueEntry(seq, i, durable) ==
-    [seq |-> seq, kind |-> "issue", id |-> i, seen |-> 0, allow |-> FALSE, code |-> None, answeredAt |-> 0,
+    [seq |-> seq, kind |-> "issue", id |-> i, seen |-> NoSeen, allow |-> FALSE, code |-> None, answeredAt |-> NoSeen,
      key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE,
-     input |-> None, value |-> FALSE, seal |-> FALSE, made |-> <<i>>, fresh |-> None, durable |-> durable, phased |-> FALSE]
+     input |-> None, value |-> FALSE, seal |-> FALSE, made |-> <<i>>, fresh |-> None, durable |-> durable, phased |-> FALSE,
+     reads |-> {}, link |-> FALSE]
 
-IdleUse == [pc |-> "idle", seq |-> 0, seen |-> 0, snap |-> 0, snapRows |-> AllTrue, snapNewest |-> AllTrue,
+IdleUse == [pc |-> "idle", seq |-> 0, seen |-> NoSeen, snap |-> NoSeen, base |-> {}, resolved |-> {}, reads |-> {}, snapLink |-> FALSE,
+            snapRows |-> AllTrue, snapNewest |-> AllTrue,
             snapForged |-> {}, forged |-> {}, snapNewestChange |-> NoChange, covered |-> 0, coverId |-> None, allow |-> FALSE, code |-> None,
             probed |-> FALSE, newest |-> AllTrue, newestChange |-> NoChange,
             key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE, write |-> NoTime,
             replied |-> FALSE, gaveUp |-> FALSE, fresh |-> None, snapIssued |-> FALSE, mode |-> None, enters |-> FALSE,
             second |-> FALSE, standing |-> FALSE, firstAllows |-> FALSE]
-\* A cover or a cache entry is the isolate's for one credential and key: a use's slot.
-Slots == KeysOr \X ({None} \cup Issuers)
-Slot(x) == <<u[x].key, u[x].fresh>>
+\* A cover or a cache entry is the isolate's for one credential and key, whose objects its uses read: a use's slot.
+Slots == KeysOr \X ({None} \cup Issuers) \X ReadSetsOr
+Slot(x) == <<u[x].key, u[x].fresh, u[x].base>>
 
 Init ==
     /\ log = {}
@@ -621,8 +673,9 @@ Init ==
     /\ shared = {}
     /\ plock = NoPlock
     /\ u = [x \in Uses |-> IdleUse]
-    /\ c = [h \in Changers |-> [pc |-> "idle", n |-> 0, seq |-> 0, aborts |-> 0, input |-> None, read |-> TRUE, forged |-> FALSE, pin |-> NoPin, value |-> FALSE]]
-    /\ answered = 0
+    /\ c = [h \in Changers |-> [pc |-> "idle", n |-> 0, seq |-> 0, aborts |-> 0, input |-> None, read |-> TRUE, forged |-> FALSE, pin |-> NoPin, value |-> FALSE,
+                                link |-> FALSE]]
+    /\ answered = NoSeen
     /\ released = {}
     /\ cp = [open |-> FALSE, from |-> 0, upto |-> 0, readFloor |-> 0, floor |-> 0 - D]
     /\ lastUpto = 0
@@ -644,7 +697,19 @@ Init ==
     /\ ishared = {}
     /\ bar = 0
 
-LockFree == holder = None /\ shared = {}
+(* The locks (L1). The fence: a use and a change's statement take it shared, the checkpointer's barrier exclusive      *)
+(* (`holder`). An object's lock: a use takes each one it will read, shared; a change the one it writes, exclusive. A   *)
+(* use takes them all in one step here, and a change its two: what Postgres grants one at a time, in key order, is as  *)
+(* if granted together when the last one is (until then the transaction has read nothing under them), and the order,  *)
+(* with what waits on what meanwhile, is WriteLocks.tla's (ObjectLocks). A use holds them while it is in `shared`; a   *)
+(* change from its lock to its commit, or, without LockToCommit, to its statement's end.                               *)
+ChangerIn(h) == c[h].pc = "locked" \/ (c[h].pc = "ran" /\ LockToCommit)
+\* The objects use x locks: the ones whose ids it read before any lock, but those it leaves unlocked (a removal).
+Locked(x) == u[x].resolved \ Unlocked
+Readers(o) == {x \in shared \cap Uses : o \in Locked(x)}
+Writers(o) == {h \in Changers : ChangeLocks /\ ChangerIn(h) /\ c[h].input = o}
+\* The fence free of every holder: what the barrier waits for.
+LockFree == holder = None /\ shared = {} /\ (ChangeSharesFence => \A h \in Changers : ~ChangerIn(h))
 
 -----------------------------------------------------------------------------
 (* Clocks. *)
@@ -667,17 +732,19 @@ ClockBack ==
 (* A use: one call. *)
 
 \* It arrives, for a key, stamped by the Worker's clock, its deadline set; the call's outer
-\* statement starts, with its snapshot. Passed a number taken before (without UseNumberUnderLock),
-\* it takes it now.
+\* statement starts, with its snapshot, and reads, before any lock, the ids of the objects it will
+\* read (`resolved`: its key's source among them if the key is a reference now), whose locks it will
+\* take. Passed a number taken before (without UseNumberUnderLock), it takes it now.
 \* It names an old credential (None) or a new one, issuer i's: with NamedAfterIssue, once its issue
 \* has answered.
 UseStart(x) ==
     /\ u[x].pc = "idle"
     /\ pnow <= MaxStart
-    /\ \E k \in KeysOr, s \in -MaxSkew..(MaxSkew + Ahead),
+    /\ \E k \in KeysOr, s \in -MaxSkew..(MaxSkew + Ahead), R \in ReadSetsOr,
           f \in {None} \cup {i \in Issuers : NamedAfterIssue => iss[i].pc = "answered"} :
           u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "started", !.key = k, !.at = pnow + s, !.deadline = pnow + s + D,
-                                          !.snap = Committed, !.snapRows = Rows, !.snapNewest = Newest, !.snapForged = Forged,
+                                          !.base = R, !.resolved = ReadsWith(R, LinkIn(log)), !.snapLink = LinkIn(log),
+                                          !.snap = SeenIn(log), !.snapRows = Rows, !.snapNewest = Newest, !.snapForged = Forged,
                                           !.snapNewestChange = NewestChange, !.fresh = f,
                                           !.snapIssued = f /= None /\ IssuedIn(log, f),
                                           !.seq = IF UseNumberUnderLock THEN 0 ELSE nextSeq]]
@@ -699,11 +766,12 @@ UseResume(x) ==
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
-\* It gets the lock shared: no one holds it exclusive. Below the floor, it lets the lock go having
-\* written nothing (503 `late`). With a bulk cap, statement A comes next; without, statement B.
+\* It gets its locks shared, the fence and each object's: the barrier does not hold the first, and no
+\* change any of the others. Below the floor, it lets them go having written nothing (503 `late`).
+\* With a bulk cap, statement A comes next; without, statement B.
 UseLock(x) ==
     /\ u[x].pc = "started"
-    /\ UseLocks => holder = None
+    /\ UseLocks => holder = None /\ \A o \in Locked(x) : Writers(o) = {}
     /\ LET late == \/ FloorChecked /\ u[x].at < floor
                    \/ AheadChecked /\ u[x].at > pnow + MaxSkew
        IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = IF late THEN "done" ELSE IF Keys = {} THEN "read" ELSE "locked",
@@ -713,7 +781,7 @@ UseLock(x) ==
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* Statement A: the key's bulk row, as committed, and the policy's window (which no change can move
-\* while the use holds the lock shared). A key that must enter the set asks for the principal's lock
+\* while the use holds the policy's lock shared). A key that must enter the set asks for the principal's lock
 \* exclusive; one in the set that must be moved on, shared (or exclusive, without RefreshShared).
 \* With DecideBeforeLock (T158, D153), a use that would ask for the principal's lock asks for it
 \* only once the Worker decided the use, in its second call: no decision is kept for a later use to
@@ -726,6 +794,7 @@ UseRead(x) ==
     /\ LET k == u[x].key
            t == u[x].at
            f == u[x].fresh
+           reads == ReadsWith(u[x].base, LinkIn(log))
            enters == k /= None /\ ~InSet(bulk, k, t, WindowIn(log))
            moves == k /= None /\ ~enters /\ ~FreshFrom(bulk, k, t, LivePhase(x, k))
            waits == PrincipalLocks /\ (enters \/ (moves /\ RefreshLocks))
@@ -734,9 +803,9 @@ UseRead(x) ==
                                              !.enters = enters,
                                              !.mode = IF ~waits THEN None ELSE IF moves /\ RefreshShared THEN "s" ELSE "x",
                                              \* Asking for the lock in its second call, the truth when the Worker decided its first.
-                                             !.standing = waits /\ IF u[x].second THEN @ ELSE Stands(f),
+                                             !.standing = waits /\ IF u[x].second THEN @ ELSE Stands(reads, f),
                                              \* What the Worker will decide on the rows this first call read.
-                                             !.firstAllows = decides /\ (f = None \/ IssuedIn(log, f)) /\ Code(Rows, Newest, Forged) = "allow",
+                                             !.firstAllows = decides /\ (f = None \/ IssuedIn(log, f)) /\ Code(reads, Rows, Newest, Forged) = "allow",
                                              !.second = FALSE]]
           /\ shared' = IF decides THEN shared \ {x} ELSE shared
     /\ UNCHANGED <<log, nextSeq, holder, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
@@ -751,7 +820,8 @@ UseDecide(x) ==
            f == u[x].fresh
        IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = IF allow THEN "started" ELSE "done", !.replied = @ \/ ~allow,
                                              !.second = allow, !.standing = @ /\ allow, !.firstAllows = FALSE,
-                                             !.snap = Committed, !.snapRows = Rows, !.snapNewest = Newest, !.snapForged = Forged,
+                                             !.resolved = ReadsWith(u[x].base, LinkIn(log)), !.snapLink = LinkIn(log),
+                                             !.snap = SeenIn(log), !.snapRows = Rows, !.snapNewest = Newest, !.snapForged = Forged,
                                              !.snapNewestChange = NewestChange, !.snapIssued = f /= None /\ IssuedIn(log, f)]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
@@ -800,19 +870,37 @@ CallerPolicies ==
     THEN {PolicyOf(v) : v \in {TRUE} \cup {e.value : e \in {d \in ChangesIn(log) : d.input = "policy"}}}
     ELSE {PolicyOf(TRUE)}
 
+\* What statement B reads: the key's and the caller's objects and, if the key's row says it is a
+\* reference in the statement's snapshot, its source's.
+ReadsNow(x) == ReadsWith(u[x].base, IF StatementSnapshot THEN LinkIn(log) ELSE u[x].snapLink)
+
+\* The rows name an object whose id the call had not read before its locks, so did not lock (the key
+\* was made a reference in between): with LockedAsRead, the call ends there, nothing written, its
+\* locks let go (`moved`), and the vault asks again. It never takes a lock after its first read.
+UseMoved(x) ==
+    /\ u[x].pc = "read"
+    /\ LockedAsRead /\ ~(ReadsNow(x) \subseteq u[x].resolved)
+    /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "done", !.replied = TRUE]]
+    /\ shared' = shared \ {x}
+    /\ plock' = PlockWithout(x)
+    /\ UNCHANGED <<log, nextSeq, holder, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
+
 \* Statement B, its snapshot taken now (or, as a bare CTE, at the call's start): everything the
 \* decision reads, the cap's rule (its count and window from the policy's newest change), the entry's
 \* number, from the sequence unless passed in; or, a repeat on its cover, nothing written. Without
-\* LockToCommit the fence lock goes here, before the commit. Without ReleaseAfterCommit the value
+\* LockToCommit its locks go here, before the commit. Without ReleaseAfterCommit the value
 \* leaves on what was read.
 UseRun(x) ==
     /\ u[x].pc = "read"
     /\ DeadlineChecked => pnow <= u[x].deadline
+    /\ LockedAsRead => ReadsNow(x) \subseteq u[x].resolved
     /\ \E passed \in IF SealCache /\ cache[Slot(x)].on THEN BOOLEAN ELSE {FALSE}, callerPolicy \in CallerPolicies :
        LET k == u[x].key
            sl == Slot(x)
            t == u[x].at
-           seen == IF StatementSnapshot THEN Committed ELSE u[x].snap
+           reads == ReadsNow(x)
+           seen == IF StatementSnapshot THEN SeenIn(log) ELSE u[x].snap
            read == IF StatementSnapshot THEN Rows ELSE u[x].snapRows
            probes == IF StatementSnapshot THEN Newest ELSE u[x].snapNewest
            probedForged == IF StatementSnapshot THEN Forged ELSE u[x].snapForged
@@ -830,9 +918,9 @@ UseRun(x) ==
            admitted == covered \/ r.admitted
            \* A new credential is found only once its issue has committed, in the statement's snapshot (its row).
            found == u[x].fresh = None \/ IF StatementSnapshot THEN IssuedIn(log, u[x].fresh) ELSE u[x].snapIssued
-           base == IF found THEN Code(read, newest, forged) ELSE "refused"
+           base == IF found THEN Code(reads, read, newest, forged) ELSE "refused"
            code == IF base = "allow" /\ ~admitted THEN "bulk" ELSE base
-       IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "ran", !.seen = seen, !.decidedAt = pnow,
+       IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "ran", !.seen = seen, !.reads = reads, !.decidedAt = pnow,
                                      !.covered = IF covered THEN cover[sl].seq ELSE 0, !.coverId = IF covered THEN cover[sl].id ELSE None,
                                      !.allow = (code = "allow"), !.code = code, !.admitted = admitted,
                                      !.write = IF covered THEN NoTime ELSE r.write,
@@ -855,7 +943,7 @@ UseCommit(x) ==
        THEN /\ log' = log \cup {UseEntry(x, SyncCommit)}
             /\ UNCHANGED repeats
        ELSE /\ repeats' = repeats \cup {[id |-> x, cover |-> u[x].covered, coverId |-> u[x].coverId, seen |-> u[x].seen,
-                                          allow |-> u[x].allow, answeredAt |-> answered]}
+                                          reads |-> u[x].reads, allow |-> u[x].allow, answeredAt |-> answered]}
             /\ UNCHANGED log
     /\ bulk' = IF u[x].write = NoTime THEN bulk ELSE [bulk EXCEPT ![u[x].key] = Max(@, u[x].write)]
     /\ shared' = shared \ {x}
@@ -920,7 +1008,7 @@ UseCrash(x) ==
 -----------------------------------------------------------------------------
 (* A change: one input revoked, or restored, by one of the changers. *)
 
-\* The call starts, for one input: the vault reads its row, outside the lock, and works out the
+\* The call starts, for one input: the vault reads its row, outside any lock, and works out the
 \* next state from it; and its newest change's, whose MAC it checks (ChangeChecksMac, T190), and which
 \* a sign-in pins (ChangePinsChecked, T192). With AppPins, a sign-in may take the change the app
 \* handed it instead, whose MAC holds over what the app handed, under whatever number it says. Without
@@ -945,22 +1033,23 @@ ChangeReread(h) ==
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
-\* It gets the lock exclusive: no one holds it at all.
+\* It gets its locks: the fence shared, which the barrier does not hold, and its object's exclusive, which
+\* no use holds and no other change.
 ChangeLock(h) ==
     /\ c[h].pc = "started"
-    /\ ChangeLocks => LockFree
-    /\ holder' = IF ChangeLocks THEN h ELSE holder
+    /\ ChangeSharesFence => holder = None
+    /\ ChangeLocks => Readers(c[h].input) = {} /\ Writers(c[h].input) = {}
     /\ c' = [c EXCEPT ![h].pc = "locked"]
-    /\ UNCHANGED <<log, nextSeq, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+    /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* Its statement: if the row is no longer the one it read (ChangeCAS), or not the one its object's
 \* newest change wrote (ChangeChecksSeal), or that change's MAC did not hold over its seal when the
 \* vault read it (ChangeChecksMac: SQL cannot check a MAC; the CAS holds the row to that read), or,
 \* for a sign-in, that change is no longer the one checked (ChangePinsChecked: a seal column forged
-\* since keeps its number), whole (ChangePinsWhole: else by number and seal), nothing is written, the lock goes and the vault reads
+\* since keeps its number), whole (ChangePinsWhole: else by number and seal), nothing is written, the locks go and the vault reads
 \* again (without ChangeRereads, it tries the same read again). Else the write (the flip of what it
-\* read) and its entry's number. Without LockToCommit the lock goes here; without CommitBeforeAnswer
+\* read) and its entry's number. Without LockToCommit the locks go here; without CommitBeforeAnswer
 \* it answers here.
 \* A sign-in's pin, under the lock: the newest change is not the one checked.
 PinMoved(h) ==
@@ -974,23 +1063,23 @@ ChangeRun(h) ==
           \/ ChangeChecksMac /\ c[h].forged
           \/ ChangePinsChecked /\ h \in PinnedChangers /\ PinMoved(h)
        THEN /\ c' = [c EXCEPT ![h].pc = IF ChangeRereads THEN "refused" ELSE "started"]
-            /\ holder' = IF holder = h THEN None ELSE holder
             /\ UNCHANGED <<nextSeq, answered, issueVars>>
-       ELSE /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "ran", !.value = ~c[h].read, !.seq = IF ChangeNumberUnderLock THEN nextSeq ELSE @]]
+       \* A change of the key may make it a reference, or plain again (with Extra): the link its row then says.
+       ELSE /\ \E l \in IF c[h].input = "secret" /\ Extra /= {} THEN BOOLEAN ELSE {FALSE} :
+                  c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "ran", !.value = ~c[h].read, !.link = l,
+                                                  !.seq = IF ChangeNumberUnderLock THEN nextSeq ELSE @]]
             /\ nextSeq' = IF ChangeNumberUnderLock THEN nextSeq + 1 ELSE nextSeq
-            /\ holder' = IF LockToCommit THEN holder ELSE None
-            /\ answered' = IF CommitBeforeAnswer THEN answered ELSE Committed + 1
-    /\ UNCHANGED <<log, shared, plock, u, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+            /\ answered' = IF CommitBeforeAnswer THEN answered ELSE [answered EXCEPT ![c[h].input] = SeenIn(log)[c[h].input] + 1]
+    /\ UNCHANGED <<log, holder, shared, plock, u, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* The commit: its entry, and the row it wrote, in place of whatever was there.
 ChangeCommit(h) ==
     /\ c[h].pc = "ran"
-    /\ log' = log \cup {ChangeEntry(c[h].seq, c[h].input, c[h].value, <<h, c[h].n + 1>>, SyncCommit)}
-    /\ holder' = IF holder = h THEN None ELSE holder
+    /\ log' = log \cup {ChangeEntry(c[h].seq, c[h].input, c[h].value, c[h].link, <<h, c[h].n + 1>>, SyncCommit)}
     /\ c' = [c EXCEPT ![h].pc = "committed"]
     /\ tamper' = [tamper EXCEPT ![c[h].input] = [on |-> FALSE, value |-> TRUE]]
-    /\ UNCHANGED <<nextSeq, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+    /\ UNCHANGED <<nextSeq, holder, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* Its statement fails instead (a deadline, a lost connection): rolled back, the lock let go; it
@@ -998,14 +1087,13 @@ ChangeCommit(h) ==
 ChangeAbort(h) ==
     /\ c[h].pc = "ran"
     /\ c[h].aborts < MaxAborts
-    /\ holder' = IF holder = h THEN None ELSE holder
     /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "idle", !.aborts = @ + 1]]
-    /\ UNCHANGED <<log, nextSeq, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+    /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 ChangeAnswer(h) ==
     /\ c[h].pc = "committed"
-    /\ answered' = IF answered > Committed THEN answered ELSE Committed
+    /\ answered' = [answered EXCEPT ![c[h].input] = Max(@, SeenIn(log)[c[h].input])]
     /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
@@ -1227,7 +1315,7 @@ Restore ==
           LET kept == {e \in log : e.seq <= k}
           IN /\ log' = kept
              /\ nextSeq' = k + 1
-             /\ answered' = Cardinality(ChangesIn(kept))
+             /\ answered' = SeenIn(kept)
              /\ bulk' = IF Keys = {} THEN bulk ELSE BulkReplay(kept).rows
     /\ tamper' = [i \in Inputs |-> [on |-> FALSE, value |-> TRUE]]
     /\ released' = {}
@@ -1240,7 +1328,7 @@ Restore ==
 -----------------------------------------------------------------------------
 
 UseStep(x) ==
-    \/ UseLock(x) \/ UseRead(x) \/ UseDecide(x) \/ UsePrincipalLock(x) \/ UseLate(x) \/ UseRun(x) \/ UseCommit(x) \/ UseRelease(x)
+    \/ UseLock(x) \/ UseRead(x) \/ UseDecide(x) \/ UsePrincipalLock(x) \/ UseLate(x) \/ UseMoved(x) \/ UseRun(x) \/ UseCommit(x) \/ UseRelease(x)
     \/ WorkerGivesUp(x)
 ChangeStep(h) ==
     ChangeStart(h) \/ ChangeReread(h) \/ ChangeLock(h) \/ ChangeRun(h) \/ ChangeCommit(h) \/ ChangeAnswer(h)
@@ -1269,10 +1357,12 @@ FairSpec ==
 -----------------------------------------------------------------------------
 (* What must hold. *)
 
-\* The number alone orders uses against changes: every use saw exactly the changes numbered
-\* before it. No revision needed.
+\* The number alone orders a use against the changes of what it reads: of each object it read, every
+\* use saw exactly the changes numbered before it. No revision needed. (Of an object it does not
+\* read, a change numbered below it may commit after it: nothing it decided on.)
 TotalOrder ==
-    \A e \in UsesIn(log) : e.seen = Cardinality({d \in ChangesIn(log) : d.seq < e.seq})
+    \A e \in UsesIn(log) : \A i \in e.reads :
+        e.seen[i] = Cardinality({d \in ChangesIn(log) : d.input = i /\ d.seq < e.seq})
 
 \* The outcome is not stored: it is recomputed from the log, and the recomputation is what the
 \* Worker decided. (With no database writer.)
@@ -1288,9 +1378,9 @@ TamperVisible ==
     \A e \in UsesIn(log) : (~e.allow /\ ReplayAllows(e)) => e.code = "stale"
 
 \* "Revoke returned => the next use is refused", in its strongest form: no use allowed on a state
-\* from before a change commits after that change has answered.
+\* from before a change of what it reads commits after that change has answered.
 NothingAllowedAfterAnswer ==
-    \A e \in UsesIn(log) : e.allow => e.answeredAt <= e.seen
+    \A e \in UsesIn(log) : e.allow => \A i \in e.reads : e.answeredAt[i] <= e.seen[i]
 
 \* A value leaves only once its entry is in the log, flushed: its own, or its cover's.
 Logged(seq, x) == \E e \in UsesIn(log) : e.seq = seq /\ e.allow /\ e.durable /\ (x = None \/ e.id = x)
@@ -1305,8 +1395,8 @@ DurableBeforeRelease ==
 RepeatsAreTheirCover ==
     \A r \in repeats : r.allow =>
         /\ Logged(r.cover, r.coverId)
-        /\ r.seen = Cardinality({d \in ChangesIn(log) : d.seq < r.cover})
-        /\ r.answeredAt <= r.seen
+        /\ \A i \in r.reads : /\ r.seen[i] = Cardinality({d \in ChangesIn(log) : d.input = i /\ d.seq < r.cover})
+                               /\ r.answeredAt[i] <= r.seen[i]
 
 \* Each checkpoint signed exactly the entries numbered in its range: none committed there later,
 \* none missed by its `at`.
@@ -1367,7 +1457,7 @@ NoLockWithoutStanding ==
     \A x \in Uses : (u[x].pc = "waiting" \/ plock.ex = x \/ x \in plock.sh) => u[x].standing
 
 \* A use holding the principal's lock shared finds its key still in the set at its statement: a key
-\* only ever moves later, and the window cannot change under the fence. So the statement never needs
+\* only ever moves later, and the window cannot change under the policy's lock. So the statement never needs
 \* the lock exclusive once it holds it shared.
 SharedStaysInSet ==
     \A x \in plock.sh : u[x].pc = "read" => InSet(bulk, u[x].key, u[x].at, WindowIn(log))
@@ -1378,6 +1468,11 @@ SharedStaysInSet ==
 UsesNeverWaitOnIssues ==
     /\ \A i \in Issuers : i \notin shared /\ holder /= i
     /\ holder = "barrier" => ishared = {}
+
+\* Not a protection but what L1 is for, which TLC must find broken (EXPECTED in scripts/formal.sh): a
+\* use reads beside a change in flight, of an object it does not read. Under the fence none did.
+NeverSideBySide ==
+    ~\E x \in Uses, h \in Changers : x \in shared /\ u[x].pc \in {"read", "ran"} /\ ChangeLocks /\ ChangerIn(h)
 
 (* Liveness. *)
 

@@ -748,11 +748,22 @@ use a key both answer a request of several keys.
 
 | Protection, in the code | Turned off, TLC finds |
 |---|---|
-| The second call takes the principal's lock exclusive, after the fence and before its first key (`use_batch`, `p_lock`; `useMany`) | two batches of one principal's, each moving a key on under the lock shared, then each waiting for it exclusive to enter another (`NoWaitCycle`, `Batching`): Postgres ends one after `deadlock_timeout`, a second, and it answers `late` |
+| The second call takes the principal's lock exclusive, after its other locks and before its first key's use (`use_batch`, `p_lock`; `useMany`) | two batches of one principal's, each moving a key on under the lock shared, then each waiting for it exclusive to enter another (`NoWaitCycle`, `Batching`): Postgres ends one after `deadlock_timeout`, a second, and it answers `late` |
 | Each key's use counts the cap's set as its own statements read it, the batch's earlier keys included (`use_credential` called a key at a time inside `use_batch`, each statement its own snapshot) | a batch of two entering beside a set of one, at a cap of two, each counted against the set as the batch began: three in the set (`CapHolds`, `Batching`) |
 | The first call takes no principal's lock: a key that would take it answers `decide` (`p_decided`, T158) | a caller revoked, or a batch with a key the rules refuse, waits for the lock (`NoLockForRefused`, `Batching`, `BatchingRefused`) and enters keys in the set (`RefusedEntersNothing`, `BatchingRefused`) |
 | The second call is made only once the vault allowed every key of the batch on the first call's rows (`useMany`, AllDecidedFirst) | the same, for a batch whose one key the rules refuse (`NoLockForRefused`, `RefusedEntersNothing`, `BatchingRefused`) |
 | Values leave only when every key of the batch is allowed (`useMany`; the app's `useValues`) | a batch hands back its allowed key beside one refused (`AllOrNothing`, `BatchingRefused`) |
+
+Since L1 (T282) a statement's locks are the fence and the lock of every
+object its keys' uses read, the caller's among them, all shared, where it
+took the fence alone. It takes them together before its first key, sorted
+by lock key whatever the request's order, and the principal's lock after
+them: a batch that took each key's as its turn came, or the principal's
+lock first as `use_batch` did, closes a wait cycle with a change of two of
+its objects (WriteLocks.tla's `ObjectLocks`, below). It holds them to its
+commit, so a batch of n keys holds its caller's objects' locks and n keys'
+at once. The model's statements take them in one step (`held`): what it
+checks needs only that a change of the caller comes between statements.
 
 The tests hold the code to it: `packages/vault/test/use-many.test.ts`, on
 both engines, each case put back without its protection to check it
@@ -1553,11 +1564,13 @@ W208's one call per use, with W211's round 2 and review r1, in one module
 (the plan's PRs 3 to 5).
 
 **The protocol.**
-- **A use** takes the fence shared, then, in one statement, reads its inputs
-  and each input's newest change, and inserts its entry, numbered under the
-  lock.
-- **A change** takes the fence exclusive. It writes only if its object's row
-  is still what it read (a CAS); refused, it reads again.
+- **A use** reads the ids of the objects it will read, takes the fence
+  shared and each of those objects' locks shared (L1, T282; until then the
+  fence alone), then, in one statement, reads its inputs and each input's
+  newest change, and inserts its entry, numbered under its locks.
+- **A change** takes the fence shared and the lock of the object it writes,
+  exclusive (until L1, the fence exclusive). It writes only if its object's
+  row is still what it read (a CAS); refused, it reads again.
 - **The model also covers:**
   - per-isolate covers and the seal cache;
   - Postgres crashes and restores;
@@ -1582,9 +1595,12 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 
 | protection | turned off, TLC finds |
 |---|---|
-| uses take the fence shared; their reads are a statement after the lock (never a bare CTE) | `TotalOrder`, `ReplayAgrees`, `NothingAllowedAfterAnswer` |
-| numbers taken under the lock; the lock goes with the commit | `TotalOrder`, `CheckpointsHold`, `NothingAllowedAfterAnswer` |
-| changes take the fence exclusive and answer once committed | `TotalOrder`, `NothingAllowedAfterAnswer` |
+| uses take their locks shared, the fence and each object's they read; their reads are a statement after the locks (never a bare CTE, nor a row's lock, which a statement takes after its snapshot) | `TotalOrder`, `ReplayAgrees`, `NothingAllowedAfterAnswer` |
+| ... of every object: one read unlocked (`Unlocked={"member"}`, the member, whom the call does not name) is one a change writes under the use (`HotPathOneObjects`) | `TotalOrder` |
+| ... and a use whose rows name an object it did not lock, its key made a reference since the call read the ids, writes nothing (LockedAsRead; `HotPathOneLinks`) | `TotalOrder`: it reads the source beside a change of it |
+| numbers taken under the locks; the locks go with the commit | `TotalOrder`, `CheckpointsHold`, `NothingAllowedAfterAnswer` |
+| changes take their object's lock exclusive and answer once committed | `TotalOrder`, `NothingAllowedAfterAnswer` |
+| ... and the fence, shared (ChangeSharesFence): without it the barrier closes a change's number before the change commits | `CheckpointsHold` |
 | a value leaves only after its entry commits, durably | `DurableBeforeRelease`, `NothingAllowedAfterAnswer` |
 | the barrier under the fence exclusive; the floor of `at` | `CheckpointsHold` |
 | the barrier checks the floor is the one it last wrote (BarrierChecksFloor), against a writer who lowers it. The model shows the barrier signing nothing past a lowered floor; the alarm PR 6 raises is not modelled | `CheckpointsHold` |
@@ -1615,6 +1631,25 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 | the barrier waits for the issues in flight on the issue lock, exclusive (BarrierWaitsIssues); an issue's number taken under that lock (IssueNumberUnderLock) | `CheckpointsHold`: a checkpoint closed over an issue that commits after it |
 | a credential named by a use only once its issue has committed (NamedAfterIssue: its token is handed out after) | `ReplayAgrees`: a use numbered after the issue that did not see it, refused live and allowed by the replay |
 | a use asks for the principal's lock only on its caller's standing decided (DecideBeforeLock, T158): its second call, once the Worker decided the first's rows; the first call locks and writes nothing, and no standing is kept for a later use (D153). The ghost `standing` is the log's truth about the caller when the use asked; a revoke after that may still find it waiting, who stood when it asked (formal/Probing.tla says what a lock taken first would tell) | `NoLockWithoutStanding` (HotPathOneStaleBulk) |
+
+**Object locks (L1, T282; `HotPathOneObjects`, `HotPathOneObjectsCovers`,
+`HotPathOneLinks`).** A use reads one of `ReadSets`, its key's and its
+caller's objects, and holds the fence and those objects' locks; a change
+holds the fence shared and its one object's lock. `TotalOrder` is per
+object: of each object a use read, it saw exactly the changes numbered
+before it. Of an object it does not read, a change numbered below it may
+commit after it, which decides nothing for it. The replay reads, for each
+use, the objects the log says its key had at its number. With every use
+reading every object, as in the scenarios before L1, the locks are the
+fence again, and each of those scenarios with one changer reaches the
+same states as before. The changers take no change lock here: two run
+side by side on two objects, and nothing in the module relies on their
+order (the change lock orders changes against each other; Coffre.tla).
+The model grants a transaction's locks in one step; the order they are
+asked in, and who waits on whom meanwhile, is WriteLocks.tla's
+(`ObjectLocks`). `EXPECTED`, not a gap but what L1 is for: a use reads
+beside a change in flight, of an object it does not read
+(`NeverSideBySide` breaks, as it could not under the fence).
 
 **A late barrier (T169; `HotPathOneStall`, `HotPathOneStallLive`).** A
 barrier a checkpointer given up on had sent may run as late as it likes,
@@ -2601,7 +2636,7 @@ it.
 | the commit holds the read (ReadHeld) | `WritesStandAtCommit` (Revoke, Names), `AddsStandAtCommit` (Protect) |
 | ... every part of it (`Unheld={...}`, each of 21 parts left out in turn: a read function that missed it) | the adversary that moves it: `WritesStandAtCommit` after a revoke, an end, a role redefined, a policy change, an archive of the environment or its parent, a write of the replaced key or a new level on the inherited one, a rename, the parent gaining the key, the personal config deleted; `KeyChangesFlip` without the key; `AddsStandAtCommit` after a demotion, a policy change, a role redefined, the setting closed, the place archived, an environment protected, a protected fork made, the grant's or the scope's slug moved; `AddsFlip` without svc's row |
 | the decision weighs the read and nothing else (DecideOnRead) | `WritesStandAtCommit`: the roles taken from the isolate's cache; the read and its hold agree, and the role redefined before both is missed |
-| the write's hold runs once its statement holds the fence (HoldAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not the change lock, between the hold and the write |
+| the write's hold runs once its statement holds the fence (HoldAfterFence; since L1, the locks of what it read, shared, and of what it writes) | `WritesStandAtCommit`: a session's revoke, which takes the fence (since L1, its credential's lock) and not the change lock, between the hold and the write |
 | the read's numbers from the log's newest change, not the row's seal column (ReadOnLog) | `WritesStandAtCommit`: a database writer puts the revoked session's row back, and the hold passes |
 | the hold compares numbers, not values alone (ReadByNumber) | `CommitsReplay`: the grant taken and given back; the write commits on equal values, and the log replayed at its commit finds the member changed since the read |
 | the app checks the caller's `auth_mac` on the rows as read (AuthChecked) | `CommitsAuthentic` (Tamper, Add): a token hash copied onto an Owner's credential; the vault resolves the token to the Owner, read and hold agree, and the write or the add commits as the Owner (round 6) |
@@ -2661,6 +2696,11 @@ lock, so its moves (`Tamper`, `Substitute`) can still come between the
 hold and the COMMIT: that is how round 7 found a token hash copied onto an
 Owner's credential after the hold, and why the change names the caller the
 app checked, by id, and never resolves the token again (`ActorFromRead`).
+Since L1 (T282) the hold shares the fence, and takes instead the lock of
+each object the vault decided on, shared, and of each it writes, exclusive:
+`held` stands for those, so the session's revoke still waits for the COMMIT
+whatever else it takes. A refusal's record, which changes no object, no
+longer waits for a hold (`Refuse`).
 Its rows come after the fence, as `app_change`
 already updates a key's row after it; every statement that locks a key's
 row holds the change lock first, and so does the write: without it, it would
@@ -2687,34 +2727,40 @@ number.
 
 ### WriteLocks.tla
 
-The order a change takes its locks in, with what the other models leave out:
-Postgres's lock queue. A request waits for every holder of its lock in a
-conflicting mode, and also for every request queued ahead of it that
-conflicts: a shared request queues behind a waiting exclusive one. Postgres
-breaks such a cycle only after `deadlock_timeout` (1 s), by reordering the
-queue or failing one, the fence held exclusive meanwhile and every use
-waiting on it.
+The order a transaction takes its locks in, with what the other models
+leave out: Postgres's lock queue. A request waits for every holder of its
+lock in a conflicting mode, and also for every request queued ahead of it
+that conflicts: a shared request queues behind a waiting exclusive one.
+Postgres breaks such a cycle only after `deadlock_timeout` (1 s), by
+reordering the queue or failing one, the locks in it held meanwhile and the
+uses behind them waiting.
 
 **The model.** Transactions, each its locks in order, a lock and its mode.
 Each asks for its next lock at the end of that lock's queue, is granted it
 once no holder and no request ahead of it conflicts, and commits with them
-all. `NoWaitCycle`: nobody waits, through others, for itself. Three flows,
-each a set of transactions that take the same locks.
+all. `NoWaitCycle`: nobody waits, through others, for itself. Four flows,
+each a set of transactions that take the same locks. Since L1 (T282;
+"0.16: object locks" below) a change's last statement takes the fence
+shared, then the lock of each object it writes, exclusive (`@key`,
+`@member`, ...), and a use the fence shared, then the lock of each object
+it reads, shared; the barrier alone takes the fence exclusive.
 
 **The order** (`ChangeLocks.cfg`, `Flow = "change"`; T272): the rows a flow
-shares with an issue, the change lock, the issue lock, the fence. The vault's
+shares with an issue, the change lock, the issue lock, the fence, its
+objects' locks. The vault's
 change of a member (`#decideOnce`, `change_input`: the member's row, the
-change lock, the issue lock shared, the fence; see below for where its issue
-lock comes from), the app's change (`audited`,
+change lock, the issue lock shared, the fence, the member's lock; see below
+for where its issue lock comes from), the app's change (`audited`,
 `app_change`: the change lock, a credential's row, the issue lock shared,
-the fence), the two changes that take the issue lock exclusive, since an
-issue compares what they move (`holdIssues`: the vault's change of the
-policy, after its actor's row and the change lock; the app's change of a
-protected environment's slug, after the change lock; each then the fence), a
-token issued to that member (`issue_token`: the member's row shared, the
-credential's, the issue lock shared), the checkpointer's barrier (the issue
-lock exclusive, then the fence; never the change lock) and a use (the fence
-shared). 133,936 states.
+the fence, the credential's lock), the two changes that take the issue lock
+exclusive, since an issue compares what they move (`holdIssues`: the vault's
+change of the policy, after its actor's row and the change lock; the app's
+change of a protected environment's slug, after the change lock; each then
+the fence and its object's lock), a token issued to that member
+(`issue_token`: the member's row shared, the credential's, the issue lock
+shared), the checkpointer's barrier (the issue lock exclusive, then the
+fence; never the change lock) and a use (the fence, then the four objects'
+locks). 426,906 states.
 
 | protection | turned off, TLC finds |
 |---|---|
@@ -2731,26 +2777,29 @@ order built is not the one checked here.
 
 **A key write's** (PR 3, `WriteLocks.cfg`, `Flow = "write"`; one Sync since
 0.16.0): the change lock; its credential's row, the last-use UPDATE;
-`hold_inputs`' issue lock shared, then the fence exclusive; then the key's
+`hold_inputs`' issue lock shared, the fence shared, the lock of the
+credential it read, shared, and the key's, exclusive; then the key's
 row, whose current version it updates. Against another change of that key
 down today's path (`setSecrets`, `patchSecret`: the change lock, the key's
-row `FOR UPDATE`, then `app_change`'s issue lock and fence), an issue on that
-credential (`issue_token`: the credential's row shared, then the issue lock
-shared), the barrier, a revoke of the credential (`revoke_credential`: the
-change lock, the row, the fence) and a use. 24,828 states.
+row `FOR UPDATE`, then `app_change`'s issue lock, fence and key's lock), an
+issue on that credential (`issue_token`: the credential's row shared, then
+the issue lock shared), the barrier, a revoke of the credential
+(`revoke_credential`: the change lock, the row, the fence, the credential's
+lock) and a use (the fence, the credential's lock, the key's). 55,356 states.
 
 | protection | turned off, TLC finds |
 |---|---|
-| the write updates its credential's row before the hold, as the issue and the revoke take it: row, issue lock, fence (TouchFirst) | `NoWaitCycle`: the write holds the issue lock and the fence and waits for the row, which the issue holds shared, queued for the issue lock behind the barrier, which waits for the write's issue lock (review r1 of #469) |
-| the write takes the change lock first, as it took 0.14's head (WriteTakesChangeLock) | `NoWaitCycle`: the write holds the issue lock and the fence and waits for the key's row; another change of that key holds the row, under the change lock, and is queued for the issue lock behind the barrier, which waits for the write's (with no barrier about, that change waits for the write's fence instead). So the two-trip write keeps the lock: its hold orders it against what a change commits, not against the rows a change locks before its last statement |
+| the write updates its credential's row before the hold, as the issue and the revoke take it: row, issue lock, fence (TouchFirst) | `NoWaitCycle`: the write holds the issue lock and waits for the row, which the issue holds shared, queued for the issue lock behind the barrier, which waits for the write's issue lock (review r1 of #469) |
+| the write takes the change lock first, as it took 0.14's head (WriteTakesChangeLock) | `NoWaitCycle`, with object locks as with the fence exclusive: the write holds the issue lock, the fence and the key's lock and waits for the key's row; another change of that key holds the row, under the change lock, and is queued for the issue lock behind the barrier, which waits for the write's (with no barrier about, that change waits for the key's lock instead, which the write holds). So the two-trip write keeps the lock: its hold orders it against what a change commits, not against the rows a change locks before its last statement |
 
 **A member add's** (PR 5, `AddLocks.cfg`, `Flow = "add"`): it locks the
 members' rows (`lockMembers`) and the change lock, then `admit_hold` takes the
-issue lock shared and then the fence, and holds the read. Against a change of
+issue lock shared, the fence shared, the lock of the credential it read,
+shared, and the member's, and holds the read. Against a change of
 the adder's member (`#decide`, `change_input`: the row, the change lock, the
-issue lock, the fence), a token issued to the adder (`issue_token`: the
-members' rows shared, the credential's, the issue lock), the barrier, a
-revoke and a use. 28,408 states.
+issue lock, the fence, the member's lock), a token issued to the adder
+(`issue_token`: the members' rows shared, the credential's, the issue lock),
+the barrier, a revoke and a use. 64,816 states.
 
 | protection | turned off, TLC finds |
 |---|---|
@@ -2759,6 +2808,23 @@ revoke and a use. 28,408 states.
 The add takes the change lock as every change does: one rule, no exemption.
 No wait cycle needs it there, the rows it locks first being every lock it
 shares with a change before the fence.
+
+**Object locks** (L1, `ObjectLocks.cfg`, `Flow = "objects"`): two objects,
+a before b in key order. A use that reads both and moves its key on in the
+cap's set (the fence, a's lock, b's, then its principal's lock shared); a
+use of b alone; a batch whose round 2 enters a key (the fence, a's, b's,
+then the principal's lock exclusive), its request naming b first; a change
+of both in one statement (a project's delete, `app_change` once per row:
+the change lock, the issue lock, the fence, a's, b's, exclusive), its calls
+b first; a revoke of b, which takes no issue lock (the change lock, the
+fence, b's); the barrier. 153,675 states.
+
+| protection | turned off, TLC finds |
+|---|---|
+| a change takes the fence before its objects' locks, as a use does (FenceBeforeObjects) | `NoWaitCycle`: the revoke holds b's lock and waits for the fence, shared, behind the barrier, which waits for a use that holds the fence and waits for b's. A change that takes the issue lock is ordered against the barrier there and closes no cycle either way |
+| a use takes its objects' locks in key order, all before its first read: a batch every key's, sorted (UsesInKeyOrder) | `NoWaitCycle`: the batch, each key's lock as its turn comes in the request, holds b's and waits for a's, which the change holds while it waits for b's |
+| a change takes them in key order too, all before its first write (ChangesInKeyOrder) | `NoWaitCycle`: the change, each call's lock as it comes, holds b's and waits for a's, which a use holds while it waits for b's |
+| a batch takes its principal's lock after its objects' locks, as a single use does (PrincipalLast) | `NoWaitCycle`: the batch holds the principal's lock and waits for a's behind the change, which is queued for a's behind the use, which holds a's and waits for the principal's lock. `use_batch` took the principal's lock before its first key until L1 |
 
 ### Findings.tla
 
@@ -3273,6 +3339,78 @@ Coffre.tla and the unwrap in Credentials.tla (`Uses015` off) are 0.14's too:
 their steps take the lock as they took the head, and leave with that path.
 Migration015.tla, and what HotPathOne.tla says of 0.14's head, go with the
 cutover.
+
+## 0.16: object locks
+
+Until L1 (T282, D201) one lock ordered every use against every change: the
+fence, which a use took shared and a change's last statement exclusive. A
+write to one key made every use wait for that statement, whatever it read.
+L1 gives each object a decision reads (a credential, a member, a key, an
+environment, the roles, the policy) a lock of its own, an advisory lock
+keyed by the object, and leaves the fence to the checkpointer. The change
+lock stays as it is: it orders changes against each other, and object
+locks order a use against a change.
+
+**Who takes what.**
+
+| Statement | The fence | Object locks |
+|---|---|---|
+| a use (`use_credential`, `use_route`, each statement of `use_batch`), and the vault's read for a key write or an add (`write_request`), which reads and numbers as a use does | shared | shared: every object it reads to decide |
+| a change's last statement (`change_input`, `app_change`, `change_bindings`, `revoke_credential`) | shared | exclusive: every object it writes |
+| a two-trip change's hold (`hold_inputs`, `admit_hold`) | shared | shared: every object the vault decided on; exclusive: those it writes |
+| an entry that changes no object (`log_refusal`, `note`) | shared | none |
+| the checkpointer's barrier (`close_one`) | exclusive, after the issue lock | none |
+| an issue, a sign-in | none: the issue lock | none: nobody names its credential before it commits |
+
+**One order.** The rows a flow shares with an issue, the change lock, the
+issue lock, the fence, the objects' locks in key order, then a use's
+principal's lock. A transaction takes its objects' locks once, all of them,
+sorted by lock key, before the first read or write they protect: a batch
+every key's, a statement of several changes every call's. `ObjectLocks`
+checks it with Postgres's queue, one run per lock taken out of turn
+(WriteLocks.tla, above).
+
+**The barrier.** It alone takes the fence exclusive, so it waits for every
+use and every change's last statement in flight, and every number handed
+out so far is committed when it closes (`CheckpointsHold`, HotPathOne's
+`ChangeSharesFence`). It can no longer make a use wait for a change, but
+for one case: while it waits for a change's last statement, the uses that
+arrive queue behind it, for that statement at most, as before L1.
+
+**A use learns what to lock by reading.** The call names its credential,
+its key and its place. The member is on the credential's row, the key's
+environment on the key's, a reference's source on the reference's. So the
+function first reads those ids, with no lock, then takes the locks, then
+runs its statement, which reads afresh. A credential keeps its member and a
+key its environment for life; what can move between the two reads is the
+key becoming a reference, a change of the key. The statement compares: rows
+that name an object the call did not lock write nothing and answer `moved`,
+and the vault calls again (HotPathOne's `LockedAsRead`, `HotPathOneLinks`).
+A use never takes a lock after its first read under them: that is what
+keeps the order one.
+
+**Advisory locks, not row locks.** `FOR SHARE` cannot carry it. A statement
+takes its snapshot before it waits for a row's lock, so a use that waited
+for a change would then decide on the other rows, and on the log's seals,
+as they were before the change committed: HotPathOne's `StatementSnapshot`,
+the bare CTE again. An advisory lock is taken by a statement of its own,
+and the reads come after it. Row share locks also write: each sets the
+row's `xmax`, and two holders make a multixact, on the rows every use reads
+(the roles, the policy, a member), which is what `FOR SHARE` cost in
+0.14.3. They conflict with every update of the row, a credential's last
+use too, where an object's lock conflicts only with a change of what its
+seal covers. And a lock keyed by the object needs no row.
+
+**What the other models' fence is.** Lifecycle.tla, WaysIn.tla,
+Unbinding.tla, Routing.tla and Roles.tla each model the fence as one lock
+between their uses and their changes, and every use there reads what those
+changes write (a credential and its member, a binding, a route's
+definition, the roles). So the fence, shared and exclusive, excludes the
+same pairs there as those objects' locks do, and their steps stand as
+written; they are renamed with L1's code. Writing.tla's `held` is the
+hold's locks (its section, above). In Seal.tla and Rotation.tla the fence
+is the appends' side of the barrier, which L1 does not change.
+Migration015.tla goes with the cutover.
 
 ## TLC
 

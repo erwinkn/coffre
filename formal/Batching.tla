@@ -8,27 +8,40 @@
 (* them share one transaction, one principal's lock and one cap.           *)
 (*                                                                         *)
 (* A batch is two rounds, as a single use by ids is (T158, D153):          *)
-(*   round 1, one statement under the fence (shared): each key whose row   *)
-(*   of the cap's is fresh is used at once, its entry written; any other   *)
-(*   key, which would take the principal's lock (to enter the cap's set,  *)
-(*   or move its row on), answers `decide`, locking and writing nothing;   *)
-(*   the vault decides every key on the rows round 1 read;                 *)
+(*   round 1, one statement under its locks: each key whose row of the     *)
+(*   cap's is fresh is used at once, its entry written; any other key,     *)
+(*   which would take the principal's lock (to enter the cap's set, or     *)
+(*   move its row on), answers `decide`, taking no such lock and writing   *)
+(*   nothing; the vault decides every key on the rows round 1 read;        *)
 (*   round 2, only for the keys that answered `decide`, and only once the  *)
-(*   vault allowed every key of the batch: one statement under the fence, *)
+(*   vault allowed every key of the batch: one statement under its locks,  *)
 (*   the principal's lock, then each key's use, decided again on what it   *)
 (*   reads then, entering the set or moving its row on.                    *)
 (* Values leave once the vault has every key's outcome, and only if every  *)
 (* one is allowed: all or nothing, as 0.14's unwrap and 0.15's uses one a  *)
 (* key both answer a request of several keys.                              *)
 (*                                                                         *)
+(* A statement's locks (L1, T282; until then the fence alone, shared,      *)
+(* which every change took exclusive): the fence, then the lock of every   *)
+(* object its keys' uses read, the caller's among them, shared, taken      *)
+(* together before its first key, in key order, whatever the request's;    *)
+(* then, in round 2, the principal's lock. A statement holds them to its   *)
+(* commit, so a batch of n keys holds its caller's objects' locks and n    *)
+(* keys' at once, where a use holds one key's. The order is                *)
+(* WriteLocks.tla's to check (ObjectLocks: UsesInKeyOrder, PrincipalLast), *)
+(* with Postgres's queue; here a statement takes them in one step          *)
+(* (`held`), and what matters is that a change of the caller comes between *)
+(* statements, never inside one.                                           *)
+(*                                                                         *)
 (* One principal, whose standing a change revokes or restores (under the   *)
-(* fence, exclusive), and whose cap holds at most BulkCount keys. `Refused` *)
-(* are keys the rules refuse whatever the standing (a reference ended, a   *)
-(* fork's parent unread). A key's row of the cap's is none, old (in the   *)
-(* set, from an earlier period: a use moves it on, under the lock shared)  *)
-(* or fresh (in the set this period: no lock); time ages rows. Row writes *)
-(* are visible at once: only a holder of the lock exclusive enters a key,  *)
-(* and a move keeps a key in the set.                                      *)
+(* caller's lock, exclusive, which each of its statements holds shared),   *)
+(* and whose cap holds at most BulkCount keys. `Refused` are keys the      *)
+(* rules refuse whatever the standing (a reference ended, a fork's parent  *)
+(* unread). A key's row of the cap's is none, old (in the set, from an     *)
+(* earlier period: a use moves it on, under the lock shared) or fresh (in  *)
+(* the set this period: no lock); time ages rows. Row writes are visible   *)
+(* at once: only a holder of the lock exclusive enters a key, and a move   *)
+(* keeps a key in the set.                                                 *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -45,7 +58,8 @@ CONSTANTS
     DecideBeforeLock,
     \* Round 2 runs only once the vault allowed every key of the batch on round 1's rows (`useMany`).
     AllDecidedFirst,
-    \* Round 2 takes the principal's lock exclusive before its first key (`use_batch`, `p_lock`), never shared then exclusive.
+    \* Round 2 takes the principal's lock exclusive before its first key's use (`use_batch`, `p_lock`), never shared then
+    \* exclusive; after its objects' locks, as a single use takes it (WriteLocks.tla, PrincipalLast).
     StrongestFirst,
     \* Each key's use counts the set as its own statement reads it, the batch's earlier keys included (one statement a
     \* key, each its own snapshot, inside the transaction), not as the batch's first statement read it.
@@ -61,7 +75,7 @@ VARIABLES
     standing,       \* whether the caller stands, as the sealed rows say
     row,            \* row[k]: the principal's row of the cap's for k
     changes, ticks,
-    fenceS, fenceX, \* the fence: its shared holders (uses), its exclusive one (a change)
+    held,           \* the batches whose statement holds its locks: the fence and its objects', the caller's among them
     lockS, lockX,   \* the principal's lock
     pc, i,          \* each batch's phase, and its next key
     seen,           \* seen[b][k]: what round 1 did of k: "used", "decide", or "none" yet
@@ -72,7 +86,7 @@ VARIABLES
     released,       \* released[b]: the keys whose values left
     waiting         \* waiting[b]: the principal's lock mode b waits for, or None
 
-vars == <<standing, row, changes, ticks, fenceS, fenceX, lockS, lockX, pc, i, seen, stood, start, outcome, entered, released, waiting>>
+vars == <<standing, row, changes, ticks, held, lockS, lockX, pc, i, seen, stood, start, outcome, entered, released, waiting>>
 
 InSet == {k \in Keys : row[k] # "none"}
 
@@ -82,8 +96,7 @@ Init ==
     /\ Cardinality(InSet) <= BulkCount
     /\ changes = 0
     /\ ticks = 0
-    /\ fenceS = {}
-    /\ fenceX = None
+    /\ held = {}
     /\ lockS = {}
     /\ lockX = None
     /\ pc = [b \in Batches |-> "r1"]
@@ -123,18 +136,15 @@ LockedUse(b, k) ==
                          /\ outcome' = [outcome EXCEPT ![b][k] = Rule(k)]
                /\ i' = [i EXCEPT ![b] = @ + 1]
 
-\* A statement's start: the fence shared, unless a change holds it.
-Fenced(b) == b \in fenceS \/ fenceX = None
-
-\* Round 1, one key: a fresh row is used at once; any other answers `decide` (or, without DecideBeforeLock, is used
+\* Round 1, one key, the statement's locks taken with its first (no change holds one across a step here): a fresh row
+\* is used at once; any other answers `decide` (or, without DecideBeforeLock, is used
 \* under the lock there and then).
 Round1(b) ==
     /\ pc[b] = "r1"
     /\ i[b] <= Len(Order[b])
-    /\ Fenced(b)
     /\ LET k == Order[b][i[b]] IN
          /\ stood' = [stood EXCEPT ![b] = standing]
-         /\ fenceS' = fenceS \cup {b}
+         /\ held' = held \cup {b}
          /\ IF row[k] = "fresh"
               THEN /\ seen' = [seen EXCEPT ![b][k] = "used"]
                    /\ outcome' = [outcome EXCEPT ![b][k] = Rule(k)]
@@ -146,11 +156,11 @@ Round1(b) ==
                      /\ UNCHANGED <<row, lockS, lockX, outcome, entered, waiting>>
                 ELSE /\ seen' = [seen EXCEPT ![b][k] = "used"]
                      /\ LockedUse(b, k)
-    /\ UNCHANGED <<standing, changes, ticks, fenceX, pc, start, released>>
+    /\ UNCHANGED <<standing, changes, ticks, pc, start, released>>
 
 \* A statement's commit: its locks go.
 Commit(b, next) ==
-    /\ fenceS' = fenceS \ {b}
+    /\ held' = held \ {b}
     /\ lockS' = lockS \ {b}
     /\ lockX' = IF lockX = b THEN None ELSE lockX
     /\ pc' = [pc EXCEPT ![b] = next]
@@ -160,7 +170,7 @@ Round1Commit(b) ==
     /\ pc[b] = "r1"
     /\ i[b] > Len(Order[b])
     /\ Commit(b, "decide")
-    /\ UNCHANGED <<standing, row, changes, ticks, fenceX, seen, stood, start, outcome, entered, released, waiting>>
+    /\ UNCHANGED <<standing, row, changes, ticks, seen, stood, start, outcome, entered, released, waiting>>
 
 \* Whether round 1's rows allowed every key of b: those it used, and those it left to decide.
 AllowedAtFirst(b) == \A k \in KeysOf(b) : IF seen[b][k] = "decide" THEN stood[b] /\ k \notin Refused ELSE outcome[b][k] = "allowed"
@@ -174,16 +184,15 @@ Decide(b) ==
                 /\ pc' = [pc EXCEPT ![b] = "answer"]
            ELSE /\ pc' = [pc EXCEPT ![b] = IF pending = {} THEN "answer" ELSE "r2"]
                 /\ UNCHANGED outcome
-    /\ UNCHANGED <<standing, row, changes, ticks, fenceS, fenceX, lockS, lockX, i, seen, stood, start, entered, released, waiting>>
+    /\ UNCHANGED <<standing, row, changes, ticks, held, lockS, lockX, i, seen, stood, start, entered, released, waiting>>
 
-\* Round 2's statement starts: the fence shared, and the set as it reads it then.
+\* Round 2's statement starts: its locks, and the set as it reads it then.
 Round2(b) ==
     /\ pc[b] = "r2"
-    /\ fenceX = None
-    /\ fenceS' = fenceS \cup {b}
+    /\ held' = held \cup {b}
     /\ start' = [start EXCEPT ![b] = InSet]
     /\ pc' = [pc EXCEPT ![b] = IF StrongestFirst THEN "r2x" ELSE "r2k"]
-    /\ UNCHANGED <<standing, row, changes, ticks, fenceX, lockS, lockX, i, seen, stood, outcome, entered, released, waiting>>
+    /\ UNCHANGED <<standing, row, changes, ticks, lockS, lockX, i, seen, stood, outcome, entered, released, waiting>>
 
 \* StrongestFirst: the principal's lock exclusive, waited for, before any key.
 Round2Lock(b) ==
@@ -195,7 +204,7 @@ Round2Lock(b) ==
          ELSE /\ waiting[b] = None
               /\ waiting' = [waiting EXCEPT ![b] = "X"]
               /\ UNCHANGED <<lockX, pc>>
-    /\ UNCHANGED <<standing, row, changes, ticks, fenceS, fenceX, lockS, i, seen, stood, start, outcome, entered, released>>
+    /\ UNCHANGED <<standing, row, changes, ticks, held, lockS, i, seen, stood, start, outcome, entered, released>>
 
 \* Round 2, one key: one the vault left to decide is used under the lock, decided on what it reads now.
 Round2Key(b) ==
@@ -206,13 +215,13 @@ Round2Key(b) ==
            THEN /\ i' = [i EXCEPT ![b] = @ + 1]
                 /\ UNCHANGED <<row, lockS, lockX, outcome, entered, waiting>>
            ELSE LockedUse(b, k)
-    /\ UNCHANGED <<standing, changes, ticks, fenceS, fenceX, pc, seen, stood, start, released>>
+    /\ UNCHANGED <<standing, changes, ticks, held, pc, seen, stood, start, released>>
 
 Round2Commit(b) ==
     /\ pc[b] = "r2k"
     /\ i[b] > Len(Order[b])
     /\ Commit(b, "answer")
-    /\ UNCHANGED <<standing, row, changes, ticks, fenceX, seen, stood, start, outcome, entered, released, waiting>>
+    /\ UNCHANGED <<standing, row, changes, ticks, seen, stood, start, outcome, entered, released, waiting>>
 
 \* The answer: every value, when every key was allowed; or, without AnswerWhole, each allowed one.
 Answer(b) ==
@@ -220,23 +229,23 @@ Answer(b) ==
     /\ LET allowed == {k \in KeysOf(b) : outcome[b][k] = "allowed"} IN
          released' = [released EXCEPT ![b] = IF ~AnswerWhole \/ allowed = KeysOf(b) THEN allowed ELSE {}]
     /\ pc' = [pc EXCEPT ![b] = "done"]
-    /\ UNCHANGED <<standing, row, changes, ticks, fenceS, fenceX, lockS, lockX, i, seen, stood, start, outcome, entered, waiting>>
+    /\ UNCHANGED <<standing, row, changes, ticks, held, lockS, lockX, i, seen, stood, start, outcome, entered, waiting>>
 
-\* A change of the caller's standing: the fence exclusive, its write and commit, between statements.
+\* A change of the caller's standing: the caller's lock exclusive, which no statement in flight then holds, its write
+\* and commit, between statements.
 Change ==
     /\ changes < MaxChanges
-    /\ fenceS = {}
-    /\ fenceX = None
+    /\ held = {}
     /\ standing' = ~standing
     /\ changes' = changes + 1
-    /\ UNCHANGED <<row, ticks, fenceS, fenceX, lockS, lockX, pc, i, seen, stood, start, outcome, entered, released, waiting>>
+    /\ UNCHANGED <<row, ticks, held, lockS, lockX, pc, i, seen, stood, start, outcome, entered, released, waiting>>
 
 \* Time: a row ages, fresh to old (a use now moves it on), old to none (out of the set).
 Tick ==
     /\ ticks < MaxTicks
     /\ \E k \in InSet : row' = [row EXCEPT ![k] = IF @ = "fresh" THEN "old" ELSE "none"]
     /\ ticks' = ticks + 1
-    /\ UNCHANGED <<standing, changes, fenceS, fenceX, lockS, lockX, pc, i, seen, stood, start, outcome, entered, released, waiting>>
+    /\ UNCHANGED <<standing, changes, held, lockS, lockX, pc, i, seen, stood, start, outcome, entered, released, waiting>>
 
 Done == (\A b \in Batches : pc[b] = "done") /\ UNCHANGED vars
 
@@ -254,7 +263,7 @@ TypeOK ==
     /\ pc \in [Batches -> Phases]
     /\ lockS \subseteq Batches
     /\ lockX \in Batches \cup {None}
-    /\ fenceS \subseteq Batches
+    /\ held \subseteq Batches
     /\ waiting \in [Batches -> {None, "X", "S"}]
     /\ \A b \in Batches : released[b] \subseteq KeysOf(b)
 
