@@ -32,7 +32,7 @@ everywhere else, are what is left of 0.14.
 
 | Fact | Read by | After |
 |---|---|---|
-| Policy revision (newest `policy.change` seq) | every authenticated request, every use that carries an app token, token issue, bind, revoke: 11 reads in SQL, 5 in TypeScript | no row: the seals the request already read (section 3) |
+| Policy revision (newest `policy.change` seq) | every authenticated request, every use that carries an app token, token issue, bind, revoke: 11 reads in SQL, 5 in TypeScript | no row: the numbers of the newest changes the request already read (section 3) |
 | Policy content (protected environments, roles) | every vault decision, `GET /api/me` | `environments.protected`, `roles`: exist, sealed, not yet read |
 | Instance settings | sign-in, `/api/me`, decisions | `settings`, new |
 | A member's access revision | every use, key write, member add | no row: `principals.seal` already says it |
@@ -258,8 +258,9 @@ the key, its version, its environment, the policy, the cap row and the fence row
 isolate knows the log's newest number and up to 10 after a change, as today. Still one call per use.
 
 **The policy revision disappears.** The app re-checks "the policy has not changed since I loaded the caller" on the
-seq of the newest `policy.change`. After, it compares seals it already read, the roles' and those of the environments
-the request touches, in the digest the two-trip key write already checks under its lock (`hold_inputs`).
+seq of the newest `policy.change`. After, it compares what it already read of the roles, the policy row and the
+environments it touches, as `hold_inputs` does for the key write: each object's newest change number in `log_changes`,
+never the seal a row stores, which a database writer puts back with the old row (#573, `TodayPolicyOnLog`).
 
 **Locks after.** `audit_chain_head`, the reads under it, the 0.14 appends and the queued read head are deleted; one
 advisory lock statement stays in multi-statement changes. The head did two jobs and only the first dies with the last
@@ -333,7 +334,7 @@ table, prepared: 0.143 ms against 0.132 ms at 100k changes, 0.196 ms against 0.1
 | Change | Model | When |
 |---|---|---|
 | The head becomes the change lock | `Coffre.tla` with its 11 scenarios, `Credentials`, `Issuing`, `Factor`, `WorkloadEnrollment`, `Writing`, `WriteLocks`, `Lifecycle`: 14 "under the head" protections keep their place and take the lock's name, with their 18 runs; the order change lock, issue lock, fence gets a deadlock check; the key write and the member add are checked without the lock. `Bulk`, `Audit` and `AppKey` keep the head, 0.14's chain's, and go with the code that ends it | first (A0) |
-| The policy revision becomes a digest of seals | `Lifecycle` (LifecyclePolicy), `Writing` (WritingProtect) | first (A0) |
+| The policy revision becomes a digest of each policy object's newest change number | `Lifecycle` (LifecyclePolicy), `Writing` (WritingProtect) | first (A0) |
 | The cap read from the `policy` row, the 0.14 guard gone from uses | `HotPathOne` (CapSealed, HotPathOnePolicy) | first, small |
 | Per-object locks | `HotPathOne` (UseLocks, ChangeLocks, LockToCommit), `WriteLocks` (NoWaitCycle), `Batching` | first, the largest: its model starts once A0's is in review, stacked on it, ahead of V2b's and A1's code |
 | Two new sealed objects | `SealedObjects`, after `Roles.tla`'s pattern | with the PR |
@@ -442,7 +443,7 @@ the collapse. Days are working days for one agent under the fast gate. Net lines
 | P2 | Pages read the projection: `GET /audit`, the report, MCP. Deletes `log_reads`, the three-log merge, 18 + 11 + 10 indexes | P1 | no | yes | 3 | -2,300 |
 | P3 | The page's check, flat: one `check` call a visit (6 statements, 4 round trips), the beat runs the same; the full walk in steps behind a Verify button and `coffre verify`; the page's walk of 0.14's chain deleted | P2 | no | no | 2 | -300 |
 | T1 | Three `text[]` columns, `log_config` dropped | #564 | no | yes | 1 | -50 |
-| A0 | Models: the head becomes the change lock (section 3), the policy revision a digest of seals | now | it is the model | no | 2 | 0 |
+| A0 | Models: the head becomes the change lock (section 3), the policy revision a digest of newest change numbers | now | it is the model | no | 2 | 0 |
 | V1 | The vault's entries go to the chain only; `settings`, `log_keys`; the vault's upgrade step (one beat's tail, the anchor); `note` for events, and a refused read written by the call that refused it | P2 | `SealedObjects` with it | yes | 4 | -300 |
 | A1 | The app's entries go to the chain; `audit_chain_head`, the reads under it and the policy revision deleted, `lockLogHead` replaced by the change lock, no re-check moved; `audit_log` frozen; sign-in in 5 round trips | P2, A0 | A0 | yes | 4 | -700 |
 | V2b | `audit_log` reads out of the use and change functions; the cap from its row; old overloads dropped | V1, V2a | `HotPathOne`, small | yes | 1.5 | -300 |
