@@ -687,21 +687,19 @@ function verifyHistory(
 /** The last migration of 0.15.0, the one release 0.16 upgrades from (D197). */
 const UPGRADES_FROM = '0049_reads';
 
-/** The migration that deleted 0.15's cutover from 0.14 (T273): a database past it was held to `requireCutOver` on its way. */
-const CUTOVER_GONE = '0083_cutover_gone';
-
 /**
  * Refuse a database this version cannot upgrade: it has no code that cuts a
- * log over from 0.14, which 0.15.0's vault does at its first start. So
- * `CUTOVER_GONE` applies only to a database that has applied every one of
- * 0.15.0's migrations and whose log holds the cutover's change: one a
- * release before 0.15.0 made steps through 0.15.0 first, and starts it once.
- * A new database has nothing to cut over.
+ * log over from 0.14, which 0.15.0's vault does at its first start. So a
+ * database a release before 0.15.0 made steps through 0.15.0 first, and
+ * 0.15.0's own is migrated only once its log holds the cutover's change. A
+ * new database has nothing to cut over, and one past 0.15.0's migrations was
+ * migrated by this version or a later one (the migrations of a run commit
+ * together).
  */
 async function requireCutOver(expected: readonly ExpectedMigration[], done: number, migrator: Migrator): Promise<void> {
-  const position = (tag: string) => expected.findIndex((entry) => entry.tag === tag);
-  if (done === 0 || done > position(CUTOVER_GONE)) return;
-  if (done <= position(UPGRADES_FROM)) {
+  const release = expected.findIndex((entry) => entry.tag === UPGRADES_FROM) + 1;
+  if (done === 0 || done > release) return;
+  if (done < release) {
     throw new Error(
       'the database was made by a coffre before 0.15.0, which this version does not upgrade from: ' +
         "upgrade it to 0.15.0 and start it once, so that its vault moves the audit log to 0.15's, then to this version (docs/deploy.md)",
