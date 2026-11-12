@@ -131,10 +131,29 @@ export function browser(api, idp, tunnel = {}, { passkeys } = {}) {
 
     /** `send`, which must succeed: its JSON. */
     async function call(session, method, path, body) {
-        const response = await send(session, method, path, body);
+        return answered(method, path, await send(session, method, path, body));
+    }
+
+    async function answered(method, path, response) {
         if (!response.ok) throw new Error(`${method} ${path} -> ${response.status} ${await response.text()}`);
         return response.status === 204 ? null : response.json();
     }
 
-    return { trySignIn, signIn, send, call };
+    /**
+     * `call`, for an act that takes a touch of its own (docs/design/passkeys.md, section 4.2), such as approving a
+     * terminal: refused `touch_required`, it goes again with a touch of the passkey kept for `email`.
+     */
+    async function touched(session, email, method, path, body) {
+        const first = await send(session, method, path, body);
+        const refusal = first.status === 403 ? await first.clone().json() : null;
+        if (refusal?.error !== 'touch_required') return answered(method, path, first);
+        const key = await keys.get(email);
+        if (key === null) throw new Error(`coffre asked ${email} for a touch of a passkey this browser does not hold`);
+        const challenge = new Uint8Array(Buffer.from(refusal.touch.options.challenge, 'base64url'));
+        const response = await key.assert({ rpId: new URL(site).hostname, origin: new URL(site).origin, challenge });
+        await keys.put(email, key);
+        return call(session, method, path, { ...body, touch: { state: refusal.touch.state, response } });
+    }
+
+    return { trySignIn, signIn, send, call, touched };
 }
