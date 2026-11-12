@@ -8,21 +8,24 @@
 //               with the log for good.
 //   before <origin> <idp> <out.json> -- <cli…>
 //               on 0.15.0, as its Owner: the log verified by `coffre verify
-//               log`, a beat, then the audit API's pages and every removed
-//               member's offboarding report, saved.
+//               log`, a beat, then an environment's values and a use of it
+//               through the credential proxy (`held`), the audit API's
+//               pages and every removed member's offboarding report, saved.
 //   after <origin> <idp> <before.json> -- <cli…>
 //               on this checkout, as its Owner: the same entries in the
-//               same order, the same reports, a use through the credential
-//               proxy, a change, a beat, and `coffre verify log` green.
-//   lists <owner's URL of the database>
+//               same order, the same reports, the same values and use, a
+//               change, a beat, and `coffre verify log` green.
+//   refusals <owner's URL of the database>
 //               on 0.15.0's database, before this checkout's migrate: no
-//               OAuth client's redirects that 0084 would cut (`brokenLists`).
+//               OAuth client's redirects that 0084 would cut
+//               (`brokenLists`), and no loss the log accepted
+//               (`acceptedLosses`).
 //
 // <cli…> is the CLI of the version serving, as a command line; it runs in a
 // home of its own, given as HOME, and is told the instance with --url.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -37,13 +40,13 @@ const say = (line) => process.stderr.write(`    ${line}\n`);
 if (import.meta.main) {
     const [command, ...args] = process.argv.slice(2);
     if (command === 'fill') fill(args[0], args[1], args[2]);
-    else if (command === 'lists') await lists(args[0]);
+    else if (command === 'refusals') await refusals(args[0]);
     else if (command === 'before' || command === 'after') {
         const split = args.indexOf('--');
         const [origin, idp, file] = args.slice(0, split);
         await (command === 'before' ? before : after)(origin, idp, file, args.slice(split + 1));
     } else {
-        console.error('usage: upgrade-check.mjs fill|lists|before|after …');
+        console.error('usage: upgrade-check.mjs fill|refusals|before|after …');
         process.exit(2);
     }
 }
@@ -79,9 +82,9 @@ async function before(origin, idp, out, cli) {
     const owner = await ownerOf(origin, idp);
     await verifyLog(owner, cli);
     await owner.beat();
-    const saved = await snapshot(owner);
+    const saved = { held: await held(owner), ...(await snapshot(owner)) };
     writeFileSync(out, JSON.stringify(saved));
-    say(`saved ${saved.entries.length} entries and the reports of ${Object.keys(saved.reports).join(', ') || 'nobody'}`);
+    say(`saved ${Object.keys(saved.held.values).length} values of ${DEV}, ${saved.entries.length} entries and the reports of ${Object.keys(saved.reports).join(', ') || 'nobody'}`);
 }
 
 async function after(origin, idp, file, cli) {
@@ -89,40 +92,35 @@ async function after(origin, idp, file, cli) {
     assert.ok(Object.keys(saved.reports).length > 0, '0.15.0 listed no removed member');
     const owner = await ownerOf(origin, idp);
     const now = await snapshot(owner);
-    sameEntries(saved.entries, now.entries);
-    say(`the same ${saved.entries.length} entries, in the same order`);
+    const since = sameEntries(saved.entries, now.entries);
+    say(`the same ${saved.entries.length} entries, in the same order; since: ${since}`);
     assert.deepEqual(Object.keys(now.reports).sort(), Object.keys(saved.reports).sort(), 'not the same members removed');
     for (const [member, report] of Object.entries(saved.reports)) {
         assert.deepEqual(sameAs(now.reports[member], report), report, `${member}'s offboarding report is not the one 0.15.0 gave`);
     }
     say(`the same offboarding reports, of ${Object.keys(saved.reports).join(', ')}`);
 
-    // A use through the credential proxy: the plan `coffre run` builds an app's environment from, for a handle. Every
-    // key the Owner lists, archived ones aside, is in it, given or left out by name; no value is printed.
-    const { keys } = await owner.call('GET', `/api/secrets/${DEV}`);
-    const { token } = await owner.call('POST', '/api/handles', { label: 'upgrade check', expiresInMinutes: 10, paths: [DEV] });
-    const response = await fetch(`${origin}/use/${DEV}`, { headers: { authorization: `Bearer ${token}` } });
-    const body = await response.text();
-    assert.equal(response.status, 200, `a use of ${DEV} through the proxy answered ${response.status}: ${body}`);
-    const plan = JSON.parse(body);
-    const given = Object.keys(plan.env);
-    const missing = keys.filter(({ archived }) => !archived).map(({ key }) => key).filter((key) => !given.includes(key) && !plan.left.includes(key));
-    assert.ok(given.length > 0, `the plan for ${DEV} gives no key; it leaves out ${plan.left.join(', ') || 'none'}`);
-    assert.deepEqual(missing, [], `the plan for ${DEV} neither gives nor leaves out ${missing.join(', ')}`);
-    say(`a handle's use of ${DEV} through the proxy gives ${given.length} keys and leaves out ${plan.left.length}`);
+    const { values, given, left } = await held(owner);
+    for (const [key, hash] of Object.entries(saved.held.values)) assert.equal(values[key], hash, `${DEV}'s ${key} does not read back as 0.15.0 read it`);
+    assert.deepEqual(Object.keys(values), Object.keys(saved.held.values), `${DEV} does not hold the keys it held on 0.15.0`);
+    assert.deepEqual({ given, left }, { given: saved.held.given, left: saved.held.left }, `a use of ${DEV} through the proxy is not 0.15.0's`);
+    say(`${DEV}'s ${Object.keys(values).length} values read back as 0.15.0 read them; a use through the proxy gives the same ${given.length} keys and leaves out the same ${left.length}`);
 
     // A change, read back.
     const value = randomBytes(18).toString('base64url');
     await owner.call('PATCH', `/api/secrets/${DEV}`, { UPGRADE_CHECK: value });
-    const { values } = await owner.call('POST', '/api/reveals', { path: `${DEV}/UPGRADE_CHECK` });
-    assert.equal(values.UPGRADE_CHECK, value, 'the value written after the upgrade does not read back');
+    const { values: read } = await owner.call('POST', '/api/reveals', { path: `${DEV}/UPGRADE_CHECK` });
+    assert.equal(read.UPGRADE_CHECK, value, 'the value written after the upgrade does not read back');
     say(`a value written to ${DEV} reads back`);
 
     await owner.beat();
     await verifyLog(owner, cli);
 }
 
-/** The Owner, signed in through the dev IdP once the instance opens its door: 503 while it cuts over or upgrades. */
+/**
+ * The Owner, signed in through the dev IdP once the instance opens its door: 503 while it cuts over or upgrades, or
+ * no answer yet. Any other failure is final.
+ */
 async function ownerOf(origin, idp) {
     const { browser } = await import('../dev/browser.mjs');
     const { signIn, call, touched } = browser(origin, idp);
@@ -131,7 +129,8 @@ async function ownerOf(origin, idp) {
         try {
             session = await signIn(OWNER);
         } catch (error) {
-            if (tries >= 60) throw error;
+            const opening = error instanceof TypeError || /\b503\b/.test(error.message);
+            if (!opening || tries >= 60) throw error;
             await new Promise((resolve) => setTimeout(resolve, 1000));
         }
     }
@@ -145,6 +144,25 @@ async function ownerOf(origin, idp) {
         },
         origin,
     };
+}
+
+/**
+ * What DEV holds, as the Owner reads it, each value as its SHA-256, never printed; and the plan a handle's use of it
+ * through the credential proxy gets (what `coffre run` builds an app's environment from): the keys it gives and the
+ * keys it leaves out.
+ */
+async function held(owner) {
+    const { values } = await owner.call('POST', '/api/reveals', { path: DEV });
+    const hashes = Object.fromEntries(Object.keys(values).sort().map((key) => [key, createHash('sha256').update(values[key]).digest('hex')]));
+    assert.ok(Object.keys(hashes).length > 0, `the Owner reads no value of ${DEV}`);
+    const { token } = await owner.call('POST', '/api/handles', { label: 'upgrade check', expiresInMinutes: 10, paths: [DEV] });
+    const response = await fetch(`${owner.origin}/use/${DEV}`, { headers: { authorization: `Bearer ${token}` } });
+    const body = await response.text();
+    assert.equal(response.status, 200, `a use of ${DEV} through the proxy answered ${response.status}: ${body}`);
+    const plan = JSON.parse(body);
+    const given = Object.keys(plan.env).sort();
+    assert.ok(given.length > 0, `the plan for ${DEV} gives no key; it leaves out ${plan.left.join(', ') || 'none'}`);
+    return { values: hashes, given, left: [...plan.left].sort() };
 }
 
 /** The audit API's pages, every entry with sign-ins and 0.15's sealed records, beats left out; and every removed member's report. */
@@ -167,7 +185,7 @@ async function snapshot(owner) {
 
 /**
  * 0.15.0's entries, newest first, are the tail of what this checkout lists: what it lists above them is what was
- * written since (this run's sign-ins and reads).
+ * written since (this run's sign-ins and reads), which it returns, counted by action.
  */
 function sameEntries(saved, now) {
     assert.ok(saved.length > 0, '0.15.0 listed no entries');
@@ -178,6 +196,9 @@ function sameEntries(saved, now) {
         if (isDeepStrictEqual(saved[at], tail[at])) continue;
         assert.fail(`entry ${at} of ${saved.length}, newest first, differs:\n0.15.0: ${JSON.stringify(saved[at], null, 2)}\nnow: ${JSON.stringify(tail[at], null, 2)}`);
     }
+    const counts = {};
+    for (const { action } of now.slice(0, top)) counts[action] = (counts[action] ?? 0) + 1;
+    return Object.entries(counts).map(([action, count]) => `${count} ${action}`).join(', ') || 'nothing';
 }
 
 /**
@@ -242,14 +263,29 @@ export async function brokenLists(sql) {
     return rows.map(({ id }) => id);
 }
 
-async function lists(url) {
+/**
+ * A loss the log accepted (`audit.loss_accepted`, which 0.15's watch writes when an Owner accepts a gap) is a break
+ * in its hashes, where 0.16's projector, walking the log back, stops: below it is not designed, and will be only for a
+ * real database that has one (state-rows.md, section 6). Such a log stops the upgrade here, with the entries' seqs.
+ */
+export async function acceptedLosses(sql) {
+    const rows = await sql.unsafe(`SELECT seq::text AS seq FROM audit_log WHERE action = 'audit.loss_accepted' ORDER BY audit_log.seq`);
+    return rows.map(({ seq }) => seq);
+}
+
+async function refusals(url) {
     const { postgresSession } = await import('@coffre/db/connect');
     const sql = postgresSession(url);
+    let broken, losses;
     try {
-        const broken = await brokenLists(sql);
-        assert.deepEqual(broken, [], `0084 would cut the redirects of the OAuth clients ${broken.join(', ')}: they are not a JSON array of strings`);
+        [broken, losses] = [await brokenLists(sql), await acceptedLosses(sql)];
     } finally {
         await sql.end();
     }
-    say('every OAuth client\'s redirects are a JSON array of strings, as 0084 converts them');
+    const refused = [
+        broken.length > 0 && `0084 would cut the redirects of the OAuth clients ${broken.join(', ')}: they are not a JSON array of strings`,
+        losses.length > 0 && `the log accepted ${losses.length} loss${losses.length === 1 ? '' : 'es'}, at seq ${losses.join(', ')}: 0.16's projector stops at one`,
+    ].filter(Boolean);
+    assert.deepEqual(refused, [], `the upgrade is refused:\n${refused.join('\n')}`);
+    say('every OAuth client\'s redirects are a JSON array of strings, as 0084 converts them, and the log accepted no loss');
 }
