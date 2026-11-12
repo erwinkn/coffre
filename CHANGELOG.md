@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **A CI sign-in survives a brief outage of its issuer's key endpoint
+  (T258).** An instance used an issuer's fetched keys for ten minutes, then
+  fetched them again inline; when that fetch failed (GitHub's JWKS endpoint
+  timing out now and then), `POST /api/auth/oidc` answered 503
+  `issuer_unavailable` for a minute with the last good keys in hand, and
+  its `Retry-After: 60` was past the 15 s the CLI waits, so the job failed
+  at once. Now the last good set verifies while a fetch fails or the URL
+  cools down, for up to an hour from its fetch (`KEYS_STALE_MS`, which
+  bounds how long a key the issuer withdrew can still verify while it
+  cannot be reached), and the failed fetch is logged once. A token naming a
+  key the set lacks still fetches once, and gets a 503 while the issuer
+  cannot be asked. With no set at all, a cold isolate's, the 503 says
+  `Retry-After: 5`, when the URL may be fetched again: CLIs since 0.14.3 wait
+  that long and ask twice more, so a blip costs a run seconds, not its job.
+  No CLI change.
 - **`coffre run` and `coffre export --help` say that a person gets
   placeholders, not values.** Where the deployment has the credential proxy, a
   person's `run` and `export` write handles, which a request through

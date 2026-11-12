@@ -269,17 +269,25 @@ it before saving. An issuer that moves its keys needs a new binding.
 
 **The cache keeps settled values only,** per isolate: never a pending fetch,
 key import or failure. Two first exchanges each fetch.
-- Key sets are kept ten minutes, for at most 64 URLs.
+- Key sets are kept ten minutes, for at most 64 URLs, then fetched again.
 - After an unknown `kid` or a failed fetch, that isolate waits a minute
-  before fetching that URL again, cold cache included. Until then such
-  tokens get a 503.
+  before fetching that URL again, or 5 s when it holds no set that can
+  verify (below). Until then a token its keys lack gets a 503.
 - Each cold isolate has its own cache and cooldowns. Admission, approximate
   as section 2 says, is what bounds them together.
 
-**When the issuer is down,** the answer is a 503 with `Retry-After`. Fresh
-cached keys work until they expire. No copy of fetched keys is kept in the
-database: an issuer that can't serve its keys can rarely mint tokens. Keys
-uploaded with a binding are a different case, fetched never (section 8).
+**When the issuer is down** (T258), a set past its ten minutes still
+verifies, for an hour from its fetch (`KEYS_STALE_MS`, whose comment gives
+the reasoning): the fetch that failed is logged once, with its URL and the
+set's age, and the cooldown that follows uses the set without asking. A
+token whose `kid` it lacks gets a 503, since whether the issuer rotated
+cannot be asked. With no such set, a cold isolate's or one past the hour,
+the answer is a 503 with `Retry-After: 5`, when the URL may be fetched
+again: the CLI waits that long and asks twice more, so a blip of a few
+seconds costs a run 5 to 15 s, not its job. No copy of fetched keys is
+kept in the database: a second cache would only spare cold isolates those
+seconds. Keys uploaded with a binding are a different case, fetched never
+(section 8).
 
 ## 5. Threats
 

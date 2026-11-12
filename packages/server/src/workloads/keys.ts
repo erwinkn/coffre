@@ -13,8 +13,49 @@ type Entry = { keys: JSONWebKeySet | null; fetchedAt: number; failedAt: number |
 
 /** A key set is used for ten minutes, then fetched again. */
 export const KEYS_FRESH_MS = 10 * 60 * 1000;
-/** After a failed fetch, or a key the set lacks, this long before that URL is fetched again. */
+/**
+ * How old a set may be and still verify when it cannot be fetched again: the
+ * issuer unreachable, or its URL cooling down after a failed fetch (T258).
+ *
+ * What it risks is a key the issuer withdrew, which verifies until coffre
+ * holds a set without it: for `KEYS_FRESH_MS` at most while the issuer
+ * answers, as before, and for this long while it does not. A rotation
+ * withdraws the old key only once the tokens it signed have expired, or the
+ * issuer would break its own tokens at every verifier: 5 minutes after the
+ * switch for GitHub's ID tokens (`exp` is `iat` + 300 s), an hour for
+ * Kubernetes' projected service account tokens (`expirationSeconds`'
+ * default; its key rotation keeps the old public key in
+ * `--service-account-key-file` until they expire). A key that new tokens
+ * name is fetched for at once, stale or not (OpenID Connect Core, 10.1.1).
+ * So the bound only weighs an emergency withdrawal, a key leaked, against
+ * an issuer that cannot serve its keys at the same time.
+ *
+ * An hour from the fetch: as long as a Kubernetes key stays valid after a
+ * planned switch, and the age coffre already accepts for a token no issuer
+ * can be asked about (`MAX_TOKEN_AGE_SECONDS`, uploaded keys); and far past
+ * a blip of the endpoint (T258: one 10 s timeout in three probes). An issuer
+ * unreachable for longer is down, not flaky, and its runs fail with it.
+ */
+export const KEYS_STALE_MS = 60 * 60 * 1000;
+/**
+ * After a failed fetch, or a key the set lacks, this long before that URL is
+ * fetched again, while a set still verifies meanwhile: the fetch an exchange
+ * would wait on, up to `FETCH_DEADLINE_MS`, is made once a minute at most.
+ */
 export const KEYS_COOLDOWN_MS = 60 * 1000;
+/**
+ * The same with no set to verify with, a cold isolate's or one past
+ * `KEYS_STALE_MS`: every exchange fails meanwhile, so the wait is short
+ * enough for the CLI to ask again within it. Its `Retry-After` is what is
+ * left of this (`IssuerUnavailable.retryAfter`), and the CLI waits at least
+ * that when it is 10 s or less (`unavailableWait` in `packages/cli/src/main.ts`,
+ * as since 0.14.3), then again, so both its retries come after the URL
+ * may be fetched again: 5 to 15 s after the first try, past a blip like
+ * T258's. It still spares an unreachable issuer: an isolate starts no
+ * fetch of its keys within 5 s of the start of an exchange whose fetch
+ * failed, whatever anonymous requests ask of it.
+ */
+export const KEYS_COLD_COOLDOWN_MS = 5_000;
 /** At most this many key sets, and `MAX_KEYS` keys in each. */
 export const MAX_KEY_SETS = 64;
 
@@ -22,9 +63,12 @@ const entries = new Map<string, Entry>();
 
 /** The issuer could not be asked for its keys, or will not be for a while. Not a verdict on the token. */
 export class IssuerUnavailable extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
+  /** When the URL may be fetched again, in whole seconds from now, at least 1: the 503's `Retry-After`. */
+  readonly retryAfter: number;
+  constructor(message: string, retryAfter: number, options?: { cause?: unknown }) {
     super(message, options);
     this.name = 'IssuerUnavailable';
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -43,8 +87,9 @@ async function fetchKeys(transport: WorkloadTransport, url: string, now: number)
     remember(url, { keys: set, fetchedAt: now, failedAt: null });
     return set;
   } catch (error) {
-    remember(url, { keys: entries.get(url)?.keys ?? null, fetchedAt: entries.get(url)?.fetchedAt ?? 0, failedAt: now });
-    throw new IssuerUnavailable(`the issuer's keys could not be fetched: ${(error as Error).message}`, { cause: error });
+    const entry = { keys: entries.get(url)?.keys ?? null, fetchedAt: entries.get(url)?.fetchedAt ?? 0, failedAt: now };
+    remember(url, entry);
+    throw unavailable(`the issuer's keys could not be fetched: ${(error as Error).message}`, entry, now, error);
   }
 }
 
@@ -55,8 +100,19 @@ function remember(url: string, entry: Entry): void {
   while (entries.size > MAX_KEY_SETS) entries.delete(entries.keys().next().value!);
 }
 
-function cooling(entry: Entry | undefined, now: number): boolean {
-  return entry?.failedAt != null && now - entry.failedAt < KEYS_COOLDOWN_MS;
+/** The set kept for `url`, if it may still verify when it cannot be fetched again. */
+function kept(entry: Entry | undefined, now: number): JSONWebKeySet | null {
+  return entry?.keys != null && now - entry.fetchedAt < KEYS_STALE_MS ? entry.keys : null;
+}
+
+/** How long before `url` is fetched again, in ms: none once its cooldown has run out. */
+function cooldownLeft(entry: Entry | undefined, now: number): number {
+  if (entry?.failedAt == null) return 0;
+  return Math.max(0, entry.failedAt + (kept(entry, now) === null ? KEYS_COLD_COOLDOWN_MS : KEYS_COOLDOWN_MS) - now);
+}
+
+function unavailable(message: string, entry: Entry | undefined, now: number, cause?: unknown): IssuerUnavailable {
+  return new IssuerUnavailable(message, Math.max(1, Math.ceil(cooldownLeft(entry, now) / 1000)), { cause });
 }
 
 /** The token's key is not in a set fetched just now: the issuer's, or no one's. */
@@ -67,8 +123,14 @@ const KEY_ABSENT = "the token's key is not among the issuer's, which were fetche
  * fetched. At most one fetch an exchange: a key missing from a set this
  * call fetched is not there, and a key missing from an older set is fetched
  * for once, in case the issuer rotated. Either way the URL then waits a
- * minute before the next fetch, and until then, or while the issuer cannot
- * be reached, `IssuerUnavailable`. Fresh cached keys work all the while.
+ * minute before the next fetch, and until then `IssuerUnavailable`.
+ *
+ * When the set cannot be fetched again, the issuer unreachable or its URL
+ * cooling down after a failed fetch, the set kept stands in while it is
+ * younger than `KEYS_STALE_MS`, and a token whose key it lacks is
+ * `IssuerUnavailable` (whether the issuer rotated cannot be asked). With no
+ * such set, `IssuerUnavailable`, until a fetch may be made again
+ * (`KEYS_COLD_COOLDOWN_MS`).
  */
 export async function verifyWithKeys(
   transport: WorkloadTransport,
@@ -79,19 +141,37 @@ export async function verifyWithKeys(
   const now = expected.now.getTime();
   let entry = entries.get(url);
   let keys = entry?.keys != null && now - entry.fetchedAt < KEYS_FRESH_MS ? entry.keys : null;
-  const fetched = keys === null;
+  let fetched = false;
+  // Why the set kept stands in for one that could not be fetched, when it does.
+  let standing: IssuerUnavailable | null = null;
   if (keys === null) {
-    if (cooling(entry, now)) throw new IssuerUnavailable("the issuer's keys could not be fetched a moment ago; try again in a minute");
-    keys = await fetchKeys(transport, url, now);
+    const stale = kept(entry, now);
+    if (cooldownLeft(entry, now) > 0) {
+      standing = unavailable("the issuer's keys could not be fetched a moment ago", entry, now);
+      if (stale === null) throw standing;
+      keys = stale;
+    } else {
+      try {
+        keys = await fetchKeys(transport, url, now);
+        fetched = true;
+      } catch (error) {
+        if (stale === null) throw error;
+        // Said once a failed fetch, never a token's contents: the cooldown that follows keeps quiet.
+        console.warn(`verifying with the issuer's keys fetched ${Math.round((now - entry!.fetchedAt) / 60_000)} min ago: ${(error as Error).message}`);
+        [keys, standing] = [stale, error as IssuerUnavailable];
+      }
+    }
   }
   try {
     return await verifyWorkloadToken(token, keys, expected);
   } catch (error) {
     if (!absentKey(error)) throw error;
+    // Whether the issuer rotated cannot be asked: as unavailable as the fetch that failed.
+    if (standing !== null) throw standing;
     entry = entries.get(url);
-    if (fetched || cooling(entry, now)) {
+    if (fetched || cooldownLeft(entry, now) > 0) {
       if (fetched) remember(url, { ...(entry ?? { keys, fetchedAt: now }), failedAt: now });
-      throw new IssuerUnavailable(KEY_ABSENT);
+      throw unavailable(KEY_ABSENT, entries.get(url), now);
     }
     // The issuer may have rotated: fetch once, and wait a minute before the next.
     remember(url, { ...(entry ?? { keys: null, fetchedAt: 0 }), failedAt: now });
@@ -100,7 +180,7 @@ export async function verifyWithKeys(
     try {
       return await verifyWorkloadToken(token, fresh, expected);
     } catch (refetched) {
-      if (absentKey(refetched)) throw new IssuerUnavailable(KEY_ABSENT);
+      if (absentKey(refetched)) throw unavailable(KEY_ABSENT, entries.get(url), now);
       throw refetched;
     }
   }

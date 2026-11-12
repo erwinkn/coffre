@@ -707,7 +707,7 @@ test("a revocation is its caller's act: the credential it ends is its target, ne
   }
 });
 
-test('a key the issuer rotated in is fetched once; while the issuer cannot be reached, a 503, and cached keys still work', async () => {
+test('a key the issuer rotated in is fetched once; while the issuer cannot be reached, cached keys still work, and with none a 503 to come back in 5 s', async () => {
   assert.equal((await trade(token(rsa))).status, 200);
   const rotated = key('RS256', 'rs-2');
   published.set(KEYS, { keys: [rsa.jwk, rotated.jwk] });
@@ -723,8 +723,8 @@ test('a key the issuer rotated in is fetched once; while the issuer cannot be re
   assert.equal((await trade(token(rsa))).status, 200);
   forgetKeys();
   const down = await trade(token(rsa));
-  // Its keys are not fetched again for a minute: no sooner, it says.
-  assert.deepEqual([down.status, down.body.reason, down.retryAfter], [503, 'issuer_unavailable', '60']);
+  // With no keys to stand in, they are fetched again in 5 s, which it says, short enough for the CLI to come back (T258).
+  assert.deepEqual([down.status, down.body.reason, down.retryAfter], [503, 'issuer_unavailable', '5']);
 });
 
 test('removing a binding ends its credentials at once; a denied attempt changes nothing; rows put back stay dead', async () => {

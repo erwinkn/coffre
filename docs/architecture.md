@@ -1095,7 +1095,8 @@ A refusal answers 401 with a reason a CI user can act on, 429, or 503 when
 the issuer cannot be asked, and stays out of the audit log: anyone can mint
 a genuine token. Each isolate keeps the issuers' keys it fetched, settled
 values only, for ten minutes; a key it lacks fetches them again once a
-minute at most.
+minute at most. When a fetch fails, the set it kept verifies for up to an
+hour from its fetch (T258).
 
 **The credential** is a service credential like any other, whose
 `created_by` names its binding, `binding:<id>`. Its MAC is of its own kind
