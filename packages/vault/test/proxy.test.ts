@@ -596,9 +596,9 @@ test('items or names no change writes fail the seal like any forgery: the tab sh
   assert.equal((await w.save({ seal: forged.seal, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } }, other)).ok, false);
 });
 
-/** The three lists 0084 types (T278) as 0083 left them, and the ledger without 0084: 0.15.0's schema, for these. */
+/** The three lists 0084 types (T278) as 0083 left them, and the ledger without 0084 and the migrations after it: 0.15.0's schema, for these. */
 const BEFORE_0084 = [
-  `DELETE FROM drizzle.__drizzle_migrations WHERE created_at = ${JSON.parse(readFileSync(join(migrationsFolder(), 'meta/_journal.json'), 'utf8')).entries.find((entry: { tag: string }) => entry.tag === '0084_text_lists').when}`,
+  `DELETE FROM drizzle.__drizzle_migrations WHERE created_at >= ${JSON.parse(readFileSync(join(migrationsFolder(), 'meta/_journal.json'), 'utf8')).entries.find((entry: { tag: string }) => entry.tag === '0084_text_lists').when}`,
   `ALTER TABLE oauth_clients ALTER COLUMN redirect_uris TYPE text USING to_jsonb(redirect_uris)::text`,
   `ALTER TABLE oauth_clients ADD CONSTRAINT oauth_clients_redirect_uris_check CHECK (redirect_uris::jsonb IS NOT NULL)`,
   `ALTER TABLE passkeys ALTER COLUMN transports DROP DEFAULT`,

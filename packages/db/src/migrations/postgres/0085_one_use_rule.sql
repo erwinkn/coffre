@@ -17,7 +17,7 @@
 -- through the first level whose definitions hold the route's item, those definitions and their newest change; that
 -- item's editor's principal, as a use reads its caller's; the keys the item names; and the newest change of these
 -- inputs, which a cover must be past (`inputs`). A null route reads every item, and none serves.
-CREATE FUNCTION public.use_route_read(p_layers uuid[], p_route text, OUT levels json, OUT serving jsonb, OUT editor json, OUT names text[], OUT inputs bigint)
+CREATE OR REPLACE FUNCTION public.use_route_read(p_layers uuid[], p_route text, OUT levels json, OUT serving jsonb, OUT editor json, OUT names text[], OUT inputs bigint)
  LANGUAGE plpgsql
 AS $function$
 DECLARE
@@ -123,7 +123,7 @@ REVOKE ALL ON FUNCTION public.use_route_read(uuid[], text) FROM PUBLIC;
 -- made. A plain SQL expression, so that the planner inlines it into each statement: no call at run time (not SECURITY
 -- DEFINER, no SET, no subquery, each argument used more than once a column or a parameter, and VOLATILE, as
 -- `clock_timestamp` is). No login may call it.
-CREATE FUNCTION public.use_state(p_mac bytea, p_retired bytea[], p_floor bigint, p_at bigint, p_deadline bigint, p_configured boolean,
+CREATE OR REPLACE FUNCTION public.use_state(p_mac bytea, p_retired bytea[], p_floor bigint, p_at bigint, p_deadline bigint, p_configured boolean,
                                  p_named text, p_right boolean, p_names boolean, p_archived boolean,
                                  p_principal text, p_locked boolean, p_moving boolean, p_silent boolean, p_in boolean, p_behind boolean)
  RETURNS text
