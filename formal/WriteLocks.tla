@@ -81,13 +81,9 @@
 (*               flow that takes both does. Without, it holds the lock and *)
 (*               waits for the row a demotion holds, which waits for the   *)
 (*               lock.                                                     *)
-(* AddTakesChangeLock is the add's shape, not a protection: no cycle       *)
-(* closes without it either (AddLocksFree.cfg), the rows it locks first    *)
-(* being every lock it shares with a change before the fence. The add      *)
-(* keeps the lock as built all the same: no budget counts its statement,   *)
-(* and what a change decides about the members between its lock and its    *)
-(* last statement (the Owners' count, a member with no row yet) is not     *)
-(* held by the add's hold.                                                 *)
+(* The add takes the change lock as every change does (T272: one rule, no  *)
+(* exemption). No wait cycle needs it there: the rows it locks first are   *)
+(* every lock it shares with a change before the fence.                    *)
 (*                                                                         *)
 (* Flow = "change": the order itself, for every change of more than one    *)
 (* statement, whichever way it takes the issue lock.                       *)
@@ -126,7 +122,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
-CONSTANTS Flow, TouchFirst, WriteTakesChangeLock, MembersFirst, AddTakesChangeLock,
+CONSTANTS Flow, TouchFirst, WriteTakesChangeLock, MembersFirst,
           ChangeLockFirst, IssueBeforeFence, BarrierIssueFirst
 
 Procs == CASE Flow = "write" -> {"write", "patch", "issue", "barrier", "revoke", "use"}
@@ -142,8 +138,8 @@ Plan(p) ==
                            ELSE << <<"issue", "S">>, <<"fence", "X">>, <<"cred", "X">>, <<"key", "X">> >>)
       [] p = "patch" -> << <<"change", "X">>, <<"key", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
       [] p = "add" ->
-            IF MembersFirst THEN << <<"member", "X">> >> \o Changing(AddTakesChangeLock) \o << <<"issue", "S">>, <<"fence", "X">> >>
-                            ELSE Changing(AddTakesChangeLock) \o << <<"member", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
+            IF MembersFirst THEN << <<"member", "X">>, <<"change", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
+                            ELSE << <<"change", "X">>, <<"member", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
       [] p \in {"demote", "vault"} -> << <<"member", "X">>, <<"change", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
       [] p = "policy" -> << <<"member", "X">>, <<"change", "X">>, <<"issue", "X">>, <<"fence", "X">> >>
       [] p = "slug" -> << <<"change", "X">>, <<"issue", "X">>, <<"fence", "X">> >>

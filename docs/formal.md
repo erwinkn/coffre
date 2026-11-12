@@ -2756,14 +2756,9 @@ revoke and a use. 28,408 states.
 |---|---|
 | the add locks the members' rows before the change lock, as every flow that takes both does (MembersFirst) | `NoWaitCycle`: the add holds the change lock and waits for the adder's row, which a demotion holds while it waits for the change lock |
 
-`AddLocksFree.cfg` is the same add without the change lock
-(`AddTakesChangeLock = FALSE`, its shape, not a protection): no cycle closes
-either (28,848 states), the rows it locks first being every lock it shares
-with a change before the fence. The add keeps the lock as built all the same.
-No budget counts its statement, and nothing here shows that what a change
-decides about the members between its lock and its last statement (the
-Owners' count, a member with no row yet) would stand an add committed in
-between.
+The add takes the change lock as every change does: one rule, no exemption.
+No wait cycle needs it there, the rows it locks first being every lock it
+shares with a change before the fence.
 
 ### Findings.tla
 
@@ -3233,8 +3228,8 @@ statement, under the fence, so its own decision needs no lock before. But a
 key write then updates the key's row, and another change of that key locks
 the row under the change lock before it asks for the fence: without the
 lock, the write waits for the row with the fence held (`WriteLocks`,
-`WriteTakesChangeLock`). The member add closes no such cycle without it
-(`AddLocksFree`) and keeps it as built.
+`WriteTakesChangeLock`). The member add takes it as every change does,
+though no wait cycle needs it there.
 
 **The policy revision.** A change that decided on the policy commits only
 while that policy is in force. 0.15 compared one number, the seq of the
