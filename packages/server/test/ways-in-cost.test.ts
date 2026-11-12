@@ -28,7 +28,7 @@ import { processLimits } from '../src/workloads/limits.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
-import { checkpointFence } from './db/tables.ts';
+import { checkpointFence } from '@coffre/db/schema';
 import { inBulkPeriod } from './window-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';

@@ -4,7 +4,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
-import { tablesOf, type Database } from '@coffre/db';
+import { type Database } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import type { Input } from '../src/inputs.ts';
@@ -15,6 +15,7 @@ import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
 import { openTestDatabase, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { ask, emptyLog, genesis, isolate, ROOT, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { serviceBindings } from '@coffre/db/schema';
 
 let db: TestDatabase;
 before(async () => {
@@ -169,7 +170,7 @@ test("a read through a Cloudflare binding is its service's, as the binding's obj
   // A binding of the service's, reaching `dev`, sealed as the vault makes one (use-ways.test.ts).
   const binding = randomUUID();
   const scope = [{ projectId: w.project, environmentId: w.dev, role: 'viewer' }];
-  await db.owner.insert(tablesOf(db.owner).serviceBindings).values({
+  await db.owner.insert(serviceBindings).values({
     id: binding, authMac: Buffer.alloc(32), principal: w.principal, generation: 0, profile: 'cloudflare', issuer: 'urn:coffre:cloudflare', jwksUri: 'urn:coffre:cloudflare',
     claims: '{}', scope: JSON.stringify(scope), policy: '{}', origin: 'https://coffre.test', createdBy: ROOT,
   });

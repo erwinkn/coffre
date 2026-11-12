@@ -1,5 +1,5 @@
 import type { WorkloadProfile } from '@coffre/core/identity';
-import { prepared, tablesOf, type Queryable } from '@coffre/db';
+import { prepared, type Queryable } from '@coffre/db';
 import { newestSeqQuery } from '@coffre/db/log';
 import { changedRows, clockMillis, truth } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
@@ -7,6 +7,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, lt, or, sql, type AnyColumn, 
 
 import { authMac, checkAuthRow } from '../auth-rows.ts';
 import { hasTombstone, insert, newestChangeColumns, newestChanges, type BindingRow, type NewestChanges } from './queries.ts';
+import { cappedAlerts, credentials, environments, principals, projects, secrets, serviceBindings } from '@coffre/db/schema';
 
 // A workload's key-bound sessions (docs/design/workload-access.md, section
 // 5): the one statement every request runs, the bindings an exchange reads,
@@ -17,8 +18,8 @@ type Tables = typeof schema;
 export type SessionRow = Tables['credentials']['$inferSelect'];
 
 /** Whether binding `id` (a column, as text) has a tombstone, as a boolean (`hasTombstone`). */
-function tombstoned(db: Queryable, id: SQL): SQL<boolean> {
-  return truth(hasTombstone(db, id));
+function tombstoned(id: SQL): SQL<boolean> {
+  return truth(hasTombstone(id));
 }
 
 /** A binding's ID as text, as a tombstone names it. */
@@ -41,8 +42,7 @@ function placeParams(place: NamedPlace) {
  * slug a `~` marks), or else `otherwise`; and its path as named now, null
  * for none or one deleted.
  */
-function placeColumns(db: Queryable, otherwise: SQL) {
-  const { environments, projects } = tablesOf(db);
+function placeColumns(otherwise: SQL) {
   const byId = sql`CAST(${sql.placeholder('place')} AS text)`;
   const project = sql`CAST(${sql.placeholder('placeProject')} AS text)`;
   const byPath = sql`(SELECT ${idText(environments.id)} FROM ${environments} INNER JOIN ${projects} ON ${projects.id} = ${environments.projectId}
@@ -85,7 +85,6 @@ const sessionRows = prepared((db) => sessionStatement(db));
 
 /** Section 5.3's statement as built, before it is prepared: for a test that holds its plan to its indexes. */
 export function sessionStatement(db: Queryable) {
-  const { credentials, serviceBindings, principals } = tablesOf(db);
   const tokenHash = sql.placeholder('tokenHash');
   // The binding a workload's row names, `binding:<id>`: every workload row has one, a child its root's.
   const bindingId = sql`CASE WHEN ${credentials.kind} = 'workload' AND ${credentials.createdBy} LIKE 'binding:%' THEN CAST(substr(${credentials.createdBy}, 9) AS uuid) END`;
@@ -94,17 +93,17 @@ export function sessionStatement(db: Queryable) {
   // The row's one place: null when it lists none, or several.
   const onlyPlace = sql`CASE WHEN jsonb_array_length(${credentials.places}::jsonb) = 1 THEN ${credentials.places}::jsonb -> 0 ->> 'environmentId' END`;
   // The place it uses: named, or else the row's one.
-  const { place, placePath } = placeColumns(db, onlyPlace);
+  const { place, placePath } = placeColumns(onlyPlace);
   return db
     .select({
       credential: credentials,
       binding: serviceBindings,
-      bindingTombstoned: tombstoned(db, idText(serviceBindings.id)),
+      bindingTombstoned: tombstoned(idText(serviceBindings.id)),
       memberStatus: principals.status,
       memberGeneration: principals.generation,
       place,
       placePath,
-      now: clockMillis(db),
+      now: clockMillis(),
       policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy')})`,
     })
     .from(credentials)
@@ -125,17 +124,16 @@ export async function callBindings(db: Queryable, principal: string, place: Name
 }
 
 const bindingCalls = prepared((db) => {
-  const { serviceBindings, principals } = tablesOf(db);
-  const { place, placePath } = placeColumns(db, sql`NULL`);
+  const { place, placePath } = placeColumns(sql`NULL`);
   return db
     .select({
       binding: serviceBindings,
-      tombstoned: tombstoned(db, idText(serviceBindings.id)),
+      tombstoned: tombstoned(idText(serviceBindings.id)),
       memberStatus: principals.status,
       memberGeneration: principals.generation,
       place,
       placePath,
-      now: clockMillis(db),
+      now: clockMillis(),
       policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy')})`,
     })
     .from(serviceBindings)
@@ -174,10 +172,9 @@ export async function workloadCandidates(
   profiles: readonly WorkloadProfile[],
   max: number,
 ): Promise<{ bindings: BindingRow[]; newest: NewestChanges }> {
-  const { serviceBindings, principals } = tablesOf(db);
   if (profiles.length === 0) return { bindings: [], newest: newestChanges([]) };
   const rows = await db
-    .select({ binding: serviceBindings, tombstoned: tombstoned(db, idText(serviceBindings.id)), ...newestChangeColumns(db, principal, serviceBindings.id), now: clockMillis(db) })
+    .select({ binding: serviceBindings, tombstoned: tombstoned(idText(serviceBindings.id)), ...newestChangeColumns(principal, serviceBindings.id), now: clockMillis() })
     .from(serviceBindings)
     .innerJoin(principals, and(eq(principals.principal, serviceBindings.principal), eq(principals.generation, serviceBindings.generation)))
     .where(and(
@@ -201,7 +198,7 @@ export async function workloadCandidates(
 
 /** Insert a workload's session, its MAC over everything that binds it (`workload_credentials`). */
 export async function insertSession(db: Queryable, chainKey: Buffer, row: SessionFields): Promise<void> {
-  await insert(db, tablesOf(db).credentials, signedSession(chainKey, row));
+  await insert(db, credentials, signedSession(chainKey, row));
 }
 
 /** A workload's session's columns, as it is made. */
@@ -221,7 +218,7 @@ export function signedSession(chainKey: Buffer, row: SessionFields): SessionFiel
 
 /** The database's clock, in milliseconds, as this statement runs: renewal's first step. */
 export async function databaseNow(db: Queryable): Promise<number> {
-  const [row] = await db.select({ now: clockMillis(db) }).from(single);
+  const [row] = await db.select({ now: clockMillis() }).from(single);
   return row!.now;
 }
 
@@ -238,7 +235,6 @@ export const RENEW_MARGIN_MS = 5_000;
  * saw as dead. True if it moved.
  */
 export async function renewSession(db: Queryable, chainKey: Buffer, old: SessionRow, expiresAt: Date): Promise<boolean> {
-  const { credentials } = tablesOf(db);
   const margin = sql`${credentials.expiresAt} > clock_timestamp() + interval '${sql.raw(String(RENEW_MARGIN_MS))} milliseconds'`;
   const next = { ...old, expiresAt };
   const changed = await db.update(credentials)
@@ -256,7 +252,6 @@ export async function renewSession(db: Queryable, chainKey: Buffer, old: Session
 /** These keys' names, by ID: a binding's `reads`, shown by name. */
 export async function keyNames(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
   if (ids.length === 0) return new Map();
-  const { secrets } = tablesOf(db);
   const rows = await db.select({ id: secrets.id, key: secrets.key }).from(secrets).where(inArray(secrets.id, [...new Set(ids)]));
   return new Map(rows.map((row) => [row.id, row.key]));
 }
@@ -271,7 +266,6 @@ export async function keyNames(db: Queryable, ids: readonly string[]): Promise<M
  * holds, the log's head.
  */
 export async function claimAlert(db: Queryable, service: string, kind: string, now: Date, everyMs: number): Promise<boolean> {
-  const { cappedAlerts } = tablesOf(db);
   const since = new Date(now.getTime() - everyMs);
   const [last] = await db.select({ raisedAt: cappedAlerts.raisedAt }).from(cappedAlerts).where(and(eq(cappedAlerts.service, service), eq(cappedAlerts.kind, kind)));
   if (last !== undefined && last.raisedAt >= since) return false;

@@ -8,7 +8,7 @@ import { defineSignin, github, githubApp, MAX_BINDINGS, MAX_ISSUER_BYTES, signin
 import type { Database } from '@coffre/db';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 
-import { auditLog, serviceBindings } from './db/tables.ts';
+import { auditLog, serviceBindings } from '@coffre/db/schema';
 import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
 import { processLimits } from '../src/workloads/limits.ts';

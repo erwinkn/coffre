@@ -13,7 +13,7 @@ import type { PostgresClient } from '@coffre/db/connect';
 import { versioned, type Vault, type VaultEntry } from '@coffre/core/vault';
 import { asc, desc, eq, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
 
-import { auditLog, spentIdTokens, credentials, logChanges, projects, serviceBindings } from './db/tables.ts';
+import { auditLog, spentIdTokens, credentials, logChanges, projects, serviceBindings } from '@coffre/db/schema';
 import { authMac } from '../src/auth-rows.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { resolveConfig } from '../src/config.ts';

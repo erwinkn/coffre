@@ -13,7 +13,7 @@ import { ROLES } from '@coffre/core/access';
 import { deriveLogKey } from '@coffre/core/audit';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { CutoverInput, CutoverOutcome, SecretRef, Vault } from '@coffre/core/vault';
-import { tablesOf, type Queryable } from '@coffre/db';
+import { type Queryable } from '@coffre/db';
 import { postgresSession } from '@coffre/db/connect';
 import { appendEntries } from '@coffre/db/log';
 import { asc, eq, sql } from 'drizzle-orm';
@@ -30,6 +30,7 @@ import { vaultLogKey } from '../src/log.ts';
 import { bindingObject } from '../src/objects.ts';
 import * as store from '../src/store.ts';
 import { emptyDatabase, openLocalVault, openTestDatabase, OWNER_URL, places, rows, run, sealed, nothingHeld, storedVersions, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
+import { auditLog, credentials, environments, grants, logChanges, principals, projects, secretReferences, secrets, secretVersions, serviceBindings } from '@coffre/db/schema';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
 const openRaw = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
@@ -99,7 +100,6 @@ async function cutOver(vault: Pick<Vault, 'cutover'>, vouched: Omit<CutoverInput
 
 /** The changes of 0.15's log, oldest first, but the cutover's own: as the replay takes them. */
 async function changes() {
-  const { logChanges } = tablesOf(db.owner);
   return (await db.owner.select().from(logChanges).orderBy(asc(logChanges.number)))
     .filter((row) => row.object !== CUTOVER_OBJECT)
     .map((row) => loggedChange({ ...row, number: BigInt(row.number), seal: row.seal ?? null })!);
@@ -112,7 +112,6 @@ async function opsOf(ref: Ref): Promise<string[]> {
 
 /** The cutover's change, and the 0.14 entry it names. */
 async function marker() {
-  const { logChanges } = tablesOf(db.owner);
   const found = await db.owner.select().from(logChanges).where(eq(logChanges.object, CUTOVER_OBJECT));
   return found.map((row) => JSON.parse(row.payload) as { op: string; anchor: { seq: string; hash: string }; from: { seq: string; hash: string } });
 }
@@ -170,7 +169,6 @@ test("a 0.14 instance cut over: each member sealed as 0.14 accepts them, naming 
   assert.equal((objects.get(objectKey({ kind: 'environment', id: w.dev })) as Extract<Input, { kind: 'environment' }>).protected, false);
   assert.deepEqual((objects.get(objectKey({ kind: 'policy', id: 'instance' })) as Extract<Input, { kind: 'policy' }>).bulk, w.config.bulkLimit);
   // Each member's genesis names their newest access entry, as their row does (UsesSeeOldWrites).
-  const { logChanges, principals } = tablesOf(db.owner);
   for (const principal of [ROOT, ADA, CI]) {
     const [{ accessSeq }] = await db.owner.select({ accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, principal));
     const [genesis] = await db.owner.select({ payload: logChanges.payload }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'principal', id: principal })));
@@ -250,7 +248,6 @@ test("a cutover committed and not yet sealed serves no use: a use by ids and one
   const w = await instance014();
   const secret = await w.key(w.dev);
   // A CLI session of the Owner's, the app's MAC aside (the vault never reads it), which the app vouches for at the cutover.
-  const { credentials } = tablesOf(db.owner);
   const id = randomUUID();
   const tokenHash = randomBytes(32);
   const expiresAt = new Date(Math.floor(Date.now() / 1000) * 1000 + 3_600_000);
@@ -293,7 +290,6 @@ test("a cutover committed and not yet sealed serves no use: a use by ids and one
 
 test("places 0.14 deleted: a deleted project's standing environment becomes `dev~deleted`, sealed deleted, its keys archived with no object; an environment deleted alone sealed deleted (T130)", async () => {
   const w = await instance014();
-  const { environments, projects, secrets, secretVersions } = tablesOf(db.owner);
   const live = await w.key(w.prod);
   const gone = await w.key(w.dev);
   // An environment deleted alone, beside: its own dated tombstone, its key erased and left unarchived, as 0.14 leaves it.
@@ -326,11 +322,11 @@ test('a slug and 0.14\'s chain disagreeing about a deletion refuse the cutover, 
   const cases: [string, (w: Awaited<ReturnType<typeof instance014>>) => Promise<CutoverInput['deleted']>, RegExp][] = [
     ['renamed back', async (w) => [{ kind: 'project', id: w.project, tombstone: 'market~deleted-2026-10-27' }], /not the tombstone its project.delete gave it/],
     ['tombstoned live', async (w) => {
-      await db.owner.update(tablesOf(db.owner).projects).set({ slug: 'market~deleted-2026-10-27' }).where(eq(tablesOf(db.owner).projects.id, w.project));
+      await db.owner.update(projects).set({ slug: 'market~deleted-2026-10-27' }).where(eq(projects.id, w.project));
       return [];
     }, /a tombstone no authentic project.delete gave it/],
     ['an environment tombstoned', async (w) => {
-      await db.owner.update(tablesOf(db.owner).environments).set({ slug: 'dev~deleted' }).where(eq(tablesOf(db.owner).environments.id, w.dev));
+      await db.owner.update(environments).set({ slug: 'dev~deleted' }).where(eq(environments.id, w.dev));
       return [];
     }, /a tombstone no authentic deletion gave it/],
   ];
@@ -350,7 +346,6 @@ test('a slug and 0.14\'s chain disagreeing about a deletion refuse the cutover, 
 
 test('a key archived before the cutover gets its object and its delete, so its unarchive restores it (T144)', async () => {
   const w = await instance014();
-  const { secrets } = tablesOf(db.owner);
   const key = await w.key(w.dev);
   await db.owner.update(secrets).set({ archivedAt: new Date() }).where(eq(secrets.id, key.secretId));
   assert.deepEqual(await cutOver(await vault015(w.config)), { ok: true, done: true });
@@ -366,7 +361,6 @@ test('a key archived before the cutover gets its object and its delete, so its u
 
 test("a key whose current version is not its newest, or not its own, rolled back around the app, is left unsealed, reported: 0.14 reads no source so (reviews r2, r5)", async () => {
   const w = await instance014();
-  const { secretVersions } = tablesOf(db.owner);
   const key = await w.key(w.prod);
   const [first] = await db.owner.select({ id: secretVersions.id }).from(secretVersions).where(eq(secretVersions.secretId, key.secretId));
   const second = { ...key, version: 2 };
@@ -419,7 +413,6 @@ test("nothing of 0.15's log is written before the cutover: an Owner the deployme
 
 test("a reference 0.14 ended is ended in its row before its holder's genesis, which reads no source; one no authentic reference.create made, whose holder was moved since, or whose row says it ended with no reference.end (review r6), leaves its holder unsealed, reported", async () => {
   const w = await instance014();
-  const { secretReferences } = tablesOf(db.owner);
   const source = await w.key(w.prod);
   const holder = async () => (await w.secret(w.dev)).secretId;
   const [ended, standing, planted, moved, marked] = [await holder(), await holder(), await holder(), await holder(), await holder()];
@@ -465,7 +458,6 @@ test("a reference 0.14 ended is ended in its row before its holder's genesis, wh
 
 test("history before 0.14's newest checkpoint damaged refuses the cutover: a reference's end, checkpointed, its entry edited, is never taken for no end (review r4, VerifyChain)", async () => {
   const w = await instance014();
-  const { secretReferences, auditLog } = tablesOf(db.owner);
   const source = await w.key(w.prod);
   const holder = (await w.secret(w.dev)).secretId;
   const id = randomUUID();
@@ -487,7 +479,6 @@ test("a member whose row 0.14's check refuses is left unsealed, reported, every 
   assert.ok((await w.old.admit({ actor: ROOT, principal: ADA })).ok);
   assert.ok((await w.old.admit({ actor: ROOT, principal: CI })).ok);
   // A grant written around the vault: Ada's row's MAC no longer holds.
-  const { grants } = tablesOf(db.owner);
   await db.owner.insert(grants).values({ principal: ADA, projectId: w.project, environmentId: null, environmentSlug: null, role: 'owner', grantedAt: Date.now(), grantedBy: ROOT });
   assert.deepEqual(await cutOver(await vault015(w.config)), { ok: true, done: true });
   assert.deepEqual(await opsOf({ kind: 'principal', id: ADA }), []);
@@ -499,7 +490,6 @@ test("a member whose row 0.14's check refuses is left unsealed, reported, every 
 test('what the app vouched for, held to its rows: a credential sealed as vouched; one moved since, or an app entry since, asks the app again; one not vouched for stays unsealed (VouchedHeld)', async () => {
   const w = await instance014();
   assert.ok((await w.old.admit({ actor: ROOT, principal: CI })).ok);
-  const { credentials } = tablesOf(db.owner);
   const credential = async () => {
     const id = randomUUID();
     const expiresAt = new Date(Math.floor(Date.now() / 1000) * 1000 + 3_600_000);
@@ -533,7 +523,6 @@ test('what the app vouched for, held to its rows: a credential sealed as vouched
 test("a binding made on 0.14, vouched for, is sealed with the instance it was made on, and a run signs in through it right after the cutover; one not vouched for, or edited since, signs nobody in (T160)", async () => {
   const w = await instance014();
   assert.ok((await w.old.admit({ actor: ROOT, principal: CI })).ok);
-  const { serviceBindings } = tablesOf(db.owner);
   const ISSUER = 'https://token.actions.githubusercontent.com';
   const ORIGIN = 'https://secrets.acme.example';
   // As 0.14's app made them: no seal, and no origin, a column of 0.15's.
@@ -585,7 +574,6 @@ test("a binding made on 0.14, vouched for, is sealed with the instance it was ma
 test("0.14's chain broken since its newest checkpoint refuses the cutover: a vault entry edited past its MAC (VerifyChain)", async () => {
   const w = await instance014();
   assert.ok((await w.old.admit({ actor: ROOT, principal: ADA })).ok);
-  const { auditLog } = tablesOf(db.owner);
   await withLogUnlocked(db.owner, async (tx) => {
     await tx.update(auditLog).set({ metadata: '{"forged":true}' }).where(eq(auditLog.subjectPrincipal, ADA));
   });
@@ -641,7 +629,6 @@ test("0.14's writes refused once the cutover is there: a decision of 0.14's vaul
   assert.ok((await w.old.admit({ actor: ROOT, principal: ADA })).ok);
   const vault = await vault015(w.config);
   assert.deepEqual(await cutOver(vault), { ok: true, done: true });
-  const { principals } = tablesOf(db.owner);
   const member = async () => (await db.owner.select().from(principals).where(eq(principals.principal, ADA)))[0];
   const before = await member();
   const [{ entries }] = await rows<{ entries: string | number }>(db.owner, sql`SELECT count(*) AS entries FROM audit_log`);
@@ -663,7 +650,6 @@ test("0.14's writes refused once the cutover is there: a decision of 0.14's vaul
 test("a binding's genesis is held to its scope too, as JSON: a row whose scope moved past the cutover's read is not sealed; one whose scope is none 0.14 writes is left unsealed, reported (PR 9a's P3)", async () => {
   const w = await instance014();
   assert.ok((await w.old.admit({ actor: ROOT, principal: CI })).ok);
-  const { serviceBindings } = tablesOf(db.owner);
   const ISSUER = 'https://token.actions.githubusercontent.com';
   const binding = async (scope: string | null) => {
     const id = randomUUID();

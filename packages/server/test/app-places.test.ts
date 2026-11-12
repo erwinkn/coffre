@@ -16,7 +16,7 @@ import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { patchProject } from '../src/api/projects.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { resolvePath } from '../src/db/queries.ts';
-import { auditLog, environments, logChanges, checkpointFence, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
+import { auditLog, environments, logChanges, checkpointFence, projects, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
 import { clientFor, contextFor, credentialsLogged, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 

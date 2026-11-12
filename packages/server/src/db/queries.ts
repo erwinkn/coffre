@@ -4,11 +4,11 @@ import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
 import { MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type LoggedChange, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
-import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import { later, prepared, type Queryable, type Transaction } from '@coffre/db';
 import { accessAllowed, changesOf, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
-import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
+import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
 import { alias } from 'drizzle-orm/pg-core';
 import { and, asc, count, countDistinct, desc, eq, exists, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, lte, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
@@ -16,6 +16,7 @@ import { and, asc, count, countDistinct, desc, eq, exists, getTableColumns, getT
 import { answerQuery, settingsQuery } from './answers.ts';
 import { readsBy } from './reads.ts';
 import { authMac, AuthRowTampered, checkAuthRow, issuedBy, issuingBinding, signedAs, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
+import { auditChainHead, auditLog, credentials, deviceLogins, dismissedKeys, environments, grants, identities, logChanges, mcpApprovals, mcpConnections, oauthClients, passkeys, principals, projects, secretReferences, secrets, secretVersions, serviceBindings, spentIdTokens } from '@coffre/db/schema';
 
 /**
  * Every query coffre runs, and nowhere else: named reads returning all
@@ -23,9 +24,7 @@ import { authMac, AuthRowTampered, checkAuthRow, issuedBy, issuingBinding, signe
  * The server works on what these return and never writes SQL; lint keeps
  * drizzle out of the server and the pages.
  *
- * Each query builds on the tables of the database it is given (`tablesOf`).
- * The server names a table for the generic writes by importing schema.ts,
- * and `own` finds it among them.
+ * The server names a table for the generic writes by importing schema.ts.
  *
  * Ordinary writes do not check first and do not read back. A unique constraint
  * answers "is it taken", and a conditional update's row count answers "was
@@ -62,7 +61,7 @@ function matching<T extends Table>(table: T, match: Match<T>): SQL | undefined {
 
 export async function insert<T extends Table>(db: Queryable, table: T, rows: NewRow<T> | NewRow<T>[]): Promise<void> {
   if (Array.isArray(rows) && rows.length === 0) return;
-  await db.insert(own(db, table)).values(rows as never);
+  await db.insert(table).values(rows as never);
 }
 
 /** Insert the rows whose unique keys are free; returns how many that was. */
@@ -73,7 +72,7 @@ export async function insertIfAbsent<T extends Table>(
 ): Promise<number> {
   const all = Array.isArray(rows) ? rows : [rows];
   if (all.length === 0) return 0;
-  return dialect.insertIfAbsent(db, own(db, table), all);
+  return dialect.insertIfAbsent(db, table, all);
 }
 
 /** Insert the rows, or where one repeats the unique key `target`, overwrite its `columns`. */
@@ -84,7 +83,7 @@ export async function upsert<T extends Table>(
   { target, columns }: { target: (keyof Row<T>)[]; columns: (keyof Row<T>)[] },
 ): Promise<void> {
   if (rows.length === 0) return;
-  await dialect.upsert(db, own(db, table), rows, target, columns);
+  await dialect.upsert(db, table, rows, target, columns);
 }
 
 /**
@@ -97,8 +96,7 @@ export async function update<T extends Table>(
   match: Match<T>,
   set: Partial<NewRow<T>>,
 ): Promise<number> {
-  const mine = own(db, table);
-  return changedRows(await db.update(mine).set(set as never).where(matching(mine, match)));
+  return changedRows(await db.update(table).set(set as never).where(matching(table, match)));
 }
 
 /**
@@ -106,7 +104,7 @@ export async function update<T extends Table>(
  * handed to a held write (`heldWrites`) whose write then went down today's path instead. Losing it never costs the request.
  */
 export async function touchCredential(db: Queryable, touch: { credential: string; at: Date; ip: string | null }): Promise<void> {
-  await update(db, tablesOf(db).credentials, { id: touch.credential }, { lastUsedAt: touch.at, lastUsedIp: touch.ip }).catch(() => 0);
+  await update(db, credentials, { id: touch.credential }, { lastUsedAt: touch.at, lastUsedIp: touch.ip }).catch(() => 0);
 }
 
 /** State changes authenticate the old row first and cannot overwrite a concurrent change. */
@@ -119,9 +117,8 @@ export async function updateAuth<
   match: Match<T>,
   changes: Partial<NewRow<T>>,
 ): Promise<number> {
-  const mine = own(db, table);
   const kind = signedAs(getTableName(table));
-  const rows = await db.select().from(mine as Table).where(matching(mine, match));
+  const rows = await db.select().from(table as Table).where(matching(table, match));
   let changed = 0;
   for (const raw of rows) {
     const row = raw as AuthRow;
@@ -140,8 +137,7 @@ export async function updateAuth<
  * are once the lock is ours. Only for real races; each caller says which.
  */
 export async function lock<T extends Table>(tx: Transaction, table: T, match: Match<T>): Promise<Row<T>[]> {
-  const mine = own(tx, table);
-  return (await forUpdate(tx, tx.select().from(mine as Table).where(matching(mine, match)))) as Row<T>[];
+  return (await tx.select().from(table as Table).where(matching(table, match)).for('update')) as Row<T>[];
 }
 
 /**
@@ -152,8 +148,7 @@ export async function lock<T extends Table>(tx: Transaction, table: T, match: Ma
  * project is read off the environment, once for the statement (an init plan),
  * and the rows are a range of that environment's own.
  */
-function inEnvironment(db: Queryable, environmentId: string): SQL {
-  const { secrets, environments } = tablesOf(db);
+function inEnvironment(environmentId: string): SQL {
   return and(
     eq(secrets.environmentId, environmentId),
     eq(secrets.projectId, sql`(SELECT ${environments.projectId} FROM ${environments} WHERE ${environments.id} = ${environmentId})`),
@@ -214,7 +209,6 @@ export async function resolvePath(
   path: { project: string; environment?: string; key?: string },
   { tombstones = false, owner = null }: { tombstones?: boolean; owner?: string | null } = {},
 ): Promise<ResolvedPath | null> {
-  const { projects, environments, secrets } = tablesOf(db);
   const alive = (slug: AnyColumn) => (tombstones ? undefined : standing(slug));
   // `dev@me`: dev first, then its personal config owned by whoever asks, and the key in that.
   const personalSlug = path.environment === undefined ? null : personalOf(path.environment);
@@ -301,14 +295,12 @@ export function resolvedPlace(
 /** When each environment was made, by id. */
 export async function environmentsCreatedAt(db: Queryable, ids: readonly string[]): Promise<Map<string, Date>> {
   if (ids.length === 0) return new Map();
-  const { environments } = tablesOf(db);
   const rows = await db.select({ id: environments.id, createdAt: environments.createdAt }).from(environments).where(inArray(environments.id, [...ids]));
   return new Map(rows.map((row) => [row.id, row.createdAt]));
 }
 
 /** `owner`'s personal config of an environment, deleted ones apart: one at most (`environments_parent_id_owner_key`). */
 export async function personalConfig(db: Queryable, parentId: string, owner: string) {
-  const { environments } = tablesOf(db);
   const [row] = await db
     .select()
     .from(environments)
@@ -319,7 +311,6 @@ export async function personalConfig(db: Queryable, parentId: string, owner: str
 /** Live environments' paths by id, `market/dev`, as they are named now: one deleted, or of a project deleted, is left out. */
 export async function environmentPaths(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
   if (ids.length === 0) return new Map();
-  const { projects, environments } = tablesOf(db);
   const rows = await db
     .select({ id: environments.id, environment: environments.slug, project: projects.slug })
     .from(environments)
@@ -341,7 +332,6 @@ export function policyNow(db: Queryable, ids: readonly string[]): Promise<{ seq:
   // included, which could otherwise rename a protected environment before this reads it (postgres-js's `flush`).
   // Nothing protected, the newest change alone.
   if (ids.length === 0) return newestVaultSeq(db, 'policy').then((seq) => ({ seq, slugs: new Map<string, string>() }));
-  const { projects, environments } = tablesOf(db);
   const live = sql`${and(inArray(environments.id, [...ids]), standing(environments.slug))}
     AND EXISTS (SELECT 1 FROM ${projects} WHERE ${projects.id} = ${environments.projectId} AND ${standing(projects.slug)})`;
   // One row for the newest change, whatever the environments: one more per live environment, each beside it.
@@ -440,7 +430,6 @@ export async function places(
  * many rows as environments, however many keys they hold, where `places` counts each one's (review r7 of #490).
  */
 export async function environmentIdsOf(db: Queryable, projectIds: readonly string[]): Promise<Map<string, string[]>> {
-  const { environments } = tablesOf(db);
   const unique = [...new Set(projectIds)];
   const found = new Map<string, string[]>(unique.map((id) => [id, []]));
   for (let start = 0; start < unique.length; start += 1000) {
@@ -453,7 +442,6 @@ export async function environmentIdsOf(db: Queryable, projectIds: readonly strin
 
 /** The projects and their environments, a row each (a project with none, a row of its own), and nothing of their keys. */
 function placeRows(db: Queryable, tombstones: boolean, within?: readonly string[]) {
-  const { projects, environments } = tablesOf(db);
   const alive = (slug: AnyColumn) => (tombstones ? undefined : standing(slug));
   return db
     .select({ project: projects, environment: environments })
@@ -481,7 +469,6 @@ function placeRows(db: Queryable, tombstones: boolean, within?: readonly string[
  * scattered updates have cleared the visibility map. Only counts kept as the keys change would bound it (T226).
  */
 function countedPlaceRows(db: Queryable, within?: readonly string[]) {
-  const { projects, environments, secrets } = tablesOf(db);
   const counted = db
     .select({ id: environments.id })
     .from(environments)
@@ -538,7 +525,6 @@ const everyPlace = prepared((db) => placeRows(db, true));
 
 /** The folder each project is listed in, for those in one. */
 export async function projectFolderOf(db: Queryable): Promise<Map<string, string>> {
-  const { projects } = tablesOf(db);
   const rows = await db.select({ id: projects.id, folder: projects.folder }).from(projects).where(isNotNull(projects.folder));
   return new Map(rows.map((row) => [row.id, row.folder!]));
 }
@@ -549,7 +535,6 @@ export async function projectFolderOf(db: Queryable): Promise<Map<string, string
  * the folder moves.
  */
 export async function projectsInFolder(db: Queryable, folder: string): Promise<{ id: string; slug: string; environments: { id: string; slug: string }[] }[]> {
-  const { projects, environments } = tablesOf(db);
   const rows = (await db
     .select({ id: projects.id, slug: projects.slug })
     .from(projects)
@@ -565,33 +550,29 @@ export async function projectsInFolder(db: Queryable, folder: string): Promise<{
 
 /** An environment's secrets filed in `folder`, archived ones too, by key. */
 export async function secretsInFolder(db: Queryable, environmentId: string, folder: string): Promise<{ id: string; key: string }[]> {
-  const { secrets } = tablesOf(db);
   return db
     .select({ id: secrets.id, key: secrets.key })
     .from(secrets)
-    .where(and(inEnvironment(db, environmentId), eq(secrets.folder, folder)))
+    .where(and(inEnvironment(environmentId), eq(secrets.folder, folder)))
     .orderBy(asc(secrets.key));
 }
 
 /** The folder each of an environment's secrets is listed in, for those in one. */
 export async function secretFolderOf(db: Queryable, environmentId: string): Promise<Map<string, string>> {
-  const { secrets } = tablesOf(db);
   const rows = await db
     .select({ id: secrets.id, folder: secrets.folder })
     .from(secrets)
-    .where(and(inEnvironment(db, environmentId), isNotNull(secrets.folder)));
+    .where(and(inEnvironment(environmentId), isNotNull(secrets.folder)));
   return new Map(rows.map((row) => [row.id, row.folder!]));
 }
 
 /** File a project in `folder`, or in none. */
 export async function fileProject(tx: Transaction, projectId: string, folder: string | null): Promise<void> {
-  const { projects } = tablesOf(tx);
   await tx.update(projects).set({ folder }).where(eq(projects.id, projectId));
 }
 
 /** File secrets in folders, or in none: one update per folder. */
 export async function fileSecrets(tx: Transaction, rows: { secretId: string; folder: string | null }[]): Promise<void> {
-  const { secrets } = tablesOf(tx);
   for (const folder of new Set(rows.map((row) => row.folder))) {
     const ids = rows.filter((row) => row.folder === folder).map((row) => row.secretId);
     await tx.update(secrets).set({ folder }).where(inArray(secrets.id, ids));
@@ -604,7 +585,6 @@ export async function fileSecrets(tx: Transaction, rows: { secretId: string; fol
  */
 export async function distinctSecretCounts(db: Queryable, environmentIds: string[]): Promise<Map<string, number>> {
   if (environmentIds.length === 0) return new Map();
-  const { secrets } = tablesOf(db);
   const rows = await db
     .select({ projectId: secrets.projectId, count: countDistinct(secrets.key) })
     .from(secrets)
@@ -636,7 +616,6 @@ export async function deletionScope(db: Queryable, place: Doomed): Promise<{
   /** Members with no instance role, whose every live grant is among `grants`. */
   stranded: string[];
 }> {
-  const { secrets, secretVersions, grants, principals, environments } = tablesOf(db);
   const under = secretsUnder(secrets, place);
   // Every grant on the instance, the place's and all others: few rows, and what tells who is left holding nothing.
   const [going, [keys], [versions], held] = await Promise.all([
@@ -693,7 +672,6 @@ function holdsValue(secretVersions: Tables['secretVersions']): SQL {
  * Returns how many still held a value.
  */
 export async function eraseVersions(tx: Transaction, place: Doomed): Promise<number> {
-  const { secrets, secretVersions } = tablesOf(tx);
   const under = tx.select({ id: secrets.id }).from(secrets).where(secretsUnder(secrets, place));
   const empty = Buffer.alloc(0);
   return changedRows(await tx.update(secretVersions)
@@ -703,7 +681,6 @@ export async function eraseVersions(tx: Transaction, place: Doomed): Promise<num
 
 /** The ids of the live keys under a place, archived ones apart: those its deletion erases with 0.15's log. */
 export async function liveSecretsUnder(db: Queryable, place: Doomed): Promise<string[]> {
-  const { secrets } = tablesOf(db);
   return (await db.select({ id: secrets.id }).from(secrets).where(and(secretsUnder(secrets, place), isNull(secrets.archivedAt)))).map((row) => row.id);
 }
 
@@ -715,7 +692,6 @@ export async function liveSecretsUnder(db: Queryable, place: Doomed): Promise<st
  */
 export async function tombstoneEnvironments(tx: Transaction, going: readonly string[]): Promise<void> {
   if (going.length === 0) return;
-  const { environments } = tablesOf(tx);
   await tx.update(environments).set({ slug: sql`${environments.slug} || ${deletedWithProject('')}` }).where(inArray(environments.id, [...going]));
 }
 
@@ -727,7 +703,6 @@ export async function tombstoneEnvironments(tx: Transaction, going: readonly str
  * before it commits.
  */
 export async function tombstoneSlug(db: Queryable, slug: string, day: Date, within: { projectId: string } | null): Promise<string> {
-  const { projects, environments } = tablesOf(db);
   const base = tombstoneOf(slug, day);
   const rows = within === null
     ? await db.select({ slug: projects.slug }).from(projects).where(like(projects.slug, `${base}%`))
@@ -753,8 +728,7 @@ export async function tombstoneSlug(db: Queryable, slug: string, day: Date, with
  * 288 pages once another key had 5,000 newer rows, 4 before;
  * `request-cost.alone.ts`). Only the holder index serves this order.
  */
-function ofNewestReference(db: Queryable, holder: AnyColumn | SQL, value: SQL): SQL<string | null> {
-  const { secretReferences } = tablesOf(db);
+function ofNewestReference(holder: AnyColumn | SQL, value: SQL): SQL<string | null> {
   return sql<string | null>`(SELECT CASE WHEN ${secretReferences.secretId} = ${holder} THEN ${value} END FROM ${secretReferences}
     WHERE ${secretReferences.secretId} <= ${holder} ORDER BY ${secretReferences.secretId} DESC, ${secretReferences.createdSeq} DESC LIMIT 1)`;
 }
@@ -775,11 +749,10 @@ export type SecretRead = ObjectRead<SecretColumns> & { archived: boolean };
  * key under a place, archived ones included.
  */
 export async function secretObjects(db: Queryable, by: { ids: readonly string[] } | { under: Doomed }): Promise<Map<string, SecretRead>> {
-  const { secrets, secretVersions, secretReferences } = tablesOf(db);
   // Its newest reference row's source, unless that row has ended (`ended_at`): the vault's end of it, logged.
-  const source = ofNewestReference(db, secrets.id, sql`CASE WHEN ${secretReferences.endedAt} IS NULL THEN ${secretReferences.sourceSecretId} END`);
+  const source = ofNewestReference(secrets.id, sql`CASE WHEN ${secretReferences.endedAt} IS NULL THEN ${secretReferences.sourceSecretId} END`);
   // And that row's id, which the object holds beside its source.
-  const reference = ofNewestReference(db, secrets.id, sql`CASE WHEN ${secretReferences.endedAt} IS NULL THEN ${secretReferences.id} END`);
+  const reference = ofNewestReference(secrets.id, sql`CASE WHEN ${secretReferences.endedAt} IS NULL THEN ${secretReferences.id} END`);
   const read = (where: SQL) => db
     .select({
       id: secrets.id,
@@ -834,7 +807,6 @@ export async function secretObjects(db: Queryable, by: { ids: readonly string[] 
  * archival, apart from its own.
  */
 export async function environmentObjects(db: Queryable, by: { ids: readonly string[] } | { projectId: string }): Promise<Map<string, ObjectRead<EnvironmentColumns>>> {
-  const { environments, projects } = tablesOf(db);
   if ('ids' in by && by.ids.length === 0) return new Map();
   const rows = await db
     .select({
@@ -852,7 +824,7 @@ export async function environmentObjects(db: Queryable, by: { ids: readonly stri
     .leftJoin(projects, eq(projects.id, environments.projectId))
     .where('ids' in by ? inArray(environments.id, [...new Set(by.ids)]) : eq(environments.projectId, by.projectId));
   return new Map(rows.map(({ archivedAt, projectArchived, seal, ...row }) => [row.id, {
-    columns: { ...row, protected: row.protected ?? null, archived: archivedAt !== null, projectArchived: Boolean(projectArchived) },
+    columns: { ...row, protected: row.protected ?? null, archived: archivedAt !== null, projectArchived },
     seal: seal ?? null,
   }]));
 }
@@ -881,7 +853,6 @@ export function memberOf(principal: string): { type: 'user' | 'service'; id: str
  * reads holds until it commits.
  */
 export async function memberStanding(db: Queryable, principal: string): Promise<{ status: string; generation: number; accessSeq: bigint } | null> {
-  const { principals } = tablesOf(db);
   const [row] = await db
     .select({ status: principals.status, generation: principals.generation, accessSeq: principals.accessSeq })
     .from(principals)
@@ -899,8 +870,7 @@ export async function memberStanding(db: Queryable, principal: string): Promise<
  * answers it from its cache.
  */
 export async function newestAccessSeq(db: Queryable, principal: string): Promise<bigint | null> {
-  const { principals } = tablesOf(db);
-  const [row] = await db.select({ seq: principals.accessSeq, now: clock(db) }).from(principals).where(eq(principals.principal, principal));
+  const [row] = await db.select({ seq: principals.accessSeq, now: clock() }).from(principals).where(eq(principals.principal, principal));
   return row?.seq ?? null;
 }
 
@@ -918,15 +888,14 @@ export async function wayInStands(
   db: Queryable,
   way: { principal: string; generation: number; credentialId: string | null; bindingId?: string | null; connectionId: string | null },
 ): Promise<boolean> {
-  const { principals, credentials, mcpConnections, serviceBindings } = tablesOf(db);
   const credential = way.credentialId === null ? sql`1 = 1` : sql`EXISTS (SELECT 1 FROM ${credentials} WHERE ${credentials.id} = ${way.credentialId}
     AND ${credentials.revokedAt} IS NULL AND ${credentials.generation} = ${way.generation})`;
   const connection = way.connectionId === null ? sql`1 = 1` : sql`EXISTS (SELECT 1 FROM ${mcpConnections} WHERE ${mcpConnections.id} = ${way.connectionId}
     AND ${mcpConnections.revokedAt} IS NULL AND ${mcpConnections.generation} = ${way.generation})`;
   const binding = way.bindingId == null ? sql`1 = 1` : sql`EXISTS (SELECT 1 FROM ${serviceBindings} WHERE ${serviceBindings.id} = ${way.bindingId}
-    AND ${serviceBindings.revokedAt} IS NULL AND ${serviceBindings.generation} = ${way.generation}) AND NOT ${hasTombstone(db, way.bindingId)}`;
+    AND ${serviceBindings.revokedAt} IS NULL AND ${serviceBindings.generation} = ${way.generation}) AND NOT ${hasTombstone(way.bindingId)}`;
   const [row] = await db
-    .select({ status: principals.status, generation: principals.generation, stands: truth(sql`${credential} AND ${connection} AND ${binding}`), now: clock(db) })
+    .select({ status: principals.status, generation: principals.generation, stands: truth(sql`${credential} AND ${connection} AND ${binding}`), now: clock() })
     .from(principals)
     .where(eq(principals.principal, way.principal));
   return row !== undefined && row.status === 'active' && row.generation === way.generation && row.stands;
@@ -938,7 +907,6 @@ export async function wayInStands(
  * many active people hold each instance role.
  */
 export async function roleHolders(db: Queryable): Promise<{ roles: Map<string, number>; instanceRoles: Map<InstanceRole, number> }> {
-  const { grants, principals } = tablesOf(db);
   const [granted, people] = await Promise.all([
     db.select({ role: grants.role, count: count() }).from(grants).groupBy(grants.role),
     db.select({ owner: principals.owner, role: principals.role, scope: principals.scope })
@@ -962,7 +930,6 @@ export async function roleHolders(db: Queryable): Promise<{ roles: Map<string, n
  * database has them.
  */
 export async function memberHoldings(db: Queryable, now: Date): Promise<{ principal: string; service: boolean; role: InstanceRole; scope: Scope; grants: StoredGrant[] }[]> {
-  const { principals } = tablesOf(db);
   const [rows, granted] = await Promise.all([
     db.select({ principal: principals.principal, owner: principals.owner, role: principals.role, scope: principals.scope })
       .from(principals)
@@ -1073,34 +1040,33 @@ export type MemberAccessRows = {
  *   WHERE m.principal = $1
  */
 export async function memberAccess(db: Queryable, principal: string, now: Date): Promise<MemberAccessRows> {
-  const { principals: m, grants: g, environments: e, projects: p, auditLog: log } = tablesOf(db);
-  const place = sql`coalesce(${g.projectId}, ${e.projectId})`;
-  const found = findingsOf(db, principal);
+  const place = sql`coalesce(${grants.projectId}, ${environments.projectId})`;
+  const found = findingsOf(principal);
   // Their newest access entry, one step of `audit_log_access_idx` (`keyedBy`): as the greatest `seq` of their entries,
   // Postgres could walk the vault's back past every read about them since (T245, R48).
-  const changed = keyedBy(log.subjectPrincipal, log.seq, 'desc', sql`ARRAY[${m.principal}]`);
+  const changed = keyedBy(auditLog.subjectPrincipal, auditLog.seq, 'desc', sql`ARRAY[${principals.principal}]`);
   const query = sql`
-    SELECT ${m.status} AS status, ${m.owner} AS owner, ${m.role} AS member_role, ${m.scope} AS scope, ${m.statusChangedBy} AS status_changed_by,
+    SELECT ${principals.status} AS status, ${principals.owner} AS owner, ${principals.role} AS member_role, ${principals.scope} AS scope, ${principals.statusChangedBy} AS status_changed_by,
       ${found.legacy} AS found_seq, ${found.named} AS found_named,
-      (SELECT CAST(${log.seq} AS text) FROM ${log} WHERE ${accessAllowed()} AND ${changed.where}
+      (SELECT CAST(${auditLog.seq} AS text) FROM ${auditLog} WHERE ${accessAllowed()} AND ${changed.where}
         ORDER BY ${sql.join(changed.orderBy, sql`, `)} LIMIT 1) AS changed_seq,
       x.kind, x.project_id, x.project_slug, x.environment_id, x.environment_slug, x.role, x.expires_at
-    FROM ${m}
+    FROM ${principals}
     LEFT JOIN (
-      SELECT 'grant' AS kind, ${g.principal} AS principal, ${place} AS project_id, ${p.slug} AS project_slug,
-        ${g.environmentId} AS environment_id, ${e.slug} AS environment_slug, ${g.role} AS role, ${g.expiresAt} AS expires_at
-      FROM ${g}
-      LEFT JOIN ${e} ON ${e.id} = ${g.environmentId}
-      JOIN ${p} ON ${p.id} = ${place}
-      WHERE ${g.principal} = ${principal} AND (${g.expiresAt} IS NULL OR ${g.expiresAt} > ${now.getTime()})
+      SELECT 'grant' AS kind, ${grants.principal} AS principal, ${place} AS project_id, ${projects.slug} AS project_slug,
+        ${grants.environmentId} AS environment_id, ${environments.slug} AS environment_slug, ${grants.role} AS role, ${grants.expiresAt} AS expires_at
+      FROM ${grants}
+      LEFT JOIN ${environments} ON ${environments.id} = ${grants.environmentId}
+      JOIN ${projects} ON ${projects.id} = ${place}
+      WHERE ${grants.principal} = ${principal} AND (${grants.expiresAt} IS NULL OR ${grants.expiresAt} > ${now.getTime()})
       UNION ALL
-      SELECT 'project', CAST(${principal} AS text), ${p.id}, ${p.slug}, NULL, NULL, NULL, NULL
-      FROM ${p}
-      WHERE EXISTS (SELECT 1 FROM ${m} WHERE ${m.principal} = ${principal} AND ${m.scope} IS NOT NULL)
-    ) x ON x.principal = ${m.principal}
-    WHERE ${m.principal} = ${principal}`;
+      SELECT 'project', CAST(${principal} AS text), ${projects.id}, ${projects.slug}, NULL, NULL, NULL, NULL
+      FROM ${projects}
+      WHERE EXISTS (SELECT 1 FROM ${principals} WHERE ${principals.principal} = ${principal} AND ${principals.scope} IS NOT NULL)
+    ) x ON x.principal = ${principals.principal}
+    WHERE ${principals.principal} = ${principal}`;
   type Row = {
-    status: string; owner: boolean | number; member_role: string | null; scope: string | null; status_changed_by: string;
+    status: string; owner: boolean; member_role: string | null; scope: string | null; status_changed_by: string;
     found_seq: string | null; found_named: number | string; changed_seq: string | null;
     kind: 'grant' | 'project' | null; project_id: string | null; project_slug: string | null;
     environment_id: string | null; environment_slug: string | null; role: string | null; expires_at: string | number | null;
@@ -1112,7 +1078,7 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
   return {
     member: {
       status: first.status as 'active' | 'removed',
-      ...storedRole({ owner: first.owner === true || first.owner === 1, role: first.member_role, scope: first.scope }),
+      ...storedRole({ owner: first.owner, role: first.member_role, scope: first.scope }),
       tampered: findingStands({ legacy: big(first.found_seq), access: big(first.changed_seq), named: Number(first.found_named) === 1 }),
       admittedBy: first.status_changed_by,
     },
@@ -1154,13 +1120,12 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
     // Their newest access entry, one step of `audit_log_access_idx` (`keyedBy`), and their newest change, of the object's
     // index (`changesOf`): as an `EXISTS` of an entry, Postgres took a match among the entries about them for likely and
     // scanned the log, past every refusal about them (1,604 pages behind 20,000; T245, R48, review r8).
-    const { auditLog: log } = tablesOf(db);
-    const access = keyedBy(log.subjectPrincipal, log.seq, 'desc', sql`ARRAY[${principal}]`);
+    const access = keyedBy(auditLog.subjectPrincipal, auditLog.seq, 'desc', sql`ARRAY[${principal}]`);
     const change = changesOf('c', logObject('principal', principal));
     const rows = await dialect.rowsOf<{ principal: string }>(db, sql`SELECT CAST(${principal} AS text) AS principal
       WHERE NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = ${principal})
         AND ((SELECT c.number FROM log_changes c WHERE ${change.where} ORDER BY ${change.order} LIMIT 1) IS NOT NULL
-          OR (SELECT ${log.seq} FROM ${log} WHERE ${accessAllowed()} AND ${access.where} ORDER BY ${sql.join(access.orderBy, sql`, `)} LIMIT 1) IS NOT NULL)`);
+          OR (SELECT ${auditLog.seq} FROM ${auditLog} WHERE ${accessAllowed()} AND ${access.where} ORDER BY ${sql.join(access.orderBy, sql`, `)} LIMIT 1) IS NOT NULL)`);
     return rows.map((row) => row.principal);
   }
   const next = (after: SQL | null) => sql`(SELECT subject_principal FROM audit_log WHERE ${accessAllowed()} AND subject_principal ${after === null ? sql`IS NOT NULL` : sql`> ${after}`} ORDER BY subject_principal LIMIT 1)`;
@@ -1200,7 +1165,6 @@ export async function members(
   filter: { member?: { type: string; id: string }; sessions?: false; standing?: false; kinds?: readonly CredentialKind[] },
   now: Date,
 ): Promise<MemberRow[]> {
-  const { principals, credentials, identities } = tablesOf(db);
   const principal = filter.member === undefined ? undefined : principalOf(filter.member);
   const of = (column: typeof principals.principal | typeof credentials.principal | typeof identities.principal) =>
     principal === undefined ? undefined : eq(column, principal);
@@ -1282,7 +1246,6 @@ export async function members(
  * fewer.
  */
 export async function memberActivity(db: Queryable, actorIds: string[], readAlready?: Awaited<ReturnType<typeof readsBy>>) {
-  const { auditLog, secrets, environments, projects } = tablesOf(db);
   const allowed = eq(auditLog.decision, 'allow');
   const entries = (where: SQL | undefined) => db
     .select({
@@ -1347,7 +1310,6 @@ export async function memberActivity(db: Queryable, actorIds: string[], readAlre
  */
 async function writtenBy(db: Queryable, members: readonly string[]): Promise<{ actor: string; at: number; secret: string; version: string }[]> {
   if (members.length === 0) return [];
-  const { logChanges } = tablesOf(db);
   const rows = await db.select({ actor: logChanges.actor, at: logChanges.at, payload: logChanges.payload }).from(logChanges)
     .where(and(recorded(logChanges.payload, 'written'), inArray(logChanges.actor, [...members])));
   // Ids of a payload's own, which a database writer may have written anything into: looked up only as ids.
@@ -1415,7 +1377,6 @@ export async function findIdentity(
   chainKey: Buffer,
   account: { provider: string; issuerHash: string; subject: string },
 ) {
-  const { identities } = tablesOf(db);
   const rows = await db
     .select()
     .from(identities)
@@ -1497,12 +1458,11 @@ export async function findCredential(
 }
 
 function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) => SQL, shown: 'answer' | 'settings' | null = null) {
-  const { credentials, identities, passkeys } = tablesOf(db);
   // The newest policy change, as `newestPolicySeq` reads it on its own.
   const newestPolicy = sql<string | number | null>`(${newestSeqQuery(db, 'policy')})`;
   return db
     .select({
-      credential: credentials, identity: identities, now: clock(db), policySeq: newestPolicy,
+      credential: credentials, identity: identities, now: clock(), policySeq: newestPolicy,
       // The passkey it names, by its primary key, and whether its person holds a live one (section 6.2 of passkeys.md).
       passkey: passkeys, passkeyHeld: heldSql(sql`${credentials.principal}`, sql`${credentials.generation}`),
       ...(shown === 'answer' ? { answer: sql<unknown>`(${answerQuery(sql`${credentials.principal}`)})` } : {}),
@@ -1538,9 +1498,8 @@ function heldSql(principal: SQL, generation: SQL): SQL<number | null> {
  * `principal` holds a live passkey at `generation`. One statement.
  */
 export async function passkeyBehind(db: Queryable, chainKey: Buffer, holder: { principal: string; generation: number; passkeyId: string | null }): Promise<PasskeyRead> {
-  const { passkeys } = tablesOf(db);
   const [row] = await db
-    .select({ passkey: passkeys, passkeyHeld: heldSql(sql`${holder.principal}`, sql`${holder.generation}`), now: clock(db) })
+    .select({ passkey: passkeys, passkeyHeld: heldSql(sql`${holder.principal}`, sql`${holder.generation}`), now: clock() })
     .from(sql`(SELECT 1) one`)
     .leftJoin(passkeys, holder.passkeyId === null ? sql`1 = 0` : eq(passkeys.id, holder.passkeyId));
   return (await passkeyOf(db, chainKey, holder, row!))!;
@@ -1590,7 +1549,6 @@ async function passkeyOf(
  * passed over, as no passkey): what a ceremony offers (`allowCredentials`) and an add excludes.
  */
 export async function livePasskeys(db: Queryable, chainKey: Buffer, principal: string, generation: number): Promise<PasskeyRow[]> {
-  const { passkeys } = tablesOf(db);
   const rows = await db.select().from(passkeys)
     .where(and(eq(passkeys.principal, principal), eq(passkeys.generation, generation), isNull(passkeys.removedAt)))
     .orderBy(asc(passkeys.createdAt));
@@ -1607,7 +1565,6 @@ export async function livePasskeys(db: Queryable, chainKey: Buffer, principal: s
  * (R64; review r2 of #500). By `passkeys_principal_idx`.
  */
 export async function passkeyHistory(db: Queryable, chainKey: Buffer, principal: string, generation: number): Promise<{ ever: number; live: number }> {
-  const { passkeys } = tablesOf(db);
   const rows = await db.select().from(passkeys).where(eq(passkeys.principal, principal));
   for (const row of rows) verifyAuthRow(chainKey, 'passkeys', row);
   return { ever: rows.length, live: rows.filter((row) => row.generation === generation && row.removedAt === null).length };
@@ -1630,7 +1587,6 @@ export async function signinMembers(
   account: { provider: string; issuerHash: string; subject: string },
   emails: readonly string[],
 ): Promise<Map<string, SigninMember>> {
-  const { principals, identities } = tablesOf(db);
   const bound = db
     .select({ principal: identities.principal })
     .from(identities)
@@ -1645,7 +1601,7 @@ export async function signinMembers(
       // Named in full: drizzle writes a column of the one table it selects from unqualified, which the subquery would read as its own.
       ever: sql<number>`(SELECT count(*) FROM passkeys ever WHERE ever.principal = principals.principal)`,
       live: sql<number>`(SELECT count(*) FROM passkeys live WHERE live.principal = principals.principal AND live.generation = principals.generation AND live.removed_at IS NULL)`,
-      now: clock(db),
+      now: clock(),
     })
     .from(principals)
     .where(candidates.length === 0 ? inArray(principals.principal, bound) : or(inArray(principals.principal, candidates), inArray(principals.principal, bound)));
@@ -1654,14 +1610,12 @@ export async function signinMembers(
 
 /** Whether a passkey row, anyone's, live or not, has this credential ID: what a first passkey's unique violation was. */
 export async function passkeyCredentialTaken(db: Queryable, credentialId: Buffer): Promise<boolean> {
-  const { passkeys } = tablesOf(db);
   const rows = await db.select({ id: passkeys.id }).from(passkeys).where(eq(passkeys.credentialId, credentialId)).limit(1);
   return rows.length > 0;
 }
 
 /** The passkey a response's credential ID names, whoever's, live or not; null for none. Its MAC is checked: a row that fails it throws (`verifyAuthRow`). */
 export async function passkeyByCredentialId(db: Queryable, chainKey: Buffer, credentialId: Buffer): Promise<PasskeyRow | null> {
-  const { passkeys } = tablesOf(db);
   const [row] = await db.select().from(passkeys).where(eq(passkeys.credentialId, credentialId)).limit(1);
   if (row === undefined) return null;
   verifyAuthRow(chainKey, 'passkeys', row);
@@ -1677,7 +1631,6 @@ export async function touchPasskey(
   tx: Queryable,
   touch: { id: string; principal: string; generation: number; issuedAt: Date; signCount: number },
 ): Promise<number> {
-  const { passkeys } = tablesOf(tx);
   return changedRows(
     await tx
       .update(passkeys)
@@ -1703,7 +1656,7 @@ export async function insertPasskey(
   },
 ): Promise<void> {
   const signed = { ...row, removedAt: null };
-  await insert(tx, tablesOf(tx).passkeys, { ...signed, authMac: authMac(chainKey, 'passkeys', signed) });
+  await insert(tx, passkeys, { ...signed, authMac: authMac(chainKey, 'passkeys', signed) });
 }
 
 /**
@@ -1723,7 +1676,6 @@ export function lockFactor(tx: Transaction, principal: string): Promise<unknown>
  * The ids it denied.
  */
 export async function denyApprovals(tx: Queryable, chainKey: Buffer, principal: string, at: Date, which: { unbacked: boolean }): Promise<string[]> {
-  const { deviceLogins } = tablesOf(tx);
   const rows = await tx.select().from(deviceLogins).where(and(
     eq(deviceLogins.principal, principal),
     eq(deviceLogins.decision, 'approved'),
@@ -1745,7 +1697,6 @@ export async function denyApprovals(tx: Queryable, chainKey: Buffer, principal: 
  * `removed_at`; a compare-and-set on the MAC read, so a row changed since is no row to remove. 1 if it moved, 0 if not.
  */
 export async function removePasskeyRow(tx: Queryable, chainKey: Buffer, row: PasskeyRow, by: { removedAt: Date; removedBy: string }): Promise<number> {
-  const { passkeys } = tablesOf(tx);
   const signed = { ...row, removedAt: by.removedAt };
   return changedRows(
     await tx
@@ -1757,7 +1708,6 @@ export async function removePasskeyRow(tx: Queryable, chainKey: Buffer, row: Pas
 
 /** A live passkey of the person's renamed (section 3.6): its name is outside the MAC, so nothing is signed again. 1 if it moved, 0 if not. */
 export async function renamePasskeyRow(tx: Queryable, passkey: { id: string; principal: string; generation: number }, name: string): Promise<number> {
-  const { passkeys } = tablesOf(tx);
   return changedRows(
     await tx
       .update(passkeys)
@@ -1772,7 +1722,6 @@ export async function renamePasskeyRow(tx: Queryable, passkey: { id: string; pri
  * the person's factor lock, and what their Passkeys tab lists. By `passkeys_principal_idx`.
  */
 export async function passkeysOf(db: Queryable, chainKey: Buffer, principal: string): Promise<PasskeyRow[]> {
-  const { passkeys } = tablesOf(db);
   const rows = await db.select().from(passkeys).where(eq(passkeys.principal, principal)).orderBy(asc(passkeys.createdAt));
   for (const row of rows) verifyAuthRow(chainKey, 'passkeys', row);
   return rows;
@@ -1833,14 +1782,13 @@ export async function serviceSignIns(
   now: Date,
   read: { tokens: boolean; bindings: boolean },
 ): Promise<{ credentials: CredentialRow[]; bindings: BindingRow[] }> {
-  const { credentials, serviceBindings } = tablesOf(db);
   const [held, bound] = await Promise.all([
     read.tokens
       ? db.select().from(credentials).where(and(like(credentials.principal, 'token:%'), isNull(credentials.revokedAt), gt(credentials.expiresAt, now)))
       : [],
     read.bindings
       ? db.select().from(serviceBindings)
-        .where(and(like(serviceBindings.principal, 'token:%'), isNull(serviceBindings.revokedAt), not(hasTombstone(db, sql`CAST(${serviceBindings.id} AS text)`))))
+        .where(and(like(serviceBindings.principal, 'token:%'), isNull(serviceBindings.revokedAt), not(hasTombstone(sql`CAST(${serviceBindings.id} AS text)`))))
         .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id))
       : [],
   ]);
@@ -1859,7 +1807,6 @@ export async function serviceSignIns(
  * which would otherwise refuse every change of the account's bindings.
  */
 export async function bindingsNow(db: Queryable, chainKey: Buffer, principal: string, generation: number): Promise<{ live: BindingRow[]; unrevoked: BindingRow[] }> {
-  const { serviceBindings } = tablesOf(db);
   const rows = await db
     .select()
     .from(serviceBindings)
@@ -1872,7 +1819,6 @@ export async function bindingsNow(db: Queryable, chainKey: Buffer, principal: st
 
 /** A binding of `principal`'s by id, as its row is, MAC or not: what the vault ends, whose seal it checks itself (PR 3a). */
 export async function bindingRow(db: Queryable, principal: string, id: string): Promise<BindingRow | null> {
-  const { serviceBindings } = tablesOf(db);
   const [row] = await db.select().from(serviceBindings).where(and(eq(serviceBindings.id, id), eq(serviceBindings.principal, principal)));
   return row ?? null;
 }
@@ -1896,7 +1842,6 @@ function liveAt(): SQL {
 }
 
 export async function issuedCredentials(db: Queryable, principal: string, bindingIds: readonly string[]): Promise<CredentialRow[]> {
-  const { credentials } = tablesOf(db);
   if (bindingIds.length === 0) return [];
   return db.select().from(credentials)
     .where(and(eq(credentials.principal, principal), inArray(credentials.createdBy, bindingIds.map((id) => `binding:${id}`)), isNull(credentials.revokedAt), gt(credentials.expiresAt, liveAt())));
@@ -1914,7 +1859,6 @@ export async function issuedCredentials(db: Queryable, principal: string, bindin
 export async function issuedSoonest(
   db: Queryable, principal: string, bindingIds: readonly string[], atMost: number, after: Date | null,
 ): Promise<{ id: string; bytes: number; expiresAt: Date }[]> {
-  const { credentials } = tablesOf(db);
   if (bindingIds.length === 0) return [];
   const length = (column: AnyColumn) => sql`coalesce(octet_length(${column}), 0)`;
   return db.select({ id: credentials.id, bytes: sql<number | string>`${length(credentials.scope)} + ${length(credentials.places)}`.mapWith(Number), expiresAt: credentials.expiresAt })
@@ -1933,7 +1877,6 @@ export async function issuedSoonest(
 
 /** How many credentials these bindings issued are still live (`issuedCredentials`): what a removal under way has left. */
 export async function liveIssued(db: Queryable, principal: string, bindingIds: readonly string[]): Promise<number> {
-  const { credentials } = tablesOf(db);
   if (bindingIds.length === 0) return 0;
   const [row] = await db.select({ n: count() }).from(credentials)
     .where(and(eq(credentials.principal, principal), inArray(credentials.createdBy, bindingIds.map((id) => `binding:${id}`)), isNull(credentials.revokedAt), gt(credentials.expiresAt, liveAt())));
@@ -1945,7 +1888,7 @@ export async function liveIssued(db: Queryable, principal: string, bindingIds: r
  * it reads a binding (`standingBinding`). Written once the vault's end was answered, which waits for its seal.
  */
 export async function bindingTombstoned(db: Queryable, bindingId: string): Promise<boolean> {
-  const [row] = await db.select({ tombstoned: truth(hasTombstone(db, bindingId)) }).from(sql`(SELECT 1) AS one`);
+  const [row] = await db.select({ tombstoned: truth(hasTombstone(bindingId)) }).from(sql`(SELECT 1) AS one`);
   return row?.tombstoned === true;
 }
 
@@ -1954,13 +1897,11 @@ export async function bindingTombstoned(db: Queryable, bindingId: string): Promi
  * row as it is, MAC or not, as a removal's end names the rows it ends whatever their MAC (Fable on PR 3a).
  */
 export async function closedBindings(db: Queryable, _chainKey: Buffer): Promise<BindingRow[]> {
-  const { serviceBindings } = tablesOf(db);
   return db.select().from(serviceBindings).where(and(isNotNull(serviceBindings.closedAt), isNull(serviceBindings.revokedAt))).orderBy(asc(serviceBindings.closedAt));
 }
 
 /** These credentials' rows, as they are, MAC or not: a removal's batch, read whole once chosen (`issuedSoonest`). */
 export async function credentialRows(db: Queryable, ids: readonly string[]): Promise<CredentialRow[]> {
-  const { credentials } = tablesOf(db);
   return ids.length === 0 ? [] : db.select().from(credentials).where(inArray(credentials.id, [...ids]));
 }
 
@@ -1969,7 +1910,6 @@ export async function credentialRows(db: Queryable, ids: readonly string[]): Pro
  * Null for none, or for a row that fails its MAC, which is reported.
  */
 export async function findBinding(db: Queryable, chainKey: Buffer, principal: string, id: string): Promise<BindingRow | null> {
-  const { serviceBindings } = tablesOf(db);
   const [row] = await db
     .select()
     .from(serviceBindings)
@@ -1987,7 +1927,6 @@ export async function findBinding(db: Queryable, chainKey: Buffer, principal: st
  */
 export async function tombstoned(db: Queryable, ids: readonly string[]): Promise<Set<string>> {
   if (ids.length === 0) return new Set();
-  const { auditLog } = tablesOf(db);
   const bindingId = sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`;
   const rows = await db
     .select({ id: bindingId })
@@ -1997,16 +1936,14 @@ export async function tombstoned(db: Queryable, ids: readonly string[]): Promise
 }
 
 /** The expression `audit_log_unbind_idx` indexes: the binding an entry names. */
-function namedBinding(db: Queryable): SQL<string> {
-  const { auditLog } = tablesOf(db);
+function namedBinding(): SQL<string> {
   return sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`;
 }
 
 /** Whether the binding `id` (a column or a value) has a tombstone: an allowed app `token.unbind` naming it. */
-export function hasTombstone(db: Queryable, id: SQL | string): SQL {
-  const { auditLog } = tablesOf(db);
+export function hasTombstone(id: SQL | string): SQL {
   return sql`EXISTS (SELECT 1 FROM ${auditLog} WHERE ${auditLog.author} = 'app' AND ${auditLog.action} = 'token.unbind'
-    AND ${auditLog.decision} = 'allow' AND ${namedBinding(db)} = ${id})`;
+    AND ${auditLog.decision} = 'allow' AND ${namedBinding()} = ${id})`;
 }
 
 /**
@@ -2035,7 +1972,6 @@ export async function exchangeCandidates(
   max: number,
   token: Buffer,
 ): Promise<{ bindings: BindingRow[]; spent: boolean | null; policySeq: bigint | null; newest: NewestChanges }> {
-  const { spentIdTokens, serviceBindings, principals } = tablesOf(db);
   const id = sql`${serviceBindings.id}::text`;
   const spent = db.select({ hash: spentIdTokens.hash }).from(spentIdTokens).where(eq(spentIdTokens.hash, token));
   const rows = await db
@@ -2043,8 +1979,8 @@ export async function exchangeCandidates(
       binding: serviceBindings,
       spent: truth(exists(spent)),
       policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy')})`,
-      ...newestChangeColumns(db, principal, serviceBindings.id),
-      now: clock(db),
+      ...newestChangeColumns(principal, serviceBindings.id),
+      now: clock(),
     })
     .from(serviceBindings)
     .innerJoin(principals, and(eq(principals.principal, serviceBindings.principal), eq(principals.generation, serviceBindings.generation)))
@@ -2056,7 +1992,7 @@ export async function exchangeCandidates(
       isNull(serviceBindings.closedAt),
       isNull(serviceBindings.policy),
       inArray(serviceBindings.profile, [...BEARER_PROFILES]),
-      sql`NOT ${hasTombstone(db, id)}`,
+      sql`NOT ${hasTombstone(id)}`,
     ))
     .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id))
     .limit(max + 1);
@@ -2091,7 +2027,7 @@ const NO_CHANGES: NewestChanges = { member: null, bindings: new Map() };
  * uncorrelated subquery, read once. As text, a JSON array in `loggedChange`'s
  * order.
  */
-export function newestChangeColumns(db: Queryable, principal: string, binding: AnyColumn): { memberChange: SQL<string | null>; bindingChange: SQL<string | null> } {
+export function newestChangeColumns(principal: string, binding: AnyColumn): { memberChange: SQL<string | null>; bindingChange: SQL<string | null> } {
   const newest = (object: SQL) => sql<string | null>`(SELECT json_build_array(c.number::text, c.at, c.request_id, c.actor, c.payload, encode(c.seal, 'base64'), encode(c.mac, 'base64'))::text
     FROM log_changes c WHERE ${changesOf('c', object).where} ORDER BY ${changesOf('c', object).order} LIMIT 1)`;
   return { memberChange: newest(sql`${logObject('principal', principal)}::uuid`), bindingChange: newest(sql`log_object('binding', ${binding}::text)`) };
@@ -2123,9 +2059,8 @@ function loggedChange(text: string | null): LoggedChange | null {
  * binding issued asks it, and the exchange asks it under its transaction.
  */
 export async function standingBinding(db: Queryable, chainKey: Buffer, bindingId: string, principal: string, generation: number): Promise<BindingRow | null> {
-  const { serviceBindings } = tablesOf(db);
   const [row] = await db
-    .select({ binding: serviceBindings, tombstoned: truth(hasTombstone(db, bindingId)), now: clock(db) })
+    .select({ binding: serviceBindings, tombstoned: truth(hasTombstone(bindingId)), now: clock() })
     .from(serviceBindings)
     .where(eq(serviceBindings.id, bindingId));
   return row !== undefined && bindingStands(chainKey, row, principal, generation) ? row.binding : null;
@@ -2155,14 +2090,13 @@ export async function exchangeStill(
   chainKey: Buffer,
   binding: { id: string; principal: string; generation: number },
 ): Promise<{ stands: boolean; scope: string | null }> {
-  const { serviceBindings, principals } = tablesOf(db);
   const [row] = await db
     .select({
       binding: serviceBindings,
-      tombstoned: truth(hasTombstone(db, binding.id)),
+      tombstoned: truth(hasTombstone(binding.id)),
       status: principals.status,
       generation: principals.generation,
-      now: clock(db),
+      now: clock(),
     })
     .from(serviceBindings)
     .leftJoin(principals, eq(principals.principal, binding.principal))
@@ -2195,7 +2129,6 @@ export type CredentialOrigin =
  */
 export async function originsOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, CredentialOrigin>> {
   if (credentialIds.length === 0) return new Map();
-  const { auditLog, logChanges } = tablesOf(db);
   const metadata = (field: string) => sql<string>`((${auditLog.metadata})::jsonb ->> ${sql.raw(`'${field}'`)})`;
   const entries = (action: 'token.exchange' | 'token.create', id: SQL<string>) => sql`
     SELECT ${id} AS credential, ${auditLog.seq} AS seq, ${auditLog.metadata} AS record, '0.14' AS log, ${sql.raw(`'${action}'`)} AS action, ${auditLog.actor} AS actor FROM ${auditLog}
@@ -2260,16 +2193,14 @@ export type RecordedChange = {
 export type ChangePoint = { at: number; number?: bigint };
 
 /** The changes below `point`, as `ChangePoint` says. */
-function below(db: Queryable, point: ChangePoint): SQL {
-  const { logChanges } = tablesOf(db);
+function below(point: ChangePoint): SQL {
   return point.number === undefined
     ? sql`${logChanges.at} <= ${point.at}`
     : sql`(${logChanges.at}, ${logChanges.number}) < (${point.at}, ${point.number})`;
 }
 
 /** The changes at `point` or above it: none of those below it. */
-function notBelow(db: Queryable, point: ChangePoint): SQL {
-  const { logChanges } = tablesOf(db);
+function notBelow(point: ChangePoint): SQL {
   return point.number === undefined
     ? sql`${logChanges.at} > ${point.at}`
     : sql`(${logChanges.at}, ${logChanges.number}) >= (${point.at}, ${point.number})`;
@@ -2323,7 +2254,6 @@ export async function sealedPage(
   },
   stop?: AbortController,
 ): Promise<{ rows: RecordedChange[]; more: boolean }> {
-  const { logChanges } = tablesOf(db);
   const of = (records: ChangeRecord[], actor: string | undefined) => and(recorded(logChanges.payload, ...records), actor === undefined ? undefined : eq(logChanges.actor, actor))!;
   // The reads one at a time, as `newest` takes them: a project's page of tens of thousands of environments, of a
   // member's two forms, is more reads than a call takes arguments (review r4 of #490), and more than an isolate
@@ -2406,11 +2336,10 @@ export const STATEMENTS_AT_ONCE = 4;
 async function newest<Row extends { number: string | number | bigint; at: string | number }>(
   db: Queryable, reads: Iterable<SQL>, columns: SQL, before: ChangePoint | undefined, take: number, skip = 0, stop = new AbortController(),
 ): Promise<Row[]> {
-  const { logChanges } = tablesOf(db);
   const statement = (part: readonly SQL[], take: number, skip: number) => {
     const each = part.map((where, i) => sql`SELECT * FROM (
       SELECT ${columns} FROM ${logChanges}
-       WHERE ${and(where, before === undefined ? undefined : below(db, before))}
+       WHERE ${and(where, before === undefined ? undefined : below(before))}
        ORDER BY ${logChanges.at} DESC, ${logChanges.number} DESC LIMIT ${skip + take}) AS ${sql.raw(`r${i}`)}`);
     return sql`${sql.join(each, sql` UNION ALL `)} ORDER BY "at" DESC, "number" DESC LIMIT ${take} OFFSET ${skip}`;
   };
@@ -2473,7 +2402,6 @@ export const HIDDEN_COUNTED = 1000;
  * index entries, each member's, from the indexes alone.
  */
 export async function sealedReach(db: Queryable, filter: { actors?: readonly string[]; before?: ChangePoint }): Promise<ChangePoint | null> {
-  const { logChanges } = tablesOf(db);
   const reads = recordActors(filter.actors, isMember).map((actor) => and(recorded(logChanges.payload, ...HIDDEN), actor === undefined ? undefined : eq(logChanges.actor, actor))!);
   if (reads.length === 0) return null;
   const [row] = await newest<{ number: string | number | bigint; at: string | number }>(
@@ -2493,7 +2421,6 @@ export async function sealedHidden(
   db: Queryable,
   filter: { actors?: readonly string[]; from?: ChangePoint; before?: ChangePoint },
 ): Promise<{ action: string; count: number }[]> {
-  const { logChanges } = tablesOf(db);
   const actors = filter.actors?.filter(isMember);
   if (actors?.length === 0) return [];
   const action = sql<string>`CASE WHEN ${recorded(logChanges.payload, 'issue')} THEN 'token.create' WHEN ${recorded(logChanges.payload, 'signOut')} THEN 'sign_out' ELSE 'token.revoke' END`;
@@ -2503,8 +2430,8 @@ export async function sealedHidden(
     .where(and(
       recorded(logChanges.payload, ...HIDDEN),
       actors === undefined ? undefined : inArray(logChanges.actor, actors),
-      filter.from === undefined ? undefined : notBelow(db, filter.from),
-      filter.before === undefined ? undefined : below(db, filter.before),
+      filter.from === undefined ? undefined : notBelow(filter.from),
+      filter.before === undefined ? undefined : below(filter.before),
     ))
     .groupBy(action);
 }
@@ -2515,14 +2442,13 @@ export async function sealedHidden(
  * on to the vault and the commit, which refuses it only there.
  */
 export async function tokenConsumed(db: Queryable, hash: Buffer): Promise<boolean> {
-  const { spentIdTokens } = tablesOf(db);
-  const [row] = await db.select({ hash: spentIdTokens.hash, now: clock(db) }).from(spentIdTokens).where(eq(spentIdTokens.hash, hash));
+  const [row] = await db.select({ hash: spentIdTokens.hash, now: clock() }).from(spentIdTokens).where(eq(spentIdTokens.hash, hash));
   return row !== undefined;
 }
 
 /** Spend a token: false when it was spent already, which the primary key decides. */
 export async function consumeToken(db: Queryable, hash: Buffer): Promise<boolean> {
-  return (await insertIfAbsent(db, tablesOf(db).spentIdTokens, { hash })) === 1;
+  return (await insertIfAbsent(db, spentIdTokens, { hash })) === 1;
 }
 
 /**
@@ -2545,7 +2471,6 @@ export async function pruneSpentTokens(db: Queryable, atMost: number): Promise<n
  * statement, under the log's head.
  */
 export async function exchangeToken(db: Queryable, token: Buffer, credential: NewRow<Tables['credentials']>, bindingId: string, at: Date): Promise<boolean> {
-  const { spentIdTokens, credentials, serviceBindings } = tablesOf(db);
   const spend = db.insert(spentIdTokens).values({ hash: token }).onConflictDoNothing().returning({ hash: spentIdTokens.hash });
   // The credential's row once for each token spent: none, or one. Its other columns take the database's defaults.
   const columns = Object.entries(getTableColumns(credentials)).filter(([name]) => credential[name as keyof typeof credential] !== undefined);
@@ -2563,7 +2488,7 @@ export async function insertBinding(db: Queryable, chainKey: Buffer, row: Omit<N
   id: string; principal: string; generation: number; profile: string; issuer: string; jwksUri: string; claims: string;
 }): Promise<void> {
   const signed = { ...row, revokedAt: null };
-  await insert(db, tablesOf(db).serviceBindings, { ...signed, authMac: authMac(chainKey, 'service_bindings', signed) });
+  await insert(db, serviceBindings, { ...signed, authMac: authMac(chainKey, 'service_bindings', signed) });
 }
 
 /**
@@ -2577,7 +2502,6 @@ export async function revokePriorMembership(
   generation: number,
   revokedBy: string,
 ): Promise<{ credentials: string[]; connections: string[] }> {
-  const { identities } = tablesOf(db);
   const revokedAt = new Date();
   for (const row of await db.select().from(identities).where(and(eq(identities.principal, principalOf(principal)), lt(identities.generation, generation), isNull(identities.revokedAt)))) {
     if (!checkAuthRow(chainKey, 'identities', row)) continue;
@@ -2586,14 +2510,13 @@ export async function revokePriorMembership(
   // Each connection it ends is a change of 0.15's log, as each credential is (T147): the caller prepared them from the same read.
   const connections: string[] = [];
   for (const row of await priorConnections(db, chainKey, principal, generation, revokedAt)) {
-    if ((await updateAuth(db, chainKey, tablesOf(db).mcpConnections, { id: row.id, authMac: row.authMac }, { revokedAt, revokedBy })) > 0) connections.push(row.id);
+    if ((await updateAuth(db, chainKey, mcpConnections, { id: row.id, authMac: row.authMac }, { revokedAt, revokedBy })) > 0) connections.push(row.id);
   }
   return { credentials: await revokeCredentialsWhere(db, chainKey, priorCredentials(principal, generation, revokedAt), { revokedAt, revokedBy }), connections };
 }
 
 /** A member's live MCP connections of a membership before `generation`, their MACs the app's: what `revokePriorMembership` ends. */
 export async function priorConnections(db: Queryable, chainKey: Buffer, principal: { type: string; id: string }, generation: number, at: Date): Promise<ConnectionRow[]> {
-  const { mcpConnections } = tablesOf(db);
   const rows = await db.select().from(mcpConnections).where(and(eq(mcpConnections.principal, principalOf(principal)), lt(mcpConnections.generation, generation),
     isNull(mcpConnections.revokedAt), gt(mcpConnections.expiresAt, at)));
   return rows.filter((row) => checkAuthRow(chainKey, 'mcp_connections', row));
@@ -2640,14 +2563,12 @@ export const credentialsBy = {
  * which `revokeCredentialsWhere` reads them again (`AppChanges.expect`).
  */
 export async function liveCredentialsWhere(db: Queryable, chainKey: Buffer, where: CredentialsWhere): Promise<CredentialRow[]> {
-  const { credentials } = tablesOf(db);
   const rows = await db.select().from(credentials).where(and(where(credentials as Tables['credentials']), isNull(credentials.revokedAt)));
   return rows.filter((row) => checkAuthRow(chainKey, 'credentials', row));
 }
 
 /** Revoke the live credentials `where` names, each a compare-and-set on its MAC, as `updateAuth` does: the ids it revoked. */
 export async function revokeCredentialsWhere(db: Queryable, chainKey: Buffer, where: CredentialsWhere, by: { revokedAt: Date; revokedBy: string }): Promise<string[]> {
-  const { credentials } = tablesOf(db);
   // Each its own compare-and-set, asked together: one round trip for them all, however many (review r1 of #529).
   const rows = await liveCredentialsWhere(db, chainKey, where);
   const done = await Promise.all(rows.map((row) => update(db, credentials as Tables['credentials'], { id: row.id, authMac: row.authMac, revokedAt: null }, { ...by, authMac: authMac(chainKey, 'credentials', { ...row, ...by }) })));
@@ -2687,12 +2608,11 @@ export async function insertOauthClient(db: Queryable, chainKey: Buffer, row: Om
   id: string; name: string; redirectUris: string;
 }): Promise<void> {
   const signed = { ...row, revokedAt: null };
-  await insert(db, tablesOf(db).oauthClients, { ...signed, authMac: authMac(chainKey, 'oauth_clients', signed) });
+  await insert(db, oauthClients, { ...signed, authMac: authMac(chainKey, 'oauth_clients', signed) });
 }
 
 /** A registered client, by its ID: null for none, a revoked one, or one that fails its MAC, which is reported. */
 export async function findOauthClient(db: Queryable, chainKey: Buffer, id: string): Promise<OauthClientRow | null> {
-  const { oauthClients } = tablesOf(db);
   const [row] = await db.select().from(oauthClients).where(eq(oauthClients.id, id));
   return row !== undefined && row.revokedAt === null && checkAuthRow(chainKey, 'oauth_clients', row) ? row : null;
 }
@@ -2704,7 +2624,6 @@ export async function findOauthClient(db: Queryable, chainKey: Buffer, id: strin
  * Returns how many were revoked.
  */
 export async function sweepOauthClients(db: Queryable, chainKey: Buffer, before: Date, limit: number): Promise<number> {
-  const { oauthClients, mcpConnections } = tablesOf(db);
   const unused = await db
     .select({ id: oauthClients.id })
     .from(oauthClients)
@@ -2723,7 +2642,7 @@ export async function insertConnection(db: Queryable, chainKey: Buffer, row: Omi
   scopes: string; redirectUri: string; codeHash: Buffer; codeChallenge: string; codeExpiresAt: Date; expiresAt: Date; passkeyId: string | null;
 }): Promise<void> {
   const signed = { ...row, refreshHash: null, refreshPreviousHash: null, revokedAt: null };
-  await insert(db, tablesOf(db).mcpConnections, { ...signed, authMac: authMac(chainKey, 'mcp_connections', signed) });
+  await insert(db, mcpConnections, { ...signed, authMac: authMac(chainKey, 'mcp_connections', signed) });
 }
 
 /**
@@ -2737,17 +2656,15 @@ export async function findConnection(
   chainKey: Buffer,
   by: { id: string } | { codeHash: Buffer } | { refreshHash: Buffer },
 ): Promise<(ConnectionRow & { previous: boolean; now: Date; passkeyRead: PasskeyRead }) | null> {
-  const { mcpConnections } = tablesOf(db);
   const where =
     'id' in by
       ? eq(mcpConnections.id, by.id)
       : 'codeHash' in by
         ? eq(mcpConnections.codeHash, by.codeHash)
         : or(eq(mcpConnections.refreshHash, by.refreshHash), eq(mcpConnections.refreshPreviousHash, by.refreshHash));
-  const { passkeys } = tablesOf(db);
   const [row] = await db
     .select({
-      connection: mcpConnections, now: clockMillis(db),
+      connection: mcpConnections, now: clockMillis(),
       // What stands behind it, as for a credential (`credentialRow`): every use through it holds it (section 6.2).
       passkey: passkeys, passkeyHeld: heldSql(sql`${mcpConnections.principal}`, sql`${mcpConnections.generation}`),
     })
@@ -2766,7 +2683,6 @@ export async function findConnection(
  * them, newest first: rows that fail their MAC are reported and passed over.
  */
 export async function liveConnections(db: Queryable, chainKey: Buffer, principal: string, at: Date): Promise<ConnectionRow[]> {
-  const { mcpConnections } = tablesOf(db);
   const rows = await db
     .select()
     .from(mcpConnections)
@@ -2778,24 +2694,22 @@ export async function liveConnections(db: Queryable, chainKey: Buffer, principal
 export type ApprovalRow = Tables['mcpApprovals']['$inferSelect'];
 
 export async function insertApproval(db: Queryable, row: NewRow<Tables['mcpApprovals']> & { id: string; expiresAt: Date }): Promise<void> {
-  await insert(db, tablesOf(db).mcpApprovals, row);
+  await insert(db, mcpApprovals, row);
 }
 
 /** An approval by its ID, with the database's clock, which its expiry is read against. */
 export async function findApproval(db: Queryable, id: string): Promise<(ApprovalRow & { now: Date }) | null> {
-  const { mcpApprovals } = tablesOf(db);
-  const [row] = await db.select({ approval: mcpApprovals, now: clockMillis(db) }).from(mcpApprovals).where(eq(mcpApprovals.id, id)).limit(1);
+  const [row] = await db.select({ approval: mcpApprovals, now: clockMillis() }).from(mcpApprovals).where(eq(mcpApprovals.id, id)).limit(1);
   return row === undefined ? null : { ...row.approval, now: new Date(row.now) };
 }
 
 /** Decide a pending approval that has not expired, by the database's clock as the write runs: 1 if it moved, 0 if not. */
 export async function decideApproval(db: Queryable, id: string, status: 'approved' | 'denied'): Promise<number> {
-  const { mcpApprovals } = tablesOf(db);
   return changedRows(
     await db
       .update(mcpApprovals)
       .set({ status, decidedAt: new Date() })
-      .where(and(eq(mcpApprovals.id, id), eq(mcpApprovals.status, 'pending'), ahead(db, mcpApprovals.expiresAt))),
+      .where(and(eq(mcpApprovals.id, id), eq(mcpApprovals.status, 'pending'), ahead(mcpApprovals.expiresAt))),
   );
 }
 
@@ -2805,9 +2719,8 @@ export async function decideApproval(db: Queryable, id: string, status: 'approve
  * no longer be rejoined, and no longer wait.
  */
 export async function openApprovals(db: Queryable, connectionId: string, since: Date): Promise<{ rows: ApprovalRow[]; now: Date }> {
-  const { mcpApprovals } = tablesOf(db);
   const rows = await db
-    .select({ approval: mcpApprovals, now: clockMillis(db) })
+    .select({ approval: mcpApprovals, now: clockMillis() })
     .from(mcpApprovals)
     .where(and(eq(mcpApprovals.connectionId, connectionId), isNull(mcpApprovals.reportedAt), gt(mcpApprovals.createdAt, since)))
     .orderBy(desc(mcpApprovals.createdAt));
@@ -2820,7 +2733,6 @@ export async function openApprovals(db: Queryable, connectionId: string, since: 
  * ended, so they stay in the open approvals' index.
  */
 export async function unansweredApprovals(db: Queryable, connectionId: string, digest: Buffer): Promise<ApprovalRow[]> {
-  const { mcpApprovals } = tablesOf(db);
   return db
     .select()
     .from(mcpApprovals)
@@ -2833,7 +2745,6 @@ export async function findDeviceAuthorizations(
   chainKey: Buffer,
   by: { userCode: string } | { deviceCodeHash: Buffer },
 ) {
-  const { deviceLogins } = tablesOf(db);
   const rows = await db
     .select()
     .from(deviceLogins)
@@ -2850,7 +2761,6 @@ export async function findDeviceAuthorizations(
  * size each. Each row's MAC is checked all the same.
  */
 export async function openDeviceSources(db: Queryable, chainKey: Buffer, at: Date): Promise<(string | null)[]> {
-  const { deviceLogins } = tablesOf(db);
   const { clientLabel: _label, ...columns } = getTableColumns(deviceLogins);
   const rows = await db.select(columns).from(deviceLogins).where(and(isNull(deviceLogins.decidedAt), gt(deviceLogins.expiresAt, at)));
   for (const row of rows) verifyAuthRow(chainKey, 'device_authorizations', row);
@@ -2861,7 +2771,6 @@ export async function openDeviceSources(db: Queryable, chainKey: Buffer, at: Dat
 
 /** The committed state to compare after the vault prepares a write or restore. */
 export async function secretHeads(db: Queryable, environmentId: string, by: { keys: string[] } | { id: string }) {
-  const { secrets, secretVersions } = tablesOf(db);
   const rows = await db.select({
     id: secrets.id,
     key: secrets.key,
@@ -2869,10 +2778,10 @@ export async function secretHeads(db: Queryable, environmentId: string, by: { ke
     currentVersionId: secrets.currentVersionId,
     archivedAt: secrets.archivedAt,
     // How its current value is held, which a write that says nothing keeps the strictness of (`Sensitivity`).
-    plain: sql<boolean | number | null>`${secretVersions.plaintext} IS NOT NULL`,
+    plain: sql<boolean | null>`${secretVersions.plaintext} IS NOT NULL`,
     sensitive: secretVersions.sensitive,
   }).from(secrets).leftJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId)).where(and(
-    inEnvironment(db, environmentId),
+    inEnvironment(environmentId),
     'id' in by ? eq(secrets.id, by.id) : inArray(secrets.key, by.keys),
   ));
   return rows.map(({ plain, sensitive, ...row }) => ({ ...row, current: row.currentVersionId === null ? null : { plain: Boolean(plain), sensitive: sensitive === true } }));
@@ -2958,7 +2867,6 @@ export async function environmentSecrets(
   environmentId: string,
   only?: { secretId: string } | { key: string },
 ): Promise<SecretRow[]> {
-  const { secrets, secretVersions, projects, environments } = tablesOf(db);
   const rows = await db
     .select({
       id: secrets.id,
@@ -3021,7 +2929,6 @@ export async function secretHistory(
   db: Queryable,
   secretId: string,
 ): Promise<{ id: string; version: number; createdAt: Date; createdBy: string; envelope: Envelope; recipe: VersionRecipe | null; plaintext: string | null; sensitive: boolean }[]> {
-  const { secretVersions } = tablesOf(db);
   const rows = await db
     .select({
       id: secretVersions.id,
@@ -3064,7 +2971,7 @@ export type ParentRow = { id: string; slug: string; archived: boolean; deleted: 
  */
 export async function parentsOf(db: Queryable, environmentId: string): Promise<ParentRow[] | null> {
   // One level past the most there may be, so that a chain too long, or a loop, shows.
-  const chain = await dialect.rowsOf<{ id: string; slug: string; archived: boolean | number; parent_id: string | null }>(db, sql`
+  const chain = await dialect.rowsOf<{ id: string; slug: string; archived: boolean; parent_id: string | null }>(db, sql`
     WITH RECURSIVE chain (id, slug, archived, parent_id, depth) AS (
       SELECT id, slug, archived_at IS NOT NULL, parent_id, 0 FROM environments WHERE id = ${environmentId}
       UNION ALL
@@ -3080,7 +2987,7 @@ export async function parentsOf(db: Queryable, environmentId: string): Promise<P
   for (const row of above) {
     if (seen.has(row.id) || parents.length === MAX_PARENTS) return null;
     seen.add(row.id);
-    parents.push({ id: row.id, slug: row.slug, archived: Boolean(row.archived), deleted: isTombstone(row.slug) });
+    parents.push({ id: row.id, slug: row.slug, archived: row.archived, deleted: isTombstone(row.slug) });
   }
   // A parent named and not found: the chain was cut around the app.
   const last = chain.at(-1)!;
@@ -3089,7 +2996,6 @@ export async function parentsOf(db: Queryable, environmentId: string): Promise<P
 
 /** Whether an environment, and its project, are neither archived nor deleted. */
 export async function liveEnvironment(db: Queryable, environmentId: string): Promise<boolean> {
-  const { environments, projects } = tablesOf(db);
   const [row] = await db
     .select({ id: environments.id })
     .from(environments)
@@ -3110,7 +3016,6 @@ export async function liveEnvironment(db: Queryable, environmentId: string): Pro
  * personal config's, which follows its parent where a shared fork stops it.
  */
 export async function forksOf(db: Queryable, environmentId: string, { archived = false }: { archived?: boolean } = {}): Promise<{ id: string; slug: string; owner: string | null; archivedAt: Date | null }[]> {
-  const { environments } = tablesOf(db);
   return db
     .select({ id: environments.id, slug: environments.slug, owner: environments.owner, archivedAt: environments.archivedAt })
     .from(environments)
@@ -3120,7 +3025,6 @@ export async function forksOf(db: Queryable, environmentId: string, { archived =
 
 /** An environment's dismissed keys, those not restored since. */
 export async function dismissalsIn(db: Queryable, environmentId: string) {
-  const { dismissedKeys } = tablesOf(db);
   return db
     .select({ key: dismissedKeys.key, dismissedAt: dismissedKeys.dismissedAt, dismissedBy: dismissedKeys.dismissedBy })
     .from(dismissedKeys)
@@ -3130,7 +3034,6 @@ export async function dismissalsIn(db: Queryable, environmentId: string) {
 /** The keys these environments dismissed, those not restored since, and who and when: in a fork, what it removed. */
 export async function dismissalsAcross(db: Queryable, environmentIds: readonly string[]) {
   if (environmentIds.length === 0) return [];
-  const { dismissedKeys } = tablesOf(db);
   return db
     .select({ environmentId: dismissedKeys.environmentId, key: dismissedKeys.key, dismissedAt: dismissedKeys.dismissedAt, dismissedBy: dismissedKeys.dismissedBy })
     .from(dismissedKeys)
@@ -3140,7 +3043,6 @@ export async function dismissalsAcross(db: Queryable, environmentIds: readonly s
 /** The live keys of these environments, each with its folder. */
 export async function liveKeysIn(db: Queryable, environmentIds: readonly string[]) {
   if (environmentIds.length === 0) return [];
-  const { secrets } = tablesOf(db);
   return db
     .select({ environmentId: secrets.environmentId, key: secrets.key, folder: secrets.folder })
     .from(secrets)
@@ -3155,7 +3057,6 @@ export async function liveKeysIn(db: Queryable, environmentIds: readonly string[
  * places (`groupReads`, @coffre/db/hyperdrive).
  */
 export async function forkedKeys(db: Queryable, within?: readonly string[]) {
-  const { environments, secrets, dismissedKeys } = tablesOf(db);
   const forked = db.select({ id: environments.projectId }).from(environments)
     .where(and(isNotNull(environments.parentId), standing(environments.slug), within === undefined ? undefined : inArray(environments.projectId, [...within])));
   const theirs = db.select({ id: environments.id }).from(environments).where(and(inArray(environments.projectId, forked), standing(environments.slug)));
@@ -3169,7 +3070,6 @@ export async function forkedKeys(db: Queryable, within?: readonly string[]) {
 
 /** The live keys of these environments, each with its folder, and those `archivedIn` archived: whether it holds a key at all. */
 export async function keysAcross(db: Queryable, environmentIds: readonly string[], archivedIn: string) {
-  const { secrets } = tablesOf(db);
   return db
     .select({ environmentId: secrets.environmentId, key: secrets.key, folder: secrets.folder, archivedAt: secrets.archivedAt })
     .from(secrets)
@@ -3197,7 +3097,6 @@ export type ReferenceRow = {
 /** Each of these environments' slug, by id. */
 async function environmentSlugs(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
   if (ids.length === 0) return new Map();
-  const { environments } = tablesOf(db);
   const rows = await db.select({ id: environments.id, slug: environments.slug }).from(environments).where(inArray(environments.id, [...new Set(ids)]));
   return new Map(rows.map((row) => [row.id, row.slug]));
 }
@@ -3217,7 +3116,6 @@ export async function referenceRows(
   db: Queryable,
   where: { holderSecretIds?: string[]; sourceSecretIds?: string[]; projectId?: string; createdBy?: string },
 ): Promise<ReferenceRow[]> {
-  const { secretReferences, auditLog, environments } = tablesOf(db);
   if (where.holderSecretIds?.length === 0 || where.sourceSecretIds?.length === 0) return [];
   const bySeal = where.projectId !== undefined || where.sourceSecretIds !== undefined || where.createdBy !== undefined;
   // One statement: each row with its seal, its end if any, and its two environments' slugs, as its own columns name
@@ -3287,11 +3185,10 @@ function sealing(entry: { author: AnyColumn; action: AnyColumn; decision: AnyCol
 
 /** The seals of the references made in or into a project, of a source, or by someone: through the log's indexes, `also` among them. */
 function sealedBy(db: Queryable, where: { sourceSecretIds?: string[]; projectId?: string; createdBy?: string }) {
-  const { auditLog } = tablesOf(db);
   return db.select({ seq: auditLog.seq }).from(auditLog).where(and(
     sealing(auditLog),
-    where.projectId === undefined ? undefined : or(eq(auditLog.projectId, where.projectId), also(db, 'projectId', [where.projectId])),
-    where.sourceSecretIds === undefined ? undefined : also(db, 'secretId', where.sourceSecretIds),
+    where.projectId === undefined ? undefined : or(eq(auditLog.projectId, where.projectId), also('projectId', [where.projectId])),
+    where.sourceSecretIds === undefined ? undefined : also('secretId', where.sourceSecretIds),
     where.createdBy === undefined ? undefined : eq(auditLog.actor, where.createdBy),
   ));
 }
@@ -3318,7 +3215,6 @@ export type SecretPlaceRow = {
  * offboarding report asks for each secret a member's reads listed).
  */
 export async function secretPlaces(db: Queryable, ids: readonly string[]): Promise<Map<string, SecretPlaceRow>> {
-  const { secrets } = tablesOf(db);
   const unique = [...new Set(ids)];
   const found = new Map<string, SecretPlaceRow>();
   for (let start = 0; start < unique.length; start += 1000) {
@@ -3333,7 +3229,6 @@ export async function secretPlaces(db: Queryable, ids: readonly string[]): Promi
  * wrote, and one statement takes no more than 65,534 parameters (review r2 of #490).
  */
 export async function versionsOf(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; recipe: string | null }>> {
-  const { secretVersions } = tablesOf(db);
   const unique = [...new Set(ids)];
   const found = new Map<string, { version: number; recipe: string | null }>();
   for (let start = 0; start < unique.length; start += 1000) {
@@ -3345,7 +3240,6 @@ export async function versionsOf(db: Queryable, ids: readonly string[]): Promise
 }
 
 function secretPlaceRows(db: Queryable, where: SQL): Promise<SecretPlaceRow[]> {
-  const { secrets, secretVersions, environments, projects } = tablesOf(db);
   return db
     .select({
       id: secrets.id,
@@ -3371,7 +3265,6 @@ function secretPlaceRows(db: Queryable, where: SQL): Promise<SecretPlaceRow[]> {
 /** Which of these versions are sensitive: what a reference to one reads as. */
 export async function sensitiveVersions(db: Queryable, ids: readonly string[]): Promise<Set<string>> {
   if (ids.length === 0) return new Set();
-  const { secretVersions } = tablesOf(db);
   const rows = await db
     .select({ id: secretVersions.id })
     .from(secretVersions)
@@ -3401,12 +3294,11 @@ export async function sensitiveVersions(db: Queryable, ids: readonly string[]): 
  */
 export async function holdingSensitive(db: Queryable, environmentIds: readonly string[]): Promise<Set<string>> {
   if (environmentIds.length === 0) return new Set();
-  const { secrets, secretVersions, secretReferences } = tablesOf(db);
   const ids = [...new Set(environmentIds)];
   const live = and(inArray(secrets.environmentId, ids), isNull(secrets.archivedAt));
   const sensitive = (versionId: SQL | AnyColumn) => sql`(SELECT ${secretVersions.sensitive} FROM ${secretVersions} WHERE ${secretVersions.id} = ${versionId})`;
   // The holder's newest reference's source, ended or not (above).
-  const newest = ofNewestReference(db, secrets.id, sql`${secretReferences.sourceSecretId}`);
+  const newest = ofNewestReference(secrets.id, sql`${secretReferences.sourceSecretId}`);
   // Whether that source's current version is sensitive. `source` names the source's row, so `secrets` in `newest` is
   // still the holder's.
   const sourceSensitive = sql`EXISTS (SELECT 1 FROM ${secrets} source WHERE source.id = ${newest} AND ${sensitive(sql`source.current_version_id`)})`;
@@ -3420,7 +3312,6 @@ export async function holdingSensitive(db: Queryable, environmentIds: readonly s
 /** These versions' numbers and envelopes, by id: what a read through a reference opens. */
 export async function versionEnvelopes(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; envelope: Envelope; sensitive: boolean; plaintext: string | null }>> {
   if (ids.length === 0) return new Map();
-  const { secretVersions } = tablesOf(db);
   const rows = await db
     .select({ id: secretVersions.id, version: secretVersions.version, sensitive: secretVersions.sensitive, plaintext: secretVersions.plaintext, ...envelopeColumns(secretVersions) })
     .from(secretVersions)
@@ -3431,7 +3322,6 @@ export async function versionEnvelopes(db: Queryable, ids: readonly string[]): P
 /** These versions' plain values, by id, for those that are plain: a reference to one is plain too. */
 export async function plainVersions(db: Queryable, ids: readonly string[]): Promise<Map<string, string>> {
   if (ids.length === 0) return new Map();
-  const { secretVersions } = tablesOf(db);
   const rows = await db
     .select({ id: secretVersions.id, plaintext: secretVersions.plaintext })
     .from(secretVersions)
@@ -3448,7 +3338,6 @@ export async function plainVersions(db: Queryable, ids: readonly string[]): Prom
  * several servers still order by time (CDR 2024/1774 Art 12(2)(f)).
  */
 export async function auditHead(db: Queryable): Promise<{ nextSeq: bigint; headHash: Buffer } | null> {
-  const { auditChainHead } = tablesOf(db);
   const [head] = await db
     .select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash })
     .from(auditChainHead)
@@ -3484,7 +3373,6 @@ function shown<Row extends { occurredAt: number }>(row: Row): Omit<Row, 'occurre
 
 /** Rows in chain order from `fromSeq`, with every field as it was hashed: a batch of a full check, at most `limit` and `BATCH_BYTES` of metadata. */
 export async function auditRange(db: Queryable, fromSeq = 0n, limit = 1000) {
-  const { auditLog } = tablesOf(db);
   const batch = await withinBytes(db, gte(auditLog.seq, fromSeq), limit);
   if (batch === null) return [];
   const rows = await db
@@ -3521,8 +3409,7 @@ export type AuditFilter = {
  * reference's making and end. Repeats the `audit_log_also_*_idx`
  * expressions and their condition, so that each is read by its index.
  */
-function also(db: Queryable, field: 'projectId' | 'environmentId' | 'secretId', ids: readonly string[]): SQL {
-  const { auditLog } = tablesOf(db);
+function also(field: 'projectId' | 'environmentId' | 'secretId', ids: readonly string[]): SQL {
   const present = sql`((${auditLog.metadata})::jsonb -> 'also') IS NOT NULL`;
   const value = sql`(((${auditLog.metadata})::jsonb -> 'also') ->> ${sql.raw(`'${field}'`)})`;
   return and(present, inArray(value, [...ids]))!;
@@ -3534,8 +3421,7 @@ function also(db: Queryable, field: 'projectId' | 'environmentId' | 'secretId', 
  * vault). Its entry names no secret of its own; its place's filters narrow
  * the entries this reads.
  */
-function listed(db: Queryable, ids: readonly string[]): SQL {
-  const { auditLog } = tablesOf(db);
+function listed(ids: readonly string[]): SQL {
   const named = (secret: SQL) => or(...ids.map((id) => sql`${secret} = ${id}`))!;
   const among = sql`EXISTS (SELECT 1 FROM jsonb_array_elements(((${auditLog.metadata})::jsonb -> 'secrets')) AS listed(secret)
         WHERE ${named(sql`(listed.secret ->> 'secretId')`)} OR ${named(sql`((listed.secret -> 'also') ->> 'secretId')`)})`;
@@ -3547,12 +3433,11 @@ function listed(db: Queryable, ids: readonly string[]): SQL {
  * the entries about it, and those about a reference into or out of it; a
  * secret, too, the reads of several that list it.
  */
-function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | undefined {
-  const { auditLog } = tablesOf(db);
+function auditWhere(filter: Omit<AuditFilter, 'limit'>): SQL | undefined {
   const { within } = filter;
   const columns = { projectId: auditLog.projectId, environmentId: auditLog.environmentId, secretId: auditLog.secretId };
   const at = (field: keyof typeof columns, ids: readonly string[]) =>
-    ids.length === 0 ? sql`false` : or(inArray(columns[field], [...ids]), also(db, field, ids));
+    ids.length === 0 ? sql`false` : or(inArray(columns[field], [...ids]), also(field, ids));
   return and(
     within === undefined
       ? undefined
@@ -3560,10 +3445,10 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
     // An entry about a place left out, as its main place or one it names besides (`also`), is left out with it.
     within?.except === undefined || within.except.length === 0
       ? undefined
-      : and(or(isNull(auditLog.environmentId), notInArray(auditLog.environmentId, within.except)), sql`NOT COALESCE(${also(db, 'environmentId', within.except)}, false)`),
+      : and(or(isNull(auditLog.environmentId), notInArray(auditLog.environmentId, within.except)), sql`NOT COALESCE(${also('environmentId', within.except)}, false)`),
     filter.projectId === undefined ? undefined : at('projectId', [filter.projectId]),
     filter.environmentId === undefined ? undefined : at('environmentId', [filter.environmentId]),
-    filter.secretId === undefined ? undefined : or(at('secretId', [filter.secretId]), listed(db, [filter.secretId])),
+    filter.secretId === undefined ? undefined : or(at('secretId', [filter.secretId]), listed([filter.secretId])),
     filter.actors === undefined ? undefined : inArray(auditLog.actor, filter.actors),
     filter.decision === undefined ? undefined : eq(auditLog.decision, filter.decision),
     filter.excludeActions === undefined || filter.excludeActions.length === 0
@@ -3580,10 +3465,9 @@ function auditWhere(db: Queryable, filter: Omit<AuditFilter, 'limit'>): SQL | un
  * when older entries may match: the page was full, or cut short.
  */
 export async function auditPage(db: Queryable, filter: AuditFilter) {
-  const { auditLog, projects, environments, secrets } = tablesOf(db);
   // The members asked for, each a stream of their own entries (`withinBytes`' `by`); then the page's entries by seq,
   // never the run between its first and its last, which holds every other member's since (T245, R48).
-  const page = await withinBytes(db, auditWhere(db, { ...filter, actors: undefined }), filter.limit, 'desc',
+  const page = await withinBytes(db, auditWhere({ ...filter, actors: undefined }), filter.limit, 'desc',
     filter.actors === undefined ? undefined : { column: auditLog.actor, values: filter.actors });
   if (page === null) return { rows: [], more: false };
   const rows = await db
@@ -3599,9 +3483,8 @@ export async function auditPage(db: Queryable, filter: AuditFilter) {
 
 /** The vault's newest signed checkpoint, with the database's clock beside it: one step of `audit_log_signed_idx` (`KINDS`; T245, R48). */
 function newestSigned(db: Queryable) {
-  const { auditLog } = tablesOf(db);
   return db
-    .select({ seq: auditLog.seq, occurredAt: auditLog.occurredAt, metadata: auditLog.metadata, now: clockMillis(db) })
+    .select({ seq: auditLog.seq, occurredAt: auditLog.occurredAt, metadata: auditLog.metadata, now: clockMillis() })
     .from(auditLog)
     .where(entriesOf('signed'))
     .orderBy(desc(auditLog.seq))
@@ -3619,7 +3502,6 @@ export async function latestCheckpoint(db: Queryable): Promise<Checkpoint | null
 
 /** The hash of entry `seq`, hex, or null when there is none. */
 export async function auditHashAt(db: Queryable, seq: bigint): Promise<string | null> {
-  const { auditLog } = tablesOf(db);
   const [row] = await db.select({ hash: auditLog.hash }).from(auditLog).where(eq(auditLog.seq, seq));
   return row?.hash.toString('hex') ?? null;
 }
@@ -3630,7 +3512,7 @@ export async function auditHashAt(db: Queryable, seq: bigint): Promise<string | 
  * as related. A verification goes on from it.
  */
 export async function latestTallied(db: Queryable): Promise<{ entry: bigint; checkpoint: Signed | null } | null> {
-  const [row] = await talliedCheckpoints(db).orderBy(desc(tablesOf(db).auditLog.seq)).limit(1);
+  const [row] = await talliedCheckpoints(db).orderBy(desc(auditLog.seq)).limit(1);
   return row === undefined ? null : { entry: row.seq, checkpoint: signedIn(row.metadata) };
 }
 
@@ -3639,7 +3521,7 @@ export async function latestTallied(db: Queryable): Promise<{ entry: bigint; che
  * there, with its entry's hash: null for its prefix if it names none.
  */
 export async function talliedAt(db: Queryable, seq: bigint): Promise<{ checkpoint: Signed | null; hash: string } | null> {
-  const [row] = await talliedCheckpoints(db, eq(tablesOf(db).auditLog.seq, seq));
+  const [row] = await talliedCheckpoints(db, eq(auditLog.seq, seq));
   return row === undefined ? null : { checkpoint: signedIn(row.metadata), hash: row.hash.toString('hex') };
 }
 
@@ -3661,24 +3543,21 @@ function signedIn(metadata: string): Signed | null {
 
 /** Up to `limit` of the vault's checkpoints that keep a tally after entry `after`, oldest first: each one's entry, and the last entry it signs. */
 export async function talliedAfter(db: Queryable, after: bigint, limit: number): Promise<{ entry: bigint; signs: bigint }[]> {
-  const { auditLog } = tablesOf(db);
   const rows = await db
     .select({ entry: auditLog.seq, signs: auditLog.relatedSeq })
     .from(auditLog)
-    .where(and(...talliedWhere(db), gt(auditLog.seq, after)))
+    .where(and(...talliedWhere(), gt(auditLog.seq, after)))
     .orderBy(asc(auditLog.seq))
     .limit(limit);
   return rows.map(({ entry, signs }) => ({ entry, signs: signs! }));
 }
 
-function talliedWhere(db: Queryable) {
-  const { auditLog } = tablesOf(db);
+function talliedWhere() {
   return [entriesOf('signed'), isNotNull(auditLog.relatedSeq)];
 }
 
 function talliedCheckpoints(db: Queryable, where?: SQL) {
-  const { auditLog } = tablesOf(db);
-  return db.select({ seq: auditLog.seq, metadata: auditLog.metadata, hash: auditLog.hash }).from(auditLog).where(and(...talliedWhere(db), where));
+  return db.select({ seq: auditLog.seq, metadata: auditLog.metadata, hash: auditLog.hash }).from(auditLog).where(and(...talliedWhere(), where));
 }
 
 /**
@@ -3694,7 +3573,6 @@ export async function auditActionCounts(
   actions: readonly string[],
   fromSeq?: bigint,
 ): Promise<{ action: string; count: number }[]> {
-  const { auditLog } = tablesOf(db);
   return db
     .select({ action: auditLog.action, count: count() })
     .from(auditLog)
@@ -3703,7 +3581,7 @@ export async function auditActionCounts(
         inArray(auditLog.author, ['app', 'vault']),
         inArray(auditLog.action, [...actions]),
         fromSeq === undefined ? undefined : gte(auditLog.seq, fromSeq),
-        auditWhere(db, { ...filter, excludeActions: undefined }),
+        auditWhere({ ...filter, excludeActions: undefined }),
       ),
     )
     .groupBy(auditLog.action);
@@ -3730,7 +3608,6 @@ export function heldWrites(
     touched: { credential: string; at: Date; ip: string | null } | null;
   },
 ): void {
-  const { secrets, secretVersions, credentials } = tablesOf(tx);
   const { hold } = write;
   if (write.touched !== null) later(tx, tx.update(credentials).set({ lastUsedAt: write.touched.at, lastUsedIp: write.touched.ip }).where(eq(credentials.id, write.touched.credential)));
   later(tx, sql`SELECT hold_inputs(${hold.tokenHash}::bytea, ${hold.project}::text, ${hold.environment}::text, ${sql.param([...hold.keys])}::text[], ${hold.digest}::bytea)`);

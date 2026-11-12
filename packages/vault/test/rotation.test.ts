@@ -11,7 +11,7 @@ import { encrypt, freshDek } from '@coffre/core/envelope';
 import { KekRegistry, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 import { decodePair, encodePair, signPair, splitNote, type PairNotes } from '@coffre/core/merkle';
 import type { TreeVerification, UseOutcome } from '@coffre/core/vault';
-import { tablesOf, type Database } from '@coffre/db';
+import { type Database } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import { genesisCall, type ChangeKeys } from '../src/changes.ts';
@@ -29,6 +29,7 @@ import * as store from '../src/store.ts';
 import { newRequestId } from '../src/use.ts';
 import { variableMemory } from './audit-tree.ts';
 import { cutOver, emptyDatabase, openTestDatabase, places, rows, run, sealed, speaking, type LocalVault, type TestDatabase } from './database.ts';
+import { checkpointFence, credentials, secretVersions } from '@coffre/db/schema';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
 const openLocalVault = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
@@ -113,10 +114,9 @@ async function underOldKey(config: VaultConfig) {
   await genesis(old.keys, old.cp, { kind: 'environment', id: where.dev }, environmentObject({ id: where.dev, projectId: where.project, slug: 'dev', owner: null, parentId: null, protected: false, archived: false, projectArchived: false }));
   assert.ok((await old.vault.admit({ actor: ROOT, principal: ADA })).ok);
   assert.ok((await old.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: where.project, environmentId: where.dev, role: 'developer', expiresAt: null }] })).ok);
-  const t = tablesOf(db.owner);
   const credential = randomUUID();
   const expires = new Date(Date.now() + 86_400_000);
-  await db.owner.insert(t.credentials).values({
+  await db.owner.insert(credentials).values({
     id: credential, kind: 'cli', authMac: Buffer.alloc(32), tokenHash: randomBytes(32), tokenHint: 'hint', generation: 0, principal: ADA, createdBy: ROOT, expiresAt: expires, scope: null,
   });
   await genesis(old.keys, old.cp, { kind: 'credential', id: credential }, credentialObject({ id: credential, principal: ADA, kind: 'cli', scope: null, revoked: false, expiresAt: expires.getTime(), generation: 0 }));
@@ -128,7 +128,7 @@ async function underOldKey(config: VaultConfig) {
     const context = { projectId: where.project, environmentId: where.dev, secretId: ref.secretId };
     const sealed = encrypt(Buffer.from('postgres://dev'), context, dek);
     const wrapped = await under.config.keks.wrap(dek, context, { deadline: Date.now() + 5000, signal: new AbortController().signal });
-    await db.owner.insert(t.secretVersions).values({
+    await db.owner.insert(secretVersions).values({
       id: version, secretId: ref.secretId, version: 1, envelopeVersion: sealed.envelopeVersion, ciphertext: sealed.ciphertext, iv: sealed.iv, authTag: sealed.authTag,
       wrappedDek: wrapped.bytes, kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, createdBy: ROOT,
     });
@@ -193,12 +193,11 @@ for (const rotation of ROTATIONS) {
     assert.equal(signer(decodePair(w.memory.record!)!), newKey.origin);
     assert.ok(now.cp.pair.pair.upto >= moved!.number);
     // Changes seal, uses go on, a key made since uses its new seals, and the log checks clean.
-    const t = tablesOf(db.owner);
     assert.ok((await now.vault.admit({ actor: ROOT, principal: 'user:bo@acme.example' })).ok);
     const used = await w.use(now.vault, w.secret);
     assert.ok(used.ok, JSON.stringify(used));
     assert.ok((await w.use(now.vault, await w.key(now))).ok);
-    assert.equal((await db.owner.select().from(t.checkpointFence)).length, 1);
+    assert.equal((await db.owner.select().from(checkpointFence)).length, 1);
     clean(await verify(now.vault));
     // Started again, it neither rotates twice nor refuses its memory.
     await now.cp.close();

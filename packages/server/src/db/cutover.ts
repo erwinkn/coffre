@@ -2,18 +2,18 @@
 // entries and rows it vouches for under its key.
 import type { StoredEntry } from '@coffre/core/audit';
 import type { BindingColumns, ConnectionColumns, CredentialColumns } from '@coffre/core/vault';
-import { tablesOf, type Queryable } from '@coffre/db';
+import { type Queryable } from '@coffre/db';
 import { entryColumns } from '@coffre/db/log';
 import { and, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 
 import { connectionColumns, credentialColumns, sealedBinding } from '../api/changes.ts';
 import { checkAuthRow } from '../auth-rows.ts';
 import { tombstoned } from './queries.ts';
+import { auditLog, credentials, identities, mcpConnections, serviceBindings } from '@coffre/db/schema';
 
 /** The app's allowed entries of these actions, whole, for their MACs to be checked. */
 export async function appEntries(db: Queryable, actions: readonly string[]): Promise<StoredEntry[]> {
-  const { auditLog } = tablesOf(db);
-  const rows = await db.select(entryColumns(db)).from(auditLog)
+  const rows = await db.select(entryColumns()).from(auditLog)
     .where(and(eq(auditLog.author, 'app'), eq(auditLog.decision, 'allow'), inArray(auditLog.action, [...actions])));
   return rows as StoredEntry[];
 }
@@ -27,7 +27,6 @@ export async function appEntries(db: Queryable, actions: readonly string[]): Pro
  * which is vouched for.
  */
 export async function liveCredentials(db: Queryable, chainKey: Buffer, issuers: ReadonlyMap<string, string>): Promise<{ columns: CredentialColumns; identityId: string | null }[]> {
-  const { credentials, identities } = tablesOf(db);
   const now = new Date();
   const rows = await db.select({ credential: credentials, identity: identities }).from(credentials)
     .leftJoin(identities, eq(identities.id, credentials.identityId))
@@ -44,7 +43,6 @@ export async function liveCredentials(db: Queryable, chainKey: Buffer, issuers: 
 
 /** Each trust binding 0.14 accepts as it stands, unsealed: its MAC the app's, not revoked, and no `token.unbind` of it. */
 export async function liveBindings(db: Queryable, chainKey: Buffer, publicUrl: string): Promise<BindingColumns[]> {
-  const { serviceBindings } = tablesOf(db);
   // No `origin`: 0.14 writes none, and its MAC covers none, so a row with one is not 0.14's to vouch for.
   const rows = (await db.select().from(serviceBindings).where(and(isNull(serviceBindings.seal), isNull(serviceBindings.revokedAt), isNull(serviceBindings.origin))))
     .filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
@@ -58,7 +56,6 @@ export async function liveBindings(db: Queryable, chainKey: Buffer, publicUrl: s
  * of its account too, which a use refuses on that, as `credentialStill` did.
  */
 export async function liveConnections(db: Queryable, chainKey: Buffer): Promise<ConnectionColumns[]> {
-  const { mcpConnections } = tablesOf(db);
   const rows = await db.select().from(mcpConnections)
     .where(and(isNull(mcpConnections.seal), isNull(mcpConnections.revokedAt), gt(mcpConnections.expiresAt, new Date())));
   return rows.filter((row) => checkAuthRow(chainKey, 'mcp_connections', row)).map(connectionColumns);

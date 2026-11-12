@@ -6,7 +6,7 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { createDatabase, tablesOf, type Database } from '@coffre/db';
+import { createDatabase, type Database } from '@coffre/db';
 import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
@@ -20,6 +20,7 @@ import { HOT_URL, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } fr
 import { namedWorld } from './named-world.ts';
 import { ask, change, CONFIG, emptyLog, LOG_015, ROOT, seal, useDatabases, world } from './use-world.ts';
 import { inBulkPeriod } from './window-fixture.ts';
+import { secrets } from '@coffre/db/schema';
 
 /** What the statement-counting uses need of one bulk-cap period: each call before the last measured one may take its 3 s deadline, so room for two of them and a margin (T218). */
 const PERIOD_ROOM_MS = 10_000;
@@ -404,7 +405,7 @@ test("T220: a reference's use reads its newest reference by its holder, its buff
    */
   const referring = async (count: number): Promise<{ id: string; reference: string }> => {
     const id = randomUUID();
-    await db.owner.insert(tablesOf(db.owner).secrets).values({ id, projectId: w.project, environmentId: w.dev, key: `HELD_${id.slice(0, 8)}` });
+    await db.owner.insert(secrets).values({ id, projectId: w.project, environmentId: w.dev, key: `HELD_${id.slice(0, 8)}` });
     const [newest] = await rows<{ reference: string }>(db.owner, sql`WITH made AS (
         INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash, log015)
         SELECT (SELECT coalesce(max(seq), 0) FROM audit_log) + g, 'vault', 'vault:x', ${Date.now()}, 'system:x', 'reference.create', 'allow', '{}',

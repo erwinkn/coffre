@@ -1,4 +1,4 @@
-import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
+import { createDatabase, type Database, type Queryable } from '@coffre/db';
 import { forgetLogHeads } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
@@ -6,6 +6,7 @@ import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE
 import { guardTransactions } from '../transaction-guard.ts';
 import { drainBackgroundTasks } from '../background-tasks.ts';
 import { testPostgresPool } from './postgres-pool.ts';
+import { auditChainHead, vaultReleases } from '@coffre/db/schema';
 
 /**
  * The integration database twice: as its owner, to reset and inspect, and
@@ -64,7 +65,6 @@ export async function withTriggersLifted<T>(owner: Database, table: 'audit_log' 
  * found in it, which would otherwise refuse the next append as a rollback.
  */
 export async function emptyLog(owner: Database): Promise<void> {
-  const { auditChainHead, vaultReleases } = tablesOf(owner);
   // Deleting checks every row against `related_seq`, which no index serves: a log of thousands takes longer than a
   // statement may. References name entries, and are gone by now.
   await withLogUnlocked(owner, async (db) => void (await db.execute(sql`TRUNCATE audit_log, secret_references`)));

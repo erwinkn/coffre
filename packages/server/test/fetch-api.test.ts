@@ -4,12 +4,12 @@ import assert from 'node:assert/strict';
 
 import { CoffreError } from '@coffre/client';
 import { github, signin, type AuthConfig, type Principal } from '@coffre/core/identity';
-import { tablesOf } from '@coffre/db';
 import { eq } from 'drizzle-orm';
 
 import { apiCredential, fetchApi as serveApi, pageClient as clientForPage, pageCredential } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, START_OVER_014, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { principals } from '@coffre/db/schema';
 
 const ORIGIN = 'https://coffre.test';
 const ROOT = 'admin@acme.example';
@@ -194,7 +194,6 @@ test('someone signed in but not a member reaches /me and nothing else', async ()
 });
 
 test('a member whose record fails the vault\'s check is told so, and listed so, until an owner starts them over', { skip: START_OVER_014 }, async () => {
-  const { principals } = tablesOf(db.owner);
   // Someone who owns the database makes DEV an owner, around the vault.
   await db.owner.update(principals).set({ owner: true, role: 'admin' }).where(eq(principals.principal, `user:${DEV}`));
   const page = () => pageClient(new Request(`${ORIGIN}/projects`, { headers: { cookie: `${SESSION}=${DEV}` } }), runtimeFor(own));

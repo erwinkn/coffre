@@ -10,7 +10,7 @@ import { INSTANCE_ROLES, ROLES } from '@coffre/core/access';
 import { encrypt, freshDek, ownerKey } from '@coffre/core/envelope';
 import { KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
 import type { UseInput, UseOutcome } from '@coffre/core/vault';
-import { tablesOf, type Database, type Queryable } from '@coffre/db';
+import { type Database, type Queryable } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import type { Sealed } from '../src/checkpointer.ts';
@@ -23,6 +23,7 @@ import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
 import { newRequestId, UseCache, useLimits, type UsePath } from '../src/use.ts';
 import { emptyReads, projectSlug, rows, run, type TestDatabase } from './database.ts';
 import { freshKeyId } from './window-fixture.ts';
+import { credentials, environments, grants, identities, principals, projects, secrets, secretVersions } from '@coffre/db/schema';
 
 export const SIGNING_KEY = randomBytes(32);
 /** The vault's key encryption key, as a configuration names it: a vault elsewhere (a Worker's) opens what this one wrapped. */
@@ -169,28 +170,27 @@ export async function world(options: {
   /** A person's browser session, signed in through this provider and issuer (its hash): `cli` otherwise. */
   identity?: { provider: string; issuerHash: string };
 } = {}) {
-  const t = tablesOf(db.owner);
   const project = randomUUID();
   const dev = randomUUID();
   const principal = options.caller === 'person' ? `user:${randomUUID()}@acme.example` : `token:${randomUUID()}`;
   const credentialId = randomUUID();
   const now = Date.now();
-  await db.owner.insert(t.projects).values({ id: project, slug: projectSlug(project), name: 'Project' });
-  await db.owner.insert(t.environments).values({ id: dev, projectId: project, slug: 'dev', name: 'Development', protected: false });
-  await db.owner.insert(t.principals).values({
+  await db.owner.insert(projects).values({ id: project, slug: projectSlug(project), name: 'Project' });
+  await db.owner.insert(environments).values({ id: dev, projectId: project, slug: 'dev', name: 'Development', protected: false });
+  await db.owner.insert(principals).values({
     principal, status: 'active', role: null, scope: null, generation: 0, createdAt: now, createdBy: ROOT, statusChangedAt: now, statusChangedBy: ROOT,
     accessSeq: 0n, mac: Buffer.alloc(32),
   });
-  await db.owner.insert(t.grants).values({ principal, projectId: null, environmentId: dev, environmentSlug: null, role: options.role ?? 'viewer', grantedAt: now, grantedBy: ROOT });
+  await db.owner.insert(grants).values({ principal, projectId: null, environmentId: dev, environmentSlug: null, role: options.role ?? 'viewer', grantedAt: now, grantedBy: ROOT });
   const expiresAt = now + DAY;
   const identityId = options.identity === undefined ? null : randomUUID();
   if (options.identity !== undefined) {
-    await db.owner.insert(t.identities).values({
+    await db.owner.insert(identities).values({
       id: identityId!, provider: options.identity.provider, issuerHash: options.identity.issuerHash, authMac: Buffer.alloc(32), subject: randomUUID(), generation: 0,
       principal, createdBy: ROOT,
     });
   }
-  await db.owner.insert(t.credentials).values({
+  await db.owner.insert(credentials).values({
     id: credentialId, kind: identityId !== null ? 'browser' : principal.startsWith('user:') ? 'cli' : 'service', authMac: Buffer.alloc(32), tokenHash: randomBytes(32),
     tokenHint: 'hint', generation: 0, principal, createdBy: ROOT, expiresAt: new Date(expiresAt), scope: null, identityId,
   });
@@ -231,8 +231,8 @@ export async function world(options: {
     const sealed = encrypt(Buffer.from(value), { projectId: project, environmentId: environment, secretId: id }, dek);
     const context = { projectId: project, environmentId: environment, secretId: id, ...(owner === null ? {} : { owner: ownerKey(owner) }), ...(sensitive ? { sensitive: true as const } : {}) };
     const wrapped = await keks.wrap(dek, context, { deadline: Date.now() + 5000, signal: new AbortController().signal });
-    await db.owner.insert(t.secrets).values({ id, projectId: project, environmentId: environment, key: `KEY_${keys.length}_${id.slice(0, 4)}` });
-    await db.owner.insert(t.secretVersions).values({
+    await db.owner.insert(secrets).values({ id, projectId: project, environmentId: environment, key: `KEY_${keys.length}_${id.slice(0, 4)}` });
+    await db.owner.insert(secretVersions).values({
       id: version, secretId: id, version: 1, envelopeVersion: sealed.envelopeVersion, ciphertext: sealed.ciphertext, iv: sealed.iv, authTag: sealed.authTag,
       wrappedDek: wrapped.bytes, kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, createdBy: ROOT, sensitive,
     });
@@ -305,7 +305,7 @@ export function ask(w: { credentialId: string }, secretId: string, extra: Partia
 export async function replayed(answered: ReadonlyMap<string, UseOutcome>): Promise<number> {
   const changes = await rows<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | null }>(db.owner,
     sql`SELECT number, at, object, payload, seal FROM log_changes ORDER BY number`);
-  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null; phased: boolean | number | null }>(db.owner,
+  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null; phased: boolean | null }>(db.owner,
     sql`SELECT number, at, credential, secret, purpose, place, phased FROM log_uses ORDER BY number`);
   const refs = new Map<string, Ref>();
   const entries: Logged[] = [

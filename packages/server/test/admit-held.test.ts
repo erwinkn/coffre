@@ -10,7 +10,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { github, signin } from '@coffre/core/identity';
 import type { AdmitReadInput, AdmitReadOutcome, Vault } from '@coffre/core/vault';
-import { tablesOf, type Queryable } from '@coffre/db';
+import { type Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { lockLogHead, logObject } from '@coffre/db/log';
 import { eq, sql } from 'drizzle-orm';
@@ -26,6 +26,7 @@ import { REFUSAL_UNSEALED_MESSAGE } from '../src/api/errors.ts';
 import { clientFor, entryOf, hotDatabaseUrl, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, stallingSeal, testDeps, testVault } from './api-fixture.ts';
 import { openVaultDatabase } from './db/engine.ts';
 import { steppedUp } from './passkey-rows.ts';
+import { credentials, principals } from '@coffre/db/schema';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -40,7 +41,6 @@ test.after(async () => {
 });
 
 const run = (on: Queryable, query: ReturnType<typeof sql>) => rowsOf(on, query);
-const { principals, credentials } = tablesOf(db.owner);
 
 /**
  * A fresh instance: projects market and billing, Bob an admin of the whole instance, and his browser session. `fast:

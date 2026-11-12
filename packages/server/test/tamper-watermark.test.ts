@@ -10,7 +10,7 @@ import { and, desc, eq, gt, inArray, max } from 'drizzle-orm';
 
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { withLogUnlocked } from './db/engine.ts';
-import { auditLog, logChanges, grants, principals } from './db/tables.ts';
+import { auditLog, logChanges, grants, principals } from '@coffre/db/schema';
 
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';

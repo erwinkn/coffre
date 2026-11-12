@@ -13,7 +13,6 @@ import { randomUUID } from 'node:crypto';
 import { CoffreError, createClient } from '@coffre/client';
 import { github, signin, type Principal } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
@@ -22,6 +21,7 @@ import { answerShown } from '../src/db/answers.ts';
 import { fetchApi, pageClient } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, contextFor, EDITS_ROLES, openTestDatabase, resetDatabase, START_OVER_014, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { principals } from '@coffre/db/schema';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -151,7 +151,6 @@ test('a removed member, or one removed and admitted again, is shown as the vault
 
 test('a row changed around the vault is shown as it says, and decides nothing: what the caller asks next, the vault refuses', { skip: START_OVER_014 }, async () => {
   const token = await cliToken(DEV);
-  const { principals } = tablesOf(db.owner);
   // Someone who owns the database makes DEV an Owner, around the vault.
   await db.owner.update(principals).set({ owner: true, role: 'owner' }).where(eq(principals.principal, `user:${DEV}`));
   const shown = await (await me(token)).json() as { instanceRole: string; runsInstance: boolean; tampered: boolean };

@@ -22,7 +22,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { auditLog, credentials, environments, logChanges, secretReferences, secrets, secretVersions, serviceBindings, principals } from './db/tables.ts';
+import { auditLog, credentials, environments, logChanges, secretReferences, secrets, secretVersions, serviceBindings, principals } from '@coffre/db/schema';
 import { clientFor, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';

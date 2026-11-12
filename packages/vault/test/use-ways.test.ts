@@ -7,7 +7,6 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import type { UseOutcome } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import { objectKey, type Input, type Op, type Ref } from '../src/inputs.ts';
@@ -15,6 +14,7 @@ import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { ask, change, DAY, emptyLog, genesis, isolate, refOf, ROOT, SEAL, seal, stripped, useDatabases, world } from './use-world.ts';
 import { newRequestId } from '../src/use.ts';
+import { mcpConnections, serviceBindings } from '@coffre/db/schema';
 
 let db: TestDatabase;
 before(async () => {
@@ -36,7 +36,7 @@ function heard(outcome: UseOutcome): UseOutcome {
 async function replayAgrees(): Promise<number> {
   const changes = await rows<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | null }>(db.owner,
     sql`SELECT number, at, object, payload, seal FROM log_changes ORDER BY number`);
-  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null; phased: boolean | number | null }>(db.owner,
+  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null; phased: boolean | null }>(db.owner,
     sql`SELECT number, at, credential, secret, purpose, place, phased FROM log_uses ORDER BY number`);
   const refs = new Map<string, Ref>();
   const entries: Logged[] = [
@@ -70,7 +70,7 @@ async function entryOf(number: string): Promise<{ credential: string; way: strin
 async function connection(w: { principal: string }, generation = 0) {
   const id = randomUUID();
   const expiresAt = Date.now() + DAY;
-  await db.owner.insert(tablesOf(db.owner).mcpConnections).values({
+  await db.owner.insert(mcpConnections).values({
     id, authMac: Buffer.alloc(32), principal: w.principal, generation, clientId: 'https://client.example/meta', clientName: 'Client', registration: 'cimd',
     scopes: 'read reveal', redirectUri: 'https://client.example/back', expiresAt: new Date(expiresAt),
   });
@@ -85,7 +85,7 @@ async function binding(w: { principal: string; project: string; dev: string }, o
   const scope = [{ projectId: w.project, environmentId: w.dev, role: 'viewer' }];
   const policy = JSON.stringify(options.reads === true ? { reads: { [w.dev]: { keys: [] } } } : {});
   const profile = options.profile ?? 'cloudflare';
-  await db.owner.insert(tablesOf(db.owner).serviceBindings).values({
+  await db.owner.insert(serviceBindings).values({
     id, authMac: Buffer.alloc(32), principal: w.principal, generation: 0, profile, issuer: 'urn:coffre:cloudflare', jwksUri: 'urn:coffre:cloudflare',
     claims: '{}', scope: JSON.stringify(scope), policy, origin: 'https://coffre.test', createdBy: ROOT,
   });

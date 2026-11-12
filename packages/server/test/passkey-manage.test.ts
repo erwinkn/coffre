@@ -16,7 +16,7 @@ import { MAX_PASSKEYS } from '../src/api/signin.ts';
 import { passkeyName } from '../src/passkey-names.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, credentials, deviceLogins, mcpConnections, passkeys } from './db/tables.ts';
+import { auditLog, credentials, deviceLogins, mcpConnections, passkeys } from '@coffre/db/schema';
 import * as rows from './passkey-rows.ts';
 import { assertion, Browser, bytes, enroll, me, register, RP, signinDeployment, touch } from './signin-browser.ts';
 

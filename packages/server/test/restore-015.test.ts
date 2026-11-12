@@ -30,7 +30,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { clientFor, resetDatabase, testDeps, testVault, type TestVault } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_OWNER_DATABASE_URL } from './db/connections.ts';
 import { openTestDatabase, openVaultDatabase } from './db/engine.ts';
-import { environments, bulkCap, logChanges, logCheckpoints, checkpointFence, logTiles, logUses, projects, secrets } from './db/tables.ts';
+import { environments, bulkCap, logChanges, logCheckpoints, checkpointFence, logTiles, logUses, projects, secrets } from '@coffre/db/schema';
 
 const ROOT = 'admin@acme.example';
 const CI = 'token:ci';

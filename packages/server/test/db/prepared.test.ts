@@ -2,12 +2,13 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
-import { prepared, tablesOf, type Database, type Queryable } from '@coffre/db';
+import { prepared, type Database, type Queryable } from '@coffre/db';
 import * as server from '@coffre/db/schema';
 import { and, asc, eq, sql, type Placeholder } from 'drizzle-orm';
 
 import { insert } from '../../src/db/queries.ts';
 import { openTestDatabase } from './engine.ts';
+import { auditChainHead, environments, projects } from '@coffre/db/schema';
 
 // A query built once and run with new values each time answers as its
 // builder would: on the database, and
@@ -26,7 +27,6 @@ let builds = 0;
 
 /** A project and its environments, by slug: a left join, whose missing side reads as null. With values, or placeholders for them. */
 function projectAndEnvironments(on: Queryable, slug: string | Placeholder = sql.placeholder('slug'), limit: number | Placeholder = sql.placeholder('limit')) {
-  const { projects, environments } = tablesOf(on);
   return on
     .select({ project: { id: projects.id, slug: projects.slug }, environment: { slug: environments.slug } })
     .from(projects)
@@ -76,7 +76,6 @@ test('inside a transaction, a prepared select reads through it', async () => {
 
 /** The log's head by its number and hash: a bigint and bytes, which go to the driver as they are. */
 function headAt(on: Queryable, seq: bigint | Placeholder = sql.placeholder('seq'), hash: Buffer | Placeholder = sql.placeholder('hash')) {
-  const { auditChainHead } = tablesOf(on);
   return on
     .select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash })
     .from(auditChainHead)
@@ -86,7 +85,7 @@ function headAt(on: Queryable, seq: bigint | Placeholder = sql.placeholder('seq'
 const headByValue = prepared((on) => headAt(on));
 
 test('bigint and byte values bind as the builder binds them', async () => {
-  const [head] = await db.select({ nextSeq: tablesOf(db).auditChainHead.nextSeq, headHash: tablesOf(db).auditChainHead.headHash }).from(tablesOf(db).auditChainHead);
+  const [head] = await db.select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash }).from(auditChainHead);
   assert.ok(head !== undefined);
   const other = Buffer.from(head.headHash).fill(head.headHash[0]! ^ 1, 0, 1);
   for (const [seq, hash] of [[head.nextSeq, head.headHash], [head.nextSeq + 1n, head.headHash], [head.nextSeq, other]] as const) {

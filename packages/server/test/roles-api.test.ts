@@ -7,7 +7,7 @@ import { and, asc, eq } from 'drizzle-orm';
 
 import { members } from '../src/db/queries.ts';
 import { writeAuditHeartbeat } from './watch-fixture.ts';
-import { auditLog, principals } from './db/tables.ts';
+import { auditLog, principals } from '@coffre/db/schema';
 import {
   clientFor,
   openTestDatabase,

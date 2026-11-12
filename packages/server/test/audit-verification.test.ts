@@ -9,7 +9,7 @@ import { and, desc, eq, gte, lte, min, or } from 'drizzle-orm';
 import { appendAudit, CHAIN_WALK, type AuditEntry } from '../src/db/audit.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
 import { withLogUnlocked } from './db/engine.ts';
-import { auditChainHead, auditLog } from './db/tables.ts';
+import { auditChainHead, auditLog } from '@coffre/db/schema';
 import { acceptAuditLoss } from '../src/api/audit.ts';
 import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault } from './api-fixture.ts';
 

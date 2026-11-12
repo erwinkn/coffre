@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
 import { clientFor, LOG, usesLogged } from './api-fixture.ts';
-import { auditLog, mcpApprovals } from './db/tables.ts';
+import { auditLog, mcpApprovals } from '@coffre/db/schema';
 import { ALPHABETS, randomValue } from '../src/mcp/changes.ts';
 import { browserFor, callRaw, connect, db, deps, DEV, entries, fromPage, ROOT, route, useMcp } from './mcp-fixture.ts';
 

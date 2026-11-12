@@ -7,11 +7,11 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { EVERYWHERE } from '@coffre/core/access';
 import { entryHash, sealEntry } from '@coffre/core/audit';
 import { github, signin, type Principal } from '@coffre/core/identity';
-import { tablesOf } from '@coffre/db';
+import * as schema from '@coffre/db/schema';
 import { and, asc, desc, eq, is, Table } from 'drizzle-orm';
 
 import { auditRange } from '../src/db/queries.ts';
-import { auditChainHead, auditLog } from './db/tables.ts';
+import { auditChainHead, auditLog, grants, projects } from '@coffre/db/schema';
 import { serveApi } from '../src/api/router.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
@@ -264,7 +264,6 @@ test('a removed member stays out despite a live session, until the vault admits 
 
 test('a grant forged in the database lists as stored until the vault meets it, which marks its member', { skip: START_OVER_014 }, async () => {
   // Someone who owns the database gives the developer the whole project.
-  const { projects, grants } = tablesOf(db.owner);
   const [{ id: projectId }] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
   await db.owner.insert(grants).values({
     principal: `user:${DEV}`, projectId, environmentId: null, role: 'owner', expiresAt: null, grantedAt: 0, grantedBy: `user:${ROOT}`,
@@ -370,7 +369,6 @@ test('the audit verification checks the vault\'s rows too, and finds a grant wri
   assert.ok(verified.ok);
 
   // Someone who owns the database gives the developer the whole project.
-  const { projects, grants } = tablesOf(db.owner);
   const [{ id: projectId }] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
   await db.owner.insert(grants).values({
     principal: `user:${DEV}`, projectId, environmentId: null, role: 'owner', expiresAt: null, grantedAt: 0, grantedBy: `user:${ROOT}`,
@@ -408,7 +406,7 @@ test('the database holds no key', async () => {
 
   // Every row of every table, the app's and the vault's.
   const values: Buffer[] = [];
-  for (const table of Object.values(tablesOf(db.owner)).filter((value) => is(value, Table))) {
+  for (const table of Object.values(schema).filter((value) => is(value, Table))) {
     for (const row of await db.owner.select().from(table as Table)) {
       for (const value of Object.values(row as Record<string, unknown>)) {
         values.push(value instanceof Uint8Array ? Buffer.from(value) : Buffer.from(String(value)));

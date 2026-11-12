@@ -11,7 +11,6 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { issuedGrant, storedScope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { ChangeBindingsInput, CredentialColumns, LoggedChange, MadeBinding, SignInInput } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { postgresSession } from '@coffre/db/connect';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 
@@ -22,6 +21,7 @@ import { objectKey, sealKey } from '../src/inputs.ts';
 import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
 import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, rows, sealed, nothingHeld, type TestDatabase } from './database.ts';
+import { auditLog, credentials as credentialsTable, logChanges, mcpConnections, oauthClients, principals, secrets, serviceBindings } from '@coffre/db/schema';
 
 const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
@@ -83,7 +83,6 @@ function change(input: Partial<ChangeBindingsInput>): ChangeBindingsInput {
 
 /** A binding as its row is now, with its seal: what a sign-in names, and what ending it names. */
 async function read(id: string): Promise<{ columns: SignInInput['binding']['columns']; seal: string | null; authMac: string }> {
-  const { serviceBindings } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id));
   return {
     columns: {
@@ -97,7 +96,6 @@ async function read(id: string): Promise<{ columns: SignInInput['binding']['colu
 
 /** An object's newest change as the app reads it beside the bindings (T192, `SignInInput.newest`), or none. */
 async function newestOf(object: { kind: 'principal' | 'binding'; id: string }): Promise<LoggedChange | null> {
-  const { logChanges } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(logChanges).where(eq(logChanges.object, objectKey(object))).orderBy(desc(logChanges.number)).limit(1);
   if (row === undefined) return null;
   return {
@@ -158,9 +156,8 @@ async function signIn(w: World, id: string, newest?: SignInInput['newest']): Pro
 
 /** Binding `id` ended, with the live credentials named (all it issued, unless `credentials` says otherwise). */
 async function ending(id: string, credentials?: string[]): Promise<ChangeBindingsInput['ends'][number]> {
-  const { credentials: table } = tablesOf(db.owner);
   const { columns, seal, authMac } = await read(id);
-  const rows = (await db.owner.select().from(table).where(eq(table.createdBy, `binding:${id}`))).filter((row) => row.revokedAt === null && (credentials === undefined || credentials.includes(row.id)));
+  const rows = (await db.owner.select().from(credentialsTable).where(eq(credentialsTable.createdBy, `binding:${id}`))).filter((row) => row.revokedAt === null && (credentials === undefined || credentials.includes(row.id)));
   return {
     before: { columns, seal: seal! }, authMacFrom: authMac, authMac: randomBytes(32).toString('base64'),
     credentials: rows.map((row) => ({
@@ -174,7 +171,6 @@ async function ending(id: string, credentials?: string[]): Promise<ChangeBinding
 }
 
 async function ops(object: { kind: 'binding' | 'credential'; id: string }): Promise<string[]> {
-  const { logChanges } = tablesOf(db.owner);
   return (await db.owner.select({ payload: logChanges.payload }).from(logChanges).where(eq(logChanges.object, objectKey(object))).orderBy(asc(logChanges.number)))
     .map(({ payload }) => (JSON.parse(payload) as { op: string }).op);
 }
@@ -184,7 +180,6 @@ test("a binding the Owner makes is a change of the log, its row the object it se
   const made = binding(w, true);
   const outcome = await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }));
   assert.ok(outcome.ok, JSON.stringify(outcome));
-  const { logChanges } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'binding', id: made.id })));
   assert.deepEqual((JSON.parse(row!.payload) as { bind: unknown }).bind, { by: ROOT, via: null, label: 'deploys', replaces: [] });
   assert.equal((await read(made.id)).seal, Buffer.from(row!.seal!).toString('base64'), "the row carries its object's seal");
@@ -195,7 +190,6 @@ test("a binding ended, put back, its end's seal column written to match only onc
   const w = await world();
   const made = binding(w);
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
-  const { credentials, logChanges, serviceBindings } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, made.id));
   assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
   // The writer: the row as it was before its end, its old seal valid. The end's log row untouched, so far: its MAC holds.
@@ -218,27 +212,26 @@ test("a binding ended, put back, its end's seal column written to match only onc
     },
   });
   const vault = await openLocalVault(late as never, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
-  const signedIn = (await db.owner.select().from(credentials)).length;
+  const signedIn = (await db.owner.select().from(credentialsTable)).length;
   // Held by the end's MAC alone, the sign-in went on to `sign_in`, whose comparison the forged column then passed: a
   // credential through an ended binding. The binding's seal, as the vault proved it, is held to the checked change's.
   assert.deepEqual((await signIn({ ...w, vault }, made.id)).outcome, { ok: false, refused: 'unbound' });
-  assert.equal((await db.owner.select().from(credentials)).length, signedIn, 'no credential made');
+  assert.equal((await db.owner.select().from(credentialsTable)).length, signedIn, 'no credential made');
 });
 
 test("a binding ended, put back by a writer with its end's seal column written to match, signs nobody in: that change's MAC does not hold (T190)", async () => {
   const w = await world();
   const made = binding(w);
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
-  const { credentials, logChanges, serviceBindings } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, made.id));
   assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
   // The writer: the row as it was before its end, and the end's seal column made that row's seal (not its MAC).
   await db.owner.update(serviceBindings).set({ revokedAt: null, seal: row!.seal, authMac: row!.authMac }).where(eq(serviceBindings.id, made.id));
   const [newest] = await db.owner.select({ number: logChanges.number }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'binding', id: made.id }))).orderBy(desc(logChanges.number)).limit(1);
   await db.owner.update(logChanges).set({ seal: row!.seal }).where(eq(logChanges.number, newest!.number));
-  const signedIn = (await db.owner.select().from(credentials)).length;
+  const signedIn = (await db.owner.select().from(credentialsTable)).length;
   assert.deepEqual((await signIn(w, made.id)).outcome, { ok: false, refused: 'unbound' });
-  assert.equal((await db.owner.select().from(credentials)).length, signedIn, 'no credential made');
+  assert.equal((await db.owner.select().from(credentialsTable)).length, signedIn, 'no credential made');
 });
 
 test("a sign-in handed the account's and the binding's newest changes, as the app reads them beside the binding, reads none itself: one statement (T192)", async () => {
@@ -291,7 +284,6 @@ test("an account removed, its row put back, its removal's seal column written to
   const w = await world();
   const made = binding(w);
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
-  const { credentials, logChanges, principals } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
   assert.ok((await w.vault.remove({ actor: ROOT, principal: CI })).ok);
   // The writer: the account's row as it was before its removal, its old seal valid; the removal's log row untouched, so
@@ -299,13 +291,13 @@ test("an account removed, its row put back, its removal's seal column written to
   await db.owner.update(principals).set({ status: row!.status, generation: row!.generation, seal: row!.seal }).where(eq(principals.principal, CI));
   const removal = (await newestOf({ kind: 'principal', id: CI }))!;
   const forge = async () => { await db.owner.update(logChanges).set({ seal: row!.seal }).where(eq(logChanges.number, BigInt(removal.number))); };
-  const signedIn = (await db.owner.select().from(credentials)).length;
+  const signedIn = (await db.owner.select().from(credentialsTable)).length;
   for (const newest of [await newestAsRead(made.id), undefined]) {
     // Then, as `sign_in`'s statement goes out, the removal's seal column made the row's: before T192, `sign_in` compared
     // the row with that column, and made a credential for an account removed.
     const watched = await watchedVault(w, forge);
     assert.deepEqual((await signIn({ ...w, vault: watched.vault }, made.id, newest)).outcome, { ok: false, refused: 'unbound' });
-    assert.equal((await db.owner.select().from(credentials)).length, signedIn, 'no credential made');
+    assert.equal((await db.owner.select().from(credentialsTable)).length, signedIn, 'no credential made');
     await db.owner.update(logChanges).set({ seal: Buffer.from(removal.seal!, 'base64') }).where(eq(logChanges.number, BigInt(removal.number)));
   }
 });
@@ -314,7 +306,6 @@ test("an account removed, its row put back with its removal's own seal, still ge
   const w = await world();
   const made = binding(w);
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
-  const { credentials, principals } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
   assert.ok((await w.vault.remove({ actor: ROOT, principal: CI })).ok);
   // The writer, with no log tamper at all: the row active again at its old generation, its seal the removal's. The
@@ -322,17 +313,16 @@ test("an account removed, its row put back with its removal's own seal, still ge
   const removal = (await newestOf({ kind: 'principal', id: CI }))!;
   await db.owner.update(principals).set({ status: row!.status, generation: row!.generation, seal: Buffer.from(removal.seal!, 'base64') })
     .where(eq(principals.principal, CI));
-  const signedIn = (await db.owner.select().from(credentials)).length;
+  const signedIn = (await db.owner.select().from(credentialsTable)).length;
   // The gap: the vault does not check the row's columns (and grants) against that seal at sign-in, so a credential is
   // made. Closing it means the app reads the row and its grants too; R64 leaves it, as the row fails closed below.
   assert.equal((await signIn(w, made.id, await newestAsRead(made.id))).outcome.ok, true);
-  assert.equal((await db.owner.select().from(credentials)).length, signedIn + 1);
+  assert.equal((await db.owner.select().from(credentialsTable)).length, signedIn + 1);
   // Every decision that reads the account checks its row against its seal (`use.ts`'s `viewOf`), and refuses it.
   assert.equal((await w.vault.access(CI)).status, 'tampered');
 });
 
 test("an account's old, authentic change handed back under the number of its removal, whose seal column a writer made the old one's, signs nobody in: `sign_in` holds the newest change to the one checked whole, not by number and seal (T192, review r2)", async () => {
-  const { credentials, logChanges, principals } = tablesOf(db.owner);
   // Its change before its removal, whose MAC holds, and the removal's number. No MAC covers a number.
   {
     const w = await world();
@@ -345,15 +335,14 @@ test("an account's old, authentic change handed back under the number of its rem
     // The writer: the row put back, the removal's seal column the old change's; nothing deleted, renumbered or replayed.
     await db.owner.update(principals).set({ status: row!.status, generation: row!.generation, seal: row!.seal }).where(eq(principals.principal, CI));
     await db.owner.update(logChanges).set({ seal: Buffer.from(old.seal!, 'base64') }).where(eq(logChanges.number, BigInt(removal.number)));
-    const signedIn = (await db.owner.select().from(credentials)).length;
+    const signedIn = (await db.owner.select().from(credentialsTable)).length;
     const handed = { ...(await newestAsRead(made.id)), member: { ...old, number: removal.number } };
     assert.deepEqual((await signIn(w, made.id, handed)).outcome, { ok: false, refused: 'unbound' });
-    assert.equal((await db.owner.select().from(credentials)).length, signedIn, 'no credential made');
+    assert.equal((await db.owner.select().from(credentialsTable)).length, signedIn, 'no credential made');
   }
 });
 
 test("a binding's making handed back under the number of its end, whose seal column a writer made the making's, signs nobody in (T192, review r2)", async () => {
-  const { credentials, logChanges, serviceBindings } = tablesOf(db.owner);
   {
     const w = await world();
     const made = binding(w);
@@ -364,10 +353,10 @@ test("a binding's making handed back under the number of its end, whose seal col
     const end = (await newestOf({ kind: 'binding', id: made.id }))!;
     await db.owner.update(serviceBindings).set({ revokedAt: null, revokedBy: null, authMac: saved!.authMac, seal: saved!.seal }).where(eq(serviceBindings.id, made.id));
     await db.owner.update(logChanges).set({ seal: Buffer.from(making.seal!, 'base64') }).where(eq(logChanges.number, BigInt(end.number)));
-    const signedIn = (await db.owner.select().from(credentials)).length;
+    const signedIn = (await db.owner.select().from(credentialsTable)).length;
     const handed = { ...(await newestAsRead(made.id)), binding: { ...making, number: end.number } };
     assert.deepEqual((await signIn(w, made.id, handed)).outcome, { ok: false, refused: 'unbound' });
-    assert.equal((await db.owner.select().from(credentials)).length, signedIn, 'no credential made');
+    assert.equal((await db.owner.select().from(credentialsTable)).length, signedIn, 'no credential made');
   }
 });
 
@@ -378,13 +367,11 @@ test("only an Owner of its project gives a binding's runs sensitive reads (R32);
   assert.ok((await w.vault.changeBindings!(change({ actor: ADMIN, make: binding(w, false, ADMIN), reason: 'replaced' }))).ok, 'no sensitive read, the Admin may');
   const bySelf = await w.vault.changeBindings!(change({ actor: CI, make: { ...binding(w), createdBy: 'ci' }, reason: 'replaced' }));
   assert.equal(!bySelf.ok && bySelf.refused, 'refused');
-  const { serviceBindings } = tablesOf(db.owner);
   assert.equal((await db.owner.select().from(serviceBindings)).length, 1);
 });
 
 test('a binding 0.14 made, which the log never held, or one whose row was edited around the vault, signs nobody in (BindingSealed)', async () => {
   const w = await world();
-  const { serviceBindings } = tablesOf(db.owner);
   // As 0.14 wrote one: no seal, no change.
   const old = binding(w);
   await db.owner.insert(serviceBindings).values({ ...old, authMac: Buffer.from(old.authMac, 'base64'), createdAt: new Date(old.createdAt), revoked: undefined } as never);
@@ -410,7 +397,6 @@ test('a binding 0.14 made, which the log never held, or one whose row was edited
 
 test("a sign-in through the binding of an account whose newest change was edited around the vault is refused, its finding naming that change (T179 PR 4a)", async () => {
   const w = await world();
-  const { auditLog } = tablesOf(db.owner);
   const made = binding(w);
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
   // The account's newest change, its actor edited: its MAC no longer holds.
@@ -436,8 +422,7 @@ test("an unbind ends the binding and every live credential it issued, each a cha
   assert.ok(outcome.ok, JSON.stringify(outcome));
   assert.deepEqual(await ops({ kind: 'binding', id: made.id }), ['binding.make', 'binding.revoke']);
   for (const { credential } of [first, second]) assert.deepEqual(await ops({ kind: 'credential', id: credential }), ['credential.issue', 'credential.revoke']);
-  const { credentials } = tablesOf(db.owner);
-  assert.ok((await db.owner.select().from(credentials)).every((row) => row.revokedAt !== null));
+  assert.ok((await db.owner.select().from(credentialsTable)).every((row) => row.revokedAt !== null));
   assert.equal((await read(made.id)).columns.revoked, true);
   // Through it again, as it was sealed before its end: the statement sees the end.
   assert.deepEqual((await signIn(w, made.id)).outcome, { ok: false, refused: 'unsealed' });
@@ -518,11 +503,9 @@ test("an unbind takes 0.14's head first, which 0.14's use of a credential it end
 
 test("a binding's maker whose access moved since the app weighed it is refused, for the app to weigh again", async () => {
   const w = await world();
-  const { principals } = tablesOf(db.owner);
   const [{ accessSeq }] = (await db.owner.select({ accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, ROOT))) as [{ accessSeq: bigint }];
   const stale = await w.vault.changeBindings!(change({ make: binding(w), reason: 'replaced', actorAccess: String(BigInt(accessSeq) + 1n) }));
   assert.equal(!stale.ok && stale.refused, 'access');
-  const { serviceBindings } = tablesOf(db.owner);
   assert.equal((await db.owner.select().from(serviceBindings)).length, 0);
 });
 
@@ -532,16 +515,15 @@ test("a credential with no seal its sealed binding issued (one planted around th
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
   const run = await signIn(w, made.id);
   assert.ok(run.outcome.ok);
-  const { credentials } = tablesOf(db.owner);
   const planted = randomUUID();
-  await db.owner.insert(credentials).values({
+  await db.owner.insert(credentialsTable).values({
     id: planted, kind: 'service', authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, principal: CI,
     createdBy: `binding:${made.id}`, expiresAt: new Date(Date.now() + 300_000),
   });
   assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
   assert.deepEqual(await ops({ kind: 'binding', id: made.id }), ['binding.make', 'binding.revoke']);
   assert.deepEqual(await ops({ kind: 'credential', id: planted }), [], 'none of the log\'s: no change of it');
-  assert.ok((await db.owner.select().from(credentials)).every((row) => row.revokedAt !== null), 'both ended');
+  assert.ok((await db.owner.select().from(credentialsTable)).every((row) => row.revokedAt !== null), 'both ended');
 });
 
 test("a bind weighed beside the account's bindings as they were is read again when another was made meanwhile, or a key it reads renamed (review r1)", async () => {
@@ -550,7 +532,6 @@ test("a bind weighed beside the account's bindings as they were is read again wh
   // Beside none, as it read them before the first was made.
   assert.deepEqual(await w.vault.changeBindings!(change({ make: binding(w), live: [], reason: 'replaced' })), { ok: false, refused: 'moved' });
   // A key its policy reads, asked by a name it no longer has.
-  const { secrets, serviceBindings } = tablesOf(db.owner);
   const environment = await newEnvironment(db.owner, w.project);
   const key = randomUUID();
   await db.owner.insert(secrets).values({ id: key, projectId: w.project, environmentId: environment, key: 'RENAMED' });
@@ -573,7 +554,6 @@ test("the log of a bind, a sign-in through it and its unbind replays to the rows
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
   assert.ok((await signIn(w, made.id)).outcome.ok);
   assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
-  const { logChanges } = tablesOf(db.owner);
   const holds = authentic(w.keys.mac);
   const changes = (await db.owner.select().from(logChanges).orderBy(asc(logChanges.number))).filter((raw) => raw.object !== CUTOVER_OBJECT).map((raw) => {
     const row = { ...raw, number: BigInt(raw.number), seal: raw.seal ?? null };
@@ -588,7 +568,6 @@ test("the log of a bind, a sign-in through it and its unbind replays to the rows
 
 test("a binding 0.14 made is ended by the vault with no change; one of the log's whose seal a writer cleared is stale, never ended with no change (review r2)", async () => {
   const w = await world();
-  const { serviceBindings } = tablesOf(db.owner);
   const old = binding(w);
   await db.owner.insert(serviceBindings).values({ ...old, authMac: Buffer.from(old.authMac, 'base64'), createdAt: new Date(old.createdAt), revoked: undefined } as never);
   assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(old.id)] }))).ok);
@@ -604,7 +583,6 @@ test("a binding 0.14 made is ended by the vault with no change; one of the log's
 
 test("a bind through an MCP connection goes ahead only while it is connected; an id the log holds already is no binding to make, its row deleted or not (review r3)", async () => {
   const w = await world();
-  const { mcpConnections, oauthClients, serviceBindings } = tablesOf(db.owner);
   const client = randomUUID();
   await db.owner.insert(oauthClients).values({ id: client, name: 'agent', redirectUris: '[]', authMac: randomBytes(32) } as never);
   const connection = randomUUID();
@@ -627,7 +605,6 @@ test("a bind through an MCP connection goes ahead only while it is connected; an
 
 test("a key a replacing bind reads, renamed while it waits for the fence, has it read again: the names compared once the fence is had (review r4)", async () => {
   const w = await world();
-  const { secrets } = tablesOf(db.owner);
   const environment = await newEnvironment(db.owner, w.project);
   const key = randomUUID();
   await db.owner.insert(secrets).values({ id: key, projectId: w.project, environmentId: environment, key: 'API_KEY' });
@@ -664,7 +641,6 @@ test("one new binding id asked for two accounts at once, the first's row deleted
     const second = w.vault.changeBindings!(change({ make: { ...binding(w), id, principal: OTHER }, live: [others.id], ends: [await ending(others.id)], reason: 'replaced' }));
     await sleep(200);
     assert.ok((await w.vault.changeBindings!(change({ make: { ...binding(w), id }, reason: 'replaced' }))).ok, "CI's, first");
-    const { serviceBindings } = tablesOf(db.owner);
     await db.owner.delete(serviceBindings).where(eq(serviceBindings.id, id));
     await holder.unsafe('COMMIT');
     assert.deepEqual(await second, { ok: false, refused: 'stale' });
@@ -677,13 +653,11 @@ test("a binding's row put back after its end, its old seal and all, signs nobody
   const w = await world();
   const made = binding(w);
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
-  const { serviceBindings } = tablesOf(db.owner);
   const [saved] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, made.id));
   const before = await read(made.id);
   assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
   await db.owner.update(serviceBindings).set({ revokedAt: null, revokedBy: null, authMac: saved!.authMac, seal: saved!.seal }).where(eq(serviceBindings.id, made.id));
-  const { credentials } = tablesOf(db.owner);
-  const none = (await db.owner.select().from(credentials)).length;
+  const none = (await db.owner.select().from(credentialsTable)).length;
   const now = Date.now();
   const outcome = await w.vault.signIn!({
     principal: CI, binding: { columns: before.columns, seal: before.seal },
@@ -694,7 +668,7 @@ test("a binding's row put back after its end, its old seal and all, signs nobody
     appKey: APP_KEY, spent: randomBytes(32).toString('base64'), validUntil: now + 60_000, record: { proof: 'oidc', issuer: ISSUER, run: {} }, idToken: null, dpop: null,
   });
   assert.deepEqual(outcome, { ok: false, refused: 'unbound' });
-  assert.equal((await db.owner.select().from(credentials)).length, none, 'nothing written');
+  assert.equal((await db.owner.select().from(credentialsTable)).length, none, 'nothing written');
 });
 
 test("a sweep closes the binding, revoking only the credentials it names, each a change, waiting for no seal; a closed binding signs nobody in, and the end ends it (W331, Unbinding.tla)", async () => {
@@ -712,7 +686,6 @@ test("a sweep closes the binding, revoking only the credentials it names, each a
   assert.deepEqual(await ops({ kind: 'binding', id: made.id }), ['binding.make']);
   assert.deepEqual(await ops({ kind: 'credential', id: first.credential }), ['credential.issue', 'credential.revoke']);
   assert.deepEqual(await ops({ kind: 'credential', id: second.credential }), ['credential.issue']);
-  const { serviceBindings } = tablesOf(db.owner);
   const [row] = await db.owner.select({ closedAt: serviceBindings.closedAt, revokedAt: serviceBindings.revokedAt }).from(serviceBindings).where(eq(serviceBindings.id, made.id));
   assert.deepEqual([row!.closedAt !== null, row!.revokedAt], [true, null]);
   assert.deepEqual((await signIn(w, made.id)).outcome, { ok: false, refused: 'unbound' });
@@ -743,7 +716,6 @@ test("a replacement's sweep makes its binding as it closes the one it replaces, 
   assert.ok(swept.ok, JSON.stringify(swept));
   assert.deepEqual(await ops({ kind: 'binding', id: next.id }), ['binding.make']);
   assert.deepEqual(await ops({ kind: 'credential', id: run.credential }), ['credential.issue', 'credential.revoke']);
-  const { serviceBindings } = tablesOf(db.owner);
   const [made] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, next.id));
   assert.ok(made !== undefined && made.revokedAt === null && made.closedAt === null);
   const [closed] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, old.id));
@@ -754,7 +726,6 @@ test("a replacement's sweep makes its binding as it closes the one it replaces, 
   assert.ok((await w.vault.changeBindings!(change({ make: other, live: [old.id, next.id], reason: 'replaced' }))).ok);
   const second = await signIn(w, other.id);
   assert.ok(second.outcome.ok);
-  const { principals } = tablesOf(db.owner);
   const [{ accessSeq }] = (await db.owner.select({ accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, ROOT))) as [{ accessSeq: bigint }];
   const refusedMake = binding(w);
   const stale = await w.vault.changeBindings!(change({

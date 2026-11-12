@@ -21,7 +21,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { NamedUseInput, Vault } from '@coffre/core/vault';
-import { createDatabase, tablesOf } from '@coffre/db';
+import { createDatabase } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
@@ -29,6 +29,7 @@ import { newRequestId } from '../../src/use.ts';
 import { openVault, prepareVault } from '../../src/vault.ts';
 import { HOT_URL, openTestDatabase, rows, run, type TestDatabase } from '../database.ts';
 import { CONFIG, DAY, emptyLog, genesis, LOG_015, ROOT, useDatabases, world } from '../use-world.ts';
+import { credentials } from '@coffre/db/schema';
 
 let db: TestDatabase;
 before(async () => {
@@ -59,7 +60,7 @@ async function credentialOf(principal: string): Promise<string> {
   const id = randomUUID();
   const tokenHash = randomBytes(32);
   const expiresAt = Date.now() + DAY;
-  await db.owner.insert(tablesOf(db.owner).credentials).values({
+  await db.owner.insert(credentials).values({
     id, kind: 'service', authMac: Buffer.alloc(32), tokenHash, tokenHint: 'hint', generation: 0, principal, createdBy: ROOT, expiresAt: new Date(expiresAt), scope: null,
   });
   await genesis({ kind: 'credential', id }, { kind: 'credential', id, principal, caller: 'bearer', scope: null, expiresAt, revoked: false, generation: 0 });

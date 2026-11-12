@@ -17,7 +17,7 @@ import { issuerNow } from '../src/api/services.ts';
 import { serveApi } from '../src/api/router.ts';
 import { parsePath } from '../src/api/paths.ts';
 import type { ApiContext } from '../src/api/context.ts';
-import { auditLog, environments, projects, secrets } from './db/tables.ts';
+import { auditLog, environments, projects, secrets } from '@coffre/db/schema';
 import { clientFor, contextFor, openTestDatabase, refusedIn, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';

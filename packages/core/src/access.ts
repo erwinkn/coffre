@@ -115,7 +115,7 @@ export const ROLE_NAMES = Object.keys(ROLES) as BuiltinRole[];
  * The longest a role's id may be, in characters. An id is not free text but an identifier, like a place's slug or a
  * key, which people type in a URL (`/roles/release-manager`), a CLI flag and a policy, and whose format, length
  * included, every copy of it holds: the API's schema, the vault's checks, the database's role check
- * (`grants_role_check`, both engines) and the UI's field. No platform sets 32; it is the format custom roles
+ * (`grants_role_check`) and the UI's field. No platform sets 32; it is the format custom roles
  * shipped with (W128, 0.10), kept as a format, not as a bound on work (the limits audit, #501, S68 and C4). A role's
  * name and description are text, and bounded only by the body that carries them.
  */

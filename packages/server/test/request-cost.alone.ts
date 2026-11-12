@@ -50,7 +50,7 @@ import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connect
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { withLogUnlocked } from './db/engine.ts';
-import { auditLog, credentials as credentialRows, secrets } from './db/tables.ts';
+import { auditLog, credentials as credentialRows, secrets } from '@coffre/db/schema';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 
 const ORIGIN = 'https://secrets.acme.example';

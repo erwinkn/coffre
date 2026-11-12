@@ -92,7 +92,7 @@ export async function useByName(
   // reads the key: the same answer, at the same cost, whatever it asked for (conformance check 19).
   if (answered.route === 'credential') return null;
   const { outcome } = answered;
-  const ahead = namedAhead(runtime.db, answered.app, { personal: asked.place !== null && personalOf(asked.place.environment) !== null });
+  const ahead = namedAhead(answered.app, { personal: asked.place !== null && personalOf(asked.place.environment) !== null });
   // The credential checked on the rows the use answered, its MAC and token's hash among them, as a request reads them,
   // its expiry at the use's `at`, as the vault judged it (one clock, review r8): of what this checks, only a forged
   // row's MAC is not decided above or by the vault (D154; the comment above).
@@ -138,7 +138,7 @@ export async function useManyByName(
   if (answered.route === 'credential') return null;
   const personal = personalOf(asked.place.environment) !== null;
   // Every key's rows, the caller standing there and its chain whole; the credential's and the place's only, otherwise.
-  const ahead = namedManyAhead(runtime.db, answered.app, answered.stands ? answered.keys : null, { personal });
+  const ahead = namedManyAhead(answered.app, answered.stands ? answered.keys : null, { personal });
   const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, {
     handle: kind === 'handle', standing: answered.standing, at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
   });
@@ -173,7 +173,7 @@ export async function useRouteByName(
   if (answered.route === 'busy') throw refusedUse(answered.outcome);
   // No credential its seals bear out: the credential's own check answers, as ever (401).
   if (answered.route === 'credential') return { credential: true, identity: await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, { handle: true }) };
-  const ahead = namedManyAhead(runtime.db, answered.app, answered.stands ? answered.keys : null, { personal: false });
+  const ahead = namedManyAhead(answered.app, answered.stands ? answered.keys : null, { personal: false });
   const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, {
     handle: true, standing: answered.standing, at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
   });

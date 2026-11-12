@@ -19,7 +19,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { passkeyStands } from '../src/passkey-check.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, credentials, deviceLogins, passkeys } from './db/tables.ts';
+import { auditLog, credentials, deviceLogins, passkeys } from '@coffre/db/schema';
 import * as rows from './passkey-rows.ts';
 import { touching } from './passkey-rows.ts';
 

@@ -11,7 +11,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { decrypt } from '@coffre/core/envelope';
 import { awsKms } from '@coffre/core/kek';
 import type { UseManyInput, UseManyOutcome, UseOutcome } from '@coffre/core/vault';
-import { createDatabase, tablesOf, type Database } from '@coffre/db';
+import { createDatabase, type Database } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
@@ -23,6 +23,7 @@ import { openVault, prepareVault } from '../src/vault.ts';
 import { HOT_URL, openTestDatabase, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, emptyLog, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 import { resolveVaultConfig } from '../src/config.ts';
+import { environments } from '@coffre/db/schema';
 
 let db: TestDatabase;
 before(async () => {
@@ -432,7 +433,7 @@ async function waitForPrincipalLock(n: number): Promise<void> {
 /** Another environment of the world's project, sealed, where it has no grant. */
 async function environmentOf(w: { project: string }, slug: string): Promise<ReturnType<typeof randomUUID>> {
   const id = randomUUID();
-  await db.owner.insert(tablesOf(db.owner).environments).values({ id, projectId: w.project, slug, name: slug, protected: false, owner: null, parentId: null });
+  await db.owner.insert(environments).values({ id, projectId: w.project, slug, name: slug, protected: false, owner: null, parentId: null });
   const object: Input = { kind: 'environment', id, projectId: w.project, slug, owner: null, parentId: null, protected: false, deleted: false, archived: false, projectArchived: false };
   await change({ kind: 'environment', id }, { op: 'genesis', value: object }, object, seal('environments', 'id', id));
   return id;

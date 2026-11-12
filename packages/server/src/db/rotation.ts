@@ -1,12 +1,13 @@
 // What the app's key rotation reads and writes (key-rotation.ts): where the
 // log says the app's key stands, and its signed rows, a stretch at a time.
 import type { StoredEntry } from '@coffre/core/audit';
-import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { forUpdate, rowsOf } from '@coffre/db/dialect';
+import { type Queryable, type Transaction } from '@coffre/db';
+import { rowsOf } from '@coffre/db/dialect';
 import { authoredBy, entriesOf, entryColumns, firstEntryUnder, MOVES_FROM } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 
 import type { AuthRow, AuthTable } from '../auth-rows.ts';
+import { auditLog, credentials, deviceLogins, enrollmentCodes, identities, mcpConnections, oauthClients, passkeys, serviceBindings } from '@coffre/db/schema';
 
 /**
  * The app's newest `key.reseal` or `key.rotate`, unchecked: one step of
@@ -15,14 +16,12 @@ import type { AuthRow, AuthTable } from '../auth-rows.ts';
  * by `seq` from the newest entry to the newest move.
  */
 export async function newestMove(db: Queryable): Promise<StoredEntry | undefined> {
-  const { auditLog } = tablesOf(db);
-  const [row] = await db.select(entryColumns(db)).from(auditLog).where(entriesOf('moves')).orderBy(desc(auditLog.seq)).limit(1);
+  const [row] = await db.select(entryColumns()).from(auditLog).where(entriesOf('moves')).orderBy(desc(auditLog.seq)).limit(1);
   return row as StoredEntry | undefined;
 }
 
 /** Which of `keyIds` an app's `key.reseal` or `key.rotate` names as the key it moves from. */
 export async function movedFrom(db: Queryable, keyIds: readonly string[]): Promise<Set<string>> {
-  const { auditLog } = tablesOf(db);
   const rows = await db
     .selectDistinct({ keyId: auditLog.subjectPrincipal })
     .from(auditLog)
@@ -41,23 +40,21 @@ export async function wroteUnder(db: Queryable, keyId: string): Promise<boolean>
  * last, at each cold start of an app idle while the vault's beats went on.
  */
 export async function newestAppEntry(db: Queryable): Promise<StoredEntry | undefined> {
-  const { auditLog } = tablesOf(db);
-  const [row] = await db.select(entryColumns(db)).from(auditLog).where(authoredBy('app')).orderBy(desc(auditLog.seq)).limit(1);
+  const [row] = await db.select(entryColumns()).from(auditLog).where(authoredBy('app')).orderBy(desc(auditLog.seq)).limit(1);
   return row as StoredEntry | undefined;
 }
 
 /** Each signed table by its name, as the app's rows name it (`AuthTable`). */
-function signedTable(db: Queryable, table: AuthTable) {
-  const tables = tablesOf(db);
+function signedTable(table: AuthTable) {
   return {
-    identities: tables.identities,
-    credentials: tables.credentials,
-    device_authorizations: tables.deviceLogins,
-    service_bindings: tables.serviceBindings,
-    oauth_clients: tables.oauthClients,
-    mcp_connections: tables.mcpConnections,
-    enrollments: tables.enrollmentCodes,
-    passkeys: tables.passkeys,
+    identities,
+    credentials,
+    device_authorizations: deviceLogins,
+    service_bindings: serviceBindings,
+    oauth_clients: oauthClients,
+    mcp_connections: mcpConnections,
+    enrollments: enrollmentCodes,
+    passkeys,
   }[table];
 }
 
@@ -68,9 +65,9 @@ function signedTable(db: Queryable, table: AuthTable) {
  * row signed again and refuses, rather than the step missing it.
  */
 export async function signedRowsAfter(tx: Queryable, table: AuthTable, after: string | null, limit: number): Promise<AuthRow[]> {
-  const rows = signedTable(tx, table);
+  const rows = signedTable(table);
   const query = tx.select().from(rows);
-  return (await forUpdate(tx, (after === null ? query : query.where(gt(rows.id, after))).orderBy(asc(rows.id)).limit(limit))) as AuthRow[];
+  return (await (after === null ? query : query.where(gt(rows.id, after))).orderBy(asc(rows.id)).limit(limit).for('update')) as AuthRow[];
 }
 
 /** A row signed again: its MAC as read, which it must still carry, and its new one; and when it ends, a session signed out or a device's login used up. */
@@ -83,7 +80,7 @@ export type Resealed = { id: string; was: Buffer; mac: Buffer; ends: Date | null
  * consumed. The ids of those it changed. One statement for each kind.
  */
 export async function reseal(tx: Transaction, table: AuthTable, rows: readonly Resealed[]): Promise<string[]> {
-  const target = signedTable(tx, table);
+  const target = signedTable(table);
   const changed: string[] = [];
   for (const ends of [false, true]) {
     const some = rows.filter((row) => (row.ends !== null) === ends);

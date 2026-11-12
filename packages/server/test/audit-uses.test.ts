@@ -16,7 +16,6 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { createClient, type AuditEntryView, type CoffreClient } from '@coffre/client';
 import { defineSignin, github } from '@coffre/core/identity';
-import { tablesOf } from '@coffre/db';
 import { derivedSigningKey } from '@coffre/vault';
 import { runCheckpointer, type RunningCheckpointer } from '@coffre/vault/node';
 import { and, desc, eq } from 'drizzle-orm';
@@ -25,7 +24,7 @@ import { READS_BEHIND_MS, readsListed } from '../src/api/audit.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { logReadDays, logReadPlaceDays, logReads, logReadsCursor, logUses, secrets } from './db/tables.ts';
+import { bulkCap, logCheckpoints, logReadDays, logReadPlaceDays, logReads, logReadsCursor, logTiles, logUses, secrets } from '@coffre/db/schema';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { openVaultDatabase } from './db/engine.ts';
 
@@ -69,7 +68,6 @@ beforeEach(async () => {
   signer = null;
   await resetDatabase(db.owner);
   if (LOG === '0.15') {
-    const { logUses, bulkCap, logCheckpoints, logTiles } = tablesOf(db.owner);
     for (const table of [logUses, bulkCap, logCheckpoints, logTiles]) await db.owner.delete(table);
     const kek = randomBytes(32);
     signer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [derivedSigningKey(kek)], memory: join(scratch, `memory-${Date.now()}`), intervalMs: 3_600_000 });

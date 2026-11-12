@@ -10,7 +10,7 @@ import { encrypt, freshDek } from '@coffre/core/envelope';
 import { decodePair, openPair } from '@coffre/core/merkle';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { TreeVerification, UseOutcome } from '@coffre/core/vault';
-import { tablesOf, type Database } from '@coffre/db';
+import { type Database } from '@coffre/db';
 import { eq, sql } from 'drizzle-orm';
 
 import { genesisCall, type ChangeKeys } from '../src/changes.ts';
@@ -28,6 +28,7 @@ import { newRequestId } from '../src/use.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
 import { cutOver, emptyDatabase, openTestDatabase, places, rows, run, speaking, type TestDatabase } from './database.ts';
+import { credentials, logCheckpoints, secretVersions } from '@coffre/db/schema';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
 const openLocalVault = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
@@ -104,10 +105,9 @@ async function instance() {
   assert.ok((await vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: where.project, environmentId: where.dev, role: 'developer', expiresAt: null }] })).ok);
 
   // Ada's session, and a key with a value, each sealed as it is.
-  const t = tablesOf(db.owner);
   const credential = randomUUID();
   const expires = new Date(Date.now() + 86_400_000);
-  await db.owner.insert(t.credentials).values({
+  await db.owner.insert(credentials).values({
     id: credential, kind: 'cli', authMac: Buffer.alloc(32), tokenHash: randomBytes(32), tokenHint: 'hint', generation: 0, principal: ADA, createdBy: ROOT, expiresAt: expires, scope: null,
   });
   await genesis({ kind: 'credential', id: credential }, credentialObject({ id: credential, principal: ADA, kind: 'cli', scope: null, revoked: false, expiresAt: expires.getTime(), generation: 0 }));
@@ -118,7 +118,7 @@ async function instance() {
     const context = { projectId: where.project, environmentId: where.dev, secretId: ref.secretId };
     const sealed = encrypt(Buffer.from('postgres://dev'), context, dek);
     const wrapped = await config.keks.wrap(dek, context, { deadline: Date.now() + 5000, signal: new AbortController().signal });
-    await db.owner.insert(t.secretVersions).values({
+    await db.owner.insert(secretVersions).values({
       id: version, secretId: ref.secretId, version: 1, envelopeVersion: sealed.envelopeVersion, ciphertext: sealed.ciphertext, iv: sealed.iv, authTag: sealed.authTag,
       wrappedDek: wrapped.bytes, kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, createdBy: ROOT,
     });
@@ -153,7 +153,6 @@ function clean(checked: Checked): void {
 async function newestRow() {
   const [newest] = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM log_checkpoints ORDER BY upto DESC LIMIT 1`);
   await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto = ${BigInt(newest!.upto as string | number)}`);
-  const { logCheckpoints } = tablesOf(db.owner);
   return () => db.owner.insert(logCheckpoints).values({
     upto: BigInt(newest!.upto as string | number), at: Number(newest!.at), atFloor: Number(newest!.at_floor), changesSize: BigInt(newest!.changes_size as string | number),
     changesRoot: Buffer.from(newest!.changes_root as Uint8Array), changesNote: newest!.changes_note as string, usesSize: BigInt(newest!.uses_size as string | number),
@@ -190,7 +189,6 @@ test('R25: a page\'s check reads the newest pair and the entries since, whatever
   assert.equal(page.checkpoint?.upto, w.cp.pair.pair.upto.toString());
   // A row written around the vault is not the page's to find: it reads none. Every use of it refuses it (D145): its
   // object is not the one its seal covers.
-  const { credentials } = tablesOf(db.owner);
   await db.owner.update(credentials).set({ expiresAt: new Date(Date.now() + 7 * 86_400_000) }).where(eq(credentials.id, w.credential));
   clean(await w.verify());
   const refused = await w.use(await w.key());

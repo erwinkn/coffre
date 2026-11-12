@@ -12,21 +12,6 @@ import type { Queryable } from './database.ts';
 export type Table = PgTable;
 
 /**
- * Lock the rows a select reads until the transaction ends.
- *
- * `no key update` is for rows others reference by foreign key: it keeps out
- * every other writer of the row, but not an insert that points at it.
- * `share` keeps out every writer, but not another `share`.
- */
-export function forUpdate<Query extends { for: (strength: 'update' | 'no key update' | 'share') => unknown }>(
-  db: Queryable,
-  query: Query,
-  strength: 'update' | 'no key update' | 'share' = 'update',
-): ReturnType<Query['for']> {
-  return query.for(strength) as ReturnType<Query['for']>;
-}
-
-/**
  * The rows a hand-written query answers, as the driver gives them. Column
  * names are the query's own, unmapped.
  */
@@ -74,9 +59,9 @@ export function tombstone(slug: SQLWrapper): SQL {
   return sql`${slug} LIKE ${`%${TOMBSTONE}%`}`;
 }
 
-/** A condition read as a boolean. */
+/** A condition read as a boolean; NULL reads as false. */
 export function truth(condition: SQL): SQL<boolean> {
-  return condition.mapWith((value) => Number(value) === 1);
+  return condition.mapWith((value) => value === true);
 }
 
 /** How many rows an insert, update or delete touched. */
@@ -170,7 +155,7 @@ export const SNAPSHOT = { isolationLevel: 'repeatable read', accessMode: 'read o
  * The database clock as text, for canonicalTimestamp. Entries from several
  * servers order by it, so it is never an application server's.
  */
-export function clock(db: Queryable): SQL<string> {
+export function clock(): SQL<string> {
   return sql<string>`CURRENT_TIMESTAMP`;
 }
 
@@ -180,7 +165,7 @@ export function clock(db: Queryable): SQL<string> {
  * transaction's start and would date an entry that waited for the log's lock
  * before one written while it waited. Read it in a statement after the lock.
  */
-export function clockMillis(db: Queryable): SQL<number> {
+export function clockMillis(): SQL<number> {
   return sql`(extract(epoch from clock_timestamp()) * 1000)::bigint`.mapWith(Number);
 }
 
@@ -189,7 +174,7 @@ export function clockMillis(db: Queryable): SQL<number> {
  * statement runs: a condition, for a write that must not land once the
  * time it names has passed.
  */
-export function ahead(db: Queryable, column: SQLWrapper): SQL {
+export function ahead(column: SQLWrapper): SQL {
   return sql`${column} > clock_timestamp()`;
 }
 
@@ -198,7 +183,7 @@ export function ahead(db: Queryable, column: SQLWrapper): SQL {
  * up but not yet migrated from one that is ready. Drizzle keeps it in a
  * `drizzle` schema.
  */
-export function migrationLedger(db: Queryable): SQL {
+export function migrationLedger(): SQL {
   return sql`${sql.identifier('drizzle')}.${sql.identifier('__drizzle_migrations')}`;
 }
 

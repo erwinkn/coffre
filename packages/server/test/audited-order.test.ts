@@ -9,7 +9,7 @@ import { eq, sql } from 'drizzle-orm';
 
 import { audited } from '../src/api/context.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { environments } from './db/tables.ts';
+import { environments } from '@coffre/db/schema';
 
 const ROOT = 'admin@acme.example';
 

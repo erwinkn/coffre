@@ -512,7 +512,7 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
       const found = await rowsOf<{
         number: string | number; at: string | number; credential: string; purpose: string | number; principal: string; secret: string; environment: string; project: string;
         place: string | null; source: string | null; source_environment: string | null; source_project: string | null; version: string | null; mac: Uint8Array;
-        dayed: boolean | number; placed: string | number;
+        dayed: boolean; placed: string | number;
       }>(db, sql`SELECT r.number, r.at, ${text('r.credential')} AS credential, r.purpose, r.principal, ${text('r.secret')} AS secret, ${text('r.environment')} AS environment,
           ${text('r.project')} AS project, ${text('r.place')} AS place, ${text('r.source')} AS source, ${text('r.source_environment')} AS source_environment,
           ${text('r.source_project')} AS source_project, ${text('r.version')} AS version, r.mac,
@@ -526,7 +526,7 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
         return {
           number: BigInt(row.number), at: Number(row.at), credential: row.credential, purpose: Number(row.purpose), principal: row.principal, secret: row.secret,
           environment: row.environment, project: row.project, place: row.place, source: row.source, sourceEnvironment: row.source_environment,
-          sourceProject: row.source_project, version: row.version, mac: Buffer.from(row.mac), dayed: row.dayed === true || row.dayed === 1,
+          sourceProject: row.source_project, version: row.version, mac: Buffer.from(row.mac), dayed: row.dayed,
           placed: Number(row.placed) === places.size,
         };
       });

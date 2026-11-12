@@ -7,7 +7,7 @@ import { and, asc, count, eq } from 'drizzle-orm';
 import { PROJECT_PAGES } from '@coffre/core/pages';
 import { EVERYWHERE } from '@coffre/core/access';
 
-import { auditLog, projects, principals } from './db/tables.ts';
+import { auditLog, projects, principals } from '@coffre/db/schema';
 import {
   clientFor,
   openTestDatabase,

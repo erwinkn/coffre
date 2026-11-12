@@ -8,13 +8,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
-import { tablesOf } from '@coffre/db';
 import { derivedSigningKey } from '@coffre/vault';
 import { runCheckpointer, type RunningCheckpointer } from '@coffre/vault/node';
 import { desc, eq } from 'drizzle-orm';
 
 import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault } from './api-fixture.ts';
 import { openVaultDatabase } from './db/engine.ts';
+import { bulkCap, logCheckpoints, logTiles, logUses } from '@coffre/db/schema';
 
 const db = await openTestDatabase();
 const scratch = mkdtempSync(join(tmpdir(), 'coffre-trees-'));
@@ -22,7 +22,6 @@ const running: RunningCheckpointer[] = [];
 beforeEach(async () => {
   for (const checkpointer of running.splice(0)) await checkpointer.stop();
   await resetDatabase(db.owner);
-  const { logUses, bulkCap, logCheckpoints, logTiles } = tablesOf(db.owner);
   for (const table of [logUses, bulkCap, logCheckpoints, logTiles]) await db.owner.delete(table);
 });
 after(async () => {
@@ -70,7 +69,6 @@ test("GET /audit/trees: 0.15's log verified from its newest checkpoint, then a f
 
   // Last, as no change seals over it after: the database's writer swaps the newest checkpoint's notes for an older
   // one's, not the pair the log signed there.
-  const { logCheckpoints } = tablesOf(db.owner);
   const [newest, older] = await db.owner.select().from(logCheckpoints).orderBy(desc(logCheckpoints.upto)).limit(2);
   await db.owner.update(logCheckpoints).set({ changesNote: older!.changesNote }).where(eq(logCheckpoints.upto, newest!.upto));
   const broken = await root.audit.verifyTrees();

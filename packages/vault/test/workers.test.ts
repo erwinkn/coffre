@@ -15,7 +15,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { RELEASE, type WrappedKey } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { isUnavailable } from '@coffre/db/dialect';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { postgresSession } from '@coffre/db/connect';
@@ -24,6 +23,7 @@ import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 import { emptyDatabase, HOT_URL, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, places, rows, run, sealed, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
 import { resolveVaultConfig } from '../src/config.ts';
 import { READ_HEAD_WAITERS } from '../src/vault.ts';
+import { auditLog } from '@coffre/db/schema';
 
 const ROOT = 'user:root@acme.example';
 
@@ -392,7 +392,6 @@ test('through the entrypoint, the credential a CI run came in on is copied into 
     assert.ok((await vault.call('access', ROOT)).ok);
     assert.ok((await vault.call('wrap', { principal: ROOT, credentialId, items: [{ secret, key: randomBytes(32).toString('base64') }] })).ok);
     assert.ok((await vault.call('admit', { actor: ROOT, principal: 'token:ci-deploy', credentialId })).ok);
-    const { auditLog } = tablesOf(db.owner);
     // Root's own row, which their bootstrap wrote, is its own: only what the calls asked for counts.
     const entries = (await db.owner.select({ action: auditLog.action, subject: auditLog.subjectPrincipal, metadata: auditLog.metadata }).from(auditLog)
       .where(and(eq(auditLog.author, 'vault'), inArray(auditLog.action, ['key.wrap', 'member.add'])))).filter((entry) => entry.subject !== ROOT);

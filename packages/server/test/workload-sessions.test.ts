@@ -24,7 +24,7 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, decisionInputs, holdSomething, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, signInsLogged, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, credentials, environments, logChanges, secrets, serviceBindings } from './db/tables.ts';
+import { auditLog, credentials, environments, logChanges, secrets, serviceBindings } from '@coffre/db/schema';
 import { answer, type Pages } from './start-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';

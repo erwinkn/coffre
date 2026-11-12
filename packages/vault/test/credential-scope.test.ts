@@ -6,10 +6,10 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { issuedGrant, type CredentialScope } from '@coffre/core/access';
 import type { Through } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { eq } from 'drizzle-orm';
 
 import { emptyDatabase, newEnvironment, newProject, openTestDatabase, places, storedVersions, type TestDatabase, openLocalVault } from './database.ts';
+import { secrets } from '@coffre/db/schema';
 
 // A request that came in on a service token or a trust binding carries its
 // scope, and the vault decides on it in every call that takes one (`Through`):
@@ -52,7 +52,6 @@ test('every call that takes a credential scope decides on it: within it a call g
   const key = await vault.wrap({ principal: ROOT, items: [{ secret: source, key: randomBytes(32).toString('base64') }] });
   assert.ok(key.ok);
   const [{ secretVersionId }] = await storedVersions(db.owner, [{ secret: source, wrapped: key.wrapped[0] }]);
-  const { secrets } = tablesOf(db.owner);
   await db.owner.update(secrets).set({ currentVersionId: secretVersionId, currentVersion: 1 }).where(eq(secrets.id, source.secretId));
   const holder = () => ({ projectId: billing, environmentId: billingProd, secretId: randomUUID(), path: 'billing/prod/DATABASE_URL' });
   /** A reference into billing/prod, made by root: one for each call that ends one. */

@@ -13,7 +13,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { DEFAULT_POLICY, type Holdings, type Scope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { RELEASE, versioned, type ProxyDefinition, type ProxyView, type SaveProxyInput } from '@coffre/core/vault';
-import { createDatabase, tablesOf } from '@coffre/db';
+import { createDatabase } from '@coffre/db';
 import { postgresClient, postgresSession } from '@coffre/db/connect';
 import { gaveUp } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
@@ -27,6 +27,7 @@ import type { Reader } from '../src/decide.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { newestChange, readObject } from '../src/store.ts';
 import { emptyDatabase, LOG, locksHere, newEnvironment, newProject, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, rows, run, sealed, sealPlaces, VAULT_URL, type LocalVault, type TestDatabase } from './database.ts';
+import { environments, proxyDefinitions } from '@coffre/db/schema';
 
 const ROOT = 'user:root@acme.example';
 const NOBODY: FrozenHoldings = { role: 'member', scope: { projects: 'all', environments: 'all' }, instance: { normal: [], protected: [] }, grants: [] };
@@ -73,7 +74,6 @@ type World = Awaited<ReturnType<typeof world>>;
 
 /** A fork of `parent` in `project`, its row sealed as the app makes one. */
 async function fork(project: string, parent: string): Promise<string> {
-  const { environments } = tablesOf(db.owner);
   const id = randomUUID();
   const slug = `f-${id.slice(0, 8)}`;
   await db.owner.insert(environments).values({ id, projectId: project, slug, name: 'Fork', parentId: parent });
@@ -83,7 +83,6 @@ async function fork(project: string, parent: string): Promise<string> {
 
 /** The environment's proxy row, as stored. */
 async function stored(environmentId: string): Promise<{ items: Record<string, ProxyItem>; digests: Buffer; seal: Buffer } | undefined> {
-  const { proxyDefinitions } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(proxyDefinitions).where(sql`${proxyDefinitions.environmentId} = ${environmentId}`);
   return row === undefined ? undefined : { items: (typeof row.items === 'string' ? JSON.parse(row.items) : row.items) as Record<string, ProxyItem>, digests: Buffer.from(row.digests), seal: Buffer.from(row.seal) };
 }
@@ -265,7 +264,6 @@ test('what a save refuses before it reads: a definition the rules refuse, an ite
   const many = Object.fromEntries(Array.from({ length: 257 }, (_, i) => [`r${i}`, route(`r${i}`)]));
   refusedWith(await w.save({ seal: null, items: many }), 'invalid', /256/);
   // A personal config takes none of its own (decision 7).
-  const { environments } = tablesOf(db.owner);
   const personal = randomUUID();
   await db.owner.insert(environments).values({ id: personal, projectId: w.project, slug: `p-${personal.slice(0, 8)}`, name: 'Mine', parentId: w.dev, owner: ROOT });
   const { prepareChanges } = await import('../src/changes.ts');

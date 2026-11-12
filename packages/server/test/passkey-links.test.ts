@@ -9,7 +9,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { authMac } from '../src/auth-rows.ts';
 import { contextFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
-import { credentials, deviceLogins, passkeys } from './db/tables.ts';
+import { credentials, deviceLogins, passkeys } from '@coffre/db/schema';
 
 const ROOT = 'admin@acme.example';
 const KEY = Buffer.alloc(32, 0xa1);

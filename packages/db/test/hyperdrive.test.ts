@@ -12,13 +12,14 @@ import { deriveLogKey } from '@coffre/core/audit';
 import { sql } from 'drizzle-orm';
 
 import { openDatabase } from '../src/connect.ts';
-import { createDatabase, QueryOutsideTransaction, tablesOf } from '../src/database.ts';
+import { createDatabase, QueryOutsideTransaction } from '../src/database.ts';
 import { lockLogHeadRead } from '../src/log.ts';
 import { HyperdrivePool } from '../src/hyperdrive.ts';
 import { later } from '../src/later.ts';
 
 import { postgresClient } from '../src/postgres.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
+import { projects } from '../src/schema.ts';
 
 const DATABASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 
@@ -56,7 +57,6 @@ test('with groupReads, the reads asked together go under one Sync, each answered
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url, { groupReads: true });
   const db = createDatabase(pool);
-  const { projects } = tablesOf(db);
   await db.execute(sql`select 1`);
   const syncs = proxy.syncs;
   // With values and without, as rows and as arrays (Drizzle's selects), a hundred of them: one round trip.

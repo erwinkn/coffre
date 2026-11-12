@@ -21,7 +21,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { auditChainHead, auditLog, cappedAlerts } from './db/tables.ts';
+import { auditChainHead, auditLog, cappedAlerts } from '@coffre/db/schema';
 import { answer, type Pages } from './start-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';

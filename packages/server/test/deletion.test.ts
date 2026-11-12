@@ -7,7 +7,7 @@ import { LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 
-import { auditLog, environments, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
+import { auditLog, environments, projects, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 import { clientFor, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';

@@ -10,7 +10,7 @@ import {
   environments,
   secrets,
   secretVersions,
-} from './db/tables.ts';
+} from '@coffre/db/schema';
 import { withLogUnlocked, withTriggersLifted } from './db/engine.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps, outcomes } from './api-fixture.ts';
 import { actorParts } from '../src/db/audit.ts';

@@ -20,7 +20,7 @@ import { McpService } from '../src/mcp/service.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, credentials, logChanges, mcpConnections, oauthClients } from './db/tables.ts';
+import { auditLog, credentials, logChanges, mcpConnections, oauthClients } from '@coffre/db/schema';
 import { addPasskey, confirmedSession, removePasskey, touchFor, type Touch } from './passkey-rows.ts';
 
 const ORIGIN = 'https://secrets.acme.example';

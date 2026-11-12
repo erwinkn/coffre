@@ -19,7 +19,7 @@ import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { LOG } from './api-fixture.ts';
-import { auditLog } from './db/tables.ts';
+import { auditLog } from '@coffre/db/schema';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';

@@ -905,7 +905,7 @@ function pluginContext(
       if (unserved !== null) throw unservedError(unserved);
       const made = await workloadIdentity(runtime, caller, sourceIp, standings, false, answered.standing);
       if (made === null || !made.identity.registered) throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
-      const ahead = namedManyAhead(runtime.db, answered.app, answered.stands ? answered.keys : null, { personal: false });
+      const ahead = namedManyAhead(answered.app, answered.stands ? answered.keys : null, { personal: false });
       const read = await reveal(apiContext(runtime, made.identity), parsePath(caller.path!, [2]), {
         purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...(await loggedOf(answered, asked)), credential: asked.stable }, only: true, environmentId: caller.place!,
         decided: { keys: answered.keys, stands: answered.stands, outcome: answered.outcome, at: answered.at }, ...(ahead == null ? {} : { ahead }),

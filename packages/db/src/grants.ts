@@ -16,10 +16,11 @@ import {
 import type { StoredEntry } from '@coffre/core/audit';
 import { and, asc, desc, eq, gt, inArray, isNull, like, lt, or, sql, type SQL } from 'drizzle-orm';
 
-import { tablesOf, type Queryable } from './database.ts';
+import { type Queryable } from './database.ts';
 import { prepared } from './prepared.ts';
 import { rowsOf, tombstone, truth } from './dialect.ts';
 import { accessAllowed, changeNamed, changesOf, entriesOf, entryColumns, keyedBy, logObject, newestAuthentic, type Authenticity, type Newest } from './log.ts';
+import { auditLog, credentials, environments, grants, principals, projects, serviceBindings } from './schema.ts';
 
 /**
  * One grant, as `grants` holds it: on a project (`environmentId`
@@ -49,12 +50,11 @@ export async function readGrants(
   // A member's grants, which every check reads, built once (`prepared`); any other filter, as asked.
   const rows = filter.principal !== undefined && filter.liveAt === undefined
     ? await grantsOf(db, { principal: filter.principal })
-    : await grantRows(db, filter.principal === undefined ? undefined : eq(tablesOf(db).grants.principal, filter.principal), filter.liveAt);
+    : await grantRows(db, filter.principal === undefined ? undefined : eq(grants.principal, filter.principal), filter.liveAt);
   return rows.map(({ grant, environmentProjectId }) => ({ ...grant, projectId: grant.projectId ?? environmentProjectId }));
 }
 
 function grantRows(db: Queryable, principal: SQL | undefined, liveAt?: number) {
-  const { grants, environments } = tablesOf(db);
   return db
     .select({ grant: grants, environmentProjectId: environments.projectId })
     .from(grants)
@@ -62,11 +62,10 @@ function grantRows(db: Queryable, principal: SQL | undefined, liveAt?: number) {
     .where(and(principal, liveAt === undefined ? undefined : or(isNull(grants.expiresAt), gt(grants.expiresAt, liveAt))));
 }
 
-const grantsOf = prepared((db) => grantRows(db, eq(tablesOf(db).grants.principal, sql.placeholder('principal'))));
+const grantsOf = prepared((db) => grantRows(db, eq(grants.principal, sql.placeholder('principal'))));
 
 /** Add a grant; an environment's row names only the environment. */
 export async function insertGrant(db: Queryable, grant: GrantRow): Promise<void> {
-  const { grants } = tablesOf(db);
   await db.insert(grants).values({ ...grant, projectId: grant.environmentId === null ? grant.projectId : null });
 }
 
@@ -101,7 +100,6 @@ export function roleColumns(role: InstanceRole, scope: Scope): StoredRole {
 
 /** Every project not deleted, with its environments not deleted: what a grant on every project of 0.4 reached. */
 export async function liveProjects(db: Queryable): Promise<ConversionInput['projects']> {
-  const { projects, environments } = tablesOf(db);
   const [found, inside] = await Promise.all([
     db.select({ id: projects.id, deleted: truth(tombstone(projects.slug)) }).from(projects).orderBy(asc(projects.id)),
     db.select({ id: environments.id, projectId: environments.projectId, slug: environments.slug, deleted: truth(tombstone(environments.slug)) }).from(environments).orderBy(asc(environments.id)),
@@ -172,7 +170,6 @@ export type EveryProjectPreview = {
  * converts is listed.
  */
 export async function everyProjectPreview(db: Queryable, at: number): Promise<EveryProjectPreview[]> {
-  const { principals, projects, environments } = tablesOf(db);
   const grants = await readGrants(db, { liveAt: at });
   const held = grants.filter((grant) => grant.projectId === null && grant.environmentId === null);
   if (held.length === 0) return [];
@@ -219,7 +216,6 @@ export type Unsealed = { kind: 'token' | 'binding'; id: string; principal: strin
  * credential a binding issued carries its binding's.
  */
 export async function unsealedCredentials(db: Queryable, at: Date): Promise<Unsealed[]> {
-  const { credentials, serviceBindings, principals } = tablesOf(db);
   // Every scope this release writes for a service says, at each place it names, whether it reads the sensitive values
   // there; one that names none, sealed while its account held nothing, is sealed (`unsealedScope` in @coffre/server).
   const unsealed = (scope: typeof credentials.scope | typeof serviceBindings.scope) =>
@@ -263,8 +259,7 @@ export async function unsealedCredentials(db: Queryable, at: Date): Promise<Unse
  * their newest change, one probe each (R48).
  */
 export async function tamperedMembers(db: Queryable, principal?: string): Promise<Set<string>> {
-  const { auditLog } = tablesOf(db);
-  const weighed = weighedBy(db);
+  const weighed = weighedBy();
   const found = await db
     .select({ principal: auditLog.subjectPrincipal, weighed: sql<string | null>`${weighed}`, seq: sql<string>`CAST(max(${auditLog.seq}) AS text)` })
     .from(auditLog)
@@ -325,8 +320,8 @@ export function findingMetadata(change: string): string {
  * 0.14's rule (a reader with no key takes every entry in the vault's name as its own; the vault's MAC tells them
  * apart, `reportStands`). A name that is no change's names none that is newest, and settles at once.
  */
-function weighedBy(db: Queryable): SQL<string | null> {
-  return changeNamed(tablesOf(db).auditLog.metadata);
+function weighedBy(): SQL<string | null> {
+  return changeNamed(auditLog.metadata);
 }
 
 /**
@@ -374,16 +369,15 @@ export async function newestChangeNames(db: Queryable, principals: readonly stri
  * Of a member's findings, as `findingStands` weighs them, in SQL: the newest of 0.14's (its seq), and whether one of
  * 0.15's names their newest change (1 or 0), read beside the rest of a statement (`memberAccess`).
  */
-export function findingsOf(db: Queryable, principal: string): { legacy: SQL<string | null>; named: SQL<number> } {
-  const { auditLog: log } = tablesOf(db);
-  const weighed = weighedBy(db);
-  const about = reportsAbout(db, principal);
+export function findingsOf(principal: string): { legacy: SQL<string | null>; named: SQL<number> } {
+  const weighed = weighedBy();
+  const about = reportsAbout(principal);
   const of = sql`${entriesOf('tamper')} AND ${about.where}`;
   return {
     // The newest of 0.14's by `audit_log_tamper_idx`, `(member, change, seq)`: as the greatest `seq`, Postgres walked
     // the member's reports of 0.15's back, or the vault's entries, 1,088 pages behind 20,000 of them (T245).
-    legacy: sql`(SELECT CAST(${log.seq} AS text) FROM ${log} WHERE ${of} AND ${weighed} IS NULL ORDER BY ${about.order} LIMIT 1)`,
-    named: sql`(CASE WHEN EXISTS (SELECT 1 FROM ${log} WHERE ${of} AND ${weighed} = ${newestNamed(sql`${logObject('principal', principal)}`)}) THEN 1 ELSE 0 END)`,
+    legacy: sql`(SELECT CAST(${auditLog.seq} AS text) FROM ${auditLog} WHERE ${of} AND ${weighed} IS NULL ORDER BY ${about.order} LIMIT 1)`,
+    named: sql`(CASE WHEN EXISTS (SELECT 1 FROM ${auditLog} WHERE ${of} AND ${weighed} = ${newestNamed(sql`${logObject('principal', principal)}`)}) THEN 1 ELSE 0 END)`,
   };
 }
 
@@ -436,10 +430,9 @@ export async function accessEntriesAbout(db: Queryable, principal: string, limit
 
 /** A principal's allowed access entries, newest first: steps of `audit_log_access_idx` (`keyedBy`; T239, T245, R48). */
 function accessEntries(db: Queryable, before?: SQL) {
-  const { auditLog } = tablesOf(db);
   const about = keyedBy(auditLog.subjectPrincipal, auditLog.seq, 'desc', sql.placeholder('principals'));
   return db
-    .select(entryColumns(db))
+    .select(entryColumns())
     .from(auditLog)
     .where(and(accessAllowed(), about.where, before))
     .orderBy(...about.orderBy)
@@ -448,7 +441,7 @@ function accessEntries(db: Queryable, before?: SQL) {
 
 // What every check of a member reads first, built once (`prepared`).
 const newestAccessEntries = prepared((db) => accessEntries(db));
-const accessEntriesBefore = prepared((db) => accessEntries(db, lt(tablesOf(db).auditLog.seq, sql.placeholder('before'))));
+const accessEntriesBefore = prepared((db) => accessEntries(db, lt(auditLog.seq, sql.placeholder('before'))));
 
 /**
  * Up to `limit` of the vault's reports that `principal`'s row was changed
@@ -459,11 +452,10 @@ const accessEntriesBefore = prepared((db) => accessEntries(db, lt(tablesOf(db).a
 async function tamperReportsAbout(
   db: Queryable, principal: string, limit: number, which: { names: string } | { after: bigint }, before?: bigint,
 ): Promise<StoredEntry[]> {
-  const { auditLog } = tablesOf(db);
-  const weighed = weighedBy(db);
-  const about = reportsAbout(db, principal);
+  const weighed = weighedBy();
+  const about = reportsAbout(principal);
   const rows = await db
-    .select(entryColumns(db))
+    .select(entryColumns())
     .from(auditLog)
     .where(
       and(
@@ -487,10 +479,9 @@ async function tamperReportsAbout(
  * alone, Postgres walked `audit_log_vault_idx` back, 1,397 pages behind
  * 40,000 reports naming another change (T245, R48).
  */
-function reportsAbout(db: Queryable, principal: string): { where: SQL; order: SQL } {
-  const { auditLog } = tablesOf(db);
+function reportsAbout(principal: string): { where: SQL; order: SQL } {
   return {
     where: sql`${auditLog.subjectPrincipal} = ANY(${sql.param([principal])}::text[])`,
-    order: sql`${auditLog.subjectPrincipal} DESC, ${weighedBy(db)} DESC, ${auditLog.seq} DESC`,
+    order: sql`${auditLog.subjectPrincipal} DESC, ${weighedBy()} DESC, ${auditLog.seq} DESC`,
   };
 }

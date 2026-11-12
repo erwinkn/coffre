@@ -197,8 +197,8 @@ function change(keys: SealKeys, replayed: Replayed, entry: LoggedChange): void {
 }
 
 /** Whether a stored use's statement phased its key: 0074's writes true, the previous release's null. */
-export function phasedOf(stored: boolean | number | null): boolean {
-  return stored === true || stored === 1;
+export function phasedOf(stored: boolean | null): boolean {
+  return stored === true;
 }
 
 /**

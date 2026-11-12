@@ -5,7 +5,7 @@ import type { CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
 import { and, eq, isNotNull } from 'drizzle-orm';
 
-import { environments, secrets, secretVersions } from './db/tables.ts';
+import { environments, secrets, secretVersions } from '@coffre/db/schema';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 /**

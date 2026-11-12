@@ -12,7 +12,7 @@ import { eq } from 'drizzle-orm';
 import { coffreRoute } from '../src/app.ts';
 import { clientFor, LOG, usesLogged } from './api-fixture.ts';
 import { db, deps, entries, ORIGIN, ROOT, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
-import { secrets } from './db/tables.ts';
+import { secrets } from '@coffre/db/schema';
 
 const skip = LOG === '0.15' ? false : "0.14's reads go through the vault's unwrap, which logs its own refusals";
 

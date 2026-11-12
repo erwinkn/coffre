@@ -18,7 +18,7 @@ import { asc, eq } from 'drizzle-orm';
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { auditLog } from './db/tables.ts';
+import { auditLog } from '@coffre/db/schema';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps, outcomes } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';

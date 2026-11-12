@@ -175,7 +175,7 @@ const LOOKUPS: Lookup[] = [
     ask: async (vault) => {
       assert.equal(await reportStands(vault, 'user:u1', check, 'change:a'), true);
       assert.equal(await reportStands(vault, 'user:u1', check, 'change:c'), false);
-      const { legacy, named } = findingsOf(vault, 'user:u1');
+      const { legacy, named } = findingsOf('user:u1');
       assert.deepEqual(await rowsOf(vault, sql`SELECT ${legacy} AS legacy, ${named} AS named`), [{ legacy: null, named: 0 }]);
     },
   },
@@ -187,7 +187,7 @@ const LOOKUPS: Lookup[] = [
     indexes: ['audit_log_access_idx', indexOf('tamper')],
     ask: async (vault, { newest }) => {
       assert.equal(await reportStands(vault, 'user:u1', check, null), true);
-      const { legacy } = findingsOf(vault, 'user:u1');
+      const { legacy } = findingsOf('user:u1');
       assert.deepEqual(await rowsOf(vault, sql`SELECT ${legacy} AS legacy`), [{ legacy: String(newest) }]);
     },
   },

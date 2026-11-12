@@ -6,11 +6,11 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { issuedGrant, type CredentialScope, type ScopeGrant } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { HolderRef, Purpose, SecretRef, Via } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { and, eq } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { emptyDatabase, openLocalVault, openTestDatabase, places, sealPlaces, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
+import { auditLog, environments, secrets } from '@coffre/db/schema';
 
 // A workload is handed back only what its credential lists, by key ID,
 // where each value is held (docs/design/workload-access.md, section 6.1):
@@ -48,7 +48,6 @@ async function world() {
     const key = await vault.wrap({ principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] });
     assert.ok(key.ok, JSON.stringify(key));
     const [{ secretVersionId }] = await storedVersions(db.owner, [{ secret, wrapped: key.wrapped[0]! }]);
-    const { secrets } = tablesOf(db.owner);
     await db.owner.update(secrets).set({ currentVersionId: secretVersionId, currentVersion: 1 }).where(eq(secrets.id, secret.secretId));
     return { secret, secretVersionId };
   };
@@ -114,7 +113,6 @@ test('a workload reads only the keys its scope lists where they are held, by ID;
   assert.ok(bearer.ok, JSON.stringify(bearer));
 
   // Each refusal is the vault's entry, of the key it withheld.
-  const { auditLog } = tablesOf(db.owner);
   const denied = await db.owner.select().from(auditLog).where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'secret.read'), eq(auditLog.code, 'use_only')));
   assert.ok(denied.length > 0 && denied.every((entry) => entry.actor === API && entry.decision === 'deny'));
 });
@@ -139,7 +137,6 @@ test('a reference is held where it lives: a list at its holder reads it, one at 
 
 test("a fork's inherited key is read at its parent: a list at the fork reads nothing of it", async () => {
   const w = await world();
-  const { environments } = tablesOf(db.owner);
   const fork = randomUUID();
   await db.owner.insert(environments).values({ id: fork, projectId: w.market.project, slug: 'pr-7', name: 'pr-7', parentId: w.market.prod });
   await sealPlaces(db.owner, [{ id: fork, projectId: w.market.project, slug: 'pr-7', parentId: w.market.prod }]);

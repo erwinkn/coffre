@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { eq } from 'drizzle-orm';
 
 import { clientFor, holdSomething } from './api-fixture.ts';
-import { credentials, mcpApprovals } from './db/tables.ts';
+import { credentials, mcpApprovals } from '@coffre/db/schema';
 import { browserFor, callRaw, connect, db, deps, DEV, fromPage, ROOT, route, useMcp } from './mcp-fixture.ts';
 
 useMcp(

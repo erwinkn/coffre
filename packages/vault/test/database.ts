@@ -4,7 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { PairNotes } from '@coffre/core/merkle';
 import type { ObjectChange, SecretRef, Through, Vault, WrappedKey } from '@coffre/core/vault';
-import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
+import { createDatabase, type Database, type Queryable } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { appChanges, forgetLogHeads } from '@coffre/db/log';
 import { and, eq, sql, type SQL } from 'drizzle-orm';
@@ -15,6 +15,7 @@ import { sealKey } from '../src/inputs.ts';
 import { openLocalVault as openRawVault, spoken, type SpokenVault as RawLocalVault } from '../src/local.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { cutOver as cutOverYet } from '../src/store.ts';
+import { auditChainHead, auditLog, credentials, dismissedKeys, environments, grants, logChanges, logConfig, passkeys, policy, principals, projects, proxyDefinitions, proxyReserved, roles, secretReferences, secrets, secretVersions, serviceBindings, spentIdTokens, vaultReleases } from '@coffre/db/schema';
 
 /**
  * The suite's database, as the vault's tests use it: the one the server's
@@ -285,7 +286,6 @@ export async function emptyReads(owner: Database): Promise<void> {
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
   await endLeftOpen(owner);
-  const { auditLog, auditChainHead, grants, principals, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys, logChanges, logConfig, policy, roles, proxyDefinitions, proxyReserved, credentials, passkeys, serviceBindings, spentIdTokens } = tablesOf(owner);
   await owner.delete(secretReferences);
   await withLogUnlocked(owner, async (db) => {
     await db.update(auditLog).set({ relatedSeq: null });
@@ -328,7 +328,7 @@ export async function changePlace(owner: Database, id: string, set: { slug?: str
   const write = (db: Queryable) => run(db, sql`UPDATE environments SET slug = coalesce(${set.slug ?? null}, slug),
     archived_at = ${set.archived === undefined ? sql`archived_at` : set.archived ? sql`${new Date()}` : sql`NULL`} WHERE id = ${id}`);
   if (placeKeys === null || !(await cutOverYet(owner))) return write(owner);
-  const [row] = await rows<{ project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: boolean | number | null; archived: boolean | number; project_archived: boolean | number; seal: Buffer | Uint8Array | null }>(owner,
+  const [row] = await rows<{ project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: boolean | null; archived: boolean; project_archived: boolean; seal: Buffer | Uint8Array | null }>(owner,
     sql`SELECT e.project_id, e.slug, e.owner, e.parent_id, e.protected, e.archived_at IS NOT NULL AS archived, p.archived_at IS NOT NULL AS project_archived, e.seal
       FROM environments e JOIN projects p ON p.id = e.project_id WHERE e.id = ${id}`);
   assert.ok(row !== undefined, `no environment ${id}`);
@@ -351,7 +351,6 @@ export async function changePlace(owner: Database, id: string, set: { slug?: str
  * rows as 0.14's log alone holds them, for a test that stands in for the cutover itself.
  */
 export async function places(owner: Database, { sealed: seal = true }: { sealed?: boolean } = {}) {
-  const { environments, secrets } = tablesOf(owner);
   const project = await newProject(owner);
   const [dev, prod] = [randomUUID(), randomUUID()];
   await owner.insert(environments).values([
@@ -378,14 +377,12 @@ export const projectSlug = (id: string) => `p-${id.replaceAll('-', '').slice(0, 
 
 /** A project of its own, with one environment, for a grant somewhere else. */
 export async function newProject(owner: Database): Promise<string> {
-  const { projects } = tablesOf(owner);
   const id = randomUUID();
   await owner.insert(projects).values({ id, slug: projectSlug(id), name: 'Project' });
   return id;
 }
 
 export async function newEnvironment(owner: Database, projectId: string): Promise<string> {
-  const { environments } = tablesOf(owner);
   const id = randomUUID();
   await owner.insert(environments).values({ id, projectId, slug: `e-${id.slice(0, 8)}`, name: 'Environment' });
   await sealPlaces(owner, [{ id, projectId, slug: `e-${id.slice(0, 8)}` }]);
@@ -394,7 +391,6 @@ export async function newEnvironment(owner: Database, projectId: string): Promis
 
 /** Commit fixture versions, as the app would, before asking the vault to open them. */
 export async function storedVersions(owner: Database, items: { secret: SecretRef; wrapped: WrappedKey }[]): Promise<{ secretVersionId: string }[]> {
-  const { secretVersions } = tablesOf(owner);
   return Promise.all(items.map(async ({ secret, wrapped }) => {
     await owner.insert(secretVersions).values({
       id: randomUUID(), secretId: secret.secretId, version: secret.version, envelopeVersion: 1,

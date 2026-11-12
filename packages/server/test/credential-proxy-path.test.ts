@@ -13,7 +13,7 @@ import { defineDeployment } from '@coffre/core/deployment';
 
 import { clientFor, LOG, usesLogged } from './api-fixture.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
-import { auditLog } from './db/tables.ts';
+import { auditLog } from '@coffre/db/schema';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, header, path, prefix, query, sigv4, type Credential, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';

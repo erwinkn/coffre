@@ -1,9 +1,10 @@
 import { personalOf } from '@coffre/core/schemas';
-import { tablesOf, type Queryable } from '@coffre/db';
+import { type Queryable } from '@coffre/db';
 import { clock, rowsOf, type Table } from '@coffre/db/dialect';
 import { getTableColumns, sql } from 'drizzle-orm';
 
 import { resolvedPlace, secretRowOf, type CredentialRead, type ResolvedPath, type SecretRow } from './queries.ts';
+import { credentials, environments, identities, passkeys, projects, secrets, secretVersions } from '@coffre/db/schema';
 
 /**
  * What a read of values reads before anything else, in one call of
@@ -43,8 +44,8 @@ export async function readAhead(db: Queryable, asked: ReadAsked): Promise<ReadAh
   // With the database's clock, as `credentialRow` reads it: Hyperdrive caches no statement that calls it.
   const [row] = await rowsOf<{ read: string; now: string }>(db, sql`SELECT app_read(
     ${asked.tokenHash ?? null}::bytea, ${path?.project ?? null}::text, ${path?.environment ?? null}::text, ${keys === null ? null : sql.param(keys)}::text[]
-  ) AS read, ${clock(db)} AS now`);
-  return readAheadOf(db, JSON.parse(row!.read) as Answer, row!.now, { tokenHash: asked.tokenHash !== undefined, path: path !== undefined });
+  ) AS read, ${clock()} AS now`);
+  return readAheadOf(JSON.parse(row!.read) as Answer, row!.now, { tokenHash: asked.tokenHash !== undefined, path: path !== undefined });
 }
 
 /**
@@ -54,10 +55,10 @@ export async function readAhead(db: Queryable, asked: ReadAsked): Promise<ReadAh
  * request named `dev@me` (T165), and the place is its caller's personal config of dev, or dev while they have none, as
  * `resolveRead` resolves it.
  */
-export function namedAhead(db: Queryable, app: string | null, { personal = false }: { personal?: boolean } = {}): ReadAhead | null {
+export function namedAhead(app: string | null, { personal = false }: { personal?: boolean } = {}): ReadAhead | null {
   if (app === null) return null;
   const read = JSON.parse(app) as Answer & { now: string };
-  const ahead = readAheadOf(db, read, read.now, { tokenHash: true, path: true });
+  const ahead = readAheadOf(read, read.now, { tokenHash: true, path: true });
   const environment = ahead.place?.environment ?? null;
   // Where the key is held, a key the place inherits: the vault's own rows say, as it resolved the names (0051).
   ahead.held = read.held == null ? null : { environmentId: read.held.id, slug: read.held.slug };
@@ -73,7 +74,7 @@ export function namedAhead(db: Queryable, app: string | null, { personal = false
   // value of. Only the place's own: a key a fork inherits is its parent's, which the path's own key is not (T165).
   const [used] = read.secrets ?? [];
   if (ahead.place != null && used !== undefined) {
-    const { id, key, archivedAt, currentVersionId, currentVersion, environmentId } = rowOf(tablesOf(db).secrets, used.secret);
+    const { id, key, archivedAt, currentVersionId, currentVersion, environmentId } = rowOf(secrets, used.secret);
     if (environmentId === environment?.id) ahead.place = { ...ahead.place, secret: { id, key, archivedAt, currentVersionId, currentVersion } };
   }
   return ahead;
@@ -85,8 +86,8 @@ export function namedAhead(db: Queryable, app: string | null, { personal = false
  * none for a key the place does not hold. Null when the vault answers none, or for a caller who does not stand
  * at the place, of whom the vault read no key: the app reads its own rows then, as ever.
  */
-export function namedManyAhead(db: Queryable, app: string | null, keys: readonly { app: string | null }[] | null, { personal = false }: { personal?: boolean } = {}): ReadAhead | null {
-  const ahead = namedAhead(db, app, { personal });
+export function namedManyAhead(app: string | null, keys: readonly { app: string | null }[] | null, { personal = false }: { personal?: boolean } = {}): ReadAhead | null {
+  const ahead = namedAhead(app, { personal });
   if (ahead === null || ahead.place == null) return ahead;
   ahead.held = null;
   // No key read: the place's rows only, and the read reads its keys itself.
@@ -96,14 +97,13 @@ export function namedManyAhead(db: Queryable, app: string | null, keys: readonly
   for (const key of keys) {
     if (key.app === null) return ahead;
     const read = JSON.parse(key.app) as Answer & { now: string };
-    secrets.push(...(readAheadOf(db, read, read.now, { tokenHash: false, path: true }).secrets ?? []));
+    secrets.push(...(readAheadOf(read, read.now, { tokenHash: false, path: true }).secrets ?? []));
   }
   ahead.secrets = secrets;
   return ahead;
 }
 
-function readAheadOf(db: Queryable, read: Answer, now: string, asked: { tokenHash: boolean; path: boolean }): ReadAhead {
-  const { credentials, identities, passkeys, projects, environments, secrets, secretVersions } = tablesOf(db);
+function readAheadOf(read: Answer, now: string, asked: { tokenHash: boolean; path: boolean }): ReadAhead {
   const ahead: ReadAhead = {};
   if (asked.tokenHash) {
     ahead.credential = read.credential === null ? null : {

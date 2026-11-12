@@ -15,7 +15,7 @@ import { logObject } from '@coffre/db/log';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
-import { auditLog, credentials, logChanges } from './db/tables.ts';
+import { auditLog, credentials, logChanges } from '@coffre/db/schema';
 import { clientFor, contextFor, credentialsLogged, holdSomething, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';

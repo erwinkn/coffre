@@ -51,7 +51,7 @@ import { ApiError } from '../src/api/errors.ts';
 import { appendAudit, type AuditEntry } from '../src/db/audit.ts';
 import { resetDatabase } from './api-fixture.ts';
 import { emptyLog, openTestDatabase } from './db/engine.ts';
-import { environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets } from './db/tables.ts';
+import { environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets } from '@coffre/db/schema';
 
 const settings = propertySettings(150, 10);
 let database: Awaited<ReturnType<typeof openTestDatabase>>;

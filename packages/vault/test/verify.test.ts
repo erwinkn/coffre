@@ -12,13 +12,13 @@ import { issuedGrant, sealedSessionScope, storedScope } from '@coffre/core/acces
 import { uploadedKeys, type BindingPolicy } from '@coffre/core/identity';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { ChangeBindingsInput, MadeBinding, SignInInput } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
 import { eq } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 
 import { ISSUER, KEYS, ORIGIN, proofKey, testIssuer, type TestIssuer } from './issuer.ts';
 import { emptyDatabase, newProject, openLocalVault, openTestDatabase, sealed, nothingHeld, type TestDatabase } from './database.ts';
+import { credentials as credentialsTable, logChanges, serviceBindings } from '@coffre/db/schema';
 
 const ROOT = 'user:root@acme.example';
 const CI = 'token:ci';
@@ -96,7 +96,6 @@ async function uploaded(w: World, as: Partial<MadeBinding> = {}): Promise<MadeBi
 
 /** A binding as a sign-in names it: its row's columns, the instance it was made on, its seal. */
 async function named(made: MadeBinding): Promise<SignInInput['binding']> {
-  const { serviceBindings } = tablesOf(db.owner);
   const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, made.id));
   return {
     columns: {
@@ -137,13 +136,11 @@ function said(outcome: Awaited<ReturnType<typeof signIn>>): string {
 }
 
 async function credentials(): Promise<number> {
-  const { credentials: table } = tablesOf(db.owner);
-  return (await db.owner.select({ id: table.id }).from(table)).length;
+  return (await db.owner.select({ id: credentialsTable.id }).from(credentialsTable)).length;
 }
 
 /** What a sign-in's change recorded of its run. */
 async function recordedRun(): Promise<Record<string, unknown>> {
-  const { logChanges } = tablesOf(db.owner);
   const rows = await db.owner.select({ number: logChanges.number, payload: logChanges.payload }).from(logChanges);
   const signIns = rows.sort((a, b) => Number(a.number) - Number(b.number))
     .map((row) => JSON.parse(row.payload) as { op: string; signIn?: { run: Record<string, unknown> } })

@@ -5,7 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { encrypt, freshDek } from '@coffre/core/envelope';
 import type { NamedUseInput } from '@coffre/core/vault';
-import { createDatabase, tablesOf, type Queryable } from '@coffre/db';
+import { createDatabase, type Queryable } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
@@ -18,6 +18,7 @@ import { absentOf, twinOf, weigh, weighInTurn, weighingSession as weighingSessio
 import { HOT_URL, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { change, CONFIG, genesis, LOG_015, ROOT, seal, SIGNING_KEY, world } from './use-world.ts';
 import { freshKeyId } from './window-fixture.ts';
+import { credentials, dismissedKeys, environments as environmentsTable, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 
 /** A world whose credential's token is known, and the names its requests use: its project's slug, `dev`, a key's name. */
 export async function namedWorld(db: TestDatabase, options: Parameters<typeof world>[0] = {}) {
@@ -35,7 +36,6 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
   };
   /** A plain value in `dev`, sealed: its text's digest in its object, no key. */
   const plain = async (text: string, name = `PLAIN_${randomUUID().slice(0, 4)}`) => {
-    const t = tablesOf(db.owner);
     const id = freshKeyId(w.principal);
     const version = randomUUID();
     // Its version as the app writes a plain one: sealed as any, its text beside (app-places.test.ts, `newVersion`).
@@ -43,8 +43,8 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
     const context = { projectId: w.project, environmentId: w.dev, secretId: id };
     const sealed = encrypt(Buffer.from(text), context, dek);
     const wrapped = await CONFIG.keks.wrap(dek, context, { deadline: Date.now() + 5000, signal: new AbortController().signal });
-    await db.owner.insert(t.secrets).values({ id, projectId: w.project, environmentId: w.dev, key: name });
-    await db.owner.insert(t.secretVersions).values({
+    await db.owner.insert(secrets).values({ id, projectId: w.project, environmentId: w.dev, key: name });
+    await db.owner.insert(secretVersions).values({
       id: version, secretId: id, version: 1, envelopeVersion: sealed.envelopeVersion, ciphertext: sealed.ciphertext, iv: sealed.iv, authTag: sealed.authTag,
       wrappedDek: wrapped.bytes, kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, createdBy: ROOT, sensitive: false, plaintext: text,
     });
@@ -105,7 +105,7 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
   const environment = async (slug: string, archived = false, { parentId = null, owner = null }: { parentId?: string | null; owner?: string | null } = {}) => {
     const id = randomUUID();
     const object: Environment = { kind: 'environment', id, projectId: w.project, slug, owner, parentId, protected: false, deleted: false, archived, projectArchived: false };
-    await db.owner.insert(tablesOf(db.owner).environments).values({ id, projectId: w.project, slug, name: slug, protected: false, parentId, owner, ...(archived ? { archivedAt: new Date() } : {}) });
+    await db.owner.insert(environmentsTable).values({ id, projectId: w.project, slug, name: slug, protected: false, parentId, owner, ...(archived ? { archivedAt: new Date() } : {}) });
     await genesis({ kind: 'environment', id }, object);
     environments.set(id, object);
     return id;
@@ -115,7 +115,7 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
   /** The caller's personal config of `of` (`dev` by default), as the app makes one (`makePersonal`): sealed, its slug generated. */
   const personal = (of = w.dev) => environment(`dev-p-${randomBytes(4).toString('hex')}`, false, { parentId: of, owner: w.principal });
   /** `key` removed in `environment`, a fork's (a dismissal, which no seal covers): what it inherits of that name, gone there. */
-  const dismiss = (environment: string, key: string) => db.owner.insert(tablesOf(db.owner).dismissedKeys).values({ environmentId: environment, key, dismissedBy: ROOT });
+  const dismiss = (environment: string, key: string) => db.owner.insert(dismissedKeys).values({ environmentId: environment, key, dismissedBy: ROOT });
   /** An environment renamed `slug`, as the app renames one: a change to its object. */
   /** `during`, if given, runs in the rename's transaction once it holds the fence, before it writes. */
   const rename = async (id: string, slug: string, during?: (tx: Queryable) => Promise<void>) => {
@@ -141,7 +141,7 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
   const credential = async () => {
     const id = randomUUID();
     const expiresAt = Date.now() + 86_400_000;
-    await db.owner.insert(tablesOf(db.owner).credentials).values({
+    await db.owner.insert(credentials).values({
       id, kind: w.principal.startsWith('user:') ? 'cli' : 'service', authMac: Buffer.alloc(32), tokenHash: randomBytes(32), tokenHint: 'hint', generation: 0, principal: w.principal, createdBy: ROOT, expiresAt: new Date(expiresAt), scope: null,
     });
     await genesis({ kind: 'credential', id }, { ...(w.objects.credential as Extract<Input, { kind: 'credential' }>), id, expiresAt });
@@ -155,8 +155,8 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
     const holder = freshKeyId(w.principal);
     const row = randomUUID();
     const appended = await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'reference.create', decision: 'allow', metadata: '{}' }], undefined, undefined, [], true));
-    await db.owner.insert(tablesOf(db.owner).secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: name });
-    await db.owner.insert(tablesOf(db.owner).secretReferences).values({
+    await db.owner.insert(secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: name });
+    await db.owner.insert(secretReferences).values({
       id: row, projectId: w.project, environmentId: w.dev, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: at, sourceSecretId: source,
       createdSeq: appended.seqStart, createdBy: ROOT,
     });

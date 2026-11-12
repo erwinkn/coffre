@@ -22,7 +22,7 @@ import { coffreRoute } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, entryOf, contextFor, LOG, openTestDatabase, refusedIn, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
-import { auditLog } from './db/tables.ts';
+import { auditLog } from '@coffre/db/schema';
 import { inBulkPeriod } from './window-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
