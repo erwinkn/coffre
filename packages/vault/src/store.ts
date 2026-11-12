@@ -1164,21 +1164,25 @@ export async function loggedChanges(db: Queryable, macs: readonly LogMacKey[], r
 }
 
 /**
- * Whether the indexes that keep request ids unique stand: a
- * second entry under one request is a replay the database refuses, so a
- * walk need hold only its own stretch to it (`RequestIdChecked`).
+ * The definitions of the indexes that keep request ids unique, as a JSON array of `{ name, def }`: a subquery, so that a
+ * check asks it with its other reads, in one statement (`requestsUniqueIn` says whether they stand).
  */
-export async function requestsUnique(db: Queryable): Promise<boolean> {
-  // Each index by its definition, so that one of the same name over other columns does not pass: a use's request is
-  // unique by its time and id, a change's by its id.
+export const REQUEST_INDEXES = sql`(SELECT coalesce(json_agg(json_build_object('name', c.relname, 'def', pg_get_indexdef(i.indexrelid))), '[]')
+    FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+   WHERE i.indexrelid IN (to_regclass('public.log_uses_request_idx'), to_regclass('public.log_changes_request_id_key')) AND i.indisunique AND i.indisvalid)`;
+
+/**
+ * Whether the indexes that keep request ids unique stand, from what `REQUEST_INDEXES` read: a second entry under one
+ * request is a replay the database refuses, so a walk need hold only its own stretch to it (`RequestIdChecked`). Each
+ * index by its definition, so that one of the same name over other columns does not pass: a use's request is unique by
+ * its time and id, a change's by its id.
+ */
+export function requestsUniqueIn(rows: readonly { name: string; def: string }[]): boolean {
   const defined = (text: string) => text.replace(/[`"\s]/g, '').toLowerCase();
-  const wanted = (uses: string | undefined, changes: string | undefined) =>
-    uses !== undefined && changes !== undefined && /^createuniqueindex.*on(only)?(public\.)?log_uses(usingbtree)?\(at,request_id\)$/.test(defined(uses))
-    && /^createuniqueindex.*on(only)?(public\.)?log_changes(usingbtree)?\(request_id\)$/.test(defined(changes));
-  const rows = await rowsOf<{ name: string; def: string }>(db, sql`SELECT c.relname AS name, pg_get_indexdef(i.indexrelid) AS def FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-    WHERE i.indexrelid IN (to_regclass('public.log_uses_request_idx'), to_regclass('public.log_changes_request_id_key')) AND i.indisunique AND i.indisvalid`);
   const of = (name: string) => rows.find((row) => row.name === name)?.def;
-  return wanted(of('log_uses_request_idx'), of('log_changes_request_id_key'));
+  const [uses, changes] = [of('log_uses_request_idx'), of('log_changes_request_id_key')];
+  return uses !== undefined && changes !== undefined && /^createuniqueindex.*on(only)?(public\.)?log_uses(usingbtree)?\(at,request_id\)$/.test(defined(uses))
+    && /^createuniqueindex.*on(only)?(public\.)?log_changes(usingbtree)?\(request_id\)$/.test(defined(changes));
 }
 
 /**

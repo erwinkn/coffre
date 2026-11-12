@@ -15,7 +15,7 @@ import type { ProjectionStore, rebuildRow } from './projection.ts';
 import type { ReadRow, ReadsStore } from './reads.ts';
 import type { CheckStore } from './audit-check.ts';
 import type { RetentionStore } from './retention.ts';
-import { latestSigned } from './store.ts';
+import { latestSigned, REQUEST_INDEXES } from './store.ts';
 
 /**
  * The checkpointer's database (checkpointer.ts, `CheckpointStore`): 0.15's
@@ -266,12 +266,14 @@ export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling:
       ORDER BY n${limitOf(limit)}`;
 }
 
-function postgresStore(db: Database, range: number): CheckpointStore & Omit<RetentionStore, 'auditCursor'> & RotationStore {
-  const CHANGE = sql.raw(`json_build_object('tree', 'changes', 'number', c.number::text, 'at', c.at::text, 'requestId', c.request_id,
+/** A change of `log_changes c`, a use of `log_uses u` and a pair of `log_checkpoints k`, each as one JSON value. */
+const CHANGE = sql.raw(`json_build_object('tree', 'changes', 'number', c.number::text, 'at', c.at::text, 'requestId', c.request_id,
     'object', c.object::text, 'actor', c.actor, 'payload', c.payload, 'seal', encode(c.seal, 'hex'), 'mac', encode(c.mac, 'hex'))`);
-  const USE = sql.raw(`json_build_object('tree', 'uses', 'number', u.number::text, 'at', u.at::text, 'requestId', u.request_id::text,
+const USE = sql.raw(`json_build_object('tree', 'uses', 'number', u.number::text, 'at', u.at::text, 'requestId', u.request_id::text,
     'credential', u.credential::text, 'secret', u.secret::text, 'purpose', u.purpose, 'mac', encode(u.mac, 'hex'), 'place', u.place::text, 'route', u.route)`);
-  const PAIR = sql.raw(`json_build_object('upto', k.upto::text, 'changes', k.changes_note, 'uses', k.uses_note)`);
+const PAIR = sql.raw(`json_build_object('upto', k.upto::text, 'changes', k.changes_note, 'uses', k.uses_note)`);
+
+function postgresStore(db: Database, range: number): CheckpointStore & Omit<RetentionStore, 'auditCursor'> & RotationStore {
   /** The entries in (after, upto], uses read from `floor` on: one JSON array, by number. */
   /**
    * The window as rows, by number: the tick's read, 500 entries every 500 ms at R44's rate, so no JSON is built
@@ -565,6 +567,82 @@ export async function callRebuild(db: Database, row: ReturnType<typeof rebuildRo
     ${String(row.at)}::bigint, ${row.requestId}::text, ${row.actor}::text, ${row.payload}::text, ${row.mac}::bytea
   ) AS text) AS n`);
   return BigInt(written!.n);
+}
+
+
+/**
+ * What a page's check of the log reads (`checkRead`), in one statement, so one snapshot and one round trip:
+ *
+ * - `newest`, the newest checkpoint row, and `floor`, the floor of `at` its row says (a verifier holds it to the one
+ *   its pair signed, which a writer cannot raise: `checkTail` reads the tail again from that one when they differ);
+ * - `tail`, the entries above it, both trees, by number, uses from that floor: the first `limit`;
+ * - `rotations`, every rotation of the vault's signing key, which bound a replaced key (keyring.ts);
+ * - `anchor`, the first change of the object `anchor`, the frozen log's anchor (upgrade.ts), and `last`, the frozen
+ *   log's last entry, each null for none;
+ * - `indexes`, the definitions of the indexes that keep a request to one entry (`requestsUniqueIn`).
+ *
+ * Every part is a seek on an index or the primary key, or a scan of what lies above the newest checkpoint: nothing it
+ * reads grows with the log.
+ */
+export type CheckRead = {
+  newest: StoredPair | null;
+  floor: number | null;
+  tail: LogEntry[];
+  rotations: LogEntry[];
+  anchor: LogEntry | null;
+  last: StoredEntry | null;
+  indexes: { name: string; def: string }[];
+};
+
+type RawLast = {
+  seq: string; author: 'app' | 'vault'; keyId: string; occurredAt: string; actor: string; action: string; decision: string; code: string | null;
+  subjectPrincipal: string | null; projectId: string | null; environmentId: string | null; secretId: string | null; secretVersionId: string | null;
+  operationId: string | null; requestId: string | null; sourceIp: string | null; relatedSeq: string | null; metadata: string;
+  prevHash: string; mac: string; hash: string;
+};
+
+export async function checkRead(db: Database, options: { limit: number; anchor: string }): Promise<CheckRead> {
+  const { limit, anchor } = options;
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error(`a check reads a positive number of entries, not ${limit}`);
+  const read = await one<{
+    newest: (RawPair & { floor: string }) | null; tail: RawEntry[]; rotations: RawEntry[]; anchor: RawEntry | null; last: RawLast | null; indexes: { name: string; def: string }[];
+  }>(db, sql`
+    WITH k AS (SELECT k.upto, k.at_floor, k.changes_note, k.uses_note FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1),
+    t AS (SELECT w.n, w.v FROM (
+        (SELECT c.number AS n, ${CHANGE} AS v FROM k, log_changes c WHERE c.number > k.upto ORDER BY c.number LIMIT ${limit})
+        UNION ALL
+        (SELECT u.number, ${USE} FROM k, log_uses u WHERE u.at >= k.at_floor AND u.number > k.upto ORDER BY u.at LIMIT ${limit})
+      ) w ORDER BY w.n LIMIT ${limit})
+    SELECT json_build_object(
+      'newest', (SELECT json_build_object('upto', k.upto::text, 'changes', k.changes_note, 'uses', k.uses_note, 'floor', k.at_floor::text) FROM k),
+      'tail', (SELECT coalesce(json_agg(t.v ORDER BY t.n), '[]') FROM t),
+      'rotations', (SELECT coalesce(json_agg(${CHANGE} ORDER BY c.number), '[]') FROM log_changes c WHERE c.object = ${KEY_OBJECT}::uuid),
+      'anchor', (SELECT ${CHANGE} FROM log_changes c WHERE c.object = ${anchor}::uuid ORDER BY c.number LIMIT 1),
+      'last', (SELECT json_build_object('seq', a.seq::text, 'author', a.author, 'keyId', a.key_id, 'occurredAt', a.occurred_at::text, 'actor', a.actor,
+          'action', a.action, 'decision', a.decision, 'code', a.code, 'subjectPrincipal', a.subject_principal, 'projectId', a.project_id,
+          'environmentId', a.environment_id, 'secretId', a.secret_id, 'secretVersionId', a.secret_version_id, 'operationId', a.operation_id,
+          'requestId', a.request_id, 'sourceIp', a.source_ip, 'relatedSeq', a.related_seq::text, 'metadata', a.metadata,
+          'prevHash', encode(a.prev_hash, 'hex'), 'mac', encode(a.mac, 'hex'), 'hash', encode(a.hash, 'hex'))
+        FROM audit_log a ORDER BY a.seq DESC LIMIT 1),
+      'indexes', ${REQUEST_INDEXES}) AS v`);
+  const last = read.last;
+  return {
+    newest: toPair(read.newest),
+    floor: read.newest === null ? null : Number(read.newest.floor),
+    tail: read.tail.map(toEntry),
+    rotations: read.rotations.map(toEntry),
+    anchor: read.anchor === null ? null : toEntry(read.anchor),
+    last: last === null ? null : {
+      ...last,
+      seq: BigInt(last.seq),
+      occurredAt: Number(last.occurredAt),
+      relatedSeq: last.relatedSeq === null ? null : BigInt(last.relatedSeq),
+      prevHash: Buffer.from(last.prevHash, 'hex'),
+      mac: Buffer.from(last.mac, 'hex'),
+      hash: Buffer.from(last.hash, 'hex'),
+    },
+    indexes: read.indexes,
+  };
 }
 
 export type { ReadRow };

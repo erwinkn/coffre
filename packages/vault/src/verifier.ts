@@ -1,14 +1,14 @@
-import { openPair, verifyLog, type LogEntry, type PairNotes, type StoredPair } from '@coffre/core/merkle';
+import { MAX_NUMBER, openPair, verifyLog, type LogEntry, type LogReader, type PairNotes, type StoredPair } from '@coffre/core/merkle';
 import type { TreeVerification } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
-import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { loggedChange } from './changes.ts';
-import { entryVouched, ringOf, signedUnder, type VerifierKeys } from './keyring.ts';
+import { alone, entryVouched, ringOf, signedUnder, type Keyring, type VerifierKeys } from './keyring.ts';
 import { authentic, retentionCut, rotationOf } from './log-entry.ts';
 import { purposeOf } from './log-replay.ts';
-import { logStore } from './log-store.ts';
-import { requestsUnique } from './store.ts';
+import { checkRead, logStore, type CheckRead } from './log-store.ts';
+import { requestsUniqueIn } from './store.ts';
+import { ANCHOR_OBJECT } from './upgrade.ts';
 
 /**
  * 0.15's verifier (docs/design/0.15-plan.md, PR 8): what holds 0.15's log
@@ -16,7 +16,7 @@ import { requestsUnique } from './store.ts';
  * on every visit (R25), and keeps nothing between calls. It checks the
  * newest signed pair, its signatures and the pairs held outside (the
  * signer's memory), then every entry above it by its MAC and its request:
- * a tick's worth of entries, whatever the log's size, in three statements,
+ * a tick's worth of entries, whatever the log's size, in one statement,
  * and never more than `ABOVE_NEWEST` of them.
  *
  * Below the newest pair, the pair vouches for what it sealed: it is not
@@ -95,46 +95,72 @@ export const ABOVE_NEWEST = 1_000;
 export type Walked = Extract<TreeVerification, { kept: true }> & { behind: boolean };
 
 export async function verifyTrees(db: Database, keys: VerifierKeys, options: VerifyOptions): Promise<Walked> {
-  const walked = await db.transaction(async (raw) => {
-    const tx = raw as unknown as Database;
-    const store = logStore(tx);
-    // From the newest pair, which its signatures and the pairs held outside vouch for. It walks no use below it, so
-    // retention's cut is not its to check: the newest pair and the signer's are at or above every cut.
-    const newest = await store.newest();
-    const keyed = await underKeys(store, keys, newest, options.anchors ?? []);
-    // Each entry's request, seen once (RequestIdChecked): a change's by its id, a use's by its time and id, which its MAC
-    // covers. A copy below the start is what the database's unique indexes refuse, which every check holds to standing.
-    const requests = new Set<string>();
-    const check = (entry: LogEntry): string | null => {
-      const refused = keyed.vouch(entry);
-      if (refused !== null) return refused;
-      const request = entry.tree === 'changes' ? `c:${String(entry.columns[1])}` : `u:${entry.at}:${String(entry.columns[1])}`;
-      if (requests.has(request)) return 'a second entry under the request of another: a replay';
-      requests.add(request);
-      return malformed(entry);
-    };
-    const verdict = await verifyLog(store, {
-      verifiers: [keys.current, ...keys.previous].map((key) => key.verifiers),
-      check,
-      ...(newest === null ? {} : { newest }),
-      ...(options.anchors === undefined ? {} : { anchors: options.anchors }),
-      above: ABOVE_NEWEST,
-    });
-    const problems = [...keyed.problems, ...verdict.problems];
-    if (!(await requestsUnique(tx))) problems.push('the indexes that keep each request to one entry are gone: a copy of an entry would pass');
-    return { verdict, problems };
-  }, SNAPSHOT);
-  const { verdict, problems } = walked;
+  return (await checkTrees(db, keys, { ...options, above: ABOVE_NEWEST })).walked;
+}
+
+/** The trees' verdict (`Walked`), what it was read from (`CheckRead`), and the keyring that read gives (keyring.ts). */
+export type TreesChecked = { walked: Walked; read: CheckRead; ring: Keyring };
+
+/**
+ * The trees checked from the newest pair (`verifyTrees`), with at most `above` entries above it, from one statement
+ * (`checkRead`): the newest pair, the entries above it, the rotations and the request indexes, one round trip. A read
+ * past it is made only where the database disagrees with the pairs: a pair held outside below the newest (its row and
+ * the tiles that prove it a prefix), or a newest row whose floor of `at` is not the one its pair signed (the entries
+ * above it again, from the signed one). Those come after the statement, in snapshots of their own; each holds what it
+ * reads to signed heads or MACs as the walk would in one.
+ */
+export async function checkTrees(db: Database, keys: VerifierKeys, options: VerifyOptions & { above: number }): Promise<TreesChecked> {
+  const { above } = options;
+  const read = await checkRead(db, { limit: above + 1, anchor: ANCHOR_OBJECT });
+  const store = logStore(db);
+  // From the newest pair, which its signatures and the pairs held outside vouch for. It walks no use below it, so
+  // retention's cut is not its to check: the newest pair and the signer's are at or above every cut.
+  const keyed = await underKeys(read, keys, options.anchors ?? []);
+  // Each entry's request, seen once (RequestIdChecked): a change's by its id, a use's by its time and id, which its MAC
+  // covers. A copy below the start is what the database's unique indexes refuse, which every check holds to standing.
+  const requests = new Set<string>();
+  const check = (entry: LogEntry): string | null => {
+    const refused = keyed.vouch(entry);
+    if (refused !== null) return refused;
+    const request = entry.tree === 'changes' ? `c:${String(entry.columns[1])}` : `u:${entry.at}:${String(entry.columns[1])}`;
+    if (requests.has(request)) return 'a second entry under the request of another: a replay';
+    requests.add(request);
+    return malformed(entry);
+  };
+  // The walk asks the entries above the newest pair from the floor that pair signed: the statement's, when the row's
+  // floor is that one.
+  const reader: LogReader = {
+    pairs: (after, limit) => store.pairs(after, limit),
+    pair: (upto) => store.pair(upto),
+    tiles: (tree, keys) => store.tiles(tree, keys),
+    entries: (after, upto, o = {}) =>
+      read.newest !== null && after === read.newest.upto && upto === MAX_NUMBER && o.floor === read.floor && o.limit === above + 1
+        ? Promise.resolve(read.tail)
+        : store.entries(after, upto, o),
+  };
+  const verdict = await verifyLog(reader, {
+    verifiers: [keys.current, ...keys.previous].map((key) => key.verifiers),
+    check,
+    ...(read.newest === null ? {} : { newest: read.newest }),
+    ...(options.anchors === undefined ? {} : { anchors: options.anchors }),
+    above,
+  });
+  const problems = [...keyed.problems, ...verdict.problems];
+  if (!requestsUniqueIn(read.indexes)) problems.push('the indexes that keep each request to one entry are gone: a copy of an entry would pass');
   const head = verdict.headPair;
   return {
-    kept: true,
-    ok: problems.length === 0 && !verdict.capped,
-    problems,
-    // The genesis pair seals nothing and is signed at time 0: no checkpoint yet.
-    checkpoint: head === null || head.upto === 0n ? null : { upto: head.upto.toString(), at: head.at },
-    unsealed: verdict.unsealed,
-    capped: verdict.capped,
-    behind: verdict.behind,
+    read,
+    ring: keyed.ring,
+    walked: {
+      kept: true,
+      ok: problems.length === 0 && !verdict.capped,
+      problems,
+      // The genesis pair seals nothing and is signed at time 0: no checkpoint yet.
+      checkpoint: head === null || head.upto === 0n ? null : { upto: head.upto.toString(), at: head.at },
+      unsealed: verdict.unsealed,
+      capped: verdict.capped,
+      behind: verdict.behind,
+    },
   };
 }
 
@@ -146,27 +172,25 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
  * entry above it, each previous one below its own rotation whatever key the
  * newest pair is under (KeyringBound: a tick seals its window in parts). The
  * newest pair's key is the one its signatures hold under (SignerVerified).
- * The rotations are read in the check's own snapshot, and only when the
- * vault holds a replaced key: a statement more for a deployment that rotated.
- * They are not capped as the entries above the newest pair are: an honest
- * log has one per key the vault has replaced, so only a writer planting rows
- * of the key object grows them, and that writer can deny a check in cheaper
- * ways; a cap would turn its slow check into a refused one, no safer (Muse's
- * review r8).
+ * The rotations are read in the check's own statement. They are not capped as
+ * the entries above the newest pair are: an honest log has one per key the
+ * vault has replaced, so only a writer planting rows of the key object grows
+ * them, and that writer can deny a check in cheaper ways; a cap would turn its
+ * slow check into a refused one, no safer (Muse's review r8).
  */
 async function underKeys(
-  store: ReturnType<typeof logStore>,
+  read: Pick<CheckRead, 'newest' | 'rotations'>,
   keys: VerifierKeys,
-  newest: StoredPair | null,
   anchors: readonly PairNotes[],
-): Promise<{ problems: string[]; vouch: (entry: LogEntry) => string | null }> {
+): Promise<{ problems: string[]; ring: Keyring; vouch: (entry: LogEntry) => string | null }> {
   const problems: string[] = [];
   if (keys.previous.length === 0) {
     const current = authentic(keys.current.mac);
-    return { problems, vouch: (entry) => (current(entry) ? null : 'its MAC does not hold') };
+    return { problems, ring: alone(keys), vouch: (entry) => (current(entry) ? null : 'its MAC does not hold') };
   }
+  const newest: StoredPair | null = read.newest;
   const under = newest === null ? null : await signedUnder(newest.notes, [keys.current, ...keys.previous]);
-  const ring = ringOf(keys, await store.rotations(), under);
+  const ring = ringOf(keys, read.rotations, under);
   if (newest !== null && under !== null && under !== keys.current) {
     const retired = ring.previous.find((p) => p.key === under)!.until;
     if (newest.upto >= retired) problems.push(`checkpoint ${newest.upto}: under ${under.origin}, at or past the rotation that retired it (${retired})`);
@@ -180,6 +204,7 @@ async function underKeys(
   }
   return {
     problems,
+    ring,
     vouch(entry) {
       const vouched = entryVouched(ring, entry);
       return vouched === 'held' ? null : vouched === 'past' ? 'under a key the log moved on from, past its rotation' : 'its MAC does not hold';

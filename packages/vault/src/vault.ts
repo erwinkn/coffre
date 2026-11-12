@@ -218,6 +218,7 @@ import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk
 import { ACCESS_ACTIONS, type CheckedChange, type EnvironmentSeal, type GrantRow, type HeldObject, type Member, type MemberLog, type ReadEnvironment, type ReadKind } from './store.ts';
 import { callWrite, decideWrite, parseInputs, secretColumnsOf, validateWriteKeys, WRITE_KINDS, writeStanding } from './write.ts';
 import { proxyItem, use, UseCache, useLimits, useMany, useNamed, useNamedMany, useRoute, type UseLimits, type UsePath } from './use.ts';
+import { checkAudit } from './audit-check.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 import { alone, entryVouched, keyringOf, type Keyring } from './keyring.ts';
 
@@ -3990,9 +3991,32 @@ class VaultService implements Vault {
     throw new Error('this vault notes no event: note is not built yet');
   }
 
-  /** The audit page's check (`Vault.check`). Not built, and nothing calls it. */
-  async check(_input: CheckInput): Promise<CheckOutcome> {
-    throw new Error('this vault checks no audit page: check is not built yet');
+  /**
+   * The audit page's check, flat (`Vault.check`; T277, audit-check.ts): one statement, whatever the log holds, and
+   * nothing written. A database behind the pair its signer holds is asked again, as `verifyTrees` is: the signer's
+   * write lands a moment after it remembers.
+   */
+  async check(input: CheckInput): Promise<CheckOutcome> {
+    await this.#settled();
+    const anchors = await this.#log015().heldOutside();
+    const keys = await this.#verifierKeys();
+    const run = () => checkAudit(this.#db, keys, input, { anchors, upgraded: this.#upgraded() });
+    let checked = await run();
+    for (const wait of [50, TICK_MS + 250]) {
+      if (!checked.behind) break;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+      checked = await run();
+    }
+    const { behind: _behind, ...outcome } = checked;
+    return { ok: true, ...outcome };
+  }
+
+  /**
+   * Whether the upgrade step has anchored the frozen log (upgrade.ts): V1 writes the step and answers here. Until it
+   * does, no database has an anchor, `audit_log` still grows, and `check` holds no last entry to one.
+   */
+  #upgraded(): boolean {
+    return false;
   }
 
   /** `coffre audit rebuild` (projection.ts): the record and the reset, one statement, then the seal wait. */
