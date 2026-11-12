@@ -531,12 +531,12 @@ const requests: Record<string, { request: () => Promise<unknown>; budget: { app:
   "a CI run's sign-in": { request: () => exchange(), budget: { app: 8, vault: 1, vaultCalls: 1 } },
   "a CI run's list": { request: () => ci.secrets.list('market/dev'), budget: { app: 4, vault: 1, vaultCalls: 1 } },
   "a CI run's reveal of seven keys": { request: () => ci.secrets.reveal('market/dev', SEVEN), budget: { app: 5, vault: 7, vaultCalls: 1 } },
-  // Section 5.3's one statement: the session, its member, binding, ancestors and freezes; the vault is not asked, its
+  // Section 5.3's one statement: the session, its member, binding and ancestors; the vault is not asked, its
   // decision warm in the proxy's cache.
   "a workload's request at the proxy": { request: () => workload(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
   // The same for an inbound webhook's signature: the secret warm in the proxy's cache, no entry in the log.
   "a workload's verify at the proxy": { request: () => verify(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
-  // A Cloudflare call naming its environment: its binding, member, place and freezes in one statement; the vault's decision warm.
+  // A Cloudflare call naming its environment: its binding, member and place in one statement; the vault's decision warm.
   "a Cloudflare call at the proxy": { request: () => bound(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
 };
 
