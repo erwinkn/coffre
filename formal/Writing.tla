@@ -733,7 +733,7 @@ AToday(p) ==
                  /\ admits' = admits \cup {[p |-> p, n |-> next, today |-> TRUE,
                                              stands |-> AddUp(p) /\ SessionLive,
                                              decided |-> AddUp(p), caller |-> SessionLive,
-                                             policy |-> \A o \in PolicyObjects : ok[o],
+                                             policy |-> \A o \in PolicyObjects \cap AddObjects : ok[o],
                                              replays |-> TRUE, from |-> seal["svc"], was |-> seal["svc"],
                                              authentic |-> IF ActorFromRead THEN l[p].auth.tok = 0 ELSE names[Token] = 0,
                                              t |-> 0, wrap |-> 0]}

@@ -608,6 +608,7 @@ REMOVALS=(
   # reads the protection too.
   'WritingDigest TodayUnheld={"protected"} TodayPolicyStandsAtCommit'
   'WritingDigest TodayUnheld={"roles"} TodayPolicyStandsAtCommit'
+  'WritingDigest TodayUnheld={"policy"} TodayPolicyStandsAtCommit'
   'WritingDigest Unheld={"protected"} WritesStandAtCommit'
   # A refusal down today's path, as before PR 6: a try the vault served, abandoned at its hold, then refused, goes on
   # there with the caller the first try checked, and writes once the grant is back, the session revoked since (review
