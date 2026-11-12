@@ -32,7 +32,7 @@ everywhere else, are what is left of 0.14.
 
 | Fact | Read by | After |
 |---|---|---|
-| Policy revision (newest `policy.change` seq) | every authenticated request, every use that carries an app token, token issue, bind, revoke: 11 reads in SQL, 5 in TypeScript | no row: the numbers of the newest changes the request already read (section 3) |
+| Policy revision (newest `policy.change` seq) | every authenticated request, every use that carries an app token, token issue, bind, revoke: 11 reads in SQL, 5 in TypeScript | no row: the newest change's number of the roles object and of the policy object (section 3) |
 | Policy content (protected environments, roles) | every vault decision, `GET /api/me` | `environments.protected`, `roles`: exist, sealed, not yet read |
 | Instance settings | sign-in, `/api/me`, decisions | `settings`, new |
 | A member's access revision | every use, key write, member add | no row: `principals.seal` already says it |
@@ -147,10 +147,11 @@ CREATE TABLE audit_cursor (             -- how far the projector has gone, one r
 
 **Where this corrects the sketch.** `log_changes` gets no `kind` column: it was for the audit page's indexes, and the
 page stops reading the chain. The projector classifies each entry once, in TypeScript, from the payload whose MAC it
-has checked. There is no table of object heads (section 4). And entries that change no object need a home, or
+has checked (section 3, "A change carries its entry", says what it reads of a change). There is no table of object heads (section 4). And entries that change no object need a home, or
 `audit_log` cannot freeze: a refusal, a refused sign-in, a finding. They go in `log_changes` as refused writes
 already do, with an object of their own, `log_object('event', id)`, and no seal, signed by the vault as everything in
-the chain is. The app hands them over in one call, `note`; section 3 says which requests gain that call.
+the chain is. The replay, and the full walk that replays the log, pass over an event as a change of no state (`op:
+'event'`). The app hands them over in one call, `note`; section 3 says which requests gain that call.
 
 **As pinned by the contract (K1, #581),** where it departs from the first drafts of this section:
 
@@ -227,11 +228,13 @@ counts fall on the audit page, on sign-in and on refusals.
 
 **What an event costs.** The chain has one signer, the vault, so an event the app decides reaches it through a vault
 call, `note`: one statement under the fence shared, answered once written, as a use is, without waiting for its seal.
-No allowed read and no page writes an event: a use's row is its record, and a list writes nothing today either.
+No page writes an event, and no allowed read but one: a use's row is its record, and a list writes nothing today
+either.
 
 | Event | Today, measured | After | Added to the request |
 |---|---|---|---|
 | A read allowed | The use's row, in the use's statement | The same | nothing |
+| A proxy use the vault wrote no use row for (today, one whose values are all plain) | An `audit_log` entry, `credential.use` | `note`, after the credential is checked again and before the values go back; a `note` that fails fails the request | 1 vault call |
 | A read the vault refuses (no grant, no such key) | The use, then the app's transaction under the head: 5 round trips | The vault writes the refusal in the call that decided it, before it answers: 2 round trips | no call; 3 round trips fewer |
 | A key write or member add the vault refuses | `recordRefusal`, a second call: 2 round trips | The same call, named `note` | nothing |
 | A refusal the app decides (a route the caller may not use, an unknown environment) | The app's transaction under the head: 4 of the request's 9 round trips | `note`: 1 of 6 | 1 vault call; 3 round trips fewer |
@@ -239,10 +242,100 @@ No allowed read and no page writes an event: a use's row is its record, and a li
 | A sign-in refused | The app's transaction under the head: 4 of 6 round trips | `note`: 1 of 3 | 1 vault call; 3 round trips fewer |
 | A finding | The beat's own transaction | An event the vault writes itself, in `beat` (below) | no request |
 
-So no audited read gains a vault call. The requests that gain one are those the app refuses on its own, and each
-trades four round trips under a global lock for one under none. Nothing cheaper is safe there: the entry cannot ride
+So no audited read gains a vault call but the plain proxy use, and that one goes if the use statement writes the use
+row for a plain key too, which is open with V2a. The other requests that gain one are those the app refuses on its
+own, and each trades four round trips under a global lock for one under none. Nothing cheaper is safe there: the entry cannot ride
 the caller's check, which comes before the decision, and an entry the app signed with its own key would be a second
 chain, which is what `audit_log` is.
+
+**A change carries its entry.** A change's payload says what the object became, not what the page prints. A key's
+change is `secret.write` or `secret.delete` with a version id and a nature. The 0.14 entry beside it said
+`secret.loosen`, `secret.restore`, `secret.archive` or `secret.reset` and carried `was`, `kept`, `from` and `recipe`,
+which the page's sentence is made of (`packages/ui/src/lib/audit-sentences.ts`). Once A1 stops writing those entries,
+a sensitive value made readable would list as a plain write. Of the 37 sites whose entry has a change beside it, 22
+lose the action or a detail that way, and all 37 lose what stands beside the detail: the trace (`credentialId`, `via`,
+`confirmedBy`), the `operationId` that folds a 12-key write into one line, who decided, and the kind and label of a
+token that `originsOf` labels its later acts with. So the entry rides whole in the change that records the same act,
+under the vault's MAC:
+
+- *The entry is an event's input without its id.* `ObjectChange` gains `entry`: a `NoteInput` less `id`, which the
+  change's own identity serves, or `null`. That is the object the site hands `appendAudit` today, so converting a site
+  moves what it already builds and drops no field by construction. The field is required, so each site says which. The
+  vault refuses an entry whose actor is not the change's, or that is not allowed: a refused change is an event.
+- *The field.* One key of the change's payload, `reported`, holding an event's payload less `op` and `ref`: `action`,
+  `allowed`, `author`, `code`, `credential`, `detail`, `operationId`, `places`, `requestId`, `sourceIp`, `subject`.
+  One encoder writes it and an event's payload, and the projector has one path from those fields to a row, with the
+  row's own actor and time. The vault sets `author`: `app` for an entry `prepare` takes, `vault` for the one its own
+  change carries (a settings change, a policy change, a member's). `places` are carried, not derived: a key's `ref`
+  gives its id alone, the page files an entry under the project and environment as they were (a key moves later), and
+  the member's summary needs the version id. A loosening:
+  `{"digest":…,"op":"secret.write","ref":{…},"reported":{"action":"secret.loosen","author":"app","detail":{"from":"sensitive","kept":3,"key":"DB_URL","to":"secret","version":4},…},"version":"…"}`.
+  No field is left out as unfit to sign: each is in `audit_log` or an event's payload today. A carrying change grows
+  by its entry, 100 to 150 bytes of it the trace.
+- *Why that name.* Keys sort, and until P2 deletes them 0.15's readers know a payload by how it starts (`RECORDS`,
+  `packages/db/src/change-records.ts`: `{"caller":"`, `{"code":"`, `{"digest":`, `{"inputs":"`,
+  `{"op":"credential.revoke",`). `reported` sorts after `op`, so no start moves. Each record is also known by text its
+  payload holds (`"inputs":"`, `"signIn":{`), which a `detail` could hold by chance, so until P2 the carrier refuses a
+  `detail` whose encoding holds one of those texts; that check is deleted with `RECORDS`.
+- *The vault holds the action to the op.* A fixed map beside `Op` (`packages/vault/src/inputs.ts`) lists the actions
+  each op's change may carry: a `secret.delete` carries `secret.archive` or `secret.reset` and nothing else, a
+  `secret.write` carries `secret.write`, `secret.loosen` or `secret.restore`, and A1's list of its sites fills the
+  rest. An op the map does not name carries nothing, and `prepare` refuses the whole call for an action outside it. So
+  the page cannot name an act the object did not undergo. The rest of the entry is the app's word, as an event's is,
+  and `author` says so.
+- *No line is inferred from an op.* A change with no entry shows only where main's page shows it today, the seven
+  records of the vault's own changes (a sign-in, an issue, a revoke, a sign-out, a two-trip write or add, either's
+  refusal), by the same rules before the upgrade and after. Any other lists nothing. Otherwise the page gains lines no
+  entry wrote: a sign-in's revokes of the credentials it replaces would each read as a sign-out. The chain still holds
+  such a change, and the full recheck walks it.
+- *One entry over several changes sits on one named change,* and the others carry `null`. They commit in one
+  transaction, so the entry is there exactly when all of them are. Which one is the site's to name, by what the entry
+  is about: a sign-in's on the issue its `targetCredentialId` names, the revokes of what it replaces silent; a
+  step-up's on the new session's issue; an environment's deletion on that environment's own `environment.delete`, by
+  id, its configs' and keys' deletions silent; a swept credential's revoke silent under the binding's change. Where
+  the act has no object (a project archived or deleted is N environment changes), the first change of the call as the
+  site hands them, which the commit numbers lowest: the choice is made at `prepare`, since the entry is under the MAC.
+  A protect over N environments is one `policy.change`, on the policy object's change (below).
+- *One change carries one entry.* `audit_events` has one row per row of the chain (its key holds the chain's number),
+  so the field is not a list. The one case of two today is a key revived and written in one change (`secret.unarchive`
+  beside `secret.write`): the write carries one entry, whose detail says `unarchived: true`, and the page's sentence
+  adds the revival. An entry about something that has no change is an event in the same `prepare` call
+  (`PrepareInput.events`), committed after the changes in the same transaction.
+- *Once only.* A site hands its entry over in the commit that stops appending it to `audit_log`, never before: the
+  interim projector lists `audit_log`'s entries and would list the act twice.
+- *The member's summary.* A carried `secret.write` whose `detail` has no `kept` writes the `wrote` row of
+  `audit_member_keys`, from the row's actor and the entry's `places`. A mark (a `secret.write` with `kept`: the value
+  as it was, at another level), a `secret.loosen` and a `secret.restore` write none. None of them supplies a value,
+  and the report ties a marked or restored version to its value by equal `(iv, auth_tag)` (D190). `from` and `kept`
+  stay what the page prints; `relatedSeq` goes.
+- *What it moves.* Nothing: no statement, round trip, lock or row is added. The entry rides a row the change writes
+  already, and the site's `audit_log` insert goes. `app_change_strict` compares one key of the payload, `inputs`, to
+  the read its transaction held (`p_payload::jsonb ->> 'inputs'`, migration 0062); `reported` is outside that
+  comparison, and a change through `prepare` has no `inputs` in any case. No model changes: each takes a payload as
+  one value under its MAC. It is built on the contract (K1's next PR), read by P1 and handed over by A1's sites.
+
+**A finding about a member is an event, read by its id.** When the vault finds a member's row changed around it
+(`mac`) or an older one put back (`stale`), it writes a `tamper` entry in `audit_log`. The members list, each member's
+page, the report, an offboarding and `GET /references` mark the member while a finding names their newest change
+(`tamperedMembers`, `packages/db/src/grants.ts`). That read groups every finding in the log: 92 pages, 917 at ten
+times the findings (S0's sweep), over a partial index the freeze drops. After, the finding is an event the vault
+writes itself in the call that found it, under a derived id as the beat's finding has:
+`system:vault/tampered:<member>:<change>`, the change being the MAC of the member's newest change in hex
+(`changeName`), `none` for a member the log holds no change of. Olga's row altered under change `9f2c…` is
+`system:vault/tampered:user:olga@acme.example:9f2c…`, written once however many requests meet it. The page asks, for
+each member it shows, whether that row exists: the member's newest change, which it reads already, then one lookup on
+`log_changes`' unique `request_id`. That is two index probes a member shown, whatever the log holds, and no new index.
+The rule is today's (`findingStands`, `formal/Findings.tla`: a finding stands while it names the member's newest
+change, any finding and not the newest alone), and the id is that rule: a later change makes another id, which no
+finding has. Like today's reader, the page takes the row on the database's word, with no key; the vault refuses the
+member on its own check of the row, whatever the page shows.
+
+It is not derived at read. `stale` could be, with no key (a row's seal against its newest change's); `mac` cannot, and
+no call of these pages hands the vault the rows they list, so weighing them would add a vault call to each. The
+upgrade carries no finding over: its precheck, on 0.15.0, lists the members a finding stands for and refuses while any
+does (an Owner's change to the member settles one). So 0.14's rule (a finding newer than the member's newest access
+entry), `weighedBy` and `tamperedMembers` go, and old `tamper` entries stay listed like any old entry. V1 writes the
+event, its id's form pinned beside `findingEventId`; P2 writes the reader (`api/members.ts`, `db/queries.ts`).
 
 **The audit page's check, flat (D200).** Today a visit asks the list, a walk of 0.14's chain from its last anchored
 point, and 0.15's trees. The walk is what grows: in #559's sweep the checks took 42 statements at 2,000 entries and
@@ -310,9 +403,14 @@ and a finding that cannot be written must fail a run the platform reports.
 - **No "finding cleared" event.** No outcome is stored, so no beat knows that one stood. A `late` is over when
   checkpoints exist above its number, each with its time. A `behind` or a `broken` ends with an operator's act (a
   restore, a forged row removed), and the next `ok` stands.
-- **New: a projector that stopped.** The beat fails its run, with no finding, when the cursor is more than two beats
-  of entries behind the checkpoint. The page already shows it ("listed through 14:05:03"); this is for when nobody
-  looks. Nothing is wrong with the log, so readiness stays green.
+- **New: a projector that stopped.** The beat fails its run, with no finding, when the cursor's `through` is below the
+  number the checkpoint signs through and the cursor's `at` is older than two of the beat's periods, the one interval
+  the deployment already configures. A quiet instance never trips it: its cursor is level with the checkpoint, however
+  old. Two periods and not one, because until the swap the projector reads the 5-minute checkpoints: just before a
+  beat it is honestly one period behind, and a run that fires a few seconds late must not fail. After the swap it
+  reads every tick and one period would do; two stays, so the rule does not change at the swap. The page already shows
+  it ("listed through 14:05:03"); this is for when nobody looks. Nothing is wrong with the log, so readiness stays
+  green.
 
 **Readiness is the same check.** `/readyz`, past its doors (migrated, then upgraded, which a probe drives as it drove
 the cutover), reads the cursor's row with the read it already makes and calls `check` with no rows: green on `ok`,
@@ -381,10 +479,40 @@ against the lean statement's 59, a cached use costs 0.959 ms of Postgres CPU aga
 probing the same, a reference 11% less. The whole difference is executor start-up, 358 µs against 227; the run time is
 equal (107 µs against 100). A join that never runs is not free, so the cached case keeps a statement without them.
 
-**The policy revision disappears.** The app re-checks "the policy has not changed since I loaded the caller" on the
-seq of the newest `policy.change`. After, it compares what it already read of the roles, the policy row and the
-environments it touches, as `hold_inputs` does for the key write: each object's newest change number in `log_changes`,
-never the seal a row stores, which a database writer puts back with the old row (#573, `TodayPolicyOnLog`).
+**The policy revision becomes two numbers.** The app re-checks "the policy has not changed since I loaded the caller"
+on the seq of the newest `policy.change`. After, it compares two numbers read with the caller: the newest change of
+the roles object and of the policy object in `log_changes`. Never the seal a row stores, which a database writer puts
+back with the old row (#573, `TodayPolicyOnLog`). The re-read of the protected environments the caller was loaded with
+(one renamed or deleted) stays as it is, and `issue_token`, `change_bindings` and `revoke_credential` take the two
+numbers where they took `p_policy_seq`.
+
+Today's one number covers a protection because every protect writes a `policy.change`. The same rule holds after,
+stated on the set: **the protected set changes only in the vault's protect decision, and that decision changes the
+policy object whenever the set changes, rows or no rows**, the condition under which it appends `policy.change` today.
+Ada's caller is loaded while `prod` is unprotected, an Owner protects `prod`, and Ada's key write to `prod` then finds
+the policy object's number moved: 409 `policy_changed`, as today. An environment created protected is no writer of the
+set: it copies `protected` from the policy its caller was loaded with (`protectedFor`), under the same re-check, and
+touches nothing. The model holds a narrower digest per write (the roles, the policy row and the written environment's
+protection, `WritingDigest`); one number for every protection compares more often than that, never less, and no route
+has a set of environments to remember.
+
+The policy's change is a new op, `policy.protect`, carrying the whole policy as its value as `bulk.limit` does: the
+use and the bulk prune read the cap from the policy's newest change whatever its op. It is not always the same value
+written again. A fork's id is protected one call before its row is written (`access.ts`: an id with no row after a
+short time is a fork abandoned, and read past), so the set holds ids with no row, which `environments.protected`
+cannot. Those live in the policy's row, as they live in the `policy.change` entry today: three aligned arrays no SQL
+reads (`ahead_environments`, `ahead_projects`, `ahead_at`), which the next protect decision prunes of ids that have a
+row or are past their time. So a protect of an id with no row is a real change of that row, and a protect of
+environments with rows writes their rows and the policy's value unchanged. One test per path: protect, unprotect, a
+protect of an id with no row, and a creation as protected, which must touch nothing. The change carries the
+`policy.change` entry (above), from the PR that deletes the vault's append of it to `audit_log`, not before. It is
+built with the carrier, and A1's two numbers stack on it.
+
+Under L1 a protect then locks the policy object and its environments exclusive in one statement, in key order after
+the fence, as any change of several objects does; for an id with no row it locks the policy object alone, as a change
+of the cap does. Every use holds the policy object shared for its cap, so a protect excludes uses for its last
+statement, as a settings change does. Checked on the lock model: with the policy's change writing an environment's
+object too, `ChangeLocks` holds (429,906 states) and breaks `NoWaitCycle` with the two taken out of key order.
 
 **Locks after.** `audit_chain_head`, the reads under it, the 0.14 appends and the queued read head are deleted; one
 advisory lock statement stays in multi-statement changes. The head did two jobs and only the first dies with the last
@@ -508,7 +636,7 @@ table, prepared: 0.143 ms against 0.132 ms at 100k changes, 0.196 ms against 0.1
 | Change | Model | When |
 |---|---|---|
 | The head becomes the change lock | `Coffre.tla` with its 11 scenarios, `Credentials`, `Issuing`, `Factor`, `WorkloadEnrollment`, `Writing`, `WriteLocks`, `Lifecycle`: 14 "under the head" protections keep their place and take the lock's name, with their 18 runs; the order change lock, issue lock, fence gets a deadlock check; the key write and the member add are checked without the lock. `Bulk`, `Audit` and `AppKey` keep the head, 0.14's chain's, and go with the code that ends it | first (A0) |
-| The policy revision becomes a digest of each policy object's newest change number | `Lifecycle` (LifecyclePolicy), `Writing` (WritingProtect) | first (A0) |
+| The policy revision becomes the newest change numbers of the roles and the policy objects | `Lifecycle` (LifecyclePolicy), `Writing` (WritingDigest, which holds the narrower per-write digest) | first (A0) |
 | The cap read from the `policy` row, the 0.14 guard gone from uses | `HotPathOne` (CapSealed, HotPathOnePolicy) | first, small |
 | Per-object locks | `HotPathOne` (UseLocks, ChangeLocks, LockToCommit), `WriteLocks` (NoWaitCycle), `Batching` | first, the largest: its model starts once A0's is in review, stacked on it, ahead of V2b's and A1's code |
 | Two new sealed objects | `SealedObjects`, after `Roles.tla`'s pattern | with the PR |
@@ -523,7 +651,7 @@ table, prepared: 0.143 ms against 0.132 ms at 100k changes, 0.196 ms against 0.1
 | The 0.14 write path | `packages/db/src/log.ts` append and head code (348), `appendAudit` (57), the vault's `#append`, `#record`, `#weigh` (62), 155 entry sites in the app rewritten as events |
 | The cutover | 1,139 source lines, 7 SQL functions (164), 2 test files (1,294), `Migration015.tla` and 11 scenarios (1,531), 819 lines of docs |
 | The head's row | 6 statements in 5 SQL functions, about 95 lines of `log.ts`, `audit_chain_head`, #552's head waiters; its 10 callers that are changes take the change lock in its place |
-| `audit_log` reads on request paths | 26 reads in 10 SQL functions, 16 read sites in TypeScript: the snapshot statement's five, `answers.ts`, `policyNow`, `hasTombstone`, `referenceRows` |
+| `audit_log` reads on request paths | 26 reads in 10 SQL functions, 16 read sites in TypeScript: the snapshot statement's five, `answers.ts`, `policyNow`, `hasTombstone`, `referenceRows`, `tamperedMembers` with `findingStands` and `weighedBy` (section 3) |
 | Freeze probes | about 200 source lines, 22 SQL, 230 test, `WorkloadFreezing.cfg` |
 | Triggers | `audit_log_fence`, `audit_log_refuse_old`, `log_reads_placed_insert`, `log_reads_placed_update`, and `audit_log_releases` with `vault_releases` once V1 deletes the 0.14 read path that counts from them: 5 of 9 |
 | Indexes | all 30 on `audit_log` (33 until #576); 18 on `log_changes` (`sign_in`, `issue_revoke`, `written`, `admitted`, `refused_write`, `refused_add`, each with its `_actor`, `_environment` and `_object` variants); 10 on `log_reads`; `secrets_lookup_idx`; 4 on `secret_references`; `credentials_enrollment_roots_idx` |
@@ -546,10 +674,14 @@ tests and the `Reads.tla` scenario. Lost: its table, triggers and migration, whi
 
 ## 6. The upgrade from 0.15.0
 
-1. **Stop.** Run `coffre verify log` on 0.15.0: the full walk of the old chain, in steps, green. Take the app off its
-   route, let one 5-minute beat pass so that the chain ends in a checkpoint the watch's store holds, then back up
-   and go on to step 2 without waiting. The beat is the Worker's cron, which fires with the route gone; 0.15.0 has no
-   command or route that runs it on demand.
+1. **Stop.** Run `coffre verify log` on 0.15.0: the full walk of the old chain, in steps, green. Run the upgrade's
+   precheck, which refuses before anything is touched: a log with an `audit.loss_accepted` entry (it prints the count
+   and their seqs), a member a finding stands for. Take the app off its route and let one 5-minute beat pass, so that
+   the chain ends in a checkpoint the watch's store holds; 0.15.0 has no command or route that runs the beat on
+   demand. Then stop the beat and back up. On Workers the cron fires whatever the routes are, so stopping it is
+   removing the cron trigger (the schedules API with an empty list, or the dashboard), read back to confirm; on Node
+   it is stopping the process. Nothing then writes the log or the store between the backup and the migration. Step 3's
+   deploy brings the trigger back, as redeploying 0.15.0 does on a rollback.
 2. **`coffre migrate`**, as the owner, one migration. It refuses a database that is not a cut-over 0.15.0 (no cutover
    change in `log_changes`, or a schema past 0049 that is not 0.16's). In SQL it creates the tables; fills `settings`
    and `log_keys` from the newest entries, unsealed; drops the indexes, triggers, functions and tables of section 5;
@@ -577,13 +709,13 @@ a cache that one job rebuilds, and the filter is one predicate: listing heartbea
 does not wait for the walk. Until it reaches the first entry, the audit page says how far back it lists and the
 offboarding report says `behind`.
 
-One case is assumed away: a log in which an Owner accepted a loss under 0.15.0 (`audit.loss_accepted`) has a break
-in its hashes at the accepted range, and the backward walk stops there with a finding. A count of that action on
-each deployment says whether any has one. If one does, P1's walk has to go on below an accepted range from the log's
-own rows, as 0.15.0's beat does; that is not designed here.
+One case is refused by the precheck, not handled: a log in which an Owner accepted a loss under 0.15.0
+(`audit.loss_accepted`) has a break in its hashes at the accepted range, where the backward walk would stop with a
+finding. The rehearsal on the copy of Equisafe's database answers for Equisafe. If a deployment has one, the walk
+below an accepted range is designed then, from the log's own rows as 0.15.0's beat does it.
 
 **With no checkpoint in the watch's store, the step starts from the log's own.** That is a deployment that never
-added the watch (0.15.0 only warns), a store that was lost, or one an operator emptied. The step then starts from the
+added the watch (0.15.0 only warns), or a store that was lost. The step then starts from the
 newest checkpoint entry `audit_log` itself holds, its signature verified, and the anchor's payload says which it was
 (`held`: `outside` or `log`, a field to add to K1's `AnchorPayload`). Nothing outside the database bounds a cut then
 but the 0.15 cutover's change, which names the old chain's position at the cutover: the exposure such a deployment
@@ -600,11 +732,9 @@ is the recheck's to find, and the rows the page shows carry MACs of their own.
 (`upgrade-0.16:settings`), compared-and-set on a null seal, so the next call skips what is done and goes on. It only
 adds changes and fills null seals. Restore is for a step that refuses: the old chain's tail does not verify, or a row
 disagrees with its entry. The door then says which, and the operator restores step 1's backup, which loses nothing:
-the app was off its route. One catch: 0.15.0's cron went on between that backup and the migration, so the watch's
-store may hold a checkpoint the restored log lacks, by a beat or two of heartbeats and checkpoints. The step refuses
-that as the cut it looks like. The operator, who knows what was restored, empties the store (the file moved aside,
-the Durable Object's storage cleared), and the step starts from the log's own newest checkpoint and records `held:
-log`. No command accepts a loss: the door answers 503 to the route `coffre audit accept-loss` calls, and nothing
+the app was off its route. The store cannot be ahead of that backup, because the beat was stopped before it (step 1).
+A store that is ahead all the same is the cut it looks like: the step refuses, and its message names step 1. No
+command or argument accepts a loss: the door answers 503 to the route `coffre audit accept-loss` calls, and nothing
 writes the store it moved.
 
 **How long.** The migration creates and drops, and the vault's step reads one beat's entries and writes a handful of
