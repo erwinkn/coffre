@@ -1,14 +1,17 @@
--- 0.16.0, T274 (V2a; state-rows.md, section 3): a use is one statement, written once. `use_credential` held its
--- statement four times, probing or from the isolate's seals, plain or through a place or a reference, and went from one
--- form to another in a loop (`reprobe`, `whole`); each form was planned on its own, dry, before the fence. Now one
--- statement reads what the four read, by the same keys: the seal probes ride a key that is null when the isolate's
--- seals are still the log's (no index scan descends for a null), a reference's rows a condition on the key's own row,
--- and the place read through an id that is null for a use by ids of a key the place holds. A cached call that finds a
--- change since probes in the same statement rather than in a second. Same locks, in the same order, and the same
--- re-checks: the fence shared before the statement, the principal's lock only after the vault decided, the bulk write
--- in a statement of its own. The route's read (its levels, its item's editor, the keys it names), which a route's named
--- call and `use_route` each held a copy of, is one function both call, `use_route_read`, which no login may call.
--- The warm-up's mark moves on (`coffre.use_planned`), so a session plans the new statement before it holds the fence.
+-- 0.16.0, T274 (V2a; state-rows.md, section 3, "Two use statements, one rule"): `use_credential` held its statement four
+-- times, probing or from the isolate's seals, plain or through a place or a reference, its rule in each, and went from
+-- one form to another in a loop (`reprobe`, `whole`). Now it holds two statements and the rule once. The full statement
+-- is the use's definition: it reads what the four read, by the same keys, and answers every call alone; the seal probes
+-- ride a key that is null when the isolate's seals are still the log's (no index scan descends for a null), a
+-- reference's rows a condition on the key's own row, and the place read through an id that is null for a use by ids of
+-- a key the place holds. The lean statement, the old cached plain form, is a fast path in front of it for the common
+-- use, and answers what the full one would or hands off (`whole`); it exists only because Postgres sets up every node
+-- of a plan on each run, read or not, and the full plan costs a lean use about 130 us more of it. The rule is
+-- `use_state`, a SQL function the planner inlines into both. Same locks, in the same order, and the same re-checks:
+-- the fence shared before the statements, the principal's lock only after the vault decided, the bulk write in a
+-- statement of its own. The route's read (its levels, its item's editor, the keys it names), which a route's named call
+-- and `use_route` each held a copy of, is one function both call, `use_route_read`. No login may call either helper.
+-- The warm-up's mark moves on (`coffre.use_planned`), so a session plans both statements before it holds the fence.
 -- A route's read (T205; T200), as both `use_route` and a route's named call in `use_credential` make it, written once:
 -- each level of the place's chain (`p_layers`, nearest first), its environment's row, seal and newest change, and,
 -- through the first level whose definitions hold the route's item, those definitions and their newest change; that
@@ -110,6 +113,35 @@ $function$;
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION public.use_route_read(uuid[], text) FROM PUBLIC;
 --> statement-breakpoint
+-- The use's rule (T158; Probing.tla, AdmissionBeforeKey; review d3 of #416), written once for both of `use_credential`'s
+-- statements, each of which calls it on the rows it read. What no key decides comes first: a MAC by a retired key, the
+-- floor, the deadline, the clock, the cap's config; then what the names decide, which the vault answers on the caller's
+-- standing first (`p_named`: no credential of that token, no live place of those names), the ids the vault passed not
+-- the ones the names name now (`p_right`, D153), and, for a named call (`p_names`), an environment it reads through
+-- archived or its chain cut. Then the principal's lock: to enter its key in the cap's set (`lock`), or to move it on
+-- (`share`), unless the use writes no entry (`p_silent`: a quiet use of no key or of a plain value). Null: the use is
+-- made. A plain SQL expression, so that the planner inlines it into each statement: no call at run time (not SECURITY
+-- DEFINER, no SET, no subquery, each argument used more than once a column or a parameter, and VOLATILE, as
+-- `clock_timestamp` is). No login may call it.
+CREATE FUNCTION public.use_state(p_mac bytea, p_retired bytea[], p_floor bigint, p_at bigint, p_deadline bigint, p_configured boolean,
+                                 p_named text, p_right boolean, p_names boolean, p_archived boolean,
+                                 p_principal text, p_locked boolean, p_moving boolean, p_silent boolean, p_in boolean, p_behind boolean)
+ RETURNS text
+ LANGUAGE sql
+AS $function$
+SELECT CASE WHEN substring(p_mac FROM 1 FOR 4) = ANY(p_retired) THEN 'superseded'
+            WHEN p_floor IS NULL OR p_at < p_floor OR (extract(epoch FROM clock_timestamp()) * 1000)::bigint > p_deadline THEN 'late'
+            WHEN p_at > (extract(epoch FROM clock_timestamp()) * 1000)::bigint + 60000 THEN 'ahead'
+            WHEN NOT p_configured THEN 'unconfigured'
+            WHEN p_named IS NOT NULL THEN p_named
+            WHEN NOT p_right THEN 'moved'
+            WHEN p_names AND p_archived THEN 'archived'
+            WHEN p_principal IS NOT NULL AND NOT p_locked AND NOT p_silent AND NOT p_in THEN 'lock'
+            WHEN p_principal IS NOT NULL AND NOT p_locked AND NOT p_moving AND NOT p_silent AND p_behind THEN 'share' END
+$function$;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION public.use_state(bytea, bytea[], bigint, bigint, bigint, boolean, text, boolean, boolean, boolean, text, boolean, boolean, boolean, boolean, boolean) FROM PUBLIC;
+--> statement-breakpoint
 -- As 0057 says of the use's other helpers: `use_credential` runs as its owner, which may not be the login that made this.
 DO $$
 DECLARE
@@ -117,6 +149,10 @@ DECLARE
 BEGIN
     IF NOT has_function_privilege(v_owner, 'public.use_route_read(uuid[], text)'::regprocedure, 'EXECUTE') THEN
         EXECUTE format('GRANT EXECUTE ON FUNCTION public.use_route_read(uuid[], text) TO %I', v_owner);
+    END IF;
+    -- The planner inlines `use_state` only where the statement's owner may call it.
+    IF NOT has_function_privilege(v_owner, 'public.use_state(bytea, bytea[], bigint, bigint, bigint, boolean, text, boolean, boolean, boolean, text, boolean, boolean, boolean, boolean, boolean)'::regprocedure, 'EXECUTE') THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION public.use_state(bytea, bytea[], bigint, bigint, bigint, boolean, text, boolean, boolean, boolean, text, boolean, boolean, boolean, boolean, boolean) TO %I', v_owner);
     END IF;
 END
 $$;
@@ -135,8 +171,15 @@ DECLARE
     moving boolean := false;
     -- Whether the statement reads each input's newest change whatever the isolate's seals say: it passed none, or no cap.
     probe boolean := p_known IS NULL OR p_cap_count IS NULL OR p_cap_window IS NULL;
-    -- Whether this session has yet to plan the statement (T131).
+    -- The lean statement's refresh, from the cap the isolate passes; the full one works its own out from the cap it reads.
+    c_refresh bigint := greatest(1, least(60000, p_cap_window / 10));
+    -- Whether the call is the full statement's: it reads a place through (`p_place`), or is a named call, whose names and
+    -- rows the app checks the lean statement reads none of (a named call always probes besides), or the lean statement
+    -- handed it off.
+    whole boolean := p_place IS NOT NULL OR p_token_hash IS NOT NULL;
+    -- Whether this session has yet to plan the two statements (T131), and which the warm-up is at.
     dry boolean := current_setting('coffre.use_planned', true) IS DISTINCT FROM '0085';
+    form integer := 0;
     -- The period this call writes, if it writes the cap's row, and the lock that elects the one use that moves it.
     b_refresh bigint;
     b_period bigint;
@@ -439,211 +482,328 @@ BEGIN
                 RETURN CASE WHEN v_routed THEN json_build_object('row', to_json(r), 'route', v_route) ELSE to_json(r) END;
             END IF;
         END IF;
-        -- The use's one statement (V2a; state-rows.md, section 3): every row the decision weighs, each by its key, then
-        -- the entry. It reads each input's newest change (`seeks`: the probe) unless the isolate's seals are still the
-        -- log's: it named the log's newest change it knew (`p_known`), and that is still the newest. A key's reference
-        -- and its source, and the place read through, are read only where the key has no version of its own or the place
-        -- is another than the key's (`whole`): each row by an id the rows before it give, none where they give none.
-        WITH i AS MATERIALIZED (
-            SELECT n.number AS newest, n.mac AS newest_mac, sk.seeks, f.at_floor, f.retired,
-                w.principal AS p, c.kind AS c_kind, w.scope AS c_scope, w.revoked_at IS NOT NULL AS c_revoked,
-                floor(extract(epoch FROM w.expires_at) * 1000)::bigint AS c_expires, w.seal AS c_seal,
-                m.status AS m_status, m.owner AS m_owner, m.role AS m_role, m.scope AS m_scope, m.seal AS m_seal, w.generation AS c_generation, m.generation AS m_generation,
-                w.row AS w_row,
-                -- What the request named, for the names it checks, and the rows the app checks, when it names them (0044).
-                c.token_hash AS c_token_hash,
-                CASE WHEN p_token_hash IS NOT NULL THEN to_json(c) END AS c_row, CASE WHEN p_token_hash IS NOT NULL THEN to_json(s) END AS s_row,
-                CASE WHEN p_token_hash IS NOT NULL AND s.current_version_id IS NOT NULL THEN to_json(sv) END AS sv_row,
-                cfg.r_value, cfg.r_seal, cfg.p_value, cfg.p_seal,
-                s.project_id AS s_project, s.environment_id AS s_environment, s.current_version_id AS s_version, ref.source_secret_id AS s_source, ref.reference_id AS s_reference, s.seal AS s_seal,
-                src.project_id AS x_project, src.environment_id AS x_environment, src.current_version_id AS x_version, xref.source_secret_id AS x_source, xref.reference_id AS x_reference, src.seal AS x_seal,
-                sv.envelope_version, sv.ciphertext, sv.iv, sv.auth_tag, sv.wrapped_dek, sv.kek_provider, sv.kek_id, sv.kek_version, sv.sensitive, sv.plaintext IS NOT NULL AS v_plain, sv.plaintext AS v_plaintext,
-                ids.e1 AS e1_id, e1.project_id AS e1_project, e1.slug AS e1_slug, e1.owner AS e1_owner, e1.parent_id AS e1_parent, e1.protected AS e1_protected, e1.archived_at IS NOT NULL AS e1_archived, CASE WHEN e1.id IS NOT NULL THEN (SELECT q.archived_at IS NOT NULL FROM public.projects q WHERE q.id = e1.project_id) END AS e1_project_archived, e1.seal AS e1_seal,
-                s.environment_id AS e2_id, e2.project_id AS e2_project, e2.slug AS e2_slug, e2.owner AS e2_owner, e2.parent_id AS e2_parent, e2.protected AS e2_protected, e2.archived_at IS NOT NULL AS e2_archived, CASE WHEN e2.id IS NOT NULL THEN (SELECT q.archived_at IS NOT NULL FROM public.projects q WHERE q.id = e2.project_id) END AS e2_project_archived, e2.seal AS e2_seal,
-                ids.e3 AS e3_id, e3.project_id AS e3_project, e3.slug AS e3_slug, e3.owner AS e3_owner, e3.parent_id AS e3_parent, e3.protected AS e3_protected, e3.archived_at IS NOT NULL AS e3_archived, CASE WHEN e3.id IS NOT NULL THEN (SELECT q.archived_at IS NOT NULL FROM public.projects q WHERE q.id = e3.project_id) END AS e3_project_archived, e3.seal AS e3_seal,
-                CASE WHEN ve.owner IS NOT NULL THEN ve.parent END AS e4_id, e4.project_id AS e4_project, e4.slug AS e4_slug, e4.owner AS e4_owner, e4.parent_id AS e4_parent, e4.protected AS e4_protected, e4.archived_at IS NOT NULL AS e4_archived, CASE WHEN e4.id IS NOT NULL THEN (SELECT q.archived_at IS NOT NULL FROM public.projects q WHERE q.id = e4.project_id) END AS e4_project_archived, e4.seal AS e4_seal,
-                b.last AS bulk_last,
-                -- Each input's object key, computed once (a key in a probe's own condition is computed again for every row
-                -- it reads: 0022, decision 3), in the order of the probe's slots below: the way in, the principal, the
-                -- roles, the policy, the key, its source, then e1 to e4. No row, no key, and no probe: no index scan
-                -- descends for a null. None at all while the isolate's seals are still the log's.
-                CASE WHEN sk.seeks THEN ARRAY[public.log_object(w.kind, v_credential::text), public.log_object('principal', w.principal), public.log_object('roles', 'instance'),
-                      public.log_object('policy', 'instance'), public.log_object('secret', v_secret::text), public.log_object('secret', ref.source_secret_id::text),
-                      public.log_object('environment', ids.e1::text), public.log_object('environment', s.environment_id::text), public.log_object('environment', ids.e3::text),
-                      public.log_object('environment', (CASE WHEN ve.owner IS NOT NULL THEN ve.parent END)::text)] END AS objects
-              FROM (SELECT 1) one
-              LEFT JOIN LATERAL (SELECT x.number, x.mac FROM public.log_changes x ORDER BY x.number DESC LIMIT 1) n ON true
-              CROSS JOIN LATERAL (SELECT probe OR NOT coalesce(n.number = p_known AND n.mac = p_known_mac, false) AS seeks) sk
-              LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.checkpoint_fence y WHERE y.only_row LIMIT 1) f ON true
-              -- The roles and the policy, both rows in one read of their one-page table.
+        -- Two statements, one rule (T274, V2a). The full statement is the use's definition: every row the decision weighs,
+        -- each by its key, then the entry; it answers every call alone. The lean one is a fast path in front of it, for the
+        -- common use: no place read through, a key with a version of its own, the isolate's seals still the log's. It reads
+        -- a subset of the full one's rows by the same keys and must answer what the full one would, or hand off (`whole`),
+        -- writing and locking nothing; the full one then runs, as the old forms' handoff did. Both decide by one rule,
+        -- `use_state`, which the planner inlines into each. Two, not one: Postgres sets up every node of a plan on each run,
+        -- run or not, and the full plan's probes and reference chain cost a lean use about 130 us of executor start-up.
+        IF (dry AND form = 0) OR (NOT dry AND NOT probe AND NOT whole) THEN
+            -- The isolate's seals, and its cap, read at the change it names: no probe, only whether a change came since.
+            WITH i AS MATERIALIZED (
+                SELECT n.number AS newest, n.mac AS newest_mac, coalesce(n.number = p_known AND n.mac = p_known_mac, false) AS cached,
+                    f.at_floor, f.retired,
+                    w.principal AS p, c.kind AS c_kind, w.scope AS c_scope, w.revoked_at IS NOT NULL AS c_revoked,
+                    floor(extract(epoch FROM w.expires_at) * 1000)::bigint AS c_expires, w.seal AS c_seal,
+                    m.status AS m_status, m.owner AS m_owner, m.role AS m_role, m.scope AS m_scope, m.seal AS m_seal, w.generation AS c_generation, m.generation AS m_generation,
+                    w.row AS w_row,
+                    c.token_hash AS c_token_hash,
+                    cfg.r_value, cfg.r_seal, cfg.p_value, cfg.p_seal,
+                    s.project_id AS s_project, s.environment_id AS s_environment, s.current_version_id AS s_version, s.seal AS s_seal,
+                    sv.envelope_version, sv.ciphertext, sv.iv, sv.auth_tag, sv.wrapped_dek, sv.kek_provider, sv.kek_id, sv.kek_version, sv.sensitive, sv.plaintext IS NOT NULL AS v_plain, sv.plaintext AS v_plaintext,
+                    s.environment_id AS e2_id, e2.project_id AS e2_project, e2.slug AS e2_slug, e2.owner AS e2_owner, e2.parent_id AS e2_parent, e2.protected AS e2_protected, e2.archived_at IS NOT NULL AS e2_archived, (SELECT q.archived_at IS NOT NULL FROM public.projects q WHERE q.id = e2.project_id) AS e2_project_archived, e2.seal AS e2_seal,
+                    CASE WHEN e2.owner IS NOT NULL THEN e2.parent_id END AS e4_id, e4.project_id AS e4_project, e4.slug AS e4_slug, e4.owner AS e4_owner, e4.parent_id AS e4_parent, e4.protected AS e4_protected, e4.archived_at IS NOT NULL AS e4_archived, (SELECT q.archived_at IS NOT NULL FROM public.projects q WHERE q.id = e4.project_id) AS e4_project_archived, e4.seal AS e4_seal,
+                    b.last AS bulk_last
+                  FROM (SELECT 1) one
+                  LEFT JOIN LATERAL (SELECT x.number, x.mac FROM public.log_changes x ORDER BY x.number DESC LIMIT 1) n ON true
+                  LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.checkpoint_fence y WHERE y.only_row LIMIT 1) f ON true
+                  -- The roles and the policy, both rows in one read of their one-page table.
+                  LEFT JOIN LATERAL (
+                      SELECT max(g.value) FILTER (WHERE g.name = 'roles') AS r_value, (array_agg(g.seal) FILTER (WHERE g.name = 'roles'))[1] AS r_seal,
+                             (SELECT json_build_object('kind', 'policy', 'bulk', json_build_object('count', p.bulk_count, 'windowMs', p.bulk_window_ms))::text FROM public.policy p) AS p_value,
+                             (SELECT p.seal FROM public.policy p) AS p_seal
+                        FROM public.log_config g
+                  ) cfg ON true
+                  -- The way in (T147), one of these by its id; or, behind Access, none: the account alone, whose row is all the
+                  -- use weighs of it. The way rides the join key: the others' is null, which no index scan descends for. A
+                  -- `p_way = 1` beside the key is no one-time filter of an outer join's inner side, and its probe ran (review r2).
+                  LEFT JOIN public.credentials c ON c.id = CASE WHEN p_way = 0 THEN v_credential END
+                  LEFT JOIN public.mcp_connections k ON k.id = CASE WHEN p_way = 1 THEN v_credential END
+                  LEFT JOIN public.service_bindings wb ON wb.id = CASE WHEN p_way = 2 THEN v_credential END
+                  CROSS JOIN LATERAL (
+                      SELECT CASE p_way WHEN 0 THEN 'credential' WHEN 1 THEN 'connection' WHEN 2 THEN 'binding' END AS kind,
+                             CASE p_way WHEN 0 THEN c.principal WHEN 1 THEN k.principal WHEN 2 THEN wb.principal WHEN 3 THEN p_principal END AS principal,
+                             CASE p_way WHEN 0 THEN c.scope WHEN 2 THEN wb.scope END AS scope,
+                             CASE p_way WHEN 0 THEN c.revoked_at WHEN 1 THEN k.revoked_at WHEN 2 THEN wb.revoked_at END AS revoked_at,
+                             CASE p_way WHEN 0 THEN least(c.expires_at, c.not_after) WHEN 1 THEN k.expires_at END AS expires_at,
+                             CASE p_way WHEN 0 THEN c.seal WHEN 1 THEN k.seal WHEN 2 THEN wb.seal END AS seal,
+                             CASE p_way WHEN 0 THEN c.generation WHEN 1 THEN k.generation WHEN 2 THEN wb.generation END AS generation,
+                             -- A binding's object is its whole row (objects.ts, bindingObject), its seal checked over it.
+                             CASE WHEN p_way = 2 AND wb.id IS NOT NULL THEN to_json(wb) END AS row
+                  ) w
+                  LEFT JOIN public.principals m ON m.principal = w.principal
+                  -- An archived key is gone (`secret.delete`): no object.
+                  LEFT JOIN public.secrets s ON s.id = v_secret AND s.archived_at IS NULL
+                  -- The key's own version, its own environment, and that environment's parent when it is a personal config.
+                  LEFT JOIN public.secret_versions sv ON sv.id = s.current_version_id
+                  LEFT JOIN public.environments e2 ON e2.id = s.environment_id
+                  LEFT JOIN public.environments e4 ON e4.id = e2.parent_id AND e2.owner IS NOT NULL
+                  LEFT JOIN public.bulk_cap b ON b.principal = w.principal AND b.secret = v_secret
+                 WHERE NOT dry
+            ),
+            v AS MATERIALIZED (
+                SELECT i.*, c_refresh AS refresh, cap.period,
+                    -- A key with no version of its own, or a change since the isolate's seals: the full statement's.
+                    CASE WHEN NOT i.cached OR (i.s_project IS NOT NULL AND i.s_version IS NULL) THEN 'whole'
+                         ELSE public.use_state(p_mac, i.retired, i.at_floor, p_at, p_deadline, true, v_named, v_right,
+                                               false, false,
+                                               i.p, locked, moving, v_quiet AND (i.s_project IS NULL OR coalesce(i.v_plain, false)),
+                                               coalesce(i.bulk_last > p_at - p_cap_window - c_refresh, false), i.bulk_last < cap.period) END AS state,
+                    coalesce(i.bulk_last > p_at - p_cap_window - c_refresh, false) AS is_in,
+                    -- The other keys in the set, up to the cap: read only under the principal's lock, for a key not in it.
+                    CASE WHEN locked AND i.p IS NOT NULL AND NOT coalesce(i.bulk_last > p_at - p_cap_window - c_refresh, false) THEN (
+                        SELECT count(*)::integer FROM (
+                            SELECT 1 FROM public.bulk_cap o
+                             WHERE o.principal = i.p AND o.secret <> v_secret AND o.last > p_at - p_cap_window - c_refresh - public.deadline_max() - 60000
+                             LIMIT p_cap_count
+                        ) z
+                    ) ELSE 0 END AS n_others,
+                    -- A repeat rides its cover only while every part of this holds: never on a key whose bulk row is missing (CoverFresh).
+                    coalesce(p_cover IS NOT NULL AND i.bulk_last >= cap.period
+                        AND public.use_covered(p_cover_at, p_cover_request, p_cover, p_credential, p_secret, p_purpose, p_place, p_route), false) AS is_covered
+                  FROM i
+                  CROSS JOIN LATERAL (SELECT public.bulk_period(i.p, v_secret, p_at, c_refresh) AS period) cap
+            ),
+            w AS (
+                INSERT INTO public.log_uses (number, at, request_id, credential, secret, purpose, mac, place, route, phased)
+                SELECT nextval('public.log_number'), p_at, p_request, p_credential, p_secret, p_purpose, p_mac, p_place, p_route, true
+                  -- The isolate held its cover to the cached seals' numbers when it read them.
+                  FROM v WHERE v.state IS NULL AND NOT v.is_covered AND NOT (v_quiet AND (v.s_project IS NULL OR coalesce(v.v_plain, false)))
+                RETURNING log_uses.number
+            )
+            SELECT v.state, (SELECT w.number FROM w), CASE WHEN v.state IS NULL AND v.is_covered THEN p_cover END, v.newest, v.newest_mac, NULL::bigint, false,
+                v.p, v.c_kind, v.c_scope, v.c_revoked, v.c_expires, v.c_seal, NULL::bytea,
+                v.m_status, v.m_owner, v.m_role, v.m_scope, v.m_seal, NULL::bytea, NULL::bigint,
+                (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.subject_principal = v.p AND a.decision = 'allow'
+                    AND a.action IN ('member.add', 'member.restore', 'member.owner', 'member.role', 'member.remove', 'access.grant', 'access.revoke') ORDER BY a.seq DESC LIMIT 1),
+                gr.g_project, gr.g_environment, gr.g_slug, gr.g_role, gr.g_expires,
+                v.r_value, v.r_seal, NULL::bytea,
+                v.p_value, v.p_seal, NULL::bytea, p_cap_count, p_cap_window,
+                v.s_project, v.s_environment, v.s_version, NULL::uuid, v.s_seal, NULL::bytea,
+                -- The slots it reads nothing of, e1, e3 and the source, as the full statement answers them for no row.
+                NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::bytea, NULL::bytea,
+                v.envelope_version, v.ciphertext, v.iv, v.auth_tag, v.wrapped_dek, v.kek_provider, v.kek_id, v.kek_version, v.sensitive, v.v_plain,
+                NULL::uuid, NULL::uuid, NULL::text, NULL::text, NULL::uuid, NULL::boolean, false, NULL::bytea, NULL::bytea,
+                v.e2_id, v.e2_project, v.e2_slug, v.e2_owner, v.e2_parent, v.e2_protected, v.e2_archived, v.e2_seal, NULL::bytea,
+                NULL::uuid, NULL::uuid, NULL::text, NULL::text, NULL::uuid, NULL::boolean, false, NULL::bytea, NULL::bytea,
+                v.e4_id, v.e4_project, v.e4_slug, v.e4_owner, v.e4_parent, v.e4_protected, v.e4_archived, v.e4_seal, NULL::bytea,
+                v.is_in, v.n_others, v.v_plaintext, NULL::boolean, v.e2_project_archived, NULL::boolean, v.e4_project_archived, NULL::uuid, NULL::uuid, v.c_generation, v.m_generation, v.c_token_hash,
+                -- No app rows: they are a named call's, which never runs here. A named call's (`n_*`), set below; a binding's row.
+                NULL::json,
+                NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::text, NULL::boolean, v.w_row, NULL::boolean, NULL::json
+              INTO r
+              FROM v
+              -- The principal's grants as five lists, one entry per grant, lapsed ones included; an environment's grant with its project, which its row finds through `environments`.
               LEFT JOIN LATERAL (
-                  SELECT max(g.value) FILTER (WHERE g.name = 'roles') AS r_value, (array_agg(g.seal) FILTER (WHERE g.name = 'roles'))[1] AS r_seal,
-                         (SELECT json_build_object('kind', 'policy', 'bulk', json_build_object('count', p.bulk_count, 'windowMs', p.bulk_window_ms))::text FROM public.policy p) AS p_value,
-                         (SELECT p.seal FROM public.policy p) AS p_seal
-                    FROM public.log_config g
-              ) cfg ON true
-              -- The way in (T147), one of these by its id; or, behind Access, none: the account alone, whose row is all the
-              -- use weighs of it. The way rides the join key: the others' is null, which no index scan descends for. A
-              -- `p_way = 1` beside the key is no one-time filter of an outer join's inner side, and its probe ran (review r2).
-              LEFT JOIN public.credentials c ON c.id = CASE WHEN p_way = 0 THEN v_credential END
-              LEFT JOIN public.mcp_connections k ON k.id = CASE WHEN p_way = 1 THEN v_credential END
-              LEFT JOIN public.service_bindings wb ON wb.id = CASE WHEN p_way = 2 THEN v_credential END
-              CROSS JOIN LATERAL (
-                  SELECT CASE p_way WHEN 0 THEN 'credential' WHEN 1 THEN 'connection' WHEN 2 THEN 'binding' END AS kind,
-                         CASE p_way WHEN 0 THEN c.principal WHEN 1 THEN k.principal WHEN 2 THEN wb.principal WHEN 3 THEN p_principal END AS principal,
-                         CASE p_way WHEN 0 THEN c.scope WHEN 2 THEN wb.scope END AS scope,
-                         CASE p_way WHEN 0 THEN c.revoked_at WHEN 1 THEN k.revoked_at WHEN 2 THEN wb.revoked_at END AS revoked_at,
-                         CASE p_way WHEN 0 THEN least(c.expires_at, c.not_after) WHEN 1 THEN k.expires_at END AS expires_at,
-                         CASE p_way WHEN 0 THEN c.seal WHEN 1 THEN k.seal WHEN 2 THEN wb.seal END AS seal,
-                         CASE p_way WHEN 0 THEN c.generation WHEN 1 THEN k.generation WHEN 2 THEN wb.generation END AS generation,
-                         -- A binding's object is its whole row (objects.ts, bindingObject), its seal checked over it.
-                         CASE WHEN p_way = 2 AND wb.id IS NOT NULL THEN to_json(wb) END AS row
-              ) w
-              LEFT JOIN public.principals m ON m.principal = w.principal
-              -- An archived key is gone (`secret.delete`): no object.
-              LEFT JOIN public.secrets s ON s.id = v_secret AND s.archived_at IS NULL
-              -- A key with no version of its own is a reference while its newest reference row names a source and has not
-              -- ended (`ended_at`): an ended one's holder reads as no value, no source (`ended`). A key with a version reads
-              -- no reference: the condition is the subquery's, on the outer row alone, so it is checked before the scan.
+                  SELECT array_agg(coalesce(g.project_id, ge.project_id)) AS g_project, array_agg(g.environment_id) AS g_environment,
+                         array_agg(g.environment_slug) AS g_slug, array_agg(g.role) AS g_role, array_agg(g.expires_at) AS g_expires
+                    FROM public.grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
+                   WHERE g.principal = v.p
+              ) gr ON v.m_status IS NOT NULL;
+        ELSE
+            -- The use's one statement (V2a; state-rows.md, section 3): every row the decision weighs, each by its key, then
+            -- the entry. It reads each input's newest change (`seeks`: the probe) unless the isolate's seals are still the
+            -- log's: it named the log's newest change it knew (`p_known`), and that is still the newest. A key's reference
+            -- and its source, and the place read through, are read only where the key has no version of its own or the place
+            -- is another than the key's (`whole`): each row by an id the rows before it give, none where they give none.
+            WITH i AS MATERIALIZED (
+                SELECT n.number AS newest, n.mac AS newest_mac, sk.seeks, f.at_floor, f.retired,
+                    w.principal AS p, c.kind AS c_kind, w.scope AS c_scope, w.revoked_at IS NOT NULL AS c_revoked,
+                    floor(extract(epoch FROM w.expires_at) * 1000)::bigint AS c_expires, w.seal AS c_seal,
+                    m.status AS m_status, m.owner AS m_owner, m.role AS m_role, m.scope AS m_scope, m.seal AS m_seal, w.generation AS c_generation, m.generation AS m_generation,
+                    w.row AS w_row,
+                    -- What the request named, for the names it checks, and the rows the app checks, when it names them (0044).
+                    c.token_hash AS c_token_hash,
+                    CASE WHEN p_token_hash IS NOT NULL THEN to_json(c) END AS c_row, CASE WHEN p_token_hash IS NOT NULL THEN to_json(s) END AS s_row,
+                    CASE WHEN p_token_hash IS NOT NULL AND s.current_version_id IS NOT NULL THEN to_json(sv) END AS sv_row,
+                    cfg.r_value, cfg.r_seal, cfg.p_value, cfg.p_seal,
+                    s.project_id AS s_project, s.environment_id AS s_environment, s.current_version_id AS s_version, ref.source_secret_id AS s_source, ref.reference_id AS s_reference, s.seal AS s_seal,
+                    src.project_id AS x_project, src.environment_id AS x_environment, src.current_version_id AS x_version, xref.source_secret_id AS x_source, xref.reference_id AS x_reference, src.seal AS x_seal,
+                    sv.envelope_version, sv.ciphertext, sv.iv, sv.auth_tag, sv.wrapped_dek, sv.kek_provider, sv.kek_id, sv.kek_version, sv.sensitive, sv.plaintext IS NOT NULL AS v_plain, sv.plaintext AS v_plaintext,
+                    ids.e1 AS e1_id, e1.project_id AS e1_project, e1.slug AS e1_slug, e1.owner AS e1_owner, e1.parent_id AS e1_parent, e1.protected AS e1_protected, e1.archived_at IS NOT NULL AS e1_archived, CASE WHEN e1.id IS NOT NULL THEN (SELECT q.archived_at IS NOT NULL FROM public.projects q WHERE q.id = e1.project_id) END AS e1_project_archived, e1.seal AS e1_seal,
+                    s.environment_id AS e2_id, e2.project_id AS e2_project, e2.slug AS e2_slug, e2.owner AS e2_owner, e2.parent_id AS e2_parent, e2.protected AS e2_protected, e2.archived_at IS NOT NULL AS e2_archived, CASE WHEN e2.id IS NOT NULL THEN (SELECT q.archived_at IS NOT NULL FROM public.projects q WHERE q.id = e2.project_id) END AS e2_project_archived, e2.seal AS e2_seal,
+                    ids.e3 AS e3_id, e3.project_id AS e3_project, e3.slug AS e3_slug, e3.owner AS e3_owner, e3.parent_id AS e3_parent, e3.protected AS e3_protected, e3.archived_at IS NOT NULL AS e3_archived, CASE WHEN e3.id IS NOT NULL THEN (SELECT q.archived_at IS NOT NULL FROM public.projects q WHERE q.id = e3.project_id) END AS e3_project_archived, e3.seal AS e3_seal,
+                    CASE WHEN ve.owner IS NOT NULL THEN ve.parent END AS e4_id, e4.project_id AS e4_project, e4.slug AS e4_slug, e4.owner AS e4_owner, e4.parent_id AS e4_parent, e4.protected AS e4_protected, e4.archived_at IS NOT NULL AS e4_archived, CASE WHEN e4.id IS NOT NULL THEN (SELECT q.archived_at IS NOT NULL FROM public.projects q WHERE q.id = e4.project_id) END AS e4_project_archived, e4.seal AS e4_seal,
+                    b.last AS bulk_last,
+                    -- Each input's object key, computed once (a key in a probe's own condition is computed again for every row
+                    -- it reads: 0022, decision 3), in the order of the probe's slots below: the way in, the principal, the
+                    -- roles, the policy, the key, its source, then e1 to e4. No row, no key, and no probe: no index scan
+                    -- descends for a null. None at all while the isolate's seals are still the log's.
+                    CASE WHEN sk.seeks THEN ARRAY[public.log_object(w.kind, v_credential::text), public.log_object('principal', w.principal), public.log_object('roles', 'instance'),
+                          public.log_object('policy', 'instance'), public.log_object('secret', v_secret::text), public.log_object('secret', ref.source_secret_id::text),
+                          public.log_object('environment', ids.e1::text), public.log_object('environment', s.environment_id::text), public.log_object('environment', ids.e3::text),
+                          public.log_object('environment', (CASE WHEN ve.owner IS NOT NULL THEN ve.parent END)::text)] END AS objects
+                  FROM (SELECT 1) one
+                  LEFT JOIN LATERAL (SELECT x.number, x.mac FROM public.log_changes x ORDER BY x.number DESC LIMIT 1) n ON true
+                  CROSS JOIN LATERAL (SELECT probe OR NOT coalesce(n.number = p_known AND n.mac = p_known_mac, false) AS seeks) sk
+                  LEFT JOIN LATERAL (SELECT y.at_floor, y.retired FROM public.checkpoint_fence y WHERE y.only_row LIMIT 1) f ON true
+                  -- The roles and the policy, both rows in one read of their one-page table.
+                  LEFT JOIN LATERAL (
+                      SELECT max(g.value) FILTER (WHERE g.name = 'roles') AS r_value, (array_agg(g.seal) FILTER (WHERE g.name = 'roles'))[1] AS r_seal,
+                             (SELECT json_build_object('kind', 'policy', 'bulk', json_build_object('count', p.bulk_count, 'windowMs', p.bulk_window_ms))::text FROM public.policy p) AS p_value,
+                             (SELECT p.seal FROM public.policy p) AS p_seal
+                        FROM public.log_config g
+                  ) cfg ON true
+                  -- The way in (T147), one of these by its id; or, behind Access, none: the account alone, whose row is all the
+                  -- use weighs of it. The way rides the join key: the others' is null, which no index scan descends for. A
+                  -- `p_way = 1` beside the key is no one-time filter of an outer join's inner side, and its probe ran (review r2).
+                  LEFT JOIN public.credentials c ON c.id = CASE WHEN p_way = 0 THEN v_credential END
+                  LEFT JOIN public.mcp_connections k ON k.id = CASE WHEN p_way = 1 THEN v_credential END
+                  LEFT JOIN public.service_bindings wb ON wb.id = CASE WHEN p_way = 2 THEN v_credential END
+                  CROSS JOIN LATERAL (
+                      SELECT CASE p_way WHEN 0 THEN 'credential' WHEN 1 THEN 'connection' WHEN 2 THEN 'binding' END AS kind,
+                             CASE p_way WHEN 0 THEN c.principal WHEN 1 THEN k.principal WHEN 2 THEN wb.principal WHEN 3 THEN p_principal END AS principal,
+                             CASE p_way WHEN 0 THEN c.scope WHEN 2 THEN wb.scope END AS scope,
+                             CASE p_way WHEN 0 THEN c.revoked_at WHEN 1 THEN k.revoked_at WHEN 2 THEN wb.revoked_at END AS revoked_at,
+                             CASE p_way WHEN 0 THEN least(c.expires_at, c.not_after) WHEN 1 THEN k.expires_at END AS expires_at,
+                             CASE p_way WHEN 0 THEN c.seal WHEN 1 THEN k.seal WHEN 2 THEN wb.seal END AS seal,
+                             CASE p_way WHEN 0 THEN c.generation WHEN 1 THEN k.generation WHEN 2 THEN wb.generation END AS generation,
+                             -- A binding's object is its whole row (objects.ts, bindingObject), its seal checked over it.
+                             CASE WHEN p_way = 2 AND wb.id IS NOT NULL THEN to_json(wb) END AS row
+                  ) w
+                  LEFT JOIN public.principals m ON m.principal = w.principal
+                  -- An archived key is gone (`secret.delete`): no object.
+                  LEFT JOIN public.secrets s ON s.id = v_secret AND s.archived_at IS NULL
+                  -- A key with no version of its own is a reference while its newest reference row names a source and has not
+                  -- ended (`ended_at`): an ended one's holder reads as no value, no source (`ended`). A key with a version reads
+                  -- no reference: the condition is the subquery's, on the outer row alone, so it is checked before the scan.
+                  LEFT JOIN LATERAL (
+                      SELECT CASE WHEN y.secret_id = s.id AND y.ended_at IS NULL THEN y.source_secret_id END AS source_secret_id, CASE WHEN y.secret_id = s.id AND y.ended_at IS NULL THEN y.id END AS reference_id
+                        FROM public.secret_references y WHERE s.current_version_id IS NULL AND y.secret_id <= s.id ORDER BY y.secret_id DESC, y.created_seq DESC LIMIT 1
+                  ) ref ON true
+                  LEFT JOIN public.secrets src ON src.id = ref.source_secret_id AND src.archived_at IS NULL
+                  LEFT JOIN LATERAL (
+                      SELECT CASE WHEN y.secret_id = src.id AND y.ended_at IS NULL THEN y.source_secret_id END AS source_secret_id, CASE WHEN y.secret_id = src.id AND y.ended_at IS NULL THEN y.id END AS reference_id
+                        FROM public.secret_references y WHERE src.current_version_id IS NULL AND y.secret_id <= src.id ORDER BY y.secret_id DESC, y.created_seq DESC LIMIT 1
+                  ) xref ON true
+                  -- The value's version: the key's own, or its source's.
+                  LEFT JOIN public.secret_versions sv ON sv.id = CASE WHEN ref.source_secret_id IS NULL THEN s.current_version_id ELSE src.current_version_id END
+                  -- The environments `useEnvironments` names, each by the id the rows name, whether or not its row is there: e1 the
+                  -- place read through, e2 the key's own, e3 its value's (a reference's source's) where that is another, and e4
+                  -- the parent of its value's when that is a personal config.
+                  LEFT JOIN LATERAL (
+                      SELECT CASE WHEN v_place IS DISTINCT FROM s.environment_id THEN v_place END AS e1,
+                             CASE WHEN src.environment_id IS DISTINCT FROM s.environment_id THEN src.environment_id END AS e3
+                  ) ids ON true
+                  LEFT JOIN public.environments e1 ON e1.id = ids.e1
+                  LEFT JOIN public.environments e2 ON e2.id = s.environment_id
+                  LEFT JOIN public.environments e3 ON e3.id = ids.e3
+                  -- The value's environment's row: the key's own, unless it is a reference, whose source is elsewhere or gone.
+                  LEFT JOIN LATERAL (
+                      -- A named call's key the place does not hold: the place's, a personal config's parent, which its standing
+                      -- there weighs (T165, `standingParents`). A use by ids reads as before.
+                      SELECT CASE WHEN s.id IS NULL AND p_token_hash IS NOT NULL THEN e1.owner
+                                  WHEN ref.source_secret_id IS NULL OR (src.id IS NOT NULL AND ids.e3 IS NULL) THEN e2.owner ELSE e3.owner END AS owner,
+                             CASE WHEN s.id IS NULL AND p_token_hash IS NOT NULL THEN e1.parent_id
+                                  WHEN ref.source_secret_id IS NULL OR (src.id IS NOT NULL AND ids.e3 IS NULL) THEN e2.parent_id ELSE e3.parent_id END AS parent
+                  ) ve ON true
+                  LEFT JOIN public.environments e4 ON e4.id = ve.parent AND ve.owner IS NOT NULL
+                  LEFT JOIN public.bulk_cap b ON b.principal = w.principal AND b.secret = v_secret
+                 WHERE NOT dry
+            ),
+            v AS MATERIALIZED (
+                SELECT i.*, cp.cap_count, cp.cap_window, cap.refresh, cap.period, pr.inputs, pr.changes,
+                    public.use_state(p_mac, i.retired, i.at_floor, p_at, p_deadline, cp.cap_count IS NOT NULL AND cp.cap_window IS NOT NULL, v_named, v_right,
+                                     p_token_hash IS NOT NULL AND NOT v_routed,
+                                     coalesce(i.e1_archived, false) OR coalesce(i.e2_archived, false) OR coalesce(i.e3_archived, false)
+                                       OR coalesce(i.e1_project_archived, false) OR coalesce(i.e2_project_archived, false) OR coalesce(i.e3_project_archived, false) OR v_cut,
+                                     i.p, locked, moving, v_quiet AND (i.s_project IS NULL OR coalesce(i.v_plain, false)),
+                                     coalesce(i.bulk_last > p_at - cp.cap_window - cap.refresh, false), i.bulk_last < cap.period) AS state,
+                    pr.c_last, pr.m_last, (pr.m_payload::jsonb ->> 'old')::bigint AS m_old, pr.r_last, pr.p_last, pr.s_last, pr.x_last, pr.e1_last, pr.e2_last, pr.e3_last, pr.e4_last,
+                    coalesce(i.bulk_last > p_at - cp.cap_window - cap.refresh, false) AS is_in,
+                    -- The other keys in the set, up to the cap: read only under the principal's lock, for a key not in it.
+                    CASE WHEN locked AND i.p IS NOT NULL AND NOT coalesce(i.bulk_last > p_at - cp.cap_window - cap.refresh, false) THEN (
+                        SELECT count(*)::integer FROM (
+                            SELECT 1 FROM public.bulk_cap o
+                             WHERE o.principal = i.p AND o.secret <> v_secret AND o.last > p_at - cp.cap_window - cap.refresh - public.deadline_max() - 60000
+                             LIMIT cp.cap_count
+                        ) z
+                    ) ELSE 0 END AS n_others,
+                    -- A repeat rides its cover only while every part of this holds: never on a key whose bulk row is missing
+                    -- (CoverFresh), nor, probing, on one any input of has changed since. The isolate held a cover to the
+                    -- seals it keeps when it read them.
+                    coalesce(p_cover IS NOT NULL AND i.bulk_last >= cap.period AND p_cover > coalesce(pr.inputs, 0)
+                        AND public.use_covered(p_cover_at, p_cover_request, p_cover, p_credential, p_secret, p_purpose, p_place, p_route), false) AS is_covered
+                  FROM i
+                  -- Each input's newest change, probed: one probe of log_changes_object_idx a slot, and the change's row, for the
+                  -- columns its MAC covers (T190; the principal's payload names the 0.14 entry it accounts for), which the
+                  -- vault checks before it holds a row to the seal recorded there. None while the isolate's seals are still the
+                  -- log's: the condition is the subquery's, on `i` alone, so it is checked before any probe. A slot with no object
+                  -- (no source, no place read through) is no row of the probe's, which it would find nothing for.
+                  LEFT JOIN LATERAL (
+                      SELECT max(x.number) AS inputs,
+                             json_object_agg(u.slot, json_build_array(x.at, x.request_id, x.actor, x.payload, x.mac)) FILTER (WHERE x.number IS NOT NULL) AS changes,
+                             (array_agg(x.seal) FILTER (WHERE u.n = 1))[1] AS c_last, (array_agg(x.seal) FILTER (WHERE u.n = 2))[1] AS m_last,
+                             (array_agg(x.seal) FILTER (WHERE u.n = 3))[1] AS r_last, (array_agg(x.seal) FILTER (WHERE u.n = 4))[1] AS p_last,
+                             (array_agg(x.seal) FILTER (WHERE u.n = 5))[1] AS s_last, (array_agg(x.seal) FILTER (WHERE u.n = 6))[1] AS x_last,
+                             (array_agg(x.seal) FILTER (WHERE u.n = 7))[1] AS e1_last, (array_agg(x.seal) FILTER (WHERE u.n = 8))[1] AS e2_last,
+                             (array_agg(x.seal) FILTER (WHERE u.n = 9))[1] AS e3_last, (array_agg(x.seal) FILTER (WHERE u.n = 10))[1] AS e4_last,
+                             (array_agg(x.payload) FILTER (WHERE u.n = 2))[1] AS m_payload, (array_agg(x.payload) FILTER (WHERE u.n = 4))[1] AS p_payload
+                        FROM unnest(ARRAY['c', 'm', 'r', 'p', 's', 'x', 'e1', 'e2', 'e3', 'e4'], i.objects) WITH ORDINALITY u (slot, object, n)
+                        LEFT JOIN LATERAL (
+                            SELECT y.number, y.seal, y.at, y.request_id, y.actor, y.payload, y.mac FROM public.log_changes y
+                             WHERE y.object = ANY(ARRAY[u.object]) ORDER BY y.object DESC, y.number DESC LIMIT 1
+                        ) x ON true
+                       WHERE i.seeks AND u.object IS NOT NULL
+                  ) pr ON true
+                  -- The cap: the isolate's, read from the policy's newest change at the change it names, or that change's as
+                  -- probed now (CapSealed, CapFromPolicy): every policy change logs the whole policy as its `value`.
+                  CROSS JOIN LATERAL (
+                      SELECT CASE WHEN i.seeks THEN (pr.p_payload::jsonb #>> '{value,bulk,count}')::integer ELSE p_cap_count END AS cap_count,
+                             CASE WHEN i.seeks THEN (pr.p_payload::jsonb #>> '{value,bulk,windowMs}')::bigint ELSE p_cap_window END AS cap_window
+                  ) cp
+                  CROSS JOIN LATERAL (SELECT greatest(1, least(60000, cp.cap_window / 10)) AS refresh) r0
+                  CROSS JOIN LATERAL (SELECT r0.refresh, public.bulk_period(i.p, v_secret, p_at, r0.refresh) AS period) cap
+            ),
+            w AS (
+                INSERT INTO public.log_uses (number, at, request_id, credential, secret, purpose, mac, place, route, phased)
+                SELECT nextval('public.log_number'), p_at, p_request, p_credential, p_secret, p_purpose, p_mac, p_place, p_route, true
+                  FROM v WHERE v.state IS NULL AND NOT v.is_covered AND NOT (v_quiet AND (v.s_project IS NULL OR coalesce(v.v_plain, false)))
+                RETURNING log_uses.number
+            )
+            SELECT v.state, (SELECT w.number FROM w), CASE WHEN v.state IS NULL AND v.is_covered THEN p_cover END, v.newest, v.newest_mac, v.inputs, v.seeks,
+                v.p, v.c_kind, v.c_scope, v.c_revoked, v.c_expires, v.c_seal, v.c_last,
+                v.m_status, v.m_owner, v.m_role, v.m_scope, v.m_seal, v.m_last, v.m_old,
+                (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.subject_principal = v.p AND a.decision = 'allow'
+                    AND a.action IN ('member.add', 'member.restore', 'member.owner', 'member.role', 'member.remove', 'access.grant', 'access.revoke') ORDER BY a.seq DESC LIMIT 1),
+                gr.g_project, gr.g_environment, gr.g_slug, gr.g_role, gr.g_expires,
+                v.r_value, v.r_seal, v.r_last,
+                v.p_value, v.p_seal, v.p_last, v.cap_count, v.cap_window,
+                v.s_project, v.s_environment, v.s_version, v.s_source, v.s_seal, v.s_last,
+                v.x_project, v.x_environment, v.x_version, v.x_source, v.x_seal, v.x_last,
+                v.envelope_version, v.ciphertext, v.iv, v.auth_tag, v.wrapped_dek, v.kek_provider, v.kek_id, v.kek_version, v.sensitive, v.v_plain,
+                v.e1_id, v.e1_project, v.e1_slug, v.e1_owner, v.e1_parent, v.e1_protected, v.e1_archived, v.e1_seal, v.e1_last,
+                v.e2_id, v.e2_project, v.e2_slug, v.e2_owner, v.e2_parent, v.e2_protected, v.e2_archived, v.e2_seal, v.e2_last,
+                v.e3_id, v.e3_project, v.e3_slug, v.e3_owner, v.e3_parent, v.e3_protected, v.e3_archived, v.e3_seal, v.e3_last,
+                v.e4_id, v.e4_project, v.e4_slug, v.e4_owner, v.e4_parent, v.e4_protected, v.e4_archived, v.e4_seal, v.e4_last,
+                v.is_in, v.n_others, v.v_plaintext, v.e1_project_archived, v.e2_project_archived, v.e3_project_archived, v.e4_project_archived, v.s_reference, v.x_reference, v.c_generation, v.m_generation, v.c_token_hash,
+                CASE WHEN p_token_hash IS NOT NULL THEN json_build_object(
+                    'now', CURRENT_TIMESTAMP, 'passkey', v_passkey, 'passkey_held', v_passkey_held, 'credential', v.c_row, 'identity', (SELECT to_json(x) FROM public.identities x WHERE x.id = (v.c_row ->> 'identity_id')::uuid),
+                    'policy', (SELECT a.seq::text FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1),
+                    'project', (SELECT to_json(q) FROM public.projects q WHERE q.id = coalesce(v.e1_project, v.e2_project)),
+                    'environment', (SELECT to_json(e) FROM public.environments e WHERE e.id = coalesce(v.e1_id, v.e2_id)),
+                    'parent', CASE WHEN v_np_parent IS NOT NULL THEN (SELECT pe.slug FROM public.environments pe WHERE pe.id = v_np_parent) END,
+                    'held', CASE WHEN v.e1_id IS NOT NULL AND v.e2_id IS NOT NULL THEN json_build_object('id', v.e2_id, 'slug', v.e2_slug) END,
+                    'secrets', CASE WHEN v.s_row IS NULL THEN '[]'::json ELSE json_build_array(json_build_object('secret', v.s_row, 'version', v.sv_row)) END) END,
+                -- A named call's (`n_*`), set below; a binding's row.
+                NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::text, NULL::boolean, v.w_row, NULL::boolean, v.changes
+              INTO r
+              FROM v
+              -- The principal's grants as five lists, one entry per grant, lapsed ones included; an environment's grant with its project, which its row finds through `environments`.
               LEFT JOIN LATERAL (
-                  SELECT CASE WHEN y.secret_id = s.id AND y.ended_at IS NULL THEN y.source_secret_id END AS source_secret_id, CASE WHEN y.secret_id = s.id AND y.ended_at IS NULL THEN y.id END AS reference_id
-                    FROM public.secret_references y WHERE s.current_version_id IS NULL AND y.secret_id <= s.id ORDER BY y.secret_id DESC, y.created_seq DESC LIMIT 1
-              ) ref ON true
-              LEFT JOIN public.secrets src ON src.id = ref.source_secret_id AND src.archived_at IS NULL
-              LEFT JOIN LATERAL (
-                  SELECT CASE WHEN y.secret_id = src.id AND y.ended_at IS NULL THEN y.source_secret_id END AS source_secret_id, CASE WHEN y.secret_id = src.id AND y.ended_at IS NULL THEN y.id END AS reference_id
-                    FROM public.secret_references y WHERE src.current_version_id IS NULL AND y.secret_id <= src.id ORDER BY y.secret_id DESC, y.created_seq DESC LIMIT 1
-              ) xref ON true
-              -- The value's version: the key's own, or its source's.
-              LEFT JOIN public.secret_versions sv ON sv.id = CASE WHEN ref.source_secret_id IS NULL THEN s.current_version_id ELSE src.current_version_id END
-              -- The environments `useEnvironments` names, each by the id the rows name, whether or not its row is there: e1 the
-              -- place read through, e2 the key's own, e3 its value's (a reference's source's) where that is another, and e4
-              -- the parent of its value's when that is a personal config.
-              LEFT JOIN LATERAL (
-                  SELECT CASE WHEN v_place IS DISTINCT FROM s.environment_id THEN v_place END AS e1,
-                         CASE WHEN src.environment_id IS DISTINCT FROM s.environment_id THEN src.environment_id END AS e3
-              ) ids ON true
-              LEFT JOIN public.environments e1 ON e1.id = ids.e1
-              LEFT JOIN public.environments e2 ON e2.id = s.environment_id
-              LEFT JOIN public.environments e3 ON e3.id = ids.e3
-              -- The value's environment's row: the key's own, unless it is a reference, whose source is elsewhere or gone.
-              LEFT JOIN LATERAL (
-                  -- A named call's key the place does not hold: the place's, a personal config's parent, which its standing
-                  -- there weighs (T165, `standingParents`). A use by ids reads as before.
-                  SELECT CASE WHEN s.id IS NULL AND p_token_hash IS NOT NULL THEN e1.owner
-                              WHEN ref.source_secret_id IS NULL OR (src.id IS NOT NULL AND ids.e3 IS NULL) THEN e2.owner ELSE e3.owner END AS owner,
-                         CASE WHEN s.id IS NULL AND p_token_hash IS NOT NULL THEN e1.parent_id
-                              WHEN ref.source_secret_id IS NULL OR (src.id IS NOT NULL AND ids.e3 IS NULL) THEN e2.parent_id ELSE e3.parent_id END AS parent
-              ) ve ON true
-              LEFT JOIN public.environments e4 ON e4.id = ve.parent AND ve.owner IS NOT NULL
-              LEFT JOIN public.bulk_cap b ON b.principal = w.principal AND b.secret = v_secret
-             WHERE NOT dry
-        ),
-        v AS MATERIALIZED (
-            SELECT i.*, cp.cap_count, cp.cap_window, cap.refresh, cap.period, pr.inputs, pr.changes,
-                -- What no key decides comes first (T158; Probing.tla, AdmissionBeforeKey; review d3 of #416): the
-                -- floor, the deadline, the clock, the cap's config; then what the names decide, which the vault
-                -- answers on the caller's standing first.
-                CASE WHEN substring(p_mac FROM 1 FOR 4) = ANY(i.retired) THEN 'superseded'
-                     WHEN i.at_floor IS NULL OR p_at < i.at_floor OR (extract(epoch FROM clock_timestamp()) * 1000)::bigint > p_deadline THEN 'late'
-                     WHEN p_at > (extract(epoch FROM clock_timestamp()) * 1000)::bigint + 60000 THEN 'ahead'
-                     WHEN cp.cap_count IS NULL OR cp.cap_window IS NULL THEN 'unconfigured'
-                     -- What the names name, read by them: no credential of that token, no live place of those names.
-                     WHEN v_named IS NOT NULL THEN v_named
-                     -- The ids the vault passed are not the ones the names name now (D153): the names' rows are read,
-                     -- and nothing is written or locked.
-                     WHEN NOT v_right THEN 'moved'
-                     WHEN p_token_hash IS NOT NULL AND NOT v_routed AND (coalesce(i.e1_archived, false) OR coalesce(i.e2_archived, false) OR coalesce(i.e3_archived, false)
-                       OR coalesce(i.e1_project_archived, false) OR coalesce(i.e2_project_archived, false) OR coalesce(i.e3_project_archived, false) OR v_cut) THEN 'archived'
-                     WHEN i.p IS NOT NULL AND NOT locked AND NOT (v_quiet AND (i.s_project IS NULL OR coalesce(i.v_plain, false))) AND NOT coalesce(i.bulk_last > p_at - cp.cap_window - cap.refresh, false) THEN 'lock'
-                     WHEN i.p IS NOT NULL AND NOT locked AND NOT moving AND NOT (v_quiet AND (i.s_project IS NULL OR coalesce(i.v_plain, false))) AND i.bulk_last < cap.period THEN 'share' END AS state,
-                pr.c_last, pr.m_last, (pr.m_payload::jsonb ->> 'old')::bigint AS m_old, pr.r_last, pr.p_last, pr.s_last, pr.x_last, pr.e1_last, pr.e2_last, pr.e3_last, pr.e4_last,
-                coalesce(i.bulk_last > p_at - cp.cap_window - cap.refresh, false) AS is_in,
-                -- The other keys in the set, up to the cap: read only under the principal's lock, for a key not in it.
-                CASE WHEN locked AND i.p IS NOT NULL AND NOT coalesce(i.bulk_last > p_at - cp.cap_window - cap.refresh, false) THEN (
-                    SELECT count(*)::integer FROM (
-                        SELECT 1 FROM public.bulk_cap o
-                         WHERE o.principal = i.p AND o.secret <> v_secret AND o.last > p_at - cp.cap_window - cap.refresh - public.deadline_max() - 60000
-                         LIMIT cp.cap_count
-                    ) z
-                ) ELSE 0 END AS n_others,
-                -- A repeat rides its cover only while every part of this holds: never on a key whose bulk row is missing
-                -- (CoverFresh), nor, probing, on one any input of has changed since. The isolate held a cover to the
-                -- seals it keeps when it read them.
-                coalesce(p_cover IS NOT NULL AND i.bulk_last >= cap.period AND p_cover > coalesce(pr.inputs, 0)
-                    AND public.use_covered(p_cover_at, p_cover_request, p_cover, p_credential, p_secret, p_purpose, p_place, p_route), false) AS is_covered
-              FROM i
-              -- Each input's newest change, probed: one probe of log_changes_object_idx a slot, and the change's row, for the
-              -- columns its MAC covers (T190; the principal's payload names the 0.14 entry it accounts for), which the
-              -- vault checks before it holds a row to the seal recorded there. None while the isolate's seals are still the
-              -- log's: the condition is the subquery's, on `i` alone, so it is checked before any probe.
-              LEFT JOIN LATERAL (
-                  SELECT max(x.number) AS inputs,
-                         json_object_agg(u.slot, json_build_array(x.at, x.request_id, x.actor, x.payload, x.mac)) FILTER (WHERE x.number IS NOT NULL) AS changes,
-                         (array_agg(x.seal) FILTER (WHERE u.n = 1))[1] AS c_last, (array_agg(x.seal) FILTER (WHERE u.n = 2))[1] AS m_last,
-                         (array_agg(x.seal) FILTER (WHERE u.n = 3))[1] AS r_last, (array_agg(x.seal) FILTER (WHERE u.n = 4))[1] AS p_last,
-                         (array_agg(x.seal) FILTER (WHERE u.n = 5))[1] AS s_last, (array_agg(x.seal) FILTER (WHERE u.n = 6))[1] AS x_last,
-                         (array_agg(x.seal) FILTER (WHERE u.n = 7))[1] AS e1_last, (array_agg(x.seal) FILTER (WHERE u.n = 8))[1] AS e2_last,
-                         (array_agg(x.seal) FILTER (WHERE u.n = 9))[1] AS e3_last, (array_agg(x.seal) FILTER (WHERE u.n = 10))[1] AS e4_last,
-                         (array_agg(x.payload) FILTER (WHERE u.n = 2))[1] AS m_payload, (array_agg(x.payload) FILTER (WHERE u.n = 4))[1] AS p_payload
-                    FROM unnest(ARRAY['c', 'm', 'r', 'p', 's', 'x', 'e1', 'e2', 'e3', 'e4'], i.objects) WITH ORDINALITY u (slot, object, n)
-                    LEFT JOIN LATERAL (
-                        SELECT y.number, y.seal, y.at, y.request_id, y.actor, y.payload, y.mac FROM public.log_changes y
-                         WHERE y.object = ANY(ARRAY[u.object]) ORDER BY y.object DESC, y.number DESC LIMIT 1
-                    ) x ON true
-                   WHERE i.seeks
-              ) pr ON true
-              -- The cap: the isolate's, read from the policy's newest change at the change it names, or that change's as
-              -- probed now (CapSealed, CapFromPolicy): every policy change logs the whole policy as its `value`.
-              CROSS JOIN LATERAL (
-                  SELECT CASE WHEN i.seeks THEN (pr.p_payload::jsonb #>> '{value,bulk,count}')::integer ELSE p_cap_count END AS cap_count,
-                         CASE WHEN i.seeks THEN (pr.p_payload::jsonb #>> '{value,bulk,windowMs}')::bigint ELSE p_cap_window END AS cap_window
-              ) cp
-              CROSS JOIN LATERAL (SELECT greatest(1, least(60000, cp.cap_window / 10)) AS refresh) r0
-              CROSS JOIN LATERAL (SELECT r0.refresh, public.bulk_period(i.p, v_secret, p_at, r0.refresh) AS period) cap
-        ),
-        w AS (
-            INSERT INTO public.log_uses (number, at, request_id, credential, secret, purpose, mac, place, route, phased)
-            SELECT nextval('public.log_number'), p_at, p_request, p_credential, p_secret, p_purpose, p_mac, p_place, p_route, true
-              FROM v WHERE v.state IS NULL AND NOT v.is_covered AND NOT (v_quiet AND (v.s_project IS NULL OR coalesce(v.v_plain, false)))
-            RETURNING log_uses.number
-        )
-        SELECT v.state, (SELECT w.number FROM w), CASE WHEN v.state IS NULL AND v.is_covered THEN p_cover END, v.newest, v.newest_mac, v.inputs, v.seeks,
-            v.p, v.c_kind, v.c_scope, v.c_revoked, v.c_expires, v.c_seal, v.c_last,
-            v.m_status, v.m_owner, v.m_role, v.m_scope, v.m_seal, v.m_last, v.m_old,
-            (SELECT a.seq FROM public.audit_log a WHERE a.author = 'vault' AND a.subject_principal = v.p AND a.decision = 'allow'
-                AND a.action IN ('member.add', 'member.restore', 'member.owner', 'member.role', 'member.remove', 'access.grant', 'access.revoke') ORDER BY a.seq DESC LIMIT 1),
-            gr.g_project, gr.g_environment, gr.g_slug, gr.g_role, gr.g_expires,
-            v.r_value, v.r_seal, v.r_last,
-            v.p_value, v.p_seal, v.p_last, v.cap_count, v.cap_window,
-            v.s_project, v.s_environment, v.s_version, v.s_source, v.s_seal, v.s_last,
-            v.x_project, v.x_environment, v.x_version, v.x_source, v.x_seal, v.x_last,
-            v.envelope_version, v.ciphertext, v.iv, v.auth_tag, v.wrapped_dek, v.kek_provider, v.kek_id, v.kek_version, v.sensitive, v.v_plain,
-            v.e1_id, v.e1_project, v.e1_slug, v.e1_owner, v.e1_parent, v.e1_protected, v.e1_archived, v.e1_seal, v.e1_last,
-            v.e2_id, v.e2_project, v.e2_slug, v.e2_owner, v.e2_parent, v.e2_protected, v.e2_archived, v.e2_seal, v.e2_last,
-            v.e3_id, v.e3_project, v.e3_slug, v.e3_owner, v.e3_parent, v.e3_protected, v.e3_archived, v.e3_seal, v.e3_last,
-            v.e4_id, v.e4_project, v.e4_slug, v.e4_owner, v.e4_parent, v.e4_protected, v.e4_archived, v.e4_seal, v.e4_last,
-            v.is_in, v.n_others, v.v_plaintext, v.e1_project_archived, v.e2_project_archived, v.e3_project_archived, v.e4_project_archived, v.s_reference, v.x_reference, v.c_generation, v.m_generation, v.c_token_hash,
-            CASE WHEN p_token_hash IS NOT NULL THEN json_build_object(
-                'now', CURRENT_TIMESTAMP, 'passkey', v_passkey, 'passkey_held', v_passkey_held, 'credential', v.c_row, 'identity', (SELECT to_json(x) FROM public.identities x WHERE x.id = (v.c_row ->> 'identity_id')::uuid),
-                'policy', (SELECT a.seq::text FROM public.audit_log a WHERE a.author = 'vault' AND a.action = 'policy.change' AND a.decision = 'allow' ORDER BY a.seq DESC LIMIT 1),
-                'project', (SELECT to_json(q) FROM public.projects q WHERE q.id = coalesce(v.e1_project, v.e2_project)),
-                'environment', (SELECT to_json(e) FROM public.environments e WHERE e.id = coalesce(v.e1_id, v.e2_id)),
-                'parent', CASE WHEN v_np_parent IS NOT NULL THEN (SELECT pe.slug FROM public.environments pe WHERE pe.id = v_np_parent) END,
-                'held', CASE WHEN v.e1_id IS NOT NULL AND v.e2_id IS NOT NULL THEN json_build_object('id', v.e2_id, 'slug', v.e2_slug) END,
-                'secrets', CASE WHEN v.s_row IS NULL THEN '[]'::json ELSE json_build_array(json_build_object('secret', v.s_row, 'version', v.sv_row)) END) END,
-            -- A named call's (`n_*`), set below; a binding's row.
-            NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::text, NULL::boolean, v.w_row, NULL::boolean, v.changes
-          INTO r
-          FROM v
-          -- The principal's grants as five lists, one entry per grant, lapsed ones included; an environment's grant with its project, which its row finds through `environments`.
-          LEFT JOIN LATERAL (
-              SELECT array_agg(coalesce(g.project_id, ge.project_id)) AS g_project, array_agg(g.environment_id) AS g_environment,
-                     array_agg(g.environment_slug) AS g_slug, array_agg(g.role) AS g_role, array_agg(g.expires_at) AS g_expires
-                FROM public.grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
-               WHERE g.principal = v.p
-          ) gr ON v.m_status IS NOT NULL;
+                  SELECT array_agg(coalesce(g.project_id, ge.project_id)) AS g_project, array_agg(g.environment_id) AS g_environment,
+                         array_agg(g.environment_slug) AS g_slug, array_agg(g.role) AS g_role, array_agg(g.expires_at) AS g_expires
+                    FROM public.grants g LEFT JOIN public.environments ge ON ge.id = g.environment_id
+                   WHERE g.principal = v.p
+              ) gr ON v.m_status IS NOT NULL;
+        END IF;
         IF dry THEN
+            -- The lean statement, then the full one; then the call itself, under the fence.
+            form := form + 1;
+            IF form < 2 THEN
+                CONTINUE;
+            END IF;
             PERFORM set_config('coffre.use_planned', '0085', false);
             dry := false;
             v_secret := p_secret;
@@ -654,6 +814,11 @@ BEGIN
         -- it is read again probing, so that every row's newest seal is there to check, in this call.
         IF r.state IN ('moved', 'archived') AND p_token_hash IS NOT NULL AND NOT r.probed THEN
             probe := true;
+            CONTINUE;
+        END IF;
+        -- Handed off by the lean statement: the full one reads it again, and every later read of the call is the full one's.
+        IF r.state = 'whole' THEN
+            whole := true;
             CONTINUE;
         END IF;
         -- Once it has probed, each later read of the call probes too.

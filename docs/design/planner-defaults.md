@@ -111,8 +111,8 @@ the same.
 `use_credential` takes a shared advisory lock, the fence, which a
 checkpoint's barrier takes exclusively: a barrier waits for every use
 holding it, and every later use waits for the barrier. So a session's
-first call runs each of its four statements once dry, before the fence,
-and only then takes it. 0.15.0's hot login forced generic plans, so that
+first call runs each of its statements (four in 0.15, two since 0.16)
+once dry, before the fence, and only then takes it. 0.15.0's hot login forced generic plans, so that
 dry run built the very plans every call after reused: no use planned
 under the fence.
 

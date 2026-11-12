@@ -556,12 +556,12 @@ test('a use on a server whose bytes are written `escape` is decided as on any: t
 test('a session\'s first call does its planning\'s cold work before it takes the fence (T131)', async () => {
   const w = await world();
   const id = await w.key();
-  // The indexes the statement's plan chooses among, which a session opens when it first plans it: its cold work,
+  // The indexes the two statements' plans choose among, which a session opens when it first plans them: its cold work,
   // tens of milliseconds on a new connection, which no use may do holding the fence a barrier waits for.
   const opened = ['bulk_cap_pkey', 'checkpoint_fence_pkey', 'credentials_token_hash_key', 'environments_pkey', 'grants_on_project',
     'log_config_pkey', 'principals_pkey', 'secret_versions_pkey', 'secrets_pkey'];
   const fence = postgresSession(OWNER_URL);
-  // Whether a fresh session's first call, cut short at the fence, has parsed the statement and opened those indexes.
+  // Whether a fresh session's first call, cut short at the fence, has parsed the two statements and opened those indexes.
   const beforeFence = async (planned: boolean) => {
     const fresh = postgresSession(OWNER_URL);
     try {
@@ -583,13 +583,14 @@ test('a session\'s first call does its planning\'s cold work before it takes the
   try {
     await fence.unsafe('BEGIN');
     await fence.unsafe('SELECT pg_advisory_xact_lock(1668244070, 0)');
-    // The call never held the fence, and yet it has planned its statement (one since 0085, V2a): its dry run, before it.
-    assert.deepEqual(await beforeFence(false), { parsed: 1, indexes: opened });
-    // Told its statement is planned, the same call does none of that before the fence: it would all be under it.
+    // The call never held the fence, and yet it has planned both statements (two since 0085, V2a; four before): their
+    // dry runs, before it.
+    assert.deepEqual(await beforeFence(false), { parsed: 2, indexes: opened });
+    // Told its statements are planned, the same call does none of that before the fence: it would all be under it.
     assert.deepEqual(await beforeFence(true), { parsed: 0, indexes: [] });
     await fence.unsafe('ROLLBACK');
     // Under the fence, a call plans warm (about 2 ms) until the plan cache settles on a plan, by a session's sixth call
-    // (docs/design/planner-defaults.md). A fresh session's first call is answered, and says the plans are made.
+    // of a statement (docs/design/planner-defaults.md). A fresh session's first call is answered, and says the plans are made.
     const fresh = postgresSession(OWNER_URL);
     try {
       const again = Date.now();

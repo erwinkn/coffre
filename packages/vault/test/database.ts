@@ -142,6 +142,9 @@ export type TestDatabase = {
  * its reads together, a pooled connection each on Node (T206), so a file that kept every test's pools open until it
  * ends would hold more than the 100 connections Postgres has for the four files that run at once.
  */
+/** What a file does to each database it opens, once open (`lean-twin.test.ts`). */
+export const onOpen: ((db: TestDatabase) => Promise<void>)[] = [];
+
 export async function openTestDatabase({ connections: pools }: { connections?: number } = {}): Promise<TestDatabase> {
   const opened: (() => Promise<void>)[] = [];
   let extra: (() => Promise<void>)[] = [];
@@ -156,7 +159,7 @@ export async function openTestDatabase({ connections: pools }: { connections?: n
     await Promise.all(closing.map((close) => close()));
   };
   const owner = await open(OWNER_URL, undefined, opened);
-  return {
+  const db: TestDatabase = {
     owner,
     vault: await open(VAULT_URL, undefined, opened),
     connect: (connections) => open(VAULT_URL, connections),
@@ -171,6 +174,8 @@ export async function openTestDatabase({ connections: pools }: { connections?: n
       }
     },
   };
+  for (const hook of onOpen) await hook(db);
+  return db;
 }
 
 /**
