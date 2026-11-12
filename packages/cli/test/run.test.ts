@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -689,12 +689,122 @@ test("a person's run, on an instance with the credential proxy, gets placeholder
     COFFRE_CREDENTIALS: JSON.stringify({ schumann: at }),
   });
   assert.match(stderr, /placeholders for market\/dev: schumann/);
+  // The handle ends with the command, by its expiry at the latest, in UTC: it is no 12-hour handle `coffre tokens` would list afterwards.
+  assert.match(stderr, /the handle ends with the command, by \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z at the latest\n/);
+  assert.doesNotMatch(stderr, /could not be confirmed ended|lists it|tokens revoke/);
   assert.match(stderr, /values as they are, which you may read: WEBHOOK_SECRET$/m);
   assert.match(stderr, /left out, neither proxied nor yours to read: DATABASE_URL/);
   // Never a read of values: the proxy's question, one handle made with the token, the plan asked with the handle; and
   // once the command ended, the handle revoked, so that nothing the run started holds it after.
   assert.deepEqual(requests, ['GET /use token', 'POST /api/handles token', 'GET /use/market/dev handle', 'DELETE /api/handles/h1 token']);
   assert.match(labels[0]!, /^coffre run on .+: market\/dev$/);
+});
+
+/**
+ * A person's `run` or `export` of market/dev on an instance with the credential proxy, whose handle h1 is revoked as
+ * `revoke` answers, signed in with a personal token or a session: its stderr, its code, the handle's expiry and the
+ * instance's origin.
+ */
+async function withHandle(t: test.TestContext, command: string[], revoke: (res: import('node:http').ServerResponse) => void, signedIn: 'token' | 'session' = 'token', lifeMs = 3_600_000) {
+  const home = mkdtempSync(join(tmpdir(), 'coffre-run-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const pat = `coffre_pat_${'p'.repeat(43)}`;
+  const handle = `coffre_use_${'h'.repeat(43)}`;
+  const expiresAt = new Date(Date.now() + lifeMs).toISOString();
+  let deletes = 0;
+  const server = createServer(async (req, res) => {
+    for await (const chunk of req) void chunk;
+    const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+    if (req.url === '/use') return send(200, { proxy: 'coffre', credentials: ['schumann'] });
+    if (req.url === '/api/handles') return send(200, { id: 'h1', token: handle, expiresAt, scope: { 'market/dev': 'viewer' } });
+    if (req.method === 'DELETE') deletes += 1;
+    if (req.method === 'DELETE' && req.url === '/api/handles/h1') return revoke(res);
+    if (req.url === '/use/market/dev') return send(200, { environment: 'market/dev', env: { SCHUMANN_API_KEY: handle }, credentials: { schumann: `http://${req.headers.host}/use/market/dev/schumann` }, left: [] });
+    send(404, { error: 'not_found', message: `no route for ${req.url}` });
+  });
+  t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as { port: number };
+  const origin = `http://127.0.0.1:${port}`;
+  if (signedIn === 'token') signedInWithToken(home, origin, pat);
+  else {
+    // A person's session: no `kind`, as a browser sign-in leaves it.
+    mkdirSync(join(home, '.coffre'), { recursive: true, mode: 0o700 });
+    const session = { mode: 'signin', token: `coffre_ses_${'s'.repeat(43)}`, expiresAt: null, obtainedAt: new Date().toISOString() };
+    writeFileSync(join(home, '.coffre', 'credentials.json'), JSON.stringify({ version: 2, current: origin, instances: { [origin]: session } }), { mode: 0o600 });
+  }
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_'))), COFFRE_STATE_DIR: home, HOME: home };
+  const child = spawn(process.execPath, ['--conditions=coffre:source', new URL('../src/main.ts', import.meta.url).pathname, ...command], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000 });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (data: string) => (stderr += data));
+  child.stdout.resume();
+  const started = Date.now();
+  const [code] = await once(child, 'close');
+  return { stderr, code: code as number, expiresAt, origin, seconds: (Date.now() - started) / 1000, deletes: () => deletes };
+}
+
+test("a person's run says its handle's id, expiry and how to end it when the revoke at exit is refused: as a session, `coffre tokens revoke` on the instance it ran on", async (t) => {
+  const ran = await withHandle(t, ['run', 'market/dev', '--', 'true'], (res) => void res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'unavailable', message: 'try later' })), 'session');
+  assert.equal(ran.code, 0, ran.stderr);
+  const lines = ran.stderr.split('\n').filter((line) => line.includes('could not be confirmed ended'));
+  // One line, naming the handle, as unconfirmed (the server may have ended it and lost the answer), and the instance (`--url`: the repository's or the default may be another).
+  assert.deepEqual(lines, [`coffre: the handle h1 of this run could not be confirmed ended: it may work until ${ran.expiresAt}; \`coffre --url ${ran.origin} tokens revoke h1 --apply\` ends it`]);
+});
+
+test("a person's run on a personal token says that it cannot end the handle itself: a session can, after `coffre login`", async (t) => {
+  const ran = await withHandle(t, ['run', 'market/dev', '--', 'true'], (res) => void res.writeHead(500).end());
+  assert.equal(ran.code, 0, ran.stderr);
+  const lines = ran.stderr.split('\n').filter((line) => line.includes('could not be confirmed ended'));
+  assert.deepEqual(lines, [`coffre: the handle h1 of this run could not be confirmed ended: it may work until ${ran.expiresAt}; a personal token cannot end it: end it under Personal tokens on ${ran.origin}/account/sessions (a page an instance behind Cloudflare Access leaves out), or after \`coffre login ${ran.origin}\` (which replaces the saved token) with \`coffre --url ${ran.origin} tokens revoke h1 --apply\``]);
+});
+
+test("a person's run says so as well when the revoke at exit gets no answer in 3 s, and ends then", async (t) => {
+  const ran = await withHandle(t, ['run', 'market/dev', '--', 'true'], () => undefined, 'session');
+  assert.equal(ran.code, 0, ran.stderr);
+  assert.ok(ran.seconds >= 3, `ended after ${ran.seconds} s`);
+  assert.equal(ran.stderr.split('\n').filter((line) => line.includes('could not be confirmed ended')).length, 1, ran.stderr);
+  assert.match(ran.stderr, /handle h1 of this run could not be confirmed ended: .*`coffre --url http:\/\/127\.0\.0\.1:\d+ tokens revoke h1 --apply`/);
+});
+
+test("a person's run that outlived its handle says nothing of a revoke that failed: the handle expired by itself", async (t) => {
+  const ran = await withHandle(t, ['run', 'market/dev', '--', 'true'], (res) => void res.writeHead(500).end(), 'session', -60_000);
+  assert.equal(ran.code, 0, ran.stderr);
+  assert.doesNotMatch(ran.stderr, /could not be confirmed ended/);
+});
+
+test("a person's run whose handle was ended by hand meanwhile says nothing of it: the revoke's 404 is a handle already ended", async (t) => {
+  const ran = await withHandle(t, ['run', 'market/dev', '--', 'true'], (res) => void res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'not_found', message: 'a handle by another name', reason: 'unknown_credential' })), 'session');
+  assert.equal(ran.code, 0, ran.stderr);
+  assert.doesNotMatch(ran.stderr, /could not be confirmed ended/);
+});
+
+test("a person's run still says its handle could not be confirmed ended when the revoke's 404 is not the server's: a proxy's page, or a route an older server lacks", async (t) => {
+  for (const answer of [
+    (res: import('node:http').ServerResponse) => void res.writeHead(404, { 'content-type': 'text/html' }).end('<h1>Not Found</h1>'),
+    (res: import('node:http').ServerResponse) => void res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'not_found', message: 'no route for DELETE /api/handles/h1' })),
+    (res: import('node:http').ServerResponse) => void res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'not_found', message: 'unknown credential' })),
+  ]) {
+    const ran = await withHandle(t, ['run', 'market/dev', '--', 'true'], answer, 'session');
+    assert.equal(ran.code, 0, ran.stderr);
+    assert.match(ran.stderr, /handle h1 of this run could not be confirmed ended/);
+  }
+});
+
+test("a person's export says its handle outlives the command, to its expiry in UTC, and gives its id to revoke, on its instance", async (t) => {
+  const exported = await withHandle(t, ['export', 'market/dev'], (res) => void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ revoked: true })), 'session');
+  assert.equal(exported.code, 0, exported.stderr);
+  // It makes no revoke of its own, which would end the placeholders it exported: no DELETE reached the server.
+  assert.equal(exported.deletes(), 0);
+  assert.match(exported.stderr, new RegExp(`the handle h1 lasts until ${exported.expiresAt.replaceAll('.', '\\.')}, past this command: \`coffre --url ${exported.origin.replaceAll('.', '\\.')} tokens revoke h1 --apply\` ends it\n`));
+  // And so no line of a revoke that failed.
+  assert.doesNotMatch(exported.stderr, /could not be confirmed ended|ends with the command/);
+});
+
+test("a personal token's export says that a session ends its handle, after `coffre login`", async (t) => {
+  const exported = await withHandle(t, ['export', 'market/dev'], (res) => void res.writeHead(500).end());
+  assert.equal(exported.code, 0, exported.stderr);
+  assert.ok(exported.stderr.includes(`past this command: a personal token cannot end it: end it under Personal tokens on ${exported.origin}/account/sessions (a page an instance behind Cloudflare Access leaves out), or after \`coffre login ${exported.origin}\` (which replaces the saved token) with \`coffre --url ${exported.origin} tokens revoke h1 --apply\`\n`), exported.stderr);
 });
 
 test("a person's run carries each tunnel's connections to coffre, with the handle, on a listener of its own", async (t) => {
