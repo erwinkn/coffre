@@ -56,8 +56,9 @@ checkpointer's ticks and the projector's batches included. Section 3 has the req
 Every authenticated request pays the same toll, whatever it does: the vault's snapshot statement reads the policy and
 the caller's access from `audit_log` 2 to 4 times, and a cutover check (`SELECT number FROM log_changes WHERE object =
 $1`) runs as often. Changes are written twice: a seeded database holds 56 `audit_log` entries beside 58 changes. And a
-change takes two global locks, the row `audit_chain_head`, then an advisory lock exclusive (the **fence**) that every
-use takes shared, so one write stalls every use until it commits.
+change takes two global locks: the row `audit_chain_head` in its first statement, which no use takes, then in its
+last statement an advisory lock exclusive (the **fence**) that every use takes shared. So a use waits for a change
+only from the change's last statement to its commit, one round trip; that wait is what L1 removes.
 
 **The cost is planning.** In a warm session:
 
@@ -191,7 +192,7 @@ column into typed ones later changes no seal while the object is the same, so it
 | Operation | Today: statements, round trips, vault calls | Target | What changes |
 |---|---|---|---|
 | Use, one key by name | 1, 1, 1 | 1, 1, 1 | The statement is half as long and reads no `audit_log` (V2a, V2b). |
-| Key write, one key | 7, 2, 2 (`writeKeys`, `waitSealed`) | 6, 2, 2 | The head lock's statement goes (A1). |
+| Key write, one key | 7, 2, 2 (`writeKeys`, `waitSealed`) | 6, 2, 2 | The head lock's statement goes, if A0's model lets the write drop the change lock; otherwise that statement becomes the change lock's and the count stays 7 (A1). |
 | Sign-in, browser | 10, 8, 3 (`access`, `prepare`, `waitSealed`) | 8, 5, 3 | The two reads of the head and the `audit_log` insert go. The transaction asks its reads together and leaves its writes to the commit, as a key write does (A1). |
 | Audit page, one visit | 24, 26, 3 at a seeded log, more as the log grows | 6, 4, 2 | The flat check below (P2, P3). |
 | Secrets list | 4, 4, 1 | 4, 4, 1 | The vault's statement reads rows by key; today it spends 3.1 ms planning its reads of `audit_log`. |
@@ -260,16 +261,24 @@ isolate knows the log's newest number and up to 10 after a change, as today. Sti
 seq of the newest `policy.change`. After, it compares seals it already read, the roles' and those of the environments
 the request touches, in the digest the two-trip key write already checks under its lock (`hold_inputs`).
 
-**Locks after.** The head's row, and what is read under it, go with the last append to `audit_log`. Its other job does
-not: it serializes changes against each other from their first statement, which 29 modelled re-checks rely on, and the
-fence cannot take that over where it sits, in a change's last statement (A0's finding: two Owners who each remove
-themselves both pass a count made before it). The shape is the coordinator's to pick; my proposal keeps a lock that
-only changes take, an advisory lock with no row and nothing read under it. Then, last before the timeout (D201), L1
-makes the fence the checkpointer's alone: uses and changes both take it shared, a change locks the objects it writes
-exclusive, and a use locks the objects it reads shared, in key order. A write to one key then stalls only uses of that
-key. Ten shared advisory locks cost a use 0.013 ms (0.052 ms against 0.039 ms for the one it takes today). The models
-state each re-check against what it needs, the lock that excludes a change to what the flow read, so that L1 moves
-none of them a second time.
+**Locks after.** `audit_chain_head`, the reads under it, the 0.14 appends and the queued read head are deleted; one
+advisory lock statement stays in multi-statement changes. The head did two jobs and only the first dies with the last
+append to `audit_log`: ordering the chain. The second is serializing changes against each other from their first
+statement, which 29 modelled re-checks rely on. The fence cannot take it over where it sits, in a change's last
+statement: two Owners who each remove themselves both pass a count made before it, and no Owner is left (A0's
+finding). So one lock stays, the **change lock**: `pg_advisory_xact_lock` on a key of its own, transaction-scoped,
+taken where `lockLogHead` is today, in the first round trip, under the same wait bound (`boundLockWaits`,
+`retryingLocks`). It has no table and no row, and nothing is read under it. Only multi-statement changes take it; uses,
+the checkpointer, the projector and `check` never do. The order is change lock, issue lock, fence; the checkpointer
+takes the issue lock, then the fence. The two-trip key write and the member add, which hold what they read in their
+last statement, drop the lock where A0's model proves it against the changes that decide on the same objects. No
+budget above counts a statement for it.
+
+Then, last before the timeout (D201), L1 makes the fence the checkpointer's alone: uses and changes both take it
+shared, a change's last statement locks the objects it writes exclusive, and a use locks the objects it reads shared,
+in key order. A write to one key then stalls only uses of that key. Ten shared advisory locks cost a use 0.013 ms
+(0.052 ms against 0.039 ms for the one it takes today). L1 moves none of the 29 re-checks: they are change against
+change, the change lock's, and L1 only replaces the fence, which is change against use.
 
 ## 4. The security argument
 
@@ -321,7 +330,7 @@ table, prepared: 0.143 ms against 0.132 ms at 100k changes, 0.196 ms against 0.1
 
 | Change | Model | When |
 |---|---|---|
-| The head lock leaves changes | `Coffre.tla` with its 11 scenarios, `Credentials`, `Issuing`, `Factor`, `Bulk`, `WorkloadEnrollment`, `AppKey`, `Writing`, `WriteLocks`, `Lifecycle`: 29 "recheck under the head" protections become "under the lock that excludes a change to what was read", bound to the fence | first (A0) |
+| The head becomes the change lock | `Coffre.tla` with its 11 scenarios, `Credentials`, `Issuing`, `Factor`, `Bulk`, `WorkloadEnrollment`, `AppKey`, `Writing`, `WriteLocks`, `Lifecycle`: the 29 "recheck under the head" protections keep their place and take the lock's name; the order change lock, issue lock, fence gets a deadlock check; the key write and the member add are checked without the lock; a re-check whose flow is deleted goes with it | first (A0) |
 | The policy revision becomes a digest of seals | `Lifecycle` (LifecyclePolicy), `Writing` (WritingProtect) | first (A0) |
 | The cap read from the `policy` row, the 0.14 guard gone from uses | `HotPathOne` (CapSealed, HotPathOnePolicy) | first, small |
 | Per-object locks | `HotPathOne` (UseLocks, ChangeLocks, LockToCommit), `WriteLocks` (NoWaitCycle), `Batching` | first, the largest: its model starts once A0's is in review, stacked on it, ahead of V2b's and A1's code |
@@ -336,7 +345,7 @@ table, prepared: 0.143 ms against 0.132 ms at 100k changes, 0.196 ms against 0.1
 | The vault's 0.14 mode (`log: '0.14'`), its CI job | 76 branch lines in `vault.ts`, 252 in 70 test files, `audit-writer.test.ts` (322) |
 | The 0.14 write path | `packages/db/src/log.ts` append and head code (348), `appendAudit` (57), the vault's `#append`, `#record`, `#weigh` (62), 155 entry sites in the app rewritten as events |
 | The cutover | 1,139 source lines, 7 SQL functions (164), 2 test files (1,294), `Migration015.tla` and 11 scenarios (1,531), 819 lines of docs |
-| The head lock | 6 statements in 5 SQL functions, about 95 lines of `log.ts`, 10 callers, `audit_chain_head`, #552's head waiters |
+| The head's row | 6 statements in 5 SQL functions, about 95 lines of `log.ts`, `audit_chain_head`, #552's head waiters; its 10 callers that are changes take the change lock in its place |
 | `audit_log` reads on request paths | 26 reads in 10 SQL functions, 16 read sites in TypeScript: the snapshot statement's five, `answers.ts`, `policyNow`, `hasTombstone`, `referenceRows` |
 | Freeze probes | about 200 source lines, 22 SQL, 230 test, `WorkloadFreezing.cfg` |
 | Triggers | `audit_log_fence`, `audit_log_refuse_old`, `log_reads_placed_insert`, `log_reads_placed_update`, and `audit_log_releases` with `vault_releases` once V1 deletes the 0.14 read path that counts from them: 5 of 9 |
@@ -355,7 +364,7 @@ the timeout's proof. Also kept: the cap of 246 key rotations. Lost: its 4 `audit
 **#560** gives the rule that a version is still current when its `(iv, auth_tag)` equal the current version's, its
 tests and the `Reads.tla` scenario. Lost: its table, triggers and migration, which `audit_member_keys` replaces.
 **#552** gives the pools derived from `max_connections` (`connections.ts`, land now) and the timeout's code
-(`holdRuntimeTimeouts`, 60 s for retention's two statements). Lost: the head waiters, which die with the head lock.
+(`holdRuntimeTimeouts`, 60 s for retention's two statements). Lost: the head waiters, which die with the head's row and the 0.14 read path.
 
 ## 6. The upgrade from 0.15.0
 
@@ -431,9 +440,9 @@ the collapse. Days are working days for one agent under the fast gate. Net lines
 | P2 | Pages read the projection: `GET /audit`, the report, MCP. Deletes `log_reads`, the three-log merge, 18 + 11 + 10 indexes | P1 | no | yes | 3 | -2,300 |
 | P3 | The page's check, flat: one `check` call a visit (6 statements, 4 round trips), the beat runs the same; the full walk in steps behind a Verify button and `coffre verify`; the page's walk of 0.14's chain deleted | P2 | no | no | 2 | -300 |
 | T1 | Three `text[]` columns, `log_config` dropped | #564 | no | yes | 1 | -50 |
-| A0 | Models for the head lock and the policy revision, each re-check stated against the lock it needs | now | it is the model | no | 2 | 0 |
+| A0 | Models: the head becomes the change lock (section 3), the policy revision a digest of seals | now | it is the model | no | 2 | 0 |
 | V1 | The vault's entries go to the chain only; `settings`, `log_keys`; the vault's upgrade step (one beat's tail, the anchor); `note` for events, and a refused read written by the call that refused it | P2 | `SealedObjects` with it | yes | 4 | -300 |
-| A1 | The app's entries go to the chain; head lock, `audit_chain_head` and the policy revision deleted; `audit_log` frozen; sign-in in 5 round trips | P2, A0 | A0 | yes | 4 | -700 |
+| A1 | The app's entries go to the chain; `audit_chain_head`, the reads under it and the policy revision deleted, `lockLogHead` replaced by the change lock, no re-check moved; `audit_log` frozen; sign-in in 5 round trips | P2, A0 | A0 | yes | 4 | -700 |
 | V2b | `audit_log` reads out of the use and change functions; the cap from its row; old overloads dropped | V1, V2a | `HotPathOne`, small | yes | 1.5 | -300 |
 | L1 | Per-object locks; the fence is the checkpointer's alone (D201). Its model is a draft PR stacked on A0, started in week one | V2b, A1 | yes | yes | 4 | +100 |
 | U1 | `scripts/upgrade-check.sh`, its 0.15.0 pages compared without heartbeats and checkpoints | V1, A1 | no | no | 2 | +500 |
@@ -449,8 +458,9 @@ Every schema PR appends to `schema.ts` and the journal, one-line conflicts.
 
 **Estimate.** About 40 agent-days. With three lanes the longest path is E4, P1, P2, V1, V2b, L1, S1, C1: 18 to 22
 working days with L1 in (D201), if the two model-first PRs (A0 and L1) hold their size. They are where the risk is.
-A0 retargets 29 protections in ten modules, and a counterexample there changes A1's shape. L1's model is the plan's
-largest, so it is written in week one, on A0's, and its counterexamples come before V2b's and A1's code, not after.
+A0 found its counterexample first: the fence cannot stand in for the head, so the 29 re-checks keep a lock of their
+own and A1 moves none of them. L1's model is the plan's largest, with two shapes left to order, a use and a change's
+last statement; it is written in week one, on A0's, so its counterexamples come before V2b's and A1's code.
 On Node, the projector and the beat run on timers in the vault's process, where Workers use a Durable Object alarm.
 
 ## 8. Decided
