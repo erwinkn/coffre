@@ -7,7 +7,9 @@
 // which functions it made, replaced, altered, granted or dropped (`pg_proc`). Every statement about functions alone
 // is then left out, and each function that lives to the end is written where the path first made or changed it,
 // as the catalog holds it at the end (`pg_get_functiondef`, with its grants); one that does not is dropped where
-// the path last touched it. Every other statement stays, in its order. So does every row a migration writes.
+// the path last touched it. Every other statement stays, in its order. So does every row a migration writes, and so
+// does a function of the session's own (`pg_temp`, 0084's), which lives only for the statements of its migration that
+// call it, and which the migration's one session runs as the collapsed one does.
 //
 // Also left out: the DO blocks that grant a function's owner what it calls or reads (0057 to 0081's), for an owner
 // that was not the login migrating. Since T193 the migrator hands each of coffre's objects to the ledger's owner in
@@ -72,7 +74,10 @@ export function assemble(sql: string, functions: ReadonlyMap<string, string>): s
 
 /** The statement without the comment lines before it. */
 const bare = (statement: string) => statement.replace(/^(?:\s*--[^\n]*\n)*\s*/, '');
+/** A statement about a function of the session's own (`pg_temp`), which a migration makes to run its own statements. */
+const temporary = (statement: string) => /^(?:CREATE (?:OR REPLACE )?FUNCTION|DROP FUNCTION(?: IF EXISTS)?|ALTER FUNCTION)\s+pg_temp\./i.test(bare(statement));
 const aboutFunctions = (statement: string) =>
+  !temporary(statement) &&
   /^(?:CREATE (?:OR REPLACE )?FUNCTION|DROP FUNCTION|ALTER FUNCTION|(?:GRANT|REVOKE)\s[^;]*?\sON (?:FUNCTION|ALL (?:FUNCTIONS|ROUTINES) IN SCHEMA))\s/i.test(bare(statement));
 const ownerGrant = (statement: string) => /^DO\s/.test(bare(statement)) && statement.includes('pg_get_userbyid(proowner)');
 
@@ -95,7 +100,8 @@ const FUNCTIONS = `
            SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(a.grantee)) END
                   || CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END
              FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner ORDER BY 1) END AS grantees
-    FROM pg_proc p WHERE p.pronamespace NOT IN ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)`;
+    FROM pg_proc p WHERE p.pronamespace NOT IN ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)
+     AND p.pronamespace <> pg_my_temp_schema() AND NOT pg_is_other_temp_schema(p.pronamespace)`;
 
 /** The functions, and each one's object ID, which a rename or a move keeps. */
 async function snapshot(client: PostgresClient): Promise<{ fns: Snapshot; oids: Map<string, string> }> {

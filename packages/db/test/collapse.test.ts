@@ -34,24 +34,31 @@ async function database(name: string, template?: string): Promise<string> {
   return urlOf(`${PREFIX}_${name}`);
 }
 
+/** A statement applied: the rows it inserted, updated or deleted, and the table it rewrote in place and its rows then. */
+type Applied = { statement: string; written: number; rewritten: string | null; held: number };
+/** The table a statement converts in place, each row's column to a new type (`ALTER TABLE t ALTER COLUMN c TYPE … USING …`). */
+const rewrites = (statement: string) => /^ALTER TABLE (?:ONLY )?"?(\w+)"? ALTER COLUMN "?\w+"? (?:SET DATA )?TYPE [^;]*\bUSING\b/i.exec(code(statement))?.[1] ?? null;
+
 /**
  * `migrations` applied as the migrator applies them, but for its ledger's rows: in one transaction, then the indexes
- * built online, then the database restricted. Each statement, with the rows it inserted, updated or deleted.
+ * built online, then the database restricted.
  */
-async function apply(url: string, migrations: readonly string[]): Promise<{ statement: string; written: number }[]> {
+async function apply(url: string, migrations: readonly string[]): Promise<Applied[]> {
   const client = postgresSession(url);
   const WRITTEN = `SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0)::int8::text AS n FROM pg_stat_xact_all_tables`;
-  const applied: { statement: string; written: number }[] = [];
+  const applied: Applied[] = [];
   try {
     await client.begin(async (tx) => {
       await tx.unsafe(LEDGER);
       for (const sql of migrations) {
         for (const statement of statements(sql)) {
           if (onlineIndex(statement) !== null) continue;
+          const rewritten = rewrites(statement);
+          const [held] = rewritten === null ? [] : await tx.unsafe<{ n: string }[]>(`SELECT count(*)::text AS n FROM ${quoteIdentifier(rewritten)}`);
           const [before] = await tx.unsafe<{ n: string }[]>(WRITTEN);
           await tx.unsafe(statement);
           const [after] = await tx.unsafe<{ n: string }[]>(WRITTEN);
-          applied.push({ statement, written: Number(after!.n) - Number(before!.n) });
+          applied.push({ statement, written: Number(after!.n) - Number(before!.n), rewritten, held: Number(held?.n ?? 0) });
         }
       }
     });
@@ -63,6 +70,9 @@ async function apply(url: string, migrations: readonly string[]): Promise<{ stat
     await client.end();
   }
 }
+
+/** A statement without its comment lines. */
+const code = (statement: string) => statement.replace(/^\s*--[^\n]*\n/gm, '').trim();
 
 /** One line per object, sorted; a table partitioned by day has days named by the date the database was made. */
 const CATALOG = `
@@ -170,15 +180,14 @@ function differences(left: readonly string[], right: readonly string[]): { only:
   return { only: { left: cut(onlyLeft), right: cut(onlyRight) } };
 }
 
-/** A statement without its comment lines. */
-const code = (statement: string) => statement.replace(/^\s*--[^\n]*\n/gm, '').trim();
-
 const same = (left: readonly string[], right: readonly string[]) => assert.deepEqual(differences(left, right), { only: { left: [], right: [] } });
 
 /**
- * Rows a 0.15.0 database holds that the upgrade's statements read: the reads it placed, and its bulk policy. Each
- * statement of the upgrade that writes rows must write some from them (or `WRITES_NOTHING` say why it writes none),
- * so a backfill added later fails this test until the seed gives it rows.
+ * Rows a 0.15.0 database holds that the upgrade's statements read: the reads it placed, its bulk policy, and its
+ * clients' redirects (a list, and one only a forger writes, which 0084 converts to none). Each statement of the
+ * upgrade that writes rows must write some from them (or `WRITES_NOTHING` say why it writes none), and each that
+ * converts a table 0.15.0 has must meet rows there, so a backfill added later fails this test until the seed gives it
+ * rows.
  */
 const SEED = `
   INSERT INTO log_config (name, value, seal) VALUES ('policy', '{"kind":"policy","bulk":{"count":50,"windowMs":60000}}', '\\x000102030405060708090a0b0c0d0e0f');
@@ -188,7 +197,12 @@ const SEED = `
          CASE WHEN n = 1 THEN '00000000-0000-4000-8000-000000000005'::uuid END, CASE WHEN n = 1 THEN '00000000-0000-4000-8000-000000000006'::uuid END,
          CASE WHEN n = 1 THEN '00000000-0000-4000-8000-000000000007'::uuid END, CASE WHEN n = 1 THEN '00000000-0000-4000-8000-000000000008'::uuid END,
          '\\x000102030405060708090a0b0c0d0e0f'
-    FROM generate_series(1, 2) AS n;`;
+    FROM generate_series(1, 2) AS n;
+  INSERT INTO oauth_clients (id, auth_mac, name, redirect_uris, created_at) VALUES
+    ('00000000-0000-4000-8000-000000000009', '\\x000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f', 'cli',
+     '["https://b.example/cb","https://a.example/cb"]', '2026-01-01T00:00:00Z'),
+    ('00000000-0000-4000-8000-00000000000a', '\\x000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f', 'forged',
+     '[1,"https://c.example/cb",null]', '2026-01-01T00:00:00Z');`;
 
 /** The upgrade's statements that look like they write rows but write none, by design. */
 const WRITES_NOTHING: { reason: string; matches: RegExp }[] = [
@@ -213,7 +227,7 @@ test('each function is made once, by its own file, which the baseline names once
   const named = (sql: string) => [...sql.matchAll(/^-- @function (\S+)$/gm)].map(([, name]) => name!);
   for (const sql of [collapsed.baseline, collapsed.upgrade]) {
     assert.equal(new Set(named(sql)).size, named(sql).length);
-    assert.doesNotMatch(sql, /CREATE (OR REPLACE )?FUNCTION/i);
+    assert.doesNotMatch(sql, /CREATE (OR REPLACE )?FUNCTION (?!pg_temp\.)/i);
   }
   assert.deepEqual(named(collapsed.baseline).sort(), [...collapsed.functions.keys()].sort());
 });
@@ -239,8 +253,10 @@ test('on a 0.15.0 database with rows, the upgrade writes what the numbered migra
   const seeded = await database('seeded');
   await apply(seeded, release);
   const client = postgresClient(seeded, { max: 1 });
+  const atRelease = new Set<string>();
   try {
     await client.unsafe(SEED);
+    for (const { name } of await client.unsafe<{ name: string }[]>(`SELECT tablename::text AS name FROM pg_tables WHERE schemaname = 'public'`)) atRelease.add(name);
   } finally {
     await client.end();
   }
@@ -253,6 +269,9 @@ test('on a 0.15.0 database with rows, the upgrade writes what the numbered migra
   for (const { statement, written } of writers) {
     if (WRITES_NOTHING.some(({ matches }) => matches.test(statement))) continue;
     assert.ok(written > 0, `the seed gives this statement no rows to write; seed what it reads:\n${code(statement).slice(0, 300)}`);
+  }
+  for (const { statement, rewritten, held } of applied) {
+    if (rewritten !== null && atRelease.has(rewritten)) assert.ok(held > 0, `the seed gives ${rewritten} no rows for this statement to convert:\n${code(statement).slice(0, 300)}`);
   }
   same(await state(stepped, { timed: true }), await state(upgraded, { timed: true }));
 });
