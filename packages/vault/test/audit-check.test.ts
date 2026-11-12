@@ -7,18 +7,19 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { deriveLogKey, GENESIS_HASH, sealEntry, type LogFields } from '@coffre/core/audit';
 import { decodePair } from '@coffre/core/merkle';
-import type { AuditCursorRow, AuditEventRow, CheckInput } from '@coffre/core/vault';
+import type { AuditCursorRow, AuditEventRow, CheckInput, Sealing } from '@coffre/core/vault';
 import { defineDeployment } from '@coffre/core/deployment';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { createDatabase, type Database, type Queryable } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
-import { CHECK_TAIL_ENTRIES, checkAudit } from '../src/audit-check.ts';
+import { CHECK_TAIL_ENTRIES, checkAudit, projectorStopped } from '../src/audit-check.ts';
+import { reachedOf, type Checkpointer, type Reached } from '../src/checkpointer.ts';
 import { cursorMac, eventMac, type AuditEvent } from '../src/audit-rows.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { entryMac, logMacKey, type LogMacKey } from '../src/log-entry.ts';
-import { logStore } from '../src/log-store.ts';
+import { logStore, type LogStore } from '../src/log-store.ts';
 import { ANCHOR_OBJECT, anchorPayload, UPGRADE_ACTOR, UPGRADE_REQUESTS } from '../src/upgrade.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
@@ -37,18 +38,22 @@ beforeEach(async () => {
   await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
 });
 
-/** A log under a key of its own, its checkpointer, and the check of it, held to the pair its signer remembers. */
-async function logged() {
+/**
+ * A log under a key of its own, its checkpointer, and the check of it, held to what its signer answers when asked
+ * (`reached`, its own by default: the pair it wrote, the one it is writing, sealing). `store` stands in for the
+ * checkpointer's, to hold its write open.
+ */
+async function logged(store: LogStore = logStore(db.vault)) {
   const seed = randomBytes(32);
   const mac = logMacKey(seed);
   const memory = variableMemory();
-  const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [seed], memory });
+  const cp = await openLogCheckpointer({ store, signingKeys: [seed], memory });
   const keys = await verifierKeys([seed]);
   const tick = async () => assert.ok((await cp.tick()).signed);
   const upto = () => cp.pair.pair.upto;
-  const check = (input: CheckInput, { upgraded = false, on = db.vault }: { upgraded?: boolean; on?: Database } = {}) =>
-    checkAudit(on, keys, input, { anchors: [decodePair(memory.record!)!], upgraded });
-  return { mac, log: logWriter(db.owner, mac), cp, tick, upto, check };
+  const check = (input: CheckInput, { upgraded = false, on = db.vault, reached = reachedOf(cp, { ok: true }) }: { upgraded?: boolean; on?: Database; reached?: Reached } = {}) =>
+    checkAudit(on, keys, input, { reached, upgraded });
+  return { mac, log: logWriter(db.owner, mac), cp, memory, tick, upto, check };
 }
 
 /** A row of `audit_events` as the projector signs it, as the page hands it in. */
@@ -64,7 +69,8 @@ const asRow = (e: AuditEvent): AuditEventRow => ({ ...e, number: String(e.number
 
 /** The cursor as the projector signs it, listed through `through`, at `at`. */
 function cursor(mac: LogMacKey, through: bigint, at: number): AuditCursorRow {
-  const c = { through, pair: through, at, oldFrom: 0n, oldHash: Buffer.alloc(32) };
+  // P1's interim `oldFloor` and `oldTop` are outside the MAC: any value signs the same.
+  const c = { through, pair: through, at, oldFloor: 0n, oldFrom: 0n, oldTop: 0n, oldHash: Buffer.alloc(32) };
   return { through: String(through), pair: String(through), at, oldFrom: '0', oldHash: c.oldHash.toString('hex'), mac: cursorMac(mac, c).toString('base64') };
 }
 
@@ -83,7 +89,10 @@ async function visited() {
 test('a visit with nothing wrong: ok, the newest checkpoint, the cursor listed through it, no row forged', async () => {
   const v = await visited();
   const checked = await v.check(v.input);
-  assert.deepEqual(checked, { state: 'ok', reason: null, checkpoint: { number: String(v.upto()), at: v.at }, listedThrough: { number: String(v.upto()), at: v.at }, forged: [], behind: false });
+  assert.deepEqual(checked, {
+    state: 'ok', reason: null, checkpoint: { number: String(v.upto()), at: v.at }, listedThrough: { number: String(v.upto()), at: v.at }, forged: [],
+    listed: { through: v.upto(), at: v.at },
+  });
 });
 
 test('an entry forged or altered above the newest checkpoint: broken, by its MAC', async () => {
@@ -118,11 +127,101 @@ test('a checkpoint deleted, or an older one served: behind, below the pair its s
   await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto = ${newest}`);
   const checked = await v.check(v.input);
   assert.equal(checked.state, 'behind');
-  assert.ok(checked.behind);
   // The database's own newest, which the beat's finding is named for: the older one, still a signed pair.
-  assert.ok(checked.checkpoint !== null && BigInt(checked.checkpoint.number) < newest, JSON.stringify(checked));
+  assert.ok(checked.checkpoint !== null && BigInt(checked.checkpoint.number) < newest, checked.reason ?? '');
   // The cursor the projector signed at the deleted one is past what the database still holds.
-  assert.match(checked.reason!, /below the checkpoint its signer holds/);
+  assert.match(checked.reason!, /below the checkpoint its signer wrote/);
+  // A row forged as well: broken comes first.
+  const forged = await v.check({ ...v.input, events: [{ ...v.input.events[0]!, action: 'secret.read' }] });
+  assert.equal(forged.state, 'broken');
+  assert.match(forged.reason!, /not the projector's/);
+});
+
+test('the cursor past the newest checkpoint: behind, a database rolled back below what the projector listed', async () => {
+  const v = await visited();
+  const signed = cursor(v.mac, v.upto() + 3n, v.at);
+  const past = await v.check({ ...v.input, cursor: signed });
+  assert.equal(past.state, 'behind');
+  assert.match(past.reason!, new RegExp(`lists through ${v.upto() + 3n}, past the newest checkpoint \\(${v.upto()}\\)`));
+});
+
+test('the cursor past genesis, the only checkpoint (every other deleted, the signer\'s memory lost with them): no checkpoint shown, behind', async () => {
+  const fresh = await logged();
+  await fresh.log.uses(5);
+  const genesis = await fresh.check({ events: [], cursor: cursor(fresh.mac, 4n, Date.now()) });
+  assert.deepEqual([genesis.state, genesis.checkpoint], ['behind', null]);
+  assert.match(genesis.reason!, /past the newest checkpoint \(0\)/);
+});
+
+test('the signer asked before the read: a visit while its write is in flight is ok, before the row lands and after', async () => {
+  // The checkpointer's store, its write held open: first before the row is written, then after, before the signer
+  // knows it landed.
+  const real = logStore(db.vault);
+  let hold: 'before' | 'after' | null = null;
+  let held: () => void = () => {};
+  let release: () => void = () => {};
+  const store: LogStore = {
+    ...real,
+    async write(row, tiles) {
+      const gate = hold === null ? null : new Promise<void>((resolve) => (release = resolve));
+      if (hold === 'before') {
+        held();
+        await gate;
+      }
+      await real.write(row, tiles);
+      if (hold === 'after') {
+        held();
+        await gate;
+      }
+    },
+  };
+  const v = await logged(store);
+  await v.log.uses(20);
+  await v.tick();
+  const at = Number(v.cp.pair.pair.at);
+  const input: CheckInput = { events: [], cursor: cursor(v.mac, v.upto(), at) };
+  const wrote = v.upto();
+
+  for (const when of ['before', 'after'] as const) {
+    await v.log.uses(5);
+    hold = when;
+    const holding = new Promise<void>((resolve) => (held = resolve));
+    let done = false;
+    const ticking = v.cp.tick().finally(() => (done = true));
+    await holding;
+    assert.ok(!done);
+    // The signer remembers the next pair before its row lands: read from its memory after the database, as the beat
+    // read it, the database is one pair below, and the visit says behind for nothing.
+    const remembered = decodePair(v.memory.record!)!;
+    const said = v.cp.reached;
+    assert.ok(said.writing !== null && said.writing.changes === remembered.changes);
+    if (when === 'before') assert.equal((await v.check(input, { reached: { pair: remembered, writing: null, sealing: { ok: true } } })).state, 'behind');
+    const counter = counting();
+    try {
+      const checked = await v.check(input, { on: counter.db });
+      assert.equal(checked.state, 'ok', checked.reason ?? '');
+      // One statement whether the row has landed or not: the pair at the database's newest place is held note for note.
+      assert.equal(counter.statements(), 1);
+    } finally {
+      await counter.close();
+    }
+    hold = null;
+    release();
+    await ticking;
+    assert.ok(v.upto() > wrote);
+  }
+});
+
+test('a signer that does not seal, or holds no pair: late, its reason; broken still comes first', async () => {
+  const v = await visited();
+  const stalled = await v.check(v.input, { reached: { ...reachedOf(v.cp, { ok: false, reason: 'its last tick ended 9000 ms ago' }) } });
+  assert.equal(stalled.state, 'late');
+  assert.match(stalled.reason!, /does not seal: its last tick ended 9000 ms ago/);
+  // Not open: no pair to hold the database to, and its host says why.
+  const closed = await v.check(v.input, { reached: reachedOf(null, { ok: false, reason: 'the checkpointer is not open' }) });
+  assert.deepEqual([closed.state, closed.reason], ['late', 'the checkpointer does not seal: the checkpointer is not open']);
+  const forged = await v.check({ ...v.input, events: [{ ...v.input.events[0]!, allowed: false }] }, { reached: reachedOf(null, { ok: false, reason: 'down' }) });
+  assert.equal(forged.state, 'broken');
 });
 
 test('a row the page shows, altered: broken, its place in `forged`', async () => {
@@ -237,6 +336,10 @@ test('the anchor deleted after the upgrade, or one not the vault\'s: broken; bef
   const planted = await v.check(v.input, { upgraded: true });
   assert.equal(planted.state, 'broken');
   assert.match(planted.reason!, /anchor is not the vault's/);
+  // No anchor and no old row (a database born on 0.16): nothing to hold, upgraded or not.
+  await run(db.owner, sql`DELETE FROM log_changes WHERE object = ${ANCHOR_OBJECT}::uuid`);
+  await withTriggersLifted(db.owner, 'audit_log', (tx) => run(tx, sql`DELETE FROM audit_log`));
+  assert.equal((await v.check(v.input, { upgraded: true })).state, 'ok');
 });
 
 test.todo('V1: the vault says it is upgraded once its step wrote the anchor (`#upgraded`), and a visit then holds the frozen log to it');
@@ -249,7 +352,11 @@ test('more entries above the newest checkpoint than `CHECK_TAIL_ENTRIES`: late, 
   assert.match(checked.reason!, /checkpointer is late/);
 });
 
-test('the vault answers `check` over its own log, held to the pair its signer remembers: ok, then a row shown altered', async () => {
+/**
+ * A vault over its own log and its checkpointer, which answers `check` and `beat` with what `sealing` says: the
+ * checkpointer's own pairs.
+ */
+async function vaulted() {
   await emptyDatabase(db.owner);
   const seed = randomBytes(32);
   const memory = variableMemory();
@@ -257,18 +364,71 @@ test('the vault answers `check` over its own log, held to the pair its signer re
     keks: new KekRegistry(LocalKekProvider.generate('test-kek-1')), owners: ['root@acme.example'], signingKeys: [seed],
     bulkLimit: { count: 1000, windowMs: 15 * 60_000 }, deployment: defineDeployment(),
   };
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: async () => (memory.record === null ? [] : [decodePair(memory.record)!]) });
+  const signer: { cp: Checkpointer | null; sealing: Sealing } = { cp: null, sealing: { ok: true } };
+  const vault = await openLocalVault(db.vault, config, {
+    log: '0.15', sealThrough: sealed, heldOutside: async () => (memory.record === null ? [] : [decodePair(memory.record)!]),
+    reached: () => reachedOf(signer.cp, signer.sealing),
+  });
   // Its first call starts its log: the cutover's change, then the root's.
   assert.equal((await vault.access('user:root@acme.example')).role, 'owner');
-  const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [seed], memory });
+  const cp = (signer.cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [seed], memory }));
   assert.ok((await cp.tick()).signed);
-  const mac = logMacKey(seed);
+  return { vault, cp, signer, mac: logMacKey(seed) };
+}
+
+test('the vault answers `check` over its own log, held to what its signer answers: ok, then a row shown altered', async () => {
+  const { vault, cp, mac } = await vaulted();
   const at = Number(cp.pair.pair.at);
   const input: CheckInput = { events: [shown(mac, 1n), shown(mac, 2n)], cursor: cursor(mac, cp.pair.pair.upto, at) };
   const checked = await vault.check!(input);
   assert.deepEqual(checked, { ok: true, state: 'ok', reason: null, checkpoint: { number: String(cp.pair.pair.upto), at }, listedThrough: { number: String(cp.pair.pair.upto), at }, forged: [] });
   const altered = await vault.check!({ ...input, events: [input.events[0]!, { ...input.events[1]!, allowed: false }] });
   assert.ok(altered.ok && altered.state === 'broken' && altered.forged.join() === '1', JSON.stringify(altered));
+});
+
+/** The events the vault wrote under `id`: its payload and actor. */
+const events = (id: string) => rows<{ actor: string; payload: string }>(db.owner, sql`SELECT actor, payload FROM log_changes WHERE request_id = ${id}`);
+
+test('`beat`: ok writes nothing; not ok, the finding, an event of the vault\'s under `findingEventId`, written once over beats', async () => {
+  const { vault, cp, signer, mac } = await vaulted();
+  const at = Number(cp.pair.pair.at);
+  const input = { cursor: cursor(mac, cp.pair.pair.upto, at), everyMs: 300_000 };
+  const ok = await vault.beat!(input);
+  assert.deepEqual(ok, { ok: true, state: 'ok', reason: null, checkpoint: { number: String(cp.pair.pair.upto), at }, listedThrough: { number: String(cp.pair.pair.upto), at }, finding: null, projector: null });
+
+  signer.sealing = { ok: false, reason: 'its last tick ended 9000 ms ago' };
+  const late = await vault.beat!(input);
+  const id = `system:vault/finding:${cp.pair.pair.upto}:late`;
+  assert.ok(late.ok && late.state === 'late' && late.finding === id, JSON.stringify(late));
+  const [written] = await events(id);
+  assert.equal(written!.actor, 'system:vault');
+  const payload = JSON.parse(written!.payload) as Record<string, unknown>;
+  assert.deepEqual([payload.action, payload.author, payload.allowed], ['audit.finding', 'vault', true]);
+  assert.deepEqual(payload.detail, { state: 'late', reason: 'the checkpointer does not seal: its last tick ended 9000 ms ago', checkpoint: String(cp.pair.pair.upto) });
+  // Seen again, for the same reason and for another: the same finding, written once.
+  assert.equal((await vault.beat!(input)).ok && (await events(id)).length, 1);
+  signer.sealing = { ok: false, reason: 'its last tick was refused: a forged entry' };
+  const again = await vault.beat!(input);
+  assert.ok(again.ok && again.finding === id);
+  assert.equal((await events(id)).length, 1);
+});
+
+test('`beat`: a projector that stopped, below the checkpoint and still two beats on, fails the run with no finding', async () => {
+  const { vault, cp, mac } = await vaulted();
+  const below = cp.pair.pair.upto;
+  const everyMs = 300_000;
+  // A checkpoint above the cursor, the cursor's pair signed three beats ago.
+  await logWriter(db.owner, mac).uses(3);
+  assert.ok((await cp.tick()).signed);
+  const stopped = await vault.beat!({ cursor: cursor(mac, below, Date.now() - 3 * everyMs), everyMs });
+  assert.ok(stopped.ok && stopped.state === 'ok' && stopped.finding === null, JSON.stringify(stopped));
+  assert.match(stopped.projector!, new RegExp(`lists through ${below}, below the newest checkpoint \\(${cp.pair.pair.upto}\\)`));
+  // Behind by a beat only: catching up.
+  const behind = await vault.beat!({ cursor: cursor(mac, below, Date.now() - everyMs), everyMs });
+  assert.ok(behind.ok && behind.projector === null);
+  // At the checkpoint, however old: nothing to catch up on.
+  assert.equal(projectorStopped({ through: cp.pair.pair.upto, at: 0 }, { number: String(cp.pair.pair.upto), at: 0 }, everyMs), null);
+  await assert.rejects(vault.beat!({ cursor: cursor(mac, below, Date.now()), everyMs: 0 }), /positive integer/);
 });
 
 /** The vault's database, each statement and each transaction counted as it is sent. */

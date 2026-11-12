@@ -5,7 +5,7 @@ import type { PairNotes } from '@coffre/core/merkle';
 import type { Sealing } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
-import { ALARMS_KEPT_MS, Fence, heldIn, OPEN_BOUND_MS, sealingOf, Stalled, Unsealed, UPKEEP_BOUND_MS, within, type Alarm, type Checkpointer, type Memory, type SealThrough, type Witness } from './checkpointer.ts';
+import { ALARMS_KEPT_MS, Fence, heldIn, OPEN_BOUND_MS, reachedOf, sealingOf, Stalled, Unsealed, UPKEEP_BOUND_MS, within, type Alarm, type Checkpointer, type Memory, type Reached, type SealThrough, type Witness } from './checkpointer.ts';
 import { daysAround, openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { vaultLogKey } from './log.ts';
 import { AuditProjector } from './projection.ts';
@@ -59,6 +59,8 @@ export type RunningCheckpointer = {
   auditProjected(): Promise<void>;
   /** Whether it seals (`Vault.sealing`): ticking, its last tick ended well, lately. */
   sealing(): Sealing;
+  /** The pairs the database may be at and whether it seals, in one answer (`Reached`, `VaultOptions.reached`): `check`'s ask. */
+  reached(): Reached;
   stop(): Promise<void>;
 };
 
@@ -213,6 +215,7 @@ export async function runCheckpointer(options: {
     });
   };
   loop();
+  const sealing = () => sealingOf({ open: !stalled && !stopped, failed: failed ?? checkpointer.standing, last });
   return {
     checkpointer,
     sealThrough: (number, deadline) => checkpointer.sealThrough(number, deadline),
@@ -224,7 +227,8 @@ export async function runCheckpointer(options: {
       for (let run = 0; run < 100; run += 1) if (!(await audit.run())) return;
       throw new Error('the audit projection did not catch up');
     },
-    sealing: () => sealingOf({ open: !stalled && !stopped, failed: failed ?? checkpointer.standing, last }),
+    sealing,
+    reached: () => reachedOf(stalled || stopped ? null : checkpointer, sealing()),
     async alarms(since = 0) {
       await appending;
       return (await readAlarms(alarmsPath)).filter((a) => a.at >= since);
@@ -266,7 +270,7 @@ async function readAlarms(path: string): Promise<Alarm[]> {
 /** How long after a refused open the vault's checkpointer tries again (`keepCheckpointer`). */
 const OPEN_AGAIN_MS = 10_000;
 
-export type KeptCheckpointer = Pick<RunningCheckpointer, 'sealThrough' | 'heldOutside' | 'alarms' | 'sealing' | 'stop'>;
+export type KeptCheckpointer = Pick<RunningCheckpointer, 'sealThrough' | 'heldOutside' | 'alarms' | 'sealing' | 'reached' | 'stop'>;
 
 /**
  * The checkpointer as the vault's process keeps it: `runCheckpointer`, tried
@@ -318,6 +322,7 @@ export async function keepCheckpointer(options: Parameters<typeof runCheckpointe
   return {
     sealThrough: (number, deadline) => (running === null ? Promise.reject(new Unsealed(number, failed ?? 'the checkpointer is not open')) : running.sealThrough(number, deadline)),
     sealing: () => (running === null ? { ok: false, reason: failed ?? 'the checkpointer is not open' } : running.sealing()),
+    reached: () => (running === null ? reachedOf(null, { ok: false, reason: failed ?? 'the checkpointer is not open' }) : running.reached()),
     async heldOutside() {
       return heldIn(await fileMemory(options.memory).last());
     },

@@ -25,7 +25,7 @@ import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
 import type { Witness } from './checkpointer.ts';
-import { checkpointerObject, durableHeldOutside, durableSealing, durableSealThrough, startCheckpointer, startProjector, type ObjectNamespace } from './checkpointer-workers.ts';
+import { checkpointerObject, durableHeldOutside, durableReached, durableSealing, durableSealThrough, startCheckpointer, startProjector, type ObjectNamespace } from './checkpointer-workers.ts';
 import { resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from './config.ts';
 import { openVault, prepareVault, type PreparedVault } from './vault.ts';
 
@@ -247,6 +247,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements VaultEntry {
         uses,
         sealThrough: durableSealThrough(namespace),
         heldOutside: durableHeldOutside(namespace),
+        reached: durableReached(namespace),
         callsEndWithRequest: true,
       });
       // Calls that raced here each made one; the first kept serves them all from now on.

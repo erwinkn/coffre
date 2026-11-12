@@ -109,6 +109,9 @@ type Options = {
   above?: number;
 };
 
+/** How the problem `behind` names begins (`Verdict.behind`): a caller that says `behind` apart from what is broken leaves it out by this. */
+export const ENDS_BELOW = 'the database ends up to ';
+
 export async function verifyLog(reader: LogReader, opts: Options): Promise<Verdict> {
   const problems: string[] = [];
   const verdict = { checkpoints: 0, sealed: 0, unsealed: 0, behind: false, capped: false };
@@ -290,7 +293,7 @@ async function walk(
         if (!sameNotes(row.pair, anchor.pair)) problems.push(`checkpoint ${anchor.pair.upto}: not the pair held outside for that place: ${samePair(row.pair, anchor.pair) ? 'the same heads signed at another time or floor' : 'a second history'}`);
       } else if (final && anchor.pair.upto > newest) {
         verdict.behind = true;
-        problems.push(`the database ends up to ${newest}; a pair held outside seals up to ${anchor.pair.upto}: entries or checkpoints were deleted`);
+        problems.push(`${ENDS_BELOW}${newest}; a pair held outside seals up to ${anchor.pair.upto}: entries or checkpoints were deleted`);
       } else {
         stops.push(anchor);
       }

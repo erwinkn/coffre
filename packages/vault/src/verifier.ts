@@ -6,7 +6,7 @@ import { loggedChange } from './changes.ts';
 import { alone, entryVouched, ringOf, signedUnder, type Keyring, type VerifierKeys } from './keyring.ts';
 import { authentic, retentionCut, rotationOf } from './log-entry.ts';
 import { purposeOf } from './log-replay.ts';
-import { checkRead, logStore, type CheckRead } from './log-store.ts';
+import { checkRead, checkTail, logStore, type CheckRead } from './log-store.ts';
 import { requestsUniqueIn } from './store.ts';
 import { ANCHOR_OBJECT } from './upgrade.ts';
 
@@ -106,16 +106,25 @@ export type TreesChecked = { walked: Walked; read: CheckRead; ring: Keyring };
  * (`checkRead`): the newest pair, the entries above it, the rotations and the request indexes, one round trip. A read
  * past it is made only where the database disagrees with the pairs: a pair held outside below the newest (its row and
  * the tiles that prove it a prefix), or a newest row whose floor of `at` is not the one its pair signed (the entries
- * above it again, from the signed one). Those come after the statement, in snapshots of their own; each holds what it
- * reads to signed heads or MACs as the walk would in one.
+ * above it again, from the signed one, with the request indexes: `checkTail`). Those come after the statement, in
+ * snapshots of their own: a pair and its tiles are held to signed roots, entries to their MACs, and the indexes are read
+ * again with the entries they keep unique.
+ *
+ * `anchors`, the pairs held outside, or what picks them from the newest row the statement read (`check`'s: the pair its
+ * signer is writing once the database has it, else the one it wrote).
  */
-export async function checkTrees(db: Database, keys: VerifierKeys, options: VerifyOptions & { above: number }): Promise<TreesChecked> {
+export async function checkTrees(
+  db: Database,
+  keys: VerifierKeys,
+  options: Omit<VerifyOptions, 'anchors'> & { above: number; anchors?: readonly PairNotes[] | ((newest: StoredPair | null) => readonly PairNotes[]) },
+): Promise<TreesChecked> {
   const { above } = options;
-  const read = await checkRead(db, { limit: above + 1, anchor: ANCHOR_OBJECT });
+  const read = await checkRead(db, { limit: above + 1, anchor: ANCHOR_OBJECT, rotations: keys.previous.length > 0 });
   const store = logStore(db);
+  const anchors = typeof options.anchors === 'function' ? options.anchors(read.newest) : (options.anchors ?? []);
   // From the newest pair, which its signatures and the pairs held outside vouch for. It walks no use below it, so
   // retention's cut is not its to check: the newest pair and the signer's are at or above every cut.
-  const keyed = await underKeys(read, keys, options.anchors ?? []);
+  const keyed = await underKeys(read, keys, anchors);
   // Each entry's request, seen once (RequestIdChecked): a change's by its id, a use's by its time and id, which its MAC
   // covers. A copy below the start is what the database's unique indexes refuse, which every check holds to standing.
   const requests = new Set<string>();
@@ -128,25 +137,29 @@ export async function checkTrees(db: Database, keys: VerifierKeys, options: Veri
     return malformed(entry);
   };
   // The walk asks the entries above the newest pair from the floor that pair signed: the statement's, when the row's
-  // floor is that one.
+  // floor is that one; else read again from the signed one, with the request indexes in the same statement.
+  const indexes = [read.indexes];
   const reader: LogReader = {
     pairs: (after, limit) => store.pairs(after, limit),
     pair: (upto) => store.pair(upto),
     tiles: (tree, keys) => store.tiles(tree, keys),
-    entries: (after, upto, o = {}) =>
-      read.newest !== null && after === read.newest.upto && upto === MAX_NUMBER && o.floor === read.floor && o.limit === above + 1
-        ? Promise.resolve(read.tail)
-        : store.entries(after, upto, o),
+    entries: async (after, upto, o = {}) => {
+      if (read.newest === null || after !== read.newest.upto || upto !== MAX_NUMBER || o.limit !== above + 1 || o.floor === undefined) return store.entries(after, upto, o);
+      if (o.floor === read.floor) return read.tail;
+      const again = await checkTail(db, { after, floor: o.floor, limit: o.limit });
+      indexes.push(again.indexes);
+      return again.tail;
+    },
   };
   const verdict = await verifyLog(reader, {
     verifiers: [keys.current, ...keys.previous].map((key) => key.verifiers),
     check,
     ...(read.newest === null ? {} : { newest: read.newest }),
-    ...(options.anchors === undefined ? {} : { anchors: options.anchors }),
+    anchors,
     above,
   });
   const problems = [...keyed.problems, ...verdict.problems];
-  if (!requestsUniqueIn(read.indexes)) problems.push('the indexes that keep each request to one entry are gone: a copy of an entry would pass');
+  if (!indexes.every(requestsUniqueIn)) problems.push('the indexes that keep each request to one entry are gone: a copy of an entry would pass');
   const head = verdict.headPair;
   return {
     read,

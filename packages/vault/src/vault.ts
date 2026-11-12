@@ -149,6 +149,8 @@ import {
   type WrapInput,
   type AdmitReadInput,
   type AdmitReadOutcome,
+  type BeatInput,
+  type BeatOutcome,
   type CheckInput,
   type CheckOutcome,
   type NoteInput,
@@ -193,7 +195,7 @@ import { admitChange, Changes, changesHold, heldByLog, heldFrom, keptFrom, keptO
 import { signer, type Signer } from './checkpoint.ts';
 import { bindingsCall, changeBindings, checkBinding, checkChangeBindings, checkIssue, givenPins, issueCall, issueToken, readPins, revokeCredential, signIn, SIGN_IN_TRIES, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
 import { bindingObject, credentialObject } from './objects.ts';
-import type { SealThrough } from './checkpointer.ts';
+import { type Reached, type SealThrough } from './checkpointer.ts';
 import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
 import {
@@ -218,7 +220,7 @@ import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk
 import { ACCESS_ACTIONS, type CheckedChange, type EnvironmentSeal, type GrantRow, type HeldObject, type Member, type MemberLog, type ReadEnvironment, type ReadKind } from './store.ts';
 import { callWrite, decideWrite, parseInputs, secretColumnsOf, validateWriteKeys, WRITE_KINDS, writeStanding } from './write.ts';
 import { proxyItem, use, UseCache, useLimits, useMany, useNamed, useNamedMany, useRoute, type UseLimits, type UsePath } from './use.ts';
-import { checkAudit } from './audit-check.ts';
+import { checkAudit, projectorStopped, writeFinding, type Checked } from './audit-check.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 import { alone, entryVouched, keyringOf, type Keyring } from './keyring.ts';
 
@@ -258,6 +260,12 @@ export type VaultOptions = {
    */
   sealing?: () => Promise<Sealing> | Sealing;
   /**
+   * Under 0.15's log, what the signer answers `check` and `beat` before they read the database (`Reached`, T277): the
+   * pairs the database may be at and whether it seals, in one ask. The Node runner's `reached`; on Workers,
+   * `durableReached`. Without, `check` and `beat` throw.
+   */
+  reached?: () => Promise<Reached> | Reached;
+  /**
    * 0.15's uses, per isolate (use.ts, `useLimits`): how long a cover holds, how many names it maps, how many keys a
    * statement makes uses of. `inFlight`, the keys in flight at once, is derived (`USES_IN_FLIGHT`, `@coffre/core/memory`):
    * only a test sets it.
@@ -295,12 +303,12 @@ export type PreparedVault = {
   logKey: LogKey;
   /** Each signing key's log key: those after the first verify only entries before `since`. */
   logKeys: LogKey[];
-  options: Required<Omit<VaultOptions, 'walks' | 'sealThrough' | 'heldOutside' | 'sealing' | 'uses' | 'callsEndWithRequest' | 'throttled'>> & { walks: Walks };
+  options: Required<Omit<VaultOptions, 'walks' | 'sealThrough' | 'heldOutside' | 'sealing' | 'reached' | 'uses' | 'callsEndWithRequest' | 'throttled'>> & { walks: Walks };
   /**
    * 0.15's log: the keys its changes are sealed and MACed with, from the
    * vault's signing keys, and what each waits on to answer.
    */
-  log015: ChangeKeys & { macs: readonly LogMacKey[]; sealThrough: SealThrough; heldOutside: () => Promise<readonly PairNotes[]>; sealing: () => Promise<Sealing> | Sealing };
+  log015: ChangeKeys & { macs: readonly LogMacKey[]; sealThrough: SealThrough; heldOutside: () => Promise<readonly PairNotes[]>; sealing: () => Promise<Sealing> | Sealing; reached: (() => Promise<Reached> | Reached) | undefined };
   /** Whether this process wrote its bulk cap into 0.15's log, or found it there (`#limit`). */
   limited: boolean;
   /** Whether this process made every role's row what the log's roles object says, sealed, or found it so (`#syncRoles`). */
@@ -339,7 +347,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     config,
     ...(await keysOf(config.signingKeys)),
     options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, codeWaitMs: options.codeWaitMs ?? CALL_DEADLINE_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
-    log015: log015(config.signingKeys, options.sealThrough, options.heldOutside, options.sealing),
+    log015: log015(config.signingKeys, options.sealThrough, options.heldOutside, options.sealing, options.reached),
     limited: false,
     rolesSynced: false,
     verifier: null,
@@ -360,11 +368,12 @@ function log015(
   sealThrough: SealThrough | undefined,
   heldOutside: (() => Promise<readonly PairNotes[]>) | undefined,
   sealing: (() => Promise<Sealing> | Sealing) = () => ({ ok: true }),
+  reached: (() => Promise<Reached> | Reached) | undefined = undefined,
 ): PreparedVault['log015'] {
   if (sealThrough === undefined) throw new Error("0.15's log answers a change once its entry is sealed (R51): give the vault the checkpointer's sealThrough");
   if (heldOutside === undefined) throw new Error("0.15's log is verified against the pairs held where no database writer reaches: give the vault the checkpointer's heldOutside");
   const macs = seeds.map((seed) => logMacKey(seed));
-  return { seals: seeds.map((seed) => sealKey(seed)), mac: macs[0]!, macs, sealThrough, heldOutside, sealing };
+  return { seals: seeds.map((seed) => sealKey(seed)), mac: macs[0]!, macs, sealThrough, heldOutside, sealing, reached };
 }
 
 /** The vault's own keys, from each of its signing keys, the one it signs with first. */
@@ -3992,23 +4001,34 @@ class VaultService implements Vault {
   }
 
   /**
-   * The audit page's check, flat (`Vault.check`; T277, audit-check.ts): one statement, whatever the log holds, and
-   * nothing written. A database behind the pair its signer holds is asked again, as `verifyTrees` is: the signer's
-   * write lands a moment after it remembers.
+   * The audit page's check, flat (`Vault.check`; T277, audit-check.ts): one ask of the signer, then one statement,
+   * whatever the log holds, and nothing written.
    */
   async check(input: CheckInput): Promise<CheckOutcome> {
     await this.#settled();
-    const anchors = await this.#log015().heldOutside();
-    const keys = await this.#verifierKeys();
-    const run = () => checkAudit(this.#db, keys, input, { anchors, upgraded: this.#upgraded() });
-    let checked = await run();
-    for (const wait of [50, TICK_MS + 250]) {
-      if (!checked.behind) break;
-      await new Promise((resolve) => setTimeout(resolve, wait));
-      checked = await run();
-    }
-    const { behind: _behind, ...outcome } = checked;
+    const { listed: _listed, ...outcome } = await this.#audit(input);
     return { ok: true, ...outcome };
+  }
+
+  /**
+   * The beat's call (`Vault.beat`; T277, audit-check.ts): `check` with no rows, the finding written when it is not
+   * `ok`, and whether the projection has stopped.
+   */
+  async beat(input: BeatInput): Promise<BeatOutcome> {
+    await this.#settled();
+    const everyMs: unknown = (input as { everyMs?: unknown } | undefined)?.everyMs;
+    if (!Number.isSafeInteger(everyMs) || (everyMs as number) <= 0) throw new Error(`a beat runs every so many ms, a positive integer, not ${String(everyMs)}`);
+    const { forged: _forged, listed, ...checked } = await this.#audit({ events: [], cursor: input.cursor });
+    const finding = checked.state === 'ok' ? null : await writeFinding(this.#db, this.#log015().mac, checked);
+    return { ok: true, ...checked, finding, projector: projectorStopped(listed, checked.checkpoint, everyMs as number) };
+  }
+
+  /** `check`'s and `beat`'s one ask of the signer, then the check (audit-check.ts). */
+  async #audit(input: CheckInput): Promise<Checked> {
+    const reached = this.#log015().reached;
+    if (reached === undefined) throw new Error("the audit check asks the signer first: give the vault the checkpointer's reached");
+    const said = await reached();
+    return checkAudit(this.#db, await this.#verifierKeys(), input, { reached: said, upgraded: this.#upgraded() });
   }
 
   /**

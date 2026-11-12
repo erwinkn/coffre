@@ -164,6 +164,19 @@ export function heldIn(record: string | null): PairNotes[] {
   return [notes];
 }
 
+/**
+ * What the signer answers `check`, in one ask, before the database is read (T277; state-rows.md, section 3): the pair
+ * the database must have reached (`Checkpointer.reached`), the one it is writing, and whether it seals (`sealingOf`).
+ * A signer that is not open answers no pair: it cannot tell a write still in flight from a deleted checkpoint, and
+ * `check` says `late` on its `sealing`.
+ */
+export type Reached = { pair: PairNotes | null; writing: PairNotes | null; sealing: Sealing };
+
+/** What a host answers for its checkpointer: open, its pairs and whether it seals; closed, no pair and why. */
+export function reachedOf(checkpointer: Checkpointer | null, sealing: Sealing): Reached {
+  return checkpointer === null ? { pair: null, writing: null, sealing } : { ...checkpointer.reached, sealing };
+}
+
 /** Somewhere each signed pair goes that a database writer cannot reach: a witness, an archive (R40's plugin). */
 export type Witness = {
   name: string;
@@ -632,6 +645,16 @@ export class Checkpointer {
   /** The newest pair the signer signed and the database holds. */
   get pair(): { pair: Pair; notes: PairNotes } {
     return this.head;
+  }
+
+  /**
+   * The pairs the database may be at, for `check` (T277; state-rows.md, section 3): the newest the signer wrote, and the
+   * one it is writing, signed and perhaps remembered, not known to be written. The signer remembers a pair before the
+   * database has it, so for the length of one write the database is honestly one pair below its memory; it is never below
+   * `pair`.
+   */
+  get reached(): Pick<Reached, 'pair' | 'writing'> {
+    return { pair: this.head.notes, writing: this.pending?.next.notes ?? null };
   }
 
   /** How much older than its pair an entry the signer seals may be (`FRESH_MS`): retention drops a day two of these past its cut. */

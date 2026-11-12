@@ -54,6 +54,7 @@ export const VAULT_METHODS = [
   'note',
   'check',
   'rebuildAudit',
+  'beat',
   'waitSealed',
   'signIn',
   'revokeCredential',

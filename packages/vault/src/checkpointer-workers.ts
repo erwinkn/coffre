@@ -34,6 +34,7 @@ import {
   Fence,
   heldIn,
   OPEN_BOUND_MS,
+  reachedOf,
   SEAL_WAIT_MS,
   sealingOf,
   Unsealed,
@@ -44,6 +45,7 @@ import {
   type Checkpointer,
   type InclusionProof,
   type Memory,
+  type Reached,
   type SealThrough,
   type Sealed,
   type Tick,
@@ -141,6 +143,11 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     #lastSeen(): { at: number; failures: readonly string[] } | null {
       const last = this.#ticks.at(-1) ?? null;
       return last === null || !this.#upkeeping ? last : { at: Date.now(), failures: last.failures };
+    }
+
+    /** Whether it seals (`sealingOf`), by the object's clock, as its ticks' times are: `status` and `reached`. */
+    #sealing(): Sealing {
+      return sealingOf({ open: this.#checkpointer !== null, failed: this.#failed ?? this.#checkpointer?.standing ?? null, last: this.#lastSeen() });
     }
 
     /** The last ticks, newest last, with their wall time in the object: `status`. */
@@ -339,7 +346,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
 
     async fetch(request: Request): Promise<Response> {
       try {
-        const call = (await request.json()) as { op: 'start' } | { op: 'project' } | { op: 'seal'; number: string; deadline?: number } | { op: 'alarms'; since?: number } | { op: 'status' } | { op: 'remembered' };
+        const call = (await request.json()) as { op: 'start' } | { op: 'project' } | { op: 'seal'; number: string; deadline?: number } | { op: 'alarms'; since?: number } | { op: 'status' } | { op: 'remembered' } | { op: 'reached' };
         if (call.op === 'project') {
           // The reads' projector from now on, its role kept for when it wakes evicted, and its alarm set.
           if (!(await this.#isProjector())) {
@@ -374,11 +381,15 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
           return Response.json({
             open: this.#checkpointer !== null,
             failed: this.#failed,
-            // By the object's clock, as its ticks' times are.
-            sealing: sealingOf({ open: this.#checkpointer !== null, failed: this.#failed ?? this.#checkpointer?.standing ?? null, last: this.#lastSeen() }),
+            sealing: this.#sealing(),
             upto: head === undefined ? null : String(head.upto), sizes: head === undefined ? null : { changes: head.changes.size, uses: head.uses.size },
             ticks: this.#ticks.map((t) => ({ ...t, upto: String(t.upto) })),
           });
+        }
+        if (call.op === 'reached') {
+          // `check`'s ask (T277): the pairs the database may be at and whether it seals, from the object's own view, as
+          // `status` gives it. One evicted is not open until its next tick: no pair, and not sealing.
+          return Response.json(reachedOf(this.#checkpointer, this.#sealing()));
         }
         if (call.op === 'remembered') {
           // The pair the signer remembers, read from the object's storage, opened or not; a record that is no pair, refused.
@@ -466,6 +477,20 @@ export function durableSealing(namespace: ObjectNamespace, name = 'checkpointer'
       return (await checkpointerStatus(namespace, name)).sealing;
     } catch (error) {
       return { ok: false, reason: `the checkpointer's object did not answer: ${(error as Error).message}` };
+    }
+  };
+}
+
+/**
+ * The pairs the database may be at and whether the object seals (`VaultOptions.reached`, T277), asked for at most 2 s:
+ * an object that does not answer has no pair to give, and does not seal.
+ */
+export function durableReached(namespace: ObjectNamespace, name = 'checkpointer'): () => Promise<Reached> {
+  return async () => {
+    try {
+      return await ask<Reached>(namespace, name, { op: 'reached' });
+    } catch (error) {
+      return reachedOf(null, { ok: false, reason: `the checkpointer's object did not answer: ${(error as Error).message}` });
     }
   };
 }

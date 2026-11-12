@@ -94,12 +94,16 @@
   newest `settings.change` and `key.rotate` entries of `audit_log`. They
   stay empty, and nothing reads them, until the vault's upgrade step.
 - **The vault checks an audit page in one statement, whatever the log
-  holds (`check`, T277).** The newest signed checkpoint against the pair
-  its signer keeps, the entries above it by their MACs (more than 1,250
-  is `late`), the rows the page shows and its cursor by theirs, and,
-  after the upgrade, the frozen `audit_log`'s last entry against its
-  anchor. Nothing calls it yet. The check of 0.15's log the page asks
-  today reads in the same one statement, where it took three.
+  holds (`check`, T277).** It asks the signer first, for the pair the
+  database must have reached and whether it seals, then reads: the
+  newest signed checkpoint against that pair, the entries above it by
+  their MACs (more than 1,250, or a checkpointer that does not seal, is
+  `late`), the rows the page shows and its cursor by theirs, and, after
+  the upgrade, the frozen `audit_log`'s last entry against its anchor.
+  `beat` is the same check with no rows, and writes a finding, an event
+  of the vault's, once per checkpoint and state. Nothing calls either
+  yet. The check of 0.15's log the page asks today reads in the same one
+  statement, where it took three.
 - **Node deployments are not tested in 0.16.0.** A Node deployment stays
   on 0.15.0 until 0.16.1, which brings Node back on Postgres; SQLite is
   gone.

@@ -14,7 +14,7 @@ import { decodePair, encodePair, leafHash, openPair, pairSigners, pairVerifiers,
 
 import { Checkpointer, logOrigin, type Witness } from '../src/checkpointer.ts';
 import { keepCheckpointer, runCheckpointer } from '../src/checkpointer-node.ts';
-import { checkpointerAlarms, checkpointerObject, checkpointerStatus, durableSealing, durableSealThrough, startCheckpointer, type ObjectNamespace, type ObjectState } from '../src/checkpointer-workers.ts';
+import { checkpointerAlarms, checkpointerObject, checkpointerStatus, durableReached, durableSealing, durableSealThrough, startCheckpointer, type ObjectNamespace, type ObjectState } from '../src/checkpointer-workers.ts';
 import { KEY_OBJECT, logMacKey } from '../src/log-entry.ts';
 import { durableWitness, r2Archive, witnessObject } from '../src/witness-workers.ts';
 import { authentic, keys, MemoryStore, sealThroughDouble, variableMemory } from './audit-tree.ts';
@@ -127,6 +127,9 @@ test("on Node, as the vault keeps it: a refused open is one alarm, a change's se
     const alarms = await kept.alarms();
     assert.equal(alarms.filter((a) => /cannot open/.test(a.message)).length, 1, JSON.stringify(alarms));
     assert.deepEqual(await kept.heldOutside(), [], 'it signed nothing');
+    // `check`'s ask: no pair to hold the database to, and why it does not seal.
+    const closed = kept.reached();
+    assert.ok(closed.pair === null && closed.writing === null && !closed.sealing.ok && /cannot open/.test(closed.sealing.reason), JSON.stringify(closed));
     // The other signer's log gone: the next try opens over it, and seals.
     await log.empty();
     for (let waited = 0; ; waited += 25) {
@@ -140,6 +143,7 @@ test("on Node, as the vault keeps it: a refused open is one alarm, a change's se
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     assert.equal((await kept.heldOutside()).length, 1, 'the pair it signed, in its file');
+    assert.ok(kept.reached().pair !== null, 'open, it answers the pair it wrote');
   } finally {
     await kept.stop();
   }
@@ -213,11 +217,15 @@ test('on Workers: the checkpointer\'s object ticks on its alarm, keeps its memor
   const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: VAULT_URL }, signingKeys: [seed], closeIdleMs: 50 }));
   const object = new Checkpointer_(state, {});
   const namespace = namespaceOf(object);
+  const unopened = await durableReached(namespace)();
+  assert.ok(unopened.pair === null && !unopened.sealing.ok, JSON.stringify(unopened));
   await startCheckpointer(namespace);
   assert.ok(state.alarm !== null, 'its alarm set');
   for (let i = 0; i < 3; i += 1) await log.use();
   await object.alarm();
   assert.ok(decodePair(state.data.get('pair') as string), 'the memory is the object\'s storage');
+  // `check`'s ask, between ticks: the pair it wrote, which its memory holds, none in flight, sealing.
+  assert.deepEqual(await durableReached(namespace)(), { pair: decodePair(state.data.get('pair') as string), writing: null, sealing: { ok: true } });
   const change = await log.change();
   const sealed = await durableSealThrough(namespace)(change);
   assert.equal(sealed.proof.number, change);
@@ -437,6 +445,8 @@ test('T169, Workers: the object\'s connection stops answering under a tick: its 
     assert.equal((await checkpointerStatus(namespace)).open, false, 'the stalled checkpointer was replaced');
     const sealing = await durableSealing(namespace)();
     assert.ok(!sealing.ok && /stalled/.test(sealing.reason), JSON.stringify(sealing));
+    const reached = await durableReached(namespace)();
+    assert.ok(reached.pair === null && !reached.sealing.ok && /stalled/.test(reached.sealing.reason), JSON.stringify(reached));
     // A change's seal: the object tries to open another, which gets no answer either: unsealed, the app's 503.
     t0 = Date.now();
     await assert.rejects(durableSealThrough(namespace)(change), (error: Error) => isUnsealed(error));

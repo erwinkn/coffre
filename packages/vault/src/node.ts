@@ -104,7 +104,7 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
       const where = url === null ? { database: db } : { connect: () => openDatabase(url, { max: 2 }) };
       // Days of uses kept: the deployment's `audit.keepUsesDays`, every day when null (retention.ts).
       const kept = (checkpointer = await keepCheckpointer({ ...where, signingKeys: resolved.signingKeys, memory: config.checkpointer!.memory, retainDays: resolved.deployment.audit.keepUsesDays }));
-      options = { ...options, sealThrough: kept.sealThrough, heldOutside: kept.heldOutside, sealing: kept.sealing };
+      options = { ...options, sealThrough: kept.sealThrough, heldOutside: kept.heldOutside, sealing: kept.sealing, reached: kept.reached };
     }
     return await openLocalVault(db, resolved, { ...options, uses }, close, hot);
   } catch (error) {

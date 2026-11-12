@@ -432,6 +432,22 @@ export interface Vault {
    */
   rebuildAudit?(input: RebuildAuditInput): Promise<{ number: string }>;
   /**
+   * The beat's one call (0.16, T277; state-rows.md, section 3, "The watch after"): `check` with no rows, the cursor's
+   * row handed in as the page hands it, and, when the state is not `ok`, the finding, an `audit.finding` event the vault
+   * writes itself (author `vault`, actor `system:vault`, id `findingEventId`), through `log_events` as `note` writes
+   * one, in a statement of its own. Written once however many beats see it: a beat that finds the same checkpoint in the
+   * same state again, for another reason or the same, finds the event under its id and writes nothing. No outcome is
+   * stored between beats, so no event says a finding cleared. A finding it cannot write throws, and the app's run fails.
+   *
+   * `projector`, null unless the projection has stopped: the cursor below the newest checkpoint, and the pair it stands
+   * at signed more than two beats (`everyMs`, the deployment's beat period) ago. The app fails its run on it; it writes
+   * no finding, since nothing is wrong with the log. Nothing calls it yet (P3's swap). Only with 0.15's log on.
+   *
+   *   beat({ cursor, everyMs: 300_000 }) on a checkpointer stuck at 4410
+   *   → { state: 'late', finding: 'system:vault/finding:4410:late', projector: null, … }
+   */
+  beat?(input: BeatInput): Promise<BeatOutcome>;
+  /**
    * Answers once the log's entry `number` is sealed in a signed checkpoint
    * and, if a witness is configured, witnessed or past its 2 s (R51): what a
    * change the app committed waits for before it answers. Only with 0.15's
@@ -1096,6 +1112,22 @@ export type CheckOutcome = Outcome<{
   checkpoint: { number: string; at: number } | null;
   listedThrough: { number: string; at: number };
   forged: number[];
+}>;
+
+/** What the beat hands `beat`: the cursor's row, as the page hands it to `check`, and how often the beat runs (ms). */
+export type BeatInput = { cursor: AuditCursorRow; everyMs: number };
+
+/**
+ * What `beat` found: `check`'s answer with no rows; `finding`, the id of the finding written or found under it, null
+ * on `ok`; `projector`, why the projection counts as stopped, null when it does not.
+ */
+export type BeatOutcome = Outcome<{
+  state: CheckState;
+  reason: string | null;
+  checkpoint: { number: string; at: number } | null;
+  listedThrough: { number: string; at: number };
+  finding: string | null;
+  projector: string | null;
 }>;
 
 /** The event written, its number in the chain, before any checkpoint seals it; `invalid` for another event's id. */

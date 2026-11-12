@@ -576,7 +576,8 @@ export async function callRebuild(db: Database, row: ReturnType<typeof rebuildRo
  * - `newest`, the newest checkpoint row, and `floor`, the floor of `at` its row says (a verifier holds it to the one
  *   its pair signed, which a writer cannot raise: `checkTail` reads the tail again from that one when they differ);
  * - `tail`, the entries above it, both trees, by number, uses from that floor: the first `limit`;
- * - `rotations`, every rotation of the vault's signing key, which bound a replaced key (keyring.ts);
+ * - `rotations`, every rotation of the vault's signing key, which bound a replaced key (keyring.ts), read only when
+ *   asked (`rotations: true`, a vault that holds a replaced key), else none;
  * - `anchor`, the first change of the object `anchor`, the frozen log's anchor (upgrade.ts), and `last`, the frozen
  *   log's last entry, each null for none;
  * - `indexes`, the definitions of the indexes that keep a request to one entry (`requestsUniqueIn`).
@@ -601,22 +602,18 @@ type RawLast = {
   prevHash: string; mac: string; hash: string;
 };
 
-export async function checkRead(db: Database, options: { limit: number; anchor: string }): Promise<CheckRead> {
+export async function checkRead(db: Database, options: { limit: number; anchor: string; rotations: boolean }): Promise<CheckRead> {
   const { limit, anchor } = options;
-  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error(`a check reads a positive number of entries, not ${limit}`);
+  tailLimit(limit);
   const read = await one<{
     newest: (RawPair & { floor: string }) | null; tail: RawEntry[]; rotations: RawEntry[]; anchor: RawEntry | null; last: RawLast | null; indexes: { name: string; def: string }[];
   }>(db, sql`
     WITH k AS (SELECT k.upto, k.at_floor, k.changes_note, k.uses_note FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1),
-    t AS (SELECT w.n, w.v FROM (
-        (SELECT c.number AS n, ${CHANGE} AS v FROM k, log_changes c WHERE c.number > k.upto ORDER BY c.number LIMIT ${limit})
-        UNION ALL
-        (SELECT u.number, ${USE} FROM k, log_uses u WHERE u.at >= k.at_floor AND u.number > k.upto ORDER BY u.at LIMIT ${limit})
-      ) w ORDER BY w.n LIMIT ${limit})
+    t AS (${tailOf(sql`k.upto`, sql`k.at_floor`, limit, sql`k,`)})
     SELECT json_build_object(
       'newest', (SELECT json_build_object('upto', k.upto::text, 'changes', k.changes_note, 'uses', k.uses_note, 'floor', k.at_floor::text) FROM k),
       'tail', (SELECT coalesce(json_agg(t.v ORDER BY t.n), '[]') FROM t),
-      'rotations', (SELECT coalesce(json_agg(${CHANGE} ORDER BY c.number), '[]') FROM log_changes c WHERE c.object = ${KEY_OBJECT}::uuid),
+      'rotations', ${options.rotations ? sql`(SELECT coalesce(json_agg(${CHANGE} ORDER BY c.number), '[]') FROM log_changes c WHERE c.object = ${KEY_OBJECT}::uuid)` : sql`'[]'::json`},
       'anchor', (SELECT ${CHANGE} FROM log_changes c WHERE c.object = ${anchor}::uuid ORDER BY c.number LIMIT 1),
       'last', (SELECT json_build_object('seq', a.seq::text, 'author', a.author, 'keyId', a.key_id, 'occurredAt', a.occurred_at::text, 'actor', a.actor,
           'action', a.action, 'decision', a.decision, 'code', a.code, 'subjectPrincipal', a.subject_principal, 'projectId', a.project_id,
@@ -643,6 +640,32 @@ export async function checkRead(db: Database, options: { limit: number; anchor: 
     },
     indexes: read.indexes,
   };
+}
+
+/**
+ * The entries above `after`, both trees, by number, uses from `floor`: the first `limit`, as `store.entries(after,
+ * MAX_NUMBER, { floor, limit })` reads them, and the indexes that keep a request to one entry, in one statement: what
+ * `checkRead` reads again when its newest row's floor is not the one its pair signed. The indexes come with the entries,
+ * so that none dropped between two statements, a copy inserted, read, then deleted and the index made again, passes.
+ */
+export async function checkTail(db: Database, options: { after: bigint; floor: number; limit: number }): Promise<Pick<CheckRead, 'tail' | 'indexes'>> {
+  const { after, floor, limit } = options;
+  tailLimit(limit);
+  const read = await one<{ tail: RawEntry[]; indexes: { name: string; def: string }[] }>(db, sql`
+    WITH t AS (${tailOf(sql`${after}::bigint`, sql`${floor}::bigint`, limit, sql``)})
+    SELECT json_build_object('tail', (SELECT coalesce(json_agg(t.v ORDER BY t.n), '[]') FROM t), 'indexes', ${REQUEST_INDEXES}) AS v`);
+  return { tail: read.tail.map(toEntry), indexes: read.indexes };
+}
+
+/** The first `limit` entries above `after`, both trees, by number, uses from `floor`, each as one JSON value (`v`, by `n`); `from` names what they read beside. */
+const tailOf = (after: SQL, floor: SQL, limit: number, from: SQL) => sql`SELECT w.n, w.v FROM (
+    (SELECT c.number AS n, ${CHANGE} AS v FROM ${from} log_changes c WHERE c.number > ${after} ORDER BY c.number LIMIT ${limit})
+    UNION ALL
+    (SELECT u.number, ${USE} FROM ${from} log_uses u WHERE u.at >= ${floor} AND u.number > ${after} ORDER BY u.at LIMIT ${limit})
+  ) w ORDER BY w.n LIMIT ${limit}`;
+
+function tailLimit(limit: number): void {
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error(`a check reads a positive number of entries, not ${limit}`);
 }
 
 export type { ReadRow };

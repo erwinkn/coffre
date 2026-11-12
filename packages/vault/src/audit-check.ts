@@ -1,14 +1,20 @@
 import { entryHash, type StoredEntry } from '@coffre/core/audit';
-import type { LogEntry, PairNotes } from '@coffre/core/merkle';
+import { ENDS_BELOW, parseCheckpoint, splitNote, type LogEntry, type PairNotes, type StoredPair } from '@coffre/core/merkle';
 import { USES_IN_FLIGHT } from '@coffre/core/memory';
-import { VOUCHED_AT_ONCE, type AuditCursorRow, type AuditEventRow, type CheckInput, type CheckState } from '@coffre/core/vault';
+import { VOUCHED_AT_ONCE, type AuditCursorRow, type AuditEventRow, type CheckInput, type CheckState, type NoteInput } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
+import { isUniqueViolation } from '@coffre/db/dialect';
+
 
 import { cursorVouched, eventColumns, eventVouched, type AuditCursor, type AuditEvent, type SignedCursor } from './audit-rows.ts';
 import { keyringOf, type Keyring, type VerifierKeys, entryVouched, openUnder } from './keyring.ts';
 import { changeEvent, readEvent } from './projection.ts';
 import { derive, newestHeld, rangeAt, sealedCut, sealedRange, type ReadsStore } from './reads.ts';
-import { UPGRADE_REQUESTS, type AnchorPayload } from './upgrade.ts';
+import { UPGRADE_REQUESTS, type AnchorPayload, parseAnchor } from './upgrade.ts';
+import type { Reached } from './checkpointer.ts';
+import type { LogMacKey } from './log-entry.ts';
+import { eventRow, findingEventId } from './note.ts';
+import { logEvents } from './store.ts';
 import { checkTrees } from './verifier.ts';
 
 // The audit's two checks. `checkAudit`, the page's and the beat's: flat, the newest checkpoint and what lies above it,
@@ -25,24 +31,28 @@ export const CHECK_TAIL_ENTRIES = USES_IN_FLIGHT;
 
 /**
  * The audit page's check, flat (0.16, T277; D200; state-rows.md, sections 3 and 4): what the vault's `check` answers,
- * and `behind`, whether the database ended below a pair held outside, which the vault asks again a tick later (the
- * signer remembers a pair a moment before its row lands), as `verifyTrees` does.
+ * and `listed`, the cursor when its MAC holds, for the beat (`projectorStopped`).
  *
- * One statement (`checkRead`): the newest checkpoint, the entries of both chains above it, at most
- * `CHECK_TAIL_ENTRIES`, the rotations, the frozen log's anchor and its last entry. Then CPU alone: the pair's
- * signatures and the pairs held outside (`verifyLog`), each entry above it by its MAC and request, the rows the page
- * shows and its cursor by their MACs (audit-rows.ts, P1's), and the frozen log's last entry against the anchor. It
- * writes nothing. Its cost is the rows handed in and what lies above the newest checkpoint, whatever the log holds.
+ * The signer first, the database after: `reached`, the signer's one answer, gives the pair the database must have
+ * reached, the one it is writing, and whether it seals. Asked after the read, a visit during the signer's write would
+ * find the database honestly one pair below its memory and say `behind`. Then one statement (`checkRead`): the newest
+ * checkpoint, the entries of both chains above it, at most `CHECK_TAIL_ENTRIES`, the rotations (only where a key was
+ * replaced), the frozen log's anchor and its last entry. Then CPU alone: the pair's signatures against the signer's
+ * (`verifyLog`), each entry above it by its MAC and request, the rows the page shows and its cursor by their MACs
+ * (audit-rows.ts, P1's), and the frozen log's last entry against the anchor. It writes nothing. Its cost is the rows
+ * handed in and what lies above the newest checkpoint, whatever the log holds.
  *
  * Retention's floor is not read: below the newest checkpoint nothing is walked, and the cursor's `reads_from`, which
  * no MAC covers, is never taken (`FloorSealed`, formal/Reads.tla). The full walk (`coffre verify log`) takes it from the
  * sealed retention change.
  *
  * What it catches, for a database writer with no key (section 4): an entry above the checkpoint forged or altered (its
- * MAC), a checkpoint deleted or an older one served (`behind`: below the pair held outside), a row shown altered (its
- * MAC: `forged`), the cursor put back (`listedThrough` falls behind `checkpoint`; altered, its MAC), the frozen log cut
- * or extended (its last entry is not the anchor's). What it leaves to the recheck: an entry altered or deleted inside a
- * signed range, a projection row deleted.
+ * MAC), a checkpoint deleted or an older one served (`behind`: below the pair the signer wrote), a row shown altered
+ * (its MAC: `forged`), the cursor put back (`listedThrough` falls behind `checkpoint`; altered, its MAC; past the
+ * newest checkpoint, `behind`), the frozen log cut or extended (its last entry is not the anchor's). A signer that is
+ * not open, or does not seal, gives no pair to hold the database to: `late`, with its reason, until it seals again,
+ * and a signer reopened over a database rolled back refuses to (log-checkpointer.ts), so the `late` stands. What it
+ * leaves to the recheck: an entry altered or deleted inside a signed range, a projection row deleted.
  */
 export type Checked = {
   state: CheckState;
@@ -50,15 +60,15 @@ export type Checked = {
   checkpoint: { number: string; at: number } | null;
   listedThrough: { number: string; at: number };
   forged: number[];
-  behind: boolean;
+  listed: { through: bigint; at: number } | null;
 };
 
 export type CheckOptions = {
-  /** Pairs held outside the database, the signer's memory and a witness's (`VaultOptions.heldOutside`). */
-  anchors: readonly PairNotes[];
+  /** The signer's answer, asked before the read (`VaultOptions.reached`). */
+  reached: Reached;
   /**
-   * Whether the vault's upgrade step has written the anchor (V1, T279; upgrade.ts): from then on the frozen log answers
-   * to it, and a check that finds no anchor says `broken`. Before, the log has none, and `audit_log` still grows.
+   * Whether the vault's upgrade step has written the anchor (V1, T279; upgrade.ts): from then on a frozen log with rows
+   * and no anchor is `broken`. Before, `audit_log` still grows, and has no anchor to answer to.
    */
   upgraded: boolean;
 };
@@ -68,46 +78,105 @@ export async function checkAudit(db: Database, keys: VerifierKeys, input: CheckI
   if (!Array.isArray(events) || events.length > VOUCHED_AT_ONCE) throw new Error(`check takes up to ${VOUCHED_AT_ONCE} rows`);
   const shown = events.map((row: unknown) => eventOf(row));
   const cursor = cursorOf((input as { cursor?: unknown }).cursor);
+  const { reached } = options;
 
-  const { walked, read, ring } = await checkTrees(db, keys, { anchors: options.anchors, above: CHECK_TAIL_ENTRIES });
+  const { walked, read, ring } = await checkTrees(db, keys, { anchors: (newest) => heldFor(reached, newest), above: CHECK_TAIL_ENTRIES });
   const forged = shown.flatMap((row, i) => (row === null || !eventVouched(ring, row) ? [i] : []));
+  // The cursor's interim columns (P1's `old_floor`, `old_top`) are outside its MAC and not in `AuditCursorRow`: filled
+  // so that their order holds whatever the five say, they leave the verdict to the MAC alone.
+  const listed = cursor !== null && cursorVouched(ring, { ...cursor, oldFloor: 0n, oldTop: cursor.oldFrom }) ? cursor : null;
   // The newest checkpoint, as its signatures open it: the walk's own when it found nothing wrong, else the row's, which
-  // the beat's finding is named for (`findingEventId`).
+  // the beat's finding is named for (`findingEventId`). Genesis (0) seals nothing: shown as none.
   const opened = walked.checkpoint !== null ? walked.checkpoint : read.newest === null ? null : (await openUnder(ring, read.newest.notes))?.pair ?? null;
-  const checkpoint = opened === null || BigInt(opened.upto) === 0n ? null : { number: String(opened.upto), at: opened.at };
+  const upto = opened === null ? 0n : BigInt(opened.upto);
+  const checkpoint = upto === 0n ? null : { number: String(upto), at: opened!.at };
 
-  const broken: string[] = walked.problems.filter((p) => !walked.behind || !/^the database ends up to /.test(p));
+  const broken: string[] = walked.problems.filter((p) => !walked.behind || !p.startsWith(ENDS_BELOW));
   if (forged.length > 0) broken.push(`${forged.length} of the rows shown: not the projector's (their MAC does not hold)`);
-  if (cursor === null || !cursorVouched(ring, cursor)) broken.push("the audit cursor is not the projector's (its MAC does not hold)");
+  if (listed === null) broken.push("the audit cursor is not the projector's (its MAC does not hold)");
   const frozen = frozenLog(read.anchor, read.last, ring, options.upgraded);
   if (frozen !== null) broken.push(frozen);
-  const behind = walked.behind ? ['the database ends below the checkpoint its signer holds: checkpoints were deleted, or an older one is served'] : [];
+  const behind = walked.behind ? ['the database ends below the checkpoint its signer wrote: checkpoints were deleted, or an older one is served'] : [];
   // The projector lists only what a checkpoint signed: a cursor past the newest one is a database rolled back below it.
-  if (cursor !== null && checkpoint !== null && cursor.through > BigInt(checkpoint.number)) behind.push(`the projection lists through ${cursor.through}, past the newest checkpoint (${checkpoint.number})`);
-  const [state, reasons]: [CheckState, string[]] = broken.length > 0 ? ['broken', broken] : behind.length > 0 ? ['behind', behind] : walked.capped ? ['late', [`more than ${CHECK_TAIL_ENTRIES} entries above the newest checkpoint: the checkpointer is late`]] : ['ok', []];
-  const given = input.cursor as Partial<AuditCursorRow> | undefined;
+  if (listed !== null && listed.through > upto) behind.push(`the projection lists through ${listed.through}, past the newest checkpoint (${upto})`);
+  const late = walked.capped ? [`more than ${CHECK_TAIL_ENTRIES} entries above the newest checkpoint: the checkpointer is late`] : [];
+  if (!reached.sealing.ok) late.push(`the checkpointer does not seal: ${reached.sealing.reason}`);
+  else if (reached.pair === null) late.push('the signer holds no pair to check the database against');
+  const [state, reasons]: [CheckState, string[]] = broken.length > 0 ? ['broken', broken] : behind.length > 0 ? ['behind', behind] : late.length > 0 ? ['late', late] : ['ok', []];
   return {
     state,
     reason: reasons.length === 0 ? null : reasons.join('; '),
     checkpoint,
-    listedThrough: cursor !== null ? { number: String(cursor.through), at: cursor.at } : { number: String(given?.through ?? '0'), at: Number(given?.at ?? 0) },
+    listedThrough: listed === null ? { number: '0', at: 0 } : { number: String(listed.through), at: listed.at },
     forged,
-    behind: walked.behind,
+    listed: listed === null ? null : { through: listed.through, at: listed.at },
   };
 }
 
 /**
- * Why the frozen log is not what the upgrade anchored, or null when it is (state-rows.md, section 6): its last entry
- * is the anchor's, by seq and by its hash computed again from its columns, so a row altered keeps no stored hash that
- * passes. The anchor is the vault's change (its MAC, its request id). Before the upgrade there is no anchor, and the
- * log is not frozen yet: nothing to hold.
+ * The pair the database must be held to, from the signer's answer and the newest row the statement read: the one it is
+ * writing once the database has reached its place (the write landed, or more), else the one it wrote. A pair at the
+ * newest row's own place is held to it note for note, with nothing more read; one below it costs the walk a read of
+ * that pair and its tiles, which only a tick landing between the ask and the read brings.
+ */
+function heldFor(reached: Reached, newest: StoredPair | null): PairNotes[] {
+  if (reached.pair === null) return [];
+  const writing = reached.writing;
+  return [writing !== null && newest !== null && uptoOf(writing) <= newest.upto ? writing : reached.pair];
+}
+
+/** A pair's place, from its notes' text: a choice of anchor, not a check (the walk opens it under the keys). */
+function uptoOf(notes: PairNotes): bigint {
+  return parseCheckpoint(splitNote(notes.changes).text).upto;
+}
+
+/**
+ * Why the projection counts as stopped, or null (state-rows.md, section 3): its cursor, MAC held, below the newest
+ * checkpoint, and the pair it stands at signed more than two beats ago. The beat fails its run on it, with no finding.
+ */
+export function projectorStopped(listed: Checked['listed'], checkpoint: Checked['checkpoint'], everyMs: number, now = Date.now()): string | null {
+  if (listed === null || checkpoint === null || listed.through >= BigInt(checkpoint.number) || now - listed.at <= 2 * everyMs) return null;
+  return `the projection lists through ${listed.through}, below the newest checkpoint (${checkpoint.number}), and the pair it stands at was signed ${now - listed.at} ms ago, more than two beats (${2 * everyMs} ms)`;
+}
+
+/**
+ * The beat's finding (state-rows.md, section 3): an `audit.finding` event of the vault's, through `log_events` as
+ * `note` writes one, under `findingEventId` of the checkpoint and the state, so that it is written once however many
+ * beats see it. Its detail is `audit_log`'s finding's, the reason the UI shows (`audit-sentences.ts`), with the state
+ * and the checkpoint. A beat that finds the event under its id, for this reason or another, writes nothing: the id
+ * names one finding per checkpoint and state. Its id, the event's, whichever wrote it. Anything else throws.
+ */
+export async function writeFinding(db: Database, key: LogMacKey, checked: Pick<Checked, 'state' | 'reason' | 'checkpoint'>): Promise<string> {
+  if (checked.state === 'ok') throw new Error('an ok check has no finding');
+  const id = findingEventId(checked.checkpoint === null ? null : BigInt(checked.checkpoint.number), checked.state);
+  const event: NoteInput = {
+    action: 'audit.finding', allowed: true, code: null, actor: 'system:vault', subject: null,
+    places: { projectId: null, environmentId: null, secretId: null, versionId: null }, credential: null, id, requestId: null, operationId: null,
+    sourceIp: null, detail: { state: checked.state, reason: checked.reason, checkpoint: checked.checkpoint?.number ?? null },
+  };
+  const row = eventRow(key, Date.now(), event, 'vault');
+  try {
+    await logEvents(db, [row]);
+  } catch (error) {
+    // The id written already, with another reason: the same finding.
+    if (!isUniqueViolation(error)) throw error;
+  }
+  return id;
+}
+
+/**
+ * Why the frozen log is not what the upgrade anchored, or null when it is (state-rows.md, section 6; upgrade.ts,
+ * `parseAnchor`'s four cases): with an anchor, its MAC and its payload hold, and the log's last entry is the one it
+ * names, by seq and by its hash computed again from its columns, so a row altered keeps no stored hash that passes.
+ * With none, an empty log is nothing to hold, and one with rows is `broken` once the upgrade has run (before it the log
+ * still grows, and has no anchor yet).
  */
 export function frozenLog(anchor: LogEntry | null, last: StoredEntry | null, ring: Keyring, upgraded: boolean): string | null {
-  if (anchor === null) return upgraded ? 'the frozen log has no anchor: the upgrade wrote one' : null;
+  if (anchor === null) return last !== null && upgraded ? 'the frozen log has no anchor: the upgrade wrote one' : null;
   if (entryVouched(ring, anchor) !== 'held') return "the frozen log's anchor is not the vault's (its MAC does not hold)";
   // [at, request, object, actor, payload, seal, mac]
   const [request, payload] = [anchor.columns[1], anchor.columns[4]];
-  const named = request === UPGRADE_REQUESTS.anchor && typeof payload === 'string' ? anchorOf(payload) : null;
+  const named = request === UPGRADE_REQUESTS.anchor && typeof payload === 'string' ? parseAnchor(payload)?.anchor ?? null : null;
   if (named === null) return `change ${anchor.number}: no anchor the upgrade writes`;
   if (last === null) return `the frozen log is empty; its anchor names seq ${named.seq}: it was cut`;
   if (last.seq !== named.seq) return `the frozen log ends at seq ${last.seq}; its anchor names ${named.seq}: it was ${last.seq < named.seq ? 'cut' : 'extended'}`;
@@ -116,18 +185,6 @@ export function frozenLog(anchor: LogEntry | null, last: StoredEntry | null, rin
     hash = entryHash(last.prevHash, last, last.mac);
   } catch {}
   return hash !== null && hash.equals(named.hash) ? null : `the frozen log's last entry (seq ${last.seq}) is not the one its anchor names: it was altered`;
-}
-
-function anchorOf(payload: string): { seq: bigint; hash: Buffer } | null {
-  try {
-    const p = JSON.parse(payload) as Partial<AnchorPayload>;
-    const seq = p.anchor?.seq;
-    const hash = p.anchor?.hash;
-    if (p.op !== 'upgrade.anchor' || typeof seq !== 'string' || !/^[0-9]{1,19}$/.test(seq) || typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) return null;
-    return { seq: BigInt(seq), hash: Buffer.from(hash, 'hex') };
-  } catch {
-    return null;
-  }
 }
 
 const DECIMAL = /^[0-9]{1,19}$/;
@@ -162,11 +219,10 @@ function eventOf(raw: unknown): AuditEvent | null {
 }
 
 /**
- * The cursor the page handed in, as P1's signed cursor; null for one the projector never writes. Only the five columns
- * its MAC covers: P1's interim `old_floor` and `old_top`, and retention's `reads_from`, carry none, and nothing here
- * reads them.
+ * The cursor the page handed in, the five columns its MAC covers (`AuditCursorRow`); null for one the projector never
+ * writes. P1's interim `old_floor` and `old_top`, and retention's `reads_from`, carry none, and nothing here reads them.
  */
-function cursorOf(raw: unknown): SignedCursor | null {
+function cursorOf(raw: unknown): Omit<AuditCursor, 'oldFloor' | 'oldTop'> | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const r = raw as Partial<Record<keyof AuditCursorRow, unknown>>;
   const decimal = (v: unknown) => (typeof v === 'string' && DECIMAL.test(v) ? BigInt(v) : null);
