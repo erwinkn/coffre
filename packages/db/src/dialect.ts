@@ -61,7 +61,7 @@ export function tombstone(slug: SQLWrapper): SQL {
 
 /** A condition read as a boolean. */
 export function truth(condition: SQL): SQL<boolean> {
-  return condition.mapWith((value) => Number(value) === 1);
+  return condition.mapWith((value) => value === true);
 }
 
 /** How many rows an insert, update or delete touched. */
