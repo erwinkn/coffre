@@ -292,14 +292,15 @@ hosts in 0.4 s.
   the fetch is asked once more at once (on Node, on a new connection;
   Workers' `fetch` says nothing of which it uses).
 - A set past its ten minutes stands in for the one the issuer could not
-  serve, for as long as its answer's `Cache-Control` let any cache keep it:
-  its `max-age`, at most an hour, an hour if it says none, never past
+  serve, for as long as its answer's `Cache-Control` lets it, counted from
+  coffre's fetch: its `max-age`, at most an hour, an hour if it says none, never past
   fresh if it says `no-store`, `no-cache` or under ten minutes, or if
   coffre cannot read it (a `max-age` twice, or not a number; a quoted
   argument's `max-age=` is the argument's, not the header's). GitHub's
-  says `max-age=3600, must-revalidate`, so a set coffre fetched up to an
-  hour ago stands in, which is no longer than GitHub lets any cache serve
-  it. A key the set lacks is never taken from it: such a token gets the
+  says `max-age=3600, must-revalidate`, and no `Age`, so a set coffre
+  fetched up to an hour ago stands in, which is no longer than GitHub lets
+  any cache serve it. (An `Age` is not subtracted: an issuer behind a CDN
+  that answers `Age: 3500` still gets its full `max-age`.) A key the set lacks is never taken from it: such a token gets the
   503.
 - The isolate then waits ten seconds before fetching that URL again, and
   the 503 says `Retry-After: 10`, which the CLI waits out and asks again,
@@ -315,11 +316,11 @@ hosts in 0.4 s.
 - An answer that is not keys ends the stand-in: an issuer that publishes a
   set with no keys, or moved them, is not one whose old keys outlive their
   ten minutes.
-- Only a fetch the issuer did not answer lets a set stand in. While the
-  isolate waits out the minute after an unknown `kid`, a token whose set
-  has gone stale gets the 503 too, saying coffre's copy is past its ten
-  minutes: nothing has failed, and the fetch for the `kid` will bring a
-  fresh set.
+- Only a fetch the issuer did not answer lets a set stand in. The minute
+  after an unknown `kid` holds back fetches for unknown keys only: a set
+  that goes stale meanwhile is fetched again as any other, and the minute
+  stays on. A token whose key the old set has is not held up to a minute,
+  past the CLI's patience, by another exchange's made-up `kid`.
 - A fetch that fails is told to the cache as it is then, not as it was when
   the fetch began. Another exchange's answer that was not keys, which came
   meanwhile, still ends the stand-in, and its minute stands. A set whose

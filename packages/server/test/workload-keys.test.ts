@@ -191,22 +191,41 @@ test("Cache-Control is read as a list of directives, a quoted argument's commas 
   assert.deepEqual(cases.map(([said]) => keptFor(said)), cases.map(([, ms]) => ms));
 });
 
-test("a set past fresh does not stand in during another call's fetch for a key it lacked, which is no failure (review r1 of #565, F1)", async () => {
+test("a set past fresh is fetched again during another call's fetch for a key it lacked, and that call's minute stays on (review r1 of #565, F1; r5)", async () => {
   assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
   // A second before the set goes stale, a key it lacks is fetched for, slowly.
   const refetch = held();
   scripted = [refetch.answer];
   const lacked = verify(unknown, KEYS_FRESH_MS - 1000);
   await started(2);
-  // Stale now, and no fetch for the minute: the old set is not taken, though the issuer has not failed.
-  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1000), { outcome: 'unavailable 58', fetches: 0 });
-  // Told why: its key may well be in the set, which coffre will not fetch again yet (review r3 of #565).
-  await assert.rejects(attempt(known, KEYS_FRESH_MS + 1000), {
-    message: `coffre's copy of the signing keys ${ISSUER} publishes at ${KEYS} is past its ten minutes, and coffre is not fetching them again yet; try again in 58 s`,
-  });
+  // Stale now: fetched again as any stale set, not held up to a minute by the unknown key (review r5 of #565).
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1000), { outcome: VERIFIED, fetches: 1 });
+  // The minute stays on: a key the new set lacks fetches nothing.
+  assert.deepEqual(await verify(unknown, KEYS_FRESH_MS + 1500), { outcome: 'unavailable 58', fetches: 0 });
   refetch.release();
-  assert.deepEqual(await lacked, { outcome: 'unavailable 60', fetches: 1 });
+  // Its fetches counted with the refresh's.
+  assert.deepEqual(await lacked, { outcome: 'unavailable 60', fetches: 2 });
+  assert.equal(fetches, 3);
   assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1500), { outcome: VERIFIED, fetches: 0 });
+
+  // The same, the stale set's refresh timing out: the issuer did not answer, so the old set stands in, for a key it has.
+  forgetKeys();
+  fetches = 0;
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  const slow = held();
+  scripted = [
+    slow.answer,
+    async (url) => {
+      throw timedOut(url);
+    },
+  ];
+  const lacking = verify(unknown, KEYS_FRESH_MS - 1000);
+  await started(2);
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1000), { outcome: VERIFIED, fetches: 1 });
+  assert.deepEqual(await verify(unknown, KEYS_FRESH_MS + 2000), { outcome: `unavailable ${KEYS_UNREACHED_MS / 1000 - 1}`, fetches: 0 });
+  slow.release();
+  assert.deepEqual(await lacking, { outcome: 'unavailable 60', fetches: 2 });
+  assert.equal(fetches, 3);
 });
 
 test("a set stands in after a timeout only as the entry is once it failed: another call's definite answer, or the end of its hour, ends it (review r1 of #565, F2)", async () => {
@@ -301,6 +320,31 @@ test('cold, a fetch that times out is asked again once, at once; failing twice, 
   const quiet = (await attempt(known, 4500).then(() => assert.fail('verified while quiet'), (error: unknown) => error)) as IssuerUnavailable;
   assert.deepEqual([fetches, quiet.retryAfter, quiet.message.startsWith(`coffre could not fetch the signing keys of the issuer ${ISSUER}`)], [2, 6, true]);
   assert.deepEqual(await verify(known, KEYS_UNREACHED_MS + 1000), { outcome: VERIFIED, fetches: 1 });
+});
+
+test('what a fetch finds, and the quiet after one that failed, are dated once its seconds are spent, not when the exchange began (review r5 of #565)', async () => {
+  // Cold, GitHub takes 5 s to answer: the set is fresh for ten minutes from then.
+  scripted = [
+    async () => {
+      spent += 5000;
+    },
+  ];
+  assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 4000), { outcome: VERIFIED, fetches: 0 });
+  assert.deepEqual(await verify(known, KEYS_FRESH_MS + 5000), { outcome: VERIFIED, fetches: 1 });
+
+  // Cold, two attempts that each time out after 5 s: the ten seconds' quiet runs from the second's end, 20 s in.
+  forgetKeys();
+  fetches = 0;
+  const slowTimeout = async (url: URL) => {
+    spent += 5000;
+    throw timedOut(url);
+  };
+  scripted = [slowTimeout, slowTimeout];
+  assert.deepEqual(await verify(known), { outcome: `unavailable ${KEYS_UNREACHED_MS / 1000}`, fetches: 2 });
+  assert.deepEqual(await verify(known, 12_000), { outcome: 'unavailable 8', fetches: 0 });
+  assert.deepEqual(await verify(known, 19_500), { outcome: 'unavailable 1', fetches: 0 });
+  assert.deepEqual(await verify(known, 20_000), { outcome: VERIFIED, fetches: 1 });
 });
 
 test('each failed fetch logs, the one a retry then answers included (review r2 of #565)', async (t) => {

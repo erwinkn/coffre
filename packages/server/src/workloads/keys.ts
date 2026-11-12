@@ -24,7 +24,8 @@ type Entry = {
  * and only then, a set past fresh verifies meanwhile, up to `keptUntil`.
  * The quiet after a key the set lacked, or after an answer that was not
  * keys, lets no stale set stand in. `absent` for the minute after a key the
- * set lacked: `why` is then true only of a token whose key the set lacks.
+ * set lacked: `why` is then true only of a token whose key the set lacks,
+ * and the quiet holds back no refresh of a set past fresh.
  */
 type Quiet = { until: number; why: string; standIn: boolean; absent?: true };
 
@@ -40,8 +41,9 @@ export const KEYS_FRESH_MS = 10 * 60 * 1000;
 /**
  * The longest a set stands in, from its fetch, while the issuer cannot be
  * reached: an hour, or less if its `Cache-Control` says so (`keptFor`).
- * GitHub's says `max-age=3600, must-revalidate`: kept no longer than it
- * allows any cache to.
+ * GitHub's says `max-age=3600, must-revalidate`, with no `Age`: kept no
+ * longer than it allows any cache to. `max-age` counts from coffre's fetch;
+ * an `Age` the answer gives is not subtracted.
  */
 export const KEYS_KEPT_MS = 60 * 60 * 1000;
 /** After a key the set lacks, or an issuer that answered anything but its keys, this long before that URL is fetched again. */
@@ -223,11 +225,6 @@ function absentWhy(url: string, issuer: string): string {
   return `the token's key is not among the signing keys ${issuer} publishes, which coffre fetched from ${url} a moment ago`;
 }
 
-/** Why a token is refused, during an unknown key's minute, whose set is past fresh. */
-function staleWhy(url: string, issuer: string): string {
-  return `coffre's copy of the signing keys ${issuer} publishes at ${url} is past its ten minutes, and coffre is not fetching them again yet`;
-}
-
 /** No fetch of `url` for `KEYS_COOLDOWN_MS` from `at`, after a key its set lacked. */
 function pauseFor(url: string, at: number, issuer: string): Quiet {
   const pause: Quiet = { until: at + KEYS_COOLDOWN_MS, why: absentWhy(url, issuer), standIn: false, absent: true };
@@ -258,7 +255,7 @@ function pauseFor(url: string, at: number, issuer: string): Quiet {
  *   stale set, 70 min old; GitHub times out     two attempts, then 503, Retry-After 10
  *   cold isolate; GitHub times out, then 200    two attempts, verified
  *   fresh set lacks the kid                     one fetch; 503, Retry-After 60, if the new set lacks it too
- *   stale set, during another's kid refetch     503, Retry-After what is left of its minute
+ *   stale set, during another's kid refetch     fetched, as any stale set; the minute stays on
  *   stale set; A times out after B was answered  A verified under B's set, no second attempt
  */
 export async function verifyWithKeys(
@@ -279,15 +276,17 @@ export async function verifyWithKeys(
   if (fresh) {
     keys = entry.keys!;
   } else {
+    // The minute after a key the set lacked holds back fetches for unknown keys only, never a stale set's refresh, which
+    // keeps it on (review r5 of #565): a token whose key the old set has is not held up to a minute, past the CLI's patience.
     const pause = quiet(url, now);
-    if (pause !== null) {
+    if (pause !== null && !pause.absent) {
       standIn = quieted(pause, now);
       const set = pause.standIn ? kept(url, now) : null;
-      if (set === null) throw pause.absent ? new IssuerUnavailable(staleWhy(url, expected.issuer), secondsLeft(pause, now)) : standIn;
+      if (set === null) throw standIn;
       keys = set;
     } else {
       try {
-        keys = await fetchKeys(transport, url, expected.issuer, clock, { retry: kept(url, now) === null });
+        keys = await fetchKeys(transport, url, expected.issuer, clock, { retry: kept(url, now) === null, own: pause });
         fetched = true;
       } catch (error) {
         const set = error instanceof IssuerUnavailable && error.transient ? kept(url, clock()) : null;
