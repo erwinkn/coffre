@@ -33,7 +33,7 @@ everywhere else, are what is left of 0.14.
 | Fact | Read by | After |
 |---|---|---|
 | Policy revision (newest `policy.change` seq) | every authenticated request, every use that carries an app token, token issue, bind, revoke: 11 reads in SQL, 5 in TypeScript | no row: the newest change's number of the roles object and of the policy object (section 3) |
-| Policy content (protected environments, roles) | every vault decision, `GET /api/me` | `environments.protected`, `roles`: exist, sealed, not yet read |
+| Policy content (protected environments, roles) | every vault decision, `GET /api/me` | the `policy` row's list (section 3) and `roles`: sealed rows |
 | Instance settings | sign-in, `/api/me`, decisions | `settings`, new |
 | A member's access revision | every use, key write, member add | no row: `principals.seal` already says it |
 | App key retired, vault key in force | sign-in, token issue, bind, every decision | `log_keys`, new |
@@ -102,6 +102,10 @@ CREATE TABLE log_keys (                 -- every key the app or the vault has wr
   seal bytea CHECK (octet_length(seal) = 16),             -- null as the settings'
   PRIMARY KEY (holder, key_id)
 );
+ALTER TABLE policy                      -- the protected set, whole, beside the cap (section 3): three aligned lists
+  ADD COLUMN protected uuid[] NOT NULL DEFAULT '{}',            -- the environments' ids, with a row or not yet
+  ADD COLUMN protected_projects uuid[] NOT NULL DEFAULT '{}',   -- each one's project
+  ADD COLUMN protected_at bigint[] NOT NULL DEFAULT '{}';       -- when each was protected, ms
 ALTER TABLE principals DROP COLUMN access_seq, DROP COLUMN mac;   -- 0.14's pointer into audit_log and its row MAC
 -- secret_references.created_seq loses its foreign key to audit_log and stays, as the number that orders a key's
 -- references. The chain's sequence moves past the old log's last seq, so a new reference sorts after every old one:
@@ -244,9 +248,9 @@ either.
 
 So no audited read gains a vault call but the plain proxy use, and that one goes if the use statement writes the use
 row for a plain key too, which is open with V2a. The other requests that gain one are those the app refuses on its
-own, and each trades four round trips under a global lock for one under none. Nothing cheaper is safe there: the entry cannot ride
-the caller's check, which comes before the decision, and an entry the app signed with its own key would be a second
-chain, which is what `audit_log` is.
+own, and each trades four round trips under a global lock for one under none. Nothing cheaper is safe there: the entry
+cannot ride the caller's check, which comes before the decision, and an entry the app signed with its own key would be
+a second chain, which is what `audit_log` is.
 
 **A change carries its entry.** A change's payload says what the object became, not what the page prints. A key's
 change is `secret.write` or `secret.delete` with a version id and a nature. The 0.14 entry beside it said
@@ -254,9 +258,8 @@ change is `secret.write` or `secret.delete` with a version id and a nature. The 
 which the page's sentence is made of (`packages/ui/src/lib/audit-sentences.ts`). Once A1 stops writing those entries,
 a sensitive value made readable would list as a plain write. Of the 37 sites whose entry has a change beside it, 22
 lose the action or a detail that way, and all 37 lose what stands beside the detail: the trace (`credentialId`, `via`,
-`confirmedBy`), the `operationId` that folds a 12-key write into one line, who decided, and the kind and label of a
-token that `originsOf` labels its later acts with. So the entry rides whole in the change that records the same act,
-under the vault's MAC:
+`confirmedBy`), the `operationId` that folds a 12-key write into one line, and who decided. So the entry rides whole
+in the change that records the same act, under the vault's MAC:
 
 - *The entry is an event's input without its id.* `ObjectChange` gains `entry`: a `NoteInput` less `id`, which the
   change's own identity serves, or `null`. That is the object the site hands `appendAudit` today, so converting a site
@@ -277,13 +280,16 @@ under the vault's MAC:
   `{"op":"credential.revoke",`). `reported` sorts after `op`, so no start moves. Each record is also known by text its
   payload holds (`"inputs":"`, `"signIn":{`), which a `detail` could hold by chance, so until P2 the carrier refuses a
   `detail` whose encoding holds one of those texts; that check is deleted with `RECORDS`.
+- *A fact the change's own record states is not repeated.* A token's kind and label are in the vault's `issue` record
+  of the same payload, and a sign-in's run in `signIn`. The projector reads them there for the page's line, as
+  `originsOf` reads a credential's origin there already, and the entry's detail leaves them out.
 - *The vault holds the action to the op.* A fixed map beside `Op` (`packages/vault/src/inputs.ts`) lists the actions
   each op's change may carry: a `secret.delete` carries `secret.archive` or `secret.reset` and nothing else, a
   `secret.write` carries `secret.write`, `secret.loosen` or `secret.restore`, and A1's list of its sites fills the
   rest. An op the map does not name carries nothing, and `prepare` refuses the whole call for an action outside it. So
   the page cannot name an act the object did not undergo. The rest of the entry is the app's word, as an event's is,
   and `author` says so.
-- *No line is inferred from an op.* A change with no entry shows only where main's page shows it today, the seven
+- *No line is inferred from an op.* A change with no entry shows only where main's page shows it today, the eight
   records of the vault's own changes (a sign-in, an issue, a revoke, a sign-out, a two-trip write or add, either's
   refusal), by the same rules before the upgrade and after. Any other lists nothing. Otherwise the page gains lines no
   entry wrote: a sign-in's revokes of the credentials it replaces would each read as a sign-out. The chain still holds
@@ -295,7 +301,8 @@ under the vault's MAC:
   id, its configs' and keys' deletions silent; a swept credential's revoke silent under the binding's change. Where
   the act has no object (a project archived or deleted is N environment changes), the first change of the call as the
   site hands them, which the commit numbers lowest: the choice is made at `prepare`, since the entry is under the MAC.
-  A protect over N environments is one `policy.change`, on the policy object's change (below).
+  A protect, of however many environments, is one change of the policy object, which carries its `policy.change`
+  (below).
 - *One change carries one entry.* `audit_events` has one row per row of the chain (its key holds the chain's number),
   so the field is not a list. The one case of two today is a key revived and written in one change (`secret.unarchive`
   beside `secret.write`): the write carries one entry, whose detail says `unarchived: true`, and the page's sentence
@@ -486,33 +493,46 @@ back with the old row (#573, `TodayPolicyOnLog`). The re-read of the protected e
 (one renamed or deleted) stays as it is, and `issue_token`, `change_bindings` and `revoke_credential` take the two
 numbers where they took `p_policy_seq`.
 
-Today's one number covers a protection because every protect writes a `policy.change`. The same rule holds after,
-stated on the set: **the protected set changes only in the vault's protect decision, and that decision changes the
-policy object whenever the set changes, rows or no rows**, the condition under which it appends `policy.change` today.
-Ada's caller is loaded while `prod` is unprotected, an Owner protects `prod`, and Ada's key write to `prod` then finds
-the policy object's number moved: 409 `policy_changed`, as today. An environment created protected is no writer of the
-set: it copies `protected` from the policy its caller was loaded with (`protectedFor`), under the same re-check, and
-touches nothing. The model holds a narrower digest per write (the roles, the policy row and the written environment's
-protection, `WritingDigest`); one number for every protection compares more often than that, never less, and no route
-has a set of environments to remember.
+**The protected set is the policy's, one list on its row.** Main keeps protection twice. The policy's list (the ids in
+the newest `policy.change` entry) is what the app's decisions and most of the vault's read (`protects`). Each
+environment's `protected` flag, under the row's seal, is what 0.15's use and key write read (`readerOf`,
+`write_inputs`). The vault's protect writes both. The first draft of this document made the flag the one truth, and
+three things have no answer there. An id protected before its row exists has no row to hold it: a fork's is protected
+one call before its row is written. A creation would decide its own protection, since `prepare` signs the flag as the
+app sends it. And a protect would move neither of the two numbers above. So the set is one list, on the `policy` row
+beside the cap: each protected id with its project and the time it was protected, as the entry holds them today, in
+three aligned arrays (section 2). Every decision reads it there: the app's with the caller, the use and the key write
+from the policy row they already read for the cap. It is derived where it is shown, never kept twice in step.
 
-The policy's change is a new op, `policy.protect`, carrying the whole policy as its value as `bulk.limit` does: the
-use and the bulk prune read the cap from the policy's newest change whatever its op. It is not always the same value
-written again. A fork's id is protected one call before its row is written (`access.ts`: an id with no row after a
-short time is a fork abandoned, and read past), so the set holds ids with no row, which `environments.protected`
-cannot. Those live in the policy's row, as they live in the `policy.change` entry today: three aligned arrays no SQL
-reads (`ahead_environments`, `ahead_projects`, `ahead_at`), which the next protect decision prunes of ids that have a
-row or are past their time. So a protect of an id with no row is a real change of that row, and a protect of
-environments with rows writes their rows and the policy's value unchanged. One test per path: protect, unprotect, a
-protect of an id with no row, and a creation as protected, which must touch nothing. The change carries the
-`policy.change` entry (above), from the PR that deletes the vault's append of it to `audit_log`, not before. It is
-built with the carrier, and A1's two numbers stack on it.
+What follows from that. A protect or an unprotect is a real change of the policy's row, a new op, `policy.protect`,
+carrying the whole policy as its value as `bulk.limit` does. So the policy's number moves by itself, in the one
+decision that changes the set. Ada's caller is loaded while `prod` is unprotected, an Owner protects `prod`, and Ada's
+key write to `prod` then finds the policy's number moved: 409 `policy_changed`, as today. A creation decides nothing
+and touches nothing: an environment is protected when the list holds its id. `environment.protect` is no longer
+written. `'*'` (`EVERY_ENVIRONMENT`) is never stored: it is what the vault answers when it cannot read its policy
+(`CLOSED_POLICY`), as today. The list holds ids and not slugs, as main's does: the policy's reader joins each id's row
+for its slug and project (`livePolicy`), so the re-read of the loaded set and the issue lock a rename of a protected
+environment takes stay exactly as they are. The model holds a narrower digest per write (the roles, the policy row and
+the written environment's protection, `WritingDigest`); one number for every protection compares more often than that,
+never less, and no route has a set of environments to remember.
 
-Under L1 a protect then locks the policy object and its environments exclusive in one statement, in key order after
-the fence, as any change of several objects does; for an id with no row it locks the policy object alone, as a change
-of the cap does. Every use holds the policy object shared for its cap, so a protect excludes uses for its last
-statement, as a settings change does. Checked on the lock model: with the policy's change writing an environment's
-object too, `ChangeLocks` holds (429,906 states) and breaks `NoWaitCycle` with the two taken out of key order.
+An environment's `protected` column stays, frozen. Every seal since the cutover covers that field, and dropping it
+from the object would seal every environment again and give the replay two mappings. After V2b nothing reads it but to
+check the row's seal, a new row has it `false`, and the pages derive what they show from the policy, as they do today
+(`protectedFor`). It goes when environments are next sealed again.
+
+The upgrade fills the list as it fills the settings. The migration takes it from the newest `policy.change` entry and
+leaves out an id with no live row: with the app off its route no fork is in flight. The vault's step checks it against
+that signed entry and against the flags of the live environments, which must agree, and writes the policy's change,
+the one existing object 0.16 seals again. One test per path: protect, unprotect, a protect of an id with no row, and a
+creation, which must touch nothing. That change carries the `policy.change` entry (above), from the PR that deletes
+the vault's append of it to `audit_log`, not before. It is built with the carrier, and A1's two numbers stack on it.
+
+Under L1 a protect locks the policy object alone, exclusive, as a change of the cap does. Every use holds it shared,
+so a protect excludes uses for its last statement, and `ChangeLocks`' policy change is its scenario already: no model
+changes. What a use pays is the list in the policy row, 16 bytes an id, read when its copy of the policy is not
+cached, and a lookup in it; V2a measures it. A protect's change holds the whole policy, so its payload grows with the
+set, as the `policy.change` entry's does today.
 
 **Locks after.** `audit_chain_head`, the reads under it, the 0.14 appends and the queued read head are deleted; one
 advisory lock statement stays in multi-statement changes. The head did two jobs and only the first dies with the last
@@ -597,7 +617,7 @@ finds a leaf missing. A fact in a sealed row is as safe as a fact in the log, an
 |---|---|---|---|---|
 | Settings | `settings` | seal differs from its newest change's | no row but a change in the log: refused | the vault, on the request that reads it |
 | Keys in force and retired | `log_keys` | the same | the same | the vault, at sign-in, issue and bind |
-| Protected, roles, the cap | `environments`, `roles`, `policy` | the same | the same | the vault, on every use and decision (already so) |
+| Protected, roles, the cap | `policy`, `roles` | the same | the same | the vault, on every use and decision (already so) |
 | Access revision | none | `principals.seal` | the same | already so; the read of `audit_log` only guarded against 0.14 writers, and none is left |
 | Binding removed, reference ended, revoked | their rows | the flag is inside the sealed object (`objects.ts`: `revoked`, `ended`) | the same | the vault, on every use |
 | What the pages list | the projections | a row's `mac` fails when the page shows it | the cursor's MAC covers how far it went; a row deleted behind it is the recheck's to find | the vault on every visit; the Verify button and `coffre verify log` |
@@ -608,11 +628,12 @@ finds a leaf missing. A fact in a sealed row is as safe as a fact in the log, an
    witnessed, and every earlier read has a smaller number, so every read is inside. Before that the report says
    `behind`, as today. The summary row is written with the event, and its time only rises.
 2. *Flags must be inside the seal.* They are: `revoked` for credentials, connections and bindings, `ended` for a
-   reference under its holder's key, `protected` and both archivals for an environment. This design adds no flag
-   outside a sealed object.
+   reference under its holder's key, both archivals for an environment, and the protected set in the policy's
+   object. This design adds no flag outside a sealed object.
 3. *Objects made before the upgrade need a first change to seal against.* 0.15.0's cutover wrote one for every
    existing object. 0.16 adds two kinds, the settings and each key, and the vault writes their first change in its
-   upgrade step (section 6). No existing object changes what its seal covers, so nothing is sealed again.
+   upgrade step (section 6). One existing object changes what its seal covers, the policy, which gains the
+   protected set; the step writes its change. Nothing else is sealed again.
 
 **What a visit's check catches.** For a database writer with no key:
 
@@ -684,19 +705,20 @@ tests and the `Reads.tla` scenario. Lost: its table, triggers and migration, whi
    deploy brings the trigger back, as redeploying 0.15.0 does on a rollback.
 2. **`coffre migrate`**, as the owner, one migration. It refuses a database that is not a cut-over 0.15.0 (no cutover
    change in `log_changes`, or a schema past 0049 that is not 0.16's). In SQL it creates the tables; fills `settings`
-   and `log_keys` from the newest entries, unsealed; drops the indexes, triggers, functions and tables of section 5;
-   revokes INSERT on `audit_log`. It copies nothing into the projections. 0.15.0's code cannot run on the result: the
-   functions it calls are gone or changed, and a row it writes directly has no seal, which the vault refuses.
+   and `log_keys` from the newest entries, unsealed, and the policy's protected set (section 3); drops the indexes,
+   triggers, functions and tables of section 5; revokes INSERT on `audit_log`. It copies nothing into the projections.
+   0.15.0's code cannot run on the result: the functions it calls are gone or changed, and a row it writes directly
+   has no seal, which the vault refuses.
 3. **Deploy 0.16.**
-4. **The vault's step**, on its first call, while the app answers 503 `upgrading` at its one door. It is the same
-   size whatever the log holds. The vault cannot read the watch's store, so the app reads it at the door and hands
-   the checkpoint it holds in on the call that runs the step; the vault verifies its own signature on it and
-   requires the log to hold that entry at that hash. It checks the old chain from there to its last entry, as
-   0.15.0's own check does between beats: the app its entries' MACs, the vault its own, and the hashes that link
-   them. That is one beat's entries, 10,000 a call at most. It writes the change that names the chain's final seq
-   and hash, the **anchor** the old log answers to from then on. It checks the settings' and keys' rows
-   against the signed entries they came from and writes each one's first change and seal. It signs the cursor at
-   the anchor, writes the change that marks the upgrade done, and the door opens.
+4. **The vault's step**, on its first call, while the app answers 503 `upgrading` at its one door. It is the same size
+   whatever the log holds. The vault cannot read the watch's store, so the app reads it at the door and hands the
+   checkpoint it holds in on the call that runs the step; the vault verifies its own signature on it and requires the
+   log to hold that entry at that hash. It checks the old chain from there to its last entry, as 0.15.0's own check
+   does between beats: the app its entries' MACs, the vault its own, and the hashes that link them. That is one beat's
+   entries, 10,000 a call at most. It writes the change that names the chain's final seq and hash, the **anchor** the
+   old log answers to from then on. It checks the settings' and keys' rows and the policy's protected set against the
+   signed entries they came from and writes each one's change and seal. It signs the cursor at the anchor, writes the
+   change that marks the upgrade done, and the door opens.
 
 **The projector lists the old log; the migration does not.** From the anchor it walks `audit_log` backward, 5,000
 entries a batch. An entry's hash covers its content and the hash before it (`entryHash`), so each batch is
