@@ -29,6 +29,23 @@
   sessions page (`/account/sessions`) read every one of your credentials
   twice, once for your sessions and once for your personal tokens; each
   list now reads its own.
+- **`coffre run` and `coffre export` say how long a person's handle really
+  lasts, and how to end it.** `run` said "the handle lasts until <local time>
+  (`coffre tokens` lists it)", but it revokes its handle when its command
+  ends, so a person who looked afterwards found it gone and believed a 12-hour
+  handle was loose and could not be revoked. Now `run` says the handle ends
+  with the command, by its expiry at the latest (UTC, ISO). If the revoke at
+  exit fails or gets no answer in 3 s, `run` says on stderr that it could not
+  confirm it, with the handle's id and how to end it: `coffre --url <instance>
+  tokens revoke <id> --apply`, which ends a handle as it ends a personal token,
+  for a session (a personal token manages no token, and `coffre login` would
+  replace its saved login: the message points it to Personal tokens on the
+  account's Sessions page instead, which an instance behind Cloudflare Access
+  leaves out). A handle already ended by hand when the command exits (the
+  server's own "unknown credential" 404) is not reported; any other 404, a
+  proxy's or an older server's, stays unconfirmed. `export`'s handle outlives its
+  command: it says the handle lasts until its expiry (UTC) and gives the same
+  command. Messages and help only.
 - **`coffre run` and `coffre export --help` say that a person gets
   placeholders, not values.** Where the deployment has the credential proxy, a
   person's `run` and `export` write handles, which a request through

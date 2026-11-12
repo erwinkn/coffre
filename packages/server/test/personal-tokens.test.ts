@@ -388,6 +388,17 @@ test("a run ends its own handle, on a personal token too: a handle of the caller
   assert.equal(await revokedAt(pat.id), null);
 });
 
+test("a handle outlives a run that failed to end it, and its person lists it and ends it as a personal token: `coffre tokens`, `coffre tokens revoke <id>`", async () => {
+  const revokedAt = async (id: string) => (await db.owner.select({ revokedAt: credentials.revokedAt }).from(credentials).where(eq(credentials.id, id)))[0]!.revokedAt;
+  const handle = await ada.handles.create({ label: 'coffre run', paths: ['market/dev'] });
+  assert.ok((await ada.tokens.list(ADA)).tokens.some((token) => token.id === handle.id && token.label === 'coffre run'));
+  await ada.tokens.revoke(ADA, handle.id);
+  assert.notEqual(await revokedAt(handle.id), null);
+  assert.ok(!(await ada.tokens.list(ADA)).tokens.some((token) => token.id === handle.id));
+  // A handle ended by hand is a refusal the CLI knows by its reason, not its words: `coffre run` counts it as ended.
+  await assert.rejects(ada.handles.revoke(handle.id), { status: 404, code: 'not_found', reason: 'unknown_credential' });
+});
+
 test('a personal token is a bearer token alone: planted in the session cookie it is no session, and it links no sign-in account', async () => {
   const issued = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   const cookie = createClient({

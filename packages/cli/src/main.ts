@@ -1422,7 +1422,7 @@ function readOrEnd(paths: readonly string[], only: Map<string, string[]> | null 
  * environment, what the proxy left out, and what this run made of the
  * person's own, by personal config.
  */
-type Placeholders = { env: Record<string, string>; left: string[]; credentials: string[]; given: string[]; expiresAt: string; tunnels: Tunnel[]; handle: string; made: [string, string[]][]; revoke: () => Promise<void> };
+type Placeholders = { env: Record<string, string>; left: string[]; credentials: string[]; given: string[]; expiresAt: string; tunnels: Tunnel[]; handle: string; handleId: string; made: [string, string[]][]; revoke: () => Promise<void> };
 
 /** A plan, `GET /use/<project>/<env>`: what the app gets, and what this run is to make of the person's own. */
 type Plan = { env: Record<string, string>; credentials: Record<string, string>; tunnels?: Record<string, Tunnel>; left: string[]; generate?: Record<string, { recipe: string; replaces: string; sensitivity?: 'secret' }> };
@@ -1494,10 +1494,19 @@ async function placeholders(paths: readonly string[], to: Target = target()): Pr
     expiresAt: handle.expiresAt,
     tunnels: plans.flatMap(([, plan]) => tunnelsOf(plan)),
     handle: handle.token,
+    handleId: handle.id,
     made,
-    // A run's handle ends with its command (`run`): no app it started holds it after. Asked quietly: a refusal, or an
-    // instance out of reach, leaves the handle to end by itself.
-    revoke: async () => void (await createClient({ url: to.origin, headers: () => headersFor(to), transport: once }).handles.revoke(handle.id)),
+    // A run's handle ends with its command (`run`): no app it started holds it after. A refusal, or an instance out of
+    // reach, is the caller's to report (`ended`), which says the handle may work until its expiry. Only the server's own
+    // `unknown_credential` refusal is a handle already ended, by hand on the Sessions page, say: nothing left to end. Any other
+    // 404 (a proxy that refuses DELETE, an older server without the route) leaves it unconfirmed.
+    revoke: async () => {
+      try {
+        await createClient({ url: to.origin, headers: () => headersFor(to), transport: once }).handles.revoke(handle.id);
+      } catch (error) {
+        if (!(error instanceof CoffreError && error.status === 404 && error.code === 'not_found' && error.reason === 'unknown_credential')) throw error;
+      }
+    },
   };
 }
 
@@ -1511,10 +1520,29 @@ async function proxied(to: Target): Promise<boolean> {
   return true;
 }
 
-/** What `run` and `export` say of a person's placeholders, on stderr: what the app holds, and what it does without. */
-function sayPlaceholders(placed: Placeholders, paths: readonly string[], to: Target): void {
+/**
+ * How a person ends a handle that outlived its command: `coffre tokens revoke` ends it as it ends a personal token
+ * (without --apply it only says what it would end), on the instance it was made on, and for a session alone: a
+ * personal token manages no token, so its holder ends the handle on the Sessions page of the account, which leaves the saved login
+ * as it is (`coffre login` would replace it).
+ */
+function endingHandle(placed: Placeholders, to: Target): string {
+  const revoke = `\`coffre --url ${to.origin} tokens revoke ${placed.handleId} --apply\``;
+  return to.credential.kind === 'token' && to.credential.token.startsWith('coffre_pat_') ? `a personal token cannot end it: end it under Personal tokens on ${to.origin}/account/sessions (a page an instance behind Cloudflare Access leaves out), or after \`coffre login ${to.origin}\` (which replaces the saved token) with ${revoke}` : `${revoke} ends it`;
+}
+
+/**
+ * What `run` and `export` say of a person's placeholders, on stderr: what the app holds, and what it does without.
+ * A run's handle ends with its command, at the latest at its expiry; an export's outlives the command, to its
+ * expiry, unless revoked. The expiry is UTC, as `coffre tokens` shows a personal token's.
+ */
+function sayPlaceholders(placed: Placeholders, paths: readonly string[], to: Target, by: 'run' | 'export'): void {
+  const expiry = new Date(placed.expiresAt).toISOString();
   const lines = [
-    `coffre: placeholders for ${listOf(paths)}: ${placed.credentials.length === 0 ? 'no credential the proxy covers' : `${placed.credentials.join(', ')} through ${to.origin}/use`}; the handle lasts until ${new Date(placed.expiresAt).toLocaleString()} (\`coffre tokens\` lists it)`,
+    `coffre: placeholders for ${listOf(paths)}: ${placed.credentials.length === 0 ? 'no credential the proxy covers' : `${placed.credentials.join(', ')} through ${to.origin}/use`}; ` +
+      (by === 'run'
+        ? `the handle ends with the command, by ${expiry} at the latest`
+        : `the handle ${placed.handleId} lasts until ${expiry}, past this command: ${endingHandle(placed, to)}`),
     ...placed.made.map(([mine, keys]) => `coffre: made your own ${keys.join(', ')} in ${mine}, each by its recipe: your next runs use them`),
     ...(placed.given.length === 0 ? [] : [`coffre: values as they are, which you may read: ${placed.given.join(', ')}`]),
     ...(placed.tunnels.length === 0 ? [] : [`coffre: ${placed.tunnels.map((tunnel) => tunnel.key).join(', ')} through a tunnel to its database, on 127.0.0.1`]),
@@ -1556,7 +1584,7 @@ async function run(args: string[]): Promise<void> {
   const paths = bound?.places ?? environmentPaths(positionals);
   // A person's app gets placeholders, where the instance has the proxy; a service account, the values.
   const placed = bound === null ? await placeholders(paths) : null;
-  if (placed !== null) sayPlaceholders(placed, paths, to);
+  if (placed !== null) sayPlaceholders(placed, paths, to, 'run');
   const values = bound?.env ?? placed?.env ?? Object.fromEntries(await readOrEnd(paths));
   // Each database the app reaches through a tunnel: a listener of this run's, for as long as its command runs.
   for (const tunnel of placed?.tunnels ?? []) {
@@ -1584,12 +1612,25 @@ async function run(args: string[]): Promise<void> {
   const passOn = (signal: NodeJS.Signals) => () => void child.kill(signal);
   const handlers = { SIGINT: () => undefined, SIGTERM: passOn('SIGTERM'), SIGHUP: passOn('SIGHUP') } as const;
   for (const [signal, handler] of Object.entries(handlers)) process.on(signal, handler);
-  /** Its handle revoked, or its key-bound session logged out, a few seconds at most, and then `then`: offline, either ends by itself, at its expiry. */
+  /**
+   * Its handle revoked, or its key-bound session logged out, a few seconds at most, and then `then`: offline, either
+   * ends by itself, at its expiry. A handle not revoked in time is said, with how to end it: `coffre tokens` lists it
+   * from then on, as it would not had the revoke gone through.
+   */
   const ended = (then: () => void) => {
     for (const [name, handler] of Object.entries(handlers)) process.off(name, handler);
     const ending = placed?.revoke() ?? bound?.close();
-    const revoked = ending === undefined ? Promise.resolve() : Promise.race([ending.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 3000).unref())]);
-    void revoked.then(then);
+    const revoked =
+      ending === undefined
+        ? Promise.resolve(true)
+        : Promise.race([ending.then(() => true, () => false), new Promise<boolean>((resolve) => setTimeout(resolve, 3000, false).unref())]);
+    void revoked.then((done) => {
+      // A command that outlived its handle left nothing to end: the handle expired by itself.
+      if (!done && placed !== null && Date.parse(placed.expiresAt) > Date.now()) {
+        process.stderr.write(`coffre: the handle ${placed.handleId} of this run could not be confirmed ended: it may work until ${new Date(placed.expiresAt).toISOString()}; ${endingHandle(placed, to)}\n`);
+      }
+      then();
+    });
   };
   child.on('error', (error) => ended(() => fail(`failed to run ${command[0]}: ${error.message}`)));
   child.on('exit', (code, signal) =>
@@ -1677,7 +1718,7 @@ async function exportEnv(args: string[]): Promise<void> {
   hijacks(only === null ? [] : [...only.values()].flat());
   // GitHub's environment is a CI run's, which a service account signs in for.
   const placed = format === 'github' ? null : await placeholders(paths);
-  if (placed !== null) sayPlaceholders(placed, paths, target());
+  if (placed !== null) sayPlaceholders(placed, paths, target(), 'export');
   if (placed !== null && placed.tunnels.length > 0) {
     process.stderr.write(`coffre: left out of the export: ${placed.tunnels.map((tunnel) => tunnel.key).join(', ')}, whose tunnel lives only as long as \`coffre run\`\n`);
   }
