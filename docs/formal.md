@@ -685,7 +685,7 @@ caller sees none of it. `packages/vault/test/use-named.test.ts` holds the
 vault's, `packages/server/test/named-reveal.test.ts` and
 `proxy-handle-check.test.ts` the app's. The model's claim is held, cell by
 cell, by two generated matrices, which a reviewer need not sample:
-`packages/vault/test/use.matrix.ts` (both engines: a key's eight states,
+`packages/vault/test/use.matrix.ts` (a key's eight states,
 a reference's and a row put back's among them, in every row of what the
 isolate's map holds, how they lost their standing or kept it, the place,
 the request's admission and the cap's window, each cell its own world, on
@@ -694,8 +694,8 @@ every key they may not have, the same answer, the same number of the
 vault's calls, no row of the cap's, and its request's entry only where its
 key's row of the cap's is fresh) and `packages/server/test/named.matrix.ts`
 (the same through the app, by the API and the proxy, byte for byte); and,
-at a fork and at `dev@me`, `packages/vault/test/forks.matrix.ts` (both
-engines: the place, a fork, a fork of a fork, her personal config or dev
+at a fork and at `dev@me`, `packages/vault/test/forks.matrix.ts` (the
+place, a fork, a fork of a fork, her personal config or dev
 read for `dev@me`, by how she lost her standing, at the place or at the
 parent, the map and the window, over eight key states, its own, inherited,
 made since, removed, deleted, never made, a reference ended, a row put
@@ -705,8 +705,7 @@ the load itself (busy is a choice of TLC's, the same in both runs, as
 admission reads nothing a request names; so is a lock held on Ada's
 principal), the calls' own costs (each call, one statement, costs the same
 whatever it reads; inside one, the statement may run another form, a
-reference's whole one or a probe after a cached read, as SQLite's twin
-runs other statements for other keys in its writer's turn), and every
+reference's whole one or a probe after a cached read), and every
 other refusal, which reads no key.
 
 ### Naming.tla
@@ -748,8 +747,8 @@ use a key both answer a request of several keys.
 | The second call is made only once the vault allowed every key of the batch on the first call's rows (`useMany`, AllDecidedFirst) | the same, for a batch whose one key the rules refuse (`NoLockForRefused`, `RefusedEntersNothing`, `BatchingRefused`) |
 | Values leave only when every key of the batch is allowed (`useMany`; the app's `useValues`) | a batch hands back its allowed key beside one refused (`AllOrNothing`, `BatchingRefused`) |
 
-The tests hold the code to it: `packages/vault/test/use-many.test.ts`, on
-both engines, each case put back without its protection to check it
+The tests hold the code to it: `packages/vault/test/use-many.test.ts`, each
+case put back without its protection to check it
 fails: two batches through the principal's lock held elsewhere (without
 the exclusive lock first, Postgres's 40P01 after a second), a batch over
 the cap, a batch refused on its first call's rows, a key the rules refuse.
@@ -803,8 +802,8 @@ each place.
 | A key goes by the ids the map holds only when they are the ones the statement resolves its name to now (`v_by`: the gate's credential, the key, through the place for one inherited; its value sealed) | a key the fork removed since, its parent's ids still mapped, used through the fork and handed back (`OnlyUsable`, `ProbingManyFork`, `ProbingManyMine`) |
 
 The tests hold the code to it: `packages/vault/test/use-named-many.test.ts`
-(both engines; on Postgres, the statements each form costs), the generated
-`packages/vault/test/many.matrix.ts` (both engines: mixed batches of two,
+(with the statements each form costs), the generated
+`packages/vault/test/many.matrix.ts` (mixed batches of two,
 named or every key, at each place, by how she lost her standing, the map
 and the window, over each key's states; without standing, the same answer,
 calls and key-table blocks for every batch), the pair and whole-place rows
@@ -3022,12 +3021,10 @@ statement checks too but which a removal makes moot by revoking `cA` under
 the lock. Each of the app's issues as a process of its own: `app` stands
 for them all (a browser session at sign-in, a CLI session at its poll, an
 MCP connection, a device decision), whose checks under the head are held
-by tests on both engines (`passkey-check.test.ts`, `mcp-oauth.test.ts`).
+by tests (`passkey-check.test.ts`, `mcp-oauth.test.ts`).
 The requests whose credential the vault reads in its own call (a use by
 name, a key write, an add), which run the check in that call (T216;
-passkeys.md, section 6.2): `req` is one statement either way. SQLite,
-whose one writer serializes the change and every issue whole, so the
-interleavings cannot happen.
+passkeys.md, section 6.2): `req` is one statement either way.
 
 ## 0.16: the roles split
 

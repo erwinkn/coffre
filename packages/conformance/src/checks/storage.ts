@@ -11,7 +11,7 @@ export const TABLES = [
 /** Inspect every table, including any a deployment added. Missing shared tables fail. */
 export async function tables(sql: Sql): Promise<string[]> {
   const rows = await sql.query<{ name: string }>(
-    `SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`);
+    `SELECT table_name AS name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`, [sql.schema]);
   const names = rows.map((row) => row.name);
   const missing = TABLES.filter((name) => !names.includes(name));
   expect(missing.length === 0, 'shared tables could not be inspected', missing);

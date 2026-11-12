@@ -14,5 +14,5 @@ export async function scratch(t: test.TestContext): Promise<() => Promise<Sql>> 
   await using(postgres(DATABASE), (sql) => sql.exec(`CREATE SCHEMA ${schema}`));
   t.after(() => using(postgres(DATABASE), (sql) => sql.exec(`DROP SCHEMA ${schema} CASCADE`)));
   const url = `${DATABASE}?options=${encodeURIComponent(`-c search_path=${schema}`)}`;
-  return () => postgres(url);
+  return () => postgres(url, schema);
 }
