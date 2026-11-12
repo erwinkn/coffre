@@ -227,7 +227,8 @@ Each is marked `Coffre:` in the code:
 - **An idle connection holds no Node process open** (`idleTimer`, in
   `connection.ts`), as node-postgres's `allowExitOnIdle`: while it waits in
   the pool, its socket and its `idle_timeout` timer are unref'd, and taken
-  for a statement, its socket is ref'd again. A Node server that SIGTERM
+  for a statement, its socket is ref'd again; its `max_lifetime` timer is
+  always unref'd. A Node server that SIGTERM
   closed (srvx closes its listener and waits for the requests in flight)
   exits as soon as they are done, and a script or test file done with its
   queries exits at once. Upstream's idle sockets held the process open

@@ -39,7 +39,19 @@ test('a Node process done with its queries exits at once: its idle connections h
   const script = `
     const { postgresClient } = await import(${JSON.stringify(new URL('../src/postgres.ts', import.meta.url).href)});
     const client = postgresClient(${JSON.stringify(DATABASE)}, { max: 2, idle_timeout: 10 });
-    const answers = await Promise.all([client.unsafe('select pg_sleep(0.3), 1 as n'), client.unsafe('select pg_sleep(0.3), 2 as n')]);
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 50));
+    const round = (a, b) => Promise.all([client.unsafe(\`select pg_sleep(0.3), \${a} as n\`), client.unsafe(\`select pg_sleep(0.3), \${b} as n\`)]);
+    const answers = [...(await round(1, 2))];
+    // Both connections idle, unref'd: taken again, each holds the process open until its statement answers.
+    await pause();
+    answers.push(...(await round(3, 4)));
+    // A transaction's connection, between its statements, is not idle.
+    await pause();
+    answers.push([await client.begin(async (tx) => {
+      await tx.unsafe('select 1');
+      await pause();
+      return (await tx.unsafe('select pg_sleep(0.3), 5 as n'))[0];
+    })]);
     console.log(answers.map(([row]) => row.n).join(','));
   `;
   const started = performance.now();
@@ -49,7 +61,7 @@ test('a Node process done with its queries exits at once: its idle connections h
     ),
   );
   const seconds = (performance.now() - started) / 1000;
-  assert.equal(output.trim(), '1,2');
+  assert.equal(output.trim(), '1,2,3,4,5');
   assert.ok(seconds < 5, `the process exited ${seconds.toFixed(1)} s after it started, its two connections idle`);
 });
 

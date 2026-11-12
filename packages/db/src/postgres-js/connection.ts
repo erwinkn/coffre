@@ -375,7 +375,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
 
   function connected(): void {
     try {
-      lifeTimer.start();
+      // Coffre: unref'd too, as `idleTimer`: a busy connection's socket holds the process open, an idle one's nothing.
+      lifeTimer.start(true);
       socket!.on('data', data);
       if (keep_alive) socket!.setKeepAlive?.(true, 1000 * keep_alive);
       write(StartupMessage());
