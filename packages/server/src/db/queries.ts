@@ -1782,14 +1782,13 @@ export async function serviceSignIns(
   now: Date,
   read: { tokens: boolean; bindings: boolean },
 ): Promise<{ credentials: CredentialRow[]; bindings: BindingRow[] }> {
-  const { credentials, serviceBindings } = tablesOf(db);
   const [held, bound] = await Promise.all([
     read.tokens
       ? db.select().from(credentials).where(and(like(credentials.principal, 'token:%'), isNull(credentials.revokedAt), gt(credentials.expiresAt, now)))
       : [],
     read.bindings
       ? db.select().from(serviceBindings)
-        .where(and(like(serviceBindings.principal, 'token:%'), isNull(serviceBindings.revokedAt), not(hasTombstone(db, sql`CAST(${serviceBindings.id} AS text)`))))
+        .where(and(like(serviceBindings.principal, 'token:%'), isNull(serviceBindings.revokedAt), not(hasTombstone(sql`CAST(${serviceBindings.id} AS text)`))))
         .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id))
       : [],
   ]);
