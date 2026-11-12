@@ -124,6 +124,11 @@ test('bump leaves release notes without an Unreleased heading, or none, as they 
 // Action's own coffre.mjs, runs `cli`, a bash script given its arguments.
 const ACTION_PATH = '/actions/coffre/action';
 
+// GitHub's `shell: bash` (`bash --noprofile --norc -e -o pipefail {0}`). Without --noprofile and --norc, bash
+// takes the socket Node gives it for stdin as a remote shell and reads the host's ~/.bashrc, whose output would
+// land in the stderr these tests match exactly.
+const BASH = ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c'];
+
 function action(dir, cli, version = 0) {
     const bin = join(dir, 'bin');
     mkdirSync(bin, { recursive: true });
@@ -141,13 +146,13 @@ ${cli}`, { mode: 0o755 });
 test('the Action refuses a missing or unsupported Node before the CLI runs, with a clear minimum', (t) => {
     const dir = checkout(t);
     const { shell, bin } = action(dir, 'echo cli-must-not-run', 1);
-    const ran = spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: bin, GITHUB_ACTION_PATH: ACTION_PATH }, timeout: 10_000 });
+    const ran = spawnSync('/bin/bash', [...BASH, shell], { encoding: 'utf8', env: { PATH: bin, GITHUB_ACTION_PATH: ACTION_PATH }, timeout: 10_000 });
     assert.equal(ran.status, 1);
     assert.match(ran.stderr, /^::error::coffre requires Node.js 20 or newer\. Set up your job toolchain before this Action\.\n$/);
     assert.doesNotMatch(ran.stdout, /cli-must-not-run/);
     const none = join(dir, 'none');
     mkdirSync(none);
-    const missing = spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { PATH: none }, timeout: 10_000 });
+    const missing = spawnSync('/bin/bash', [...BASH, shell], { encoding: 'utf8', env: { PATH: none }, timeout: 10_000 });
     assert.equal(missing.status, 1);
     assert.match(missing.stderr, /^::error::coffre requires Node.js 20 or newer\. Set up your job toolchain before this Action\.\n$/);
 });
@@ -158,7 +163,7 @@ test('the Action takes one of a token or a service, and a service only with the 
     const { shell, env: runner } = action(dir, `echo "$HOME" >> '${join(dir, 'homes')}'\ntouch "$HOME/session"\necho "coffre ran with: $*"\necho "stdin: $(cat)"\n`);
     // As GitHub passes them, a default included.
     const inputs = { INPUT_URL: 'https://coffre.example.com', INPUT_ENVIRONMENT: 'app/ci', INPUT_KEYS: 'DATABASE_URL STRIPE_*', INPUT_REQUIRE_COMPLETE: 'false' };
-    const run = (env) => spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: { ...runner, ...inputs, ...env }, timeout: 10_000 });
+    const run = (env) => spawnSync('/bin/bash', [...BASH, shell], { encoding: 'utf8', env: { ...runner, ...inputs, ...env }, timeout: 10_000 });
     for (const env of [{}, { INPUT_TOKEN: 'coffre_svc_x', INPUT_SERVICE: 'token:api-deploy' }]) {
         const ran = run(env);
         assert.equal(ran.status, 1);
@@ -185,7 +190,7 @@ test('the Action takes one of a token or a service, and a service only with the 
     assert.equal(several.stdout, `coffre ran with: --url https://coffre.example.com --service token:api-deploy --verbose export --format github --keys=DATABASE_URL STRIPE_* deploy/prod auth/prod www/prod\nstdin: \n`);
     // The keys, by spaces or lines too, go to the CLI as one argument, unexpanded: STRIPE_* is no file glob.
     writeFileSync(join(dir, 'STRIPE_KEY'), '');
-    const lines = spawnSync('/bin/bash', ['-e', '-c', shell], { cwd: dir, encoding: 'utf8', env: { ...runner, ...inputs, INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_KEYS: 'STRIPE_*\n--format\n' }, timeout: 10_000 });
+    const lines = spawnSync('/bin/bash', [...BASH, shell], { cwd: dir, encoding: 'utf8', env: { ...runner, ...inputs, INPUT_SERVICE: 'token:api-deploy', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://runner.example/token', INPUT_KEYS: 'STRIPE_*\n--format\n' }, timeout: 10_000 });
     assert.equal(lines.status, 0, lines.stderr);
     assert.equal(lines.stdout, `coffre ran with: --url https://coffre.example.com --service token:api-deploy --verbose export --format github --keys=STRIPE_*\n--format\n app/ci\nstdin: \n`);
     // Each step's CLI had a home of its own, not the runner user's, and it went with the step.
@@ -203,7 +208,7 @@ test('the Action needs the workflow to name the keys it exports, and stops befor
     // Left out, GitHub passes it empty; a YAML block of blank lines is as empty.
     for (const keys of [undefined, '', ' \n\n']) {
         const env = { ...runner, INPUT_URL: 'https://coffre.example.com', INPUT_TOKEN: 'coffre_svc_x', INPUT_ENVIRONMENT: 'app/ci', INPUT_REQUIRE_COMPLETE: 'true' };
-        const ran = spawnSync('/bin/bash', ['-e', '-c', shell], { encoding: 'utf8', env: keys === undefined ? env : { ...env, INPUT_KEYS: keys }, timeout: 10_000 });
+        const ran = spawnSync('/bin/bash', [...BASH, shell], { encoding: 'utf8', env: keys === undefined ? env : { ...env, INPUT_KEYS: keys }, timeout: 10_000 });
         assert.equal(ran.status, 1);
         assert.match(ran.stderr, /^::error::coffre needs `keys:`, the keys to export to the later steps, by name or prefix: `keys: DATABASE_URL STRIPE_\*`\. To hand every key to one process instead, run it with `coffre run <environment> -- <cmd>`\.\n$/);
         assert.doesNotMatch(ran.stdout, /cli-must-not-run/);
@@ -228,7 +233,7 @@ exit 0
 `);
     const run = (env) => {
         rmSync(join(dir, 'calls'), { force: true });
-        const ran = spawnSync('/bin/bash', ['-e', '-o', 'pipefail', '-c', shell], {
+        const ran = spawnSync('/bin/bash', [...BASH, shell], {
             encoding: 'utf8',
             env: { ...runner, INPUT_URL: 'https://coffre.example.com', INPUT_TOKEN: 'coffre_svc_x', INPUT_KEYS: 'DATABASE_URL', ...env },
             timeout: 10_000,
