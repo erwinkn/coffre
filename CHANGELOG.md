@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`coffre run` and `coffre export --help` say that a person gets
+  placeholders, not values.** Where the deployment has the credential proxy, a
+  person's `run` and `export` write handles, which a request through
+  `<coffre>/use` swaps for each value; the keys they may read come as they are.
+  The help and the README said nothing of it.
 - **A use whose key AWS KMS throttled counts as overload to the `/use`
   throttle, however fast it failed (T250).** KMS answers
   `ThrottlingException` at once, so a use whose three tries were all
