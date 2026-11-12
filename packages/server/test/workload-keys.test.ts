@@ -224,18 +224,29 @@ test('cold, the fetch running out its deadline: the cooldown, and its Retry-Afte
   assert.deepEqual(await verify(known, FETCH_DEADLINE_MS + KEYS_COLD_COOLDOWN_MS), { outcome: VERIFIED, fetches: 1 });
 });
 
-test('stale, raced: a fetch failing after another exchange fetched a set without the key stands in with that set, not the older one', async () => {
+test('raced: a fetch failing after another exchange fetched the set answers with that set, says nothing, and leaves no failure for the next refresh', async () => {
   assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
-  // The issuer withdrew `known`. One exchange's fetch hangs; another's gets the new set meanwhile.
+  // The issuer withdrew `known`. One exchange's fetch hangs, then fails; another's gets the new set meanwhile.
   published = [rotated];
-  let fail!: () => void;
-  held = new Promise((resolve) => (fail = resolve));
-  await warnings(async () => {
+  const said = await warnings(async () => {
+    let fail!: () => void;
+    held = new Promise((resolve) => (fail = resolve));
     const hung = verify(known, KEYS_FRESH_MS + MIN);
     assert.deepEqual(await verify(rotated, KEYS_FRESH_MS + MIN), { outcome: VERIFIED, fetches: 1 });
+    down = true;
     fail();
+    // The new set is its answer: `known` missed from a set fetched just now.
     assert.equal((await hung).outcome, `unavailable ${KEYS_COOLDOWN_MS / 1000}`);
+    down = false;
+    // That set due, an exchange beside its refresh fetches for itself, as with no failure on record.
+    let answer!: () => void;
+    held = new Promise((resolve) => (answer = resolve));
+    const refresh = verify(rotated, 2 * KEYS_FRESH_MS + MIN);
+    assert.deepEqual(await verify(rotated, 2 * KEYS_FRESH_MS + MIN + 1000), { outcome: VERIFIED, fetches: 1 });
+    answer();
+    assert.equal((await refresh).outcome, VERIFIED);
   });
+  assert.deepEqual(said, []);
 });
 
 test('fresh, a key it lacks fetched for in vain: said once, and the set verifies on, past its ten minutes, through the cooldown', async () => {

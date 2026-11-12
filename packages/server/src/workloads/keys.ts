@@ -86,9 +86,12 @@ export function forgetKeys(): void {
  * ran out its `FETCH_DEADLINE_MS` starts its cooldown, and its `Retry-After`,
  * as it fails. A failure while a set is kept says so once, never with a
  * token's contents: that set verifies until the URL may be fetched again,
- * and the exchanges meanwhile keep quiet.
+ * and the exchanges meanwhile keep quiet. A failure after another exchange
+ * fetched the set, since this fetch began, is no failure: that set is as
+ * new as this one would have been, and is this fetch's answer.
  */
 async function fetchKeys(transport: WorkloadTransport, url: string): Promise<JSONWebKeySet> {
+  const began = Date.now();
   try {
     const document = await transport.json(new URL(url));
     const keys = (document as { keys?: unknown } | null)?.keys;
@@ -101,6 +104,7 @@ async function fetchKeys(transport: WorkloadTransport, url: string): Promise<JSO
     const now = Date.now();
     // The entry as it is now: another exchange may have fetched meanwhile.
     const latest = entries.get(url);
+    if (latest?.keys != null && latest.fetchedAt >= began) return latest.keys;
     const entry = { ...(latest ?? { keys: null, fetchedAt: 0, missedAt: null }), failedAt: now };
     remember(url, entry);
     const message = `the issuer's keys could not be fetched: ${(error as Error).message}`;
@@ -145,7 +149,7 @@ function unavailable(message: string, entry: Entry | undefined, now: number, cau
 }
 
 /** The token's key is not in a set fetched just now: the issuer's, or no one's. */
-const KEY_ABSENT = "the token's key is not among the issuer's, which were fetched a moment ago; try again in a minute";
+const KEY_ABSENT = "the token's key is not among the issuer's, which were fetched a moment ago";
 
 /**
  * Verify a token under the keys at `url`: the cached set while fresh, else
