@@ -26,6 +26,14 @@ export async function openTestDatabase(): Promise<{ owner: Database; runtime: Da
 }
 
 let vaultDatabase: Promise<Database> | null = null;
+let vaultPool: { end(): Promise<void> } | null = null;
+
+/** Ends `openVaultDatabase`'s pool, for a process whose pools keep their connections (`keepTestConnections`). */
+export async function closeVaultDatabase(): Promise<void> {
+  const pool = vaultPool;
+  [vaultDatabase, vaultPool] = [null, null];
+  await pool?.end();
+}
 
 /**
  * The integration database as the vault: the vault's own login. Opened
@@ -33,7 +41,11 @@ let vaultDatabase: Promise<Database> | null = null;
  * the process exit when idle.
  */
 export function openVaultDatabase(): Promise<Database> {
-  vaultDatabase ??= (async () => createDatabase(testPostgresPool(TEST_VAULT_DATABASE_URL, true)))();
+  vaultDatabase ??= (async () => {
+    const pool = testPostgresPool(TEST_VAULT_DATABASE_URL, true);
+    vaultPool = pool;
+    return createDatabase(pool);
+  })();
   return vaultDatabase;
 }
 

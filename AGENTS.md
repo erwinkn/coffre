@@ -156,7 +156,7 @@ terminal (`packages/cli/src/secret.ts`); a CI run signs in with `coffre login <u
 --token` and the like, which save its session. The env vars left are `DATABASE_URL` for `coffre-server
 migrate`, the platforms' own the CLI uses (GitHub's `ACTIONS_ID_TOKEN_REQUEST_*`,
 `GITHUB_ENV`), and the dev and test tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`,
-`COFFRE_TEST_DATABASE`, `COFFRE_TEST_SHARD`, `COFFRE_TEST_SHARD_REPORT`, `COFFRE_POSTGRES_PORT`, `COFFRE_CLIENT_NODES`). Don't add another to a package or the
+`COFFRE_TEST_DATABASE`, `COFFRE_TEST_SHARD`, `COFFRE_TEST_SHARD_REPORT`, `COFFRE_POSTGRES_PORT`, `COFFRE_CLIENT_NODES`, `COFFRE_SWEEP_SIZE`, `COFFRE_SWEEP_OUTCOMES`, `COFFRE_SWEEP_KEEP`). Don't add another to a package or the
 CLI.
 
 **Migrations: expand, then contract.** A deployment runs `coffre migrate` in
@@ -339,6 +339,15 @@ anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
   vault apart. `--entries` and `--members` grow the instance first. Workers' Free plan
   gives an invocation 10 ms of CPU; `request-cost.alone.ts` holds a request's
   statements and rows to the same however the instance grows.
+- `pnpm sweep:growth [--size <n>] [--out <dir>] [--write-known]` runs every
+  GET route, the audit page's filters and the main writes and background jobs
+  (`docs/growth-sweep.md` lists what it leaves out) on a history of each shape
+  `--size` long (2,000), then ten times that, and lists each runtime statement
+  that read twice the pages at the larger, or ran there alone. It fails on one
+  that `scripts/growth-sweep-known.txt` does not list: a change that fixes one
+  deletes its lines. On a Postgres of your own only (`COMPOSE_PROJECT_NAME`,
+  `COFFRE_POSTGRES_PORT`), since it logs every plan; neither `pnpm test` nor
+  `pnpm validate` runs it.
 - `pnpm formal` model-checks the locking protocol, `formal/Coffre.tla`, and
   the credentials, issuing, bulk-limit, audit-chain and tunnel protocols
   beside it, with TLC

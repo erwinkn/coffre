@@ -28,6 +28,7 @@
     "test:compat": "./scripts/compat-check.sh",
     "test:image": "./scripts/test-image.sh",
     "test:terraform": "./scripts/terraform-provider.sh",
+    "sweep:growth": "./scripts/growth-sweep.sh",
     "lint": "eslint \"packages/*/{src,test,scripts}/**/*.{ts,tsx}\"",
     "check:pins": "node scripts/check-pins.mjs",
     "check:workflows": "./scripts/zizmor.sh",
