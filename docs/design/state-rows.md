@@ -161,10 +161,12 @@ the chain is. The app hands them over in one call, `note`; section 3 says which 
   keeps for it). No reader accepts a row with no seal.
 - *`note` takes an `audit_log` entry's fields by today's names:* action, allowed, code, actor, subject, the four
   places, credential, request id, detail, and `operationId` and `sourceIp`, which `audit_events` has columns for.
-- *One event per id.* #581 takes the app's request id as the event's id, so a request notes one event. A change's row
-  never carries that id (the vault draws or derives its own, `writeRequestId`), so a request can change an object and
-  note an event. Open with K1: giving an event an id of its own too, with the request's id in the payload as a
-  refusal's record has it today, for the requests and the beats that note several.
+- *An event has an id of its own.* `NoteInput.id` is the row's `request_id` and the key of its object: a UUID its
+  writer draws once and sends again unchanged on a retry, which then finds its row. The app's request id rides in the
+  payload beside `operationId`, as a refusal's record has it today. So a request notes as many events as it has, the
+  vault's own refusals inside it among them, and the projector fills `audit_events.request_id` from the payload for
+  every kind of row. One id is derived: an event of no request that may be written twice (a finding of the beat) takes
+  `<system actor>/<what it is about>` (`systemEventId`: `system:vault/finding:4410`), so a second run writes nothing.
 
 **Each projection must beat its absence.**
 
