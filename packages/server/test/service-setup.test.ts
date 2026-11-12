@@ -7,10 +7,11 @@ import { and, asc, eq, inArray } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
+import { authMac } from '../src/auth-rows.ts';
 import { updateAuth } from '../src/db/queries.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { auditLog, credentials, principals, projects } from './db/tables.ts';
+import { auditLog, credentials, principals, projects, serviceBindings } from './db/tables.ts';
 import { clientFor, issuesLogged, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // People who set up service accounts without running the instance (D97,
@@ -377,6 +378,36 @@ test("the list says how each account its caller manages signs in, as the account
   assert.deepEqual((await signsIn(boss))[CI], { tokens: 1, bindings: ['github'], lastUsedAt: '2026-11-01T10:00:00.000Z' });
   // A project's list says nothing of it: no page shows it there.
   assert.ok((await root.members.list('market')).members.every((member) => member.signsIn === undefined));
+});
+
+test("rows the account's own lists pass over, the list passes over too: one put back over its removal, one of another generation, one whose MAC fails", async () => {
+  await root.members.add(CI);
+  await root.access.set(CI, { 'market/dev': 'developer' });
+  await root.tokens.issue(CI, { label: 'kept', expiresInDays: 30 });
+  const forged = await root.tokens.issue(CI, { label: 'forged', expiresInDays: 30 });
+  const workflow = (name: string) => ({ ...CHECKS, workflow_ref: `acme/api/.github/workflows/${name}.yml@refs/heads/main` });
+  const kept = (await root.bindings.create(CI, { profile: 'github', claims: workflow('kept') })).binding;
+  const removed = (await root.bindings.create(CI, { profile: 'github', claims: workflow('removed') })).binding;
+  const moved = (await root.bindings.create(CI, { profile: 'github', claims: workflow('moved') })).binding;
+  const edited = (await root.bindings.create(CI, { profile: 'github', claims: workflow('edited') })).binding;
+  await root.bindings.remove(CI, removed.id);
+
+  // Signed again by the app's own key, so that only its tombstone or its generation stops each.
+  const signedAgain = async (id: string, changes: Partial<typeof serviceBindings.$inferSelect>) => {
+    const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, id));
+    const next = { ...row!, ...changes };
+    await db.owner.update(serviceBindings).set({ ...changes, authMac: authMac(deps.chainKey, 'service_bindings', next) }).where(eq(serviceBindings.id, id));
+  };
+  await signedAgain(removed.id, { revokedAt: null, revokedBy: null });
+  const [{ generation }] = await db.owner.select({ generation: serviceBindings.generation }).from(serviceBindings).where(eq(serviceBindings.id, moved.id)) as [{ generation: number }];
+  await signedAgain(moved.id, { generation: generation + 1 });
+  // Edited behind the app's back, a field each MAC covers: it no longer holds.
+  await db.owner.update(serviceBindings).set({ issuer: 'https://issuer.evil.example' }).where(eq(serviceBindings.id, edited.id));
+  await db.owner.update(credentials).set({ expiresAt: new Date('2099-01-01T00:00:00Z') }).where(eq(credentials.id, forged.id));
+
+  assert.deepEqual((await root.bindings.list(CI)).bindings.map((binding) => binding.id), [kept.id]);
+  assert.deepEqual((await signsIn(root))[CI], { tokens: 1, bindings: ['github'], lastUsedAt: null });
+  assert.deepEqual((await signsIn(root))[CI], await ownLists(CI));
 });
 
 test('an account the vault found tampered with, or removed, says nothing of how it signs in, to an Owner or to whoever set it up', async () => {
