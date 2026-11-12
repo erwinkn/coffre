@@ -37,7 +37,7 @@ wrote them with its tagged template.
 
 ## Changes from upstream
 
-Eleven, each marked `Coffre:` in the code:
+Each is marked `Coffre:` in the code:
 
 - **One round trip per statement** (`typedByServer`, in `connection.ts`).
   Upstream asks the server for an unnamed statement's parameter types (Parse,
@@ -224,6 +224,17 @@ Eleven, each marked `Coffre:` in the code:
   the connection goes on as after any answer. Upstream failed the statement
   already answering instead, and left this one waiting, its transaction and
   connection with it, for ever.
+- **An idle connection holds no Node process open** (`idleTimer`, in
+  `connection.ts`), as node-postgres's `allowExitOnIdle`: while it waits in
+  the pool, its socket and its `idle_timeout` timer are unref'd, and taken
+  for a statement, its socket is ref'd again. A Node server that SIGTERM
+  closed (srvx closes its listener and waits for the requests in flight)
+  exits as soon as they are done, and a script or test file done with its
+  queries exits at once. Upstream's idle sockets held the process open
+  until `idle_timeout` closed them, 10 s with `openDatabase`: Node
+  conformance, which restarts its server 223 times, spent most of its 49
+  minutes waiting so. Postgres sees an idle connection's EOF, which it logs
+  at DEBUG1 only.
 
 ## Checking on a real Hyperdrive
 

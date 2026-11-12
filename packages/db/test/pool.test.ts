@@ -5,6 +5,7 @@
 // Coffre's own, in src/postgres-js, takes that one too.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer, type AddressInfo } from 'node:net';
 
@@ -31,6 +32,25 @@ test('a statement takes the connection idle the shortest: one after another, the
   } finally {
     await client.end();
   }
+});
+
+test('a Node process done with its queries exits at once: its idle connections hold it open no longer, its statements until they answer', { skip }, async () => {
+  // As openDatabase opens a pool: closed after 10 s idle, which held a process open as long, a stopped server's too.
+  const script = `
+    const { postgresClient } = await import(${JSON.stringify(new URL('../src/postgres.ts', import.meta.url).href)});
+    const client = postgresClient(${JSON.stringify(DATABASE)}, { max: 2, idle_timeout: 10 });
+    const answers = await Promise.all([client.unsafe('select pg_sleep(0.3), 1 as n'), client.unsafe('select pg_sleep(0.3), 2 as n')]);
+    console.log(answers.map(([row]) => row.n).join(','));
+  `;
+  const started = performance.now();
+  const output = await new Promise<string>((resolve, reject) =>
+    execFile(process.execPath, ['--conditions=coffre:source', '--input-type=module', '--eval', script], { timeout: 20_000 }, (error, stdout, stderr) =>
+      error ? reject(new Error(`${error.message}\n${stderr}`)) : resolve(stdout),
+    ),
+  );
+  const seconds = (performance.now() - started) / 1000;
+  assert.equal(output.trim(), '1,2');
+  assert.ok(seconds < 5, `the process exited ${seconds.toFixed(1)} s after it started, its two connections idle`);
 });
 
 test("a transaction's BEGIN queued behind as many statements as a connection pipelines still learns its connection, and ends its transaction", { skip }, async () => {
