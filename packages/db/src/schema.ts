@@ -158,8 +158,7 @@ export const secrets = pgTable(
       columns: [table.environmentId, table.projectId],
       foreignColumns: [environments.id, environments.projectId],
     }),
-    index('secrets_lookup_idx').on(table.projectId, table.environmentId, table.key),
-    // The live keys of an environment, which a read by environment alone (the places tree's counts, `liveKeysIn`) walks without the archived ones beside them; the one above leads with the project (T152, 0032).
+    // The live keys of an environment, which a read by environment alone (the places tree's counts, `liveKeysIn`) walks without the archived ones beside them; the unique key leads with the project (T152, 0032).
     index('secrets_live_idx').on(table.environmentId).where(sql`${table.archivedAt} IS NULL`),
   ],
 );
@@ -444,9 +443,10 @@ export const auditLog = pgTable(
     index('audit_log_environment_idx').on(table.environmentId, table.seq),
     index('audit_log_secret_idx').on(table.secretId, table.seq),
     index('audit_log_actor_idx').on(table.actor, table.seq),
-    index('audit_log_operation_idx').on(table.operationId, table.seq),
     index('audit_log_action_idx').on(table.author, table.action, table.seq),
-    // The bulk limit: one reader's recent releases.
+    // The references one member made (`referencesBy`): their `reference.create` seals, in one seek, however many
+    // other entries they or the instance wrote (2,004 buffers where `actor_idx` and `action_idx` took 3,297 for a
+    // member with 50,000 reads and 2,000 of 100,000 references; T269). The bulk limit that made it reads it no more.
     index('audit_log_releases_idx').on(table.author, table.actor, table.action, table.decision, table.occurredAt),
     // What the vault logged about one member, in order.
     index('audit_log_subject_idx').on(table.author, table.subjectPrincipal, table.seq),
@@ -486,20 +486,11 @@ export const auditLog = pgTable(
       .on(sql`((${table.metadata})::jsonb ->> 'bindingId')`)
       .where(sql`${table.author} = 'app' AND ${table.action} = 'token.unbind' AND ${table.decision} = 'allow'`),
     // Whether a target is frozen: its newest allowed freeze or lift (docs/design/workload-access.md, section 8.2), one
-    // step back by `(target, seq)` however many of the app's entries came since (T245, R48). `audit_log_freeze_idx`,
-    // keyed `seq DESC NULLS LAST`, serves no lookup's `ORDER BY seq DESC` (nulls first): Postgres walked the app's
-    // entries back by `seq` instead, from the newest to the target's newest freeze. Unused, it goes in 0.17.
-    index('audit_log_freeze_idx')
-      .on(sql`((${table.metadata})::jsonb ->> 'target')`, table.seq.desc())
-      .where(sql`${table.author} = 'app' AND ${table.action} IN ('workload.freeze', 'workload.unfreeze') AND ${table.decision} = 'allow'`),
+    // step back by `(target, seq)` however many of the app's entries came since (T245, R48).
     index('audit_log_frozen_idx')
       .on(sql`((${table.metadata})::jsonb ->> 'target')`, table.seq)
       .where(sql`${table.author} = 'app' AND ${table.action} IN ('workload.freeze', 'workload.unfreeze') AND ${table.decision} = 'allow'`)
       .concurrently(),
-    // An enrollment code's tombstone: the app's successful `enrollment.supersede` naming it.
-    index('audit_log_supersede_idx')
-      .on(sql`((${table.metadata})::jsonb ->> 'enrollmentId')`)
-      .where(sql`${table.author} = 'app' AND ${table.action} = 'enrollment.supersede' AND ${table.decision} = 'allow'`),
     // The run a credential was issued for: its exchange's entry, by the credential's ID.
     index('audit_log_exchange_idx')
       .on(sql`((${table.metadata})::jsonb ->> 'credentialId')`)
@@ -572,12 +563,12 @@ export const secretReferences = pgTable(
       columns: [table.createdSeq],
       foreignColumns: [auditLog.seq],
     }).onDelete('restrict'),
-    // A holder's newest reference; what reads its source; what a project lends; what someone made.
+    // A holder's newest reference. By source, project or maker, a read finds the seals in the log first, then
+    // the rows by `created_seq` (`referenceRows`).
     index('secret_references_holder_idx').on(table.secretId, table.createdSeq),
+    // No query reads it: the foreign key to the source does, on a delete of a secret, which no login makes but
+    // an owner and the tests' fixtures do; without it each deleted secret scans the whole table.
     index('secret_references_source_idx').on(table.sourceSecretId),
-    index('secret_references_project_idx').on(table.projectId),
-    index('secret_references_source_project_idx').on(table.sourceProjectId),
-    index('secret_references_created_by_idx').on(table.createdBy),
   ],
 );
 
@@ -1066,10 +1057,6 @@ export const credentials = pgTable(
       columns: [table.enrollmentId],
       foreignColumns: [enrollmentCodes.id],
     }).onDelete('restrict'),
-    // A code's sessions made by the exchange, ended ones too: its capacity and its tripwire's last hour, never a child.
-    index('credentials_enrollment_roots_idx')
-      .on(table.enrollmentId, table.createdAt)
-      .where(sql`${table.kind} = 'workload' AND ${table.ancestors} IS NULL`),
   ],
 );
 

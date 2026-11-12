@@ -1,6 +1,6 @@
 {
-  "id": "ef3f7cdc-4479-4834-89bb-860ef6e45424",
-  "prevId": "e6ab33a8-e311-49eb-84ee-6c7af712716d",
+  "id": "0f20e454-b7ac-446f-ade4-1ad526a1e7ab",
+  "prevId": "ef3f7cdc-4479-4834-89bb-860ef6e45424",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -257,27 +257,6 @@
           "columns": [
             {
               "expression": "actor",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "seq",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "audit_log_operation_idx": {
-          "name": "audit_log_operation_idx",
-          "columns": [
-            {
-              "expression": "operation_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -673,28 +652,6 @@
           "method": "btree",
           "with": {}
         },
-        "audit_log_freeze_idx": {
-          "name": "audit_log_freeze_idx",
-          "columns": [
-            {
-              "expression": "((\"metadata\")::jsonb ->> 'target')",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "seq",
-              "isExpression": false,
-              "asc": false,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" IN ('workload.freeze', 'workload.unfreeze') AND \"audit_log\".\"decision\" = 'allow'",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "audit_log_frozen_idx": {
           "name": "audit_log_frozen_idx",
           "columns": [
@@ -714,22 +671,6 @@
           "isUnique": false,
           "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" IN ('workload.freeze', 'workload.unfreeze') AND \"audit_log\".\"decision\" = 'allow'",
           "concurrently": true,
-          "method": "btree",
-          "with": {}
-        },
-        "audit_log_supersede_idx": {
-          "name": "audit_log_supersede_idx",
-          "columns": [
-            {
-              "expression": "((\"metadata\")::jsonb ->> 'enrollmentId')",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'enrollment.supersede' AND \"audit_log\".\"decision\" = 'allow'",
-          "concurrently": false,
           "method": "btree",
           "with": {}
         },
@@ -1308,28 +1249,6 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "credentials_enrollment_roots_idx": {
-          "name": "credentials_enrollment_roots_idx",
-          "columns": [
-            {
-              "expression": "enrollment_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"credentials\".\"kind\" = 'workload' AND \"credentials\".\"ancestors\" IS NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -4930,51 +4849,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "secret_references_project_idx": {
-          "name": "secret_references_project_idx",
-          "columns": [
-            {
-              "expression": "project_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "secret_references_source_project_idx": {
-          "name": "secret_references_source_project_idx",
-          "columns": [
-            {
-              "expression": "source_project_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "secret_references_created_by_idx": {
-          "name": "secret_references_created_by_idx",
-          "columns": [
-            {
-              "expression": "created_by",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -5290,33 +5164,6 @@
         }
       },
       "indexes": {
-        "secrets_lookup_idx": {
-          "name": "secrets_lookup_idx",
-          "columns": [
-            {
-              "expression": "project_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "environment_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "secrets_live_idx": {
           "name": "secrets_live_idx",
           "columns": [

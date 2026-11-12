@@ -2446,8 +2446,8 @@ class VaultService implements Vault {
     }
     const seals = sealed as Sealed[];
     // Ended already: by an authentic end only. A forged one (a row with the vault's name and no valid MAC) refuses a
-    // read, the safe side there (`endedReferences`); here it would stop a genuine break, and with 0.15's log leave the
-    // holder serving, its end written nowhere (review r9).
+    // read, the safe side there (the server's `referenceRows`); here it would stop a genuine break, and with 0.15's
+    // log leave the holder serving, its end written nowhere (review r9).
     const ended = async (db: Queryable) => {
       const done = new Set((await store.referenceEnds(db, seals.map((seal) => seal.seq))).filter((end) => this.#authentic(end)).map((end) => end.relatedSeq!));
       return seals.map((seal) => (done.has(seal.seq) ? ('ended' as const) : null));

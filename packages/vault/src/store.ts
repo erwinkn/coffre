@@ -668,26 +668,10 @@ export async function entriesAt(db: Queryable, seqs: readonly bigint[]): Promise
 }
 
 /**
- * Which of these `reference.create` entries a `reference.end` of the
- * vault's names, allowed: one read through `audit_log_reference_end_idx`.
- * An end that fails its MAC still ends: putting a reference back takes
- * more than a forged end can undo, and refusing is the safe side.
- */
-export async function endedReferences(db: Queryable, seqs: readonly bigint[]): Promise<Set<bigint>> {
-  if (seqs.length === 0) return new Set();
-  const { auditLog } = tablesOf(db);
-  const rows = await db
-    .select({ relatedSeq: auditLog.relatedSeq })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'reference.end'), eq(auditLog.decision, 'allow'), inArray(auditLog.relatedSeq, [...new Set(seqs)])));
-  return new Set(rows.map((row) => row.relatedSeq!));
-}
-
-/**
  * The vault's allowed `reference.end` entries naming these `reference.create`
  * entries, whole, for a caller to hold to their MACs: a break weighs only
  * authentic ends (a forged one must not stop a genuine break), where a read
- * takes any (`endedReferences`).
+ * takes any (the server's `referenceRows`).
  */
 export async function referenceEnds(db: Queryable, seqs: readonly bigint[]): Promise<StoredEntry[]> {
   if (seqs.length === 0) return [];

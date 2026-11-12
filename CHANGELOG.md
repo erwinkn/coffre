@@ -5,6 +5,17 @@
 - **Node deployments are not tested in 0.16.0.** A Node deployment stays
   on 0.15.0 until 0.16.1, which brings Node back on Postgres; SQLite is
   gone.
+- **Eight indexes no query read are gone (0083).** On `audit_log`, by
+  operation, the freeze lookup's first index (`audit_log_frozen_idx` has
+  served it since 0082) and an enrollment code's tombstone; on
+  `credentials`, an enrollment code's sessions; on `secret_references`,
+  by project, source project and maker (every read goes by id, by
+  holder or by its seal's `created_seq`); on `secrets`, a copy of its
+  unique key. Each write to those tables updates fewer indexes, and each
+  statement on them plans against fewer. `audit_log_releases_idx` stays:
+  the list of the references a member made reads it. So does
+  `secret_references_source_idx`: deleting a secret checks the foreign
+  key from a reference's source through it.
 - **`coffre-conformance node` checks a Node deployment on Postgres, as
   `workers` does.** It now takes the same four logins, `--postgres`,
   `--runtime`, `--vault-runtime` and `--hot-runtime`, and refuses to boot
