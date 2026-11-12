@@ -732,19 +732,19 @@ BEGIN
                   -- log's: the condition is the subquery's, on `i` alone, so it is checked before any probe. A slot with no object
                   -- (no source, no place read through) is no row of the probe's, which it would find nothing for.
                   LEFT JOIN LATERAL (
-                      SELECT max(x.number) AS inputs,
-                             json_object_agg(u.slot, json_build_array(x.at, x.request_id, x.actor, x.payload, x.mac)) FILTER (WHERE x.number IS NOT NULL) AS changes,
-                             (array_agg(x.seal) FILTER (WHERE u.n = 1))[1] AS c_last, (array_agg(x.seal) FILTER (WHERE u.n = 2))[1] AS m_last,
-                             (array_agg(x.seal) FILTER (WHERE u.n = 3))[1] AS r_last, (array_agg(x.seal) FILTER (WHERE u.n = 4))[1] AS p_last,
-                             (array_agg(x.seal) FILTER (WHERE u.n = 5))[1] AS s_last, (array_agg(x.seal) FILTER (WHERE u.n = 6))[1] AS x_last,
-                             (array_agg(x.seal) FILTER (WHERE u.n = 7))[1] AS e1_last, (array_agg(x.seal) FILTER (WHERE u.n = 8))[1] AS e2_last,
-                             (array_agg(x.seal) FILTER (WHERE u.n = 9))[1] AS e3_last, (array_agg(x.seal) FILTER (WHERE u.n = 10))[1] AS e4_last,
-                             (array_agg(x.payload) FILTER (WHERE u.n = 2))[1] AS m_payload, (array_agg(x.payload) FILTER (WHERE u.n = 4))[1] AS p_payload
+                      SELECT max(ch.number) AS inputs,
+                             json_object_agg(u.slot, json_build_array(ch.at, ch.request_id, ch.actor, ch.payload, ch.mac)) FILTER (WHERE ch.number IS NOT NULL) AS changes,
+                             (array_agg(ch.seal) FILTER (WHERE u.n = 1))[1] AS c_last, (array_agg(ch.seal) FILTER (WHERE u.n = 2))[1] AS m_last,
+                             (array_agg(ch.seal) FILTER (WHERE u.n = 3))[1] AS r_last, (array_agg(ch.seal) FILTER (WHERE u.n = 4))[1] AS p_last,
+                             (array_agg(ch.seal) FILTER (WHERE u.n = 5))[1] AS s_last, (array_agg(ch.seal) FILTER (WHERE u.n = 6))[1] AS x_last,
+                             (array_agg(ch.seal) FILTER (WHERE u.n = 7))[1] AS e1_last, (array_agg(ch.seal) FILTER (WHERE u.n = 8))[1] AS e2_last,
+                             (array_agg(ch.seal) FILTER (WHERE u.n = 9))[1] AS e3_last, (array_agg(ch.seal) FILTER (WHERE u.n = 10))[1] AS e4_last,
+                             (array_agg(ch.payload) FILTER (WHERE u.n = 2))[1] AS m_payload, (array_agg(ch.payload) FILTER (WHERE u.n = 4))[1] AS p_payload
                         FROM unnest(ARRAY['c', 'm', 'r', 'p', 's', 'x', 'e1', 'e2', 'e3', 'e4'], i.objects) WITH ORDINALITY u (slot, object, n)
                         LEFT JOIN LATERAL (
                             SELECT y.number, y.seal, y.at, y.request_id, y.actor, y.payload, y.mac FROM public.log_changes y
-                             WHERE y.object = ANY(ARRAY[u.object]) ORDER BY y.object DESC, y.number DESC LIMIT 1
-                        ) x ON true
+                             WHERE y.object = ANY(ARRAY[u.object::uuid]) ORDER BY y.object DESC, y.number DESC LIMIT 1
+                        ) ch ON true
                        WHERE i.seeks AND u.object IS NOT NULL
                   ) pr ON true
                   -- The cap: the isolate's, read from the policy's newest change at the change it names, or that change's as
