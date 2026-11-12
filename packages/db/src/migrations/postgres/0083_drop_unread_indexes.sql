@@ -1,8 +1,9 @@
 -- 0.16.0, T269: drop the eight indexes no query reads (at most two secondary indexes a table, unless measured).
 -- 0.16 upgrades offline from exactly 0.15.0 (D197): no 0.15 code serves on this schema, so the drops need no release
 -- between them and their last reader, and plain DROP INDEX runs inside the migrator's transaction (CONCURRENTLY cannot).
--- audit_log: by operation (no reader filters on operation_id), the freeze lookup's first index (audit_log_frozen_idx
--- serves it since 0082), an enrollment code's tombstone (nothing reads `enrollment.supersede`).
+-- audit_log: by operation (only conformance's probe, on its own small database, filters on operation_id), the
+-- freeze lookup's first index (audit_log_frozen_idx serves it since 0082), an enrollment code's tombstone (nothing
+-- reads `enrollment.supersede`).
 DROP INDEX IF EXISTS "audit_log_operation_idx";--> statement-breakpoint
 DROP INDEX IF EXISTS "audit_log_freeze_idx";--> statement-breakpoint
 DROP INDEX IF EXISTS "audit_log_supersede_idx";--> statement-breakpoint

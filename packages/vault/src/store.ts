@@ -671,7 +671,7 @@ export async function entriesAt(db: Queryable, seqs: readonly bigint[]): Promise
  * The vault's allowed `reference.end` entries naming these `reference.create`
  * entries, whole, for a caller to hold to their MACs: a break weighs only
  * authentic ends (a forged one must not stop a genuine break), where a read
- * takes any (the server's `referenceRows`).
+ * takes any (the snapshot's `ended`, `snapshotQuery`).
  */
 export async function referenceEnds(db: Queryable, seqs: readonly bigint[]): Promise<StoredEntry[]> {
   if (seqs.length === 0) return [];
