@@ -1,5 +1,5 @@
 import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
-import { BEARER_PROFILES } from '@coffre/core/identity';
+import { BEARER_PROFILES, type CredentialKind } from '@coffre/core/identity';
 import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
 import { MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type LoggedChange, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
@@ -1193,11 +1193,13 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
  * credentials and identities left empty: what a list of grants shows;
  * `standing: false` their sessions alone, their grants and the vault's
  * findings about them left empty: what their sessions' lists show.
+ * `kinds` reads only those credentials: the sessions page lists one's
+ * sessions and personal tokens apart, each from its own call.
  */
 export async function members(
   db: Queryable,
   chainKey: Buffer,
-  filter: { member?: { type: string; id: string }; sessions?: false; standing?: false },
+  filter: { member?: { type: string; id: string }; sessions?: false; standing?: false; kinds?: readonly CredentialKind[] },
   now: Date,
 ): Promise<MemberRow[]> {
   const { principals, credentials, identities } = tablesOf(db);
@@ -1223,7 +1225,9 @@ export async function members(
       .where(of(principals.principal))
       .orderBy(asc(principals.principal)),
     // Live ones only, through `credentials_live_idx`: a CI service leaves an expired one behind each run.
-    filter.sessions === false ? [] : db.select().from(credentials).where(and(of(credentials.principal), isNull(credentials.revokedAt), gt(credentials.expiresAt, now))),
+    filter.sessions === false ? [] : db.select().from(credentials).where(and(
+      of(credentials.principal), isNull(credentials.revokedAt), gt(credentials.expiresAt, now), filter.kinds === undefined ? undefined : inArray(credentials.kind, [...filter.kinds]),
+    )),
     filter.sessions === false ? [] : db.select().from(identities).where(of(identities.principal)),
     filter.standing === false ? [] : readGrants(db, { ...(principal === undefined ? {} : { principal }), liveAt: now.getTime() }),
     filter.standing === false ? new Set<string>() : tamperedMembers(db, principal),
@@ -1815,6 +1819,39 @@ export type BindingRow = Tables['serviceBindings']['$inferSelect'];
  */
 export async function liveBindings(db: Queryable, chainKey: Buffer, principal: string, generation: number): Promise<BindingRow[]> {
   return (await bindingsNow(db, chainKey, principal, generation)).live;
+}
+
+/**
+ * Every service account's live tokens and live trust bindings, a statement
+ * each however many accounts there are: how each signs in, on the service
+ * accounts page (`signsIn`, `listMembers`). As one account's lists read
+ * them (`members`, `liveBindings`): a credential neither revoked nor past
+ * its end, its MAC the app's, with no sign-in account behind it, which no
+ * service has; a binding not revoked, its MAC the app's, with no tombstone,
+ * oldest first. Which generation's bindings are live is the caller's to
+ * match, from the account's row.
+ */
+export async function serviceSignIns(
+  db: Queryable,
+  chainKey: Buffer,
+  now: Date,
+  read: { tokens: boolean; bindings: boolean },
+): Promise<{ credentials: CredentialRow[]; bindings: BindingRow[] }> {
+  const { credentials, serviceBindings } = tablesOf(db);
+  const [held, bound] = await Promise.all([
+    read.tokens
+      ? db.select().from(credentials).where(and(like(credentials.principal, 'token:%'), isNull(credentials.revokedAt), gt(credentials.expiresAt, now)))
+      : [],
+    read.bindings
+      ? db.select().from(serviceBindings)
+        .where(and(like(serviceBindings.principal, 'token:%'), isNull(serviceBindings.revokedAt), not(hasTombstone(db, sql`CAST(${serviceBindings.id} AS text)`))))
+        .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id))
+      : [],
+  ]);
+  return {
+    credentials: held.filter((row) => row.identityId === null && checkAuthRow(chainKey, 'credentials', row)),
+    bindings: bound.filter((row) => checkAuthRow(chainKey, 'service_bindings', row)),
+  };
 }
 
 /**
