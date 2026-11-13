@@ -47,6 +47,11 @@
       "types": "./dist/kek.d.ts",
       "default": "./dist/kek.js"
     },
+    "./log": {
+      "coffre:source": "./src/log/index.ts",
+      "types": "./dist/log.d.ts",
+      "default": "./dist/log.js"
+    },
     "./mcp": {
       "coffre:source": "./src/mcp.ts",
       "types": "./dist/mcp.d.ts",
