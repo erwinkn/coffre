@@ -141,6 +141,30 @@ ALTER ROLE coffre_vault_hot RESET jit;
 ALTER ROLE coffre_vault_hot RESET plan_cache_mode;
 ```
 
+### Statement timeouts
+
+`coffre_runtime` and `coffre_vault_runtime` end any statement after 60
+seconds (`statement_timeout`), Hyperdrive's own limit on a query, so that
+a statement that hangs gives its connection back. On a small database
+that can be one of only six. The hot path's login keeps its own, shorter
+timeouts. `coffre setup` and every `coffre migrate` set it server-wide on
+each of the two roles, unless the role holds a value an administrator
+set, which stays. A later release lowers it to a read's 5 second
+deadline, and its migrate moves a role from the 60 seconds coffre gave
+it. The same `CREATEROLE` and `ADMIN` rule as above applies: a login that
+only migrates leaves the setting as it is, and prints the statements an
+administrator runs once per server:
+
+```sql
+ALTER ROLE coffre_runtime SET statement_timeout = '60s';
+ALTER ROLE coffre_vault_runtime SET statement_timeout = '60s';
+```
+
+Postgres applies a role's setting when a session logs in. So the run that
+sets it also ends those logins' idle sessions on the database, and their
+pools log in again with it. A query sent on such a session at that moment
+fails once, as it would during a restart.
+
 `coffre setup` makes `coffre_backup_login` and grants it the group.
 `coffre migrate --backup-login <role>` grants `coffre_backup` to that
 existing role, on every run that names it. Migrate never makes the role,

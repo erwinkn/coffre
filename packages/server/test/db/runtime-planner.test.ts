@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
 import { postgresClient, type PostgresClient } from '@coffre/db/connect';
-import { clearPlannerSettings } from '@coffre/db/migrate';
+import { clearPlannerSettings, holdRuntimeTimeouts, RUNTIME_SETTINGS } from '@coffre/db/migrate';
 
 import { TEST_OWNER_DATABASE_URL } from './connections.ts';
 
@@ -92,6 +92,59 @@ test(
         await migrator.end();
       }
       assert.deepEqual((await setting(owner, hot!)).sort(), ['jit=off', 'plan_cache_mode=force_generic_plan']);
+    });
+  },
+);
+
+test(
+  "the runtime logins get coffre's statement timeout once, however many migrations of other databases race to; one coffre gave before moves to today's, an administrator's own stays, and the login's idle sessions here end",
+  async () => {
+    await withRoles(async (owner, [none, earlier, own]) => {
+      await owner.unsafe(`ALTER ROLE ${earlier!} SET statement_timeout = '45s'`);
+      await owner.unsafe(`ALTER ROLE ${own!} SET statement_timeout = '30s'`);
+      // An idle session of the login given it: it logged in without it, so it is ended, and its pool logs in again.
+      const idle = postgresClient(asLogin(none!, 'local-plan-only'), { max: 1 });
+      try {
+        const [{ pid }] = await idle.unsafe<[{ pid: number }]>('SELECT pg_backend_pid() AS pid');
+        const racers = Array.from({ length: 8 }, () => postgresClient(TEST_OWNER_DATABASE_URL, { max: 1 }));
+        try {
+          const untimed = await Promise.all(racers.map((racer) => holdRuntimeTimeouts(racer, { logins: [none!, earlier!, own!], given: ['45s'] })));
+          assert.deepEqual(untimed, racers.map(() => []));
+        } finally {
+          await Promise.all(racers.map((racer) => racer.end()));
+        }
+        const today = `statement_timeout=${RUNTIME_SETTINGS.statement_timeout}`;
+        assert.deepEqual(await setting(owner, none!), [today]);
+        assert.deepEqual(await setting(owner, earlier!), [today]);
+        assert.deepEqual(await setting(owner, own!), ['statement_timeout=30s']);
+        for (let waited = 0; ; waited += 50) {
+          const [left] = await owner.unsafe<[{ n: number }]>('SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = $1', [pid]);
+          if (left.n === 0) break;
+          assert.ok(waited < 5_000, 'the idle session was ended');
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        const [again] = await idle.unsafe<[{ ms: string; source: string }]>("SELECT setting AS ms, source FROM pg_settings WHERE name = 'statement_timeout'");
+        assert.deepEqual(again, { ms: String(Number.parseInt(RUNTIME_SETTINGS.statement_timeout, 10) * 1000), source: 'user' });
+      } finally {
+        await idle.end();
+      }
+    });
+  },
+);
+
+test(
+  'a login that may not alter the runtime logins leaves them without the timeout, fails nothing, and names them',
+  async () => {
+    await withRoles(async (owner, [none, earlier], { login, password }) => {
+      await owner.unsafe(`ALTER ROLE ${earlier!} SET statement_timeout = '45s'`);
+      const migrator = postgresClient(asLogin(login, password), { max: 1 });
+      try {
+        assert.deepEqual(await holdRuntimeTimeouts(migrator, { logins: [none!, earlier!], given: ['45s'] }), [none!, earlier!]);
+      } finally {
+        await migrator.end();
+      }
+      assert.deepEqual(await setting(owner, none!), []);
+      assert.deepEqual(await setting(owner, earlier!), ['statement_timeout=45s']);
     });
   },
 );

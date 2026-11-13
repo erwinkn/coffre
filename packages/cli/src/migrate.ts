@@ -18,7 +18,7 @@ import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core
 import { shownMember } from '@coffre/core/schemas';
 import { openDatabase } from '@coffre/db/connect';
 import { everyProjectPreview, readGrants, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
-import { AfterMigrations, backupLoginProblem, DatabaseAhead, HandOverFailed, LockWaitsExhausted, migrateDatabase, migrationStatus, NotOwner, unbuiltNote, type UnbuiltIndex } from '@coffre/db/migrate';
+import { AfterMigrations, backupLoginProblem, DatabaseAhead, HandOverFailed, LockWaitsExhausted, migrateDatabase, migrationStatus, NotOwner, unbuiltNote, untimedNote, type MigrateRun } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
 import { coffrePins, deploymentKind } from './deployment.ts';
@@ -153,14 +153,14 @@ async function migrateDeployment(
       return;
     }
     // What every run does with nothing to apply: the privileges a restore leaves out, and the backup login's group.
-    let unbuilt: UnbuiltIndex[];
+    let run: MigrateRun;
     try {
-      ({ unbuilt } = await migrateDatabase(url.href, { backupLogin: options.backupLogin }));
+      run = await migrateDatabase(url.href, { backupLogin: options.backupLogin });
     } catch (error) {
       throw new MigrateError(migrationFailure(error));
     }
     out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}; ${reasserted(options)}\n`);
-    writeUnbuilt(out, unbuilt);
+    writeNotes(out, run);
     out.write(describeFirstRun(await previewFirstRun(url)));
     return;
   }
@@ -170,18 +170,18 @@ async function migrateDeployment(
   }
   out.write(`  ${count(pending.length, 'migration')} to apply to ${where}, for coffre ${deployment.version}: ${listed(pending, 'and')}\n\n`);
   const steps = new Steps(out, [`Apply ${listed(pending, 'and')}`], () => terminal?.keys ?? null, clean);
-  let unbuilt: UnbuiltIndex[] = [];
+  let run: MigrateRun = { unbuilt: [], untimed: [] };
   try {
     await steps.run(0, async (step) => {
       const applied = await apply(url, where, pending, step, options);
-      unbuilt = applied.unbuilt;
+      run = applied.run;
       return applied.text;
     });
   } finally {
     steps.end();
   }
   // Whole, after the step, whose line a terminal's width may cut.
-  writeUnbuilt(out, unbuilt);
+  writeNotes(out, run);
   out.write(describeFirstRun(await previewFirstRun(url)));
 }
 
@@ -335,12 +335,12 @@ export function describeEveryProject(previews: readonly EveryProjectPreview[]): 
 }
 
 /** Apply `pending` to the database, asking first unless told yes. */
-async function apply(url: URL, where: string, pending: string[], step: Step, options: Options): Promise<{ text: string; unbuilt: UnbuiltIndex[] }> {
+async function apply(url: URL, where: string, pending: string[], step: Step, options: Options): Promise<{ text: string; run: MigrateRun }> {
   if (!options.yes && !(await step.ask(`Apply ${count(pending.length, 'migration')} to ${where}?`))) throw new Cancelled();
   step.note(`Applying ${listed(pending, 'and')}`);
-  let unbuilt: UnbuiltIndex[];
+  let run: MigrateRun;
   try {
-    ({ unbuilt } = await migrateDatabase(url.href, {
+    run = await migrateDatabase(url.href, {
       backupLogin: options.backupLogin,
       onPlan(plan) {
         // Under the lock now: what was read before, or another run got there first.
@@ -348,18 +348,19 @@ async function apply(url: URL, where: string, pending: string[], step: Step, opt
           throw new MigrateError(`another migration ran meanwhile: ${where} now lacks ${listed(plan.pending, 'and') || 'nothing'}`);
         }
       },
-    }));
+    });
   } catch (error) {
     if (error instanceof MigrateError) throw error;
     throw new MigrateError(migrationFailure(error));
   }
-  return { text: `Applied ${listed(pending, 'and')}, and ${reasserted(options)}`, unbuilt };
+  return { text: `Applied ${listed(pending, 'and')}, and ${reasserted(options)}`, run };
 }
 
-/** The indexes the run left to the next (`unbuiltNote`), said when there are any. */
-function writeUnbuilt(out: Output, unbuilt: readonly UnbuiltIndex[]): void {
-  const note = unbuiltNote(unbuilt);
-  if (note !== null) out.write(`  ${style(out).accent('!')} ${note}\n`);
+/** What the run left to whoever migrates (`unbuiltNote`, `untimedNote`), said when there is any. */
+function writeNotes(out: Output, { unbuilt, untimed }: MigrateRun): void {
+  for (const note of [unbuiltNote(unbuilt), untimedNote(untimed)]) {
+    if (note !== null) out.write(`  ${style(out).accent('!')} ${note}\n`);
+  }
 }
 
 function reasserted({ backupLogin }: Options): string {

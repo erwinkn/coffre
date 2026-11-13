@@ -5,7 +5,7 @@
 // argument, or DATABASE_URL: a direct Postgres URL for a Workers deployment
 // (not Hyperdrive's), or whatever `serve` is given on Node.
 
-import { migrateDatabase, unbuiltNote } from '@coffre/db/migrate';
+import { migrateDatabase, unbuiltNote, untimedNote } from '@coffre/db/migrate';
 
 const USAGE = 'usage: coffre-server migrate [database-url]   (or set DATABASE_URL)';
 
@@ -19,8 +19,9 @@ if (command === '--help' || command === '-h') {
   console.error('coffre-server: no database URL: pass one, or set DATABASE_URL');
   process.exitCode = 2;
 } else {
-  const { unbuilt } = await migrateDatabase(url);
+  const { unbuilt, untimed } = await migrateDatabase(url);
   console.log('database schema is up to date');
-  const note = unbuiltNote(unbuilt);
-  if (note !== null) console.warn(`coffre-server: ${note}`);
+  for (const note of [unbuiltNote(unbuilt), untimedNote(untimed)]) {
+    if (note !== null) console.warn(`coffre-server: ${note}`);
+  }
 }
