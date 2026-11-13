@@ -112,7 +112,7 @@ test('inclusion and consistency proofs verify, and fail when anything is off', (
   assert.ok(!verifyConsistency(0, 0, all[0]!, all[0]!, []) && verifyConsistency(0, 0, EMPTY_ROOT, EMPTY_ROOT, []), 'nor at size 0');
 });
 
-test('a proof reads about one tile per 8 levels', () => {
+test('a proof of one entry among 70,001 reads at most 4 tiles', () => {
   // Leaf 12,345 of 70,001: its own level-0 tile, then level 1, level 2, and the partial tile at the right edge.
   const keys = tilesFor((nodes) => inclusionProof(nodes, 12345, 70001));
   assert.ok(keys.length <= 4, `${keys.length} tiles`);
@@ -147,19 +147,27 @@ test('a tree past 2^32 leaves splits as the RFC says: no 32-bit arithmetic', () 
   }
 });
 
-test('a tree pruned from its start keeps its head, and proves every entry it kept', () => {
-  // Every level-0 tile wholly below the cut is deleted, and nothing else. `nodesFrom` throws on a missing tile, so
-  // whatever verifies below read none of them: the head, the proof of every kept entry, and consistency from every
-  // size at or past the cut. Exhaustive on a small tree, sampled on one that fills a level-1 tile.
+/** The tiles left once the entries below `cut`, a multiple of 256, are pruned: every level-0 tile below it is gone, and nothing else. */
+function prune(tiles: ReadonlyMap<string, Buffer>, cut: number): Map<string, Buffer> {
+  return new Map([...tiles].filter(([key]) => {
+    const [level, index] = key.split('/').map(Number) as [number, number];
+    return level > 0 || index >= cut / WIDTH;
+  }));
+}
+
+test('a tree pruned from its start keeps its head, proves every entry it kept, and grows as before', () => {
+  // `nodesFrom` throws on a missing tile, so whatever verifies below read none of the pruned ones: the head, the proof
+  // of every kept entry, and consistency from every size at or past the cut. Then the signer's next run: the edge
+  // loaded from what is kept, and appended to. Exhaustive on small trees, one of them a whole number of level-1
+  // tiles and pruned to its last block and to nothing; sampled on one that goes past a level-1 tile.
   const check = (n: number, cuts: readonly number[], stride: number) => {
     const { tiles, edge, all } = grow(Array.from({ length: Math.ceil(n / 997) }, (_, i) => Math.min(n, (i + 1) * 997)));
     const whole = memo(nodesFrom(tiles));
+    const more = leaves(n + 300, n);
+    const grown = edge.clone();
+    grown.append(more);
     for (const cut of cuts) {
-      const kept = new Map([...tiles].filter(([key]) => {
-        const [level, index] = key.split('/').map(Number) as [number, number];
-        return level > 0 || (index + 1) * WIDTH > cut;
-      }));
-      assert.equal(tiles.size - kept.size, cut / WIDTH, `cut ${cut}: one tile gone per 256 entries`);
+      const kept = prune(tiles, cut);
       const nodes = memo(nodesFrom(kept));
       const head = treeHash(nodes, n);
       assert.ok(head.equals(edge.root()), `cut ${cut}: the head`);
@@ -170,10 +178,34 @@ test('a tree pruned from its start keeps its head, and proves every entry it kep
         assert.ok(verifyConsistency(from, n, before, head, consistencyProof(nodes, from, n)), `cut ${cut}, from ${from}`);
       }
       assert.throws(() => inclusionProof(nodes, cut - 1, n), /lacks node/, 'a pruned entry proves no more');
+      const again = Edge.load(n, kept);
+      again.append(more);
+      assert.ok(again.root().equals(grown.root()), `cut ${cut}: 300 more entries`);
     }
   };
   check(1500, [256, 512, 768, 1024, 1280], 1);
+  check(65_536, [65_280, 65_536], 1);
   check(300_000, [65_536, 200_192], 1013);
+});
+
+test('a full verify of a pruned tree starts from the edge at the cut, and an edited entry moves the head', () => {
+  const [n, cut] = [1536, 1280];
+  const { tiles, edge, all } = grow([n]);
+  const kept = prune(tiles, cut);
+  // The edge at the cut holds the pruned blocks' hashes, as stored, and nothing of the kept entries.
+  const verify = (entries: readonly Hash[]) => {
+    const from = Edge.load(cut, kept);
+    from.append(entries);
+    return from.root();
+  };
+  assert.ok(verify(all.slice(cut)).equals(edge.root()));
+  const edited = all.slice(cut);
+  edited[3] = leafHash(Buffer.from('edited'));
+  assert.ok(!verify(edited).equals(edge.root()), 'an edited entry');
+  assert.ok(!verify(all.slice(cut, -1)).equals(edge.root()), 'a missing one');
+  // What a verify must not do: fill in the block's tile and ask `nodesFrom`, which answers from the tile above.
+  const filled = new Map(kept).set(tileKey(0, cut / WIDTH), Buffer.concat(edited));
+  assert.ok(treeHash(nodesFrom(filled), n).equals(edge.root()), 'nodesFrom never read the edited block');
 });
 
 type Vectors = {

@@ -6,8 +6,9 @@ import { HASH_SIZE, nodeHash, treeHash, type Hash, type Nodes } from './tree.ts'
  * i) holds up to 256 hashes: the nodes at tree level 8t numbered i·256
  * onwards, concatenated. A level-0 tile holds leaf hashes; a level-1 tile,
  * the roots of 256-leaf subtrees; and so on. Any perfect subtree's hash is in
- * one tile or is at most 128 hashes away from one, so a proof reads one tile
- * per 8 levels: 4 tiles at 2^32 leaves.
+ * one tile or is at most 128 hashes away from one, so a proof reads at most
+ * two tiles per level of tiles, the entry's and the right edge's: 7 at 2^32
+ * leaves.
  *
  * A tile's hashes never change once written, only grow (the partial tile at
  * the tree's right edge), so a tile is read for any older tree size by taking
@@ -17,6 +18,11 @@ import { HASH_SIZE, nodeHash, treeHash, type Hash, type Nodes } from './tree.ts'
  * entries each stands for. The level-1 tile above keeps each one's root, so
  * the head still covers the pruned entries, and every entry that is kept
  * proves from tiles that are kept.
+ *
+ * A full verify of a pruned tree is `Edge.load` at the first kept entry, then
+ * `append` of every kept entry's hash, which must arrive at the signed head.
+ * `nodesFrom` cannot do it: it answers for a block of 256 from the tile above
+ * and never reads the block's own hashes.
  */
 export const HEIGHT = 8;
 export const WIDTH = 256;
