@@ -19,7 +19,7 @@
 // heard of, or a shortened log. The one exception is a row with an entry
 // whose wake-up never arrived.
 module log {
-  type Entry = { row: str, was: int, now: int, at: int }
+  type Entry = { row: str, was: int, now: int, read: str, saw: int, at: int }
   type Snap = { on: bool, full: bool, at: int, pending: Set[int], expected: Set[int], rows: str -> int, ends: bool, wrong: bool }
   type Db = { rows: str -> int, pending: Set[int], log: Set[int] }
   type Vault = { made: List[Entry], calls: Set[int], lost: Set[int] }
@@ -42,6 +42,7 @@ module log {
   const KeepIntent: bool    // what was signed is kept until it is moved
   const SizeCheck: bool     // the log must end with the entry signed last
   const Chain: bool         // a change must replace the MAC the mirror holds
+  const Reads: bool         // and must have decided on the MAC the mirror holds, of a row it read and did not write
 
   var db: Db          // what the writer can change
   var vault: Vault    // made: every entry it MAC'd, by number; lost: wake-ups that never left
@@ -71,9 +72,11 @@ module log {
   val due = range(0, made.length()).foldl(Rows.mapBy(_ => 0), (r, n) =>
     if (made[n].was == made[n].now) r else r.set(made[n].row, made[n].now))
   def excused(row: str): bool = made.indices().exists(n => made[n].row == row and unheard(n) and gone(n))
+  // A change decided on a row that was not what the entries say: on its own row, or on the row it read.
+  def decidedOn(n: int): bool = not(excused(made[n].row)) and not(excused(made[n].read))
   def offBook(row: str): bool = db.rows.get(row) != due.get(row) and not(excused(row))
   val wrong = or {
-    world.tainted.exists(n => not(excused(made[n].row))),
+    world.tainted.exists(n => decidedOn(n)),
     Rows.exists(row => offBook(row)),
     made.indices().exists(n => not(unheard(n)) and gone(n)),
     not(ends),
@@ -89,19 +92,21 @@ module log {
   }
 
   // A change (v is a new MAC) or a use (v is the row's own): one statement
-  // writes the row and the entry. `sent` false: the vault dies before the wake-up.
-  action commit(row: str, v: int, sent: bool): bool = {
+  // writes the row and the entry. A change is decided on a row it reads, its
+  // own or another: the caller's, say, for a change to someone else's. `sent`
+  // false: the vault dies before the wake-up.
+  action commit(row: str, v: int, read: str, sent: bool): bool = {
     val n = made.length()
     all {
       n < MaxEntries,
       db' = { ...db, rows: db.rows.set(row, v), pending: db.pending.union(Set(n)) },
       vault' = {
-        made: made.append({ row: row, was: db.rows.get(row), now: v, at: world.clock }),
+        made: made.append({ row: row, was: db.rows.get(row), now: v, read: read, saw: db.rows.get(read), at: world.clock }),
         calls: if (sent) vault.calls.union(Set(n)) else vault.calls,
         lost: if (sent) vault.lost else vault.lost.union(Set(n)),
       },
       signer' = signer,
-      world' = if (v != db.rows.get(row) and offBook(row)) { ...world, tainted: world.tainted.union(Set(n)) } else world,
+      world' = if (v != db.rows.get(row) and (offBook(row) or offBook(read))) { ...world, tainted: world.tainted.union(Set(n)) } else world,
     }
   }
 
@@ -130,11 +135,14 @@ module log {
     // In the order they were written: each change moves the mirror from the MAC it replaced.
     val held = range(0, made.length()).foldl({ rows: signer.mirror, ok: true }, (m, n) =>
       if (not(good.contains(n)) or made[n].was == made[n].now) m
-      else { rows: m.rows.set(made[n].row, made[n].now), ok: m.ok and m.rows.get(made[n].row) == made[n].was })
+      else {
+        rows: m.rows.set(made[n].row, made[n].now),
+        ok: m.ok and (not(Chain) or m.rows.get(made[n].row) == made[n].was) and (not(Reads) or made[n].read == made[n].row or m.rows.get(made[n].read) == made[n].saw),
+      })
     val found = or {
       good != s.pending,
       not((if (CaptureFirst) s.expected else signer.expected).subseteq(s.pending)),
-      Chain and not(held.ok),
+      not(held.ok),
       s.full and held.rows != (if (OneSnapshot) s.rows else db.rows),
       s.full and SizeCheck and not(s.ends),
     }
@@ -196,8 +204,9 @@ module log {
   action step = any {
     nondet row = Rows.oneOf()
     nondet v = 0.to(MaxVal).oneOf()
+    nondet read = Rows.oneOf()
     nondet sent = Set(true, false).oneOf()
-    commit(row, v, sent),
+    commit(row, v, read, sent),
     nondet n = 0.to(MaxEntries - 1).oneOf()
     deliver(n),
     nondet full = Set(true, false).oneOf()
@@ -213,41 +222,51 @@ module log {
 
 module logSound {
   import log(Rows = Set("g"), MaxVal = 2, MaxEntries = 3, MaxClock = 2, Fresh = 1, Attacks = 2,
-    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true).*
+    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true, Reads = true).*
 }
 module noWake {
   import log(Rows = Set("g"), MaxVal = 2, MaxEntries = 3, MaxClock = 2, Fresh = 1, Attacks = 2,
-    Wake = false, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true).*
+    Wake = false, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true, Reads = true).*
 }
 module noDedupe {
   import log(Rows = Set("g"), MaxVal = 2, MaxEntries = 3, MaxClock = 2, Fresh = 1, Attacks = 2,
-    Wake = true, Dedupe = false, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true).*
+    Wake = true, Dedupe = false, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true, Reads = true).*
 }
 module twice {
   import log(Rows = Set("g"), MaxVal = 2, MaxEntries = 3, MaxClock = 2, Fresh = 1, Attacks = 2,
-    Wake = true, Dedupe = true, Once = false, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true).*
+    Wake = true, Dedupe = true, Once = false, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true, Reads = true).*
 }
 module stale {
   import log(Rows = Set("g"), MaxVal = 2, MaxEntries = 3, MaxClock = 2, Fresh = 1, Attacks = 2,
-    Wake = true, Dedupe = true, Once = true, FreshOnly = false, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true).*
+    Wake = true, Dedupe = true, Once = true, FreshOnly = false, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true, Reads = true).*
 }
 module captureLate {
   import log(Rows = Set("g"), MaxVal = 2, MaxEntries = 3, MaxClock = 2, Fresh = 1, Attacks = 2,
-    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = false, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true).*
+    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = false, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true, Reads = true).*
 }
 module twoReads {
   import log(Rows = Set("g"), MaxVal = 2, MaxEntries = 3, MaxClock = 2, Fresh = 1, Attacks = 2,
-    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = false, KeepIntent = true, SizeCheck = true, Chain = true).*
+    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = false, KeepIntent = true, SizeCheck = true, Chain = true, Reads = true).*
 }
 module forgetful {
   import log(Rows = Set("g"), MaxVal = 2, MaxEntries = 3, MaxClock = 2, Fresh = 1, Attacks = 2,
-    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = false, SizeCheck = true, Chain = true).*
+    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = false, SizeCheck = true, Chain = true, Reads = true).*
 }
 module noSize {
   import log(Rows = Set("g"), MaxVal = 2, MaxEntries = 3, MaxClock = 2, Fresh = 1, Attacks = 2,
-    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = false, Chain = true).*
+    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = false, Chain = true, Reads = true).*
 }
 module noChain {
   import log(Rows = Set("g"), MaxVal = 2, MaxEntries = 3, MaxClock = 2, Fresh = 1, Attacks = 2,
-    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = false).*
+    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = false, Reads = true).*
+}
+
+// Two rows, each there or not: a change to one decided on the other.
+module logTwo {
+  import log(Rows = Set("g", "h"), MaxVal = 1, MaxEntries = 3, MaxClock = 1, Fresh = 1, Attacks = 2,
+    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true, Reads = true).*
+}
+module noReads {
+  import log(Rows = Set("g", "h"), MaxVal = 1, MaxEntries = 3, MaxClock = 1, Fresh = 1, Attacks = 2,
+    Wake = true, Dedupe = true, Once = true, FreshOnly = true, CaptureFirst = true, OneSnapshot = true, KeepIntent = true, SizeCheck = true, Chain = true, Reads = false).*
 }
