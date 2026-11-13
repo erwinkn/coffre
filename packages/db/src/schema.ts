@@ -144,10 +144,15 @@ export const secrets = pgTable(
     key: text().notNull(),
     createdAt: at('created_at').notNull(),
     updatedAt: at('updated_at').notNull(),
-    // The number of the current version, 0 before the first. Versions only
-    // append, so it is also the highest: the next one is this plus one, and
-    // the current version's row is the one of this number.
-    currentVersion: integer('current_version').notNull(),
+    // How many versions it has had: the newest's number, 0 before the first.
+    // Versions only append, so the next one is this plus one. Under the MAC, so
+    // that a number is never used twice, whatever becomes of the versions' rows.
+    versions: integer().notNull(),
+    // The version that is its value: the newest, or none. A reference has
+    // none of its own, and neither does a secret whose reference ended, until
+    // someone writes it a value: what it held before it pointed elsewhere was
+    // replaced, and stays history.
+    currentVersion: integer('current_version'),
     archivedAt: at('archived_at'),
     // Within its environment: the same key elsewhere has its own.
     folder: text(),
@@ -159,7 +164,8 @@ export const secrets = pgTable(
   (table) => [
     unique('secrets_project_id_environment_id_key_key').on(table.projectId, table.environmentId, table.key),
     check('secrets_key_check', sql`${table.key} ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$'`),
-    check('secrets_source_check', sql`${table.sourceId} IS NULL OR ${table.sourceId} <> ${table.id}`),
+    check('secrets_versions_check', sql`${table.versions} >= 0 AND (${table.currentVersion} IS NULL OR (${table.currentVersion} = ${table.versions} AND ${table.versions} > 0))`),
+    check('secrets_source_check', sql`${table.sourceId} IS NULL OR (${table.sourceId} <> ${table.id} AND ${table.currentVersion} IS NULL)`),
     folderCheck('secrets_folder_check', table.folder),
     macCheck('secrets_mac_check', table.mac),
     foreignKey({
@@ -464,7 +470,7 @@ export const bindings = pgTable(
     jwks: text(),
     // JSON, sorted by claim name.
     claims: text().notNull(),
-    // What the credentials it issues reach (`CredentialScope`), JSON.
+    // What the credentials it issues reach (`CredentialScope`), JSON; null, a binding of 0.4 never used since, reaches nothing.
     scope: text(),
     // What a workload's binding says beyond its claims (`BindingPolicy`), canonical JSON: null on a binding `/api/auth/oidc` takes.
     policy: text(),
@@ -522,6 +528,7 @@ export const credentials = pgTable(
     principal: text().notNull(),
     identityId: uuid('identity_id'),
     // What a service or personal token reaches (`CredentialScope`), JSON: null for a session, or one a binding issued (its binding's).
+    // On a token, null reaches nothing: 0.4 wrote such rows, and 0.14 gave each live one its scope.
     scope: text(),
     // The environments a handle was made for, by id, each with whether it was asked for as `@me`, JSON: null for any other credential.
     places: text(),
@@ -558,7 +565,7 @@ export const credentials = pgTable(
     check('credentials_principal_check', sql`${table.principal} LIKE 'user:%' OR ${table.principal} LIKE 'token:%'`),
     check('credentials_kind_matches_principal', sql`(${table.kind} IN ('service', 'workload')) = (${table.principal} LIKE 'token:%')`),
     check('credentials_workload_jkt_check', sql`${table.kind} <> 'workload' OR ${table.jkt} IS NOT NULL`),
-    check('credentials_mcp_client_check', sql`(${table.kind} = 'mcp') = (${table.client} IS NOT NULL)`),
+    check('credentials_mcp_client_check', sql`(${table.kind} = 'mcp') = (${table.client} IS NOT NULL) AND (${table.challenge} IS NULL OR ${table.kind} = 'mcp')`),
     check('credentials_token_hash_check', sql`octet_length(${table.tokenHash}) = 32`),
     check('credentials_previous_token_hash_check', sql`${table.previousTokenHash} IS NULL OR octet_length(${table.previousTokenHash}) = 32`),
     macCheck('credentials_mac_check', table.mac),
@@ -911,9 +918,11 @@ export const exposures = pgTable(
 
 /**
  * 0.14's audit log, as the upgrade left it: the same rows, never written
- * again, with no index but its key. The log's first entry records its last
- * hash and number. `coffre log export --archive` reads it, and nothing else
- * does once the vault has adopted the database.
+ * again, with its key and one index of its sixteen, by action, which finds
+ * the vault what it adopts (the newest policy and settings) without reading
+ * every entry. The log's first entry records its last hash and number.
+ * `coffre log export --archive` reads it, and nothing else does once the
+ * vault has adopted the database.
  */
 export const auditArchive = pgTable(
   'audit_archive',
@@ -941,6 +950,7 @@ export const auditArchive = pgTable(
     mac: bytea().notNull(),
     hash: bytea().notNull(),
   },
+  (table) => [index('audit_archive_action_idx').on(table.author, table.action, table.seq)],
 );
 
 // For Drizzle's relational queries; see relations.ts.

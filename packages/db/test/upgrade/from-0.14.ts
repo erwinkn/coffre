@@ -49,14 +49,23 @@ function before(dir: string): string {
 }
 
 /** An entry of 0.14's log: only what the upgrade reads is true to life. */
-const entry = (seq: number, author: 'app' | 'vault', actor: string, action: string, more: { decision?: string; secret?: number; related?: number; metadata?: object; at?: number } = {}) =>
-  `(${seq}, '${author}', 'k1', ${more.at ?? T0 + seq * 1000}, '${actor}', '${action}', '${more.decision ?? 'allow'}', ${more.secret === undefined ? 'NULL' : u(more.secret)}, ${more.related ?? 'NULL'}, '${JSON.stringify(more.metadata ?? {})}', ${h(1)}, ${h(2)}, ${h(3)})`;
+type More = { decision?: string; code?: string; subject?: string; place?: [project: number, environment: number]; secret?: number; related?: number; metadata?: object; at?: number };
+const ENTRY_COLUMNS = 'seq, author, key_id, occurred_at, actor, action, decision, code, subject_principal, project_id, environment_id, secret_id, related_seq, metadata, prev_hash, mac, hash';
+const text = (value: string | undefined) => (value === undefined ? 'NULL' : `'${value}'`);
+const entry = (seq: number, author: 'app' | 'vault', actor: string, action: string, more: More = {}) =>
+  `(${seq}, '${author}', 'k1', ${more.at ?? T0 + seq * 1000}, '${actor}', '${action}', '${more.decision ?? 'allow'}', ${text(more.code)}, ${text(more.subject)}, ` +
+  `${more.place === undefined ? 'NULL, NULL' : `${u(more.place[0])}, ${u(more.place[1])}`}, ${more.secret === undefined ? 'NULL' : u(more.secret)}, ${more.related ?? 'NULL'}, '${JSON.stringify(more.metadata ?? {})}', ${h(1)}, ${h(2)}, ${h(3)})`;
+/** The vault's seal of a reference: `holder` in billing/prod reads market/prod's `source`. */
+const seal = (seq: number, reference: number, holder: number, source: number) =>
+  entry(seq, 'vault', ADA, 'reference.create', { place: [2, 21], metadata: { reference: id(reference), secretId: id(holder), also: { projectId: id(1), environmentId: id(11), secretId: id(source) } } });
+const version = (n: number, secret: number, number: number, more: { erased?: boolean; plaintext?: string; sensitive?: boolean } = {}) =>
+  `(${u(n)}, ${u(secret)}, ${number}, 1, '\\x${more.erased ? '' : '01'}', '\\x${'00'.repeat(12)}', '\\x${'00'.repeat(16)}', '\\x${more.erased ? '' : '02'}', 'local', 'k', '1', '${ADA}', ${text(more.plaintext)}, ${more.sensitive ?? false})`;
 
 const ADA = 'user:ada@acme.example';
 const BO = 'user:bo@acme.example';
 const API = 'token:api';
 const CI = 'token:ci';
-// Projects 1 and 2; environments 11 (market/prod), 12 (market/dev), 21 (billing/prod); secrets 101 to 105.
+// Projects 1 and 2; environments 11 (market/prod), 12 (market/dev), 21 (billing/prod); secrets 101 and 102 in market/prod, 103 to 109 in billing/prod.
 const SEED = `
   INSERT INTO vault_members (principal, status, owner, role, scope, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES
     ('${ADA}', 'active', true, NULL, NULL, 0, ${T0}, 'system:setup', ${T0}, 'system:setup', 1, ${h(9)}),
@@ -67,24 +76,44 @@ const SEED = `
   INSERT INTO environments (id, project_id, slug, name) VALUES (${u(11)}, ${u(1)}, 'prod', 'Production'), (${u(12)}, ${u(1)}, 'dev', 'Development'), (${u(21)}, ${u(2)}, 'prod', 'Production');
   INSERT INTO secrets (id, project_id, environment_id, key, current_version) VALUES
     (${u(101)}, ${u(1)}, ${u(11)}, 'DATABASE_URL', 1), (${u(102)}, ${u(1)}, ${u(11)}, 'STRIPE_KEY', 2),
-    (${u(103)}, ${u(2)}, ${u(21)}, 'DATABASE_URL', 0), (${u(104)}, ${u(2)}, ${u(21)}, 'OLD_REFERENCE', 0), (${u(105)}, ${u(2)}, ${u(21)}, 'FORGED_REFERENCE', 0);
+    (${u(103)}, ${u(2)}, ${u(21)}, 'DATABASE_URL', 0), (${u(104)}, ${u(2)}, ${u(21)}, 'OLD_REFERENCE', 0), (${u(105)}, ${u(2)}, ${u(21)}, 'FORGED_REFERENCE', 0),
+    (${u(106)}, ${u(2)}, ${u(21)}, 'VALUE_THEN_ENDED_REFERENCE', 2), (${u(107)}, ${u(2)}, ${u(21)}, 'VALUE_THEN_REFERENCE', 1),
+    (${u(108)}, ${u(2)}, ${u(21)}, 'ENDED_OVER_UNENDED', 0), (${u(109)}, ${u(2)}, ${u(21)}, 'REFERENCE_THEN_VALUE', 1);
   INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by, plaintext, sensitive) VALUES
-    (${u(1011)}, ${u(101)}, 1, 1, '\\x01', '\\x${'00'.repeat(12)}', '\\x${'00'.repeat(16)}', '\\x02', 'local', 'k', '1', '${ADA}', NULL, true),
-    (${u(1021)}, ${u(102)}, 1, 1, '\\x01', '\\x${'00'.repeat(12)}', '\\x${'00'.repeat(16)}', '\\x02', 'local', 'k', '1', '${ADA}', NULL, false),
-    (${u(1022)}, ${u(102)}, 2, 1, '\\x01', '\\x${'00'.repeat(12)}', '\\x${'00'.repeat(16)}', '\\x02', 'local', 'k', '1', '${ADA}', 'pk_live', false);
+    ${[
+      version(1011, 101, 1, { sensitive: true }),
+      version(1021, 102, 1),
+      version(1022, 102, 2, { plaintext: 'pk_live' }),
+      // An erased version, of a place since deleted: 0.14 empties its ciphertext and its wrapped key.
+      version(1061, 106, 1, { erased: true }),
+      version(1062, 106, 2),
+      version(1071, 107, 1),
+      version(1091, 109, 1),
+    ].join(',\n    ')};
   UPDATE secrets SET current_version_id = ${u(1011)} WHERE id = ${u(101)};
   UPDATE secrets SET current_version_id = ${u(1022)} WHERE id = ${u(102)};
+  UPDATE secrets SET current_version_id = ${u(1091)} WHERE id = ${u(109)};
   INSERT INTO dismissed_keys (environment_id, key, dismissed_by) VALUES (${u(12)}, 'STRIPE_KEY', '${ADA}');
   INSERT INTO vault_grants (principal, project_id, environment_id, environment_slug, role, expires_at, granted_at, granted_by) VALUES
     ('${ADA}', ${u(1)}, NULL, NULL, 'maintainer', NULL, ${T0 + 7}, 'system:setup'),
     ('${API}', NULL, ${u(11)}, NULL, 'viewer', ${T0 + 400 * day + 1}, ${T0 + 8}, '${ADA}');
-  INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, secret_id, related_seq, metadata, prev_hash, mac, hash) VALUES
+  INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES
     ${[
       // References: 10 seals billing/DATABASE_URL, live; 11 seals OLD_REFERENCE, which 12 ends; FORGED_REFERENCE's row points at 13, which seals nothing.
-      entry(10, 'vault', ADA, 'reference.create', { metadata: { reference: id(201), secretId: id(103), also: { projectId: id(1), environmentId: id(11), secretId: id(101) } } }),
-      entry(11, 'vault', ADA, 'reference.create', { metadata: { reference: id(202), secretId: id(104), also: { projectId: id(1), environmentId: id(11), secretId: id(102) } } }),
+      seal(10, 201, 103, 101),
+      seal(11, 202, 104, 102),
       entry(12, 'vault', ADA, 'reference.end', { related: 11, metadata: { reason: 'removed' } }),
       entry(13, 'app', ADA, 'secret.write'),
+      // A secret with two versions that became a reference (14), which 15 ended: it has no value, not version 2 back.
+      seal(14, 204, 106, 102),
+      entry(15, 'vault', ADA, 'reference.end', { related: 14, metadata: { reason: 'broken' } }),
+      // One with a version that became a reference, live (16). One whose newest reference (18) ended, over an older
+      // one never ended (17): no reference. One given a value after its reference (19): a value.
+      seal(16, 205, 107, 101),
+      seal(17, 206, 108, 101),
+      seal(18, 207, 108, 102),
+      entry(19, 'vault', ADA, 'reference.end', { related: 18, metadata: { reason: 'broken' } }),
+      seal(25, 208, 109, 101),
       // A binding unbound; freezes, of every target: the instance (lifted), a service, a binding (frozen, lifted, frozen), a session, two upstream credentials (one lifted).
       entry(20, 'app', ADA, 'token.unbind', { metadata: { bindingId: id(302) } }),
       entry(30, 'app', ADA, 'workload.freeze', { metadata: { target: 'instance' } }),
@@ -113,7 +142,12 @@ const SEED = `
   INSERT INTO secret_references (id, project_id, environment_id, secret_id, source_project_id, source_environment_id, source_secret_id, created_seq, created_by) VALUES
     (${u(201)}, ${u(2)}, ${u(21)}, ${u(103)}, ${u(1)}, ${u(11)}, ${u(101)}, 10, '${ADA}'),
     (${u(202)}, ${u(2)}, ${u(21)}, ${u(104)}, ${u(1)}, ${u(11)}, ${u(102)}, 11, '${ADA}'),
-    (${u(203)}, ${u(2)}, ${u(21)}, ${u(105)}, ${u(1)}, ${u(11)}, ${u(101)}, 13, '${ADA}');
+    (${u(203)}, ${u(2)}, ${u(21)}, ${u(105)}, ${u(1)}, ${u(11)}, ${u(101)}, 13, '${ADA}'),
+    (${u(204)}, ${u(2)}, ${u(21)}, ${u(106)}, ${u(1)}, ${u(11)}, ${u(102)}, 14, '${ADA}'),
+    (${u(205)}, ${u(2)}, ${u(21)}, ${u(107)}, ${u(1)}, ${u(11)}, ${u(101)}, 16, '${ADA}'),
+    (${u(206)}, ${u(2)}, ${u(21)}, ${u(108)}, ${u(1)}, ${u(11)}, ${u(101)}, 17, '${ADA}'),
+    (${u(207)}, ${u(2)}, ${u(21)}, ${u(108)}, ${u(1)}, ${u(11)}, ${u(102)}, 18, '${ADA}'),
+    (${u(208)}, ${u(2)}, ${u(21)}, ${u(109)}, ${u(1)}, ${u(11)}, ${u(101)}, 25, '${ADA}');
   INSERT INTO identities (id, provider, auth_mac, subject, issuer_hash, generation, principal, email, created_by, revoked_at) VALUES
     (${u(601)}, 'github', ${h(4)}, '1001', 'x', 0, '${ADA}', 'ada@acme.example', 'system:setup', NULL),
     (${u(602)}, 'github', ${h(4)}, '1002', 'x', 0, '${BO}', 'bo@acme.example', '${ADA}', now());
@@ -165,20 +199,33 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
   await migrate(drizzle(db), { migrationsFolder: before(dir) });
   await db.query(SEED);
   const count = async (table: string) => Number((await one<{ n: string }>(`SELECT count(*) AS n FROM ${table}`)).n);
-  const archived = await count('audit_log');
 
   // Online, it changes nothing: the migration is one transaction.
-  await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /coffre is still online/.test(String((error as { cause?: unknown }).cause ?? error)));
+  await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /still online.*Set coffre_runtime, coffre_vault_runtime NOLOGIN/.test(String((error as { cause?: unknown }).cause ?? error)));
   assert.equal(await count('vault_members'), 4);
 
   // A session a runtime login still holds refuses it too.
   const session = new pg.Client({ connectionString: urlOf(UPGRADED, { name: 'coffre_runtime', password: 'local-runtime-only' }) });
   await session.connect();
-  await login(false);
-  await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /still has a session open/.test(String((error as { cause?: unknown }).cause ?? error)));
-  await session.end();
+  try {
+    await login(false);
+    await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /coffre_runtime still has a session open/.test(String((error as { cause?: unknown }).cause ?? error)));
+    // Another login a host gave the app's rights is coffre online too.
+    await admin.query(`DROP ROLE IF EXISTS reporting; CREATE ROLE reporting LOGIN; GRANT coffre_app TO reporting`);
+    await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /still online.*Set reporting NOLOGIN/.test(String((error as { cause?: unknown }).cause ?? error)));
+    await admin.query(`DROP ROLE reporting`);
+  } finally {
+    await session.end();
+  }
   // Postgres drops the session from its list a moment after the client goes.
   for (let i = 0; i < 50 && (await rows(`SELECT 1 FROM pg_stat_activity WHERE usename = 'coffre_runtime'`)).length > 0; i += 1) await new Promise((done) => setTimeout(done, 100));
+
+  // A member 0.14's vault refuses, their row changed around it, stops it, until they are removed.
+  await db.query(`INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES ${entry(70, 'vault', 'system:vault', 'vault.tampered', { decision: 'deny', code: 'mac', subject: BO })}`);
+  await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /changed around it/.test(String((error as { cause?: unknown }).cause ?? error)) && String((error as { cause?: unknown }).cause).includes(BO));
+  await db.query(`INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES ${entry(71, 'vault', ADA, 'member.remove', { subject: BO })}`);
+  assert.equal(await count('vault_members'), 4);
+  const archived = await count('audit_log');
 
   await migrateDatabase(urlOf(UPGRADED));
   await login(true);
@@ -207,17 +254,25 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
     assert.notEqual(found[0]!.id, found[1]!.id);
   });
 
-  await t.test('secrets: a live reference is its holder\'s source, and an ended or unsealed one is none', async () => {
-    assert.deepEqual(await rows(`SELECT key, source_id, current_version FROM secrets WHERE project_id = ${u(2)} ORDER BY key`), [
-      { key: 'DATABASE_URL', source_id: id(101), current_version: 0 },
-      { key: 'FORGED_REFERENCE', source_id: null, current_version: 0 },
-      { key: 'OLD_REFERENCE', source_id: null, current_version: 0 },
+  await t.test('secrets: a live reference is its holder\'s source, and a secret with no value of its own gets none back', async () => {
+    assert.deepEqual(await rows(`SELECT key, source_id, versions, current_version FROM secrets WHERE project_id = ${u(2)} ORDER BY key`), [
+      { key: 'DATABASE_URL', source_id: id(101), versions: 0, current_version: null },
+      { key: 'ENDED_OVER_UNENDED', source_id: null, versions: 0, current_version: null },
+      { key: 'FORGED_REFERENCE', source_id: null, versions: 0, current_version: null },
+      { key: 'OLD_REFERENCE', source_id: null, versions: 0, current_version: null },
+      { key: 'REFERENCE_THEN_VALUE', source_id: null, versions: 1, current_version: 1 },
+      // Version 2 was replaced by the reference, and the reference ended: no value, and the next version is 3.
+      { key: 'VALUE_THEN_ENDED_REFERENCE', source_id: null, versions: 2, current_version: null },
+      { key: 'VALUE_THEN_REFERENCE', source_id: id(101), versions: 1, current_version: null },
     ]);
-    assert.equal(await count('secret_versions'), 3);
-    assert.deepEqual(await rows(`SELECT s.key, v.id FROM secrets s JOIN secret_versions v ON v.secret_id = s.id AND v.version = s.current_version ORDER BY s.key`), [
+    assert.equal(await count('secret_versions'), 7);
+    assert.deepEqual(await rows(`SELECT s.key, v.id FROM secrets s JOIN secret_versions v ON v.secret_id = s.id AND v.version = s.current_version ORDER BY s.key, s.id`), [
       { key: 'DATABASE_URL', id: id(1011) },
+      { key: 'REFERENCE_THEN_VALUE', id: id(1091) },
       { key: 'STRIPE_KEY', id: id(1022) },
     ]);
+    // An erased version stays erased: the adoption has nothing of it to encrypt again.
+    assert.deepEqual(await rows(`SELECT octet_length(ciphertext) AS ciphertext, octet_length(wrapped_dek) AS wrapped FROM secret_versions WHERE id = ${u(1061)}`), [{ ciphertext: 0, wrapped: 0 }]);
   });
 
   await t.test('freezes: each is a field of the row it stops', async () => {

@@ -4,7 +4,8 @@
 # cluster's. A 0.14 database with a row of every kind is upgraded in place
 # (packages/db/test/upgrade/from-0.14.ts); then three databases must have one
 # schema, line for line: that one, one migrated from nothing, and one made
-# from schema.ts alone, as drizzle-kit writes it.
+# from schema.ts alone, as drizzle-kit writes it. The first two must also
+# agree on every privilege and storage setting, which schema.ts does not say.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
@@ -49,4 +50,9 @@ done
 [[ -s "$scratch/coffre_declared.txt" ]]
 diff "$scratch/coffre_declared.txt" "$scratch/coffre_fresh.txt" || { echo "a database migrated from nothing does not have schema.ts's schema (declared < > migrated)"; exit 1; }
 diff "$scratch/coffre_declared.txt" "$scratch/coffre_upgraded.txt" || { echo "a database upgraded from 0.14 does not have schema.ts's schema (declared < > upgraded)"; exit 1; }
+for database in coffre_upgraded coffre_fresh; do
+    as_owner -At -d "$database" < packages/db/test/upgrade/settings.sql > "$scratch/$database.settings.txt"
+done
+[[ -s "$scratch/coffre_fresh.settings.txt" ]]
+diff "$scratch/coffre_fresh.settings.txt" "$scratch/coffre_upgraded.settings.txt" || { echo "a database upgraded from 0.14 has other privileges or storage settings than one migrated from nothing (migrated < > upgraded)"; exit 1; }
 echo "upgrade from 0.14: every row converted, and $(wc -l < "$scratch/coffre_declared.txt") lines of schema agree across the three databases"

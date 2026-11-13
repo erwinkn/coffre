@@ -3,21 +3,52 @@
 -- it, and the way back is the backup taken before. It does what SQL can without a key. Every row that turns into
 -- access is left with an empty MAC, which verifies under no key, until the vault adopts the database at its first call.
 
--- A database that holds an instance converts only with coffre offline: its runtime logins set NOLOGIN and none of
--- their sessions open. A pipeline run without that step fails here, having changed nothing. A new database passes.
+-- A database that holds an instance converts only with coffre offline: every login of its two groups set NOLOGIN, the
+-- runtime logins and any other a host gave their rights, and none of their sessions open. A pipeline run without
+-- that step fails here, having changed nothing. A new database passes.
 DO $$
+DECLARE
+    online text;
+    tampered text;
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM vault_members) THEN
         RETURN;
     END IF;
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('coffre_runtime', 'coffre_vault_runtime') AND rolcanlogin) THEN
-        RAISE EXCEPTION 'this database holds a 0.14 instance, and coffre is still online: the upgrade to 0.16 converts it with coffre offline. Set coffre_runtime and coffre_vault_runtime NOLOGIN, end their sessions, back up, then migrate (docs/design/0.16.md, "Upgrade from 0.14")';
+    -- Whoever has the app's or the vault's rights, by any membership that hands them on. Not the login that migrates,
+    -- nor a superuser, who has every role's: Postgres 16 makes a role's creator its member, to administer it.
+    SELECT string_agg(login.rolname, ', ' ORDER BY login.rolname) INTO online
+      FROM pg_roles login
+     WHERE login.rolcanlogin AND NOT login.rolsuper AND login.rolname <> current_user
+       AND (pg_has_role(login.oid, 'coffre_app', 'USAGE') OR pg_has_role(login.oid, 'coffre_vault', 'USAGE'));
+    IF online IS NOT NULL THEN
+        RAISE EXCEPTION 'this database holds a 0.14 instance, and coffre is still online: the upgrade to 0.16 converts it with coffre offline. Set % NOLOGIN, end their sessions, back up, then migrate (docs/design/0.16.md, "Upgrade from 0.14")', online;
     END IF;
-    IF EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND usename IN ('coffre_runtime', 'coffre_vault_runtime')) THEN
-        RAISE EXCEPTION 'coffre_runtime or coffre_vault_runtime still has a session open on this database: end them (pg_terminate_backend), back up, then migrate (docs/design/0.16.md, "Upgrade from 0.14")';
+    SELECT string_agg(DISTINCT login.rolname, ', ') INTO online
+      FROM pg_stat_activity session
+      JOIN pg_roles login ON login.rolname = session.usename
+     WHERE session.datname = current_database() AND NOT login.rolsuper AND login.rolname <> current_user
+       AND (pg_has_role(login.oid, 'coffre_app', 'USAGE') OR pg_has_role(login.oid, 'coffre_vault', 'USAGE'));
+    IF online IS NOT NULL THEN
+        RAISE EXCEPTION '% still has a session open on this database: end it (pg_terminate_backend), back up, then migrate (docs/design/0.16.md, "Upgrade from 0.14")', online;
+    END IF;
+    -- A member 0.14's vault found changed around it, and refuses: its report (`vault.tampered`) is newer than the
+    -- newest change to what they hold. 0.16 would take their row as it is.
+    SELECT string_agg(found.subject_principal, ', ') INTO tampered
+      FROM (
+        SELECT subject_principal, max(seq) AS seq FROM audit_log
+         WHERE author = 'vault' AND action = 'vault.tampered' AND code IN ('mac', 'stale') AND subject_principal IS NOT NULL
+         GROUP BY subject_principal
+      ) AS found
+     WHERE found.seq > coalesce((
+        SELECT max(changed.seq) FROM audit_log changed
+         WHERE changed.author = 'vault' AND changed.decision = 'allow' AND changed.subject_principal = found.subject_principal
+           AND changed.action IN ('member.add', 'member.restore', 'member.owner', 'member.role', 'member.remove', 'access.grant', 'access.revoke')
+     ), -1);
+    IF tampered IS NOT NULL THEN
+        RAISE EXCEPTION 'on 0.14, the vault found the member row of % changed around it, and refuses them: remove each one on 0.14.7, and add them again if they should stay, then upgrade', tampered;
     END IF;
     IF EXISTS (SELECT 1 FROM vault_grants WHERE project_id IS NULL AND environment_id IS NULL) THEN
-        RAISE EXCEPTION 'vault_grants still holds a grant on every project, of 0.4: sign in to 0.14.7 as an Owner once, which converts them, then upgrade';
+        RAISE EXCEPTION 'vault_grants still holds a grant on every project, of 0.4, which 0.14''s vault converts when their member next signs in, and never for a member it refuses: on 0.14.7, have them sign in, or remove them, then upgrade';
     END IF;
 END
 $$;
@@ -25,24 +56,27 @@ $$;
 
 -- 1. What 0.14 kept only in its log becomes rows, while the log's indexes are still there to find it.
 
--- A reference still live: the newest its holder has that the vault sealed (`reference.create`, which names the holder
--- and the source) and no `reference.end` names.
+-- A reference, as 0.14 reads one: a secret with no value of its own is its newest reference that the vault sealed
+-- (`reference.create`, which names the holder and the source), and that reference is live while no `reference.end`
+-- names it. A newer one that ended leaves no older one standing.
 ALTER TABLE secrets ADD COLUMN source_id uuid;
 --> statement-breakpoint
-UPDATE secrets AS holder SET source_id = live.source_id
+UPDATE secrets AS holder SET source_id = newest.source_id
   FROM (
-    SELECT DISTINCT ON (reference.secret_id) reference.secret_id, source.id AS source_id
+    SELECT DISTINCT ON (reference.secret_id) reference.secret_id, reference.created_seq, source.id AS source_id
       FROM secret_references reference
       JOIN audit_log seal ON seal.seq = reference.created_seq AND seal.author = 'vault' AND seal.action = 'reference.create' AND seal.decision = 'allow'
+       AND seal.project_id IS NOT NULL AND seal.environment_id IS NOT NULL
        AND seal.metadata::jsonb ->> 'reference' = reference.id::text AND seal.metadata::jsonb ->> 'secretId' = reference.secret_id::text
-      JOIN secrets source ON source.id::text = seal.metadata::jsonb -> 'also' ->> 'secretId'
-     WHERE NOT EXISTS (
-        SELECT 1 FROM audit_log ended
-         WHERE ended.related_seq = reference.created_seq AND ended.author = 'vault' AND ended.action = 'reference.end' AND ended.decision = 'allow'
-     )
+       AND seal.metadata::jsonb -> 'also' ->> 'projectId' <> '' AND seal.metadata::jsonb -> 'also' ->> 'environmentId' <> ''
+      LEFT JOIN secrets source ON source.id::text = seal.metadata::jsonb -> 'also' ->> 'secretId'
      ORDER BY reference.secret_id, reference.created_seq DESC
-  ) AS live
- WHERE live.secret_id = holder.id AND live.source_id <> holder.id;
+  ) AS newest
+ WHERE newest.secret_id = holder.id AND holder.current_version_id IS NULL AND newest.source_id <> holder.id
+   AND NOT EXISTS (
+        SELECT 1 FROM audit_log ended
+         WHERE ended.related_seq = newest.created_seq AND ended.author = 'vault' AND ended.action = 'reference.end' AND ended.decision = 'allow'
+   );
 --> statement-breakpoint
 
 -- A binding's tombstone, the app's `token.unbind` naming it, becomes its revocation.
@@ -169,6 +203,7 @@ ALTER TABLE audit_log DISABLE ROW LEVEL SECURITY;
 --> statement-breakpoint
 DROP TABLE secret_references, audit_chain_head, capped_alerts, vault_releases, device_authorizations;
 --> statement-breakpoint
+-- One index stays, by action: it finds the vault the newest policy and settings when it adopts.
 DO $$
 DECLARE
     name text;
@@ -176,13 +211,15 @@ BEGIN
     FOR name IN SELECT conname FROM pg_constraint WHERE conrelid = 'audit_log'::regclass AND contype IN ('f', 'c') LOOP
         EXECUTE format('ALTER TABLE audit_log DROP CONSTRAINT %I', name);
     END LOOP;
-    FOR name IN SELECT indexrelid::regclass::text FROM pg_index WHERE indrelid = 'audit_log'::regclass AND NOT indisprimary LOOP
+    FOR name IN SELECT indexrelid::regclass::text FROM pg_index WHERE indrelid = 'audit_log'::regclass AND NOT indisprimary AND indexrelid <> 'audit_log_action_idx'::regclass LOOP
         EXECUTE format('DROP INDEX %s', name);
     END LOOP;
 END
 $$;
 --> statement-breakpoint
 ALTER TABLE audit_log RENAME TO audit_archive;
+--> statement-breakpoint
+ALTER INDEX audit_log_action_idx RENAME TO audit_archive_action_idx;
 --> statement-breakpoint
 ALTER TABLE audit_archive RENAME CONSTRAINT audit_log_pkey TO audit_archive_pkey;
 --> statement-breakpoint
@@ -191,12 +228,24 @@ ALTER TABLE audit_archive ALTER COLUMN metadata DROP DEFAULT;
 
 -- 3. Secrets.
 
+-- 0.14 said two things of a secret: the number of its newest version (`current_version`), and which version is its
+-- value, if any (`current_version_id`: the newest, or null for a reference and for a secret whose reference ended).
+-- Both stay, as numbers: a secret with no value of its own does not get back the one it held before.
+ALTER TABLE secrets RENAME COLUMN current_version TO versions;
+--> statement-breakpoint
+ALTER TABLE secrets ADD COLUMN current_version integer;
+--> statement-breakpoint
+UPDATE secrets AS secret SET current_version = version.version
+  FROM secret_versions version
+ WHERE version.id = secret.current_version_id AND version.secret_id = secret.id AND version.version = secret.versions;
+--> statement-breakpoint
 ALTER TABLE secrets DROP COLUMN current_version_id;
 --> statement-breakpoint
 DROP INDEX secrets_lookup_idx, secret_versions_secret_idx;
 --> statement-breakpoint
 ALTER TABLE secrets
-    ADD CONSTRAINT secrets_source_check CHECK (source_id IS NULL OR source_id <> id),
+    ADD CONSTRAINT secrets_versions_check CHECK (versions >= 0 AND (current_version IS NULL OR (current_version = versions AND versions > 0))),
+    ADD CONSTRAINT secrets_source_check CHECK (source_id IS NULL OR (source_id <> id AND current_version IS NULL)),
     ADD CONSTRAINT secrets_source_id_fkey FOREIGN KEY (source_id) REFERENCES secrets (id) ON DELETE RESTRICT;
 --> statement-breakpoint
 CREATE INDEX secrets_source_idx ON secrets (source_id) WHERE source_id IS NOT NULL;
@@ -366,7 +415,7 @@ ALTER TABLE credentials
 --> statement-breakpoint
 ALTER TABLE credentials
     ADD CONSTRAINT credentials_kind_check CHECK (kind IN ('browser', 'cli', 'service', 'personal', 'handle', 'workload', 'mcp')),
-    ADD CONSTRAINT credentials_mcp_client_check CHECK ((kind = 'mcp') = (client IS NOT NULL)),
+    ADD CONSTRAINT credentials_mcp_client_check CHECK ((kind = 'mcp') = (client IS NOT NULL) AND (challenge IS NULL OR kind = 'mcp')),
     ADD CONSTRAINT credentials_previous_token_hash_check CHECK (previous_token_hash IS NULL OR octet_length(previous_token_hash) = 32);
 --> statement-breakpoint
 INSERT INTO credentials (id, kind, token_hash, previous_token_hash, generation, principal, label, created_at, created_by, expires_at, last_used_at, last_used_ip, client)
@@ -532,7 +581,7 @@ CREATE UNIQUE INDEX identities_active_subject ON identities (provider, issuer_ha
 --> statement-breakpoint
 ALTER TABLE environments ALTER COLUMN protected DROP DEFAULT, ALTER COLUMN frozen_credentials DROP DEFAULT;
 --> statement-breakpoint
-ALTER TABLE secrets ALTER COLUMN current_version DROP DEFAULT;
+ALTER TABLE secrets ALTER COLUMN versions DROP DEFAULT;
 --> statement-breakpoint
 ALTER TABLE secret_versions ALTER COLUMN sensitive DROP DEFAULT;
 --> statement-breakpoint
