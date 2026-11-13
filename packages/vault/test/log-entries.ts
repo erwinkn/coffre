@@ -39,8 +39,8 @@ export function logWriter(owner: Database, macKey: LogMacKey) {
       const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
       await run(owner, sql`SELECT make_day(${day(Date.now())}::date), make_day(${day(Date.now() + 86_400_000)}::date)`);
     },
-    async change(payload = '{"op":"genesis"}', at = Date.now(), object: string = randomUUID()): Promise<bigint> {
-      const row = { at, requestId: `c-${randomUUID()}`, object, actor: 'vault', payload, seal: randomBytes(16) };
+    async change(payload = '{"op":"genesis"}', at = Date.now(), object: string = randomUUID(), actor = 'vault'): Promise<bigint> {
+      const row = { at, requestId: `c-${randomUUID()}`, object, actor, payload, seal: randomBytes(16) };
       const mac = entryMac(macKey, { tree: 'changes', row });
       return append((number) => sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
         VALUES (${number}, ${row.at}, ${row.requestId}, ${row.object}, ${row.actor}, ${row.payload}, ${row.seal}, ${mac})`);

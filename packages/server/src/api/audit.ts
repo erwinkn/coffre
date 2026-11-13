@@ -1,4 +1,5 @@
 import { ownsInstance, readsWholeLog, runsInstance } from '@coffre/core/access';
+import { DETAIL_ACTIONS } from '@coffre/core/audit';
 import { describeAccessFault, useOfCode, type LogVerification, type ReadsVerification, type TreeVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { missingEntry, newestWindow } from '@coffre/db/log';
@@ -105,37 +106,8 @@ export type AuditEntryView = {
   metadata: Record<string, unknown>;
 };
 
-/**
- * Technical steps and sign-ins: in the log and its chain like everything
- * else, but not what someone did with secrets or access, so a page leaves
- * them out unless asked.
- */
-export const DETAIL_ACTIONS = [
-  'sign_in',
-  'sign_out',
-  'token.create',
-  'token.revoke',
-  'device.approve',
-  'device.deny',
-  // An MCP client's code redeemed, or its tokens refreshed: every hour of its use.
-  'mcp.token',
-  // A read-only tool's call through MCP that went through. Its refusals, and every change, are `mcp.call`, shown.
-  'mcp.read',
-  'account.link',
-  'account.unlink',
-  // A touch that stepped a session up (docs/design/passkeys.md, section 6.2): one per five minutes at most, in PR 5.
-  'passkey.check',
-  'key.wrap',
-  'key.rewrap',
-  // The vault's seal of a reference: the app's `secret.reference` says it in words.
-  'reference.create',
-  'key.intent',
-  'key.check',
-  'audit.heartbeat',
-  'audit.checkpoint',
-  // A step of the app key's rotation, a hundred rows signed again; its `key.rotate` is shown.
-  'key.reseal',
-] as const;
+/** Technical steps and sign-ins, which a page leaves out unless asked: @coffre/core's, the projection's `shown` too. */
+export { DETAIL_ACTIONS };
 
 /** Detail entries a page left out, by action. */
 export type HiddenCount = { action: string; count: number };
@@ -1345,6 +1317,19 @@ export async function acceptAuditLoss(ctx: ApiContext, range: { from: number; to
     if (error instanceof Refusal) throw badRequest(error.message);
     throw error;
   }
+}
+
+/**
+ * `coffre audit rebuild`: the audit projection emptied and started over, as an Owner of the whole instance, as a
+ * person, as `accept-loss`. The vault writes the record naming who asked and resets in one transaction; its projector
+ * lists every log again, the frozen `audit_log` included, and the pages say how far it has gone meanwhile.
+ */
+export async function rebuildAudit(ctx: ApiContext): Promise<{ number: string }> {
+  if (ctx.caller.principal.type !== 'user' || !runsInstance(ctx.caller) || !ownsInstance(ctx.caller)) {
+    throw forbidden('only an owner of the whole instance, as a person, may rebuild the audit projection');
+  }
+  if (ctx.vault.rebuildAudit === undefined) throw new ApiError('unavailable', 'the vault cannot rebuild the audit projection: it is older than this app, so deploy it first', 'vault_outdated');
+  return await ctx.vault.rebuildAudit({ actor: formatMember(ctx.caller.principal), requestId: ctx.requestId });
 }
 
 /** Why a check stops at a checkpoint whose entry names no prefix: the vault never wrote it so. */

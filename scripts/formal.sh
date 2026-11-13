@@ -596,6 +596,17 @@ REMOVALS=(
   "ReadsSeal ProjectorApart ChangeAnswered"
   "ReadsLive CursorAfterRows EveryUseProjected"
   "ReadsLive DeriveFromSealed EveryUseProjected"
+  # The offboarding report's newest read of each member, key and version, `audit_member_keys`: written with the
+  # rows, in the batch's statement; its time only moved up; held by the full verify (not built yet), to retention's floor
+  # as the sealed retention change gives it; dropped with retention's days, `reads_from` raised past them and no read
+  # below it written again, under the cursor's row, which the drop and a batch both take first.
+  "ReadsNewest NewestWithRows ReportNamesListed"
+  "ReadsNewest GreatestAt ReportNamesListed"
+  "ReadsNewest NewestChecked UnnamedDetected"
+  "ReadsNewest FloorSealed UnnamedDetected"
+  "ReadsRetain NewestRetired RetiredUnnamed"
+  "ReadsRetain RetiredKeptOut RetiredUnnamed"
+  "ReadsRetain PruneLocked RetiredUnnamed"
   # 0.15's log across a rotation of the vault's signing key (Rotation.tla; T168, W277). An isolate under the old key,
   # serving on after the deploy, is refused at its write, under the lock, ordered against the rotation's entry.
   "RotationDeploy RetiredRefused OldWritesBelowBoundary"

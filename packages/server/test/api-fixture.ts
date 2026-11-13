@@ -9,11 +9,11 @@ import { issuedGrant } from '@coffre/core/access';
 import { sealEntry, type LogFields } from '@coffre/core/audit';
 import { UNSEALED, type Through, type UseInput, type UseOutcome, type Vault, type VaultEntry } from '@coffre/core/vault';
 import { type Database } from '@coffre/db';
-import { auditLog, credentials, environments, grants, logConfig, principals, projects, proxyDefinitions, proxyReserved, secretReferences, secrets, secretVersions, serviceBindings, logUses, logChanges, auditChainHead, deviceLogins, enrollmentCodes, identities, spentIdTokens, cappedAlerts, dismissedKeys, mcpApprovals, mcpConnections, oauthClients, policy, roles, passkeys, bulkCap, logReads, logReadDays, logReadsCursor } from '@coffre/db/schema';
+import { auditLog, credentials, environments, grants, logConfig, principals, projects, proxyDefinitions, proxyReserved, secretReferences, secrets, secretVersions, serviceBindings, logUses, logChanges, auditChainHead, deviceLogins, enrollmentCodes, identities, spentIdTokens, cappedAlerts, dismissedKeys, mcpApprovals, mcpConnections, oauthClients, policy, roles, passkeys, bulkCap, logReads, logReadDays, logReadsCursor, auditCursor } from '@coffre/db/schema';
 import { rowsOf } from '@coffre/db/dialect';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { derivedSigningKey } from '@coffre/vault';
-import { localVault, runCheckpointer, spoken, type SpokenVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
+import { localVault, runCheckpointer, spoken, type RunningCheckpointer, type SpokenVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
 
 import { memoryAnchor, type AnchorStore } from '../src/anchor.ts';
 import { appLogKey } from '../src/db/audit.ts';
@@ -63,7 +63,22 @@ export type TestVault = SpeakingVault<Vault> & VaultEntry & {
    * newest pair.
    */
   listReads(): Promise<void>;
+  /** Every log as the audit projection lists it, as `listAudit` settles it, with a checkpointer of its own. */
+  listAudit(): Promise<void>;
 };
+
+/**
+ * Every log as the audit projection lists it, up to now: while `audit_log` is still appended to, it is listed behind
+ * its newest signed 0.14 checkpoint, which the beat writes every five minutes and this asks for at once; the chains
+ * behind the newest pair, which a tick signs; then the projector runs until nothing is left. The one place to change
+ * when `audit_log` freezes (the checkpoint goes).
+ */
+export async function listAudit(vault: Pick<Vault, 'checkpoint'>, signer: Pick<RunningCheckpointer, 'checkpointer' | 'auditProjected'>): Promise<void> {
+  const checkpoint = await vault.checkpoint();
+  assert.ok(checkpoint.ok, JSON.stringify(checkpoint));
+  await signer.checkpointer.tick();
+  await signer.auditProjected();
+}
 
 /** A vault's input as a test writes it: its `caller` may be left out, for `speaking` to say. */
 type Spoken<I> = I extends Through ? Omit<I, 'caller'> & Partial<Through> : I;
@@ -365,6 +380,7 @@ export function testVault(
     admitRead: call('admitRead'),
     admitWrite: call('admitWrite'),
     recordRefusal: call('recordRefusal'),
+    rebuildAudit: call('rebuildAudit'),
     waitSealed: call('waitSealed'),
     signIn: call('signIn'),
     revokeCredential: call('revokeCredential'),
@@ -401,6 +417,16 @@ export function testVault(
     async reset() {
       current = null;
       offset = 0;
+    },
+    async listAudit() {
+      const memory = mkdtempSync(join(tmpdir(), 'coffre-audit-'));
+      const signer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [config.signingKey === undefined ? signingKey : Buffer.from(config.signingKey, 'base64')], memory: join(memory, 'memory'), intervalMs: 3_600_000 });
+      try {
+        await listAudit(this as TestVault, signer);
+      } finally {
+        await signer.stop();
+        rmSync(memory, { recursive: true, force: true });
+      }
     },
     async listReads() {
       const memory = mkdtempSync(join(tmpdir(), 'coffre-reads-'));
@@ -559,6 +585,10 @@ export async function resetDatabase(owner: Database): Promise<void> {
   // Its one row put back if a test deleted it (review r6).
   const start = { through: 0n, pair: 0n, at: 0, mac: null };
   await owner.insert(logReadsCursor).values({ onlyRow: true, ...start }).onConflictDoUpdate({ target: logReadsCursor.onlyRow, set: start });
+  // The audit projection at its start: nothing listed of any log.
+  await owner.execute(sql`TRUNCATE audit_events, audit_event_places, audit_member_keys`);
+  const listed = { through: 0n, pair: 0n, at: 0, oldFloor: 0n, oldFrom: 0n, oldTop: 0n, oldHash: Buffer.alloc(32), mac: null, readsFrom: 0 };
+  await owner.insert(auditCursor).values({ onlyRow: true, ...listed }).onConflictDoUpdate({ target: auditCursor.onlyRow, set: listed });
   await owner.delete(grants);
   await owner.delete(principals);
   await owner.delete(dismissedKeys);

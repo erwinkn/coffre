@@ -2427,6 +2427,12 @@ export type Api = {
       };
     };
   };
+  "POST /audit/rebuild": {
+    input: undefined;
+    output: {
+      number: string;
+    };
+  };
 };
 
 export type AccessValue = string | null | {

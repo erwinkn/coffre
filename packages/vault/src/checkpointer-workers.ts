@@ -20,7 +20,9 @@
 // alarm, its own invocation and its own connection, so that no invocation
 // ever holds two connections (a Worker that opened several at once was
 // cancelled as hung, AGENTS.md), and a projection behind, or failing, delays
-// no tick, no seal, no change and no use (formal/Reads.tla).
+// no tick, no seal, no change and no use (formal/Reads.tla). The audit projector
+// (projection.ts) runs in the same object, after it on each alarm and on
+// the same connection.
 import { parseCheckpoint, splitNote, type PairNotes } from '@coffre/core/merkle';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
@@ -48,6 +50,8 @@ import {
   type Witness,
 } from './checkpointer.ts';
 import { daysAround, openLogCheckpointer, reasonOf, RETAIN_EVERY_MS, TICK_MS, upkeep } from './log-checkpointer.ts';
+import { vaultLogKey } from './log.ts';
+import { AuditProjector } from './projection.ts';
 import { Projector } from './reads.ts';
 import { verifierKeys } from './verifier.ts';
 import { logStore } from './log-store.ts';
@@ -124,6 +128,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     #projects: boolean | null = null;
     /** The projector, on a connection of its own for as long as the object lives, as the checkpointer's. */
     #projector: Projector | null = null;
+    #audit: AuditProjector | null = null;
     /** The day the next days of uses were last made for without the checkpointer (`#makeDays`), when it last tried, and its failure. */
     #daysFor: string | null = null;
     #daysTried = -Infinity;
@@ -266,8 +271,8 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     }
 
     /**
-     * The projector's run: some steps of `projectReads`, then the next alarm, a tick later, or at once while a run
-     * leaves sealed uses to project. A failure is an alarm, said once while it stands (`Projector`), and the next
+     * The projectors' run: some steps of `projectReads`, then some batches of `projectAudit`, then the next
+     * alarm, a tick later, or at once while either leaves something to list. A failure is an alarm, said once while it stands (`Projector`), and the next
      * tick tries again, on the same connection, which postgres.js opens again when it is lost.
      */
     async #project(): Promise<void> {
@@ -277,12 +282,16 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
           const s = await settings(this.#env);
           const pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
           const store = logStore(createDatabase(pool));
-          this.#projector = new Projector(store, await verifierKeys(s.signingKeys), (message) => {
+          const said = (message: string) => {
             console.warn(`coffre audit: ${message}`);
             void this.#record({ at: Date.now(), message }).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));
-          });
+          };
+          const keys = await verifierKeys(s.signingKeys);
+          this.#projector = new Projector(store, keys, said);
+          this.#audit = new AuditProjector(store, keys, s.signingKeys.map(vaultLogKey), said);
         }
         more = await this.#projector.run();
+        if (await this.#audit!.run()) more = true;
       } catch (error) {
         this.#projector = null;
         await this.#failure(`the reads' projection cannot open: ${reasonOf(error)}`);

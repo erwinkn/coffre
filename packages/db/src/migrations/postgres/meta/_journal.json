@@ -589,6 +589,13 @@
       "when": 1794530497445,
       "tag": "0086_settings_log_keys",
       "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1794530497446,
+      "tag": "0087_audit_projection",
+      "breakpoints": true
     }
   ]
 }

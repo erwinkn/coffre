@@ -2190,6 +2190,13 @@ async function acceptLoss(args: string[]): Promise<void> {
   process.stdout.write(`entries ${from} to ${to} accepted as lost: the audit watch goes on from entry ${resumes ?? 0}\n`);
 }
 
+/** `coffre audit rebuild`: the audit pages' listing started over, its record naming who asked. */
+async function rebuildAudit(args: string[]): Promise<void> {
+  if (args.length > 0) fail('usage: coffre audit rebuild');
+  const { number } = await client().audit.rebuild();
+  process.stdout.write(`the audit listing starts over (its record is change ${number}): the pages say how far it has listed again\n`);
+}
+
 /** One check of the instance, named, or chosen on the terminal (`verify/index.ts`). */
 async function verify(args: string[]): Promise<void> {
   const [named, ...more] = args;
@@ -2389,6 +2396,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   serve: (args) => serve(args, sessionFlags.url, fetching),
   audit,
   'audit accept-loss': acceptLoss,
+  'audit rebuild': rebuildAudit,
   verify,
   'verify instance': (args) => verify(['instance', ...args]),
   'verify keys': (args) => verify(['keys', ...args]),

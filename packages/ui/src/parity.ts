@@ -251,6 +251,7 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'PUT /settings': { ui: [{ does: 'Settings › General › Service accounts › Edit, beside who creates them', in: 'pages/settings.tsx', call: 'settings.set' }] },
   'GET /audit/keys': { ui: [{ does: 'Settings › Keys: what the keys you keep are checked against', in: 'pages/settings.tsx', call: 'audit.keys' }] },
   'POST /audit/loss': { not: "an Owner's acceptance of lost audit entries is rare and irreversible: `coffre audit accept-loss`, never a button" },
+  'POST /audit/rebuild': { not: "a rebuild of the audit projection empties the pages until it has listed every log again: an operator's `coffre audit rebuild`, never a button" },
   // A person's passkeys (docs/design/passkeys.md, section 3.6); removing one replaces the browser's session, so it goes
   // through the passkey door (`/api/auth/passkey?remove=<id>`), no API route.
   'GET /members/:member/passkeys': {

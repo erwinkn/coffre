@@ -28,4 +28,19 @@ ReadsScript ==
        Use("c1", "r"),
        Use("c2", "k1") >>
 
+\* Each use's time its number: one clock (retention's cut drops what is at or below its time).
+ReadsAt == [n \in 1..5 |-> n]
+
+(* As ReadsAt, but c2's read of k1, the last, is timed before every other: listed after any cut, timed below it,
+   as a read of the frozen `audit_log` is, which the projector lists whatever retention has dropped of the uses. *)
+ReadsRetainAt == <<2, 3, 4, 5, 1>>
+
+(* c1 reads k1, c2 reads k2, c1 reads k1 again from a clock two behind the first: the newest read of k1 is the
+   first by time, the last by number. *)
+ReadsNewestScript ==
+    << Use("c1", "k1"),
+       Use("c2", "k2"),
+       Use("c1", "k1") >>
+ReadsNewestAt == <<3, 2, 1>>
+
 =============================================================================

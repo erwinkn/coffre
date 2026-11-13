@@ -14,12 +14,14 @@ import { leafHash, openPair, verifyInclusion, verifyLog, type PairNotes, type Pa
 import { postgresClient, postgresSession } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
+import { CURSOR_START, cursorMac as auditCursorMac, type AuditCursor } from '../src/audit-rows.ts';
 import { Checkpointer, FenceClosed } from '../src/checkpointer.ts';
 import { logObject } from '../src/inputs.ts';
 import { verifierKeys, type VerifierKeys } from '../src/keyring.ts';
 import { DAYS_AHEAD, logKey, openLogCheckpointer, upkeep } from '../src/log-checkpointer.ts';
 import { authentic, RETENTION_OBJECT, retentionCut, type LogMacKey } from '../src/log-entry.ts';
-import { logStore, type LogStore } from '../src/log-store.ts';
+import { callRebuild, logStore, type LogStore } from '../src/log-store.ts';
+import { projectAudit, rebuildRow } from '../src/projection.ts';
 import { checkReads, cursorMac, projectReads } from '../src/reads.ts';
 import { DAY_MS, dayOf, retain } from '../src/retention.ts';
 import { variableMemory } from './audit-tree.ts';
@@ -88,16 +90,28 @@ beforeEach(async () => {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** The audit projector's cursor at `through`, MAC'd under `key` as the projector writes it (audit-rows.ts). */
+const auditCursorAt = (through: bigint, key: LogMacKey): AuditCursor => {
+  const cursor = { ...CURSOR_START, through };
+  return { ...cursor, mac: auditCursorMac(key, cursor) };
+};
+
 /**
- * A store whose reads' projection is past every cut, as these tests have no projector: retention waits on it otherwise
- * (T166). The T166 test below opens the store as it is (`projected` false).
+ * A store whose audit projection is past every cut, as these tests run no audit projector: retention waits on it
+ * otherwise, as a test below holds it to.
  */
-const projected = (store: LogStore): LogStore => ({ ...store, readsCursor: async () => ({ through: 2n ** 62n, pair: 0n, at: 0, mac: cursorMac(macKey, { through: 2n ** 62n, pair: 0n, at: 0 }) }) });
+const auditPast = (store: LogStore): LogStore => ({ ...store, auditCursor: async () => auditCursorAt(2n ** 62n, macKey) });
+
+/**
+ * A store whose reads' projection is past every cut too, as these tests have no projector: retention waits on it
+ * otherwise. A test that opens with `projected` false reads the store's reads' cursor as it is.
+ */
+const projected = (store: LogStore): LogStore => auditPast({ ...store, readsCursor: async () => ({ through: 2n ** 62n, pair: 0n, at: 0, mac: cursorMac(macKey, { through: 2n ** 62n, pair: 0n, at: 0 }) }) });
 
 async function open(options: { projected?: boolean } = {}) {
   const alerts: string[] = [];
   const raw = logStore(db.vault, { tileRange: RANGE });
-  const store = options.projected === false ? raw : projected(raw);
+  const store = options.projected === false ? auditPast(raw) : projected(raw);
   const cp = await Checkpointer.open(store, signers, { memory: variableMemory(), authentic: authentic(macKey), alert: (m) => alerts.push(m), freshMs: FRESH, now });
   return { cp, store, alerts };
 }
@@ -139,8 +153,12 @@ test('T168, review r3 of #444: a day whose cut is under the key the log moved on
   const memory = variableMemory();
   const raw = logStore(db.vault, { tileRange: RANGE });
   let cursor: { through: bigint; mac: Buffer } = { through: 0n, mac: Buffer.alloc(0) };
-  // The reads' cursor, where the test puts it, MAC'd under the key it says.
-  const store: LogStore = { ...raw, readsCursor: async () => ({ through: cursor.through, pair: 0n, at: 0, mac: cursor.mac }) };
+  // The reads' cursor, where the test puts it, MAC'd under the key it says; the audit projector's beside it, under the old key.
+  const store: LogStore = {
+    ...raw,
+    readsCursor: async () => ({ through: cursor.through, pair: 0n, at: 0, mac: cursor.mac }),
+    auditCursor: async () => auditCursorAt(cursor.through, macKey),
+  };
   const old = await Checkpointer.open(raw, signers, { memory, authentic: authentic(macKey), alert: () => {}, freshMs: FRESH, now });
   await midnight(old);
   const cut = (await store.cutAt(MIDNIGHT))!.upto;
@@ -175,6 +193,69 @@ test('T168, review r3 of #444: a day whose cut is under the key the log moved on
   const r = await retain(cp, store, { keepDays: 9, keys: both, now });
   assert.equal(r.waiting, null);
   assert.deepEqual(r.dropped.map((d) => d.day), [D10]);
+  await cp.close();
+});
+
+test('a day goes only once the audit projection is past its cut too, by the cursor the vault MACs, never a number moved around it', async () => {
+  const { cp, store } = await open();
+  await midnight(cp);
+  await later(cp);
+  // The reads' projection past the cut, the audit projection at its start: D10 waits.
+  const behind = await retain(cp, { ...store, auditCursor: async () => ({ ...CURSOR_START, mac: null }) }, { keepDays: 9, keys, now });
+  assert.deepEqual(behind.dropped, []);
+  assert.match(behind.waiting?.reason ?? '', /the audit projection \(through 0\) has not reached the cut/);
+  // A database writer moving the cursor past the cut, its MAC left behind: still waits.
+  const moved = { ...auditCursorAt(0n, macKey), through: 2n ** 62n };
+  const forged = await retain(cp, { ...store, auditCursor: async () => moved }, { keepDays: 9, keys, now });
+  assert.deepEqual(forged.dropped, []);
+  assert.match(forged.waiting?.reason ?? '', /the audit cursor, at \d+, is not the vault's/);
+  // The projector past it: D10 goes.
+  const r = await retain(cp, store, { keepDays: 9, keys, now });
+  assert.equal(r.waiting, null);
+  assert.deepEqual(r.dropped.map((d) => d.day), [D10]);
+  await cp.close();
+});
+
+test("the audit projection starts below retention's cuts, after an upgrade or a rebuild: changes listed from the start, uses from the cut, no dropped one looked for", async () => {
+  const { cp, store } = await open();
+  // The audit projector's own store: its cursor as it stands, where retention's (`open`) is stubbed past every cut, as a
+  // database upgraded from 0.15, whose days went before any audit projector ran.
+  const audit = logStore(db.vault, { tileRange: RANGE });
+  const rebuild = () => callRebuild(db.vault, rebuildRow(macKey, { actor: `user:${randomUUID()}`, requestId: randomUUID() }, Date.now()));
+  const projectedAll = async () => {
+    for (let run = 0; run < 100; run += 1) if (!(await projectAudit(audit, keys, [], { steps: 1 })).more) return;
+    assert.fail('the audit projection did not catch up');
+  };
+  const listed = async () => {
+    const found = await rows<{ number: string; log: number; action: string }>(db.owner, sql`SELECT number::text AS number, log, action FROM audit_events ORDER BY number`);
+    return { uses: found.filter((r) => Number(r.log) === 16).map((r) => BigInt(r.number)), rebuilds: found.filter((r) => r.action === 'audit.rebuild').map((r) => BigInt(r.number)) };
+  };
+  // A change the projection lists, below the cut to come: the record of a rebuild, which also puts the cursor at the start.
+  await rebuild();
+  const { d10, d9, today } = await midnight(cp);
+  const cutUpto = (await store.cutAt(MIDNIGHT))!.upto;
+  await later(cp);
+  // D10 goes, its partition and the uses tree's tiles below the cut with it.
+  assert.deepEqual((await retain(cp, store, { keepDays: 9, keys, now })).dropped.map((d) => d.day), [D10]);
+  await retain(cp, store, { keepDays: 9, keys, now });
+  assert.equal(await exists('log_tiles_uses_0'), false);
+  // From the start: the change below the cut listed, no use at or below it (D10's are gone, D9's stragglers have no tree
+  // to vouch for them), today's all.
+  await projectedAll();
+  const first = await listed();
+  assert.equal(first.rebuilds.length, 1);
+  assert.ok(first.uses.every((n) => n > cutUpto), `${first.uses.filter((n) => n <= cutUpto).join(', ')} listed at or below the cut ${cutUpto}`);
+  for (const n of [...d10, ...d9]) assert.ok(!first.uses.includes(n), `${n} listed`);
+  for (const n of today) assert.ok(first.uses.includes(n), `${n} not listed`);
+  // D9 goes too; then a rebuild lists the same again, its own record beside the first.
+  await retain(cp, store, { keepDays: 1, keys, now });
+  await retain(cp, store, { keepDays: 1, keys, now });
+  await rebuild();
+  await later(cp);
+  await projectedAll();
+  const again = await listed();
+  assert.equal(again.rebuilds.length, 2);
+  assert.deepEqual(again.uses, first.uses);
   await cp.close();
 });
 

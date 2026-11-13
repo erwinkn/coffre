@@ -14,7 +14,11 @@ import { join, relative } from 'node:path';
  */
 export const SERVER_TABLES = [
   'audit_chain_head',
+  'audit_cursor',
+  'audit_event_places',
+  'audit_events',
   'audit_log',
+  'audit_member_keys',
   'bulk_cap',
   'capped_alerts',
   'checkpoint_fence',

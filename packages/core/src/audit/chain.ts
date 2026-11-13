@@ -205,3 +205,5 @@ function checkHash(value: Buffer, what: string): void {
 function equal(a: Buffer, b: Buffer): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
+
+export { DETAIL_ACTIONS } from './actions.ts';

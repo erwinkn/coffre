@@ -2143,7 +2143,9 @@ covers every column but the number. A projector writes one row of
 if the key was a reference then, the version read, and a MAC under the
 vault's key that covers the number too. It records how far it got in a
 cursor. The audit pages read only these rows, and say "reads sealed
-through <cursor>" while the cursor is below the signed pair.
+through <cursor>" while the cursor is below the signed pair. The audit
+projector writes the same rows to `audit_events` under
+`audit_cursor`, and the model stands for both.
 
 **The parties.**
 - **Writers** number each change or use from the one sequence and commit
@@ -2156,7 +2158,9 @@ through <cursor>" while the cursor is below the signed pair.
 - **An attacker** with write access to the database and no key can delete
   or swap uses, delete changes, edit live rows (a credential's account, a
   key's place, the reference's source), delete, copy or make up projection
-  rows, and set the cursor.
+  rows, set the cursor, delete an entry of `audit_member_keys` or set its
+  time, and set `audit_cursor.reads_from`. None of the last three carries
+  a MAC.
 
 MCReads.tla's log: c1 reads through a reference r to k1; r is repointed to
 k2; c1 moves to account B; c1 reads through r again; c2 reads k1. Each
@@ -2164,10 +2168,27 @@ use's projection differs from every other's. The scenarios:
 - `Reads`: one projector, one crash, two attacker steps;
 - `ReadsRace`: two projectors, no attacker;
 - `ReadsRetain`: as `ReadsRace`, with retention dropping the uses and rows
-  at or below a cut the cursor has passed;
+  at or below a cut the cursor has passed. c2's read of k1, the last, is
+  timed before every other: listed after any cut and timed below it, as a
+  read of the frozen `audit_log` is (the projector walks that log
+  whatever retention has dropped of the uses);
 - `ReadsProbe`: as `Reads`, with a use's MAC that covers only its own columns;
 - `ReadsSeal`: only the signer is fair;
-- `ReadsLive`: the signer and the projector are both fair, with one crash.
+- `ReadsLive`: the signer and the projector are both fair, with one crash;
+- `ReadsNewest`: c1 reads k1, c2 reads k2, then c1 reads k1
+  again from a clock two behind its first read, so the newest read of k1
+  is the first by time and the last by number. One projector, one crash,
+  one attacker step on `audit_member_keys` or `reads_from`.
+
+An offboarding report names each key and version a member read or wrote,
+and when last. It reads `audit_member_keys`, one entry for each
+member, key and version, with the time of the newest read of it. It never
+reads each day the member read, which grows with their history. A
+use's time is its own (`At`), which need not rise with its number:
+isolates' clocks are apart. The report covers retention's window: a read
+timed before the newest day retention dropped is on no report, even when
+its row stays listed (a read of the frozen log). The model checks reads
+only; a write's entry is never dropped.
 
 | protection | turned off, TLC finds |
 |---|---|
@@ -2183,6 +2204,13 @@ use's projection differs from every other's. The scenarios:
 | the full verify flags a sealed use with no row, not just a row with no use (CountChecked) | `DeletionDetected` |
 | the projector runs apart from the signer's tick (ProjectorApart) | `SealNeverWaitsOnProjection`, `ChangeAnswered`: a stopped projector stops sealing, and the next change never answers |
 | a chunk's rows written only while the cursor stands where the chunk started (FromChecked) | `RetiredStayGone`: p2 reads use 1's chunk, p1 projects it and moves the cursor, retention drops use 1 and its row, and p2 writes the row back below the cut (review r11 of #434: 600 retired reads came back) |
+| the entries of `audit_member_keys` written with the rows, before the cursor passes them (NewestWithRows) | `ReportNamesListed`: written once the cursor has moved, the page lists use 1 and the report does not name it, for good if the projector crashes first |
+| an entry's time only moved up, the later kept (GreatestAt) | `ReportNamesListed`: use 3, c1's second read of k1, sets the entry to its own time, 1, and c1's read at 3 is left unnamed |
+| the full verify holds each listed read within retention to an entry of its member, key and version at its time or later (NewestChecked) | `UnnamedDetected`: the attacker deletes the entry of c1's read of k1 and nothing says so |
+| ... from retention's floor as the sealed retention change gives it, never `reads_from` (FloorSealed) | `UnnamedDetected`: the attacker sets `reads_from` past every read, the projector writes no entry, and a verify that reads the column excuses them all |
+| retention's drop of a day drops the entries of reads timed before the day's end (NewestRetired) | `RetiredUnnamed`: the report names use 1, which retention dropped |
+| ... and raises `reads_from` to the day's end, and a batch writes no entry of a read timed below it (RetiredKeptOut) | `RetiredUnnamed`: retention drops through number 2 (times up to 3), and c2's read, listed later but timed 1, is named again |
+| the drop and a batch's write never interleave: both take `audit_cursor`'s row first (PruneLocked) | `RetiredUnnamed`: the drop deletes the entries it sees, the batch listing c2's read reads `reads_from` before the drop commits, and writes its entry, which the drop never saw |
 
 `EXPECTED`, with every protection on:
 - `Reads ListedComplete`: the page does not see a row deleted below its
@@ -2206,13 +2234,34 @@ use's projection differs from every other's. The scenarios:
   and nothing else ties it to the rows.
 - **A window above the seal is not empty, only in flight.** The projector
   must stop at the signer's barrier, not at the newest number it can see.
+- **FromChecked keeps retired rows out, not retired reads'
+  entries.** A use listed after a cut is timed after its day (retention
+  cuts at the first pair past the day's end), so for the uses alone a
+  batch never brings back a retired read: with clocks in number order,
+  `ReadsRetain` holds with RetiredKeptOut and PruneLocked both off. A read
+  of the frozen `audit_log` is listed whenever its walk reaches it, timed
+  before any cut, and again after `coffre audit rebuild`, which lists
+  that log from the start: those need `reads_from` checked, under the
+  cursor's row. Turning
+  FromChecked off breaks `RetiredStayGone` only; `RetiredUnnamed` holds.
+- **The cursor's row is the only lock the summary needs.** PruneLocked is
+  the row lock both functions take first, and every scenario holds with
+  it alone. Retention drops by the day's end, not by a sweep of the
+  entries below the oldest day left, so it needs no advisory lock.
+- **`reads_from` is a writer's to set.** It carries no MAC, so a full
+  verify that excused the reads below it would excuse whatever a writer
+  hides (FloorSealed). It must take the floor from the newest sealed
+  retention change, whose day the vault signed.
 
 **Not modelled:** forged use or change rows, which the signer's MAC check
 refuses (Seal.tla's `MacChecked`); the use's own decision, which is
 HotPathOne's; retention's day as such (a cut, below which uses and rows
 go, stands for it; the order in which a day's two partitions go, the
 reads' first, is `retention.test.ts`'s); and who sees which rows
-(`formal/lean`'s access model).
+(`formal/lean`'s access model); `coffre audit rebuild`
+(`rebuild_audit`), which takes the cursor's row first too and empties the
+tables, `reads_from` kept; and the summary's writes (`wrote`), which no
+drop touches.
 
 **As built** (`packages/vault/src/reads.ts`; `docs/design/0.15-plan.md`,
 "As built: T166"):
@@ -2233,6 +2282,29 @@ reads' first, is `retention.test.ts`'s); and who sees which rows
   IdempotentByNumber `project_reads`' upsert, CursorAfterRows its single
   transaction, FromChecked its `p_from`, the days the reads need made in the same call. ProjectorApart is the `reads` object on Workers and an
   unawaited kick on Node.
+- The audit projector (`packages/vault/src/projection.ts`) writes a
+  batch in one statement, `project_audit` (postgres
+  `0087_audit_projection`): its first statement is the cursor's
+  compare-and-set (FromChecked, `WHERE` the cursor still stands at
+  `p_from`; IdempotentByNumber), which takes `audit_cursor`'s row for the
+  rest of the transaction; then the rows (ReplaceOnConflict, `ON CONFLICT
+  … DO UPDATE`), their places, and the summary (NewestWithRows). The
+  model's separate rows and cursor steps allow more interleavings than one
+  transaction does. GreatestAt is the summary's `DO UPDATE … WHERE
+  (audit_member_keys.at, audit_member_keys.number) < (excluded.at,
+  excluded.number)`; RetiredKeptOut its `at >= reads_from`, read after the
+  row is held. NewestRetired is `drop_audit_day`, which raises
+  `reads_from` to the day's end first (taking the same row: PruneLocked),
+  then drops the day's uses' rows and their places, then every read of
+  the summary timed before the day's end. Retention calls it only once
+  both cursors have passed the day's cut (`behindReads`). No advisory
+  lock.
+- NewestChecked and FloorSealed belong to the full recheck over the
+  projection, which is not built: `checkReads` holds `log_reads` alone,
+  and nothing holds `audit_member_keys` to the rows yet.
+- The entries carry no MAC, as the days do not: the full verify, not the
+  report, holds them to the rows. An entry made up or set later makes the
+  report name more, never less.
 
 ### Rotation.tla
 

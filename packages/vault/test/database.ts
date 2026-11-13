@@ -241,6 +241,11 @@ export async function emptyReads(owner: Database): Promise<void> {
   await run(owner, sql`DELETE FROM log_read_days`);
   await run(owner, sql`DELETE FROM log_read_place_days`);
   await run(owner, sql`INSERT INTO log_reads_cursor (only_row, through, pair, at, mac) VALUES (true, 0, 0, 0, NULL) ON CONFLICT (only_row) DO UPDATE SET through = 0, pair = 0, at = 0, mac = NULL`);
+  // The audit projection at its start: nothing listed of any log.
+  await run(owner, sql`TRUNCATE audit_events, audit_event_places, audit_member_keys`);
+  await run(owner, sql`INSERT INTO audit_cursor (only_row, through, pair, at, old_floor, old_from, old_top, old_hash, mac, reads_from)
+    VALUES (true, 0, 0, 0, 0, 0, 0, ${Buffer.alloc(32)}, NULL, 0) ON CONFLICT (only_row) DO UPDATE SET through = 0, pair = 0, at = 0, old_floor = 0,
+    old_from = 0, old_top = 0, old_hash = excluded.old_hash, mac = NULL, reads_from = 0`);
 }
 
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */

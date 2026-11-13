@@ -3,6 +3,7 @@ import { leafData, proveConsistency, TREES, verifyConsistency, type Cut, type Lo
 import { FenceClosed, type Checkpointer, type CheckpointStore } from './checkpointer.ts';
 import { keyringOf, openUnder, type Keyring, type KeyringStore, type VerifierKeys } from './keyring.ts';
 import { entryMac, RETENTION_ACTOR, RETENTION_OBJECT, retentionCut, retentionPayload } from './log-entry.ts';
+import { cursorVouched as auditVouched, type AuditCursor } from './audit-rows.ts';
 import { cursorVouched, type ReadsCursor } from './reads.ts';
 
 /**
@@ -44,6 +45,8 @@ import { cursorVouched, type ReadsCursor } from './reads.ts';
 export type RetentionStore = {
   /** How far the reads' projector has gone (reads.ts, T166), with its MAC: no day nor tile it has yet to read is dropped. */
   readsCursor(): Promise<ReadsCursor>;
+  /** How far the audit projector has gone (projection.ts), likewise: no day of uses it has yet to list is dropped. */
+  auditCursor(): Promise<AuditCursor>;
   /** The UTC days of uses the database holds, oldest first: YYYY-MM-DD. */
   days(): Promise<string[]>;
   /** Makes each day's partition of uses (`make_day`), once a store. */
@@ -209,11 +212,14 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
  * and alarms once it has waited long.
  */
 async function behindReads(store: RetentionStore, ring: Keyring, upto: bigint): Promise<string | null> {
-  const cursor = await store.readsCursor();
+  const [cursor, audit] = await Promise.all([store.readsCursor(), store.auditCursor()]);
   // Under the current key, or under one replaced while the cursor is below its rotation: the projector re-MACs it
   // under the current key when it next moves (reads.ts).
   if (!cursorVouched(ring, cursor)) return `the reads' cursor, at ${cursor.through}, is not the vault's: it was moved around the projector`;
-  return cursor.through >= upto ? null : `the reads' projection (through ${cursor.through}) has not reached the cut (${upto}) yet`;
+  if (cursor.through < upto) return `the reads' projection (through ${cursor.through}) has not reached the cut (${upto}) yet`;
+  // The audit projection's too: a use it has yet to list would never be, its day gone.
+  if (!auditVouched(ring, audit)) return `the audit cursor, at ${audit.through}, is not the vault's: it was moved around the projector`;
+  return audit.through >= upto ? null : `the audit projection (through ${audit.through}) has not reached the cut (${upto}) yet`;
 }
 
 /** What `work` answers, or, when the database gave up waiting for a lock (55P03, lock_timeout), why: no alarm. */

@@ -155,6 +155,7 @@ import {
   type NoteOutcome,
   type RecordRefusalInput,
   type RecordRefusalOutcome,
+  type RebuildAuditInput,
   type AdmitWriteInput,
   type AdmitWriteOutcome,
   type WriteKeysInput,
@@ -185,6 +186,7 @@ import { changeName, everyProjectConversion, findingMetadata, newestAccess, newe
 import { appendEntries, COUNTED_AT_ONCE, countWindow, HeadBusy, holdIssues, isMovedChange, laterHead, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestWindow, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { KeyAccounting } from './accounting.ts';
+import { rebuildRow } from './projection.ts';
 import { addRefusal, callRefusal, openRefusal, refusalRow, writeRefusal } from './refusal.ts';
 import { ADMIT_KINDS, admitStanding, callAdmit, decideAdmit, holdAdmit, openTicket, OWNERS_ONLY, parseAdmitInputs, scopeSlugs, sealTicket, SETS_UP_ONLY, TICKET_MS, validateAdmitRead, type AdmitAsked, type AdmitTicket } from './admit.ts';
 import { admitChange, Changes, changesHold, heldByLog, heldFrom, keptFrom, keptObjects, macsOf, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
@@ -203,7 +205,7 @@ import { roleChanges, type StoredRole } from './role-rows.ts';
 import { frozenHoldings, notCleared, proxyView, reservedProblem, routeRefusal, type ResolvedKey } from './proxy.ts';
 import { TICK_MS } from './log-checkpointer.ts';
 import { changeEntry, changeHolds, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
-import { logStore } from './log-store.ts';
+import { callRebuild, logStore } from './log-store.ts';
 import { checkReads, cursorVouched, readVouched, type ReadRow } from './reads.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { replayFault, type Replayed } from './replay.ts';
@@ -3990,6 +3992,14 @@ class VaultService implements Vault {
   /** The audit page's check (`Vault.check`). Not built, and nothing calls it. */
   async check(_input: CheckInput): Promise<CheckOutcome> {
     throw new Error('this vault checks no audit page: check is not built yet');
+  }
+
+  /** `coffre audit rebuild` (projection.ts): the record and the reset, one statement, then the seal wait. */
+  async rebuildAudit(input: RebuildAuditInput): Promise<{ number: string }> {
+    const log015 = this.#prepared.log015;
+    const number = await callRebuild(this.#db, rebuildRow(log015.mac, input, Date.now() + this.#prepared.options.clockOffset()));
+    await log015.sealThrough(number);
+    return { number: number.toString() };
   }
 
   /** Whether this vault serves `writeKeys`: its key-encryption key in memory (a key service's intent and outcome are records of their own, PR 7). */
