@@ -1104,7 +1104,7 @@ test("T200, T205: under a light gate, or the route's named call, the caller is d
   }
 });
 
-test("a caller who stands nowhere there reads nothing of the route, its gate asked light or not: each refusal weighed beside its twin (a route the world never saved), its key's blocks and its buffers alike whatever the route names (NoKeyBeforeStanding)", async (t) => {
+test("a caller who stands nowhere there reads nothing of the route, its gate asked light or not: each refusal weighed beside its twin (a route the world never saved), its key's blocks alike whatever the route names (NoKeyBeforeStanding)", async (t) => {
   const w = await routeWorld(db);
   const held = await w.key('sk');
   const sensitive = await w.key('sens');

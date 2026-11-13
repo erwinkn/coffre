@@ -607,8 +607,9 @@ test('a database that asks for more SCRAM iterations than any needs is refused b
 test('a peer that leaves while a plugin has not decided takes its socket with it', async (t) => {
   // Refused once the case ends: a decision left pending holds the file open until the admission's bound.
   let decide = (_: Response) => {};
+  const decided = new Promise<Response>((resolve) => (decide = resolve));
   t.after(() => decide(new Response(null, { status: 403 })));
-  runtime.plugins = checkPlugins([{ name: 'stall', routes: { prefix: '/stall', fetch: async () => new Response(null, { status: 404 }), socket: () => new Promise<Response>((resolve) => (decide = resolve)) } }]);
+  runtime.plugins = checkPlugins([{ name: 'stall', routes: { prefix: '/stall', fetch: async () => new Response(null, { status: 404 }), socket: () => decided } }]);
   const before = await new Promise<number>((resolve) => coffre.getConnections((_, count) => resolve(count)));
   const socket = tcp({ host: '127.0.0.1', port: Number(new URL(coffreAt).port) });
   await once(socket, 'connect');

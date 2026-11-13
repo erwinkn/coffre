@@ -1078,13 +1078,18 @@ test('readiness costs the same however long the log, and however far it ran past
  * log as after a short one.
  */
 test("a checkpoint's transactions read the same however far its walk goes", async () => {
-  const held = async (count: number) => {
+  const held = async (count: number): Promise<{ statements: number; rows: number; walked: number }> => {
     assert.ok((await signLog()).ok);
     await append(count);
     const before = { ...vaultPool.held };
     let signed: { ok: boolean } = { ok: false };
     const all = await cost(async () => (signed = await signLog()));
     assert.ok(signed.ok, 'the measured checkpoint signed');
+    // The call that ends a lap of the rehash of the past rehashes fewer than its stretch (`walks.scrub`), in a statement
+    // fewer; how many checkpoints ran before says which call that is. The next call starts a lap over the whole log.
+    const [newest] = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
+      .where(eq(auditLog.action, 'audit.checkpoint')).orderBy(desc(auditLog.seq)).limit(1);
+    if ((JSON.parse(newest!.metadata) as { scrub: unknown }).scrub === null) return held(count);
     return { statements: vaultPool.held.statements - before.statements, rows: vaultPool.held.rows - before.rows, walked: all.vault.rows };
   };
   const short = await held(10);
@@ -1566,7 +1571,7 @@ test("the project list and a render's shell count no deleted place's keys in thi
  * however many entries the projection holds. Planted as rows, as only their reads are measured, a tenth of them first,
  * then all, and gone again after.
  */
-test("the audit pages and the offboarding report read as many pages however many entries the projection holds", async () => {
+test("the audit pages and the offboarding report are each one statement, and read as many pages however many entries the projection holds", async (t) => {
   const counted = createDatabase(app.client);
   const u = (kind: number, n: number) => `00000000-0000-4000-${8000 + kind}-${String(n).padStart(12, '0')}`;
   const ADA = 'user:u3@x';
@@ -1627,19 +1632,21 @@ test("the audit pages and the offboarding report read as many pages however many
     // key's 330, so that the larger compares like with like.
     await plant(1, 20_000);
     const small = await pages();
-    await plant(20_001, 180_000);
-    const grown = await pages();
-    for (const [name, statements] of Object.entries(small)) {
-      assert.equal(statements.length, 1, `${name} is one statement`);
-      const [{ text, pages: before }] = statements as [{ text: string; pages: number | null }];
-      const { pages: after, plan } = grown[name]![0]!;
-      assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with the projection grown tenfold, ${before} before:\n${plan}`);
-    }
-    // And they read what was planted: a full page of each, the newest first.
-    const newest = await eventsPage(counted, { stream: { all: true, shownOnly: true }, match: {}, detail: false, counted: false, limit: 2 });
-    assert.deepEqual(newest.rows.map(({ number }) => number), [200_000n, 199_999n]);
-    const member = await eventsPage(counted, { stream: { actors: [ADA] }, match: {}, detail: false, counted: false, limit: 2 });
-    assert.deepEqual(member.rows.map(({ actor, shown }) => [actor, shown]), [[ADA, true], [ADA, true]]);
+    for (const [name, statements] of Object.entries(small)) assert.equal(statements.length, 1, `${name} is one statement`);
+    await t.test('as many pages with the projection grown tenfold [full]', async () => {
+      await plant(20_001, 180_000);
+      const grown = await pages();
+      for (const [name, statements] of Object.entries(small)) {
+        const [{ text, pages: before }] = statements as [{ text: string; pages: number | null }];
+        const { pages: after, plan } = grown[name]![0]!;
+        assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with the projection grown tenfold, ${before} before:\n${plan}`);
+      }
+      // And they read what was planted: a full page of each, the newest first.
+      const newest = await eventsPage(counted, { stream: { all: true, shownOnly: true }, match: {}, detail: false, counted: false, limit: 2 });
+      assert.deepEqual(newest.rows.map(({ number }) => number), [200_000n, 199_999n]);
+      const member = await eventsPage(counted, { stream: { actors: [ADA] }, match: {}, detail: false, counted: false, limit: 2 });
+      assert.deepEqual(member.rows.map(({ actor, shown }) => [actor, shown]), [[ADA, true], [ADA, true]]);
+    });
   } finally {
     await db.owner.execute(sql`TRUNCATE audit_events, audit_event_places, audit_member_keys`);
   }

@@ -7,7 +7,7 @@
 # and the files `pnpm validate` picks; `--serial --files <file>...` runs them one at a time.
 # `--skip-full` leaves out the cases whose name says `[full]`: a growth, heap or large-N check
 # that `pnpm validate` runs only with `--full`, as `pnpm test` and CI always do.
-# Without it, the files that must run alone (`*.alone.ts`) run after the rest.
+# Without `--files`, the files that must run alone (`*.alone.ts`) run after the rest.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
