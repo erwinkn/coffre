@@ -18,6 +18,12 @@ import { fromWire, nameOf, seal, sealedBy, shapeOf, toWire, type Fresh, type Key
  *    rows and the log entry. Otherwise nothing is written, and the change
  *    starts again.
  *
+ * The entry names every row the decision read, written or not, with its
+ * MAC, and the signer holds each to its mirror: a row put back for the
+ * decision and withdrawn after is found. A row the read looked for and did
+ * not find has no name to give. So a decision takes nothing from a missing
+ * row: with fewer rows it refuses, or allows less.
+ *
  * So what an operation says is what it reads and how it decides. Reading
  * again, comparing, writing, sealing each row and logging what it replaced
  * are here, once.
@@ -107,15 +113,52 @@ const ATTEMPTS = 5;
  * busy then: every waiter holds a database connection, which uses need too.
  */
 const LOCK_WAIT_MS = 2000;
+/**
+ * How long a write runs, in milliseconds, its waits included. It is
+ * milliseconds of work, so five seconds is a database that cannot keep up,
+ * and the write answers busy. An entry is dated as its write is sent, so it
+ * commits within this of its date, well inside the minute the signer takes
+ * it in (`FRESH_MS` in signer.ts): no entry is refused as too old for a
+ * database that was slow.
+ */
+const WRITE_MS = 5000;
 
 export class Busy extends Error {
   override readonly name = 'Busy';
 }
 
-/** Postgres's `lock_not_available`: a wait `lock_timeout` ended. */
-function waitedOut(error: unknown): boolean {
-  for (let cause = error; cause instanceof Error; cause = cause.cause) if ((cause as { code?: unknown }).code === '55P03') return true;
+/** Postgres's `lock_not_available` and `query_canceled`: a wait `lock_timeout` ended, or a statement `statement_timeout` did. */
+function gaveUp(error: unknown): boolean {
+  for (let cause = error; cause instanceof Error; cause = cause.cause) if (['55P03', '57014'].includes((cause as { code?: unknown }).code as string)) return true;
   return false;
+}
+
+/**
+ * One statement in a transaction of its own that bounds its lock waits and
+ * its run, and its rows. `first` is selected ahead of it, in a statement of
+ * its own. One round trip: nothing is waited for inside the transaction, so
+ * the driver sends BEGIN, the statements and COMMIT together (`later` in
+ * @coffre/db). Postgres still runs them one after the other, and skips the
+ * rest once one fails. Read committed, said here and not left to the
+ * database's default: the statement sees the database as of when it starts,
+ * after whatever `first` waited for.
+ */
+export async function bounded<Row>(db: Database, statement: SQL, { first, runMs = WRITE_MS }: { first?: SQL; runMs?: number } = {}): Promise<Row[]> {
+  let rows!: Promise<Row[]>;
+  await db
+    .transaction(
+      async (tx) => {
+        // The bounds are set ahead of the wait they bound: a select list is worked out in order.
+        later(tx, sql`SELECT set_config('lock_timeout', ${String(LOCK_WAIT_MS)}, true), set_config('statement_timeout', ${String(runMs)}, true)${first === undefined ? sql`` : sql`, ${first}`}`);
+        rows = laterRows<Row>(tx, statement);
+      },
+      { isolationLevel: 'read committed' },
+    )
+    .catch((error: unknown) => {
+      throw gaveUp(error) ? new Busy(`a statement waited ${LOCK_WAIT_MS} ms for a lock, or ran ${runMs} ms`) : error;
+    });
+  // Read once the transaction has resolved: it committed.
+  return rows;
 }
 
 const id = (name: string) => sql.identifier(name);
@@ -123,7 +166,6 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
 
 /** A change's read and its decision. */
 export async function prepare<P extends Parts, A>(vault: Running, operation: Operation<P, A>): Promise<Prepared<A> | Refusal> {
-  const at = vault.now();
   const parts = Object.entries(operation.read);
   if (parts.length === 0) throw new Error('a change reads at least its caller');
   // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts).
@@ -131,8 +173,11 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
     vault.db,
     sql`SELECT part, row, clock_timestamp() AS read_at FROM (${sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`), sql` UNION ALL `)}) parts`,
   );
+  // After the read: the entry's date is the decision's, and the write is sent next.
+  const at = vault.now();
   const seen = Object.fromEntries(parts.map(([name]) => [name, [] as object[]]));
-  const read = new Set<object>();
+  /** Each row read, with its name. One that several parts found is one object each time. */
+  const read = new Map<object, string>();
   const tokens: string[] = [];
   for (const { part: name, row: wire } of found) {
     const { table } = operation.read[name]!;
@@ -140,7 +185,7 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
     tokens.push(`${name}:${row.mac.toString('hex')}`);
     if (sealedBy(vault.keys, table, row) === undefined) continue;
     seen[name]!.push(row);
-    read.add(row);
+    read.set(row, nameOf(table, row));
   }
   const plan = operation.decide(seen as Seen<P>, at);
   if ('refused' in plan) return plan;
@@ -160,6 +205,11 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
     written.set(shape.name, group);
     if (row === null) group.deletes.push(toWire(table, was!, shape.key));
     else (was === null ? group.inserts : group.updates).push({ ...toWire(table, row), mac: `\\x${mac!.toString('hex')}` });
+  }
+  // What it read and left, by the MAC it carried: the same twice.
+  for (const [row, name] of read) {
+    const mac = (row as { mac: Buffer }).mac.toString('hex');
+    if (!rows.some((other) => other.row === name)) rows.push({ row: name, was: mac, now: mac });
   }
   const entry = pending(key, plan.entry, at, rows);
 
@@ -192,31 +242,11 @@ function label(name: string): string {
  * nothing was written. The lock is taken by a statement of its own, ahead
  * of the write: a statement sees the database as of when it starts, so a
  * write that took the lock itself would compare against rows from before
- * it waited. For the same reason the transaction is read committed, said
- * here and not left to the database's default: under repeatable read every
- * statement sees the database as of the first, the one that waits.
- *
- * One round trip: neither statement is waited for inside the transaction,
- * so the driver sends BEGIN, both and COMMIT together (`later` in
- * @coffre/db). Postgres still runs them one after the other, and skips the
- * rest once one fails.
+ * it waited (`bounded`).
  */
 export async function commit<A>(vault: Running, prepared: Prepared<A>): Promise<boolean> {
-  let wrote!: Promise<{ ok: boolean }[]>;
-  await vault.db
-    .transaction(
-      async (tx) => {
-        // The bound is set for this transaction, ahead of the wait it bounds: a select list is worked out in order.
-        later(tx, sql`SELECT set_config('lock_timeout', ${String(LOCK_WAIT_MS)}, true), pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
-        wrote = laterRows<{ ok: boolean }>(tx, prepared.statement);
-      },
-      { isolationLevel: 'read committed' },
-    )
-    .catch((error: unknown) => {
-      throw waitedOut(error) ? new Busy(`a change waited ${LOCK_WAIT_MS} ms for a lock`) : error;
-    });
-  // Read once the transaction has resolved: it committed. Were the write's answer lost on its way back, this throws for a write that landed, and the signer finds its entry unannounced, as after a vault that died.
-  const [same] = await wrote;
+  // Were the write's answer lost on its way back, this throws for a write that landed, and the signer finds its entry unannounced, as after a vault that died.
+  const [same] = await bounded<{ ok: boolean }>(vault.db, prepared.statement, { first: sql`pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})` });
   if (same!.ok) vault.wake(prepared.hash);
   return same!.ok;
 }

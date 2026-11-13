@@ -237,8 +237,12 @@ test('a refusal writes nothing, and a change logs what it replaced', async () =>
   assert.equal(vault.woken.length, 0);
 
   const [was] = await seenOf(principals, eq(principals.id, bo));
+  const [by] = await seenOf(principals, eq(principals.id, ada));
   vault.tick(1500);
-  assert.equal(await done(setRole(ada, bo, 'removed')), 'removed');
+  // The entry is dated once the rows are read, not before: the read may wait, and the write, sent next, may not.
+  const db = Object.create(vault.db) as typeof vault.db;
+  db.execute = ((...args: Parameters<typeof vault.db.execute>) => (vault.tick(500), vault.db.execute(...args))) as typeof vault.db.execute;
+  assert.deepEqual(await change({ ...vault, db }, setRole(ada, bo, 'removed')), { answer: 'removed' });
   const [now] = await seenOf(principals, eq(principals.id, bo));
   assert.equal(now!.generation, 1);
   assert.equal(now!.statusChangedAt.getTime(), vault.now());
@@ -249,7 +253,12 @@ test('a refusal writes nothing, and a change logs what it replaced', async () =>
     { ...entry, id: null },
     {
       id: null, at: vault.now(), action: 'member.role', actor: ada, credential: null, request: null, ip: null, objects: [`principal:${bo}`],
-      rows: [{ row: JSON.stringify(['principals', bo]), was: was!.mac.toString('hex'), now: now!.mac.toString('hex') }], detail: { to: 'removed' },
+      // What it wrote, then what it read and left: Ada's row, once, though it was read as the caller and as an Owner.
+      rows: [
+        { row: JSON.stringify(['principals', bo]), was: was!.mac.toString('hex'), now: now!.mac.toString('hex') },
+        { row: JSON.stringify(['principals', ada]), was: by!.mac.toString('hex'), now: by!.mac.toString('hex') },
+      ],
+      detail: { to: 'removed' },
     },
   );
   assert.deepEqual(vault.woken, [leafHash(Buffer.from(logged.body))], 'the signer is told the hash of the entry committed');
@@ -316,6 +325,26 @@ test('a change that cannot have the lock answers busy, and holds nothing', async
   // The bound was the transaction's: the next change runs.
   await done(writing(put(principals, member(bo))));
   assert.equal((await seenOf(principals)).length, 2);
+});
+
+test('a write that runs past its bound answers busy, and writes nothing', async () => {
+  await done(writing(put(principals, member(ada, 'owner'))));
+  const entries = (await rowsOf(vault.owner, sql`SELECT 1 FROM log_pending`)).length;
+  // The database's writer makes every entry slow to write.
+  await vault.owner.execute(sql`CREATE FUNCTION slow_entry() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(10); RETURN NEW; END $$`);
+  await vault.owner.execute(sql`CREATE TRIGGER slow_entry BEFORE INSERT ON log_pending FOR EACH ROW EXECUTE FUNCTION slow_entry()`);
+  try {
+    const started = Date.now();
+    await assert.rejects(change(vault, writing(put(principals, member(bo)))), Busy);
+    const ran = Date.now() - started;
+    assert.ok(ran >= 5000 && ran < 8000, `ran ${ran} ms`);
+  } finally {
+    await vault.owner.execute(sql`DROP TRIGGER slow_entry ON log_pending`);
+    await vault.owner.execute(sql`DROP FUNCTION slow_entry()`);
+  }
+  assert.deepEqual([(await seenOf(principals)).length, (await rowsOf(vault.owner, sql`SELECT 1 FROM log_pending`)).length], [1, entries]);
+  // The lock went with the write, and the bound: the next change runs.
+  await done(writing(put(principals, member(bo))));
 });
 
 test('a change that keeps losing answers busy', async () => {

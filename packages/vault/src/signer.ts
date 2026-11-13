@@ -1,10 +1,10 @@
 import { Edge, leafHash, tileMap } from '@coffre/core/log';
 import type { Database } from '@coffre/db';
-import { later, laterRows } from '@coffre/db/later';
 import * as schema from '@coffre/db/schema';
 import { is, sql, type SQL } from 'drizzle-orm';
 import { PgTable } from 'drizzle-orm/pg-core';
 
+import { bounded } from './change.ts';
 import { entryOf, type Entry } from './entry.ts';
 import { macOf, shapeOf, type Key, type Sealed } from './rows.ts';
 
@@ -51,7 +51,7 @@ export type Signing = { db: Database; keys: readonly Key[]; now(): number; store
  * - `replayed`: one already signed, put back.
  * - `stale`: one dated before the window, which nothing remembers signing.
  * - `missing`: one the vault told of, gone before it was signed.
- * - `rewritten`: a change replaced a MAC that is not the one the mirror holds: false history.
+ * - `rewritten`: a change replaced a row, or was decided on one, whose MAC is not the one the mirror holds: false history.
  * - `row`: on a full run, a row that is not what the entries say.
  * - `cut`: on a full run, a tree that does not end with the entry signed last.
  * - `lost`: an entry signed, and not in the log as it was signed once moved.
@@ -62,18 +62,18 @@ export type Finding = { found: 'forged' | 'replayed' | 'stale' | 'missing' | 're
  * How far before its last read the signer still takes an entry's date. The
  * window slides with the signer, not the clock: one that was away takes
  * what waited for it. It bounds what the signer remembers signing, and must
- * outlast the longest a commit or a wake-up takes.
+ * outlast the longest a commit and its wake-up take: an entry is dated as
+ * its write is sent, and the write is bounded (`WRITE_MS` in change.ts).
  */
 const FRESH_MS = 60_000;
 /** The most entries one run takes: a tile's worth. More wait for the next, at once. */
 const MOST = 256;
 /**
- * How long a statement of the signer's waits for a lock, as a change does,
- * and how long it runs: half the minute its full run comes round in. Whoever
- * writes the database can hold a lock for good; the run then fails, and the
- * next one tries again, where it would have waited for ever.
+ * How long a statement of the signer's runs: half the minute its full run
+ * comes round in. Whoever writes the database can hold a lock for good; the
+ * run then fails, and the next one tries again, where it would have waited
+ * for ever.
  */
-const LOCK_WAIT_MS = 2000;
 const STATEMENT_MS = 30_000;
 
 const TREES = ['kept', 'aging'] as const;
@@ -228,17 +228,8 @@ export class Signer {
     changes.set('found', [...this.#found]);
   }
 
-  /** A statement in a transaction of its own that bounds its waits, in one round trip (`later` in @coffre/db). */
-  async #ask<Row>(statement: SQL): Promise<Row[]> {
-    let rows!: Promise<Row[]>;
-    await this.#on.db.transaction(
-      async (tx) => {
-        later(tx, sql`SELECT set_config('lock_timeout', ${String(LOCK_WAIT_MS)}, true), set_config('statement_timeout', ${String(STATEMENT_MS)}, true)`);
-        rows = laterRows<Row>(tx, statement);
-      },
-      { isolationLevel: 'read committed' },
-    );
-    return rows;
+  #ask<Row>(statement: SQL): Promise<Row[]> {
+    return bounded<Row>(this.#on.db, statement, { runMs: STATEMENT_MS });
   }
 
   /** The vault's word that an entry was committed (D223). One already signed is not expected again. */
@@ -320,6 +311,8 @@ export class Signer {
         // In the order written: each change moves the mirror on from the MAC it replaced.
         for (const { row: name, was, now } of entry.rows) {
           if ((this.#mirror.get(name) ?? null) !== was) this.#find(changes, 'rewritten', name);
+          // A row read and left moves nothing: the mirror stays what the entries wrote.
+          if (now === was) continue;
           if (now === null) this.#mirror.delete(name);
           else this.#mirror.set(name, now);
           changes.set(`row ${name}`, now ?? undefined);

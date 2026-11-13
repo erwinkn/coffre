@@ -5,6 +5,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import { entryOf, type Entry } from '../src/entry.ts';
+import { Busy } from '../src/change.ts';
 import { memoryOf, recall, read, answer, use, type Ask, type Value } from '../src/use.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
 import { amend, ask, binding, credential, dismissed, environment, grant, identity, instance, principal, project, role, rows, secret, session, user, value, write } from './world.ts';
@@ -77,6 +78,35 @@ const exposed = () => rowsOf<{ principal: string; secret_id: string }>(vault.own
 async function untouched(): Promise<void> {
   assert.deepEqual([await logged(), await exposed(), vault.woken], [[], [], []]);
 }
+
+test('a use is dated as its entry is written, and its write gives up after two seconds behind a lock', async () => {
+  // Every look at the clock is a second later: the read, the decision, values opened through a slow key service, the write.
+  let last = vault.now();
+  const slow = { ...vault, now: () => (last += 1000) };
+  assert.ok('values' in (await use(slow, ask('ada', 'market/prod', ['DATABASE_URL']))));
+  assert.equal((await logged())[0]!.at, last);
+
+  // Past the minute a use is logged once in, behind someone who holds the row that says Ada has seen the key.
+  vault.tick(120_000);
+  let release!: () => void;
+  const held = vault.owner.transaction(async (tx) => {
+    await tx.execute(sql`SELECT 1 FROM exposures FOR UPDATE`);
+    await new Promise<void>((resolve) => (release = resolve));
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const started = Date.now();
+    await assert.rejects(use(vault, ask('ada', 'market/prod', ['DATABASE_URL'])), Busy);
+    assert.ok(Date.now() - started < 4000);
+  } finally {
+    release();
+    await held;
+  }
+  // Nothing of it was written, nobody was told, and the next use is logged.
+  assert.deepEqual([(await logged()).length, vault.woken.length], [1, 1]);
+  assert.ok('values' in (await use(vault, ask('ada', 'market/prod', ['DATABASE_URL']))));
+  assert.equal((await logged()).length, 2);
+});
 
 test('a reader is handed a key, and the use is logged once: who, with what, where, which version', async () => {
   const result = await use(vault, ask('ada', 'market/prod', ['DATABASE_URL']));
