@@ -237,7 +237,7 @@ function failure(status: number, message = '', retryAfter?: string): Response {
 /**
  * The API's refusal, as Vault says it. A token coffre does not know is
  * Vault's 403, not 401; a place that does not exist is 404, which ESO
- * reads as the secret gone. A key's one refusal (`not_available`, D153),
+ * reads as the secret gone. A key's one refusal (`not_available`),
  * whether the key is missing or the caller may not have it, is 403: as
  * the two are one answer, a 404 would have ESO delete a secret it syncs
  * whenever its reader lost the key, a grant revoked or the key made

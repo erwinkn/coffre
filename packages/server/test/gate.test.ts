@@ -1,7 +1,7 @@
 // The workload gate (docs/design/workload-access.md, section 5.2), through
-// PR 0's `Gate` and the state behind it: a proof is taken once, across a
-// restart too; a stale nonce is answered with the current one, under which
-// the proof then passes; past the ceiling, `overloaded`; past a limit, a
+// `Gate` and the state behind it: a proof is taken once, across a restart
+// too; a stale nonce is answered with the current one, under which the
+// proof then passes; past the ceiling, `overloaded`; past a limit, a
 // refusal whose first says so. And the Durable Object around the same
 // state, with a storage in memory: its counts over a day outlive an
 // eviction, its epochs never do.
@@ -313,7 +313,7 @@ test("on Workers, each workload's object: a replayed proof refused, and after an
 });
 
 test("on Workers, a day's counts are written within a flush and read back after an eviction; a minute's are not", async (t) => {
-  // On a stopped clock, 01:30 UTC: the day's window cannot turn over between the calls (T218).
+  // On a stopped clock, 01:30 UTC: the day's window cannot turn over between the calls.
   t.mock.timers.enable({ apis: ['Date'], now: T0 });
   const held = objectState();
   const first = new CoffreGates(held.state, {});
@@ -342,7 +342,7 @@ test("on Workers, a day's counts are written within a flush and read back after 
 });
 
 test('on Workers, a write that fails is written by the retried alarm, and an alarm that could not be set is set by the next request', async (t) => {
-  // On a stopped clock, 01:30 UTC: the day's window cannot turn over between the failed request and its retry (T218).
+  // On a stopped clock, 01:30 UTC: the day's window cannot turn over between the failed request and its retry.
   t.mock.timers.enable({ apis: ['Date'], now: T0 });
   const held = objectState();
   const object = new CoffreGates(held.state, {});

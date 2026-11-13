@@ -145,7 +145,7 @@ beforeEach(async () => {
     await afterAccess?.();
     return answered;
   };
-  // With 0.15's log the vault makes the credential (T149), asking `access` nothing: the same moments come before its one call.
+  // With 0.15's log the vault makes the credential, asking `access` nothing: the same moments come before its one call.
   const signIn = deps.vault.signIn?.bind(deps.vault);
   if (signIn !== undefined) {
     deps.vault.signIn = async (input) => {
@@ -213,7 +213,7 @@ test("a run's token buys a five-minute credential of the service, logged with it
   assert.ok(lifetime > 4 * 60_000 && lifetime <= 5 * 60_000 + 1000, `lives five minutes, not ${lifetime} ms`);
   assert.equal(await caller(body.token!), `service:${SERVICE}`);
 
-  // Its record: the vault's change, which says who, through what, for which run (D147), and when (its `at`).
+  // Its record: the vault's change, which says who, through what, for which run, and when (its `at`).
   const [signedIn] = await signInsLogged(db.owner);
   assert.equal(signedIn!.actor, MEMBER);
   assert.equal(signedIn!.run.run_id, '7001');
@@ -330,8 +330,8 @@ test("the beat forgets spent tokens by their place, a stretch of the table at a 
     const [after] = await execute(stats);
     return { seq: Number(after!.seq) - Number(before!.seq), indexed: Number(after!.indexed) - Number(before!.indexed) };
   });
-  // 50,000 primary-key lookups were the 0.15 prune's cost on a full table (1.85 s on 7.5 million): none now. Nor a scan
-  // of the whole table, 0080's: a TID range scan of at most 16,384 blocks (0082, T245), which Postgres counts as neither.
+  // No primary-key lookup (50,000 cost 1.85 s on a table of 7.5 million) and no scan of the whole table: a TID range
+  // scan of at most 16,384 blocks (migration 0082), which Postgres counts as neither.
   assert.deepEqual(scans, { seq: 0, indexed: 0 });
   assert.equal((await db.owner.select().from(spentIdTokens)).length, 50_000);
   // The sweep goes on past the stretch it read, the table's end here, and round from its start the next time.
@@ -340,7 +340,7 @@ test("the beat forgets spent tokens by their place, a stretch of the table at a 
   await run(sql`INSERT INTO spent_id_tokens (hash, consumed_at) SELECT sha256(int8send(-i)), now() - interval '3 hours' FROM generate_series(10, 12) i`);
   assert.equal(await pruneSpentTokens(db.owner, SPENT_TOKENS_PER_BEAT), 3);
   assert.equal(await next(), 16_384);
-  // Twice what R44's 1,000 sign-ins a second spend in a five-minute beat.
+  // Twice what 1,000 sign-ins a second spend in a five-minute beat.
   assert.equal(SPENT_TOKENS_PER_BEAT, 600_000);
 });
 
@@ -573,7 +573,7 @@ test('removing a binding revokes only what is live: its expired history costs no
     const counting = { ...deps, db: createDatabase(counted(pool, seen)) };
     const read = (table: string) => seen.filter((statement) => new RegExp(`from "${table}"`, 'i').test(statement.text)).reduce((n, statement) => n + statement.rows, 0);
     await createRuntime(config, counting.db, deps.vault, transport).workloads!.unbind(await contextFor(counting, ROOT), SERVICE, binding!.id);
-    // The vault's one statement ends the binding and the run under way (PR 3a): the app writes none.
+    // The vault's one statement ends the binding and the run under way: the app writes none.
     assert.equal(seen.filter((statement) => /^update "credentials"/i.test(statement.text)).length, 0, 'the run under way, not the thousand over');
     assert.equal((await db.owner.select().from(credentials).where(isNotNull(credentials.revokedAt))).length, 1, 'the run under way, not the thousand over');
     assert.ok(read('credentials') <= 2, `read ${read('credentials')} credential rows`);
@@ -600,7 +600,7 @@ test("a binding made on another public URL is still the vault's to end, with wha
   );
   assert.equal(refused.status, 401);
   assert.equal(((await refused.json()) as { reason: string }).reason, 'audience', "a token for the new URL is none of a binding made on the old");
-  // Bound again on the new URL, the old one still live beside it: the old shadows nothing (review r1).
+  // Bound again on the new URL, the old one still live beside it: the old shadows nothing.
   const again = await moved.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY, label: 'deploys', replaces: [] }, { dryRun: false });
   assert.ok('binding' in again);
   const signedIn = await answer(
@@ -633,7 +633,7 @@ test("a revocation is its caller's act: the credential it ends is its target, ne
   const revocations = (await appEntries('token.revoke')).map(({ actor, decision, metadata }) => ({
     actor, decision, credentialId: metadata.credentialId, targetCredentialId: metadata.targetCredentialId,
   }));
-  // The refusal is the app's entry; each revoke, the vault's change, naming the credential it came in on (T164 shows them).
+  // The refusal is the app's entry; each revoke, the vault's change, naming the credential it came in on.
   assert.deepEqual(revocations, [{ actor: MEMBER, decision: 'deny', credentialId: a.id, targetCredentialId: nobody }]);
   assert.deepEqual(await revokesLogged(db.owner), [
     { actor: MEMBER, reason: 'revoke', targetCredentialId: b.id },
@@ -890,10 +890,10 @@ test('admission comes first: the address\'s limit at this entry point, a limiter
   assert.equal((await trade(token(rsa))).status, 200);
   vaultCalls = 0;
   const limited = await trade(token(rsa));
-  // Asked again once the window has moved on: 10 s, not a minute (W331).
+  // Asked again once the window has moved on: 10 s, not a minute.
   assert.deepEqual([limited.status, limited.body.reason, limited.retryAfter], [429, 'busy', '10']);
   assert.equal(vaultCalls, 0);
-  // Another address has its own allowance, and no limit counts them all together (W331, D177).
+  // Another address has its own allowance, and no limit counts them all together.
   for (let i = 4; i < 10; i++) assert.equal((await exchange({ service: MEMBER, token: token(rsa) }, `198.51.100.${i}`)).status, 200);
   // Each entry point counted apart, the key naming it.
   assert.deepEqual(new Set(keysAsked), new Set([`exchange:${IP}`, ...Array.from({ length: 6 }, (_, n) => `exchange:198.51.100.${n + 4}`)]));
@@ -961,12 +961,12 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
   await db.owner.delete(credentials).where(eq(credentials.id, credentialId));
   await deps.vault.listReads();
   const { entries } = await root.audit.list({ detail: '1', sealed: '1' });
-  // Its sign-in, the vault's change (D147), which the page lists as a `token.exchange` entry (T156); and every read it shows, the refused one included, with the run.
+  // Its sign-in, the vault's change, which the page lists as a `token.exchange` entry; and every read it shows, the refused one included, with the run.
   const signedIn = entries.find((entry) => entry.action === 'token.exchange')!;
   assert.equal(signedIn.log, '0.15');
   assert.deepEqual(signedIn.run, { exchangeSeq: signedIn.seq, log: '0.15', claims: exchange!.run });
   assert.equal(signedIn.run!.claims.run_id, '7001');
-  // The allowed read is the vault's use, listed as a `secret.read` entry (T166), by the service, as the credential's
+  // The allowed read is the vault's use, listed as a `secret.read` entry, by the service, as the credential's
   // sign-in names it though its row is gone.
   const reads = entries.filter((entry) => entry.action === 'secret.read');
   assert.equal(reads.length, 2);
@@ -978,7 +978,7 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
 });
 
 /**
- * A run's sign-in on the audit pages (T156): the vault's change, which is its record (D147), listed as a
+ * A run's sign-in on the audit pages: the vault's change, which is its record, listed as a
  * `token.exchange` entry with what it said: the service, the binding, the generation, the
  * issuer, the credential and its end, the run, and when. On every list of the instance's entries, and the service's;
  * on none of a place's, nor of refusals: a refused sign-in is logged by neither (the server's log says why).
@@ -1014,7 +1014,7 @@ test("a run's sign-in is on the audit list as a `token.exchange` entry; a refuse
 });
 
 /**
- * Pages of the audit list tile both logs (T156): each entry on one page, newest first, a sign-in 0.15's log records
+ * Pages of the audit list tile both logs: each entry on one page, newest first, a sign-in 0.15's log records
  * among 0.14's entries by when; each page's `next`, `before` for the one after, says where it stopped in each. The
  * detail entries a page leaves out are counted on one page each, as with 0.14's log alone.
  */
@@ -1052,7 +1052,7 @@ test('pages of the audit list tile both logs: every entry once, newest first, an
     }
   }
   // A client that does not ask for 0.15's sealed log, as one before 0.15, pages 0.14's log alone, by the last seq it
-  // read: whole, each entry once (review r3 of W258); and a seq alone pages 0.14's log, whatever it asks.
+  // read: whole, each entry once; and a seq alone pages 0.14's log, whatever it asks.
   const legacy: number[] = [];
   for (let before: number | undefined; ;) {
     const page = await root.audit.list({ limit: 1, ...(before === undefined ? {} : { before }) });
@@ -1071,7 +1071,7 @@ test('pages of the audit list tile both logs: every entry once, newest first, an
 /**
  * A sign-in takes its number when it commits, after any wait for a lock, but is listed by when the vault asked (its
  * `at`), as everything else on the page is by when it happened: one that asked later but waited less is the newer,
- * on the first page (review r2 of W258). Here the first, numbered first, says it asked after the second.
+ * on the first page. Here the first, numbered first, says it asked after the second.
  */
 test("sign-ins are listed newest first by when they were asked, not by the number a wait gave them", async () => {
   for (let i = 0; i < 2; i++) assert.equal((await trade(token(rsa))).status, 200);
@@ -1088,7 +1088,7 @@ test("sign-ins are listed newest first by when they were asked, not by the numbe
 
 /**
  * A row under the sign-ins' index that is no sign-in, which only a database writer leaves there: passed over, the
- * page going on past it, never a failure (review r2 of W258). Under either log: the page reads 0.15's changes as
+ * page going on past it, never a failure. Under either log: the page reads 0.15's changes as
  * they are.
  */
 test("a change the sign-ins' index holds that is no sign-in is passed over, and the pages go on past it", async () => {
@@ -1221,7 +1221,7 @@ test("replacing keys asks each binding's change on its own: one that moved is as
   const done = await replaceKeys([rsa, ec]);
   assert.ok('bindings' in done);
   assert.deepEqual(done.replaced, [first.binding.id, other.binding.id]);
-  // The second moved, so closed (a sweep of none: no sign-in through it while it ends, W331), then asked again.
+  // The second moved, so closed (a sweep of none: no sign-in through it while it ends), then asked again.
   assert.equal(calls, 4, 'the first once, the second three times');
   assert.equal((await db.owner.select().from(serviceBindings)).filter((row) => row.revokedAt === null && row.issuer === first.binding.issuer).length, 2);
 });
@@ -1411,7 +1411,7 @@ test("a token with fractional times, and one with every claim a run records, sig
 
 test('no limit counts every address together: 301 exchanges in a minute, from 301 addresses, all past admission (W331, D177)', async () => {
   limits = processLimits();
-  // One after another: 32 at once is the isolate's bound on exchanges in flight, which stays (#35).
+  // One after another: 32 at once is the isolate's bound on exchanges in flight, which stays.
   const answers = [];
   for (let n = 0; n < 301; n++) answers.push(await exchange({ service: MEMBER, token: 'not.a.token' }, `198.51.${n >> 8}.${n & 255}`));
   // Each refused for its token, after admission: none for a count.
@@ -1433,7 +1433,7 @@ test("one binding's sign-ins share its row: one goes through while another holds
     await holding;
     return { release: async () => (release(), await done) };
   };
-  // As another sign-in in flight holds it: this one does not wait for it (it did, FOR UPDATE, until W331).
+  // As another sign-in in flight holds it: this one does not wait for it.
   const shared = await hold('KEY SHARE');
   const started = performance.now();
   assert.equal((await trade(token(rsa))).status, 200);
@@ -1672,7 +1672,7 @@ test("on Workers, a replacement answers once its first call has made the new bin
   assert.deepEqual(await bindingState(bound), { live: 2 * WORKERS_BATCH, closed: true, ended: false });
   assert.equal((await trade(token(rsa, release))).status, 200, 'the new binding signs its runs in');
   assert.equal((await trade(token(rsa))).body.reason, 'no_match', 'the old one none');
-  // No tombstone of the old one before its end (review r10): a credential of it not yet revoked reads as the vault,
+  // No tombstone of the old one before its end: a credential of it not yet revoked reads as the vault,
   // which a use by name asks first, still takes it, and the app refuses nothing the vault does not.
   assert.deepEqual((await appEntries('token.unbind')).length, 0);
   assert.equal(await caller(tokens.at(-1)!), `service:${SERVICE}`);
@@ -1713,7 +1713,7 @@ test("a removal asked again once the scheduled run has finished it is done, not 
   assert.deepEqual(await bindingState(bound), { live: 0, closed: true, ended: true });
   const again = await asWorker(remove());
   assert.equal(again.status, 200, await again.text());
-  // One whose columns a writer set around coffre, with no end the app logged: unknown still (review r10).
+  // One whose columns a writer set around coffre, with no end the app logged: unknown still.
   const forged = await bind({ ...DEPLOY, ref: 'refs/heads/forged', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/forged' });
   await db.owner.update(serviceBindings).set({ closedAt: new Date(), revokedAt: new Date(), closedBy: `user:${ROOT}` }).where(eq(serviceBindings.id, forged));
   assert.equal((await asWorker(new Request(`https://coffre.test/api/members/${encodeURIComponent(MEMBER)}/bindings/${forged}`, { method: 'DELETE' }))).status, 404);
@@ -1742,7 +1742,7 @@ test("the scheduled run reads a removal again when another remover moved it, and
     return change(input);
   });
   const logged = t.mock.method(console, 'error', () => {});
-  // And, closed before both, one whose close a writer left without its remover (review r12).
+  // And, closed before both, one whose close a writer left without its remover.
   const malformed = await bind({ ...DEPLOY, ref: 'refs/heads/malformed', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/malformed' });
   await db.owner.update(serviceBindings).set({ closedAt: new Date(Date.now() - 120_000), closedBy: null }).where(eq(serviceBindings.id, malformed));
   const { resumed, failed } = await runtime.workloads!.resumeRemovals();
@@ -1857,7 +1857,7 @@ test('a removal that fails midway leaves its binding closed, signing nobody in, 
   assert.deepEqual([(await trade(token(rsa))).status, (await trade(token(rsa))).body.reason], [401, 'no_match']);
   // The credentials it exchanged not yet revoked still read until their batch (or their own end, five minutes at most):
   // the vault decides a use by name before the app reads the binding, so the app may refuse nothing it does not
-  // (`bindingStands`, review r8). Its sessions it refuses at once (workload-sessions.test.ts).
+  // (`bindingStands`). Its sessions it refuses at once (workload-sessions.test.ts).
   const reading = async () => (await Promise.all(tokens.map((credential) => caller(credential)))).filter((who) => who === `service:${SERVICE}`).length;
   assert.equal(await reading(), UNBIND_BATCH);
   deps.vault.changeBindings = change;

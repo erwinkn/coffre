@@ -1,7 +1,7 @@
-// What a CI run's sign-in costs with 0.15's log, where the vault makes it (T149, R42, R44, R48): on the app's
+// What a CI run's sign-in costs with 0.15's log, where the vault makes it: on the app's
 // connection, one read, its service's bindings on the token's issuer with whether the token was spent (which the
-// app's check of the token needs), and the account's and each binding's newest change, whose MACs the vault checks
-// (T192); then the vault's one call, `sign_in` (migrations 0034, 0075), one statement, which weighs
+// app's check of the token needs), and the account's and each binding's newest change, whose MACs the vault checks;
+// then the vault's one call, `sign_in` (migrations 0034, 0075), one statement, which weighs
 // the binding, the account, the rate and the token on their rows and writes the credential and its change. No 0.14
 // head, no entry of 0.14's. Each statement reads as many rows, and as many pages, however many credentials the binding
 // issued before, however many tokens were spent, and however long both logs grow.
@@ -173,9 +173,9 @@ function freshSignIn(values: unknown[]): unknown[] {
 test("a CI run's sign-in is one app statement and one vault call, one statement there: no 0.14 head, no 0.14 entry (T149, T190, T192)", async () => {
   const ran = await statements();
   assert.deepEqual(shown(ran.app), ['select "service_bindings"."i'], "its service's bindings on the issuer, with whether the token was spent and the newest changes");
-  // `sign_in` holds the member's and the binding's rows to their newest changes' seals, which SQL cannot authenticate
-  // (T190, R64): the app's read answers those changes beside the bindings, the vault checks their MACs, and `sign_in`
-  // holds each object's newest change to the one checked (T192), in its one statement.
+  // `sign_in` holds the member's and the binding's rows to their newest changes' seals, which SQL cannot authenticate:
+  // the app's read answers those changes beside the bindings, the vault checks their MACs, and `sign_in`
+  // holds each object's newest change to the one checked, in its one statement.
   assert.deepEqual(shown(ran.vault), ['/* writes */ SELECT sign_in('], 'the sign-in, in one statement');
   assert.equal(ran.vaultCalls, 1);
 });
@@ -259,14 +259,14 @@ const holding = ({ text }: Statement) => /^\s*select distinct "environment_id" f
 test("a service token's issue: the app's reads and the vault's two answers, as before; then one vault call, its write one statement, no 0.14 head (T149, PR 2)", async () => {
   const ran = await issueStatements();
   // The issuer's newest policy and access entries, and the places: the scope as the app works it out, by path. An Owner
-  // of every project in it withholds nothing (R71: a reference's sensitive value is its holder's project's to give, R32),
+  // of every project in it withholds nothing (a reference's sensitive value is its holder's project's to give),
   // so the app reads nothing of what those places hold; a Developer's issue does, below.
   assert.equal(ran.app.length, 3);
   assert.equal(ran.app.filter(holding).length, 0);
   assert.ok(ran.app.every(({ text }) => /^\s*select/i.test(text)), 'the app writes nothing');
   // `access` for the issuer and for the account (the app's checks), a snapshot each; then the issue: one snapshot (the
   // members, their grants, the policy, the setting, and the places their grants are on, each with what 0.15's log holds
-  // it to: T159), and its one write.
+  // it to), and its one write.
   assert.equal(ran.vaultCalls, 3);
   assert.deepEqual(shown(ran.vault), ['WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', '/* writes */ SELECT issue_to']);
 });

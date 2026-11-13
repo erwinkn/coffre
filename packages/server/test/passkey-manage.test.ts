@@ -1,4 +1,4 @@
-// Managing passkeys (docs/design/passkeys.md, sections 3.6 and 3.7; T176 PR 6), through the
+// Managing passkeys (docs/design/passkeys.md, sections 3.6 and 3.7), through the
 // deployment's own routes, as a browser goes: a person lists their passkeys, adds another from a session a touch
 // confirmed in the last five minutes, renames one, and removes one with a touch of one they keep, which signs them out
 // everywhere else and gives this browser a new session; an Owner of the whole instance resets someone's, which ends
@@ -149,7 +149,7 @@ test("a person lists their passkeys, adds another from a fresh session, and rena
   assert.deepEqual((await listed(bob, BOB)).passkeys.map((row) => row.name), ['Passkey 1', '1Password']);
   const entry = (await entries('passkey.add')).at(-1);
   assert.deepEqual([entry!.actor, entry!.metadata.passkeyId, typeof entry!.metadata.confirmedBy], [`user:${BOB}`, added.body.passkey.id, 'string']);
-  // The same answer again, as when the first reply was lost, adds nothing and says it was added (review r1 of #539).
+  // The same answer again, as when the first reply was lost, adds nothing and says it was added.
   assert.deepEqual(refused(await act(bob, 'POST', `/api/members/user:${BOB}/passkeys`, { state: asked.body.state, response: created })), [409, 'conflict', 'passkey_exists']);
   assert.equal((await listed(bob, BOB)).passkeys.length, 2);
   // Another answer to options asked before a passkey was added is a change's: new options, and a new `create()`.
@@ -186,7 +186,7 @@ test("a person lists their passkeys, adds another from a fresh session, and rena
   // Ten at most.
   const dana = await enroll(runtime, DANA, await SoftAuthenticator.create('ES256'));
   for (let held = 2; held < MAX_PASSKEYS; held++) await rows.addPasskey(db.owner, deps.chainKey, DANA);
-  // The tenth, its reply lost: sent again, it is the one added, not one too many (review r1 of #539).
+  // The tenth, its reply lost: sent again, it is the one added, not one too many.
   const tenth = await act(dana, 'POST', `/api/members/user:${DANA}/passkeys/options`);
   const made = await (await SoftAuthenticator.create('ES256')).register({ ...RP, challenge: bytes(tenth.body.options.challenge), userHandle: bytes(tenth.body.options.user.id) });
   assert.equal((await act(dana, 'POST', `/api/members/user:${DANA}/passkeys`, { state: tenth.body.state, response: made })).status, 200);
@@ -216,7 +216,7 @@ test('removing a passkey takes a touch of one the person keeps, signs them out e
   assert.equal(token.status, 200, JSON.stringify(token.body));
   const handle = await act(bob, 'POST', '/api/handles', { label: 'agent', paths: ['market/prod'] });
   assert.equal(handle.status, 200, JSON.stringify(handle.body));
-  // A terminal code approved with the passkey removed, not yet redeemed, and an app connected with it (review r1 of #529).
+  // A terminal code approved with the passkey removed, not yet redeemed, and an app connected with it.
   const approval = await rows.approvedCode(db.owner, deps.chainKey, BOB, removed.id);
   const app = await rows.connectedApp(db.owner, deps.chainKey, BOB, removed.id);
   assert.deepEqual((await listed(bob, BOB)).ends, { sessions: 2, tokens: 1, handles: 1, apps: 1 });

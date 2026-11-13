@@ -141,7 +141,7 @@ test("ESO's Kubernetes auth: a login, a read with its token, then lookup-self an
   assert.equal((await vault('PUT', 'auth/token/revoke-self', { token: auth.client_token })).status, 204);
   assert.equal((await vault('GET', 'secret/data/market/prod', { token: auth.client_token })).status, 403);
 
-  // The exchange's own record: the run it came from, as `coffre login --service` leaves it; with 0.15's log, its change (D147).
+  // The exchange's own record: the run it came from, as `coffre login --service` leaves it; with 0.15's log, its change.
   const [exchanged] = await signInsLogged(db.owner);
   assert.equal(exchanged!.actor, `token:${SERVICE}`);
 });

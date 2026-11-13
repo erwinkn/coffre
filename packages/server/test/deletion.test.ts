@@ -565,7 +565,7 @@ test('the vault grants nothing on a deleted place, and still revokes there', asy
   const version = await currentVersion('prod', 'API_KEY');
   await db.owner.update(projects).set({ slug: `market~deleted-${today()}` }).where(eq(projects.id, version.projectId));
   // A project's deletion deletes its environments too: a project's tombstone alone is a writer's, and its
-  // environments' rows are not as the log holds them (T159).
+  // environments' rows are not as the log holds them.
   const change = (role: 'viewer' | null, environmentId: string | null) => deps.vault.setAccess({
     actor: `user:${ROOT}`, principal: CI, requestId: 'r', operationId: crypto.randomUUID(),
     changes: [{ projectId: version.projectId, environmentId, role, expiresAt: null }],
@@ -592,7 +592,7 @@ test('a tombstone is refused by the rule, not by its emptied keys: values left i
   const version = await currentVersion('prod', 'API_KEY');
   // As if the erase had missed it: the slug says deleted, the value and the developer's grant are still there. A project's
   // deletion deletes its environments too, so a project's tombstone alone is a writer's: its
-  // environments' rows are not as the log holds them, a grant on one holds nothing, and a decision there is refused (T159).
+  // environments' rows are not as the log holds them, a grant on one holds nothing, and a decision there is refused.
   await db.owner.update(projects).set({ slug: `market~deleted-${today()}` }).where(eq(projects.id, version.projectId));
   assert.equal((await deps.vault.access(DEV)).grants.length, 1);
 

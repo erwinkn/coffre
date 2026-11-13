@@ -94,7 +94,7 @@ async function outcome<T>(call: Promise<T>): Promise<T | string> {
     return await call;
   } catch (error) {
     const { status, code, reason } = error as { status: number; code?: string; reason?: string };
-    // A key's one refusal says no reason (D153): the app's entry of it does.
+    // A key's one refusal says no reason: the app's entry of it does.
     return `${status} ${(code === 'not_available' ? await refusedIn(db.owner) : reason) ?? ''}`.trim();
   }
 }

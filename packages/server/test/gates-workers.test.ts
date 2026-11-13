@@ -48,7 +48,7 @@ before(async () => {
   await start();
 }, { timeout: 120_000 });
 
-// The test's day of counts must stay in one UTC day: its flush wait, restart and calls take well under this (T218).
+// The test's day of counts must stay in one UTC day: its flush wait, restart and calls take well under this.
 before(() => inUtcDay(DAY_ROOM_MS), { timeout: DAY_ROOM_MS + 10_000 });
 
 after(async () => {

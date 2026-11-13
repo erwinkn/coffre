@@ -18,7 +18,7 @@ import { RefusalRecord } from './refused.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
 /**
- * A member's first add in three round trips (T179 PR 5; docs/design/two-trips.md, "A member add"; formal/Writing.tla,
+ * A member's first add in three round trips (docs/design/two-trips.md, "A member add"; formal/Writing.tla,
  * the add), the app's front door. Served before `authenticate` and the router, as a key write is (`writeAhead`): the
  * vault's read reads everything its decision weighs, the caller's rows among them, decides and prepares the add; the
  * app checks the caller's rows' `auth_mac` on what it answered (`authenticateRequest`, reading nothing: AuthChecked),
@@ -27,7 +27,7 @@ import type { CoffreRuntime } from './runtime.ts';
  * is left to its next use, or written on its own should the add go down today's path.
  *
  *   PUT /members/user:ada@acme.example { role: "developer" }, an admin's session   vault 1 + 2   app 0   3 round trips
- *   the same with first grants (`access`), or by someone who runs no instance        today's path (PR 5b)
+ *   the same with first grants (`access`), or by someone who runs no instance        today's path
  *
  * Null wherever this path does not serve the request: another route or shape, a token of another kind or refused for
  * its kind alone, a vault that does not serve it, or the vault's own `served: false`, a refusal among them. The request
@@ -85,7 +85,7 @@ export function admitAsked(request: Request, body: Uint8Array): AdmitAsked | nul
 /** One try of an add: the vault's answer, the add it prepared among it. */
 export type AdmitTry = Extract<AdmitReadOutcome, { served: true }>;
 
-/** A try the vault's decision refused on its read (PR 6): the route answers it, and the vault records it (`RefusalRecord`). */
+/** A try the vault's decision refused on its read: the route answers it, and the vault records it (`RefusalRecord`). */
 export type RefusedAdmit = { refused: RefusalRecord };
 
 /** A try as the vault answered it: decided and prepared, or refused. */
@@ -177,7 +177,7 @@ export async function admitAhead(
   let touched: Touch | null = null;
   // The credential checked on the rows the vault answered, its MAC and token's hash among them (AuthChecked: before
   // anything is written), its expiry at the vault's `at`, its standing as the vault decided it, and the passkey rows the
-  // read answered with it (T216, as a key write's: `writeAhead`).
+  // read answered with it (as a key write's: `writeAhead`).
   const identity = await authenticateRequest(request, runtime, requestId, token, sourceIp, {
     standing: answerOf(first).standing, at: answerOf(first).at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
     touch: (touch) => {

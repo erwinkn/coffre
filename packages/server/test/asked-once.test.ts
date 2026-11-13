@@ -1,4 +1,4 @@
-// A value an isolate asks for once (asked-once.ts, T201): its concurrent first requests make one call and take its
+// A value an isolate asks for once (asked-once.ts): its concurrent first requests make one call and take its
 // answer, or its failure; no request ever waits on another's pending call, so a call that never settles (its request
 // cancelled, on Workers) holds the others back only until one of them takes the call over.
 import test from 'node:test';
@@ -67,8 +67,8 @@ test("a call that never settles holds the others back only so long: one takes th
   assert.ok(waited >= 90 && waited < 1_000, `waited ${waited} ms`);
 });
 
-// Review r1 of T201: an outcome is its attempt's, given to the requests that joined that attempt, never told apart by
-// the clock. Each of the next three answered otherwise when outcomes were kept by time (`failed.at >= began`).
+// An outcome is its attempt's, given to the requests that joined that attempt, never told apart by the clock. Each of
+// the next three would fail if outcomes were kept by time (`failed.at >= began`).
 
 test("a retry in the millisecond its predecessor failed: the retry's followers take the retry's answer, not that failure", async (t) => {
   t.mock.method(Date, 'now', () => 1_000);
@@ -141,7 +141,7 @@ async function advance(clock: Clock, ms: number, step = 1) {
 /**
  * The polls' jitter held at its middle, so mocked time alone says when each poll comes (1, 3, 7, 15, 31 ms, then every
  * 20 ms); past `budget` jitters drawn, a poll throws, so a request that loops without waiting fails rather than hangs
- * the event loop (review r3 of T201).
+ * the event loop.
  */
 function steadyJitter(t: { mock: { method: (object: object, name: string, impl: () => number) => unknown } }, budget = 10_000) {
   const drawn = { count: 0 };
@@ -167,7 +167,7 @@ function refusedStarting(seen: { settled: { value: unknown } | { error: unknown 
 
 test('a request waits WAIT_MS in all, however many calls are taken over meanwhile: then 503, Retry-After 1, and it never makes the call', async (t) => {
   // Mocked time, moved a millisecond at a time: each take-over comes before the waiting request's poll would see its
-  // call 100 ms old, however slow the machine (review r2 of T201).
+  // call 100 ms old, however slow the machine.
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 0 });
   const kept = askedOnce<string>();
   const never = () => new Promise<string>(() => {});
@@ -226,8 +226,8 @@ test("a request that took a call over answers as soon as its own call does, not 
   const mine = call<string>();
   let asked = false;
   const waiting = watched(askOnce(kept, () => ((asked = true), mine.promise), { takeOverMs: 100, waitMs: 300 }));
-  // Its poll at 111 ms finds the call 100 ms old and takes it over (review r3 of T201: the jitter drawn, it might not
-  // have by 120 ms).
+  // Its poll at 111 ms finds the call 100 ms old and takes it over (the jitter drawn, it might not have by
+  // 120 ms).
   await advance(t.mock.timers, 120);
   assert.equal(asked, true, 'it took the call over');
   assert.equal(waiting.settled, null);

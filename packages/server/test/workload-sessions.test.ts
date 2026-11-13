@@ -259,7 +259,7 @@ test("a GitHub run's token, its audience naming the key, buys a session bound to
   const row = await sessionRow({ token: made.body.token as string, key });
   assert.equal(row.kind, 'workload');
   assert.equal(row.jkt, await thumbprint(key.jwk));
-  // The vault makes it (T149), and its change records the sign-in (D147): its proof, key and hard end.
+  // The vault makes it, and its change records the sign-in: its proof, key and hard end.
   const [signedIn] = await signInsLogged(db.owner);
   assert.deepEqual(signedIn!.record.signIn, {
     binding: (await db.owner.select({ id: serviceBindings.id }).from(serviceBindings))[0]!.id, proof: 'oidc', issuer: GITHUB, run: signedIn!.run,
@@ -267,7 +267,7 @@ test("a GitHub run's token, its audience naming the key, buys a session bound to
   });
   assert.equal(signedIn!.record.caller, 'workload');
   assert.deepEqual(await entries('token.exchange'), []);
-  // The audit list shows it as a `token.exchange` entry (T156): a workload's, by its proof, key and hard end.
+  // The audit list shows it as a `token.exchange` entry: a workload's, by its proof, key and hard end.
   const [shown] = (await clientFor(deps, ROOT).audit.list({ sealed: '1' })).entries.filter((entry) => entry.action === 'token.exchange');
   assert.deepEqual(
     [shown!.log, shown!.metadata.kind, shown!.metadata.proof, shown!.metadata.jkt, shown!.metadata.notAfter, shown!.metadata.expiresAt],
@@ -550,7 +550,7 @@ test("the per-request statement reads its rows through their indexes, however ma
   };
   const inlined = text.replace(/\$(\d+)/g, (_, n: string) => literal(params[Number(n) - 1]));
   // A log with history, the app's and the vault's, analyzed: on an empty one every index is one page, and the
-  // planner may as well walk the app's or the vault's newest entries back (`audit_log_app_idx`, T245) as look up a tombstone.
+  // planner may as well walk the app's or the vault's newest entries back (`audit_log_app_idx`) as look up a tombstone.
   await db.owner.execute(sql`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
     SELECT coalesce((SELECT max(seq) FROM audit_log), 0) + n, CASE WHEN n % 2 = 0 THEN 'app' ELSE 'vault' END, 'k', 0, 'system:coffre', 'audit.heartbeat', 'allow', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex')
     FROM generate_series(1, 20000) n`);
@@ -565,7 +565,7 @@ test("the per-request statement reads its rows through their indexes, however ma
   assert.doesNotMatch(lines, /Seq Scan on credentials/, lines);
   assert.match(lines, /Bitmap Index Scan on credentials_token_hash_key/, lines);
   assert.match(lines, /Bitmap Index Scan on credentials_pkey/, lines);
-  // Nor of the log, which only grows: the tombstone and the newest policy change each through an index (T245).
+  // Nor of the log, which only grows: the tombstone and the newest policy change each through an index.
   assert.doesNotMatch(lines, /Seq Scan on audit_log/, lines);
   assert.doesNotMatch(lines, /Backward using audit_log_(app|vault)_idx/, lines);
 });
@@ -631,7 +631,7 @@ test('logout revokes the session, with its key', async () => {
   const out = await call(held, 'POST', '/api/auth/logout');
   assert.equal(out.status, 200, JSON.stringify(out.body));
   assert.equal((await me(held)).status, 401);
-  // The vault ends it (T149), and its change records the sign-out (D147).
+  // The vault ends it, and its change records the sign-out.
   const revokes = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).flatMap(({ payload }) => {
     const { revoke } = JSON.parse(payload) as { revoke?: { reason: string; kind: string } };
     return revoke === undefined ? [] : [revoke];
@@ -780,7 +780,7 @@ async function marketProd(): Promise<string> {
   return (await db.owner.select().from(environments).where(eq(environments.slug, 'prod')))[0]!.id;
 }
 
-/** A plugin that answers `/use/...` with what `workload` and `use` say, as PR 1d's proxy will. */
+/** A plugin that answers `/use/...` with what `workload` and `use` say, as a proxy would. */
 function probe(seen: { caller?: WorkloadUse; context?: PluginContext }) {
   return {
     name: 'probe',
@@ -860,7 +860,7 @@ test("a narrowed session's row stands only while every ancestor does, and reache
   await bindGithub();
   const parent = await githubSession();
   const root = await sessionRow(parent);
-  // A child as PR 4's narrow will make it: bound to its own key, its ancestors and limits under its MAC.
+  // A child as a narrow would make it: bound to its own key, its ancestors and limits under its MAC.
   const key = await generateProofKey();
   const child = { token: `coffre_wl_${Buffer.alloc(32, 7).toString('base64url')}`, key };
   await insertSession(deps.db, deps.chainKey, {
@@ -918,7 +918,7 @@ test("a Cloudflare call uses its service's values: the vault's read names no cre
   assert.equal((await read((await bindingRoute(new Request(`${ORIGIN}/use/-/stripe`, { method: 'POST' }), runtime, MEMBER))!)).status, 200);
   const used = await seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } });
   assert.equal(used.values.STRIPE_SECRET_KEY, 'sk_live_1');
-  // The use is the record, the binding its way in (T147), its kind in the purpose's bits above 512.
+  // The use is the record, the binding its way in, its kind in the purpose's bits above 512.
   assert.deepEqual((await usesLogged(db.owner)).map((use) => [use.credential, Math.floor(use.purpose / 512)]), [[binding, 2]]);
 });
 
@@ -931,6 +931,6 @@ test('a Cloudflare binding unbound after its call was checked releases nothing: 
   // Checked; then unbound before the vault is asked.
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, binding);
   await assert.rejects(seen.context!.use(seen.caller!, { path: 'market/prod', keys: ['STRIPE_SECRET_KEY'], purpose: 'use', logged: { credential: 'stripe' } }), { status: 401 });
-  // The use itself reads the binding ended (T147, WaysIn.tla's WayReadInUse): nothing released.
+  // The use itself reads the binding ended (WaysIn.tla's WayReadInUse): nothing released.
   assert.equal((await newest('vault')).find((entry) => entry.action === 'secret.read'), undefined);
 });

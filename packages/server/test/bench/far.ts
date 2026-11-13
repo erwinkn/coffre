@@ -6,7 +6,7 @@ export async function farPostgres(at: string, rtt: number): Promise<{ url: strin
   const server: Server = createServer((client) => {
     const upstream = connect(Number(target.port), target.hostname);
     // No Nagle, as Postgres and Hyperdrive set on theirs: an answer past Postgres's 8 KB writes comes in several chunks,
-    // and Node's default would hold each after the first until the client's delayed ACK, up to 40 ms (T165, PR 2).
+    // and Node's default would hold each after the first until the client's delayed ACK, up to 40 ms.
     client.setNoDelay(true);
     upstream.setNoDelay(true);
     const relay = (from: NodeJS.ReadableStream, to: NodeJS.WritableStream) => from.on('data', (chunk) => setTimeout(() => to.write(chunk), rtt / 2));

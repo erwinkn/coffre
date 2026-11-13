@@ -1,6 +1,6 @@
 // A read decides on the vault's answer about its caller kept from their
 // last request, and makes one vault call, a use, which decides on the rows as
-// they are and logs its request (R53; `Accesses`, src/accesses.ts).
+// they are and logs its request (`Accesses`, src/accesses.ts).
 // Whatever changed since, it answers as a request that asked would have:
 // a grant revoked or given, the reader removed, a vault too old to name its answer.
 // And it logs only what that request would have: never a read or a refusal
@@ -34,8 +34,8 @@ let root: CoffreClient;
 /** The vault the runtime calls, counted. */
 let calls: string[];
 /**
- * Whether the vault serves a request's one key by name (T145, PR B): then it keeps no answer. Off but where a test
- * turns it on, so that a read of one key here goes as a read of several does, on the answer kept, until PR B2.
+ * Whether the vault serves a request's one key by name: then it keeps no answer. Off but where a test turns it
+ * on, so that a read of one key here goes as a read of several does, on the answer kept.
  */
 let named = false;
 let runtime: CoffreRuntime;
@@ -119,7 +119,7 @@ async function reveal(client: CoffreClient, path: string): Promise<string> {
     return Object.values((await client.secrets.reveal(path)).values).join();
   } catch (error) {
     const { status, code, reason } = error as { status: number; code?: string; reason?: string };
-    // A key's one refusal says no reason (D153): the app's entry of it does, the newest refusal of a read.
+    // A key's one refusal says no reason: the app's entry of it does, the newest refusal of a read.
     return `${status} ${(code === 'not_available' ? await refusedIn(db.owner) : reason) ?? ''}`.trim();
   }
 }
@@ -135,16 +135,16 @@ test('a read on a kept answer makes one vault call, which checks it', async () =
 test("a read of one key keeps and recalls nothing: the vault's one use by name decides on the reader as they are", async () => {
   named = true;
   const reader = await readerSession();
-  // Both reads in one of the key's refresh periods (a minute, at the default window, from its phase, T204), with time
+  // Both reads in one of the key's refresh periods (a minute, at the default window, from its phase), with time
   // to spare: a repeat rides its cover only while its key's bulk row is of the period it is in (CoverFresh), and two
-  // reads either side of a period's turn write a use each (seen in CI on T158's branch and on #438's).
+  // reads either side of a period's turn write a use each (seen in CI).
   await inBulkPeriod(5_000, db.owner, [`user:${READER}`], 'market/dev');
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
   calls = [];
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
   assert.deepEqual(calls, ['useNamed']);
   // Revoked: refused at once as they are now, by the same one call; nothing asked first. A caller standing nowhere there
-  // has no key read, so the vault logs no use of theirs (W268): the app's entry records the request.
+  // has no key read, so the vault logs no use of theirs: the app's entry records the request.
   await root.access.set(`user:${READER}`, { 'market/dev': null, 'market/prod': 'viewer' });
   calls = [];
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), '404 no_grant');

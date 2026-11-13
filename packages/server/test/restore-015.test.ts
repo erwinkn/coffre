@@ -1,11 +1,11 @@
-// The restore drill on 0.15's log (docs/restore.md, "On 0.15's log"; PR 9b), as scripts/restore-drill.sh runs it on
+// The restore drill on 0.15's log (docs/restore.md, "On 0.15's log"), as scripts/restore-drill.sh runs it on
 // 0.14's: an instance cut over and writing under 0.15, its checkpointer sealing, backed up with `coffre backup`,
 // restored with `coffre restore --keys` into an empty database, and checked to have come back on 0.15: its log
 // cut over, its trees signed by its vault key and verified, its rows the log's, a token's use serving the value it
 // served, and new changes sealed on top. The signer's memory of a pair the backup predates refuses the restored log
 // (the database lost entries it signed), as a writer's rollback would be refused, until it is given a new memory.
 // The wrong vault key verifies nothing. A backup from before a rotation of the vault key comes back under the new
-// key, the log moving on from the old one again (T168). With PostgreSQL 16's pg_dump and pg_restore on PATH, as the
+// key, the log moving on from the old one again. With PostgreSQL 16's pg_dump and pg_restore on PATH, as the
 // CLI's backup tests (packages/cli/test/backup.test.ts) need them.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';

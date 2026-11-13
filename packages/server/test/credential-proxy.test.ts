@@ -1,4 +1,4 @@
-// Placeholders (docs/design/credential-proxy.md, R13): a sensitive value is
+// Placeholders (docs/design/credential-proxy.md): a sensitive value is
 // handed back to no person, on any credential of theirs, while a service
 // account reads it as any other. A person's app holds handles for what the
 // proxy covers, and the values its person reads as they are; only the
@@ -224,7 +224,7 @@ async function refusal(promise: Promise<unknown>): Promise<{ status: number; rea
     await promise;
   } catch (error) {
     const { status, code, reason } = error as { status: number; code?: string; reason?: string };
-    // A key's one refusal says no reason (D153): the app's entry of it does.
+    // A key's one refusal says no reason: the app's entry of it does.
     if (code === 'not_available') return { status, reason: await refusedFor() };
     return { status, reason: reason ?? null };
   }
@@ -280,12 +280,12 @@ test('a sensitive value opens for no person, on any credential of theirs nor thr
   const one = await callRaw(mcp, 'reveal_secret_values', { path: 'market/dev/SCHUMANN_API_KEY' });
   assert.equal(one.body.result!.isError, true);
   assert.equal(JSON.stringify(one.body).includes(KEY), false);
-  // A key's one refusal through MCP too (D153), its reason in the app's entry.
+  // A key's one refusal through MCP too, its reason in the app's entry.
   assert.deepEqual(one.body.result!.content, [{ type: 'text', text: 'not available: no such key, or no access to it' }]);
   assert.equal(await refusedFor(), 'sensitive');
 
-  // Every refusal is decided before its use, which writes nothing (D153): the vault logs none, and the app's entry of
-  // each request records it, by the person, on a credential and through MCP on its connection (T147).
+  // Every refusal is decided before its use, which writes nothing: the vault logs none, and the app's entry of
+  // each request records it, by the person, on a credential and through MCP on its connection.
   const refused = (await entries('secret.read')).filter((entry) => entry.decision === 'deny' && entry.author === 'vault');
   assert.equal(refused.length, 0);
   const app = (await entries('secret.read')).filter((entry) => entry.decision === 'deny' && entry.author !== 'vault');
@@ -303,7 +303,7 @@ test('a handle stands in for its environment and reaches nothing but the proxy; 
   assert.match(made.token, /^coffre_use_[A-Za-z0-9_-]{43}$/);
   assert.deepEqual(made.scope, { 'market/dev': 'viewer' });
   assert.ok(Math.abs(Date.parse(made.expiresAt) - Date.now() - 12 * 3_600_000) < 60_000, 'twelve hours unless told');
-  // Its record: the vault's change (T149, D147).
+  // Its record: the vault's change.
   const [created] = (await issuesLogged(db.owner)).filter((entry) => entry.kind === 'handle');
   assert.equal(created!.actor, `user:${DEV}`);
 
@@ -391,7 +391,7 @@ test("Schumann's own client, its base URL the proxy's stable URL and its key fro
   assert.equal((await helper.fetch('/companies')).status, 200);
   assert.equal(received[1]!.headers['x-api-key'], KEY);
 
-  // One opening of the credential's keys for the minute, however many calls: one use, its row slim (R53), naming
+  // One opening of the credential's keys for the minute, however many calls: one use, its row slim, naming
   // neither the credential nor the host.
   await schumann.get('/companies');
   assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
@@ -892,11 +892,11 @@ test("a handle made for dev reads its reference into a protected prod through de
   assert.equal(response.status, 200, await response.clone().text());
   assert.equal(((await response.json()) as { env: Record<string, string> }).env.WEBHOOK_SECRET, 'whsec_prod_0123456789');
   // Prod itself, its plan or a credential of it, is no place the handle was made for: its plan says so, and a
-  // credential's one key is the one "no" (D153), its reason in the app's entry.
+  // credential's one key is the one "no", its reason in the app's entry.
   const sent = received.length;
   assert.equal((await route('/use/market/prod', { headers: { authorization: `Bearer ${made.token}` } })).status, 403);
   const key = await route(`/use/market/prod/maps/geocode?address=paris&key=${made.token}`);
-  // Its reason: the app's, or, by name (0.15's log), the vault's own, the app reading nothing more of the key (D153).
+  // Its reason: the app's, or, by name (0.15's log), the vault's own, the app reading nothing more of the key.
   assert.deepEqual([key.status, await key.json(), await refusedFor()], [404, NO, 'no_grant']);
   assert.equal(received.length, sent, 'nothing reached an upstream');
 });

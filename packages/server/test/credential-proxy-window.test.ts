@@ -22,7 +22,7 @@ const VALUES = { API_KEY: 'sk_live_0123456789abcdef', SIGNING_KEY: PEM, WEBHOOK_
 
 test('every window is R: values kept R (none without cacheValues), a request sent within R, a tunnel checked every R − d with d = min(R ÷ 2, 10 s)', () => {
   const times = (proxy: DeploymentOptions['proxy']) => proxyTimes(defineDeployment({ proxy }));
-  // The default: checks every 50 s, each given 10 s, so a revoked handle's tunnel ends by 60 s, not 0.15's 70.
+  // The default: checks every 50 s, each given 10 s, so a revoked handle's tunnel ends by 60 s.
   assert.deepEqual(times({}), { cacheMs: 60_000, sendMs: 60_000, check: { every: 50_000, deadline: 10_000 }, bound: 60_000 });
   // R = 4: every 2 s with 2 s to answer (config.md's example).
   assert.deepEqual(times({ revokedWithinSeconds: 4 }), { cacheMs: 4_000, sendMs: 4_000, check: { every: 2_000, deadline: 2_000 }, bound: 4_000 });

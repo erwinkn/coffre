@@ -428,7 +428,7 @@ test('rule 2: a reveal of plain values, which the app opens itself, weighed befo
   // No vault call opens a plain value: the app's fence, under the head, is all that sees prod protected meanwhile.
   meanwhileOn('access', (asked) => asked === ADA, () => maya.environments.protect('market/prod'));
   assert.deepEqual(await refusal(ada.secrets.reveal('market/prod/REGION')), { status: 409, reason: 'policy_changed' });
-  // Asked again, it is decided as the policy is now: Ada only uses prod, and a key's refusal is the one "no" (D153).
+  // Asked again, it is decided as the policy is now: Ada only uses prod, and a key's refusal is the one "no".
   assert.equal(await status(ada.secrets.reveal('market/prod/REGION')), 404);
 });
 

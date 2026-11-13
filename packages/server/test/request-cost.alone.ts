@@ -105,7 +105,7 @@ class CountingPool {
    * a write of a row it made, which fails as a duplicate (23505); any other
    * failure fails the test. Run once before, and rolled back, so that a
    * connection that has not yet planned what a function it calls runs (the
-   * audit pages' reads of 0.15's uses, T166) reads no catalog for it.
+   * audit pages' reads of 0.15's uses) reads no catalog for it.
    */
   async work(statement: Statement): Promise<{ pages: number; plan: string; tree: Plan } | null> {
     const rolledBack = new Error('rolled back');
@@ -140,7 +140,7 @@ function shown(plan: Plan, depth = 0): string {
 }
 
 /**
- * A page's statements held to the budget `small` measured, call after call on one connection (W308): every SELECT
+ * A page's statements held to the budget `small` measured, call after call on one connection: every SELECT
  * `run` sends, twelve times over on a connection of the app's login opened for it, `makeDay` making a day of reads
  * before the ninth. The first call reads the catalog the connection plans with, as `work` leaves aside; each after it
  * reads what a request does. A statement of PL/pgSQL is planned for each call's values five times, then Postgres
@@ -410,7 +410,7 @@ before(async () => {
 
   const gate: Gate = { nonce: async () => 'g1.cost', admit: async () => ({ ok: true, nonce: 'g1.cost' }) };
   // A workload's key-bound session of the service, from `/api/auth/workload` as a CI run's SDK asks for one: its ID
-  // token's audience names the proof key, and the vault signs it in (T149). Then a plugin that asks for it as the proxy does.
+  // token's audience names the proof key, and the vault signs it in. Then a plugin that asks for it as the proxy does.
   // Its binding has a policy, as a binding whose runs hold sessions does, and trusts another workflow than the CI run's,
   // whose sign-in it would otherwise add a candidate to.
   const deploy = { ...claims, workflow_ref: 'acme/market/.github/workflows/deploy.yml@refs/heads/main' };
@@ -507,7 +507,7 @@ async function cost(request: () => Promise<unknown>): Promise<Cost> {
 
 /**
  * The bulk cap's periods: a tenth of its window, at most a minute (the vault's default window, 15 minutes, which this
- * deployment keeps), each principal's key starting its own at a phase of its own (`phaseOf`, T204). A key's first use
+ * deployment keeps), each principal's key starting its own at a phase of its own (`phaseOf`). A key's first use
  * in a new one moves its row of the cap's, one statement more (`useNamedMany`'s "3, a key entering her cap's set"),
  * whichever request comes first after that key's period turns. The requests' callers: the reader, and ci-web's token,
  * which its CI runs and its workloads use too. Every key they reveal is market/dev's.
@@ -683,7 +683,7 @@ const renders: Record<string, { request: () => Promise<unknown>; budget: PageCos
   "an Owner's project page": { request: () => projectPage('owner'), budget: { app: 8, trips: 3, vault: 1, vaultCalls: 2 } },
   "a viewer's project page": { request: () => projectPage('viewer'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
   // Every other page, as Owner and viewer (`visits`); the sign-in page signed out too, which reads nothing. Not the
-  // audit page's: its check reads what was written since the newest checkpoint (R25), which its own test holds.
+  // audit page's: its check reads what was written since the newest checkpoint, which its own test holds.
   "/projects, owner": { request: () => visit('owner', '/projects'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
   "/projects, viewer": { request: () => visit('viewer', '/projects'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
   "/projects/market/users, owner": { request: () => visit('owner', '/projects/market/users'), budget: { app: 14, trips: 4, vault: 1, vaultCalls: 2 } },
@@ -696,20 +696,19 @@ const renders: Record<string, { request: () => Promise<unknown>; budget: PageCos
   // statement beside its first reads, no trip (and their bindings, where a deployment trusts workloads, as this one does not).
   "/users, owner": { request: () => visit('owner', '/users'), budget: { app: 9, trips: 3, vault: 1, vaultCalls: 2 } },
   "/users, viewer": { request: () => visit('viewer', '/users'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  // Its report reads what they read under 0.15's log, as the projection lists them, and how far it does (T166), beside
-  // its first reads: a statement, no trip. And what they wrote that 0.15's log records alone (T179, 0.16.0): one more
+  // Its report reads what they read under 0.15's log, as the projection lists them, and how far it does, beside
+  // its first reads: a statement, no trip. And what they wrote that 0.15's log records alone: one more
   // statement beside them, no trip; its keys and versions only when there are some.
-  // One vault call more than 0.14's log made, and one trip less: the report's reads and uses, which only 0.15's log holds,
-  // asked of the vault. T276: P2 moves that report onto the projection, and W393 brings the calls back down.
+  // The report's reads and uses, which only 0.15's log holds, are a vault call of their own.
   "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 17, trips: 5, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
   "/users/reader@acme.example, viewer": { request: () => visit('viewer', '/users/reader@acme.example'), budget: { app: 5, trips: 3, vault: 1, vaultCalls: 1 } },
-  // The same directory, and nothing asked of any one account (T264): before, each account's token list, a vault call and
-  // three statements more each.
+  // The same directory, and nothing asked of any one account: its token list would be a vault call and three
+  // statements more each.
   "/service-accounts, owner": { request: () => visit('owner', '/service-accounts'), budget: { app: 9, trips: 3, vault: 1, vaultCalls: 2 } },
   "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 10, trips: 3, vault: 2, vaultCalls: 3 } },
-  // Its report reads their reads too, and how far they are listed (T166), beside its first reads; and what they wrote
-  // that 0.15's log records alone (T179, 0.16.0), one more statement beside them, no trip.
-  // As the member's page: one vault call more than 0.14's log made, for the report's reads and uses (T276, W393).
+  // Its report reads their reads too, and how far they are listed, beside its first reads; and what they wrote
+  // that 0.15's log records alone, one more statement beside them, no trip.
+  // As the member's page: the report's reads and uses are a vault call of their own.
   "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 20, trips: 6, vault: 3, vaultCalls: 4 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
   "/service-accounts/ci-web, viewer": { request: () => visit('viewer', '/service-accounts/ci-web'), budget: { app: 10, trips: 5, vault: 4, vaultCalls: 4 } },
   // Its directory too, which counts the service accounts' tokens.
@@ -856,7 +855,7 @@ test('a request runs the same statements, and reads the same rows, however large
 });
 
 /**
- * R48: a request's work in the database does not grow with the log. Each
+ * A request's work in the database does not grow with the log. Each
  * statement of each hot request, run again under EXPLAIN, reads as many
  * pages of the database (shared buffers, cached or not) on a log of ten
  * thousand entries as on one ten times longer, grown as Equisafe's grows:
@@ -886,7 +885,7 @@ test("each hot request's statements read as many pages however long the log grow
     }
     assert.deepEqual(await releases(), released, 'the copies released no key later than the log did');
     // And a tenth as many keys, each read once by each reader over a day ago, past any window and its margin: what a
-    // count of every key ever released would read. A checkpoint, as each scheduled run asks, forgets them (T111).
+    // count of every key ever released would read. A checkpoint, as each scheduled run asks, forgets them.
     for (let left = count / 10; left > 0; left -= 5000) await db.owner.execute(keys(Math.min(5000, left)));
     // As many runs as it takes, each forgetting up to 10,000: the keys of every reader, a day and an hour old.
     const old = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM vault_releases WHERE released_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - 25 * 3600000`))[0]!.n;
@@ -1223,11 +1222,11 @@ test('a standing finding costs each beat the same on the app\'s side, however lo
 });
 
 /**
- * T152: a read of one environment's keys costs the same however many keys
+ * A read of one environment's keys costs the same however many keys
  * the others hold, and however many archived keys its own live ones have
- * beside them. `secrets` had only (project_id, environment_id, key), so a
- * read that knew the environment and not the project, the places tree's
- * counts in every `me` among them, scanned the table: archived keys of every
+ * beside them. With only (project_id, environment_id, key) on `secrets`, a
+ * read that knows the environment and not the project, the places tree's
+ * counts in every `me` among them, scans the table: archived keys of every
  * project included. Each statement run again under EXPLAIN reads as many
  * pages once 10,000 archived keys sit in market/prod beside its live ones and
  * thirty more projects hold theirs.
@@ -1239,7 +1238,7 @@ test("a read of an environment's keys reads as many pages however many keys the 
   const everything = [ids.dev!, ids.prod!, ids.busy!];
   // A sensitive value of market/prod's own, and one market/busy reads through a reference into shop. With none, a plan
   // of `holdingSensitive` that scans a table can stop at an empty join after a handful of pages, and the count said which
-  // plan Postgres picked, not what the statement reads; with them, a scan shows (T214). The growth above keeps what it
+  // plan Postgres picked, not what the statement reads; with them, a scan shows. The growth above keeps what it
   // made, a sensitive value of market/busy's own among what it may, so these add to what the environments held before.
   const before = await holdingSensitive(counted, everything);
   await root.secrets.set('market/prod', { COST_SENSITIVE: { value: 'fake-sensitive', sensitivity: 'sensitive' } });
@@ -1248,7 +1247,7 @@ test("a read of an environment's keys reads as many pages however many keys the 
   const shop = (await places(counted)).find((project) => project.slug === 'shop')!;
   assert.deepEqual(await holdingSensitive(counted, everything), new Set([...before, ids.prod!, ids.busy!]));
   // A key with a value of its own, and market/busy's reference, as 0.15's objects take them (`secretObjects`): its source
-  // and its newest reference row read by the holder's index, never through other keys' references (T220).
+  // and its newest reference row read by the holder's index, never through other keys' references.
   const idOf = async (where: SQL) => (await db.owner.execute<{ id: string }>(sql`SELECT id FROM secrets WHERE archived_at IS NULL AND ${where}`))[0]!.id;
   const plain = await idOf(sql`environment_id = ${ids.dev!} AND key = 'API_KEY'`);
   const refers = await idOf(sql`environment_id = ${ids.busy!} AND key = 'COST_REFERS'`);
@@ -1316,8 +1315,8 @@ test("a read of an environment's keys reads as many pages however many keys the 
   await settle();
   const elsewhere = await pages();
   // market/busy's reference made long ago, and a key of shop's repointed 5,000 times since: newer rows of another
-  // holder's, which a lookup of market/busy's newest that walks the references by `created_seq` reads one by one (review
-  // r1 of #502). Their entries in the log, at seqs before any other, copy its oldest, as the log's growth above does.
+  // holder's, which a lookup of market/busy's newest that walks the references by `created_seq` reads one by one.
+  // Their entries in the log, at seqs before any other, copy its oldest, as the log's growth above does.
   await withLogUnlocked(db.owner, (owner) => owner.execute(sql`
     INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash, metadata)
     SELECT e.seq - g, e.author, e.key_id, e.occurred_at, e.actor, e.action, e.decision, e.prev_hash, e.mac, e.hash, e.metadata
@@ -1350,9 +1349,9 @@ test("a read of an environment's keys reads as many pages however many keys the 
 });
 
 /**
- * A project's audit page, through the API, as coffre's own pages ask it: where 0.15's log records key writes alone
- * (T179, 0.16.0), it reads the project's environments, and only those, never a count of each one's keys, which grew
- * with every key the project holds (review r7 of #490).
+ * A project's audit page, through the API, as coffre's own pages ask it: where 0.15's log records key writes alone,
+ * it reads the project's environments, and only those, never a count of each one's keys, which grows
+ * with every key the project holds.
  */
 test("a project's audit page reads as many pages however many keys the project holds", async () => {
   const asked = () => root.audit.list({ path: 'market', sealed: '1', limit: 50 });
@@ -1392,13 +1391,11 @@ test("a project's audit page reads as many pages however many keys the project h
 
 /**
  * The reads that name the places, and count nothing in them: a member's report, `me`, the members list. Each reads no
- * key, so as many pages however many the instance holds (T221). A count of them read every live key of the places, a
- * page for each when Postgres picked an index scan for each environment (1,184 pages for 1,282 keys), 30 to 48 when it
- * picked one bitmap scan, and which it picked followed the statistics of `secrets` (T166's flake): with keys counted,
- * these grow with the keys, whichever plan runs. The earlier tests leave the log due for an auto-analyze, which landed
- * now and then between the two counts: the missing members' read then looked for an access entry of every principal
- * before it dropped those with a member row, 155 pages to 370, until it named its order (`missingMembers`, T233, which
- * the next test holds). The log is analyzed before each count here, so that both are planned on fresh statistics, and
+ * key, so as many pages however many the instance holds. A count of them would read every live key of the places, a
+ * page for each when Postgres picks an index scan for each environment (1,184 pages for 1,282 keys), 30 to 48 when it
+ * picks one bitmap scan, as the statistics of `secrets` decide: with keys counted, these grow with the keys, whichever
+ * plan runs. The earlier tests leave the log due for an auto-analyze, which may land between the two counts and change
+ * the plan of the missing members' read (`missingMembers`, which the next test holds). The log is analyzed before each count here, so that both are planned on fresh statistics, and
  * no auto-analyze is left due to land between them.
  */
 test("a member's report, `me` and the members list read as many pages however many keys the instance holds (T221)", async () => {
@@ -1449,14 +1446,14 @@ test("a member's report, `me` and the members list read as many pages however ma
 
 /**
  * The missing members' read (`missingMembers`) looks for an access entry only of the principals the log names with no
- * member row. Left to the planner, it looked for one of every principal first, once the log's statistics were fresh,
+ * member row. Left to the planner, it may look for one of every principal first, once the log's statistics are fresh,
  * each a step down the subject index to an allowed entry: 155 pages to 370 in the test above, whenever an auto-analyze
- * landed between its counts (T233). So the log is analyzed here, as that auto-analyze did, and the read is held, beyond
+ * lands between its counts. So the log is analyzed here, as that auto-analyze does, and the read is held, beyond
  * the walk that names the principals, to the rowless principals' log: a ceiling of its own, not a baseline an earlier
- * plan could raise. This file leaves no principal rowless, so the ceiling is 16 pages, which the old order passed by
+ * plan could raise. This file leaves no principal rowless, so the ceiling is 16 pages, which the other order passes by
  * about 170 (172 against 0 over 20 analyzes, each a fresh sample of the ~190,000 entries this file leaves): a bound for
- * this fixture, not for any log, where a hash join may scan the log for a few rowless principals. Since T239 the read
- * looks for no access entry at all: `audit_log_access_idx` holds the allowed ones alone, which name the principals, and
+ * this fixture, not for any log, where a hash join may scan the log for a few rowless principals. Beyond that walk, the
+ * read looks for no access entry at all: `audit_log_access_idx` holds the allowed ones alone, which name the principals, and
  * the next test holds that walk flat.
  */
 test("the missing members' read looks in the log, beyond naming its principals, only for those with no member row (T233)", async () => {
@@ -1478,11 +1475,11 @@ test("the missing members' read looks in the log, beyond naming its principals, 
 });
 
 /**
- * R48 for the missing members' read (`missingMembers`), of everyone and of one: the vault's refusals of access changes
- * about someone with no member row, which name them in the log as its allowed changes do, cost nothing however many
- * there are; nor do the other changes of 0.15's log. Before `audit_log_access_idx` (T239), the read of everyone named
- * them by any entry of the vault's about them, then looked through every one for an allowed access change, and the read
- * of one scanned the log for it: 33 pages to 233 from 1,000 refusals to 10,000, and the whole log. Each refusal here is a
+ * The missing members' read (`missingMembers`), of everyone and of one: the vault's refusals of access changes
+ * about someone with no member row, which name them in the log as its allowed changes do, cost it nothing however many
+ * there are; nor do the other changes of 0.15's log. Without `audit_log_access_idx`, the read of everyone would name
+ * them by any entry of the vault's about them, then look through every one for an allowed access change, and the read
+ * of one would scan the log for it: 33 pages to 233 from 1,000 refusals to 10,000, and the whole log. Each refusal here is a
  * copy of the vault's own, older than any entry.
  */
 test("the missing members' read reads as many pages however many refusals the log holds about someone with no member row (T239)", async () => {
@@ -1546,7 +1543,7 @@ test("the missing members' read reads as many pages however many refusals the lo
 
 
 /**
- * What the project list and a render's shell count of the places (T221): each environment's live keys, each project's
+ * What the project list and a render's shell count of the places: each environment's live keys, each project's
  * team keys. A count reads the keys, so it grows with them: here, with the table's and its live index's pages, as one
  * bitmap scan reads them, where an index scan for each environment read a page for each key (29,889 pages for 29,262
  * live keys in 706). Postgres can still pick an index scan of the keys that reads a page for each, when the archived
@@ -1586,11 +1583,11 @@ test("the project list and a render's shell count the keys within twice their ta
 });
 
 /**
- * The keys of deleted places, which 0.14's log leaves unarchived (review r1 of T221): a count names the standing
+ * The keys of deleted places, which 0.14's log leaves unarchived: a count names the standing
  * environments, so Postgres can seek their keys alone. 100 deleted environments of 400 keys each: the project list's
  * count read 166 pages, then 169; a count over every live key read 308, then 945. This holds that plan's shape, not
  * every plan: with fewer, larger environments Postgres can scan the table and filter the deleted ones' keys out (one
- * standing environment of 4,000 keys beside two deleted ones of 4,000 each: 67 pages, then 191, review r2).
+ * standing environment of 4,000 keys beside two deleted ones of 4,000 each: 67 pages, then 191).
  */
 test("the project list and a render's shell count no deleted place's keys in this fixture (T221)", async () => {
   const reads: Record<string, () => Promise<unknown>> = {
@@ -1643,17 +1640,17 @@ test("the project list and a render's shell count no deleted place's keys in thi
 });
 
 /**
- * What the audit pages read of what 0.15's log alone records (D147): the
- * sign-ins through trust bindings (T156), and the token issues, revokes and
- * sign-outs (T164). A page of them, every member's and one's, with the
+ * What the audit pages read of what 0.15's log alone records: the
+ * sign-ins through trust bindings, and the token issues, revokes and
+ * sign-outs. A page of them, every member's and one's, with the
  * detail and without; what a page hides, counted over its stretch; and how
  * the credentials a page's entries name came to be. Each reads as many
  * pages however many other changes, and other members' records, the log
- * holds (R48): members' changes, renewals, the revokes a binding's end makes,
+ * holds: members' changes, renewals, the revokes a binding's end makes,
  * all around them in time. Planted as rows, as only their reads are
  * measured, and gone again after.
  */
-/** Where the changes planted below are numbered from: past those the fixture's requests made, and below T239's (`changes`). */
+/** Where the changes planted below are numbered from: past those the fixture's requests made, and below the missing members' test's (`changes`). */
 const PLANTED = 10_000_000n;
 
 test("the audit pages' records of 0.15's log read as many pages however many other changes the log holds", async () => {
@@ -1662,13 +1659,13 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
   // number a planted change takes.
   const n = (number: number) => PLANTED + BigInt(number);
   const ADA = 'user:ada@acme.example';
-  // A page of the instance's, as before 0.16: its sign-ins, and with the detail its token records, and its first adds.
+  // A page of the instance's: its sign-ins, and with the detail its token records, and its first adds.
   const page = (filter: Omit<Parameters<typeof sealedPage>[1], 'instance' | 'written'>) => sealedPage(counted, { instance: true, written: null, ...filter });
-  // The key writes 0.15's log records alone (T179, 0.16.0): one environment's, another of the project's, one key's.
+  // The key writes 0.15's log records alone: one environment's, another of the project's, one key's.
   const [envA, envC, key] = [randomUUID(), randomUUID(), randomUUID()];
   const THIRD = 'user:third@acme.example';
   const writes = (written: Parameters<typeof sealedPage>[1]['written'], actors?: string[]) => sealedPage(counted, { ...(actors === undefined ? {} : { actors }), detail: false, limit: 100, instance: false, written });
-  // Their refusals, which the vault records since PR 6: a key write's where its writes are listed, an add's on the instance's pages.
+  // Their refusals, as the vault records them: a key write's where its writes are listed, an add's on the instance's pages.
   const refusals = (at: Parameters<typeof sealedPage>[1]['written'], actors?: string[], instance = false) =>
     sealedPage(counted, { ...(actors === undefined ? {} : { actors }), detail: false, limit: 100, instance: false, written: null, refusals: { instance, at } });
   const credentials = Array.from({ length: 20 }, () => randomUUID());
@@ -1692,7 +1689,7 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     "how far a page counts of everyone's": () => sealedReach(counted, { before: stretch.before }),
     "what a page counts of a person's, as far as it reaches": () => sealedHidden(counted, { actors: [ADA], from: reached!, before: stretch.before }),
     // Whole pages through the API, every statement each makes, as coffre's own pages ask them and counted (`hidden`): a
-    // service's, its runs' sign-outs above its sign-ins, and a person's, nothing but their records (reviews r3, r4).
+    // service's, its runs' sign-outs above its sign-ins, and a person's, nothing but their records.
     "through the API, a service's page": () => root.audit.list({ actor: 'token:planted', sealed: '1', limit: 50 }),
     "through the API, a person's page": () => root.audit.list({ actor: ADA, sealed: '1', limit: 50 }),
     "through the API, a service's page, counted": () => root.audit.list({ actor: 'token:planted', sealed: '1', hidden: '1', limit: 50 }),
@@ -1736,7 +1733,7 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
   };
   // A key write down the two-trip path, at an environment: its payload starts with its `digest` and names its read.
   const writtenAt = (environment: string) => sql`${`{"digest":null,"environmentId":"${environment}","inputs":"00","key":null,"nature":"secret","op":"secret.write","projectId":"p","ref":{"id":"`} || gen_random_uuid() || '","kind":"secret"},"reference":null,"request":{"credential":"c","identity":null,"number":"1","operationId":null,"requestId":null},"source":null,"version":"v"}'`;
-  // A key write's refusal at an environment, and an add's, as the vault records them (PR 6): their payloads start with their code.
+  // A key write's refusal at an environment, and an add's, as the vault records them: their payloads start with their code.
   const refusedAt = (environment: string) => sql`${`{"code":"no_grant","credential":"c","environmentId":"${environment}","identity":null,"keys":["K"],"op":"write.refused","path":"market/dev","projectId":"p","read":"00","ref":{"id":"`} || gen_random_uuid() || '","kind":"request"},"request":{"number":"1","operationId":null,"requestId":null}}'`;
   const credential = (record: string) => sql.raw(`'{"op":"credential.${record}","ref":{"id":"' || gen_random_uuid() || '","kind":"credential"}'`);
   // Each kind of change as the vault writes its payload, canonical (keys in order): `g` its row's place in the batch.
@@ -1769,13 +1766,13 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
    * reads no heap, and its statistics fresh. VACUUM marks a page all-visible only once no snapshot in the database may
    * still see its rows in progress, and a snapshot's horizon is the oldest transaction running anywhere in the cluster:
    * one taken here while the last rows were planted (an autovacuum's ANALYZE, a request's work left to the background)
-   * left the newest of them to the heap on CI, the service's counted page reading 52 pages, not 14 (T199). So it
+   * left the newest of them to the heap on CI, the service's counted page reading 52 pages, not 14. So it
    * vacuums again until no page is left, as autovacuum's next round would, and names what held them past a minute.
    */
   const settle = async () => {
     for (const until = Date.now() + 60_000; ; await sleep(100)) {
       // Not in parallel, as autovacuum never does: a parallel one's shared memory outgrows a container's 64 MB /dev/shm
-      // with the log's indexes (53100 on CI, review r1 of #490).
+      // with the log's indexes (53100 on CI).
       await db.owner.execute(sql`VACUUM (PARALLEL 0) log_changes`);
       const [{ pages, visible }] = await db.owner.execute<{ pages: number; visible: number }>(sql`
         SELECT relpages AS pages, relallvisible AS visible FROM pg_class WHERE oid = 'log_changes'::regclass`);
@@ -1790,7 +1787,7 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     await db.owner.execute(sql`ANALYZE log_changes`);
   };
   try {
-    // No autovacuum on the log while it is planted (T227). A VACUUM tells the free space map of the room each page kept,
+    // No autovacuum on the log while it is planted. A VACUUM tells the free space map of the room each page kept,
     // too little for the rows that filled it but enough for a smaller kind's (a page of key writes keeps a refused
     // add's), and the batch planted next fills that room first, a row a page. So where an autovacuum landed decided
     // which rows lay scattered: one late in the 50,000 newer refused adds left the newest 100 a page each, and their
@@ -1816,7 +1813,7 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     await plant(1_200_100, 100, ADA, 'written', { object: sql`log_object('secret', ${key})` });
     await plant(1_201_000, 20_000, 'user:other@acme.example', 'writtenC');
     await plant(1_230_000, 1_000, 'user:admin@acme.example', 'admitted');
-    // Refusals (PR 6): Ada's at envA, others' at envC, an admin's adds.
+    // Refusals: Ada's at envA, others' at envC, an admin's adds.
     await plant(1_240_000, 100, ADA, 'refused');
     await plant(1_241_000, 20_000, 'user:other@acme.example', 'refusedC');
     await plant(1_262_000, 1_000, 'user:admin@acme.example', 'refusedAdd');
@@ -1840,7 +1837,7 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     // 50,000 key writes more by someone else at another environment, and 50,000 first adds, all since.
     await plant(1_300_000, 50_000, 'user:other@acme.example', 'writtenC');
     await plant(1_350_000, 50_000, 'user:admin@acme.example', 'admitted');
-    // Crossed (review r1 of #490): another's key writes at Ada's environment and at her key, and hers elsewhere, all
+    // Crossed: another's key writes at Ada's environment and at her key, and hers elsewhere, all
     // newer than hers there: a page of hers at a place reads past none of them.
     await plant(1_410_000, 50_000, 'user:other@acme.example', 'written');
     await plant(1_460_000, 50_000, ADA, 'writtenC');
@@ -1869,7 +1866,7 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     assert.deepEqual((await page({ actors: ['token:planted'], detail: false, before: { at: 100_150, number: n(100_150) }, limit: 100 })).rows.map(({ number }) => number).slice(0, 2), [n(100_149), n(100_148)]);
     assert.deepEqual((await page({ actors: [ADA], detail: true, limit: 2 })).rows.map(({ number }) => number), [n(650_000), n(649_999)]);
     assert.deepEqual((await page({ actors: [ADA], detail: true, before: stretch.before, limit: 2 })).rows.map(({ number }) => number), [n(150_200), n(150_199)]);
-    // The newest of the instance's records: the newest first add planted (T179, 0.16.0); of its token records, the
+    // The newest of the instance's records: the newest first add planted; of its token records, the
     // service's runs' newest sign-out. Below the fixture's own, made at this run's time, long after any planted.
     assert.deepEqual((await page({ detail: true, before: { at: 1_000_000_000 }, limit: 1 })).rows.map(({ number }) => number), [n(1_400_000)]);
     assert.deepEqual((await page({ actors: ['token:planted'], detail: true, limit: 1 })).rows.map(({ number }) => number), [n(1_000_000)]);
@@ -1928,7 +1925,7 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
  * own: the history an audit page's `originsOf` asks about each credential the page shows. With a handful of them the
  * planner may walk them all by `audit_log_action_idx` (23 pages) rather than probe `audit_log_exchange_idx` and
  * `audit_log_token_create_idx` once a credential (100, for 50), and which it picks follows ANALYZE's sample of a long log
- * holding a few: a page measured once each way read as if the reads had grown it (W308). Thousands of them, as an
+ * holding a few: a page measured once each way read as if the reads had grown it. Thousands of them, as an
  * instance holds, and it probes, at every step.
  */
 const signIns = (count: number) => append(2 * count, (i): NewEntry => i % 2 === 0
@@ -1942,7 +1939,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
   const AHEAD = 100;
   const ids = async (where: SQL) => (await db.owner.execute<{ id: string }>(sql`SELECT CAST(id AS text) AS id FROM ${where}`)).map((row) => row.id);
   // Ada's reads are of market's keys, of their current versions, as the offboarding report weighs them; everyone else's
-  // are of keys anywhere, in forks and through references whose source moves on (review r5): none is on her pages.
+  // are of keys anywhere, in forks and through references whose source moves on: none is on her pages.
   await root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`READS_COST_${i}`, `value-${i}`])));
   // A member, whose report the page reads.
   await root.members.add(ADA).catch(() => {});
@@ -2023,7 +2020,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     await db.owner.execute(sql`VACUUM (ANALYZE) log_reads`);
     await db.owner.execute(sql`ANALYZE`);
   };
-  // A day of reads made past the last, each time: what a connection's plans are made again for (W308).
+  // A day of reads made past the last, each time: what a connection's plans are made again for.
   let made = AHEAD + 1;
   const makeDay = async () => {
     made += 1;
@@ -2040,7 +2037,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     await plant(2_000, ADA, 10 * 3_600_000, 15_000, { own: true });
     await settle();
     const small = await pages();
-    // A hundred days of others' reads after all of Ada's, each of its own partition, alone first (reviews r6, r8: her
+    // A hundred days of others' reads after all of Ada's, each of its own partition, alone first (else her
     // page read a probe of each, then her report each whole, whichever plan the others' other reads tipped it to).
     await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${AHEAD + 1}) d`);
     await plant(20_000, OTHER, -86_400_000, (AHEAD * 86_400_000) / 20_000);
@@ -2057,7 +2054,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     await plant(100_000, ADA, 20 * 3_600_000, 300, { own: true });
     await settle();
     flat(small, await pages(), ['every read', "a member's reads", 'how far the reads are listed', 'through the API, the whole log', "through the API, a member's page"]);
-    // And as many on a connection's sixth call and after, and once a day is made (W308).
+    // And as many on a connection's sixth call and after, and once a day is made.
     for (const name of ["a member's reads", "through the API, a member's page"]) await callAfterCall(name, reads[name]!, small[name]!, makeDay);
     // And they read what was planted: full pages, Ada's hers alone, her report each of her keys once.
     const page = (filter: Parameters<typeof readsPage>[1]) => readsPage(counted, filter).then(({ rows }) => rows);
@@ -2167,7 +2164,7 @@ test("a place's page of reads, a key's, an environment's or a project's, reads a
     return read;
   };
   const shown = async (at: { kind: 'secret' | 'environment' | 'project'; id: string }, limit = 100) => (await readsPage(counted, { at, limit })).rows;
-  // A day of reads made past the last, each time: what a connection's plans are made again for (W308).
+  // A day of reads made past the last, each time: what a connection's plans are made again for.
   let made = AHEAD + 1;
   const makeDay = async () => {
     made += 1;
@@ -2211,7 +2208,7 @@ test("a place's page of reads, a key's, an environment's or a project's, reads a
     await settle();
     flat(small, record("a key's own history", await measure()), "a key's own history");
     console.log(JSON.stringify(steps));
-    // And as many on a connection's sixth call and after, and once a day is made (W308).
+    // And as many on a connection's sixth call and after, and once a day is made.
     for (const name of ["a key's reads", "an environment's reads", "a project's reads", "through the API, a key's page"]) await callAfterCall(name, pages[name]!, small[name]!, makeDay);
     // And they read what was planted: each page its place's reads alone, full where it has a page of them.
     const first = await shown({ kind: 'secret', id: keys[0]! });

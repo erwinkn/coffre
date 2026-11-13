@@ -45,7 +45,7 @@ test('values reach the model only with Reveal values, with a warning first, and 
   const revealed = await callRaw(revealing, 'reveal_secret_values', { path: 'market/prod' });
   assert.deepEqual(revealed.body.result!.structuredContent!.values, { API_KEY: VALUE });
   assert.match(revealed.body.result!.content[0]!.text!, /^These values are now part of this conversation and its history\./);
-  // The vault's use is the record of the read, the connection its way in (T147), its kind in the purpose's bits above 512.
+  // The vault's use is the record of the read, the connection its way in, its kind in the purpose's bits above 512.
   const [call] = await entries('mcp.read');
   const connectionId = (call!.metadata.via as { connectionId: string }).connectionId;
   const uses = await usesLogged(db.owner);
@@ -65,7 +65,7 @@ test('show_secret_value shows the value to the person on the page, with Read, an
   assert.match(reported.body.result!.content[0]!.text!, /shown to the person/);
   assert.equal(JSON.stringify([asked.body, reported.body]).includes(VALUE), false, 'never to the client');
   assert.equal(JSON.stringify(await db.owner.select().from(mcpApprovals)).includes(VALUE), false);
-  // The reveal is the person's, logged by the vault under the connection; nothing else is read with Read. One use on the session the person approved it in: its row is slim (R53), and names no connection.
+  // The reveal is the person's, logged by the vault under the connection; nothing else is read with Read. One use on the session the person approved it in: its row is slim, and names no connection.
   assert.deepEqual((await usesLogged(db.owner)).map((use) => use.purpose), [0]);
   assert.equal((await callRaw(token, 'reveal_secret_values', { path: 'market/prod' })).status, 403);
 });

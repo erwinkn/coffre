@@ -1,7 +1,7 @@
-// What the credential proxy's `/use` costs with 0.15's uses (T135, R42, R44, R48), a person's handle at a proxy that
+// What the credential proxy's `/use` costs with 0.15's uses, a person's handle at a proxy that
 // keeps nothing (`proxy: { cacheValues: false }`), the hot path at its worst. On the app's connection, one `app_read` (migration
 // 0031): the handle's credential, the place and the key, in one call; then the vault's one `use_credential`, which
-// decides on the credential's standing itself, its generation included (T145): no `credentialStill` after it. The stable URL first checks the handle, its
+// decides on the credential's standing itself, its generation included: no `credentialStill` after it. The stable URL first checks the handle, its
 // credential read ahead and the vault asked about its person, for which environments it was made; then the use, as the
 // environment's URL makes it, on the answer just kept. Each statement reads as many rows, and
 // as many pages, however long the log grows and however many keys, environments and members the instance holds. A
@@ -39,7 +39,7 @@ const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
 const API_KEY = 'sk_live_0123456789abcdef';
 
-/** What a request and its warm-up need of one bulk-cap period, far more than they take (T202). */
+/** What a request and its warm-up need of one bulk-cap period, far more than they take. */
 const PERIOD_ROOM_MS = 5000;
 /** Whoever uses market/dev's keys here, by handle or token: a person, and a service. */
 const PRINCIPALS = [`user:${DEV}`, 'token:ci'];
@@ -148,7 +148,7 @@ async function statements(url: string, token = handle, { warm = true, at = runti
     assert.equal(response.status, 200, await response.clone().text());
     await response.arrayBuffer();
   };
-  // The warm-up and the measured request share one refresh period of the bulk cap: a use in the next one writes its key's row again (T202).
+  // The warm-up and the measured request share one refresh period of the bulk cap: a use in the next one writes its key's row again.
   await inBulkPeriod(PERIOD_ROOM_MS, db.owner, PRINCIPALS, 'market/dev');
   if (warm) await use();
   for (const pool of [app, vaultPool, hot]) pool.recording = [];
@@ -210,7 +210,7 @@ test("a handle's /use reads as many rows and pages however the log and the insta
   for (const path of ['market/staging', 'market/prod']) await root.environments.create(path);
   await root.environments.protect('market/prod');
   await root.environments.protect('market/prod', false);
-  // Keys spread as an instance spreads them (review r4): twenty projects of ten environments of forty keys, and forty
+  // Keys spread as an instance spreads them: twenty projects of ten environments of forty keys, and forty
   // more of market/dev's among them, a page or so apart, as keys added over time land. The planner then reckons an
   // environment's keys a row or two, and a read by environment alone, not by key, reads each of its pages.
   await db.owner.execute(sql`
@@ -256,7 +256,7 @@ test("a handle's /use of a UI route is the vault's one call too, at either URL a
     return out;
   };
   const one = await measure();
-  // The route's named call (T205, 0071): `use_credential`, naming the route, once the vault's map is warm.
+  // The route's named call (0071): `use_credential`, naming the route, once the vault's map is warm.
   const route1 = 'SELECT use_credential( $1::uuid,';
   for (const [url, ran] of Object.entries(one)) {
     assert.deepEqual(ran.app, [], `${url}: no statement of the app`);
@@ -300,13 +300,13 @@ test("a reveal of one key is the vault's one call, as a /use is; a reveal of sev
   // What the app reads itself of a place's keys with no value of their own: whether a reference holds one (`valuesIn`).
   const references = ['select "secret_references"."id",', 'select "secrets"."id", "secrets"'];
   // A person's credential, with passkeys not off, alike: the vault's call holds it to the passkey check and answers
-  // its passkey rows with the rest, which the app checks, reading nothing itself (T216; passkeys.md, section 6.4).
+  // its passkey rows with the rest, which the app checks, reading nothing itself (passkeys.md, section 6.4).
   const cases = [
     // One key, by its path or as a list of one: the vault's use by name, warm, which answers the rows the app checks.
     ['a reveal of one key', personal, { path: 'market/dev/API_KEY' }, [], [use]],
     ['a reveal of its one named key', personal, { path: 'market/dev', keys: ['API_KEY'] }, [], [use]],
     ['a reveal of one key, as a service', service, { path: 'market/dev/API_KEY' }, [], [use]],
-    // Several: the vault's one call by name (T165), its gate and each key's named read in one statement, warm (asked
+    // Several: the vault's one call by name, its gate and each key's named read in one statement, warm (asked
     // once before, every key in the caller's cap's set). A person's read leaves sensitive values out, so its first
     // statement passes no ids and writes nothing: its uses are a batch by ids after it, as an environment's are, whose
     // keys the vault lists itself (use-named-many.test.ts).

@@ -226,7 +226,7 @@ test('an Owner is whoever the vault says, in one call', async () => {
     assert.equal(result.registered, true);
     assert.equal(result.sourceIp, '203.0.113.10');
     assert.deepEqual(result.principal, root);
-    // Access signed it in, with no row of coffre's: a use's way in is its account (T147).
+    // Access signed it in, with no row of coffre's: a use's way in is its account.
     assert.equal(result.access, true);
   }
 });

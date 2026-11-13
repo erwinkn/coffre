@@ -4,14 +4,14 @@ import { sql, type SQL } from 'drizzle-orm';
 
 import type { ChangePoint } from './queries.ts';
 
-// 0.15's reads as the audit pages list them (T166; docs/design/0.15-plan.md,
+// 0.15's reads as the audit pages list them (docs/design/0.15-plan.md,
 // "As built: T166" and "As built: T175"; formal/Reads.tla). Each use a signed
 // pair seals, the vault's projector writes once, from the sealed objects at
 // its number, under a MAC of the vault's that covers its number too
 // (`log_reads`): whose read it was, its key's place, the fork it was read in,
 // through a reference its source then, the version read. These reads list
 // them on the whole log, by member, and by place (a key, an environment, a
-// project: T175), a page at a time, each from an index read newest first and
+// project), a page at a time, each from an index read newest first and
 // no further than a page.
 
 /** A read as a page lists it: the projector's row, and the names of what it names, as the rows say them now. */
@@ -45,7 +45,7 @@ export type ListedRead = {
 };
 
 /**
- * A place whose reads a page lists (T175), by its id: a key, an environment
+ * A place whose reads a page lists, by its id: a key, an environment
  * or a project. A read is at its key, that key's environment and project; at
  * the fork it was read in; and through a reference at its source, the
  * source's environment and project.
@@ -120,7 +120,7 @@ type Row = {
 function listed(found: SQL): SQL {
   const text = (column: string) => sql.raw(`CAST(${column} AS text)`);
   // Each a probe of its row's key, `LIMIT 1` so that Postgres keeps it one: pulled up into a join, the planner may read a
-  // table whole once its estimates grow (review r3: secrets read whole, 911 pages a page, then 2,139).
+  // table whole once its estimates grow (secrets read whole: 911 pages a page, then 2,139).
   const join = (alias: string, select: SQL) => sql`LEFT JOIN LATERAL (${select} LIMIT 1) ${sql.raw(alias)} ON TRUE`;
   return sql`
     SELECT c.number, c.at, ${text('c.credential')} AS credential, c.purpose, c.principal, ${text('c.secret')} AS secret, ${text('c.environment')} AS environment,
@@ -161,7 +161,7 @@ export type ReadsStanding = { through: bigint; pair: bigint; at: number; mac: Bu
 /**
  * The standing's columns, one row whatever the cursor: its migration's one
  * row gone (only a database writer leaves it so) reads as `missing`, which
- * the pages show unvouched, never as a fresh start (review r6). Joined into
+ * the pages show unvouched, never as a fresh start. Joined into
  * a page's or a report's statement, the two are one snapshot.
  */
 function standingSql(): SQL {
@@ -192,8 +192,7 @@ export async function readsStanding(db: Queryable): Promise<ReadsStanding> {
 /**
  * A page of reads (`readsPage`) and how far they are listed, in one
  * statement, so in one snapshot: read apart, a projector's write between the
- * two would have the cursor vouch for reads the page did not list (review
- * r6).
+ * two would have the cursor vouch for reads the page did not list.
  */
 export async function readsPageStanding(db: Queryable, filter: ReadFilter): Promise<{ rows: ListedRead[]; more: boolean; standing: ReadsStanding }> {
   const take = filter.limit + 1;
@@ -217,7 +216,7 @@ function readsBySql(members: readonly string[]): SQL {
   const named = sql.join(members.map((member) => sql`${member}`), sql`, `);
   // Each of the member's days reads its own partition, a day at a time: `OFFSET 0` keeps the lateral a loop
   // over the days, whose bounds prune the partitions as it runs; flattened into a join, the planner may read every
-  // day's partition first (review r8: 80 buffers, then 322 with 100 newer days of others' reads).
+  // day's partition first (80 buffers, then 322 with 100 newer days of others' reads).
   const reads = sql`log_read_days d CROSS JOIN LATERAL (
         SELECT r.principal, r.source, r.secret, r.version, r.at FROM log_reads r
          WHERE r.principal = d.principal AND r.at >= CAST(d.day AS bigint) * 86400000 AND r.at < (CAST(d.day AS bigint) + 1) * 86400000 OFFSET 0) r`;
@@ -243,7 +242,7 @@ export async function readsBy(db: Queryable, actors: readonly string[]): Promise
  * `readsBy` and `readsStanding` in one statement, so in one snapshot: an
  * offboarding report's reads, and how far they are listed as it read them.
  * Read apart, a projector's write between the two would have the report
- * name none and say none wait (review r5).
+ * name none and say none wait.
  */
 export async function readsByStanding(db: Queryable, actors: readonly string[]): Promise<{ reads: Awaited<ReturnType<typeof readsBy>>; standing: ReadsStanding }> {
   const members = membersOf(actors);

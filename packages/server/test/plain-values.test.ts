@@ -84,7 +84,7 @@ async function refusal(promise: Promise<unknown>): Promise<{ status: number; rea
     await promise;
   } catch (error) {
     const { status, code, reason, message } = error as { status: number; code?: string; reason?: string; message: string };
-    // A key's one refusal says no reason (D153): the app's entry of it does.
+    // A key's one refusal says no reason: the app's entry of it does.
     if (code === 'not_available') return { status, reason: await refusedFor(), message };
     return { status, reason: reason ?? null, message };
   }
@@ -138,7 +138,7 @@ test('a plain value made a secret in place stays one: its plain version comes ba
   await root.secrets.restore('market/dev/REGION', 1);
   assert.deepEqual((await root.secrets.history('market/dev/REGION')).versions.map(({ version, sensitivity }) => [version, sensitivity]), [[4, 'secret'], [3, 'secret'], [2, 'secret'], [1, 'plain']]);
   assert.deepEqual((await clientFor(deps, DEV).secrets.reveal('market/dev/REGION')).values, { REGION: 'eu-west-3' });
-  // Made sensitive in place, then loosened by an Owner to a secret (R30), it comes back a secret: as it was made last.
+  // Made sensitive in place, then loosened by an Owner to a secret, it comes back a secret: as it was made last.
   await root.secrets.set('market/dev', { TWILIO_SID: { sensitivity: 'sensitive' } });
   await root.secrets.set('market/dev', { TWILIO_SID: { sensitivity: 'secret' } });
   await root.secrets.set('market/dev', { TWILIO_SID: 'AC-another' });

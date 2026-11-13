@@ -1,21 +1,21 @@
-// The matrix of use.matrix.ts in @coffre/vault, through the app (T158, D153; formal/Probing.tla, NoIsFixed): what a
+// The matrix of use.matrix.ts in @coffre/vault, through the app (formal/Probing.tla, NoIsFixed): what a
 // person is answered, byte for byte, by `POST /api/reveals` of a key's path and through the credential proxy's
 // environment URL, for each of a key's states (held, made since, used before, deleted since, never made, a reference
 // broken since or repointed around the log, its row put back, a reference whose source's key or environment was
 // archived since), generated over what the vault's map of the names holds (what
 // they asked before: never, while they stood, after; or, asked while they stood, their place since renamed, its grant
-// left them, or deleted, and its slug taken by a new one, review d4 of #416), their grant (revoked, or kept), the place
+// left them, or deleted, and its slug taken by a new one), their grant (revoked, or kept), the place
 // (live, its environment archived, its project archived), the request's admission (as asked, the floor of `at` past it)
 // and the cap's window (open, or passed since, so that a use of a key would take the principal's lock). Every key of a
-// row they may not have must be answered alike, one `no` whatever the reason (D153), with the principal's lock held and
+// row they may not have must be answered alike, one `no` whatever the reason, with the principal's lock held and
 // every statement of the vault's hot path slowed, so that a lock waited for, or a statement more, shows as a 503; and
-// in as many of the vault's calls, of the hot path's statements and of the app's own (reviews r2 and r3 of D153). Each
+// in as many of the vault's calls, of the hot path's statements and of the app's own. Each
 // cell is a project, an environment and a person of its own.
 //
 // A map set as it should never be (another place's key, an id never made, another credential's) is the vault's own
-// state, which no request and no API of the app's reaches: use.matrix.ts sets it, in the vault (D150).
+// state, which no request and no API of the app's reaches: use.matrix.ts sets it, in the vault.
 //
-// The same at a fork and at `dev@me` (T165, B2): the key's states made in dev, which a fork of it (`feature`) inherits,
+// The same at a fork and at `dev@me`: the key's states made in dev, which a fork of it (`feature`) inherits,
 // and their personal config of dev (made by a write of theirs to `dev@me`), each asked by its path; a fork's by the
 // proxy's environment URL too (a person's `dev@me` is the proxy's only where the deployment generates values for dev,
 // which this one does not: by the API alone). Their grant on the fork revoked, on dev (which the fork inherits from),
@@ -52,16 +52,16 @@ const ROOT = 'admin@acme.example';
 
 const KEYS = [
   'held', 'made since', 'used before', 'deleted', 'never made',
-  // Used before, then its value gone: a reference broken since (review d5 of #416). The app deletes no source a reference
+  // Used before, then its value gone: a reference broken since. The app deletes no source a reference
   // reads (`referenced`): use.matrix.ts deletes one, in the vault.
   'a reference, broken since',
   // Its source pointed elsewhere by a writer around the log, no change of the log's: its rows not as sealed, nor as the
-  // vault's seals of them say (review r2 of D153): refused by name, never routed to the app's path.
+  // vault's seals of them say: refused by name, never routed to the app's path.
   'a reference repointed around the log',
   // Its row put back, by a writer around the log, as it was before a write of it: not its newest change's.
   'its row put back since',
   // Its source's key archived since, or its source's environment: the reference reads nothing until it is back, the
-  // vault's refusal by name, never the app's path (review r4 of D153). As the app lets them, its holder archived first.
+  // vault's refusal by name, never the app's path. As the app lets them, its holder archived first.
   "a reference, its source's key archived since",
   "a reference, its source's environment archived since",
 ] as const;
@@ -75,9 +75,9 @@ const ASKED = ['never', 'while standing', 'after', 'renamed, its slug reused', '
 const PLACES = ['live', 'environment archived', 'project archived', 'its seal replaced'] as const;
 const ADMISSIONS = ['as asked', 'past the floor'] as const;
 const WINDOWS = ['open', 'passed'] as const;
-/** Their grant revoked, or kept: then the keys they may not have are the ones to answer alike (D153); or their token and handle revoked, which every key answers 401. */
+/** Their grant revoked, or kept: then the keys they may not have are the ones to answer alike; or their token and handle revoked, which every key answers 401. */
 const LOST = ['revoked', 'they stand', 'token revoked'] as const;
-/** Where the key is asked for (T165): the environment itself, a fork of it that inherits it, or `dev@me`, their personal config of it. */
+/** Where the key is asked for: the environment itself, a fork of it that inherits it, or `dev@me`, their personal config of it. */
 const WHERE = ['env', 'fork', 'mine'] as const;
 type Row = {
   where: (typeof WHERE)[number]; asked: (typeof ASKED)[number]; lost: (typeof LOST)[number] | 'parent revoked'; place: (typeof PLACES)[number];
@@ -93,10 +93,10 @@ const ROWS: Row[] = shardOf(import.meta.url, [
     (reused(asked) ? (['passed'] as const) : WINDOWS).map((window) => ({ where: 'env' as const, asked, lost: 'revoked' as const, place, admission, window }))))),
   // Standing, where a key's answer may differ, as asked at a live place: those they may not have, alike.
   ...(['never', 'while standing', 'after'] as const).flatMap((asked) => WINDOWS.map((window) => ({ where: 'env' as const, asked, lost: 'they stand' as const, place: 'live' as const, admission: 'as asked' as const, window }))),
-  // A place whose seal a writer replaced: refused alike, and a token revoked 401 there as anywhere (review r1 of D153).
+  // A place whose seal a writer replaced: refused alike, and a token revoked 401 there as anywhere.
   ...(['never', 'while standing', 'after'] as const).flatMap((asked) => (['revoked', 'token revoked'] as const).flatMap((lost) => (['live', 'its seal replaced'] as const).map((place) =>
     ({ where: 'env' as const, asked, lost, place, admission: 'as asked' as const, window: 'passed' as const })))).filter((row) => row.lost === 'token revoked' || row.place === 'its seal replaced'),
-  // At a fork and at `dev@me` (T165), as asked at a live place: revoked where they ask, at dev, which the fork inherits
+  // At a fork and at `dev@me`, as asked at a live place: revoked where they ask, at dev, which the fork inherits
   // from, or standing; and a token revoked, 401 whatever the key.
   ...(['fork', 'mine'] as const).flatMap((where) => (['never', 'while standing', 'after'] as const).flatMap((asked) =>
     (where === 'fork' ? (['revoked', 'parent revoked', 'they stand', 'token revoked'] as const) : (['revoked', 'they stand', 'token revoked'] as const)).flatMap((lost) =>
@@ -105,7 +105,7 @@ const ROWS: Row[] = shardOf(import.meta.url, [
 /** A key they may have: they stand, and it is held with its value, dev's, which they read. Its answer is theirs to know of. */
 const usable = (row: Row, key: Key) => row.lost === 'they stand' && (key === 'held' || key === 'made since' || key === 'used before');
 
-/** As use.matrix.ts: 1.6 s a statement, a refusal being one whatever the vault's map holds (D153). */
+/** As use.matrix.ts: 1.6 s a statement, a refusal being one whatever the vault's map holds. */
 const DELAY = 1600;
 
 /**
@@ -114,8 +114,8 @@ const DELAY = 1600;
  * it has carried, each ended by its Sync (or a simple Query), as the client sends them. `statementsOf`: how many of
  * them bound one of `requests` as their third parameter, `use_credential`'s `p_request`, the only statement the hot
  * path runs; and every simple Query, which binds none. So a request is counted its own statements, never one a request
- * before it sent late (review r6 of D153: a use whose deadline passed while its connection was opening sent its
- * statement once it had, inside a later request's count).
+ * before it sent late (a use whose deadline passed while its connection was opening sends its statement once it has,
+ * inside a later request's count).
  */
 async function relay(at: string): Promise<{
   url: string; delay(ms: number): void; statements(): number; statementsOf(requests: readonly string[]): number; callsOf(requests: readonly string[]): HotCall[];
@@ -130,7 +130,7 @@ async function relay(at: string): Promise<{
     const upstream = connect(Number(target.port), target.hostname);
     // A connection's startup and authentication pass at no delay, opened mid-row too (a pool's connection replaced after
     // one a deadline cut off): only its statements, from its first Parse or simple Query on, are slowed, both ways. Else
-    // a call that opened one sent nothing within its deadline, its handshake's round trips each slowed (T165, W301).
+    // a call that opened one sent nothing within its deadline, its handshake's round trips each slowed.
     let slowed = false;
     const pass = (from: NodeJS.ReadableStream, to: NodeJS.WritableStream) => from.on('data', (chunk) => {
       if (half === 0 || !slowed) to.write(chunk);
@@ -222,9 +222,8 @@ function bindOf(body: Buffer): { statement: string; args: (string | Buffer | nul
 /**
  * How many more shared buffers one refusal may read beyond its twin's (`twinOf`) than another it is held alike to does
  * beyond its own; the blocks of the key's own relations are held exactly alike. Weighed beside a twin of its own world,
- * a refusal of no key reads nothing beyond it (T194). A key's own rows read before the standing was decided cost 30
- * to 90 more (W259: 42 to 136 a refusal; T194, the standing check removed: 45 to 58), a form chosen by the isolate's
- * history 10 to 34 (Fable's review, review r12 of D153).
+ * a refusal of no key reads nothing beyond it. A key's own rows read before the standing was decided cost 30
+ * to 90 more, a form chosen by the isolate's history 10 to 34.
  */
 const BUFFER_SLACK = 6;
 
@@ -251,7 +250,7 @@ before(async () => {
   // No autovacuum on this database's tables: a row's refusals are weighed on statistics only the row's own ANALYZE
   // refreshes, before it is weighed, never while it is, as use.matrix.ts weighs its cells. An autoanalyze landing
   // mid-row (of `environments`, `principals`) had one cell's runs plan `use_credential`'s statements anew, and that
-  // cell read 60 to 260 buffers above the rest of its row, whatever its key (CI, T170: auto_explain showed the
+  // cell read 60 to 260 buffers above the rest of its row, whatever its key (on CI, auto_explain showed the
   // planning, and the places' statement turned from a nested loop to a hash join for every cell after).
   await rowsOf(db.owner, sql.raw(`DO $$ DECLARE t record; BEGIN
     FOR t IN SELECT c.oid::regclass AS name FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' LOOP
@@ -280,7 +279,7 @@ before(async () => {
     plugins: [credentialProxy({
       credentials: {
         api: { upstream: 'https://api.example', inject: header('x-api-key', '{API_KEY}'), egress },
-        // Two keys, the proxy's several by name (T165): API_KEY, and OTHER, which no cell makes.
+        // Two keys, the proxy's several by name: API_KEY, and OTHER, which no cell makes.
         pair: { upstream: 'https://api.example', inject: header('x-api-key', '{API_KEY}:{OTHER}'), egress },
       },
     })],
@@ -338,7 +337,7 @@ async function cell(row: Row, key: Key) {
     if (key === 'a reference repointed around the log') await root.secrets.set(source, { OTHER_KEY: 'sk_t158_other' });
   }
   await root.members.add(`user:${person}`);
-  // Where they ask (T165): dev itself, a fork of it that inherits its keys, or their personal config of it, made by a
+  // Where they ask: dev itself, a fork of it that inherits its keys, or their personal config of it, made by a
   // value of theirs written there.
   const fork = `${project}/feature`;
   if (row.where === 'fork') await root.environments.create(fork, { from: 'dev', inherit: true });
@@ -355,7 +354,7 @@ async function cell(row: Row, key: Key) {
   const held = `${place}/API_KEY`;
   // A person's `dev@me` is the proxy's only where the deployment generates values for dev: by the API alone.
   const url = row.where === 'mine' ? null : `/use/${row.where === 'fork' ? fork : place}/api/v1/thing`;
-  // The proxy's credential of two keys, which the vault reads by name in one call (T165).
+  // The proxy's credential of two keys, which the vault reads by name in one call.
   const pairUrl = row.where === 'mine' ? null : `/use/${row.where === 'fork' ? fork : place}/pair/v1/thing`;
   // Used before: through another token of theirs, while they stood, whose use leaves the key fresh in their set.
   if (USED.has(key)) {
@@ -419,9 +418,9 @@ async function cell(row: Row, key: Key) {
 }
 
 /**
- * Whether a row's several-key requests are held alike too (T165, B2's PR 2): where they stand nowhere at the place,
+ * Whether a row's several-key requests are held alike too: where they stand nowhere at the place,
  * their grant there or their token revoked. Standing, a request of several keys says which the place holds, leaves out
- * or refuses, keys they may know of (R6), and use-named-many.test.ts holds its yes.
+ * or refuses, keys they may know of, and use-named-many.test.ts holds its yes.
  */
 const manyAlike = (row: Row) => row.lost === 'revoked' || row.lost === 'token revoked';
 
@@ -445,7 +444,7 @@ test(`through the app, a person is answered alike for every key they may not hav
         try {
           for (const c of cells) {
             // Past the floor: a minute past every request of this cell's, set again for each cell. Once for the row, its
-            // later cells were asked after the minute, each cell's several keys the vault's calls by name, slowed (T203).
+            // later cells were asked after the minute, each cell's several keys the vault's calls by name, slowed.
             if (row.admission === 'past the floor') await db.owner.update(checkpointFence).set({ atFloor: Date.now() + 60_000 });
             let release!: () => void;
             const released = new Promise<void>((resolve) => { release = resolve; });
@@ -457,7 +456,7 @@ test(`through the app, a person is answered alike for every key they may not hav
             hot?.delay(DELAY);
             try {
               // Each answer, and its work: the vault's calls, by name, the statements on its hot path, and the app's own
-              // statements, what it wrote in the background included (review r3 of D153).
+              // statements, what it wrote in the background included.
               const measured = async <T>(ask: () => Promise<T>) => {
                 const [calls, uses, own] = [vaultCalls.length, useRequests.length, appStatements()];
                 const unbound = hotStatements([]);
@@ -471,7 +470,7 @@ test(`through the app, a person is answered alike for every key they may not hav
               };
               const api = await measured(() => reveal(c.token, c.path));
               const proxy = await measured(() => (c.url === null ? Promise.resolve(null) : proxied(c.url, c.handle)));
-              // Several keys (T165): two by name, every key of the place, and the proxy's credential of two, each the
+              // Several keys: two by name, every key of the place, and the proxy's credential of two, each the
               // vault's one call by name, its statements on the hot path all counted (they bind no use's request id).
               const several = async <T>(ask: () => Promise<T>) => {
                 const [calls, own, sent] = [vaultCalls.length, appStatements(), hot!.statements()];
@@ -500,18 +499,18 @@ test(`through the app, a person is answered alike for every key they may not hav
           if (row.admission === 'past the floor') await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
         }
         const label = labelOf(row);
-        // The keys they may not have, each answered alike (D153); a key they may have is theirs to know of.
+        // The keys they may not have, each answered alike; a key they may have is theirs to know of.
         const refused = answers.filter((a) => !usable(row, a.key));
         const [first] = refused;
-        // Byte for byte, by the same route, in as many vault calls and statements (review r2 of D153).
+        // Byte for byte, by the same route, in as many vault calls and statements.
         if (refused.some((a) => JSON.stringify(a.api) !== JSON.stringify(first!.api) || JSON.stringify(a.proxy) !== JSON.stringify(first!.proxy) || JSON.stringify(a.work) !== JSON.stringify(first!.work))) {
           differing.push(`${label}: ${refused.map((a) => `${a.key} ${JSON.stringify(a.api)} ${JSON.stringify(a.proxy)} ${JSON.stringify(a.work)}`).join(' | ')}`);
         }
         // As asked: each refusal's last statement in the same form, the probe's (a named call never runs the
-        // cached form, `p_known`, the 12th argument); its work inside, which the statements counted do not show (Fable's
-        // review, review r12 of D153), in buffers. No standing: no key read (W268, NoKeyBeforeStanding), as many for
+        // cached form, `p_known`, the 12th argument); its work inside, which the statements counted do not show, in
+        // buffers. No standing: no key read (NoKeyBeforeStanding), as many for
         // every key (BUFFER_SLACK, the run's noise). Standing: a key's may cost what its shape does, a key they may know
-        // of (R6), never what their asking before left (`histories`, below).
+        // of, never what their asking before left (`histories`, below).
         if (row.admission === 'as asked') {
           // The statistics as the row's cells left them, and none changing while they are weighed (autovacuum is off,
           // `before`): every cell's statements planned on the same. Each cell is a world of its own, whose own rows its
@@ -526,13 +525,13 @@ test(`through the app, a person is answered alike for every key they may not hav
               if (cached.length > 0) differing.push(`${label}: ${via}, the cached form for ${cached.map((a) => a.key).join(', ')}`);
               // Standing: the form alone here. The app runs no statement of its own on this path, and the vault's
               // matrix holds each refusal's buffers to the same request's from an isolate with no history.
-              // Standing at the place (a fork's, its parent's grant gone, T165, included): a key's shape may show in its cost,
-              // a key they may know of (R6). Only a caller standing nowhere there is held to reading no key.
+              // Standing at the place (a fork's, its parent's grant gone, included): a key's shape may show in its cost,
+              // a key they may know of. Only a caller standing nowhere there is held to reading no key.
               if (row.lost === 'they stand' || row.lost === 'parent revoked') continue;
-              // No standing: no key read (W268, NoKeyBeforeStanding). Each refusal weighed beside its twin, the same
+              // No standing: no key read (NoKeyBeforeStanding). Each refusal weighed beside its twin, the same
               // request of a key its world never made (`twinOf`): what a world's own rows cost (its credential's, its
               // place's, its grants', wherever on their pages they fell) is the twin's too, so what is left, beyond, is
-              // the key's (T194: weighed alone, refusals of no key read up to 8 buffers apart, all of them in
+              // the key's (weighed alone, refusals of no key read up to 8 buffers apart, all of them in
               // `credentials` and `environments`, as each world's rows fell in the heap). Each fetches as many blocks of
               // the key's own relations as its twin, and as every other key's; and reads beyond its twin alike for every
               // key, held, gone, a reference in any state, or never made (BUFFER_SLACK).

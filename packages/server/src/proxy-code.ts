@@ -30,8 +30,8 @@ export type PluginCode = {
 };
 
 /**
- * An item the deployment's code defines, as the Proxy tab shows it, locked
- * (R66): its definition in the tab's shape, where it serves, and what code
+ * An item the deployment's code defines, as the Proxy tab shows it, locked:
+ * its definition in the tab's shape, where it serves, and what code
  * says that no field of a UI item can.
  *
  *   credentials: { maps: { upstream: 'https://maps.googleapis.com', inject: query('key', '{MAPS_API_KEY}'), environments: ['market/prod'] } }
@@ -49,7 +49,7 @@ export type ProxyCodeItem = {
    * How its allow list matches where code reads it otherwise than the tab:
    * `code`, an `allow` in code, whose trailing slash takes what is below it
    * (`/files/`, which the tab writes `/files/**`); `legacy`, `methods` and
-   * `paths` as before 0.16, each path compared as written and `*` itself,
+   * `paths`, each path compared as written and `*` itself,
    * never a glob, with `methods` as code wrote them, upper-cased: null where
    * unset (any), `[]` taking none, which the tab's `methods: []` (any) cannot
    * say, and kept apart since `paths: []` has no allow entry to carry them.

@@ -1,4 +1,4 @@
-// UI definitions served by the credential proxy (0.16, T186 PR C; docs/design/proxy-ui.md, sections 3, 4 and 6), end
+// UI definitions served by the credential proxy (docs/design/proxy-ui.md, sections 3, 4 and 6), end
 // to end: coffre's own vault, a route saved in the Proxy tab, a handle as `coffre run` makes one, and a fake upstream
 // over HTTP. The route use is the vault's one call, which reads the URL both ways; every request goes by the item the
 // vault decided on (SentAsDecided), kept values by the item they were decided on (BoundToDefinition); code wins its
@@ -203,8 +203,7 @@ test('a name no definition holds is 404; a signer saved in the UI reaches no ups
   assert.equal(personal.status, 409, await personal.clone().text());
   assert.match((await personal.json() as { message: string }).message, /market\/dev\b(?!@)/);
   await save({ signer: { kind: 'signer', name: 'signer', signer: { kind: 'private-key', key: 'OPENAI_API_KEY' }, limit: { perMinute: null, perDay: null } } });
-  // Refused before the app reads the values the vault answered: none kept, so the next request asks the vault again
-  // (Fable's review of #467).
+  // Refused before the app reads the values the vault answered: none kept, so the next request asks the vault again.
   const vault = runtime.vault as unknown as { useRoute: Vault['useRoute'] };
   const real = vault.useRoute;
   let uses = 0;
@@ -909,7 +908,7 @@ test("a UI route through undici's public fetch, as a Node deployment sends one: 
   let port = 0;
   const tls = createTlsServer();
   try {
-    // The name in a config file of its own, not `-addext`, which macOS's LibreSSL lacks (review r10 of #467).
+    // The name in a config file of its own, not `-addext`, which macOS's LibreSSL lacks.
     writeFileSync(join(dir, 'san.cnf'), '[req]\ndistinguished_name = dn\n[dn]\n[san]\nsubjectAltName = DNS:api.openai.example\n');
     execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=api.openai.example', '-config', join(dir, 'san.cnf'), '-extensions', 'san', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem')], { stdio: 'ignore' });
     const cert = readFileSync(join(dir, 'cert.pem'), 'utf8');
@@ -1098,7 +1097,7 @@ test("a signer and a verifier saved in the UI: a private key's signature and an 
   const token = await handle();
   const message = Buffer.from('transfer 10');
   await countingUses(async (uses) => {
-    // A private key's: each signature a use of its own, never kept (0.15's row is slim, R53, naming no message).
+    // A private key's: each signature a use of its own, never kept (its row is slim, naming no message).
     for (let round = 0; round < 2; round++) {
       const signed = await compute(token, { sign: { credential: 'dfns', message: message.toString('base64url') } });
       assert.equal(signed.status, 200, JSON.stringify(signed.body));
@@ -1126,8 +1125,8 @@ test("a signer and a verifier saved in the UI: a private key's signature and an 
   assert.equal((await compute(other, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `v2=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
   assert.equal((await compute(token, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `sha256=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
   // A kept item's kind holds as a copy's does: the verifier's values, kept by the verify above, sign nothing; a route's,
-  // kept by a request through it, sign nothing either, and it is sent nothing (review r1 of #480).
-  // Thrown from the kept entry, answered in the proxy's shape as the decided item's refusal is (Fable's review of #480).
+  // kept by a request through it, sign nothing either, and it is sent nothing.
+  // Thrown from the kept entry, answered in the proxy's shape as the decided item's refusal is.
   proxyRefused(await compute(token, { sign: { credential: 'inbound', message: 'aGk' } }), 404);
   await countingUses(async (uses) => {
     assert.equal((await route('/use/market/dev/openai/models', as(token))).status, 200);
@@ -1186,7 +1185,7 @@ test("a message longer than the decided item takes is refused before its values 
 
 test("a copy past the cache's window refuses nothing: the use decides, and a private key's sign logs its message's SHA-256, hashed once the vault decided (Fable's review of #480)", async () => {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-  // Plain keys, so that the app writes the credential.use entry this test reads (a secret's use is the vault's slim row, R53).
+  // Plain keys, so that the app writes the credential.use entry this test reads (a secret's use is the vault's slim row).
   await root.secrets.set('market/dev', {
     STAMP_PEM: { value: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), sensitivity: 'plain' },
     STAMP_SECRET: { value: 'whsec-0123456789abcdef', sensitivity: 'plain' },
@@ -1212,7 +1211,7 @@ test("a copy past the cache's window refuses nothing: the use decides, and a pri
 
 test("a presign of a route saved in the UI: built and checked again on the decided item, signed with its pair, its entry logging the decided host; a copy that admitted what the decided item refuses is 503 moved (C2b2)", async () => {
   // Plain keys, so that the app writes its credential.use entry, whose host this test reads: a secret's use is the
-  // vault's slim row alone (R53), which names the route, and the item by the object's seal.
+  // vault's slim row alone, which names the route, and the item by the object's seal.
   await root.secrets.set('market/dev', { AWS_ACCESS_KEY_ID: { value: AWS_ID, sensitivity: 'plain' }, AWS_SECRET_ACCESS_KEY: { value: AWS_SECRET, sensitivity: 'plain' } });
   const s3 = (upstream: string, allow: string, inject: 'sigv4' | 'header' = 'sigv4'): ProxyDefinition => ({
     kind: 'route', name: 's3', upstream,
@@ -1237,7 +1236,7 @@ test("a presign of a route saved in the UI: built and checked again on the decid
     assert.equal((await presign('/other/report.csv')).status, 403);
     assert.equal(uses(), 1);
     // The handle in none of the URL, encoded seven times over in its query (an eighth by the URL), or eight, past what is
-    // checked: each 400, nothing signed (review r2 of #480).
+    // checked: each 400, nothing signed.
     const encoded = (layers: number) => compute(token, { presign: { credential: 's3', path: '/bucket/report.csv', expiresIn: 60, query: { trace: token.replaceAll('_', `%${'25'.repeat(layers - 1)}5F`) } } });
     assert.deepEqual([(await encoded(7)).status, (await encoded(7)).body.message], [400, 'the handle goes in no presigned URL']);
     assert.deepEqual([(await encoded(8)).status, (await encoded(8)).body.message], [400, 'the URL is encoded too many times over to check']);
@@ -1373,7 +1372,7 @@ test("an item naming a key the environment does not hold, or one gone before the
   let gone: string | null = null;
   vault.useRoute = (async (...args: Parameters<Vault['useRoute']>) => {
     const answered = await real.apply(runtime.vault, args);
-    // Gone from under its name by a write around the app (R64): what fails closed.
+    // Gone from under its name by a write around the app: what fails closed.
     if (gone !== null) await run(sql`UPDATE secrets SET key = ${`gone_${gone}`} WHERE key = ${gone}`);
     return answered;
   }) as Vault['useRoute'];

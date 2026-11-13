@@ -1,5 +1,5 @@
-// A personal config is an overlay of its environment (docs/design/forking.md,
-// R8, R18, decision 27): each key its owner sets is theirs, over dev's key or
+// A personal config is an overlay of its environment (docs/design/forking.md):
+// each key its owner sets is theirs, over dev's key or
 // beside it, and every other key falls through to dev's, live. Its own
 // values may be plain, secret or sensitive, as anywhere; one written saying
 // nothing takes the level of the value the key reads now, dev's or the
@@ -122,7 +122,7 @@ test('each key the owner sets is theirs, at the level of the key it overrides un
   });
   assert.deepEqual([...all.sensitive].sort(), ['API_KEY', 'NEW_SENSITIVE', 'SEAL']);
   for (const key of ['API_KEY', 'NEW_SENSITIVE', 'SEAL']) {
-    // A key's one refusal (D153), its reason in the app's entry.
+    // A key's one refusal, its reason in the app's entry.
     await assert.rejects(dev.secrets.reveal(`market/dev@me/${key}`), { status: 404, code: 'not_available' });
     assert.equal(await refusedFor(), 'sensitive', key);
   }
@@ -182,7 +182,7 @@ for (const [who, email] of [['an instance Owner', ROOT], ["the project's Maintai
       ['dry run', () => client.secrets.dryRun(path, { NEW_PLAIN: MINE.NEW_PLAIN })],
       ['write', () => client.secrets.set(path, { NEW_PLAIN: { value: 'overwritten', sensitivity: 'plain' } })],
     ] as const) {
-      // A key's read is the one "no" (D153); what is no read of a key says the place is not theirs.
+      // A key's read is the one "no"; what is no read of a key says the place is not theirs.
       await assert.rejects(attempt(), { status: what === 'get' ? 404 : 403 }, what);
     }
     // A handle may name it, and its plan opens nothing.

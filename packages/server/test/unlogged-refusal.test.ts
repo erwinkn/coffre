@@ -1,5 +1,5 @@
-// A use by ids the vault refuses before its principal's lock writes nothing in the vault's log (DecideBeforeLock; review
-// r2 of D153): the app logs the request, whoever asked for it (`withRefusals`, review r3), a fork's copy and a dry run's
+// A use by ids the vault refuses before its principal's lock writes nothing in the vault's log
+// (DecideBeforeLock): the app logs the request, whoever asked for it (`withRefusals`), a fork's copy and a dry run's
 // compare as a reveal does: one entry each, at the use's place and key, with its purpose and the vault's reason. 0.15's
 // log alone, where a request's values are uses.
 import test from 'node:test';
@@ -48,8 +48,8 @@ for (const [what, ask, purpose] of [
   });
 }
 
-// A read of one key at a fork, inheriting a reference its parent holds: the vault's one call by name (T165), its refusal
-// answered as the one `no`, and logged where the key is held, at the holder's place and key (review r5 of D153), as a
+// A read of one key at a fork, inheriting a reference its parent holds: the vault's one call by name, its refusal
+// answered as the one `no`, and logged where the key is held, at the holder's place and key, as a
 // use by ids would be, with the named request's path and key.
 test("a fork's read of a reference its parent holds, refused before its principal's lock, is logged at the holder's place and key (review r5 of D153)", async () => {
   const root = clientFor(deps, ROOT);

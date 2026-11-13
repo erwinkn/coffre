@@ -631,7 +631,7 @@ test('sign and presign take a workload, its proof signing what is asked; the pla
   const presigned = await use(held, 'POST', '/use/market/prod', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ presign: { credential: 's3', path: '/bucket/report.pdf', expiresIn: 60 } }) });
   assert.equal(presigned.status, 200, JSON.stringify(presigned.body));
   assert.match(presigned.body.url as string, /X-Amz-Credential=AKIAREAL0123456789AB/);
-  // The session's token in none of a URL, which is for sharing: in its query, or its path, as it is, escaped, or escaped twice (review r1 of #480).
+  // The session's token in none of a URL, which is for sharing: in its query, or its path, as it is, escaped, or escaped twice.
   for (const presign of [
     { path: '/bucket/report.pdf', query: { trace: held.token } },
     { path: `/bucket/${held.token}` },
@@ -643,7 +643,7 @@ test('sign and presign take a workload, its proof signing what is asked; the pla
     const carried = await use(held, 'POST', '/use/market/prod', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ presign: { credential: 's3', expiresIn: 60, ...presign } }) });
     assert.deepEqual([carried.status, carried.body.message], [400, 'the session token goes in no presigned URL'], JSON.stringify(presign));
   }
-  // Eight times over, a ninth by the URL: past what is checked, refused as such, never signed (review r2 of #480).
+  // Eight times over, a ninth by the URL: past what is checked, refused as such, never signed.
   const deep = await use(held, 'POST', '/use/market/prod', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ presign: { credential: 's3', expiresIn: 60, path: '/bucket/report.pdf', query: { trace: held.token.replaceAll('_', `%${'25'.repeat(7)}5F`) } } }) });
   assert.deepEqual([deep.status, deep.body.message], [400, 'the URL is encoded too many times over to check'], JSON.stringify(deep.body));
   const plan = await use(held, 'GET', '/use/market/prod');
@@ -671,7 +671,7 @@ test("verify takes a workload, its proof binding the body and signature checked;
   const swapped = await use(held, 'POST', '/use/market/prod', { headers: { 'content-type': 'application/json' }, body: ask(body, signature), signed: { body: ask(body, 'sha256=00') } });
   assert.equal(swapped.body.reason, 'req');
   assert.ok(vaultCalls - opened <= 1, 'the vault asked once at most, then the cache');
-  // The record: one use of the secret, its row slim (R53), naming no verifier.
+  // The record: one use of the secret, its row slim, naming no verifier.
   assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
   // A verifier signs nothing.
   const signed = await use(held, 'POST', '/use', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sign: { credential: 'webhook', message: 'aGk' } }) });

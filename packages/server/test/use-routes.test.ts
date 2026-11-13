@@ -1,9 +1,9 @@
-// 0.15's uses as the app routes them (docs/design/0.15-plan.md, PR 5b): with the vault answering them (`about().uses`),
+// 0.15's uses as the app routes them (docs/design/0.15-plan.md): with the vault answering them (`about().uses`),
 // each value a request opens on a credential is one `use_credential` call, logged as its request and decided on the rows
 // as they are then. Here every routed path, through the whole app as a deployment runs it: a reveal of one key, a run of
 // a whole environment (a reference, a plain value, a fork's inherited keys), the credential proxy's use, sign and verify
-// on a person's handle, and a CI run's sign-in then its read. Every live answer is the replay's (R53), and a
-// checkpointer on the vault's seed seals every use (T128).
+// on a person's handle, and a CI run's sign-in then its read. Every live answer is the replay's, and a
+// checkpointer on the vault's seed seals every use.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac, generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
@@ -85,8 +85,8 @@ after(async () => {
 
 /**
  * The instance with its uses, its changes sealed by a checkpointer on the vault's
- * seed (each change waits for its tick, R51), and `inFlight`, the isolate's uses in flight at most. `batches` false: a
- * 0.15 vault from before T165 and T167, mid-deploy, which serves a request's several keys in no one call.
+ * seed (each change waits for its tick), and `inFlight`, the isolate's uses in flight at most. `batches` false: a
+ * 0.15 vault mid-deploy that serves a request's several keys in no one call.
  */
 async function instance(inFlight?: number, batches = true): Promise<void> {
   await checkpointer?.stop();
@@ -245,7 +245,7 @@ test('0.15: a use the rows refuse refuses the request, logged as its request, an
    * A refusal, recorded once: by the vault, its use refused on the rows as they are and replayed so (`code`), when the
    * key's row of the cap's is fresh; or, when the cap's period turned between the two requests (it is the wall clock's,
    * a minute at most) and the use would take the principal's lock, decided first and written nowhere by the vault, by
-   * the app's own entry (T158), or for a credential ended, by none, as any 401. Which, the clock decides, never the key.
+   * the app's own entry, or for a credential ended, by none, as any 401. Which, the clock decides, never the key.
    */
   const recordedOnce = async (ask: () => Promise<unknown>, code: string, app: boolean) => {
     const [since, uses, decided] = [await newest(), (await usesLogged()).length, [...(await replayStored(db.owner, [signingKey])).decided.values()]];
@@ -260,17 +260,17 @@ test('0.15: a use the rows refuse refuses the request, logged as its request, an
     }
   };
   // Its grant gone: a key it has used is used and refused on the rows as they are. Nothing goes back, and it is
-  // answered as every refusal of a key is (D153): no such key, or no access to it.
+  // answered as every refusal of a key is: no such key, or no access to it.
   await root.access.set(CI, { market: null });
   const notAvailable = (error: { status: number; code?: string }) => error.status === 404 && error.code === 'not_available';
   await recordedOnce(() => assert.rejects(ci.secrets.reveal('market/dev/API_KEY'), notAvailable), 'no_grant', true);
   // One it has not used in the window would take its principal's lock: its standing decides first, refuses it there,
-  // and nothing is written, as for a key the place does not hold (T158); the app's own entry records the request.
+  // and nothing is written, as for a key the place does not hold; the app's own entry records the request.
   const [since, uses] = [await newest(), (await usesLogged()).length];
   await assert.rejects(ci.secrets.reveal('market/dev/WEBHOOK'), notAvailable);
   assert.equal((await usesLogged()).length, uses, 'no entry of its own');
   assert.ok(await denied(since), "the app's records it");
-  // Revoked, the token reads nothing: its one key's use by name (T145) refuses it as the vault's rows have it, and the
+  // Revoked, the token reads nothing: its one key's use by name refuses it as the vault's rows have it, and the
   // app's own check answers it, 401, as ever.
   await root.tokens.revoke(CI, issued.id);
   await recordedOnce(() => assert.rejects(ci.secrets.reveal('market/dev/API_KEY'), (error: { status: number }) => error.status === 401), 'credential', false);
@@ -306,7 +306,7 @@ test('0.15: past its uses in flight, the isolate refuses a read at once, by the 
   const refused = await send(new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path: 'market/dev/API_KEY' }) }));
   assert.equal(refused.status, 503, await refused.clone().text());
   assert.equal(refused.headers.get('retry-after'), '1', "the vault's own: an isolate's calls in flight free up in a moment");
-  // Busy, and why: never that coffre cannot reach what it depends on (T170).
+  // Busy, and why: never that coffre cannot reach what it depends on.
   const overloaded = 'coffre is busy: it has as many uses under way as it can take; try again in a moment';
   assert.deepEqual(await refused.json(), { error: 'unavailable', message: overloaded, reason: 'busy' });
   // The same through the credential proxy, coffre's own refusal, the vault's Retry-After with it.
@@ -325,7 +325,7 @@ test("0.15: a read through a fork vouches for no kept answer: its uses check whe
   assert.equal((await ci.secrets.reveal('market/feature/API_KEY')).values.API_KEY, API_KEY);
   // Its grant on the fork gone, its parent's kept: each use is allowed where the value is held, and the kept answer,
   // which still holds the fork, is asked again rather than vouched for, and refuses it: a key's refusal, the one answer
-  // for every one (D153), the fork's read the app's own path's.
+  // for every one, the fork's read the app's own path's.
   await root.access.set(CI, { 'market/feature': null });
   await assert.rejects(ci.secrets.reveal('market/feature/API_KEY'), (error: { status: number; code?: string }) => error.status === 404 && error.code === 'not_available');
   assert.equal((await ci.secrets.reveal('market/dev/API_KEY')).values.API_KEY, API_KEY, 'its parent it still reads');

@@ -5,14 +5,14 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import { base64urlLength, deriveKey, MAX_CREDENTIAL_ID, PASSKEY_ALGORITHMS, seal, unseal, USER_VERIFICATION, type PasskeysConfig } from '@coffre/core/identity';
 
-/** How long a challenge, and the state it travels in, lasts: five minutes, as the design Erwin approved sets (sections 3.1 and 7.3). */
+/** How long a challenge, and the state it travels in, lasts: five minutes, as the design sets (sections 3.1 and 7.3). */
 export const CEREMONY_TTL_SECONDS = 5 * 60;
 
 /**
  * What is left of a ceremony's lifetime, ms, which its options give the browser as `timeout`: the state lasts
  * `CEREMONY_TTL_SECONDS` from its challenge (`issuedAt`, which `seal` dates it from), so `create()` and `get()` wait no
  * longer than it can be answered, and the page knows when its step ends (`Lifetime`, `@coffre/ui`'s passkey-answer.ts):
- * a page left open past it asks the authenticator for nothing (review r9 of #500).
+ * a page left open past it asks the authenticator for nothing.
  */
 export function remainingMs(state: { issuedAt: number }, now = Date.now()): number {
   return Math.max(0, state.issuedAt + CEREMONY_TTL_SECONDS * 1000 - now);
@@ -44,7 +44,7 @@ export type PendingFactor = {
    * The membership the step is for: their row's generation when the callback read it, active or not (a removed member
    * comes back at the one their removal left), and 0, a first admission's, for an Owner the deployment names whom the
    * vault holds no row of yet. The post holds the vault's answer to it, so a removal and readmission meanwhile, which
-   * moves it, refuses (review r3 of #500).
+   * moves it, refuses.
    */
   generation: number;
   /** Where to land: a path on this origin. */
@@ -73,7 +73,7 @@ export type StepUpState = {
  * that no two `create()` calls, from two tabs, a reload, or a page whose answer was lost, ever share one. An
  * authenticator keeps one discoverable credential per (RP ID, user handle) and replaces it on a second `create()` with
  * the same handle, so a shared one could replace a passkey coffre had already stored with one it refuses, and lock its
- * person out (reviews r7 to r12 of #500; D173). Sealed in the GET's answer, sent back with the POST, and bound to the
+ * person out. Sealed in the GET's answer, sent back with the POST, and bound to the
  * enrollment's challenge, it lasts as long as the enrollment does.
  */
 export type CreateState = {

@@ -1,5 +1,5 @@
-// What an Owner of a place does there that nobody else does (R30,
-// docs/design/roles.md): make a sensitive value a secret in place, its
+// What an Owner of a place does there that nobody else does
+// (docs/design/roles.md): make a sensitive value a secret in place, its
 // value kept and never shown by it, and take an environment's protection
 // off. An Owner of the whole instance, an Owner of the project by a grant,
 // or one whose instance role is scoped to it; as a person, on no

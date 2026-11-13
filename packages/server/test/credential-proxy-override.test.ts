@@ -1,7 +1,7 @@
-// T189: a method override in a header or the query never takes a request past its allow list. Many upstreams act on
+// A method override in a header or the query never takes a request past its allow list. Many upstreams act on
 // a POST that says `X-HTTP-Method-Override: DELETE`, or `?_method=DELETE`, as on a DELETE (Rails, Laravel and Symfony,
 // Spring, Express's method-override, Google's and Azure's APIs), so an allow list that takes POST and not DELETE
-// refuses such a POST; one whose override it takes goes on as it came. A `_method` in a body is not read (D179): the
+// refuses such a POST; one whose override it takes goes on as it came. A `_method` in a body is not read: the
 // last test pins that, so that a change to it is deliberate. Each through the plugin's route with a fake coffre and an
 // egress for the upstream, as credential-proxy-scope.test.ts: no database, what is checked is the plugin's own work,
 // before anything opens.
@@ -193,8 +193,8 @@ test("a narrowed session's methods hold an override too, with no allow list; a w
 });
 
 // ASP.NET Core's middleware sets `Request.Method` to the override as it came, and its routing reads `pAtCh` as PATCH:
-// coffre holds that spelling as it would a request's own method, which a list or session taking `PATCH` does not take
-// (review r4 of #526). `delete` is DELETE either way, as fetch reads one.
+// coffre holds that spelling as it would a request's own method, which a list or session taking `PATCH` does not
+// take. `delete` is DELETE either way, as fetch reads one.
 test('an override is held as it came as well as uppercased: a session or list taking PATCH takes no pAtCh', async () => {
   const session = proxy({}, { methods: ['POST', 'PATCH'] });
   const narrowed = await session.ask('/market/dev/api/items/1', { method: 'POST', as: 'workload', headers: { 'x-http-method-override': 'pAtCh' } });
@@ -213,10 +213,10 @@ test('an override is held as it came as well as uppercased: a session or list ta
   assert.deepEqual(listed.reached.map((each) => each.headers.get('x-http-method-override')), ['PATCH', 'delete'], 'what goes on goes as it came');
 });
 
-// ASP.NET MVC and ServiceStack read `?X-HTTP-Method-Override=` as they read the header, its case kept (review r5 of
-// #526), and Hono's method-override middleware reissues `?_method=pAtCh` as `pAtCh` (review r6): every override in a
-// query is held as it came as well as uppercased, whatever its name. So a list taking PATCH refuses Rails' lowercase
-// `_method=patch` too, where an upstream that uppercases would have taken it: `PATCH` is what to send.
+// ASP.NET MVC and ServiceStack read `?X-HTTP-Method-Override=` as they read the header, its case kept, and
+// Hono's method-override middleware reissues `?_method=pAtCh` as `pAtCh`: every override in a query is held as it
+// came as well as uppercased, whatever its name. So a list taking PATCH refuses Rails' lowercase `_method=patch` too,
+// where an upstream that uppercases would have taken it: `PATCH` is what to send.
 test('an override in a query is held as it came as well as uppercased, whatever its name', async () => {
   const session = proxy({}, { methods: ['POST', 'PATCH'] });
   for (const query of ['X-HTTP-Method-Override=pAtCh', '_method=pAtCh']) {
@@ -240,7 +240,7 @@ test('an override in a query is held as it came as well as uppercased, whatever 
   assert.deepEqual(listed.reached.map((each) => each.url.search), ['?X-HTTP-Method-Override=PATCH', '?_method=PATCH', '?_method=delete']);
 });
 
-// D179 (Erwin's choice): coffre reads no body for an override. A `_method` field of a POST's form, multipart or JSON
+// coffre reads no body for an override. A `_method` field of a POST's form, multipart or JSON
 // body, which Rails, Laravel and Spring honour, goes on through a list that takes POST alone, as it came
 // (docs/design/credential-proxy.md, section 3, `allow`). Should coffre ever read bodies for one, this test changes
 // with it, on purpose.

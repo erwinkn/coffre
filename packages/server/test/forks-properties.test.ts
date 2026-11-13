@@ -153,7 +153,7 @@ async function write(scene: Scene, app: Scene): Promise<void> {
   await db.insert(projects).values(scene.projects.map((project) => ({ id: project.id, slug: project.slug, name: project.slug })));
   await db.insert(environments).values(app.envs.map((env) => ({ id: env.id, projectId: env.projectId, slug: env.slug, name: env.slug, parentId: env.parentId, owner: env.owner, protected: false })));
   // Each sealed as the app's creation of it seals it (`createEnvironment`): the vault checks every environment it decides
-  // on, a reference's included, against its log (T159).
+  // on, a reference's included, against its log.
   const made = await AppChanges.prepare(vault, `user:${ROOT}`, app.envs.map((env) => environmentChange(undefined, {
     id: env.id, projectId: env.projectId, slug: env.slug, owner: env.owner, parentId: env.parentId, protected: false, archived: false, projectArchived: false,
   })));

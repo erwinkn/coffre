@@ -1,4 +1,4 @@
-// `app_read` (migration 0031, src/db/read-ahead.ts, T135): what a read of values reads before anything else, in one
+// `app_read` (migration 0031, src/db/read-ahead.ts): what a read of values reads before anything else, in one
 // call, is exactly what the app's own statements read, row for row, as Drizzle would have read it: the credential
 // (`findCredential`), the place (`resolvePath`) and its keys (`environmentSecrets`). A credential of each kind and none; a place missing, archived, deleted (by its slug and its tombstone's), a
 // fork, whose keys its read reads; keys of every nature, a reference, one archived, one with no version yet, the named

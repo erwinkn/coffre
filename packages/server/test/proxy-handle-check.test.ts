@@ -1,12 +1,12 @@
-// A plugin's check of a handle (`PluginContext.handle`) with the vault's uses (T135): the vault asked about its person, as
+// A plugin's check of a handle (`PluginContext.handle`) with the vault's uses: the vault asked about its person, as
 // ever, and in a fetch, handed to the use of the same handle that follows, which then asks nothing again. Someone
 // removed meanwhile, their credentials not swept yet, is refused: by the credential proxy's stable URL for a handle of
 // two environments, which names neither, cached or not; by a plugin that only asks whether a handle stands; and by one
 // that uses another person's handle after it. And `use`'s answer lists every key the environment holds unless the
 // plugin asks for its keys `only`; a plain value used long after the check, on access as it is then. Someone removed
 // and admitted again before the sweep is refused their earlier membership's handle, on the answer the app kept: by the
-// use itself (T145). Someone whose grant was revoked since their answer was kept learns nothing of the keys made since,
-// even when the vault is too busy to use them (review r2): their read asks the vault again before it answers.
+// use itself. Someone whose grant was revoked since their answer was kept learns nothing of the keys made since,
+// even when the vault is too busy to use them: their read asks the vault again before it answers.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -196,7 +196,7 @@ test("a plain value used after the handle's check is used on the person's access
   assert.equal((await fetched('/probe/later', fifth)).status, 200);
   between = () => root.access.set(`user:${FIFTH}`, { market: null }).then(() => undefined);
   try {
-    // A key's one "no" (D153), its reason in the app's entry.
+    // A key's one "no", its reason in the app's entry.
     const answer = await fetched('/probe/later', fifth);
     assert.deepEqual([answer.status, await answer.json(), await refusedIn(db.owner)], [404, { error: 'not_available' }, 'no_grant']);
   } finally {
@@ -230,7 +230,7 @@ test("revoked since their answer was kept, someone learns nothing of a key made 
   for (const person of [SEVENTH, EIGHTH]) await root.access.set(`user:${person}`, { market: null });
   await root.secrets.set('market/dev', { MADE_SINCE: 'made-since' });
   const [use, useNamed] = [deps.vault.use!, deps.vault.useNamed!];
-  // Busy, by ids or by name (T145): a request of one key is the vault's use by name, which answers busy before it reads
+  // Busy, by ids or by name: a request of one key is the vault's use by name, which answers busy before it reads
   // anything, whatever the key; the app's answer kept, refused, asks the vault again first (`Recalled.confirm`).
   deps.vault.use = async () => ({ ok: false, busy: 'overloaded', retryAfter: 1 });
   deps.vault.useNamed = async () => ({ served: true, route: 'busy', outcome: { ok: false, busy: 'overloaded', retryAfter: 1 } });
@@ -242,7 +242,7 @@ test("revoked since their answer was kept, someone learns nothing of a key made 
     const used = await fetched('/probe/use?only&key=MADE_SINCE', eighth);
     const unused = await fetched('/probe/use?only&key=NEVER_MADE', eighth);
     assert.deepEqual([used.status, unused.status], [503, 503], `the proxy: ${await used.text()} / ${await unused.text()}`);
-    // Two keys, as before PR B2: on the answer kept, which the busy refusal confirms, as to someone with no access.
+    // Two keys: on the answer kept, which the busy refusal confirms, as to someone with no access.
     const both = await fetched('/probe/use?only&key=MADE_SINCE&key=OTHER', eighth);
     const neither = await fetched('/probe/use?only&key=NEVER_MADE&key=OTHER', eighth);
     assert.deepEqual([both.status, neither.status], [403, 403], `the proxy, two keys: ${await both.text()} / ${await neither.text()}`);

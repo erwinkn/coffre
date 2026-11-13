@@ -1,6 +1,6 @@
-// T179 PR 4a: the app's readers of the vault's findings about a member, under 0.15's log. A finding names the newest
+// The app's readers of the vault's findings about a member, under 0.15's log. A finding names the newest
 // change of theirs it weighed, by its MAC, and stands until a change after it; a member the log has a change of, with no row, is
-// missing. Neither leans on 0.14's access entries, which 0.16 stops writing (docs/design/two-trips.md, PR 4).
+// missing. Neither leans on 0.14's access entries, which 0.16 stops writing (docs/design/two-trips.md).
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -98,7 +98,7 @@ test('a member the log has a change of, with no row and no access entry of 0.14\
   await db.owner.delete(principals).where(eq(principals.principal, MEMBER));
   await dropAccessEntriesAfter(-1n);
   // Their report, by a change of theirs in 0.15's log and no row. The list of everyone finds the rowless by 0.14's
-  // entries alone (PR 4b, with PR 6): it does not list them.
+  // entries alone: it does not list them.
   assert.equal((await root.members.get(MEMBER)).status, 'tampered');
   assert.equal((await root.members.list()).members.some((entry) => entry.member === MEMBER), false);
 });

@@ -85,7 +85,7 @@ export type KeyState =
  * moved from, every row it signed signed again, whatever wrote after it:
  * rows the new key signed meanwhile are left as they are, and the order
  * the keys are listed in changes nothing. A key the app does not hold,
- * the log's newest, is said and served under: as before rotations, its
+ * the log's newest, is said and served under: its
  * rows fail and the log does not verify, but the instance does not stop. Three indexed reads, together; a key
  * held as replaced is looked for among the entries until one is found.
  */
@@ -93,7 +93,7 @@ export async function keyState(db: Queryable, keys: AppKeys): Promise<KeyState> 
   const current = appLogKey(keys.chainKey).keyId;
   const previous = keys.previousChainKeys.map((key) => ({ id: appLogKey(key).keyId, key }));
   const held = new Map([[current, keys.chainKey], ...previous.map(({ id, key }) => [id, key] as const)]);
-  // Its first reads asked together: one round trip at a cold isolate's door, not three (T206; `groupReads`, or a
+  // Its first reads asked together: one round trip at a cold isolate's door, not three (`groupReads`, or a
   // transaction's statements under one Sync). The newest app entry is read whether or not a move is found: an indexed
   // read of the newest few, where the entries a replaced key wrote are looked for only as each is due (`wroteUnder`).
   const [moved, move, latest] = await Promise.all([movedFrom(db, [...held.keys()]), newestMove(db), newestAppEntry(db)]);

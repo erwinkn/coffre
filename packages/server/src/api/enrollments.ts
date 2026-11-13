@@ -1,7 +1,7 @@
 // Enrollment codes (docs/design/workload-access.md, section 4.4): minting
 // one for a binding, listing a binding's, promoting one to supersede the
 // rest, and approving a session an `approve` binding holds. Declared in
-// every map of the API by that design's PR 0; PR 3 serves them, here.
+// every map of the API, and not built yet.
 import { z } from 'zod';
 
 import type { ApiContext } from './context.ts';

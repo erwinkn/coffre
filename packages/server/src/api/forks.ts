@@ -75,7 +75,7 @@ export async function forkEnvironment(
     const plan = input.references ? referencesFor(ctx, readable.items) : new Map<string, string>();
     // A workload forks only values it is handed back, plain ones and those it lists (`useOnly`): a copy, or a reference,
     // would move a value it only uses to a place whose keys it may read. A copy is read where its key is held, a
-    // reference's at its holder (R71); a reference the fork makes, at its source, which it refers to (`referencesFor`).
+    // reference's at its holder; a reference the fork makes, at its source, which it refers to (`referencesFor`).
     // The vault refuses each copy and reference of one too; refused here, the fork makes nothing.
     const usedOnly = readable.items.filter((item) => !plain(item) && useOnly(ctx.caller, plan.has(item.key) ? item.secret : heldKey(item)))
       .map((item) => `${item.key} (${item.secret.path})`);

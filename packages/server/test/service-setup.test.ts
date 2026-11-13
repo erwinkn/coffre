@@ -14,8 +14,8 @@ import type { WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditLog, credentials, principals, projects, serviceBindings } from '@coffre/db/schema';
 import { clientFor, issuesLogged, openTestDatabase, resetDatabase, revokesLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
 
-// People who set up service accounts without running the instance (D97,
-// D99): docs/design/instance-roles.md, "Setting up service accounts".
+// People who set up service accounts without running the instance:
+// docs/design/instance-roles.md, "Setting up service accounts".
 
 const ROOT = 'admin@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -119,7 +119,7 @@ test('a Developer of dev sets up CI for dev: the account, its grant, a token and
     [ADA, 'member.add', 'allow', null],
     [ADA, 'access.grant', 'allow', null],
     [ADA, 'access.grant', 'allow', null],
-    // The vault issues the token and revokes it (T149), and its changes record who (D147).
+    // The vault issues the token and revokes it, and its changes record who.
     [ADA, 'token.bind', 'allow', null],
     [ADA, 'token.unbind', 'allow', 'removed'],
     [ADA, 'access.revoke', 'allow', null],
@@ -239,7 +239,7 @@ test('an account that holds prod is out of a dev Developer\'s hands: no token, n
   // A Developer everywhere holds what it holds, and manages it.
   assert.equal((await bo.tokens.issue(CI, { label: 'bo', expiresInDays: 1 })).expiresAt.length > 0, true);
 
-  // The issue is the vault's change (T149, D147); only the refusal is the app's entry.
+  // The issue is the vault's change; only the refusal is the app's entry.
   assert.deepEqual((await logged('token.create')).filter(([actor]) => actor === ADA).map(([, , decision, reason]) => [decision, reason]), [
     ['deny', 'not_service_manager'],
   ]);

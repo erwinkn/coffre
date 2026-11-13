@@ -6,7 +6,7 @@ import { askedOnce, askOnce, type AskedOnce } from './asked-once.ts';
 import type { PluginCode } from './proxy-code.ts';
 
 /**
- * The gate (0.16, T186 PR C; docs/design/proxy-ui.md, section 6; formal/Routing.tla, CodeGate): before an isolate
+ * The gate (docs/design/proxy-ui.md, section 6; formal/Routing.tla, CodeGate): before an isolate
  * serves its first proxy request, or the Proxy tab reads or writes, the names its code defines are reserved in the
  * vault's log (`reserveProxy`, a `proxy.code` change when it adds one, which deletes the UI items of those names,
  * audited). So no UI item a name code holds is served or shown by any isolate after one ran this code, and none
@@ -45,9 +45,9 @@ async function reserve(vault: Vault, code: Pick<PluginCode, 'names'>): Promise<v
     // log is fixed when it is made, so the answer is kept with the vault.
     answer = (await keeps015(vault)) ? await vault.reserveProxy({ names: [...code.names] }) : null;
   } catch (error) {
-    // A vault on another release (decision 8): 503 `deploying`, as every call answers it. An answer already the app's
+    // A vault on another release (proxy-ui.md, decision 8): 503 `deploying`, as every call answers it. An answer already the app's
     // own as well: 503 `starting`, from the vault's `about()` asked once (`keeps015`), when this request waited its
-    // deadline for another's (review r2 of T201).
+    // deadline for another's.
     if (isDeploying(error) || error instanceof ApiError) throw error;
     console.error("reserving the proxy code's names failed", { error: error instanceof Error ? error.message : String(error) });
     throw new ApiError('unavailable', "coffre cannot reserve its code's proxy names right now: ask again", 'proxy_gate', '1');

@@ -1,6 +1,6 @@
 // 0.15's change path for the app's own rows, as the API drives it (docs/design/0.15-plan.md, "As built: PR 4b"):
 // each write that makes or ends a credential is a change of 0.15's log, prepared by the vault before the app's
-// transaction and committed in it, beside the row, and answers once sealed (R51). The vault's tests hold `prepare`
+// transaction and committed in it, beside the row, and answers once sealed. The vault's tests hold `prepare`
 // and `app_change` themselves (packages/vault/test/app-changes.test.ts); these, the app's wiring.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -207,7 +207,7 @@ test("a credential 0.14 made, which the log never held, is revoked and signed ou
   assert.ok(session.ok);
   // As 0.14 left them: no seal, no change.
   await db.owner.update(credentials).set({ seal: null }).where(inArray(credentials.id, [issued.id, session.credential.id]));
-  // Their changes gone, and theirs alone: the members' stay, which the vault decides on (T179 PR 2).
+  // Their changes gone, and theirs alone: the members' stay, which the vault decides on.
   await db.owner.delete(logChanges).where(inArray(logChanges.object, [issued.id, session.credential.id].map((id) => logObject('credential', id))));
   await root.tokens.revoke(`token:${SERVICE}`, issued.id);
   await signin.signOut(session.credential.token, meta());

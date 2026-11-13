@@ -1,4 +1,4 @@
-// A member add in three round trips (T179 PR 5; docs/design/two-trips.md, "A member add"; formal/Writing.tla, the add):
+// A member add in three round trips (docs/design/two-trips.md, "A member add"; formal/Writing.tla, the add):
 // the vault decides a first add on one read of its own, the app checks the caller's rows it answered, and the vault's
 // write holds that read again under the fence before it commits. Each adversary of the model's add scenarios is made
 // here between the vault's read and its write (`between`), and the add commits only as the log stands at its commit:

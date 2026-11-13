@@ -110,7 +110,7 @@ const connect: Connect = (host, port, signal) => dial({ host, port }, signal);
  * through `lookup` as the connection opens, which refuses a name with any answer that is not public, so a name that
  * resolves to `10.0.1.5` gets no SYN, however it resolved a moment before; an address written as one, which Node
  * dials without asking a resolver, is checked as written. TLS, once Postgres says it will, still checks the
- * certificate against the name (review r1 of #485).
+ * certificate against the name.
  *
  *   db.acme.example:5432, resolving to 34.117.1.2       dialled
  *   db.attacker.example:5432, resolving to 10.0.1.5     refused before the SYN: ENOTPUBLIC

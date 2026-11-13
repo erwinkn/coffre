@@ -20,7 +20,7 @@ import { errorResponse } from './http.ts';
  * Live: its row not removed, and still its holder's, at the generation the credential is of. Its MAC is checked here, on
  * the one branch whose answer reads the row, so that what the check exempts (`off`, a credential of a kind it does not
  * hold) never fails on it; a row that fails throws `AuthRowTampered`, which each caller answers as it answers its own
- * row's (review r1 of #497). The revocations of section 6.1 end what a change to the person's passkeys leaves no passkey
+ * row's. The revocations of section 6.1 end what a change to the person's passkeys leaves no passkey
  * behind; this is there for what no change marks: a session made while the policy was `off`, or by the previous
  * release during a rollout, for a person who holds a passkey; one made before the deployment turned `required` on
  * (formal/Factor.tla, `ServedBacked`).
@@ -47,7 +47,7 @@ export function passkeyStands(
 /**
  * The credentials the check holds: a person's browser and CLI sessions, and their personal tokens. An MCP connection
  * holds it in its own read (`McpService.authenticate`). A handle never: it reaches `/use` alone, which stays one
- * statement (R44, R58), and the revocations carry it (section 6.3). A service's credentials hold no passkey.
+ * statement, and the revocations carry it (section 6.3). A service's credentials hold no passkey.
  */
 export function passkeyChecked(kind: string): boolean {
   return kind === 'browser' || kind === 'cli' || kind === 'personal';

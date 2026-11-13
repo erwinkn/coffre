@@ -64,9 +64,9 @@ for (const [name, transport] of [
     answers.set('/broken', json('{"keys":'));
     answers.set('/huge', json(JSON.stringify({ pad: 'x'.repeat(MAX_BODY_BYTES) })));
     answers.set('/gone', (res) => res.writeHead(500).end());
-    // Past 5xx is no status HTTP defines: an answer all the same, which ends a stand-in (review r4 of #565).
+    // Past 5xx is no status HTTP defines: an answer all the same, which ends a stand-in.
     answers.set('/odd', (res) => res.writeHead(600).end());
-    // A 200 that says HTML, then breaks off: the answer was given before the body broke (review r2 of #565).
+    // A 200 that says HTML, then breaks off: the answer was given before the body broke.
     answers.set('/html-reset', (res) => {
       res.writeHead(200, { 'content-type': 'text/html' });
       res.write('<html>'.padEnd(64 * 1024, ' '));

@@ -1,11 +1,11 @@
-// UI routes served to workloads (0.16, T186 PR C2b; docs/design/proxy-ui.md, section 3, "Workloads"), end to end: a
+// UI routes served to workloads (docs/design/proxy-ui.md, section 3, "Workloads"), end to end: a
 // key-bound session, or a Cloudflare service binding's call, at the environment its statement checks, a route saved in
 // the Proxy tab, and a fake upstream over HTTP. The item comes after the proof: the body is carried by its headers
 // alone, the route's limit is counted from this isolate's copy or the vault's `proxyItem`, and the vault's one route use
 // decides the values and the item, by which every check runs again before the send (BoundToDefinition): the allow
 // list, and whether it takes the body as it came (503 `moved`). (A `narrow` child's constraints are weighed on the URL
 // the decided item's upstream makes too; no test makes one here: 0.15's log refuses a child planted around the app, and
-// `/api/auth/workload/narrow` answers 501 until its PR.)
+// `/api/auth/workload/narrow` answers 501.)
 // A revocation stops the next request whatever the value cache holds. 0.15's log.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -324,7 +324,7 @@ test("BoundToDefinition: kept values go where the item they were decided on says
 
 test("kept values answer to their own item's allow list alone, not to a newer copy another session's use brought", async () => {
   // Version 7 allows /v1/**, version 8 /v2/**, both /health/**. A keeps 7's values; B's use brings 8's copy. A's requests are
-  // held to 7 alone: /v1 goes, /v2 is refused, never both refused nor both let through to the kept check (review r1 of #477).
+  // held to 7 alone: /v1 goes, /v2 is refused, never both refused nor both let through to the kept check.
   runtime = makeRuntime(true);
   const allow = (path: string) => [{ methods: ['GET' as const], path: '/health/**' }, { methods: ['GET' as const], path }];
   await save({ openai: uiRoute('openai', '/openai', { allow: allow('/v1/**') }) });
@@ -489,7 +489,7 @@ test("a workload signs, verifies and presigns with items saved in the UI: the si
   assert.match(made.searchParams.get('X-Amz-Credential')!, new RegExp(`^${AWS_ID}/`));
   assert.ok(!made.href.includes(AWS_SECRET) && !made.href.includes(held.token));
   assert.equal((await compute(held, { presign: { credential: 's3', path: '/other/report.csv' } })).status, 403);
-  // Nor in any URL it asks for: its token in the query, or the path, as it is, escaped, or escaped twice, is 400, nothing signed (review r1 of #480).
+  // Nor in any URL it asks for: its token in the query, or the path, as it is, escaped, or escaped twice, is 400, nothing signed.
   for (const presign of [
     { path: '/bucket/report.csv', query: { trace: held.token } },
     { path: `/bucket/${held.token}` },
@@ -501,7 +501,7 @@ test("a workload signs, verifies and presigns with items saved in the UI: the si
     const carried = await compute(held, { presign: { credential: 's3', expiresIn: 60, ...presign } });
     assert.deepEqual([carried.status, carried.body.message], [400, 'the session token goes in no presigned URL'], JSON.stringify(presign));
   }
-  // Eight times over, a ninth by the URL: past what is checked, refused as such, never signed (review r2 of #480).
+  // Eight times over, a ninth by the URL: past what is checked, refused as such, never signed.
   const deep = await compute(held, { presign: { credential: 's3', expiresIn: 60, path: '/bucket/report.csv', query: { trace: deeply(held.token, 8) } } });
   assert.deepEqual([deep.status, deep.body.message], [400, 'the URL is encoded too many times over to check'], JSON.stringify(deep.body));
   assert.equal((await compute(held, { presign: { credential: 's3', expiresIn: 60, path: `/bucket/${deeply(held.token, 9)}` } })).status, 400);
@@ -604,7 +604,7 @@ test("a session's tunnel to a database saved in the Proxy tab: dialled by the de
     const editedAt = Date.now();
     const at = await closed;
     assert.ok(at - editedAt <= 2000 + 300, `ended ${at - editedAt} ms after the edit`);
-    // The reconnect dials by the new item, which reaches no 127.0.0.1: refused, with the nonce its next proof signs (review r1 of #485).
+    // The reconnect dials by the new item, which reaches no 127.0.0.1: refused, with the nonce its next proof signs.
     const again = await open();
     assert.equal(again.opened, 403);
     assert.equal(again.nonce, await gates(MEMBER).nonce(), "the refusal carries the gate's nonce");

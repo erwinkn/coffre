@@ -14,9 +14,9 @@ type Rows = {
   passkeys: typeof passkeys.$inferSelect;
 };
 /**
- * A signed table by the kind its rows' MACs name: its name when they were first written. 0.16 renamed two of them
- * (T178), `device_authorizations` to `device_logins` and `enrollments` to `enrollment_codes`, whose rows keep their
- * kind, so that nothing is signed again; a rotation's cursor in the log names the kind too.
+ * A signed table by the kind its rows' MACs name: its name when they were first written. Two differ: `device_logins`
+ * signs as `device_authorizations` and `enrollment_codes` as `enrollments`, so that nothing is signed again; a
+ * rotation's cursor in the log names the kind too.
  */
 export type AuthTable = keyof Rows;
 
@@ -145,7 +145,7 @@ function tupleOf<K extends AuthTable>(table: K, row: Fields[K]): string {
     if (value === undefined) throw new Error(`missing ${table}.${field} for its authentication MAC`);
     if (value instanceof Date) return value.getTime();
     if (value instanceof Uint8Array) return Buffer.from(value).toString('hex');
-    // A list as its JSON text, which a client's redirects were until 0.16 made them a text[] (T278): its MAC stands.
+    // A list (a client's redirects, a text[]) as its JSON text, the form its MAC was first made over.
     if (Array.isArray(value)) return JSON.stringify(value);
     return value;
   });

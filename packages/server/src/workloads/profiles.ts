@@ -1,2 +1,2 @@
-// Moved to `@coffre/core/identity`, which the vault shares (T149, PR 3b).
+// The profiles live in `@coffre/core/identity`, which the vault shares.
 export { expectedAudiences, PROFILE_RULES, type ProfileRules } from '@coffre/core/identity';

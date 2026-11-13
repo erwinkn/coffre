@@ -1,4 +1,4 @@
-// Fixed windows in tests (T217, T202, T218, T204). Two things count by the clock: a workload gate's limits (`gate.ts`:
+// Fixed windows in tests. Two things count by the clock: a workload gate's limits (`gate.ts`:
 // a count's window starts at `floor(now / windowMs) * windowMs`), the wall clock's minute; and the vault's bulk cap,
 // whose refresh period a use writes its key's row in (`bulk.ts`), a minute that starts for each principal's key at a
 // phase of its own (`phaseOf`, 0074's `bulk_period`). A window turning over between a test's calls resets the first and makes
@@ -40,7 +40,7 @@ export function pinnedGates(now: number = Date.now()): Gates {
  * Where `principal`'s `key` starts its refresh periods, in [0, `refresh`): the vault's `phaseOf` (`bulk.ts`), which
  * 0074's `bulk_period` computes too (`sql-copies.test.ts` holds it to `phaseOf`). A copy, since a
  * package's tests import another's exports only, and the vault exports no cap internals; a copy that drifted would
- * only wait at the wrong times again, as the minute did (T204).
+ * only wait at the wrong times again, as the minute did.
  */
 function phaseOf(principal: string, key: string, refresh: number): number {
   return createHash('sha256').update(`${principal}/${key.toLowerCase()}`, 'utf8').digest().readUIntBE(0, 6) % refresh;
@@ -101,7 +101,7 @@ const DAY_MS = 86_400_000;
 
 /**
  * Waits for the next UTC day if fewer than `ms` of this one are left, so that a test of a Durable Object in workerd,
- * whose clock a test cannot stop, keeps its day's counts in one window (T218). Waits at most `ms`.
+ * whose clock a test cannot stop, keeps its day's counts in one window. Waits at most `ms`.
  */
 export async function inUtcDay(ms: number, now: () => number = Date.now): Promise<void> {
   const left = DAY_MS - (now() % DAY_MS);

@@ -24,7 +24,7 @@ function independentMac(kind: string, values: unknown[]): Buffer {
   return createHmac('sha256', deriveKey(deps.chainKey, 'signin-rows/v1')).update(JSON.stringify(['coffre.auth.v2', kind, ...values])).digest();
 }
 
-// What docs/design/workload-access.md's PR 0 declares, before the changes
+// What docs/design/workload-access.md declares, before the changes
 // that serve it: every route answers 501 past sign-in, the new tokens are
 // never bearers, and the rows' MAC kinds cover what binds them.
 

@@ -39,7 +39,7 @@ let handle: string;
 /** Each connection the listener carried. */
 const carried: Socket[] = [];
 
-/** How the vault opens a value, which a case holds up: a use of the tunnel's one key, by name (T145). */
+/** How the vault opens a value, which a case holds up: a use of the tunnel's one key, by name. */
 const OPENS = 'useNamed';
 type Opens = (...args: unknown[]) => Promise<unknown>;
 const opens = (): Opens => deps.vault[OPENS] as Opens;
@@ -179,7 +179,7 @@ test('queries through the tunnel run as the real login, and the session is logge
     await client.end();
   }
   // The session's own: the checks its group made while it was open, a fifth of a second apart here, are logged as theirs.
-  // One use of the key, its checks riding its cover; its row slim (R53), naming no tunnel.
+  // One use of the key, its checks riding its cover; its row slim, naming no tunnel.
   assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 1);
 });
 
@@ -757,7 +757,7 @@ test('a tunnel through a network binding reaches the private host it names, plai
 
 test('a cancel request through a network binding reaches the database, though its connector dials after the socket opens', async () => {
   // A VPC Network binding as Cloudflare's is: open at once, its connector dialing the database only later; closed before
-  // that, it sends nothing (W150, measured live).
+  // that, it sends nothing (measured live).
   const port = Number(new URL(TEST_RUNTIME_DATABASE_URL).port);
   const network: Network = {
     connect: () => {

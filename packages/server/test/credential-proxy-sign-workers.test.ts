@@ -120,7 +120,7 @@ async function heapHeld(): Promise<number> {
 
 test('the isolate holds none of a raw message as it signs it: 9 MiB in, its heap is as it was', { timeout: 60_000 }, async () => {
   // A sign first: the isolate, and its inspector's target, start with its first request. A short one, so that `before`
-  // holds no body-sized garbage a collection during the next sign could hide a held body behind (Fable's review of #572).
+  // holds no body-sized garbage a collection during the next sign could hide a held body behind.
   const warm = Buffer.from('warm');
   assert.equal((await sign(parts(warm), warm)).status, 200);
   const before = await heapHeld();

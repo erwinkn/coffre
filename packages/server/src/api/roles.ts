@@ -97,7 +97,7 @@ export function editsRoles(caller: Caller): boolean {
 
 /**
  * Whether the caller takes an environment's protection off: an Owner of its
- * project, or of the whole instance, on no credential's scope (R30), as the
+ * project, or of the whole instance, on no credential's scope, as the
  * vault decides (`ownsProject`). A personal config is protected as the
  * environment it is a config of, and is unprotected there.
  */
@@ -329,7 +329,7 @@ function impactSentence(weighed: readonly { impact: ImpactLine; only: string | n
 /**
  * Protect an environment, or take its protection off: whoever manages its
  * project's environments protects it, and only an Owner of its project, or
- * of the whole instance, unprotects it (R30). The vault decides, and logs it as
+ * of the whole instance, unprotects it. The vault decides, and logs it as
  * `policy.change`. Before any app transaction: none stays open across a
  * vault call. The request as of the change (`protectIds`).
  */
@@ -342,8 +342,8 @@ export async function protectEnvironment(ctx: ApiContext, place: ResolvedPath, o
 }
 
 /**
- * A workload's session changes no one's access (docs/design/workload-access.md,
- * D15): protecting or unprotecting an environment that exists decides what
+ * A workload's session changes no one's access (docs/design/workload-access.md):
+ * protecting or unprotecting an environment that exists decides what
  * every role reads there. A fork it makes may still be protected as its
  * source is: a new place, which nobody reached before.
  */

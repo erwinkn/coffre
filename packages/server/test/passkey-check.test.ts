@@ -3,7 +3,7 @@
 // of a person's holds its credential to a live passkey, or to none while they
 // hold none, as the policy says; every issue holds what it would issue to the
 // same under the log's head; and what a request issues names its passkey. No
-// sign-in confirms a session with a touch yet (T176 PR 4b), so a confirmed
+// sign-in confirms a session with a touch yet, so a confirmed
 // session here is a row written as the app writes one.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -129,7 +129,7 @@ test('a passkey that is not the credential\'s person\'s, or whose row was change
   assert.equal(await answer(deployment('optional').bearer(token).me()), 'unauthenticated');
 });
 
-// Review r1 of #497: the passkey's MAC is the check's to verify, where its answer reads the row, never the read's.
+// The passkey's MAC is the check's to verify, where its answer reads the row, never the read's.
 test('a credential the check exempts never fails on a passkey it does not need: a service\'s token, any under off', async () => {
   const key = await rows.addPasskey(db.owner, deps.chainKey, ROOT);
   const { bearer } = deployment('optional');
@@ -166,7 +166,7 @@ test('the provider alone signs in nobody who holds a live passkey, unless the po
   const refused = await deployment('optional').signin.completeSignin(account, meta());
   assert.deepEqual(refused, { ok: false, reason: 'passkey_required' });
   assert.equal((await db.owner.select().from(credentials).where(eq(credentials.principal, `user:${ADA}`))).length, 0, 'no session written');
-  // Whoever answered passed the provider, not the factor: no entry (passkeys.md, section 11; review r1 of #497).
+  // Whoever answered passed the provider, not the factor: no entry (passkeys.md, section 11).
   assert.equal(await entries(), logged, 'no entry written');
   assert.ok((await deployment('off').signin.completeSignin(account, meta())).ok);
 });
@@ -253,7 +253,7 @@ test('a reveal by a credential whose passkey fails its MAC gets the 401 any requ
   assert.equal(await answer(ada.secrets.reveal('market/dev', ['API_KEY'])), 'ok');
   const used = (await usesLogged(db.owner)).length;
 
-  // Review r1 of #497: the check ahead of the vault's call threw outside the boundary that answers it, a 500.
+  // The check ahead of the vault's call fails inside the boundary that answers it, never a 500.
   await db.owner.update(passkeys).set({ authMac: randomBytes(32) }).where(eq(passkeys.id, key));
   assert.equal(await answer(ada.me()), 'unauthenticated');
   assert.deepEqual(await Promise.all([answer(ada.secrets.reveal('market/dev', ['API_KEY'])), answer(ada.secrets.reveal('market/dev'))]), ['unauthenticated', 'unauthenticated']);
@@ -263,7 +263,7 @@ test('a reveal by a credential whose passkey fails its MAC gets the 401 any requ
 test('a key write or a member\'s add by a credential the check refuses is refused before it writes, by the fast path and today\'s alike', async () => {
   const root = clientFor(deps, ROOT);
   await root.members.add(`user:${BOB}`, { role: 'admin' });
-  // The vault's fast-path calls, counted, and the refusals it records (T179 PR 6).
+  // The vault's fast-path calls, counted, and the refusals it records.
   const served = { writes: 0, adds: 0 };
   let recorded = 0;
   const vault = deps.vault;

@@ -102,7 +102,7 @@ async function appDenials(action: string): Promise<unknown[]> {
 test('an app permission bug does not reach prod: the vault refuses and logs the claim', async () => {
   const buggy = buggyClientFor(deps, DEV);
   assert.equal((await buggy.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'sk_test');
-  // A key's one refusal (D153): the vault's reason in its entry alone.
+  // A key's one refusal: the vault's reason in its entry alone.
   await assert.rejects(buggy.secrets.reveal('market/prod/API_KEY'), { status: 404, code: 'not_available', reason: undefined });
 
   const [refused] = await vaultEntries();
@@ -248,7 +248,7 @@ test('a removed member stays out despite a live session, until the vault admits 
   // What to rotate: what they read.
   const { report } = await root.members.remove(`user:${DEV}`);
   assert.deepEqual(report!.exposed.map(({ environment, key, how }) => [environment, key, how]), [['dev', 'API_KEY', 'read']]);
-  // No member: told so, whatever the key (D153 keeps an answer that tells nothing of it).
+  // No member: told so, whatever the key, in an answer that tells nothing of it.
   assert.equal((await reveal()).status, 403);
   const removal = (await vaultEntries()).find((entry) => entry.action === 'member.remove');
   assert.equal(removal?.subject, `user:${DEV}`);

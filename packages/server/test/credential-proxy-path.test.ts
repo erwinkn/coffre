@@ -1,4 +1,4 @@
-// A path rule (0.16, T208; docs/design/credential-proxy.md, section 5, "A segment of the path"), end to end:
+// A path rule (docs/design/credential-proxy.md, section 5, "A segment of the path"), end to end:
 // coffre's own vault, a handle as `coffre run` makes one, and a fake Telegram Bot API over HTTP. A method call and a
 // file download, each with the token in its path; the allow list read on the path as the app sent it; a value that
 // would change the path's shape, refused; a redirect quoting the token, given back the app's placeholder; an echo,
@@ -24,10 +24,10 @@ const AIOGRAM = '987654321:AAFzzBP0av28dGcj4Xqp-5Yv_LxQz0654321';
 const TENANT = 'tenant-0123456789abcdef';
 const ACCOUNT = 'acct_1Plain0123456';
 const ESCAPED = '%41%42%43%44%45%46%47%48';
-/** Escapes as written and punctuation a URL's parser encodes: `'` in a query, `"` in a path (review r5 of #483). */
+/** Escapes as written and punctuation a URL's parser encodes: `'` in a query, `"` in a path. */
 const PUNCTUATED = `${ESCAPED}'"`;
-/** Values a JSON string escapes, each its own way: Go `<` and `>`, Python what is past ASCII, PHP `/` (review r6 of #483). */
-/** A key long enough to mask that reads, as a URL's client reads it, shorter than that: `ABC"` (review r7 of #483). */
+/** Values a JSON string escapes, each its own way: Go `<` and `>`, Python what is past ASCII, PHP `/`. */
+/** A key long enough to mask that reads, as a URL's client reads it, shorter than that: `ABC"`. */
 const SHORTENED = '%41%42%43"';
 const ANGLED = 'foo<bar>baz';
 const ACCENTED = 'foo\u00e9baz';
@@ -47,7 +47,7 @@ before(async () => {
       if (url.endsWith('/moved')) response.writeHead(302, { location: url.replace(/moved$/, 'getMe') }).end();
       else if (url.endsWith('/absolute')) response.writeHead(307, { location: `${upstreamUrl}${url.replace(/absolute$/, 'getMe')}?again=${encodeURIComponent(decodeURIComponent(url))}` }).end();
       else if (url.endsWith('/away')) response.writeHead(302, { location: `https://elsewhere.example${url}` }).end();
-      // Relative ones, which resolve against the URL the token went out in (review r1 of #483).
+      // Relative ones, which resolve against the URL the token went out in.
       else if (url.endsWith('/relative')) response.writeHead(302, { location: 'getMe' }).end();
       else if (url.endsWith('/offset')) response.writeHead(302, { location: '?offset=1' }).end();
       else if (url.endsWith('/fragment')) response.writeHead(302, { location: '#top' }).end();
@@ -56,18 +56,18 @@ before(async () => {
       else if (url.endsWith('/lower')) response.writeHead(302, { location: url.replace(/lower$/, 'getMe').replace(':', '%3a') }).end();
       else if (url.endsWith('/spelled')) response.writeHead(302, { location: url.replace(/spelled$/, 'getMe').replace('AAE', '%41AE') }).end();
       else if (url.endsWith('/quoted')) response.writeHead(302, { location: `/tg/getMe?t=${url.split('/')[2]!.slice(3).replace(':', '%3a')}` }).end();
-      // A relative redirect whose first segment is the token's, `%3A` or `%3a` for its colon (review r2 of #483).
+      // A relative redirect whose first segment is the token's, `%3A` or `%3a` for its colon.
       else if (url.includes('?first=')) {
         const [segment, way] = url.split('/').at(-1)!.split('?first=') as [string, string];
         // `raw` keeps the colon: a relative Location whose first segment reads as a scheme.
         response.writeHead(302, { location: `${way === 'raw' ? segment : segment.replace(':', way === 'upper' ? '%3A' : '%3a')}/getMe` }).end();
       }
-      // The token's colon encoded twice, `%253A`, in a path and in a query: after one decoding it is `%3A`, not the token (review of #483, T211).
+      // The token's colon encoded twice, `%253A`, in a path and in a query: after one decoding it is `%3A`, not the token.
       else if (url.endsWith('/twice')) response.writeHead(302, { location: url.replace(/twice$/, 'getMe').replace(':', '%253A') }).end();
       else if (url.endsWith('/twicequery')) response.writeHead(302, { location: `/tg/getMe?t=${url.split('/')[2]!.slice(3).replace(':', '%253A')}` }).end();
-      // An absolute redirect to the path as it came, where the value is the upstream's own host and port (review r3 of #483).
+      // An absolute redirect to the path as it came, where the value is the upstream's own host and port.
       else if (url.endsWith('/loop')) response.writeHead(302, { location: `${upstreamUrl}${url.replace(/loop$/, 'getMe')}` }).end();
-      // A query rule's value quoted in a redirect's query as it is, `%41%42…`, which `searchParams` would write `AB…` (review r4 of #483).
+      // A query rule's value quoted in a redirect's query as it is, `%41%42…`, which `searchParams` would write `AB…`.
       // A field named `?api_key`, which is not the rule's.
       else if (url.includes('/echoquery') || url.includes('/echopath')) {
         const sent = new URL(url, upstreamUrl).searchParams.get('api_key')!;
@@ -76,7 +76,7 @@ before(async () => {
         response.writeHead(302, { location }).end();
       }
       // The value, the path rule's or the query rule's, quoted in a redirect's path as a JSON string writes it: Go's
-      // `\u003c`, Python's `\u00e9`, PHP's `\/`, each backslash a `/` to a URL's parser (review r6 of #483).
+      // `\u003c`, Python's `\u00e9`, PHP's `\/`, each backslash a `/` to a URL's parser.
       else if (url.includes('/jsonecho')) {
         const at = new URL(url, upstreamUrl);
         const sent = at.searchParams.get('k') ?? decodeURIComponent(at.pathname.split('/')[2]!.slice(3));
@@ -113,7 +113,7 @@ function options(): CredentialProxyOptions {
       odd: { upstream: `${upstreamUrl}/odd`, inject: path('bot{BOT_VALUE}') },
       // A path rule of a plain key beside a header of a secret: the handle rides in the header, the app holds the account as it is.
       tenant: { upstream: `${upstreamUrl}/tenant`, inject: [header('x-api-key', '{TENANT_KEY}'), path('{ACCOUNT}')] },
-      // Where the stable URL's own segments would frame the slot, read against the wrong base (review r1 of #483): a name
+      // Where the stable URL's own segments would frame the slot, read against the wrong base: a name
       // the template frames (`bots`, `bot{…}`), and a key alone under a long base path.
       bots: { upstream: upstreamUrl, inject: path('bot{TELEGRAM_BOT_TOKEN}') },
       bare: { upstream: `${upstreamUrl}/a/long/base/path/for/the/bot`, inject: path('{TELEGRAM_BOT_TOKEN}') },
@@ -317,7 +317,7 @@ test("the token's segment, encoded otherwise in a redirect, gets the placeholder
     assert.equal(moved.headers.get('location'), `${ORIGIN}/use/market/dev/telegram/x/bot${handle}/getMe`, way);
   }
   // The same, for a shaped token: `bot987654321%3a…` swapped back before the URL is read would be the scheme
-  // `bot987654321:` (review r3 of #483).
+  // `bot987654321:`.
   const { env } = await run();
   const shaped = await route(`/use/aiogram/x/bot${env.AIOGRAM_TOKEN}?first=lower`);
   assert.equal(shaped.status, 302, await shaped.clone().text());
@@ -427,7 +427,7 @@ test("the token is in no log line, no audit entry and no refusal", async () => {
   assert.ok(reached.length >= 4);
   // Every audit entry, whatever its action.
   assert.ok(free(JSON.stringify(await db.owner.select().from(auditLog), (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value))));
-  // The use row is slim (R53): it names no host or URL at all.
+  // The use row is slim: it names no host or URL at all.
   assert.ok((await usesLogged(db.owner)).length > 0);
 });
 

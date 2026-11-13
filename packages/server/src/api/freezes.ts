@@ -1,7 +1,6 @@
 // Freezes (docs/design/workload-access.md, section 8.2): what stops every
 // use under a target at its next request, and lifts it, derived from the
-// log. Declared in every map of the API by that design's PR 0; PR 4 serves
-// them, here.
+// log. Declared in every map of the API, and not built yet.
 import { z } from 'zod';
 
 import type { ApiContext } from './context.ts';

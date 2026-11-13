@@ -255,7 +255,7 @@ test("where someone's role applies is told only to those who run the instance: a
   const listed = async (client: CoffreClient, query?: { path: string }) =>
     (await client.members.list(query?.path)).members.find((member) => member.member === ADA);
   assert.deepEqual([(await listed(root))?.scope, (await root.members.access(ADA)).scope], [scope, scope]);
-  // W59's case: an access manager on market, who sees only market, read that Ada was "developer, all projects but billing".
+  // An access manager on market, who sees only market, reads Ada's role but not her scope, "all projects but billing".
   for (const seen of [await listed(lead), await listed(lead, { path: 'market' }), await lead.members.access(ADA)]) {
     assert.deepEqual([seen?.instanceRole, seen?.scope], ['developer', null]);
   }
@@ -272,7 +272,7 @@ test('a scoped auditor reads the log of the places in its scope; an auditor of t
   assert.ok(entries.every((entry) => entry.project === 'market' && entry.environment === 'dev'), JSON.stringify(entries.map((entry) => [entry.project, entry.environment])));
   assert.ok(entries.every((entry) => entry.project !== null), 'never the instance\'s own entries');
   await assert.rejects(ada.audit.verify(), { status: 403 });
-  // Unscoped (D96): every project's, and the instance's own too: people, service accounts, sign-ins.
+  // Unscoped: every project's, and the instance's own too: people, service accounts, sign-ins.
   await root.members.add(ADA, { role: 'auditor' });
   const everywhere = (await ada.audit.list({ detail: '1' })).entries;
   assert.ok(everywhere.some((entry) => entry.project === 'billing'));

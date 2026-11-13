@@ -11,9 +11,8 @@ import { auditLog, credentials, deviceLogins, enrollmentCodes, identities, mcpCo
 
 /**
  * The app's newest `key.reseal` or `key.rotate`, unchecked: one step of
- * `audit_log_moves_idx` (`KINDS`; T245, R48), however many of the app's
- * other entries came since. Before 0.16 Postgres could walk the log back
- * by `seq` from the newest entry to the newest move.
+ * `audit_log_moves_idx` (`KINDS`), however many of the app's
+ * other entries came since, each of which a walk back by `seq` would read.
  */
 export async function newestMove(db: Queryable): Promise<StoredEntry | undefined> {
   const [row] = await db.select(entryColumns()).from(auditLog).where(entriesOf('moves')).orderBy(desc(auditLog.seq)).limit(1);
@@ -35,9 +34,9 @@ export async function wroteUnder(db: Queryable, keyId: string): Promise<boolean>
 }
 
 /**
- * The app's newest entry, unchecked: one step of `audit_log_app_idx` (T245,
- * R48), where the walk back by `seq` read every vault entry since the app's
- * last, at each cold start of an app idle while the vault's beats went on.
+ * The app's newest entry, unchecked: one step of `audit_log_app_idx`, where
+ * a walk back by `seq` would read every vault entry since the app's last, at
+ * each cold start of an app idle while the vault's beats go on.
  */
 export async function newestAppEntry(db: Queryable): Promise<StoredEntry | undefined> {
   const [row] = await db.select(entryColumns()).from(auditLog).where(authoredBy('app')).orderBy(desc(auditLog.seq)).limit(1);

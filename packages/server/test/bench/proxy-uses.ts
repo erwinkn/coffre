@@ -1,4 +1,4 @@
-// `/use` at a steady rate beside ci.ts's sign-ins (PR 5b, R44, R58): the credential proxy's inject on a person's handle,
+// `/use` at a steady rate beside ci.ts's sign-ins: the credential proxy's inject on a person's handle,
 // through the whole app, as a Node deployment serves it: one runtime, the vault in process, each Postgres connection one
 // round trip away through a relay of its own (`farPostgres`), on a thread of its own so that the sign-ins' work never
 // delays a request's timer. The proxy keeps no value (`proxy: { cacheValues: false }`): every request opens its key, a
@@ -43,24 +43,24 @@ export type ProxyLoad = {
   origin: string;
   /** How long the proxy keeps values, in seconds (`proxy.revokedWithinSeconds`): 0, none, every request opens its key; 60, as a deployment runs it. */
   cacheSeconds: number;
-  /** The stable URL, `/use/<credential>/…`, as an app's own config names it (R14), which asks first which environment the handle was made for; else the environment's. */
+  /** The stable URL, `/use/<credential>/…`, as an app's own config names it, which asks first which environment the handle was made for; else the environment's. */
   stable: boolean;
   /**
-   * 0.15's vault's map of names (T145, `UseLimits.names`), its cap: 0, every request's use reads its names first, then is made,
+   * The vault's map of names (`UseLimits.names`), its cap: 0, every request's use reads its names first, then is made,
    * the worst case; under the handles a thread sends, each picked at random, that share of them misses. Unset, its
    * default, and the handles in turn: every request warm.
    */
   names?: number;
-  /** The credential's two keys, `API_KEY` and `API_SECRET` (`value` and `secret`), in one header: a request's several keys, the vault's named batch (T165, PR 2). */
+  /** The credential's two keys, `API_KEY` and `API_SECRET` (`value` and `secret`), in one header: a request's several keys, the vault's named batch. */
   secret?: string;
-  /** The vault's named batch hidden from the app (`about().namedBatches`), as a vault older than the app: several keys read by the app, then used by ids (T167). */
+  /** The vault's named batch hidden from the app (`about().namedBatches`), as a vault older than the app: several keys read by the app, then used by ids. */
   unnamed?: boolean;
   /**
-   * `api` a route saved in the place's Proxy tab, at this upstream, the proxy's code naming none (T186 PR C,
-   * `--proxy-ui`): each request a path of its own, so that no map keys on the URL.
+   * `api` a route saved in the place's Proxy tab, at this upstream, the proxy's code naming none
+   * (`--proxy-ui`): each request a path of its own, so that no map keys on the URL.
    */
   ui?: { upstream: string };
-  /** `API_KEY` in a segment of the path, `path('bot{API_KEY}')`, as Telegram takes its token (T208, `--proxy-path`): the handle in the app's path alone. */
+  /** `API_KEY` in a segment of the path, `path('bot{API_KEY}')`, as Telegram takes its token (`--proxy-path`): the handle in the app's path alone. */
   inPath?: boolean;
 };
 
@@ -120,7 +120,7 @@ let current = null as Phase | null;
 let running = true;
 const inflight = new Set<Promise<void>>();
 let next = 0;
-// Each request's own number, however its handle was picked: a UI route's path differs every time (review r2 of #467).
+// Each request's own number, however its handle was picked: a UI route's path differs every time.
 let requests = 0;
 
 const use = async (phase: Phase, due: number, first: boolean) => {
@@ -134,7 +134,7 @@ const use = async (phase: Phase, due: number, first: boolean) => {
     phase.timeline[bucket] = (phase.timeline[bucket] ?? 0) + 1;
   };
   try {
-    // As an app's own config names them (R14): the stable URL with the API's path after it, `/use/<credential>/v1/…`.
+    // As an app's own config names them: the stable URL with the API's path after it, `/use/<credential>/v1/…`.
     // Through a path rule, the handle in the path alone, as Telegram's SDKs put the token there: `/bot<handle>/thing`.
     const rest = load.inPath === true ? `bot${handle}/thing` : load.ui === undefined ? 'v1/thing' : `v1/thing/${nth}`;
     const url = load.stable ? `${load.origin}/use/api/${rest}` : `${load.origin}/use/${load.path}/api/${rest}`;

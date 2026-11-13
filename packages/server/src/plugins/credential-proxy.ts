@@ -201,15 +201,15 @@ export type Credential = {
    */
   inject: Inject | readonly Inject[];
   /**
-   * @deprecated Gone in 0.9, and refused: `coffre run` sets no base URL.
+   * @deprecated Refused: `coffre run` sets no base URL.
    * The app's own config points at the proxy's stable URL for the
    * credential, `<publicUrl>/use/<name>`, the same for every environment.
    */
   baseUrl?: "gone in 0.9: point the app's own config at <publicUrl>/use/<name>, the proxy's stable URL for this credential";
-  /** @deprecated Called `placeholder` in 0.10, and refused: rename it. */
+  /** @deprecated Refused: it is `placeholder` now. */
   standIn?: 'called placeholder in 0.10: rename it';
   /**
-   * @deprecated Gone in 0.10, and refused: mark each key plain instead
+   * @deprecated Refused: mark each key plain instead
    * (`coffre set <env>/TWILIO_SID <sid> --plain`), which says it in the data,
    * for every environment and fork alike.
    */
@@ -225,7 +225,7 @@ export type Credential = {
   allow?: readonly Allow[];
   /** The methods it may be used with, `['GET', 'POST']`; any, unless set. Read as `allow`'s entries' methods. */
   methods?: readonly string[];
-  /** The paths under `upstream` it may be used on, each as an `allow` entry's path, `['/companies']`; any, unless set. A trailing slash, `/companies/`, takes what is below it and not `/companies` itself; a `*` is itself, as before 0.16, never a glob. */
+  /** The paths under `upstream` it may be used on, each as an `allow` entry's path, `['/companies']`; any, unless set. A trailing slash, `/companies/`, takes what is below it and not `/companies` itself; a `*` is itself, never a glob. */
   paths?: readonly string[];
   /** The environments it serves, by path, `['market/prod']`; every one, unless set. Its name is the deployment's in every environment all the same. */
   environments?: readonly string[];
@@ -337,14 +337,14 @@ export type CredentialProxyOptions = {
   /** HMAC secrets, by name as credentials are, that coffre checks signatures with for the app, and never signs with: an inbound webhook's, `{ yousign: hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) }`. */
   verifiers?: Record<string, Hmac>;
   /**
-   * @deprecated In `deployment.ts` since 0.16, `proxy: { revokedWithinSeconds }`,
+   * @deprecated In `deployment.ts`, `proxy: { revokedWithinSeconds }`,
    * which bounds the tunnels' checks and the values' cache as one: read until
    * 0.17, which refuses it here. How often an open tunnel checks its handle
    * still stands, above 0, an hour at most.
    */
   recheckSeconds?: number;
   /**
-   * @deprecated Gone in 0.10, and refused: each key says who sees it now. A
+   * @deprecated Refused: each key says who sees it. A
    * person's app holds as they are the values they may read; mark sensitive
    * those it must use only through the proxy (`coffre mark <env> sensitive`).
    */
@@ -364,13 +364,13 @@ export type CredentialProxyOptions = {
   /** Upstreams over plain HTTP, and at private, loopback or link-local addresses: for local fakes in development, never in production. */
   insecureUpstreams?: boolean;
   /**
-   * @deprecated In `deployment.ts` since 0.16, `proxy: { editable }`: read
+   * @deprecated In `deployment.ts`, `proxy: { editable }`: read
    * until 0.17, which refuses it here. Whether Owners may write the
    * deployment's proxy definitions in the UI.
    */
   editable?: boolean;
   /**
-   * @deprecated In `deployment.ts` since 0.16: `proxy: { revokedWithinSeconds }`
+   * @deprecated In `deployment.ts`: `proxy: { revokedWithinSeconds }`
    * for how long opened values serve, `proxy: { cacheValues: false }` for 0.
    * Read until 0.17, which refuses it here. 0 to 3,600.
    */
@@ -411,7 +411,7 @@ const HANDLE_LENGTH = 'coffre_use_'.length + 43;
  */
 const MESSAGE_BYTES = 64 * 1024;
 /**
- * The longest message an `hmac()` signer's `maxBytes` may take, raw (`signRaw`): what R27's 20 ms of a request's CPU
+ * The longest message an `hmac()` signer's `maxBytes` may take, raw (`signRaw`): what the 20 ms of a request's CPU
  * at p99 holds of the signing's own work, two passes of SHA-256 over the message (the HMAC's and a workload's
  * `Content-Digest` check), 1.2 ms per MiB, past about 4 ms of every request's: (20 − 4) ÷ 1.2, about 13 MiB, rounded down.
  * The body's delivery into the isolate is the platform's, as every streamed body's (docs/design/config.md, "A raw
@@ -534,7 +534,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
 }
 
 /**
- * The options 0.16 moved to `deployment.ts`, checked as before, as the object's fields (`movedSettings`): `editable`
+ * The options that moved to `deployment.ts`, still checked, as the object's fields (`movedSettings`): `editable`
  * as `proxy.editable`; `cacheSeconds: 0` as `proxy.cacheValues: false`; and one bound R for the rest, the smaller of
  * `cacheSeconds` (above 0) and `recheckSeconds`, each 60 unless given, as 0.15 ran them. Either below 3 s, R's floor,
  * is refused: read as 3 it would let a revoked credential work longer than the deployment said, so it names what to
@@ -548,8 +548,8 @@ function movedOptions(options: CredentialProxyOptions): MovedSetting[] {
   const { cacheSeconds, recheckSeconds, editable } = options;
   if (recheckSeconds !== undefined && !(recheckSeconds > 0 && recheckSeconds <= 3_600)) throw new Error('credentialProxy: recheckSeconds is above 0, an hour at most');
   if (cacheSeconds !== undefined && !(Number.isFinite(cacheSeconds) && cacheSeconds >= 0 && cacheSeconds <= 3_600)) throw new Error('credentialProxy: cacheSeconds is between 0 and 3600');
-  // R: the smaller of the two as 0.15 ran them (60 each unless set; a cache of 0 bounds nothing), so that no deployment's
-  // revocation bound grows on the way: `recheckSeconds: 600` alone keeps values 60 s, as before, and checks every 50.
+  // R: the smaller of the two (60 each unless set; a cache of 0 bounds nothing), so that no deployment's revocation
+  // bound grows on the upgrade: `recheckSeconds: 600` alone keeps values 60 s, as 0.15 did, and checks every 50.
   // One below R's floor has no R that keeps it, and raising it would loosen it: refused, with what to write.
   const short = [
     ...(cacheSeconds !== undefined && cacheSeconds > 0 && cacheSeconds < LEAST_REVOKED_WITHIN_SECONDS ? [`cacheSeconds: ${cacheSeconds}`] : []),
@@ -650,7 +650,7 @@ type Held = {
 type Proxy = Held & ProxyTimes & { editable: boolean };
 
 /**
- * This isolate's UI definitions (0.16, T186 PR C; docs/design/proxy-ui.md, sections 3 and 4): each item a vault answer
+ * This isolate's UI definitions (docs/design/proxy-ui.md, sections 3 and 4): each item a vault answer
  * brought, by its digest, and read as a code credential is (`resolve`), once; the digest each reading last answered,
  * and when (the copy, which only saves the item's bytes: CopyFromVault); and the values each caller's use opened, by
  * caller and the reading the vault took (`keptAt`), each kept with the item it was decided on, which a cache hit sends by
@@ -671,7 +671,7 @@ type UiItem = { definition: ProxyDefinition; resolved: Resolved | string | null 
 
 /**
  * What an item's copy weighs: its definition, and what the proxy reads of it (`resolve`), which holds 1.8 to 2.3 times
- * as much as the definition's own `weight` (Node 24, a one-rule route and one of 40 allow entries, W331 phase 2b).
+ * as much as the definition's own `weight` (Node 24, a one-rule route and one of 40 allow entries).
  */
 const itemWeight = (digest: string, item: UiItem) => weight(digest) + 3 * weight(item.definition);
 
@@ -725,11 +725,11 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   }
   const stable = proxy.credentials.get(place[0]!);
   // A raw sign, `POST /use/<a>/<b>` whose body is the message (octet-stream): no handle is ever looked for in that body,
-  // and `signRaw` refuses before a byte of it is read (reviews r1 and r2 of #572). A workload's session or binding is
+  // and `signRaw` refuses before a byte of it is read. A workload's session or binding is
   // the exception the URL makes for any POST there: `<a>`, a credential's name, makes it that credential's (below).
   const rawSign = raw.length === 2 && request.method === 'POST' && isRaw(request);
   // Whether a name may be a handle's UI route for this request: under `proxy.editable`, of a handle's request (no session, no
-  // service binding, whose calls `uiWorkloadForward` takes), and a name code lacks (R66).
+  // service binding, whose calls `uiWorkloadForward` takes), and a name code lacks.
   const uiServes = (name: string | undefined) => proxy.editable && coffre.useRoute !== undefined && !coffre.binding && sessionToken(request) === null
     && name !== undefined && CREDENTIAL_NAME.test(name) && !coded(proxy, name);
   // A workload's: `/use/<credential>/<path>` whenever `<credential>` is one, for the one environment it reaches, and
@@ -741,22 +741,22 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     if (used !== null) return used;
   }
   // A name code lacks, of a workload's request (a session's or a service binding's call): the environment's UI route,
-  // under `proxy.editable` (T186 PR C2b). `/use/<a>/<b>` stays the plan or compute for a workload, as before.
+  // under `proxy.editable`. `/use/<a>/<b>` stays the plan or compute for a workload.
   if (proxy.editable && coffre.useRoute !== undefined && stable === undefined && named === undefined && raw.length !== 2) {
     const used = await uiWorkloadForward(request, coffre, proxy, raw, place, url);
     if (used !== null) return used;
   }
-  // A name code lacks, of a handle's request: the environment's UI definitions, under `proxy.editable` (T186 PR C). Code wins
-  // a name it holds (R66): only a URL whose name code lacks gets here, its readings as section 6's table says. Never a
-  // service binding's call, which carries no handle, before any copy kept for a handle is looked at (review r2 of #467).
+  // A name code lacks, of a handle's request: the environment's UI definitions, under `proxy.editable`. Code wins
+  // a name it holds: only a URL whose name code lacks gets here, its readings as section 6's table says. Never a
+  // service binding's call, which carries no handle, before any copy kept for a handle is looked at.
   if (proxy.editable && coffre.useRoute !== undefined && stable === undefined && sessionToken(request) === null && !coffre.binding) {
     if (raw.length === 1 || (raw.length >= 3 && !coded(proxy, place[2]!))) return uiForward(request, coffre, proxy, raw, place, url, 'route');
     // `/use/<a>/<b>`, the plan or compute, and `/use/<a>/<b>/<code's name>/…`, code's credential, when the handle was
     // made for `<a>/<b>`; otherwise route `<a>` at `/<b>…` (section 6), the handle found outside the body or in it. A
     // made-for list this isolate keeps decides, no call made; else the route use reads both, the place itself and route
-    // `<a>`, in its one call (C2b4), and the place's answer, nothing used, falls through to what the place's URL serves.
-    // A raw sign's handle (`rawSign`) is looked for outside its body alone: its body is the message, never read for one
-    // (reviews r1 and r2 of #572), and an octet-stream POST to route `<a>` at `/<b>` still reaches it (Fable's review).
+    // `<a>`, in its one call, and the place's answer, nothing used, falls through to what the place's URL serves.
+    // A raw sign's handle (`rawSign`) is looked for outside its body alone: its body is the message, never read for one,
+    // and an octet-stream POST to route `<a>` at `/<b>` still reaches it.
     if (!coded(proxy, place[0]!)) {
       const handle = await uiHandle(request, url, !rawSign);
       if (handle instanceof Response) return handle;
@@ -800,8 +800,7 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     const second = first ?? (named === undefined ? null : await found(named, raw.slice(3)));
     if (second instanceof Response) return second;
     // Where code's credential takes no handle, a URL whose third segment may name the handle's environment's UI route:
-    // the handle wherever that route's item may take it, `x-openai-key` say, which the made-for list below then weighs
-    // (review r3 of #467).
+    // the handle wherever that route's item may take it, `x-openai-key` say, which the made-for list below then weighs.
     const third = place[2];
     const outside = second ?? HANDLE.exec(bearer(request) ?? '')?.[0] ?? (raw.length >= 3 && uiServes(third) ? await uiHandle(request, url) : null);
     if (outside instanceof Response) return outside;
@@ -823,9 +822,9 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     };
     // With no cache, and a URL whose third segment names nothing of the proxy's, so that it is the stable URL whatever
     // the handle was made for, unless `<a>/<b>` is that environment: its one key in the vault's one call, which finds
-    // the environment itself (T145). Anything else it serves not so, as below.
+    // the environment itself. Anything else it serves not so, as below.
     // The handle's environment named, its credential one code lacks: the environment's UI route, or none. Its body still
-    // to read: code's credential read a copy (reviews r3 and r4 of #467).
+    // to read: code's credential read a copy.
     const placed = () => (uiServes(third) ? uiForward(request, coffre, proxy, raw, place, url, 'route', handle) : noCredential(third!));
     const direct = proxy.cacheMs === 0 && coffre.useMadeFor !== undefined && stable.keys.length === 1
       && (raw.length === 1 || (third !== undefined && !proxy.credentials.has(third) && !proxy.signers.has(third) && !proxy.verifiers.has(third)));
@@ -837,7 +836,7 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     if (route instanceof Response) return route;
     if (route !== null) return forward(request, coffre, proxy, route, stable, raw.slice(1), url.search, peeked.get(stable));
     // `<a>/<b>` is the handle's environment, and `<a>` only happens to name code's credential: the third segment is the
-    // credential, code's (below) or the environment's UI route (review r2 of #467).
+    // credential, code's (below) or the environment's UI route.
     if (uiServes(third)) return uiForward(request, coffre, proxy, raw, place, url, 'route', handle);
   }
   if (raw.length === 2) {
@@ -858,7 +857,7 @@ function isRaw(request: Request): boolean {
   return (request.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase() === 'application/octet-stream';
 }
 
-/** Whether code defines `name`, of any kind: a name code holds is never a UI item's (R66). */
+/** Whether code defines `name`, of any kind: a name code holds is never a UI item's. */
 function coded(proxy: Proxy, name: string): boolean {
   return proxy.credentials.has(name) || proxy.signers.has(name) || proxy.verifiers.has(name) || proxy.tunnels.has(name);
 }
@@ -891,7 +890,7 @@ async function uiHandle(request: Request, url: URL, inBody = true): Promise<stri
  * handle sits where it takes its key (`sendAs`).
  */
 function handlesOutside(request: Request, url: URL): Set<string> {
-  // As sent and as decoded: `?key=coffre%5Fuse_…` is the handle `handleIn` reads from `searchParams` (review r7 of #467),
+  // As sent and as decoded: `?key=coffre%5Fuse_…` is the handle `handleIn` reads from `searchParams`,
   // and a segment is read decoded once, as `appSegment` reads it.
   const found = new Set<string>([...(url.search.match(HANDLES) ?? []), ...(url.pathname.match(HANDLES) ?? []), ...(bytesOf(url.pathname).match(HANDLES) ?? [])]);
   for (const [name, value] of url.searchParams) for (const handle of `${name}\n${value}`.match(HANDLES) ?? []) found.add(handle);
@@ -914,9 +913,9 @@ function handlesOutside(request: Request, url: URL): Set<string> {
 
 /**
  * The handles a body carries: its bytes as sent, and the body as the one rule kind its Content-Type lets read it
- * (`bodyKind`, as `fieldsIn` does) decodes it (review r7 of #467): a form's pairs (`client_secret=coffre%5Fuse_…`),
+ * (`bodyKind`, as `fieldsIn` does) decodes it: a form's pairs (`client_secret=coffre%5Fuse_…`),
  * or each JSON string with its escapes undone (`"coffre\u005fuse_…"`). Never the other kind's: a JSON note holding
- * `coffre%5Fuse_…` is text, which `handleIn` reads as text, not a second handle (review r8 of #467).
+ * `coffre%5Fuse_…` is text, which `handleIn` reads as text, not a second handle.
  */
 function handlesInBody(bytes: Uint8Array, kind: BodyRule['kind'] | null): Set<string> {
   const found = new Set<string>(LATIN1.decode(bytes).match(HANDLES) ?? []);
@@ -938,7 +937,7 @@ function handlesInBody(bytes: Uint8Array, kind: BodyRule['kind'] | null): Set<st
 }
 
 /**
- * A UI route's request, a handle's (T186 PR C; docs/design/proxy-ui.md, sections 3 and 6): the handle found by its
+ * A UI route's request, a handle's (docs/design/proxy-ui.md, sections 3 and 6): the handle found by its
  * shape outside the body (`handlesOutside`), else in the body (read from a copy, 64 KiB at most), before anything
  * else, as no definition is needed for it; then the route use, the vault's one call, which reads the URL both
  * ways and answers the values with the item they were decided on (SentAsDecided); or the values this caller's use kept
@@ -946,7 +945,7 @@ function handlesInBody(bytes: Uint8Array, kind: BodyRule['kind'] | null): Set<st
  * runs on that item, the target rebuilt from its upstream, and the handle must sit where it takes its key.
  *
  * The URL's place reading is `placeReading`'s: a route's (`'route'`, `/use/<a>/<b>/<route>/…`), none, or the place
- * itself (`'place'`, `/use/<a>/<b>` and code's credentials under it; C2b4), which the vault's one call may take: then
+ * itself (`'place'`, `/use/<a>/<b>` and code's credentials under it), which the vault's one call may take: then
  * null, nothing used, and the caller serves the URL as the place's.
  *
  *   Bo's handle, `GET /use/openai/models`, openai saved in market/dev's Proxy tab   the vault's call, then api.openai.com/v1/models
@@ -957,7 +956,7 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
 async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, raw: readonly string[], place: readonly string[], url: URL, placeReading: 'place', found: string): Promise<Response | null>;
 async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, raw: readonly string[], place: readonly string[], url: URL, placeReading: 'route' | 'place' | null, found?: string): Promise<Response | null> {
   // Only a reading whose name can be a UI route's: `/use/s3/bucket/report.csv` is `s3` at `/bucket/report.csv`, never a
-  // route `report.csv` at `s3/bucket`; and never a name code holds (R66).
+  // route `report.csv` at `s3/bucket`; and never a name code holds.
   const named = placeReading === 'route' && raw.length >= 3 && CREDENTIAL_NAME.test(place[2]!) && !coded(proxy, place[2]!) ? { path: `${place[0]}/${place[1]}`, route: place[2]! } : null;
   const itself = placeReading === 'place' ? `${place[0]}/${place[1]}` : null;
   const stable = CREDENTIAL_NAME.test(place[0]!) && !coded(proxy, place[0]!) ? place[0]! : null;
@@ -967,7 +966,7 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
   if (handle instanceof Response) return handle;
   if (handle === null) return failure(401, `send the handle \`coffre run\` gave your app where ${named?.route ?? stable} takes its key, or as x-coffre-handle`);
   // An upstream an Owner typed goes out through the runtime's public fetch, which on Node dials no private address
-  // whatever the name resolves to (section 5; review r2 of #467); `insecureUpstreams`, for local fakes, through the
+  // whatever the name resolves to (section 5); `insecureUpstreams`, for local fakes, through the
   // global one. A runtime without it sends none, asked before the use, so no use is logged for nothing.
   let through: Egress | undefined;
   if (!proxy.insecure) {
@@ -976,7 +975,7 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
   }
   const now = Date.now();
   // When the values may be sent by at the latest: kept, until they lapse; decided now, within the use's deadline, as
-  // the vault decided them for a request sent then. A body that comes later is sent with none (P1, review r1 of #467).
+  // the vault decided them for a request sent then. A body that comes later is sent with none.
   let sendBy: number;
   let kept = keptFor(proxy, handle, named, stable, now, itself);
   if (kept === undefined) {
@@ -987,11 +986,11 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
     // copy of the reading the vault would take: the place reading where the handle's kept made-for list names `<a>/<b>`,
     // else the stable one (section 6); none when that list is not kept, as another handle's place copy says nothing of
     // this one's URL, nor of whether it is a handle at all: only this handle's own copy, or a place copy its checked
-    // made-for list chose, refuses before the vault has seen it (review r2 of #467).
+    // made-for list chose, refuses before the vault has seen it.
     const known = proxy.handles.get(handle);
     const paths = known !== undefined && known.until > now ? known.paths : undefined;
     // The place itself asks which reading the URL is: no copy of either refuses its URL, the plan's or compute's when it
-    // is the place's, whatever list is kept (Fable's review of #486).
+    // is the place's, whatever list is kept.
     const reading = itself === 'place' ? null : paths === undefined
       ? (named === null && itself === null ? 1 : null)
       : named !== null && (paths ?? []).includes(named.path) ? 0 : stable !== null ? 1 : null;
@@ -1017,7 +1016,7 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
       : await coffre.useRouteOrPlace!(handle, { place: itself, stable: stable!, digests, logged: { ui: true }, refuses });
     if (used.reading === 'place') {
       // The place's, kept as a made-for list keeps it, for `cacheMs` and never past the handle's end: the next such
-      // URL serves the place's at once, and a copy's refusal there stands for this handle only while it stands (Sol r1).
+      // URL serves the place's at once, and a copy's refusal there stands for this handle only while it stands.
       if (proxy.cacheMs > 0) proxy.ui.places.set(`${handle}\n${itself}`, Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)));
       return null;
     }
@@ -1051,7 +1050,7 @@ function unrouted(definition: ProxyDefinition): string | null {
 
 /**
  * Where a handle's kept values are, by the reading the vault took, never by the URL: the place reading's by place and
- * route, the stable one's by route, so every path under a route finds them (review r4 of #467).
+ * route, the stable one's by route, so every path under a route finds them.
  */
 function keptAt(handle: string, reading: { named: { path: string; route: string } } | { stable: string }): string {
   return 'named' in reading ? `${handle}\nn\n${reading.named.path}/${reading.named.route}` : `${handle}\ns\n${reading.stable}`;
@@ -1079,7 +1078,7 @@ function keptFor(proxy: Proxy, handle: string, named: { path: string; route: str
 }
 
 /**
- * Whether this handle's route use found, within `cacheMs`, that `at` names the place itself (C2b4): the plan, compute
+ * Whether this handle's route use found, within `cacheMs`, that `at` names the place itself: the plan, compute
  * or code's credential there, which then decide everything themselves. It only says which URL this is, as a kept
  * made-for list does: nothing is sent on it.
  */
@@ -1110,8 +1109,8 @@ function itemOf(proxy: Proxy, item: DecidedItem, copy: { digest: string; definit
 
 /**
  * A UI route's definition as the proxy reads a code credential (`resolve`), once per digest: its rules, allow list and
- * placeholder as code would write them. An egress is a binding only code declares, none yet (PR C keeps them for
- * later): a route naming one answers 503, never a direct fetch in its place.
+ * placeholder as code would write them. An egress is a binding only code declares, and UI routes take none
+ * yet: a route naming one answers 503, never a direct fetch in its place.
  */
 function uiCredential(proxy: Proxy, digest: string, definition: ProxyRoute): Resolved | string {
   const held = proxy.ui.items.get(digest);
@@ -1191,8 +1190,8 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   // The place's UI items, before the read that picks what the app is given: their keys are the handle too. Asked of the
   // environment; the read below says whether it reads the person's personal config instead (`generate`'s `@me`), which
   // serves none: decided on the read's own answer, so no config made between the two calls gets the base environment's
-  // routes (review r5 of #467). On each attempt's answer: a read the vault retries (`AccessChanged`) may resolve the base
-  // environment after a personal config, deleted between the two, and its items are the base's again (review r6).
+  // routes. On each attempt's answer: a read the vault retries (`AccessChanged`) may resolve the base
+  // environment after a personal config, deleted between the two, and its items are the base's again.
   const items = await uiPlanItems(coffre, proxy, handle, path);
   const none = { routes: [], tunnels: [], held: new Set<string>() };
   let ui = items;
@@ -1241,15 +1240,14 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   const covered = new Set<string>();
   const using = covering(held.keys);
   // Two that read one key with different placeholders, as startup refuses of code's alone: the app holds one value for
-  // it, which one of them would refuse. Code's and the UI's routes together, as this environment serves them (review r2
-  // of #467).
+  // it, which one of them would refuse. Code's and the UI's routes together, as this environment serves them.
   for (const one of using) {
     const other = using.find((two) => two !== one && two.keys.some((key) => one.keys.includes(key)) && JSON.stringify(two.placeholder) !== JSON.stringify(one.placeholder));
     if (other !== undefined) {
       throw new CoffreError(409, 'conflict', `${one.name} and ${other.name} read ${one.keys.find((key) => other.keys.includes(key))} with different placeholders in ${held.environment.path}, and the app holds one value for it: give them the same placeholder, in the Proxy tab or the deployment's code`);
     }
     // And a signer's or verifier's key, whose value is the handle as it is (`checkSigner`'s rule for code's): a shaped
-    // route reading it would be given the bare handle below, and refuse it (review r3 of #467).
+    // route reading it would be given the bare handle below, and refuse it.
     const signer = one.placeholder === undefined ? undefined : signers.find(([, two]) => one.keys.includes(two.key));
     if (signer !== undefined) {
       throw new CoffreError(409, 'conflict', `${one.name} and ${signer[0]} read ${signer[1].key} with different placeholders in ${held.environment.path}, and the app holds one value for it: a signer's is the handle as it is, so drop ${one.name}'s placeholder`);
@@ -1302,7 +1300,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     delete env[tunnel.key];
     covered.add(tunnel.key);
   }
-  // And the place's databases saved in the Proxy tab, dialled as code's (C2b3).
+  // And the place's databases saved in the Proxy tab, dialled as code's.
   for (const tunnel of ui.tunnels) {
     if (!held.keys.includes(tunnel.key)) continue;
     dialled[tunnel.name] = { key: tunnel.key, url: `${coffre.publicUrl.replace(/^http/, 'ws')}/use/${path}/${tunnel.name}` };
@@ -1318,7 +1316,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   const generates = (key: string) => making === 'all' || (making?.includes(key) ?? false);
   for (const row of making === undefined ? [] : resolved) {
     if (covered.has(row.key) || row.recipe === null || row.versionId === null || recipeProblem(row.recipe) !== null || !generates(row.key)) continue;
-    // The person's own value, made sensitive: theirs, which the app goes without, never made again over it (R18).
+    // The person's own value, made sensitive: theirs, which the app goes without, never made again over it.
     if (personal && !row.inherited && row.sensitive) continue;
     generate[row.key] = { recipe: row.recipe, replaces: row.versionId, sensitivity: 'secret' };
   }
@@ -1333,10 +1331,10 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
 }
 
 /**
- * The UI items a handle's plan shapes (T186 PR C; docs/design/proxy-ui.md, section 6, "The plan shapes UI items as it
+ * The UI items a handle's plan shapes (docs/design/proxy-ui.md, section 6, "The plan shapes UI items as it
  * shapes code's"): one `proxyItem` call with no name, as the handle, which answers every item the place serves, fork
  * chain included, each checked as a use checks it. Its routes, read as code's (`resolve`), join the covering set, and its
- * databases the plan's tunnels (C2b3); every other key an item sends (a signer's or verifier's, or a route's this proxy
+ * databases the plan's tunnels; every other key an item sends (a signer's or verifier's, or a route's this proxy
  * cannot read) is the handle too, so that no UI item's value reaches the app. A name code holds is
  * left out, as no use reaches it. Nothing here is kept as a copy to send by: only a use's answer is (`CopyFromVault`).
  * Fails closed: a level a writer changed answers 503, never a plan shaped from code alone, which would hand the app the
@@ -1380,7 +1378,7 @@ async function uiPlanItems(coffre: PluginContext, proxy: Proxy, handle: string, 
  * coffre, and its tunnels, each with the key whose URL the local listener
  * stands in for, as a handle's plan has them; and every key it holds but
  * does not read, `useOnly`. No placeholder: its requests carry its proof,
- * never a value in a slot. Its environment's UI routes and databases too (T186 PR C2b):
+ * never a value in a slot. Its environment's UI routes and databases too:
  * one `proxyItem` call as the workload, failing closed as a handle's plan
  * does (a level a writer changed: 503, no plan).
  */
@@ -1429,7 +1427,7 @@ async function uiItemsOf(coffre: PluginContext, proxy: Proxy, caller: WorkloadUs
  * code chose those claims. A UI route's (`ui`, the plan read's rows) are opened
  * for the caller alone, purpose `expose` (docs/design/proxy-ui.md, section 3,
  * "The plan's placeholder shaping is not a route use"): an editor's choice of
- * claims shows the caller nothing they may not read (review r5 of #467).
+ * claims shows the caller nothing they may not read.
  *
  *   code's jwt() on a sensitive DFNS_AUTH_TOKEN, a Developer's plan    its claims, as ever
  *   a UI route's, the same key                                         403, nothing of it opened
@@ -1497,7 +1495,7 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   const name = place[2]!;
   const tunnel = proxy.tunnels.get(name);
   const path = `${place[0]}/${place[1]}`;
-  // A name code lacks, of any kind (R66): the environment's database saved in the Proxy tab (C2b3).
+  // A name code lacks, of any kind: the environment's database saved in the Proxy tab.
   if (tunnel === undefined && proxy.editable && coffre.useRoute !== undefined && CREDENTIAL_NAME.test(name) && !coded(proxy, name)) return uiTunnel(request, coffre, proxy, path, name);
   if (tunnel === undefined) return failure(404, `this instance has no tunnel ${JSON.stringify(name)}: its deployment's credentialProxy names them`);
   if (!serves(tunnel, path)) return notServed(name, path);
@@ -1582,7 +1580,7 @@ async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Pr
 type Dialling = { who: User; at: string; reading: string; asked: Pick<RouteAsked, 'named' | 'stable'> };
 
 /**
- * A tunnel to a database saved in the Proxy tab, a name code lacks (T186 PR C2b3; docs/design/proxy-ui.md, section 3,
+ * A tunnel to a database saved in the Proxy tab, a name code lacks (docs/design/proxy-ui.md, section 3,
  * "Tunnels"; formal/Tunnel.tla). The open is a route use of the item by name (`useRoute`), decided for the caller and
  * for the item's editor, and dials the decided item's hosts, never a copy's; the session keeps that item's digest. Each
  * recheck is the same use, which passes only if the item the vault decides on is the one dialled (`DigestRecheck`):
@@ -1619,7 +1617,7 @@ async function uiTunnel(request: Request, coffre: PluginContext, proxy: Proxy, p
         handle: null,
         admitted,
       });
-      // Its refusals as its thrown ones: with the nonce the next proof signs (review r1 of #485).
+      // Its refusals as its thrown ones: with the nonce the next proof signs.
       return opened instanceof Response ? nonced(opened, caller) : opened;
     } catch (error) {
       if (!(error instanceof CoffreError)) throw error;
@@ -1654,7 +1652,7 @@ function undialled(definition: ProxyDefinition): CoffreError | null {
  * A UI tunnel's open once its caller is known: the use, the decided item's database, and its session, checked by that
  * item's digest, and dialled only to public addresses (`publicConnect`; `insecureUpstreams` aside, for a local database).
  * The digest it tells the vault it holds is a copy it keeps through the use, so the answer that leaves the definition
- * out finds it however the isolate's copies turned over meanwhile; one it lacks, it never claims (review r1 of #485).
+ * out finds it however the isolate's copies turned over meanwhile; one it lacks, it never claims.
  */
 async function uiDialled(coffre: PluginContext, proxy: Proxy, dialling: Dialling, name: string, checked: UiChecks): Promise<Response | SocketSession> {
   const { who, at, reading, asked } = dialling;
@@ -1678,13 +1676,13 @@ async function uiDialled(coffre: PluginContext, proxy: Proxy, dialling: Dialling
   const unfit = undialled(definition);
   if (unfit !== null) return answered(unfit);
   const item = definition as ProxyTunnel;
-  // Own values only: a key named `toString` reads no prototype (review r3 of #480).
+  // Own values only: a key named `toString` reads no prototype.
   if (!Object.hasOwn(used.values, item.key)) return failure(409, `${used.environment.path} holds no ${item.key}, which ${name} dials`);
   const tunnel: Tunnel = { kind: 'postgres', key: item.key, hosts: item.hosts };
   const db = dialled(proxy, used.environment.path, name, tunnel, used.values[item.key]!);
   if (db instanceof Response) return db;
   // The admission is the group's first check, from when it started: one that answered after its whole bound lets in
-  // nothing, as an edit since may have narrowed the item (`AdmitClock`; review r1 of #485).
+  // nothing, as an edit since may have narrowed the item (`AdmitClock`).
   if (Date.now() - checked.admitted >= checked.bound) return failure(503, `${name}: its use answered too late to dial by; ask again`, 'late', '1');
   const digest = used.item.digest;
   // By the item dialled: a session dialled by a newer item never joins a group whose checks hold it to an older one.
@@ -1762,7 +1760,7 @@ type Check = { every: number; deadline: number; arms: boolean; now: boolean; run
 function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bound: number; until: number | null; admitted?: number }, end: () => void): () => void {
   let group = proxy.groups.get(key);
   if (group === undefined) {
-    // A UI tunnel's clock starts at its admission's start (`AdmitClock`). A code tunnel's starts here, as before C2b3:
+    // A UI tunnel's clock starts at its admission's start (`AdmitClock`). A code tunnel's starts here:
     // its admission may take as long as a burst of a pool's connections makes it, and is let in all the same.
     const admitted = tunnel.admitted ?? Date.now();
     const made: Group = { ends: new Set(), stands: true, timers: [], watchdog: undefined, expiry: undefined };
@@ -1798,7 +1796,7 @@ function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bo
         made.timers.push(setInterval(() => void recheck(), check.every));
       } else {
         // Else its admission was its first check, which started at `admitted`, and may have answered late: the next is
-        // an interval after that start, at once if that is past, never an interval after the group (review r1 of #485).
+        // an interval after that start, at once if that is past, never an interval after the group.
         made.timers.push(setTimeout(() => {
           void recheck();
           // clearInterval clears either kind of timer, on Node as on Workers.
@@ -1831,8 +1829,7 @@ function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bo
  * presigned URL, `{ sign: {…} }` for a signature, or `{ verify: {…} }`
  * for whether a signature is a verifier's. A handle's holder sends it as a
  * bearer token; a workload's proof signs the body, so nobody on the way
- * can change what is signed or checked. PR 7 adds `mint` beside them,
- * naming the credential it uses, as these do.
+ * can change what is signed or checked.
  */
 async function compute(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null): Promise<Response> {
   // A message sent raw, the body itself, which is never read whole: an hmac() signer's (`signRaw`).
@@ -1858,7 +1855,7 @@ async function compute(request: Request, coffre: PluginContext, proxy: Proxy, pa
   }
   const given = asked[operation] ?? {};
   const name = typeof given.credential === 'string' ? given.credential : '';
-  // A name code lacks, of any kind (R66): the environment's item saved in the Proxy tab (C2b2).
+  // A name code lacks, of any kind: the environment's item saved in the Proxy tab.
   if (ui && CREDENTIAL_NAME.test(name) && !coded(proxy, name)) return uiCompute(request, coffre, proxy, path, operation, name, given, raw);
   // A verifier verifies, and an HMAC signer too, which could check a signature by making it: a private key's is no HMAC.
   const signer = operation === 'sign' ? proxy.signers.get(name) : operation === 'verify' ? (proxy.verifiers.get(name) ?? proxy.signers.get(name)) : undefined;
@@ -1896,7 +1893,7 @@ type Computing = {
 };
 
 /**
- * A sign, verify or presign of an item saved in the Proxy tab, a name code lacks (T186 PR C2b2; docs/design/proxy-ui.md,
+ * A sign, verify or presign of an item saved in the Proxy tab, a name code lacks (docs/design/proxy-ui.md,
  * section 3, "Signers and verifiers" and "Presign"). One route use decides the item and its keys, for the caller and
  * for the item's editor, as a route's are; then everything the request asks is checked again on the decided item, and
  * the signature, the check or the URL is made by it alone, never by this isolate's copy (`SentAsDecided`). A copy's
@@ -1927,8 +1924,7 @@ async function uiCompute(request: Request, coffre: PluginContext, proxy: Proxy, 
   const handle = bearer(request);
   if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
   // The place reading's copy, which any handle's use of the place brings: its refusals stand only for a handle whose
-  // checked made-for list names the place, or whose route use found the URL the place's (C2b4), never a stranger's
-  // token (review r2 of #467).
+  // checked made-for list names the place, or whose route use found the URL the place's, never a stranger's token.
   const now = Date.now();
   const reading = `n\n${path}\n${name}`;
   const last = proxy.ui.last.get(reading);
@@ -2024,7 +2020,7 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
   // The entry records what was asked of the item the vault decided on: a private key's sign the message's SHA-256, a
   // presign the decided upstream's host, never the copy's (section 3, "Presign"). Asked once the vault has decided, so a
   // message is hashed only for a caller it knows, and only when the decided item signs with a private key, whose own
-  // check (`refuses`) has held it to 64 KiB by then: never 1 MiB for any bearer (Fable's review of #480).
+  // check (`refuses`) has held it to 64 KiB by then: never 1 MiB for any bearer.
   const logged = async (decided: DecidedItem | null): Promise<Record<string, unknown>> => {
     const definition = decided === null ? null : itemOf(proxy, decided);
     if (asked !== null) {
@@ -2046,7 +2042,7 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
   const definition = itemOf(proxy, used.item);
   if (definition === null) return failure(503, `${used.item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
   // What is made with values decided now answers within the use's window, as a route's request is sent in it
-  // (`WithinWindow`): a signature made later, a slow key's or a stalled isolate's, answers 503 `late` (review r1 of #480).
+  // (`WithinWindow`): a signature made later, a slow key's or a stalled isolate's, answers 503 `late`.
   const answerBy = Math.min(now + proxy.sendMs, Date.parse(used.expiresAt));
   // Refused before its use opened anything (`refuses`): the item takes the request.
   if (definition.kind === 'route') {
@@ -2064,7 +2060,7 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
     return presigned(resolved.sigv4!, asked!, aimed.target, used.values, used.expiresAt, who, name, answerBy);
   }
   if (definition.kind === 'signer' && definition.signer.kind === 'private-key') {
-    // Own values only: a key named `toString` reads no prototype (review r3 of #480).
+    // Own values only: a key named `toString` reads no prototype.
     const pem = Object.hasOwn(used.values, definition.signer.key) ? used.values[definition.signer.key] : undefined;
     if (pem === undefined) return failure(409, `${used.environment.path} holds no ${definition.signer.key}, which ${name} signs with`);
     try {
@@ -2145,7 +2141,7 @@ async function sign(coffre: PluginContext, proxy: Proxy, path: string, who: User
 async function verify(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, verifier: Hmac, asked: { message?: unknown; signature?: unknown }): Promise<Response> {
   const message = messageOf(asked.message);
   if (message === null) return failure(400, 'verify a message given as base64url: the body as it came, byte for byte');
-  // A signer's maxBytes may take a raw message; a message to verify is JSON's, 1 MiB at most (Fable's review of #572).
+  // A signer's maxBytes may take a raw message; a message to verify is JSON's, 1 MiB at most.
   const most = Math.min(longest(verifier), MAX_MESSAGE_BYTES);
   if (message.byteLength > most) return failure(413, `${name} checks a message of ${sized(most)} at most${most < MAX_MESSAGE_BYTES ? ": its hmac()'s maxBytes takes a longer one" : ''}`);
   if (typeof asked.signature !== 'string') return failure(400, 'verify a signature given as a string, as its header carried it');
@@ -2225,7 +2221,7 @@ async function fed(body: ReadableStream<Uint8Array> | null, length: number, dige
   const parts = partsOf(body);
   for (;;) {
     let read: ReadableStreamReadResult<Uint8Array>;
-    // Only the read is the caller's to break: a throw past it is coffre's, a 500 (Fable's review of #572).
+    // Only the read is the caller's to break: a throw past it is coffre's, a 500.
     try {
       read = await parts.read();
     } catch {
@@ -2310,7 +2306,7 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   const inject = credential.sigv4!;
   const method = given.method ?? 'GET';
   if (method !== 'GET' && method !== 'HEAD') return failure(400, 'a presigned URL is for GET or HEAD: an upload goes through the proxy');
-  // Legacy `methods` answer before the other arguments are read, as before 0.16: `methods: ['POST']` is a 405 to any presign,
+  // Legacy `methods` answer before the other arguments are read: `methods: ['POST']` is a 405 to any presign,
   // a malformed one included. `allow` never sets them (the two do not mix), and its methods answer with its paths, below.
   if (credential.methods !== undefined && !credential.methods.some((taken) => taken.toUpperCase() === method)) {
     return failure(405, credential.methods.length === 0 ? `${credential.name} takes no method` : `${credential.name} takes ${credential.methods.map((taken) => taken.toUpperCase()).join(', ')}`);
@@ -2371,10 +2367,10 @@ function presignTarget(credential: Resolved, asked: PresignAsked, token: string 
   const refused = allowed(credential, asked.method, relative, credential.allowed === null ? [] : segmentsOf(credential.allowed, relative));
   if (refused !== null) return refused;
   // A URL is for sharing: neither the handle nor the session's token goes in it, its path or its query, as it is or
-  // decoded however often a server behind may decode it (review r1 of #480: `query: { trace: <token> }`).
+  // decoded however often a server behind may decode it (`query: { trace: <token> }`).
   const readings = decodings(target.href);
   // A URL still decoding after `climbs`'s 8 passes may hold anything a ninth would show: refused, as `climbs` refuses
-  // such a segment (review r2 of #480: a token's `_` encoded 8 times over, which `searchParams` encodes a ninth).
+  // such a segment (a token's `_` encoded 8 times over, which `searchParams` encodes a ninth).
   if (readings === null) return failure(400, 'the URL is encoded too many times over to check');
   if (readings.some((text) => HANDLE.test(text))) return failure(400, 'the handle goes in no presigned URL');
   if (token !== null && readings.some((text) => text.includes(token))) return failure(400, 'the session token goes in no presigned URL');
@@ -2499,11 +2495,11 @@ function segmentsOf(entries: readonly AllowEntry[], relative: string): string[] 
 }
 
 /**
- * The headers an upstream may take a request's method from instead of its own (T189), lowercase: Google's and
+ * The headers an upstream may take a request's method from instead of its own, lowercase: Google's and
  * ASP.NET's `X-HTTP-Method-Override`, OData's `X-HTTP-Method`, and `X-Method-Override`; with any character but a
  * letter or a digit between the words, as a CGI-style server reads a name, each the `_` of an `HTTP_` variable. Rack
  * and PHP read `X_HTTP_METHOD_OVERRIDE`, and PHP `X.HTTP.Method.Override` too, as `HTTP_X_HTTP_METHOD_OVERRIDE`, which
- * Symfony takes for the dashed one (review r3 of #526). One test, allocating nothing: every header of every request
+ * Symfony takes for the dashed one. One test, allocating nothing: every header of every request
  * passes it.
  */
 const OVERRIDE_HEADER = /^x[^a-z0-9](?:http[^a-z0-9]method(?:[^a-z0-9]override)?|method[^a-z0-9]override)$/;
@@ -2538,7 +2534,7 @@ function namesMethod(name: string): boolean {
 
 /**
  * A query's name or value as frameworks decode one: as a form's, `+` a space and `%XX` a byte; and where it holds a
- * `%uXXXX`, as ASP.NET's decoder reads that too, one UTF-16 unit (`%u0058` an `X`, review r3 of #526), in the same pass.
+ * `%uXXXX`, as ASP.NET's decoder reads that too, one UTF-16 unit (`%u0058` an `X`), in the same pass.
  */
 function readingsOf(part: string): string[] {
   if (!/[%+]/.test(part)) return [part];
@@ -2567,14 +2563,14 @@ function methodPairs(text: string): string[] {
 
 /**
  * A request whose method override asks for a method its credential's allow list, or its narrowed session's `methods`,
- * does not take on its path, refused (T189): many upstreams act on a POST that says `X-HTTP-Method-Override: DELETE`,
+ * does not take on its path, refused: many upstreams act on a POST that says `X-HTTP-Method-Override: DELETE`,
  * or `?_method=DELETE`, as on a DELETE, which the list refuses. Each value of an override header counts (each of a
  * list's, as Express's `method-override` takes the first of one), and each of a `_method` query parameter. An override
  * the list takes too goes on as it came, Google's `PATCH` through a POST say: what coffre lets through is the same
  * either way. Read from what goes upstream, `headers` (`outbound`): a header a workload's proof does not sign never
  * gets there. Nothing is looked for where the list takes any method on the path and no session limits methods.
  *
- * A body is not read for one (D179): a `_method` field of a POST's form or multipart body, which Rails, Laravel and
+ * A body is not read for one: a `_method` field of a POST's form or multipart body, which Rails, Laravel and
  * Spring honour, goes on unchecked, as `docs/design/credential-proxy.md` says.
  */
 function overridden(credential: Resolved, aimed: Aim, headers: Headers, session: { constraints: Constraints | null; place: string } | null = null): Response | null {
@@ -2591,8 +2587,8 @@ function overridden(credential: Resolved, aimed: Aim, headers: Headers, session:
   for (const value of methodPairs(aimed.target.search.slice(1))) if (value.trim() !== '') asked.push({ method: value, via: 'a method query parameter' });
   for (const { method: raw, via } of asked) {
     // Every override, wherever it is written, counts both ways an upstream may read it: uppercased, as Express, Rack,
-    // Laravel and Symfony do, and as it came, as ASP.NET Core, ASP.NET MVC, ServiceStack and Hono do (`pAtCh`, reviews
-    // r4 to r6 of #526), held as the request's own method would be (`fetchMethod`): a list or session that takes
+    // Laravel and Symfony do, and as it came, as ASP.NET Core, ASP.NET MVC, ServiceStack and Hono do (`pAtCh`),
+    // held as the request's own method would be (`fetchMethod`): a list or session that takes
     // `PATCH` takes no `pAtCh`, nor `patch`. No reading is left to which framework reads which place.
     const value = raw.trim();
     const readings = new Set([value.replace(/[a-z]/g, (char) => char.toUpperCase())]);
@@ -2690,11 +2686,11 @@ type MadeFor = { unless: readonly string[]; routed: () => Promise<string | Respo
 
 async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string | MadeFor, credential: Resolved, rest: string[], search: string, peeked?: Fillable): Promise<Response> {
   // The stable URL's environment, as `routed` finds it, once: and its refusal before any of the request's own, as when
-  // the route was found first (review r2 of #412).
+  // the route was found first.
   let routing: Promise<string | Response> | undefined;
   const routed = (made: MadeFor) => (routing ??= made.routed());
   // The body as this credential reads it: under the stable URL, from a copy, so that the request is whole for another
-  // reading of the URL, whatever this one made of its body, a refusal's included (review r4 of #467). A streamed body
+  // reading of the URL, whatever this one made of its body, a refusal's included. A streamed body
   // is read from neither: `send` streams the request's own.
   const body = <T>(reading: (from: Request) => Promise<T>): Promise<T> => (typeof path === 'string' ? reading(request) : fromCopy(request, reading));
   const refuse = async (response: Response): Promise<Response> => {
@@ -2702,7 +2698,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     const route = await routed(path);
     return route instanceof Response ? route : response;
   };
-  // The body, read: a read that throws (a stream that breaks) after the route's refusal, if it has one (review r3).
+  // The body, read: a read that throws (a stream that breaks) after the route's refusal, if it has one.
   const read = async <T>(reading: () => Promise<T>): Promise<T | Response> => {
     try {
       return await reading();
@@ -2793,7 +2789,7 @@ function backOf(credential: Resolved, target: URL, handle: string): [string, str
 }
 
 /**
- * A UI route's request sent, by the item its values were decided on (T186 PR C): every check a code credential's
+ * A UI route's request sent, by the item its values were decided on: every check a code credential's
  * request takes, on that item (its upstream, allow list, body rules), and the handle the use was made on found where
  * the item takes its key, else nothing goes (a copy that let the request through only provisionally: `moved`).
  */
@@ -2939,7 +2935,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
 }
 
 /**
- * A UI route's request by a workload (T186 PR C2b; docs/design/proxy-ui.md, section 3, "Workloads"), or null when it
+ * A UI route's request by a workload (docs/design/proxy-ui.md, section 3, "Workloads"), or null when it
  * is no workload's: a key-bound session's, or a Cloudflare service binding's call, at the environment the workload's
  * statement checks. The URL is read as the workload's client writes it (`WorkloadAt.or`): `/use/<route>/…` at the one
  * environment it reaches, `/use/<project>/<environment>/<route>/…` when it reaches several, or that one is
@@ -3015,7 +3011,7 @@ async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy:
     if (kept === undefined) {
       // No values kept: the copy's refusals before any use, standing when it is fresh (provisional otherwise: the use's
       // answer decides). Kept values answer to their own item alone, never to a newer copy another session's use
-      // brought, which would hold the request to both versions' rules at once (P2, review r1 of #477).
+      // brought, which would hold the request to both versions' rules at once.
       if (found !== null && found.fresh) {
         if (found.definition.kind !== 'route') return failure(404, unrouted(found.definition)!);
         const read = uiCredential(proxy, found.digest, found.definition);
@@ -3104,11 +3100,11 @@ type ItemCopy = { digest: string; definition: ProxyDefinition; fresh: boolean };
 type ItemCounted = { counts: PluginCounts; copy: () => ItemCopy | CoffreError | null; refresh: () => (() => Promise<void>) | null };
 
 /**
- * The counts of a workload's request to a UI item (C2b), and the copy they were made from: this isolate's at the
+ * The counts of a workload's request to a UI item, and the copy they were made from: this isolate's at the
  * workload's place, or, on a cold isolate, the vault's (`proxyItem`, asked as the workload), whose refusal is answered
  * after the gate (`copy`). The request counts against the copy's limit whatever the item's kind and whatever it asks:
  * values kept for this session may still serve it after an Owner saved another kind under the name, which a limit taken
- * only from a kind that takes the request would leave uncounted (review r2 of #480: a kept HMAC signer's signs, under a
+ * only from a kind that takes the request would leave uncounted (a kept HMAC signer's signs, under a
  * verifier with the same limit). `refresh`, when a kept copy made the counts, asks the vault for the item again
  * (`limitRefused`).
  */
@@ -3190,7 +3186,7 @@ type Sending = Aim & Carried & {
   /**
    * When the values decided for the request may last go out (epoch ms), a code credential's as a UI route's: checked as
    * the fetch starts, after the body came and every signature was made, so a request that took longer sends none
-   * (review r1 and r3 of #467; docs/design/config.md, section 1, `proxy.revokedWithinSeconds`).
+   * (docs/design/config.md, section 1, `proxy.revokedWithinSeconds`).
    */
   sendBy: number;
 };
@@ -3339,7 +3335,7 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
       const path = swap === null ? to.pathname.slice(under.length) : swappedBack(to.pathname.slice(under.length), swap);
       // The query as the upstream wrote it, `?` to `#`, where a URL's parser finds it too, and redacted so, before
       // anything reads it: the parser's own copy is encoded its way, `'` as `%27`, and `%41%42'`, a key, would be
-      // `%41%42%27`, a form no list names, nor its decoding, `AB'` (review r5 of #483). A Location with none keeps the
+      // `%41%42%27`, a form no list names, nor its decoding, `AB'`. A Location with none keeps the
       // app's own, which a relative `#top` or `` inherits from it.
       const written = /^[^#]*?(\?[^#]*)/.exec(raw)?.[1];
       // Its spaces `%20`, as the parser writes them: one left last when the fragment goes, `?cursor=abc #top`'s, a
@@ -3354,9 +3350,9 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
     // Read as the app's HTTP client reads it, it holds no value either: a form no list above names (`%3a` for `%3A`,
     // `%41` for `A`), or one the path's parsing made (`%41%42"` as `%41%42%22`), goes nowhere. Each value, and each
     // echo of it, read the same way: a parse only encodes, so whatever it encoded the same decoding undoes, and an
-    // echo's backslashes are the `/` a parse made of them, Go's `foo\u003cbar` `foo/u003cbar` (review r6 of #483).
+    // echo's backslashes are the `/` a parse made of them, Go's `foo\u003cbar` `foo/u003cbar`.
     // Whether a form is long enough to mask is decided as it is written, before reading shortens it: `%41%42%43"`, a
-    // key, reads `ABC"`, too short on its own, yet the key's (review r7 of #483).
+    // key, reads `ABC"`, too short on its own, yet the key's.
     type Form = [form: string, written: number];
     const read = (forms: Form[]): Form[] => forms.flatMap(([form, written]) => [[form, written], [readAsURL(form), written]]);
     const echoes = read(read(known.map((value) => [value, value.length])).flatMap(([form, written]) => echoed(form).map((echo): Form => [echo, Math.max(written, echo.length)])));
@@ -3377,7 +3373,7 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
 /**
  * A redirect's query with each query rule's parameter the app's placeholder, in place of the first it holds, the others
  * dropped, or at its end, as `searchParams.set` would, and every other pair the bytes the upstream wrote. Never through
- * `searchParams`, which writes every pair again, decoded and encoded its own way (review r4 of #483): `echo=%41%42…`,
+ * `searchParams`, which writes every pair again, decoded and encoded its own way: `echo=%41%42…`,
  * a key's value as it is, which the redactor masks, would be `echo=AB…`, which it does not know.
  */
 function queryBack(search: string, back: readonly [string, string][]): string {
@@ -3901,7 +3897,7 @@ function jsonFields(bytes: Uint8Array, wanted: readonly string[]): Fields | stri
  * Each string of a JSON document, in order, as written and where it starts: a quote outside a string opens one, a
  * backslash takes the character after it, and a string that never closes ends the scan. Each character is read once,
  * so 64 KiB of escaped quotes that never close (`"\"\"\"…`) cost their length; the regex this replaced, retried
- * from each quote, cost their square, seconds of CPU before any check (review r8 of #467).
+ * from each quote, cost their square, seconds of CPU before any check.
  */
 function* jsonStrings(text: string): Generator<{ index: number; raw: string }> {
   for (let at = text.indexOf('"'); at !== -1; ) {
@@ -4254,7 +4250,7 @@ function allowList(name: string, credential: Credential): readonly AllowEntry[] 
   const methods = (given: readonly string[] | undefined, legacy: boolean): ReadonlySet<string> | null => {
     if (given === undefined) return null;
     if (!Array.isArray(given) || given.some((method) => typeof method !== 'string' || !/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(method))) throw new Error(`credentialProxy: ${name}'s methods are a list of methods, ['GET', 'POST']`);
-    // `allow`'s none is any, as the Proxy tab's; `methods: []`, as before 0.16, takes none.
+    // `allow`'s none is any, as the Proxy tab's; legacy `methods: []` takes none.
     return given.length === 0 && !legacy ? null : new Set(given.map((method) => method.toUpperCase()));
   };
   const path = (given: string, from: 'legacy' | 'code') => {
@@ -4279,10 +4275,10 @@ function allowList(name: string, credential: Credential): readonly AllowEntry[] 
   const taken = methods(credential.methods, true);
   if (credential.paths === undefined) return [{ methods: taken, path: null }];
   if (!Array.isArray(credential.paths)) throw new Error(`credentialProxy: ${name}'s paths are a list, ['/companies']`);
-  // `paths: []` takes no path, but its methods still answer first, as before 0.16: `methods: ['POST'], paths: []` is a
+  // `paths: []` takes no path, but its methods still answer first: `methods: ['POST'], paths: []` is a
   // 405 to a GET and a 403 to a POST. An entry whose path matches none keeps them; no entry at all would be a 403 to both.
   if (credential.paths.length === 0) return [{ methods: taken, path: { segments: [], tail: 'never', written: true } }];
-  // A path of `paths` matches as it did before 0.16 (`readPattern`'s `legacy`): `*` itself, never a glob, and `//` or `;x` as written.
+  // A path of `paths` matches as `readPattern`'s `legacy` reads it: `*` itself, never a glob, and `//` or `;x` as written.
   return credential.paths.map((given) => {
     if (typeof given === 'string' && given.includes('*')) console.warn(`credentialProxy: ${name}'s path ${given} takes * as itself, as before 0.16: allow: [{ path }] reads * and ** as globs`);
     return { methods: taken, path: path(given, 'legacy') };
@@ -4327,7 +4323,7 @@ function codeItems(credentials: Record<string, Credential>, tunnels: ReadonlyMap
         : credential.methods !== undefined ? [{ methods: methods(credential.methods), path: '/' }] : null;
       const { limit: limited, limitPerService } = limit(credential.limit);
       const placeholder = credential.placeholder === undefined ? null : credential.placeholder.kind === 'jwt' ? { kind: 'jwt' as const, claims: [...credential.placeholder.claims] } : { kind: 'prefix' as const, prefix: credential.placeholder.prefix };
-      // Matched as code matches it, which the tab's preview follows: `paths` as before 0.16, and its `methods` as written,
+      // Matched as code matches it, which the tab's preview follows: `paths` as legacy, and its `methods` as written,
       // `[]` taking none, and still there when `paths: []` leaves no entry to hold them (`methods: ['POST'], paths: []`).
       const allowAs: ProxyCodeItem['allowAs'] = credential.allow !== undefined ? { from: 'code', methods: null } : allow !== null ? { from: 'legacy', methods: credential.methods === undefined ? null : methods(credential.methods) } : null;
       return item({ kind: 'route', name, upstream: credential.upstream, inject, allow, limit: limited, placeholder, egress: null }, credential, limitPerService, credential.egress !== undefined, allowAs);

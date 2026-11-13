@@ -190,7 +190,7 @@ const SECRET_PERMISSIONS: readonly Permission[] = ['secret.read', 'secret.use', 
 /**
  * What a credential's scope must hold at a personal config's parent for
  * its owner to do `permission` in it: as much, but for reading, which use
- * there allows. Its values are its owner's own (R8), so a handle or a token
+ * there allows. Its values are its owner's own, so a handle or a token
  * that uses the environment, a Contributor's, reads what its owner wrote
  * over it, and nothing of the environment's.
  */
@@ -198,7 +198,7 @@ export function personalCap(permission: Permission): Permission {
   return permission === 'secret.read' ? 'secret.use' : permission;
 }
 
-/** Whether the caller lists an environment's keys: reads its values, or uses them, as a Contributor does (R6). */
+/** Whether the caller lists an environment's keys: reads its values, or uses them, as a Contributor does. */
 export function lists(caller: Caller, place: Place): boolean {
   return can(caller, 'secret.read', place) || can(caller, 'secret.use', place);
 }

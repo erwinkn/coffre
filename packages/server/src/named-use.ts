@@ -10,7 +10,7 @@ import type { CoffreRuntime } from './runtime.ts';
 
 /**
  * What the deployment's config accepts of a credential, as the named call carries it (`NamedUseInput.accepts`): its
- * passkey policy among it (T216), which the vault's named call holds a person's credential to as the app's own check
+ * passkey policy among it, which the vault's named call holds a person's credential to as the app's own check
  * does (`passkeyStands`), and a key write's or an add's first call answers the rows of.
  */
 export function acceptance(runtime: Pick<CoffreRuntime, 'auth' | 'signin'>): CredentialAcceptance {
@@ -20,16 +20,16 @@ export function acceptance(runtime: Pick<CoffreRuntime, 'auth' | 'signin'>): Cre
 }
 
 /**
- * 0.15's use by name, the vault's one call (T145, PR B; formal/Probing.tla): a request's one key, or none (`key` null:
+ * 0.15's use by name, the vault's one call (formal/Probing.tla): a request's one key, or none (`key` null:
  * the caller's standing at the place alone), at the place its path names, or the one a handle was made for (`place`
  * null). The place may be a fork, whose key the vault finds where the fork inherits it from, or `dev@me`, its caller's
- * personal config of dev, or dev while they have none (T165, B2; `forks`). The vault answers the rows the request
+ * personal config of dev, or dev while they have none (`forks`). The vault answers the rows the request
  * checks, its credential's MAC and token's hash among them, and the caller as it decided them from the sealed rows it
  * read: nothing is read, asked or kept here first.
  *
  *   Ada's `coffre secrets get market/dev/API_KEY`   one vault call   its value, her standing, the rows: no statement here
  *   the same, her grant revoked                    one vault call   404 `not_available`, whatever API_KEY is or was
- *   the same, API_KEY never made, or ended         one vault call   the same 404: one answer for every refusal (D153)
+ *   the same, API_KEY never made, or ended         one vault call   the same 404: one answer for every refusal
  *   the same at market/dev-ada, inherited from dev one vault call   decided at the fork and at dev, where it is held
  *   the same at market/dev@me                      one vault call   at her personal config of dev, or dev without one
  *
@@ -45,8 +45,8 @@ export function acceptance(runtime: Pick<CoffreRuntime, 'auth' | 'signin'>): Cre
  * Every check the app makes of a credential is one of (formal/Probing.tla, AcceptedFirst; docs/formal.md):
  * - what its config accepts, which the call carries (`accepts`) and the vault's statement holds the credential to before
  *   it reads anything else: the deployment signs in through coffre's own sign-in (under Cloudflare Access no coffre
- *   token is one; review r7 of D153), a browser session's identity names a provider it configures (review r6), and a
- *   person's session or token has a live passkey behind it, as the policy says (T216; docs/design/passkeys.md, section
+ *   token is one), a browser session's identity names a provider it configures, and a
+ *   person's session or token has a live passkey behind it, as the policy says (docs/design/passkeys.md, section
  *   6.4): the vault answers what it read of their passkeys with the rows, whose MACs the app's check holds them to, so
  *   that a person's reveal is one call too;
  * - the token's kind, decided here before any call (`kinds`, never a workload's; `refusedByKind`: a strict instance's
@@ -54,10 +54,10 @@ export function acceptance(runtime: Pick<CoffreRuntime, 'auth' | 'signin'>): Cre
  * - a fact the vault decides on itself, before any lock: the credential revoked, expired or of an earlier generation
  *   of its account (`credentialEnded`); its identity unlinked or the trust binding that issued it ended, each of which
  *   revokes it in the same change. Its expiry, the one of these that hangs on the clock, both judge at the use's `at`
- *   (review r8, `OneClock`): a credential live when its request began is honoured for that request, which the use's
+ *   (`OneClock`): a credential live when its request began is honoured for that request, which the use's
  *   deadline (3 s) bounds; revocation and generation stay live checks (`credentialStill`);
  * - a row forged around the app (its MAC broken, its seal whole), which only a database writer makes: accepted, the
- *   request refused 401 whatever the key (D154, R64; docs/architecture.md, "Limits").
+ *   request refused 401 whatever the key (docs/architecture.md, "Limits").
  * A check of any other kind goes in the first, or the vault learns it.
  */
 export async function useByName(
@@ -74,7 +74,7 @@ export async function useByName(
   const kind = tokenKind(token);
   if (kind === null || !asked.kinds.includes(kind) || runtime.vault.useNamed === undefined || !(await uses015(runtime.vault))) return null;
   // Refused on its kind alone (a service's bearer token on a strict instance): by the credential's own check, as ever,
-  // with nothing asked of the vault, nor written in its log or its cap (review r3 of #412).
+  // with nothing asked of the vault, nor written in its log or its cap.
   if (refusedByKind(runtime, token, { handle: kind === 'handle' }) !== null) return null;
   const at = Date.now();
   const answered = await runtime.vault.useNamed({
@@ -83,7 +83,7 @@ export async function useByName(
     ...(asked.unless === undefined ? {} : { unless: asked.unless }),
   });
   if (!answered.served) return null;
-  // The route the vault picked on the credential and its account alone (`routeOf`; D153, review r2), never on the key
+  // The route the vault picked on the credential and its account alone (`routeOf`), never on the key
   // or its map. Busy: nothing decided, and nothing read first, whatever the request names (StandingSharesAdmission).
   if (answered.route === 'busy') throw refusedUse(answered.outcome);
   // No credential its seals bear out (unknown, ended, its account's row put back or written around the log, or a token
@@ -94,8 +94,8 @@ export async function useByName(
   const { outcome } = answered;
   const ahead = namedAhead(answered.app, { personal: asked.place !== null && personalOf(asked.place.environment) !== null });
   // The credential checked on the rows the use answered, its MAC and token's hash among them, as a request reads them,
-  // its expiry at the use's `at`, as the vault judged it (one clock, review r8): of what this checks, only a forged
-  // row's MAC is not decided above or by the vault (D154; the comment above).
+  // its expiry at the use's `at`, as the vault judged it (one clock): of what this checks, only a forged
+  // row's MAC is not decided above or by the vault (the comment above).
   const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, {
     handle: kind === 'handle', standing: answered.standing, at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
   });
@@ -103,7 +103,7 @@ export async function useByName(
 }
 
 /**
- * A request's several keys by name, the vault's one call (T165, B2's PR 2; formal/ProbingMany.tla): its keys (`keys`),
+ * A request's several keys by name, the vault's one call (formal/ProbingMany.tla): its keys (`keys`),
  * or every key the place holds (null), at the place its path names, an environment, a fork or `dev@me`. The vault decides
  * the caller's standing there first, from rows no key decides, and reads nothing of any key without it; for one who
  * stands, it resolves each key's name, decides them all, then uses them, all or nothing. It answers the
@@ -146,7 +146,7 @@ export async function useManyByName(
 }
 
 /**
- * A UI route's use by a handle (0.16, T186 PR C; docs/design/proxy-ui.md, section 3): the vault's one call (two on a
+ * A UI route's use by a handle (docs/design/proxy-ui.md, section 3): the vault's one call (two on a
  * map miss), which reads the URL both ways it may be read, finds the route at the place, and decides each of its keys
  * for the caller and for the route's editor. As `useManyByName`, nothing is read here first: the credential is checked
  * on the rows the vault answered, and the read decides on them (`reveal`). Null where the vault serves the place not by

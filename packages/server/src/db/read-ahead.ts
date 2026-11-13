@@ -8,7 +8,7 @@ import { credentials, environments, identities, passkeys, projects, secrets, sec
 
 /**
  * What a read of values reads before anything else, in one call of
- * migration 0031's `app_read` (T135): the request's credential, as
+ * migration 0031's `app_read`: the request's credential, as
  * `findCredential` reads it; the place, as `resolvePath` resolves a path
  * with no key; and its keys' rows, as `environmentSecrets` reads them, the
  * named ones only when `keys` names them. Each statement of the app's own
@@ -28,7 +28,7 @@ import { credentials, environments, identities, passkeys, projects, secrets, sec
 export type ReadAhead = {
   credential?: CredentialRead | null; place?: ResolvedPath | null; secrets?: SecretRow[];
   /**
-   * Of a named use's rows (`namedAhead`, T165): where the key the vault used is held, when the place inherits it (a
+   * Of a named use's rows (`namedAhead`): where the key the vault used is held, when the place inherits it (a
    * fork's parent, a personal config's dev), by id and slug; null for a key the place holds itself, or none.
    */
   held?: { environmentId: string; slug: string } | null;
@@ -49,10 +49,10 @@ export async function readAhead(db: Queryable, asked: ReadAsked): Promise<ReadAh
 }
 
 /**
- * The rows the vault's named use answers (T145, PR B; `Vault.useNamed`, migration 0044's `app`): what `app_read`
+ * The rows the vault's named use answers (`Vault.useNamed`, migration 0044's `app`): what `app_read`
  * answers, for the request's credential, place and key, read in the use's own statement, so that the app reads nothing
  * itself. Null when the vault answers none: the app reads its own rows then, as ever. `personal`: the
- * request named `dev@me` (T165), and the place is its caller's personal config of dev, or dev while they have none, as
+ * request named `dev@me`, and the place is its caller's personal config of dev, or dev while they have none, as
  * `resolveRead` resolves it.
  */
 export function namedAhead(app: string | null, { personal = false }: { personal?: boolean } = {}): ReadAhead | null {
@@ -71,7 +71,7 @@ export function namedAhead(app: string | null, { personal = false }: { personal?
     };
   }
   // The key it used, as `resolvePath` answers a path's key: what a reveal of `market/dev/API_KEY` says of one it finds no
-  // value of. Only the place's own: a key a fork inherits is its parent's, which the path's own key is not (T165).
+  // value of. Only the place's own: a key a fork inherits is its parent's, which the path's own key is not.
   const [used] = read.secrets ?? [];
   if (ahead.place != null && used !== undefined) {
     const { id, key, archivedAt, currentVersionId, currentVersion, environmentId } = rowOf(secrets, used.secret);
@@ -81,7 +81,7 @@ export function namedAhead(app: string | null, { personal = false }: { personal?
 }
 
 /**
- * The rows a named batch answers (T165, B2's PR 2; `Vault.useNamedMany`): the credential and the place, as its gate's
+ * The rows a named batch answers (`Vault.useNamedMany`): the credential and the place, as its gate's
  * named call read them (`namedAhead`), and every key's rows, as each key's named call read them, in the order asked,
  * none for a key the place does not hold. Null when the vault answers none, or for a caller who does not stand
  * at the place, of whom the vault read no key: the app reads its own rows then, as ever.
@@ -111,7 +111,7 @@ function readAheadOf(read: Answer, now: string, asked: { tokenHash: boolean; pat
       identity: read.identity === null ? null : rowOf(identities, read.identity),
       now,
       policySeq: read.policy,
-      // What stands behind it, as the vault's call read it with it (T216): the credential's check decides on these, as on
+      // What stands behind it, as the vault's call read it with it: the credential's check decides on these, as on
       // its own statement's (`passkeyOf`).
       ...(read.passkey_held === undefined ? {} : { passkey: read.passkey == null ? null : rowOf(passkeys, read.passkey), passkeyHeld: read.passkey_held }),
     };
@@ -155,7 +155,7 @@ type Answer = {
   /** A named use's key the place inherits: where it is held (0051). */
   held?: { id: string; slug: string } | null;
   /**
-   * The vault's (0073, T216), for a person's credential: the passkey it names, and whether its person holds a live one
+   * The vault's (0073), for a person's credential: the passkey it names, and whether its person holds a live one
    * at its generation (2), has rows but none live at it (1), or none ever (null), as `heldSql` answers. Absent from
    * `app_read`'s, and from a write's or an add's for a kind the check exempts; null for a named call that checked none.
    */

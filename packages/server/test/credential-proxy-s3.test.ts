@@ -375,7 +375,7 @@ test('an upload past what the proxy holds streams through: 20 MiB, signed again,
   assert.ok(seen.at(-1)!.verified);
 });
 
-// A path rule before SigV4 (review r2 of #483): the bucket a secret of its own, in the first segment, and the signature
+// A path rule before SigV4: the bucket a secret of its own, in the first segment, and the signature
 // made on the path the bucket went into, which S3 recomputes, never the one the app sent.
 test("a path rule's segment is filled before SigV4 signs: S3 verifies the signature on the bucket the app never saw", async () => {
   const BUCKET = 'tenant-7f3k9q';

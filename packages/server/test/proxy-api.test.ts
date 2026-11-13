@@ -1,4 +1,4 @@
-// The Proxy tab's API (0.16, T186; docs/design/proxy-ui.md, sections 6 and 8): an environment's proxy definitions read
+// The Proxy tab's API (docs/design/proxy-ui.md, sections 6 and 8): an environment's proxy definitions read
 // by whoever lists it, and saved by a person holding proxy.edit there, which Owners hold as roles ship and a role an
 // Owner gives it to. Each item's keys are cleared for its editor at save, where a use will find them: an inherited key
 // takes reading the parent, a reference's sensitive source owning its project, a sensitive key owning the place's. No
@@ -139,7 +139,7 @@ test("a role an Owner gives proxy.edit routes what its holder reads, where the u
   // Lin holds the role on market/dev-eu alone: its own key, and one not made yet, she routes.
   const own = await lin.proxy.save('market/dev-eu', { seal: null, items: { eu: route('eu', ['EU_KEY']), later: route('later', ['NOT_MADE_YET']) } });
   assert.deepEqual(own.items.map((item) => [item.definition.name, item.savedBy, item.routesSensitive]), [['eu', LIN, false], ['later', LIN, false]]);
-  // OPENAI_API_KEY, which dev-eu inherits from dev, where she reads nothing (R8).
+  // OPENAI_API_KEY, which dev-eu inherits from dev, where she reads nothing.
   const inherited = await refusal(lin.proxy.save('market/dev-eu', { seal: own.seal, items: { openai: route('openai') } }));
   assert.equal(inherited.status, 403);
   assert.equal(inherited.reason, 'route_not_cleared');
@@ -148,7 +148,7 @@ test("a role an Owner gives proxy.edit routes what its holder reads, where the u
   await root.access.set(LIN, { 'market/dev-eu': 'router', 'market/dev': 'viewer' });
   const routed = await lin.proxy.save('market/dev-eu', { seal: own.seal, items: { openai: route('openai') } });
   assert.deepEqual(routed.items.map((item) => item.definition.name), ['eu', 'later', 'openai']);
-  // A sensitive key routes only by an Owner covering its place (R66): never by her; by an Owner of market, audited.
+  // A sensitive key routes only by an Owner covering its place: never by her; by an Owner of market, audited.
   await root.access.set(LIN, { 'market/dev': 'router' });
   const sensitive = await refusal(lin.proxy.save('market/dev', { seal: null, items: { stripe2: route('stripe2', ['STRIPE_SECRET_KEY']) } }));
   assert.equal(sensitive.reason, 'route_not_cleared');
@@ -229,7 +229,7 @@ test("a fork's inherited item is marked where the fork resolves its keys: its ow
 
 test("a reference is decided where it lives (R71): its sensitive value is routed by an Owner of the holder's project, whatever project its source is in", async () => {
   await root.access.set(LIN, { 'market/dev': 'router' });
-  // BILLING_REF reads billing/prod's secret: her read of market/dev covers it (R20).
+  // BILLING_REF reads billing/prod's secret: her read of market/dev covers it.
   const seal = (await lin.proxy.save('market/dev', { seal: null, items: { billing: route('billing', ['BILLING_REF']) } })).seal;
   // SENSITIVE_REF reads billing's sensitive value: a router who owns nothing may not route it; Pat, an Owner of market
   // and of nothing of billing's, may, as any sensitive key of market/dev.

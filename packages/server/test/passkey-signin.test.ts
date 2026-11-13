@@ -45,7 +45,7 @@ after(async () => {
 
 beforeEach(async () => {
   await resetDatabase(db.owner);
-  // NAMED: an Owner the deployment's configuration names beside ROOT, whom the vault declares as it starts (R3).
+  // NAMED: an Owner the deployment's configuration names beside ROOT, whom the vault declares as it starts.
   kek = randomBytes(32);
   deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], { owners: [ROOT, NAMED] }, { kek }) });
   const root = clientFor(deps, ROOT);
@@ -89,8 +89,8 @@ test('under optional, a Developer with no passkey signs in by the provider alone
 
 /**
  * A deployment that names LATER an Owner too, now: a vault of that configuration, over the same database and keys,
- * which declares them as it starts (R3), and that vault as a cold isolate's callback meets it, its `about` answered as
- * the configuration says without it starting (review r1 of #500).
+ * which declares them as it starts, and that vault as a cold isolate's callback meets it, its `about` answered as
+ * the configuration says without it starting.
  */
 function laterOwner() {
   const later = testVault([ROOT], { owners: [ROOT, NAMED, LATER] }, { kek });
@@ -105,9 +105,9 @@ function laterOwner() {
 
 test("an Owner the deployment names, never admitted, passes the provider and stops: the callback writes nothing, the vault's members included; the passkey's answer admits and enrolls them, and they sign in again with it (sections 3.1, 13.22, 13.27)", async () => {
   // The deployment names LATER too, now: a vault of that configuration, over the same database and keys, which
-  // declares them as it starts (R3). On a cold isolate the callback reads the members beside the vault's first call,
+  // declares them as it starts. On a cold isolate the callback reads the members beside the vault's first call,
   // whose start lands after: here, its `about`, which settles it, answered as the configuration says without it, and
-  // the vault started by the post's own call. Held first (review r1 of #500): named, and no row of theirs.
+  // the vault started by the post's own call. Held first: named, and no row of theirs.
   const { cold } = laterOwner();
   const runtime = deployment('required', undefined, cold);
   assert.ok((await cold.about()).owners?.includes(LATER), 'the deployment names them an Owner');
