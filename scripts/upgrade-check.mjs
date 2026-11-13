@@ -433,8 +433,12 @@ async function refusals(url) {
     const sql = postgresSession(url);
     let broken, losses, tampered, protection, bindings, stale, rotation;
     try {
-        [broken, losses, tampered] = [await brokenLists(sql), await acceptedLosses(sql), await standingFindings(sql)];
-        [protection, bindings, stale, rotation] = [await disagreeing(sql), await bindingsDiffer(sql), await staleAccess(sql), await rotating(sql)];
+        // One snapshot, which 0.15.0, still serving, cannot move between two checks; and read-only, so that Postgres
+        // itself refuses any write a check might make.
+        await sql.begin('read only isolation level repeatable read', async (tx) => {
+            [broken, losses, tampered] = [await brokenLists(tx), await acceptedLosses(tx), await standingFindings(tx)];
+            [protection, bindings, stale, rotation] = [await disagreeing(tx), await bindingsDiffer(tx), await staleAccess(tx), await rotating(tx)];
+        });
     } finally {
         await sql.end();
     }
@@ -446,7 +450,7 @@ async function refusals(url) {
         protection?.length > 0 && `the newest policy.change and the rows disagree on protecting ${protection.join(', ')}: an Owner turns each off and on again (or on and off), on 0.15.0, to end where it should`,
         bindings.revived.length > 0 && `0.14 ended the trust bindings ${bindings.revived.join(', ')}, which 0.16, reading the log, would bring back: no change on 0.15.0 is known to settle it, so stop and ask coffre's maintainers`,
         rotation !== null && `an app key rotation is under way (key.reseal, seq ${rotation}): finish it on 0.15.0 first, with one start of the app under its new key, then upgrade`,
-        stale.length > 0 && `0.14's log holds an access entry newer than what the newest change of ${stale.join(', ')} accounts for: written around the vault after the cutover, or forged. On 0.15.0, an Owner removes each and adds them again`,
+        stale.length > 0 && `0.14's log holds an access entry newer than what the newest change of ${stale.join(', ')} accounts for: written around the vault after the cutover, or forged. On 0.15.0, an Owner's change to each settles it`,
     ].filter(Boolean);
     assert.deepEqual(refused, [], `the upgrade is refused:\n${refused.join('\n')}`);
     if (bindings.dropped.length > 0) say(`${bindings.dropped.length} trust binding${bindings.dropped.length === 1 ? '' : 's'} sign${bindings.dropped.length === 1 ? 's' : ''} in on 0.15.0 but not on 0.16, whose log ends ${bindings.dropped.length === 1 ? 'it' : 'them'}: ${bindings.dropped.join(', ')}. A write around the vault made ${bindings.dropped.length === 1 ? 'it' : 'them'}; an Owner creates ${bindings.dropped.length === 1 ? 'it' : 'them'} again on 0.16`);

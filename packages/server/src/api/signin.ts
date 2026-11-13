@@ -1514,7 +1514,7 @@ export class SigninService {
     try {
       return await this.#deps.vault.access(formatMember(principal));
     } catch (error) {
-      if (isDeploying(error) || error instanceof ApiError) throw error;
+      if (isDeploying(error)) throw error;
       console.error('asking the vault about a member failed', logged(error));
       throw new ApiError('unavailable', 'coffre cannot check who you are right now');
     }

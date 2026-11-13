@@ -24,7 +24,7 @@
 // (projection.ts) runs in the same object, after it on each alarm and on
 // the same connection.
 import { parseCheckpoint, splitNote, type PairNotes } from '@coffre/core/merkle';
-import { createDatabase } from '@coffre/db';
+import { createDatabase, type Database } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 
 import type { Sealing } from '@coffre/core/vault';
@@ -51,7 +51,7 @@ import {
   type Tick,
   type Witness,
 } from './checkpointer.ts';
-import { daysAround, openLogCheckpointer, reasonOf, RETAIN_EVERY_MS, TICK_MS, upkeep } from './log-checkpointer.ts';
+import { daysAround, openLogCheckpointer, reasonOf, requireMigrated, RETAIN_EVERY_MS, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { vaultLogKey } from './log.ts';
 import { AuditProjector } from './projection.ts';
 import { verifierKeys } from './verifier.ts';
@@ -176,8 +176,10 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
           const s = await settings(this.#env);
           const opening = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
           pool = opening;
-          const store = logStore(createDatabase(pool));
-          const checkpointer = await within(openLogCheckpointer({
+          const db = createDatabase(pool);
+          const store = logStore(db);
+          // Below its migrations it opens over nothing and signs nothing: refused, as any open is, and tried again.
+          const checkpointer = await within(this.#requireMigrated(db).then(() => openLogCheckpointer({
             store,
             signingKeys: s.signingKeys,
             memory: durableMemory(this.#state.storage),
@@ -185,7 +187,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
             record: (alarm) => this.#record(alarm),
             fence,
             ...(s.tickBoundMs === undefined ? {} : { tickBoundMs: s.tickBoundMs }),
-          }), s.tickBoundMs ?? OPEN_BOUND_MS, 'the open', () => {
+          })), s.tickBoundMs ?? OPEN_BOUND_MS, 'the open', () => {
             void fence.close('its open stalled');
             opening.destroy();
           });
@@ -208,6 +210,15 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         this.#pool = pool;
         return this.#checkpointer;
       });
+    }
+
+    /** Whether the database has this release's migrations: asked until it has, then known. */
+    #migrated = false;
+
+    async #requireMigrated(db: Database): Promise<void> {
+      if (this.#migrated) return;
+      await requireMigrated(db);
+      this.#migrated = true;
     }
 
     /** The failure that stands, alarmed once: a refused open, a tick that threw. */
@@ -260,7 +271,9 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         const s = await settings(this.#env);
         const making = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: 1000 });
         pool = making;
-        await within(logStore(createDatabase(making)).makeDays(daysAround(now)), s.tickBoundMs ?? OPEN_BOUND_MS, 'making them', () => making.destroy());
+        const db = createDatabase(making);
+        // The days are this release's tables too: below its migrations, none are made.
+        await within(this.#requireMigrated(db).then(() => logStore(db).makeDays(daysAround(now))), s.tickBoundMs ?? OPEN_BOUND_MS, 'making them', () => making.destroy());
         this.#daysFor = today;
         this.#daysFailed = null;
       } catch (error) {
@@ -286,7 +299,13 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
         if (this.#audit === null) {
           const s = await settings(this.#env);
           const pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
-          const store = logStore(createDatabase(pool));
+          const db = createDatabase(pool);
+          // Below its migrations it projects nothing, and the next tick asks again over a connection of its own.
+          await within(this.#requireMigrated(db), s.tickBoundMs ?? OPEN_BOUND_MS, 'reading the migrations', () => pool.destroy()).catch((error: unknown) => {
+            pool.destroy();
+            throw error;
+          });
+          const store = logStore(db);
           const said = (message: string) => {
             console.warn(`coffre audit: ${message}`);
             void this.#record({ at: Date.now(), message }).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));

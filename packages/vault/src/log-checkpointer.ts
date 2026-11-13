@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import { pairSigners, pairVerifiers, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
+import type { Database } from '@coffre/db';
+import { migrated } from '@coffre/db/schema-version';
 
 import { verifierKeys, type VerifierKeys } from './keyring.ts';
 import { Checkpointer, FenceClosed, logOrigin, type Alarm, type CheckpointStore, type Fence, type Memory, type Witness } from './checkpointer.ts';
@@ -101,6 +103,15 @@ export const TICK_MS = 500;
 export function reasonOf(error: unknown): string {
   const e = error as Error & { cause?: unknown };
   return e?.cause instanceof Error ? e.cause.message : (e?.message ?? String(error));
+}
+
+/**
+ * Throws below this release's migrations, as before its `coffre migrate`: what the checkpointer seals, the days it
+ * makes and the tables its projector fills are not yet this release's there, so on either platform it opens over
+ * nothing, makes nothing and projects nothing until they are.
+ */
+export async function requireMigrated(db: Database): Promise<void> {
+  if (!(await migrated(db))) throw new Error("the database is below this release's migrations: run coffre migrate");
 }
 
 /** Days of uses made ahead of today's (and yesterday's, for a new database): uses stamped in a day with no partition fail. */

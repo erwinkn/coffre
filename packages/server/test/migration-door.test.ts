@@ -7,7 +7,8 @@ import type { Sealing } from '@coffre/core/vault';
 import { isUnreachable, migrationLedger } from '@coffre/db/dialect';
 import { asc, sql, type SQL } from 'drizzle-orm';
 
-import { coffreRoute, respond, runScheduled, walkAnchor } from '../src/app.ts';
+import { coffreRoute, respond, runScheduled, walkAnchor, walkAuditBacklog } from '../src/app.ts';
+import { auditWatch } from '../src/plugins/audit-watch.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { admitSocket } from '../src/socket-admission.ts';
 import { openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
@@ -161,13 +162,29 @@ test("below its migrations, a plugin's WebSocket is refused at the same door, on
   assert.equal(asked, false);
 });
 
-test("below its migrations, the anchor's alarm walks nothing and reads no anchor, and comes again", async () => {
+test("below its migrations, the audit watch walks nothing and reads no anchor: neither the anchor's alarm on Workers nor Node's scheduled job, and each comes again", async () => {
   let touched = 0;
   const store = { read: async () => ((touched += 1), null), write: async () => ((touched += 1), false) };
+  const runtime = { ...freshRuntime(), plugins: [auditWatch({ anchor: store })] };
   await unmigrated(async () => {
-    assert.equal(await walkAnchor(freshRuntime(), store), true);
+    assert.equal(await walkAnchor(runtime, store), true);
+    assert.equal(await walkAuditBacklog(runtime, 3), true);
   });
   assert.equal(touched, 0);
+});
+
+test("a database that cannot be asked whether it is migrated is an outage at a WebSocket's door too: 503 unavailable, and its plugin never asked", async () => {
+  let asked = false;
+  const down = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' });
+  const runtime = {
+    ...freshRuntime(),
+    db: { select: () => ({ from: () => Promise.reject(down) }) } as unknown as CoffreRuntime['db'],
+    plugins: [{ name: 'sockets', routes: { prefix: '/sockets', fetch: async () => new Response(), socket: async () => ((asked = true), new Response('admitted')) } }],
+  };
+  const answer = await admitSocket(new Request(`${ORIGIN}/sockets/x`), runtime, null);
+  assert.ok(answer instanceof Response);
+  assert.deepEqual([answer.status, answer.headers.get('retry-after'), (await answer.json() as { error: string }).error], [503, '1', 'unavailable']);
+  assert.equal(asked, false);
 });
 
 test('a plugin that takes 20 s to admit a WebSocket, as under a burst of runs at once, is let in; past 45 s, refused', async () => {

@@ -435,20 +435,23 @@ async function logIsEmpty(runtime: CoffreRuntime): Promise<boolean> {
  * Whether more is left.
  */
 export async function walkAnchor(runtime: CoffreRuntime, store: AnchorStore): Promise<boolean> {
-  if (!(await migrated(runtime.db))) return true;
   const watch = watchOf(runtime);
-  return watch === null ? false : watch.hooks.walkOn(watch.context(), store);
+  if (watch === null) return false;
+  if (!(await schemaReady(runtime))) return true;
+  return watch.hooks.walkOn(watch.context(), store);
 }
 
 /**
  * More of the audit watch's backlog walked, a walk after another, up to
  * `walks`, and none begun after `until` (ms since the epoch): what Node's
  * scheduled job runs after each run (on Workers, the anchor's Durable
- * Object's alarm). Whether more is left.
+ * Object's alarm). Below its migrations none is, as `walkAnchor` says.
+ * Whether more is left.
  */
 export async function walkAuditBacklog(runtime: CoffreRuntime, walks: number, until = Infinity): Promise<boolean> {
   const watch = watchOf(runtime);
   if (watch === null) return false;
+  if (!(await schemaReady(runtime))) return true;
   for (let i = 0; i < walks; i++) {
     if (Date.now() >= until) return true;
     if (!(await watch.hooks.walkOn(watch.context()))) return false;

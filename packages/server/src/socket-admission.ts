@@ -3,6 +3,7 @@
 // then the plugin under the path, which refuses or hands back its session.
 import { UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import { keyReady, schemaReady } from './app.ts';
+import { errorResponse } from './http.ts';
 import { pluginSocket, type SocketSession } from './plugins.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
@@ -19,14 +20,19 @@ const ADMISSION_MS = 45_000;
  */
 export async function admitSocket(request: Request, runtime: CoffreRuntime, sourceIp: string | null, hold?: (deciding: Promise<unknown>) => void): Promise<Response | SocketSession> {
   return inTime(
-    (async () =>
-      !(await schemaReady(runtime))
-        ? new Response("coffre's database lacks this version's migrations", { status: 503 })
-        : (await keyReady(runtime)) !== null
-          ? new Response('coffre is not serving under its app key yet', { status: 503 })
-          : ((await pluginSocket(request, runtime, sourceIp)) ?? new Response('no WebSocket here', { status: 404 })))(),
+    (async () => (await closed(runtime)) ?? (await pluginSocket(request, runtime, sourceIp)) ?? new Response('no WebSocket here', { status: 404 }))(),
     hold,
   );
+}
+
+/** The door's answer, as `respond` gives it: a database that cannot be asked is the outage's 503, never the plugin's 500. */
+async function closed(runtime: CoffreRuntime): Promise<Response | null> {
+  try {
+    if (!(await schemaReady(runtime))) return new Response("coffre's database lacks this version's migrations", { status: 503 });
+    return (await keyReady(runtime)) === null ? null : new Response('coffre is not serving under its app key yet', { status: 503 });
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
 
 /**
