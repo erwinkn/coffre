@@ -214,6 +214,8 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
     await admin.query(`DROP ROLE IF EXISTS reporting; CREATE ROLE reporting LOGIN; GRANT coffre_app TO reporting`);
     await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /still online.*Set reporting NOLOGIN/.test(String((error as { cause?: unknown }).cause ?? error)));
     await admin.query(`DROP ROLE reporting`);
+    // A host's administrator is not: Postgres 16 makes whoever created a role its member, and some hosts have that inherit.
+    await admin.query(`DROP ROLE IF EXISTS host_admin; CREATE ROLE host_admin LOGIN CREATEROLE; GRANT coffre_app, coffre_vault TO host_admin`);
   } finally {
     await session.end();
   }
@@ -222,13 +224,14 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
 
   // A member 0.14's vault refuses, their row changed around it, stops it, until they are removed.
   await db.query(`INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES ${entry(70, 'vault', 'system:vault', 'vault.tampered', { decision: 'deny', code: 'mac', subject: BO })}`);
-  await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /changed around it/.test(String((error as { cause?: unknown }).cause ?? error)) && String((error as { cause?: unknown }).cause).includes(BO));
+  await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /that report stands/.test(String((error as { cause?: unknown }).cause ?? error)) && String((error as { cause?: unknown }).cause).includes(BO));
   await db.query(`INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES ${entry(71, 'vault', ADA, 'member.remove', { subject: BO })}`);
   assert.equal(await count('vault_members'), 4);
   const archived = await count('audit_log');
 
   await migrateDatabase(urlOf(UPGRADED));
   await login(true);
+  await admin.query(`DROP ROLE host_admin`);
 
   await t.test('principals: a row of 0.4 gets its role, and times keep their milliseconds', async () => {
     assert.deepEqual(

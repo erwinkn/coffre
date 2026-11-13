@@ -14,25 +14,29 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM vault_members) THEN
         RETURN;
     END IF;
-    -- Whoever has the app's or the vault's rights, by any membership that hands them on. Not the login that migrates,
-    -- nor a superuser, who has every role's: Postgres 16 makes a role's creator its member, to administer it.
+    -- Whoever is a member of the app's or the vault's group, directly or through another role, inheriting or not. Not
+    -- the login that migrates, nor one that administers roles (a superuser, or one with CREATEROLE): Postgres 16 makes
+    -- a role's creator its member, which a host may have inherit, and coffre never runs as such a login, which its
+    -- first migration refuses for a runtime login.
     SELECT string_agg(login.rolname, ', ' ORDER BY login.rolname) INTO online
       FROM pg_roles login
-     WHERE login.rolcanlogin AND NOT login.rolsuper AND login.rolname <> current_user
-       AND (pg_has_role(login.oid, 'coffre_app', 'USAGE') OR pg_has_role(login.oid, 'coffre_vault', 'USAGE'));
+     WHERE login.rolcanlogin AND NOT login.rolsuper AND NOT login.rolcreaterole AND login.rolname <> current_user
+       AND (pg_has_role(login.oid, 'coffre_app', 'MEMBER') OR pg_has_role(login.oid, 'coffre_vault', 'MEMBER'));
     IF online IS NOT NULL THEN
         RAISE EXCEPTION 'this database holds a 0.14 instance, and coffre is still online: the upgrade to 0.16 converts it with coffre offline. Set % NOLOGIN, end their sessions, back up, then migrate (docs/design/0.16.md, "Upgrade from 0.14")', online;
     END IF;
     SELECT string_agg(DISTINCT login.rolname, ', ') INTO online
       FROM pg_stat_activity session
       JOIN pg_roles login ON login.rolname = session.usename
-     WHERE session.datname = current_database() AND NOT login.rolsuper AND login.rolname <> current_user
-       AND (pg_has_role(login.oid, 'coffre_app', 'USAGE') OR pg_has_role(login.oid, 'coffre_vault', 'USAGE'));
+     WHERE session.datname = current_database() AND NOT login.rolsuper AND NOT login.rolcreaterole AND login.rolname <> current_user
+       AND (pg_has_role(login.oid, 'coffre_app', 'MEMBER') OR pg_has_role(login.oid, 'coffre_vault', 'MEMBER'));
     IF online IS NOT NULL THEN
         RAISE EXCEPTION '% still has a session open on this database: end it (pg_terminate_backend), back up, then migrate (docs/design/0.16.md, "Upgrade from 0.14")', online;
     END IF;
-    -- A member 0.14's vault found changed around it, and refuses: its report (`vault.tampered`) is newer than the
-    -- newest change to what they hold. 0.16 would take their row as it is.
+    -- A member whose row 0.14's vault found changed around it, and its report (`vault.tampered`) still stands: it is
+    -- newer than the newest change to what they hold. The row may check out again since, a genuine one put back, and
+    -- the member be in use; the report stands all the same, as 0.14's members page says, until they are removed.
+    -- 0.16 would take their row as it is, and this migration holds no key to check it.
     SELECT string_agg(found.subject_principal, ', ') INTO tampered
       FROM (
         SELECT subject_principal, max(seq) AS seq FROM audit_log
@@ -45,7 +49,7 @@ BEGIN
            AND changed.action IN ('member.add', 'member.restore', 'member.owner', 'member.role', 'member.remove', 'access.grant', 'access.revoke')
      ), -1);
     IF tampered IS NOT NULL THEN
-        RAISE EXCEPTION 'on 0.14, the vault found the member row of % changed around it, and refuses them: remove each one on 0.14.7, and add them again if they should stay, then upgrade', tampered;
+        RAISE EXCEPTION 'on 0.14, the vault reported the member row of % changed around it, and that report stands: remove each one on 0.14.7, and add them again if they should stay, then upgrade', tampered;
     END IF;
     IF EXISTS (SELECT 1 FROM vault_grants WHERE project_id IS NULL AND environment_id IS NULL) THEN
         RAISE EXCEPTION 'vault_grants still holds a grant on every project, of 0.4, which 0.14''s vault converts when their member next signs in, and never for a member it refuses: on 0.14.7, have them sign in, or remove them, then upgrade';
@@ -232,6 +236,14 @@ ALTER TABLE audit_archive ALTER COLUMN metadata DROP DEFAULT;
 -- value, if any (`current_version_id`: the newest, or null for a reference and for a secret whose reference ended).
 -- Both stay, as numbers: a secret with no value of its own does not get back the one it held before.
 ALTER TABLE secrets RENAME COLUMN current_version TO versions;
+--> statement-breakpoint
+-- 0.14's app could write the count: one below its secret's newest version, written around coffre, would have the
+-- next write take a number already used.
+UPDATE secrets AS secret SET versions = newest.version
+  FROM (SELECT secret_id, max(version) AS version FROM secret_versions GROUP BY secret_id) AS newest
+ WHERE newest.secret_id = secret.id AND secret.versions < newest.version;
+--> statement-breakpoint
+UPDATE secrets SET versions = 0 WHERE versions < 0;
 --> statement-breakpoint
 ALTER TABLE secrets ADD COLUMN current_version integer;
 --> statement-breakpoint
