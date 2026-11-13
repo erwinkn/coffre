@@ -1601,8 +1601,8 @@ billing tokens.
   entry (`cipher: true`) naming the cipher, never the plaintext, the AAD
   or the IV. A narrowed session encrypts or decrypts only with a cipher it
   names. A cipher's name is no credential's, tunnel's, signer's or
-  verifier's, and asking one kind for another's operation is a 404 naming
-  the map the name is in.
+  verifier's, and asking a signer, verifier or cipher for another one's
+  operation is a 404 naming the map the name is in.
 - **What it protects, and what not.** The key stays out of the app: a
   leaked environment, log or memory dump of the app holds no key, and
   every use is in coffre's log and under its limits. But whoever may use

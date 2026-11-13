@@ -1041,8 +1041,9 @@ function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bo
  * What a caller asks coffre to make with an environment's values, which it
  * never hands back: `POST /use/<project>/<env>`, or `POST /use` for a
  * workload that reaches one environment, with `{ presign: {…} }` for a
- * presigned URL, `{ sign: {…} }` for a signature, or `{ verify: {…} }`
- * for whether a signature is a verifier's. A handle's holder sends it as a
+ * presigned URL, `{ sign: {…} }` for a signature, `{ verify: {…} }`
+ * for whether a signature is a verifier's, or `{ encrypt: {…} }` and
+ * `{ decrypt: {…} }` for a cipher's AES-256-GCM. A handle's holder sends it as a
  * bearer token; a workload's proof signs the body, so nobody on the way
  * can change what is signed or checked. PR 7 adds `mint` beside them,
  * naming the credential it uses, as these do.
@@ -1052,7 +1053,7 @@ async function compute(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (isRaw(request)) return signRaw(request, coffre, proxy, path);
   // Read up to what the longest message takes, as base64url in JSON beside the rest.
   const raw = await boundedBody(request, Math.ceil(proxy.messageBytes / 3) * 4 + 4096);
-  if (raw === null) return failure(413, `a message to sign or verify is at most ${sized(proxy.messageBytes)} here as JSON; a longer one to an hmac() signer whose maxBytes takes it goes raw, its bytes as the body: POST ?sign=<signer>, Content-Type: application/octet-stream, as @coffre/client sends it`);
+  if (raw === null) return failure(413, `a message to sign or verify is at most ${sized(proxy.messageBytes)} here as JSON; a longer one to an hmac() signer whose maxBytes takes it goes raw, its bytes as the body: POST ?sign=<signer>, Content-Type: application/octet-stream, as @coffre/client sends it; a cipher's encrypt and decrypt have no raw form`);
   type Asked = { presign?: Record<string, unknown>; sign?: Record<string, unknown>; verify?: Record<string, unknown>; encrypt?: Record<string, unknown>; decrypt?: Record<string, unknown> };
   let asked: Asked | null = null;
   try {
@@ -1309,7 +1310,7 @@ function partsOf(body: ReadableStream<Uint8Array>): { read(): Promise<ReadableSt
   };
 }
 
-/** The longest message a signer or verifier takes. */
+/** The longest message a signer, verifier or cipher takes. */
 function longest(signer: Signer | Cipher): number {
   return signer.kind === 'private-key' ? MESSAGE_BYTES : (signer.maxBytes ?? MESSAGE_BYTES);
 }

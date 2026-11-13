@@ -26,6 +26,7 @@ const KEYS = {
   // signature-cipher.util.ts: HKDF-SHA256 of the seal key's bytes, read as hex.
   POLICY_SIGNATURE_KEY: hkdf(Buffer.from(POLICY_SEAL_KEY, 'hex'), 'equisafe/policy-engine/approval-decision-signature'),
   SMALL_KEY: Buffer.alloc(32, 0xa5),
+  WIDE_KEY: Buffer.alloc(32, 0x3c),
 };
 const options: CredentialProxyOptions = {
   credentials: {},
@@ -34,6 +35,7 @@ const options: CredentialProxyOptions = {
     'billing-tokens': aesGcm('BILLING_TOKEN_KEY', { keyEncoding: 'hex' }),
     'policy-signatures': aesGcm('POLICY_SIGNATURE_KEY', { keyEncoding: 'hex' }),
     small: aesGcm('SMALL_KEY', { keyEncoding: 'base64url', maxBytes: 32 }),
+    wide: aesGcm('WIDE_KEY', { keyEncoding: 'base64' }),
   },
   signers: { 'iframe-token': hmac('IFRAME_TOKEN_SECRET', { encoding: 'base64url' }) },
   verifiers: { yousign: hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex' }) },
@@ -54,6 +56,7 @@ useMcp(async () => {
     BILLING_TOKEN_KEY: KEYS.BILLING_TOKEN_KEY.toString('hex'),
     POLICY_SIGNATURE_KEY: { value: KEYS.POLICY_SIGNATURE_KEY.toString('hex'), sensitivity: 'sensitive' },
     SMALL_KEY: KEYS.SMALL_KEY.toString('base64url'),
+    WIDE_KEY: KEYS.WIDE_KEY.toString('base64'),
     IFRAME_TOKEN_SECRET: 'iframe_secret_0123456789',
     YOUSIGN_WEBHOOK_SECRET: 'ys_whsec_0123456789',
   });
@@ -117,7 +120,7 @@ test("coffre encrypts as Node's createCipheriv('aes-256-gcm') does, and decrypts
   const env = await run();
   // The app holds the handle where each key was, and finds each cipher by name.
   for (const key of Object.keys(KEYS)) assert.equal(env[key], env.COFFRE_HANDLE, key);
-  assert.deepEqual(Object.keys(JSON.parse(env.COFFRE_CREDENTIALS!) as object).sort(), ['billing-tokens', 'iframe-token', 'payer-session', 'policy-signatures', 'small', 'yousign']);
+  assert.deepEqual(Object.keys(JSON.parse(env.COFFRE_CREDENTIALS!) as object).sort(), ['billing-tokens', 'iframe-token', 'payer-session', 'policy-signatures', 'small', 'wide', 'yousign']);
   const payer = used(env, 'payer-session');
   const binary = Buffer.from(Array.from({ length: 3000 }, (_, at) => (at * 37) % 256));
   for (const [plaintext, aad] of [['a pimlico refresh token', 'workspace-1'], ['no aad', undefined], ['', 'empty plaintext'], [binary, 'bytes']] as const) {
@@ -182,6 +185,9 @@ test('a flipped bit in the tag, the IV, the AAD or the ciphertext, or another ke
     await asked({}, 'billing-tokens'), await asked({}, 'policy-signatures'),
   ];
   for (const one of answers) assert.deepEqual(one, [200, '{"plaintext":null}']);
+  // And with the success's headers: only whether the body holds a plaintext tells them apart.
+  const headers = answered.slice(-11).map((line) => line.slice(4, line.indexOf(']] ') + 2));
+  for (const one of headers) assert.equal(one, headers[0]);
   // Malformed asks are 400s, not decrypts: not base64url, an IV that is not 12 bytes, a tag that is not 16.
   for (const decrypt of [
     { iv: '!!', ciphertext: b64u(good.ciphertext), tag: b64u(good.tag) },
@@ -222,6 +228,20 @@ test('a key of 31 or 33 bytes, outside its encoding, or a passphrase is a 409 th
       assert.equal(status, 409, text);
       assert.match(text, new RegExp(`market/bad's ${key} is no AES-256 key, which ${name} reads as exactly 32 bytes`));
       assert.ok(!text.includes(BAD[key]) && !text.includes(BAD[key].slice(4, 20)), `${key}'s value in ${text}`);
+    }
+  }
+  // Base64 and base64url keys that decode cleanly to 31 and 33 bytes: their 409 comes from the length alone.
+  const root = clientFor(deps, ROOT);
+  for (const length of [31, 33]) {
+    const bytes = Buffer.alloc(length, 0x5a);
+    const values = { SMALL_KEY: bytes.toString('base64url'), WIDE_KEY: bytes.toString('base64') };
+    await root.secrets.set('market/bad', values);
+    const fresh = await run('market/bad');
+    for (const [name, key] of [['small', 'SMALL_KEY'], ['wide', 'WIDE_KEY']] as const) {
+      const [status, text] = await ask(fresh, { encrypt: { credential: name, plaintext: b64u('x') } }, '/use/market/bad');
+      assert.equal(status, 409, text);
+      assert.match(text, new RegExp(`market/bad's ${key} is no AES-256 key, which ${name} reads as exactly 32 bytes`));
+      assert.ok(!text.includes(values[key].slice(4, 20)), `${key}'s value in ${text}`);
     }
   }
 });

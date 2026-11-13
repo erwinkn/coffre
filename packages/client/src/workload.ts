@@ -28,6 +28,8 @@
  *   - logout on `close()`, and on SIGTERM.
  */
 import type { Sealed } from './credential.ts';
+
+export type { Sealed };
 import { base64url, bodyDigest, bodyLine, contentDigest, createProof, declaredDigest, fromBase64url, generateProofKey, JSON_MESSAGE_BYTES, thumbprint, type ProofKey, type PublicJwk } from './dpop.ts';
 import { CoffreError } from './index.ts';
 import type { Proof, ProofContext } from './workload-proofs.ts';
@@ -542,7 +544,10 @@ function surface(core: Core): Workload {
       decrypt: async ({ iv, ciphertext, tag }, aad) => {
         const body = await compute({ decrypt: { credential: name, iv: bytesOf(iv), ciphertext: bytesOf(ciphertext), tag: bytesOf(tag), ...(aad === undefined ? {} : { aad: bytesOf(aad) }) } }, 'decrypted');
         if (body.plaintext !== null && typeof body.plaintext !== 'string') throw new Error('coffre decrypted nothing');
-        return body.plaintext === null ? null : fromBase64url(body.plaintext);
+        if (body.plaintext === null) return null;
+        const plaintext = fromBase64url(body.plaintext);
+        if (plaintext === null) throw new Error('coffre decrypted nothing: its answer is no base64url');
+        return plaintext;
       },
       presign: async (path, options = {}) => {
         const body = await compute({ presign: { credential: name, path, ...options } }, 'presigned');

@@ -132,7 +132,10 @@ export function credential(
     decrypt: async ({ iv, ciphertext, tag }, aad) => {
       const { answer, body } = await compute({ decrypt: { credential: name, iv: bytesOf(iv), ciphertext: bytesOf(ciphertext), tag: bytesOf(tag), ...(aad === undefined ? {} : { aad: bytesOf(aad) }) } });
       if (!answer.ok || (body.plaintext !== null && typeof body.plaintext !== 'string')) throw new Error(`coffre decrypted nothing: ${body.message ?? answer.status}`);
-      return body.plaintext === null ? null : fromBase64url(body.plaintext);
+      if (body.plaintext === null) return null;
+      const plaintext = fromBase64url(body.plaintext);
+      if (plaintext === null) throw new Error('coffre decrypted nothing: its answer is no base64url');
+      return plaintext;
     },
   };
 }
