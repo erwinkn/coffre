@@ -289,9 +289,11 @@ in the change that records the same act, under the vault's MAC:
   as one reader knows a payload by its text. P2 does not end that: `originsOf`, the read of admitted principals, one
   partial index and P1's `changeEvent` are left, and each needs an owner before section 2's "18 partial indexes
   dropped" is whole.
-- *A fact the change's own record states is not repeated.* A token's kind and label are in the vault's `issue` record
-  of the same payload, and a sign-in's run in `signIn`. The projector reads them there for the page's line, as
-  `originsOf` reads a credential's origin there already, and the entry's detail leaves them out.
+- *One source per row.* A change the vault authors (`issueToken`, `signIn`) carries no entry: the projector builds its
+  row from the change's own record (`issue`, `signIn`). A change the app authors carries its entry and has no such
+  record, so the entry's detail holds everything the row shows, a token's kind and label and a sign-in's run included.
+  The projector never merges the two; if a payload ever held both, the entry is read first. The detail is what
+  `audit_log` holds for the same line today, so nothing grows against 0.15.
 - *The vault holds the action to the op.* A fixed map beside `Op` (`packages/vault/src/inputs.ts`) lists the actions
   each op's change may carry: a `secret.delete` carries `secret.archive` or `secret.reset` and nothing else, a
   `secret.write` carries `secret.write`, `secret.loosen` or `secret.restore`, and A1's list of its sites fills the
@@ -612,12 +614,12 @@ run, the protection taken out and the invariant that then breaks, or says that n
 | **Fence** (advisory `(1668244070, 0)`) | shared: every use, a refusal's entry, an event, a retention change, a write's request, for the statement. Exclusive: a change's last statement (except the change of a credential its own transaction made), a two-trip write's hold, a revoke, a bind that ends a binding or revokes; the barrier | `HotPathOne`: UseLocks, ChangeLocks, LockToCommit > `TotalOrder`, `NothingAllowedAfterAnswer`; CheckpointLocks > `CheckpointsHold`. `Lifecycle`: RevokeTakesFence > `RevokeOrdersUses`. `Writing`: HoldAfterFence > `WritesStandAtCommit` | every use, behind each change's last statement and its commit (a few ms; a removal's revokes in batches of 10 ms) and behind each barrier | necessary |
 | **Principal's lock** (advisory `(1668244066, hash)`) | a use whose key enters its caller's cap set, exclusive; one that moves a key on to a new period, shared; a batch's second round, exclusive, before its first key. To the commit | `HotPathOne`: PrincipalLocks > `BulkCapHolds`, `BulkReplayAgrees`; RefreshLocks > `BulkReplayAgrees`; RefreshShared > `RefreshesNeverQueue`. `Batching`: StrongestFirst > `NoWaitCycle` | the same caller's other uses that take it, for one statement and its commit | necessary |
 | **The cap's election lock** (`b_lock`: advisory, one a caller, key, period and round) | the uses moving one key on, under the principal's lock shared: one gets it without waiting and writes the cap's row; the others take it shared and read the row again; a winner that rolled back costs them a round more, on another lock. To the commit | nothing modelled, and no test names it. By the SQL's comment, each mover's UPDATE would queue on the row and keep it locked to its own commit: N uses committing one behind another at each period | the losers, for the winner's commit | advantageous under the shared lock, though never measured alone. Neither under the exclusive one: delete it there (below) |
-| **Member's queue** (advisory `(1668245101, hash)`), with the member's row | a decision that names members: queue, then row, in principal order. Exclusive for a change, shared for the vault's reads under the head. A key rotation takes every member's | the row: `Members`, `Sharing`: StandingRecheckUnderChangeLock > `NothingReleasedAfterRevocation`; `Locks`: SortedMemberLocks > `NoWaitCycle`. The queue: nothing modelled. It is fairness: a stream of shared row locks never lets a removal in (`store.ts`) | changes that name the same member, for the holder's transaction | the row: necessary. The queue: neither, once nothing takes it shared (below) |
+| **Member's queue** (advisory `(1668245101, hash)`), with the member's row | a decision that names members: queue, then row, in principal order. Exclusive for a change, shared for the vault's key decisions (`unwrap`, `wrap`, `rewrap`), which hold the reader's row across a key service's call. A key rotation takes every member's | the row: `Members`, `Sharing`: StandingRecheckUnderChangeLock > `NothingReleasedAfterRevocation`; `Locks`: SortedMemberLocks > `NoWaitCycle`. The queue: nothing modelled, one test (`a removal amid a steady stream of one member's reads is not starved`). It is fairness: a stream of shared row locks never lets a removal in (`store.ts`) | changes that name the same member, for the holder's transaction | the row: necessary. The queue: necessary while a key decision holds a row shared across a key service's call; it goes with the last of them, which is V1's to decide (below) |
 | **Factor lock** (advisory `(1717658484, hash)`) | an issue, for its issuer, and a change of that person's passkeys: exclusive, first, to the commit | `Factor`: IssueTakesFactor, ChangeTakesFactor > `ChangeEndsAll`, `LiveFromLive`; FactorFirst > `NoWaitCycle` | one person's issues and passkey changes, each behind the other | necessary |
 | **Place in line** (advisory, tried: `reserveProxy`'s one place. The reads' 16 go with the reads under the head) | the one call that reserves a deploy's proxy names, to its commit; the others are refused at once and ask again | nothing modelled. Measured (#467): 3,080 no-op decisions queued 200 s behind the head at 1,000 uses a second, and every use behind them | nobody: it is tried, never waited for | advantageous |
 | **Rows of members, credentials, bindings, connections** (`FOR SHARE`, `FOR KEY SHARE`, `FOR UPDATE`, in id order) | a sign-in, an issue, a bind, a revoke, inside their one statement, to the commit | `Lifecycle`: IssuerLocked > `SensitiveOnlyFromOwners`, `IssuedByLiveCredential`; BindingLocked, UnbindExclusive > `EndedBindingEndsCredentials`; TouchSkipsLocked > `SignInsRunTogether`. `Members`: MemberRecheckInSignin > `CredentialsAtCurrentGeneration` | an unbind behind the sign-ins through its binding, and they behind it, for one statement | necessary: an issue and a sign-in take no change lock |
-| **A key's row** (`FOR UPDATE` at 7 sites of the app; `FOR SHARE` in `end_reference`) | a key's write, move, restore or delete, each in a change, to the commit | nothing modelled for the explicit lock: `WriteLocks` has the row as the UPDATE takes it | another change of that key, which the change lock already holds off | not judged: each site says which race it is for, and I did not read the seven |
-| **A key rotation's signed rows** (`FOR UPDATE`, a page a step) | the app's rotation step, to its commit | nothing modelled that I found. By its comment: a session's renewal, which takes no change lock, would slip past the step | a renewal of a row on that page, for one step | necessary by its comment, not checked |
+| **A key's row** (`FOR UPDATE` at 7 sites of the app, through `lock` in `server/src/db/queries.ts`; `FOR SHARE` in `end_reference`) | a key's write, rename, reset or restore, a removal's check in a fork and a reference's end, each in a change, to the commit | nothing modelled, and nothing to model: `WriteLocks` has the row as the UPDATE takes it, and every transaction that writes a key's row holds the change lock from before its first read | nobody: the change lock has held off whoever would | goes, all eight (below) |
+| **A key rotation's signed rows** (`FOR UPDATE`, a page of 100 a step) | the app's rotation step, under the change lock, to its commit | nothing modelled, and no test that I found by reading (not run without it). Its comment names a session's renewal that takes no head, which no vault makes any more | a sign-in through a binding on the page, an issue through a credential on it, a last-use stamp: for one step | goes (below) |
 | **Sweeps** (`FOR UPDATE SKIP LOCKED`: the cap's old rows, spent tokens, old releases) | one sweeper at a time, for its statement | nothing modelled: two sweepers would do one's work twice | nobody: a locked row is skipped | harmless |
 | **The projector's** (P1: the fence shared in `project_audit`; a rebuild's `TRUNCATE`) | a batch of the projector; a rebuild | `Reads`: CursorAfterRows > `LagShown` | the audit page, behind a rebuild's `TRUNCATE` | P1's to state |
 | **The migrator's two** (advisory, session-long) | `coffre migrate`, and its index builds | nothing modelled: two migrators at once. On no request's path | a second migrator | necessary |
@@ -625,7 +627,7 @@ run, the protection taken out and the invariant that then breaks, or says that n
 Not locks, and counted nowhere above: the UPDATEs' own row locks (a credential's last use, a binding's stamp, the
 cap's row), which no statement asks for by name.
 
-**What can go now.** Three, none of which needs a model:
+**What can go now.** Five, none of which needs a model:
 
 - **The election under the exclusive lock.** A batch's second round holds its principal's lock exclusive, and each key
   still runs the election and wins it at once: up to 100 advisory locks a statement (`limits.batch`), each an entry in
@@ -644,11 +646,62 @@ cap's row), which no statement asks for by name.
   read before it, no new `moved`). V2b makes `use_credential` again for its policy reads, so the argument rides that
   migration instead of a second copy of a 700-line function. If V2b's owner declines, W386 stacks one small PR on
   #590.
-- **The members' queue, with its last shared caller.** Its 5 shared callers on main are the vault's reads under the
-  head (`#decide` with `reads: true`), which the plan deletes. After that only changes take it, exclusive, in the
-  statement that locks the same member's row, and it orders nothing the row does not. The smallest change:
-  `lockMembers` and `change_input` drop their `pg_advisory_xact_lock`, in the PR that removes the last shared caller,
-  with the check of the pair's order in `scripts/test-schema.sh`. If a shared caller stays, the queue stays.
+- **The members' queue, with its last shared caller: V1's (W391).** Its 5 shared callers on main are not reads of the
+  log. They are the vault's key decisions, `unwrap`, `wrap` and `rewrap` (`#keys` and `#refuseVersions`,
+  `vault.ts:1964` to `:2207`), which the app reaches from an interactive write, a reveal, a fork and a restore
+  (`api/keys.ts:65`, `:145`, `:445`). Each takes the reader's row shared and, with a key service, holds it across the
+  service's call. That is the stream the queue was made for, and `a removal amid a steady stream of one member's reads
+  is not starved` (`vault/test/vault.test.ts:1193`: a removal and a revocation, beside reads of 150 ms every 40 ms) is
+  the test that fails without it. No row of section 7 deletes these callers. V1 moves their entries off `audit_log`,
+  so V1 decides their shape (the plan's open point: which 0.16 request still reaches `unwrap`). If V1 keeps a decision
+  that holds a member's row shared across a key service's call, the queue stays, and is necessary. If V1 decides them
+  as a use is decided, no member's row held, only changes take the queue, exclusive, in the statement that locks the
+  same row, and it orders nothing the row does not: `lockMembers` and `change_input` drop their
+  `pg_advisory_xact_lock` in V1's PR, with the check of the pair's order in `scripts/test-schema.sh` and that test.
+
+  The queue never ordered the others that share a member's row. A sign-in (`sign_in`, `FOR SHARE`, lines 847 and 939
+  of `0082_flat_history.sql`), an issue (`issue_token`, issuer and member, line 677) and a bind (`change_bindings`,
+  its actor, line 232) take the row with no queue. So one starvation case exists on main and stays whatever becomes of
+  the queue: a removal or a revocation of a member whose sign-ins or issues leave no gap waits out its lock timeout
+  and answers busy, and again at each retry. Each of those holds the row for one statement and its commit, where a
+  read held it across a key service's call, so it takes a member signing in back to back, in practice a service's
+  workloads. No test covers a removal beside steady sign-ins of its member, and no model does (bounded runs do not
+  check how long). Not fixed here: a queue in `sign_in` is one more lock on every sign-in. A test first, after the
+  tag.
+- **A key's row lock, at all eight places.** `lock` (`server/src/db/queries.ts:140`) reads a key's rows `FOR UPDATE`
+  at seven sites: a removal's check in a fork (`api/missing.ts:91`), a write (`api/secrets.ts:859`), a rename, the row
+  read again after it and the same key in each fork below (`:1492`, `:1531`, `:1564`), a reset (`:1647`) and a restore
+  (`:1828`). `end_reference` takes the holder's row `FOR SHARE`. Each names a race with another change of the same
+  key, and none can be under way. Every statement that writes a `secrets` row runs in a transaction that took the
+  change lock first and holds it to its commit: the app's `audited` (each `update` and `insert` in `api/secrets.ts`,
+  `api/projects.ts:770`, `api/forks.ts:131`, `fileSecrets`), a key write by token (`laterHead`, then `heldWrites`),
+  and the seal that `app_change` and `change_input` write, each locking the head itself; `end_reference` runs in the
+  vault's decision under the head (`vault.ts:2451`). Nothing else writes the table or locks a row of it: across every
+  migration those three functions and the deleted cutover's are the only ones that do, so no use, sweep or renewal
+  does. The three tables whose rows refer to a key (`secret_versions`, `secret_references`, `audit_log`) are inserted
+  into under the head too, and a use reads the row with no lock, waiting for none. So the lock waits for nobody, and a
+  plain read in its place returns the same rows: each statement after the change lock sees what its earlier holders
+  committed (READ COMMITTED). `missing.ts:91`'s own comment already gives the head as its reason. The smallest
+  deletion: `lock` goes and its seven callers read the rows plainly, about ten lines; `end_reference` loses one line,
+  in a migration that makes its 28 lines again. One follow-up PR after A1, which is rewriting `api/secrets.ts` now:
+  seven sites are more than a line or two to add to it.
+- **The rotation step's page lock.** `signedRowsAfter` (`server/src/db/rotation.ts:70`) reads a step's 100 signed rows
+  `FOR UPDATE`, for a session's renewal that takes no head, by its comment. From the code: the step's write (`reseal`)
+  and every change of a signed row (`updateAuth`, `renewSession`, `revokeCredentialsWhere`, the vault's
+  `revoke_credential` and `change_bindings`) are compare-and-set on the row's MAC, so neither overwrites the other.
+  What the lock adds is who loses: the other waits and finds the row signed again, where without it the step could
+  lose and name the row unsigned. The renewal now runs in `audited` (`api/workloads.ts:1743`); its other branch, a
+  plain transaction, is for a vault on 0.14's log, which #584 deleted. The step holds the head (`headFor`). So no
+  renewal runs beside a step. One change of a signed row is left outside the head, `sweepOauthClients`, which a
+  client's registration runs on the bare database (`mcp/service.ts:657`), and only from an instance still on the old
+  key, the new one answering `rotating`. Without the lock it can revoke an unused client under the step, and the
+  step's `key.reseal` entry then names a revoked, unused client as unsigned: a wrong line in a report, nothing served
+  and nothing kept alive. Against that, the lock makes a sign-in through a binding on the page (`FOR KEY SHARE`), an
+  issue through a credential on it (`FOR SHARE`) and the last-use stamps wait for the step. No test fails without it
+  that I can find by reading: `key-rotation.test.ts` has 21, none writes a signed row beside a step, and the two that
+  race are steps, both under the head. Not run without it. The smallest deletion: `.for('update')` and the comment's
+  claim, with the dead branch of `renew` (`keeps015`), in A1 if it already deletes that branch, else the same
+  follow-up.
 
 **What does not go now: the issue lock into the fence.** They do different jobs today. The fence orders uses against
 changes. The issue lock lets a transaction number a new credential, and compare the policy it was weighed on, without
@@ -999,12 +1052,21 @@ A1 both need `note` in the vault's contract (`packages/core/src/vault.ts`), whic
 P3 both edit `server/src/api/audit.ts` and run in sequence, as do E4 and V0 in `vault.ts`. Every schema PR appends to
 `schema.ts` and the journal, one-line conflicts.
 
-**Estimate.** About 40 agent-days. With the contract pinned, the longest path is the contract, V1, V2b, S1, C1: 10.5
-build days with L1's 4 gone (D202), which I have not laid out again against the landings (it was 15 to 17 working days
-with L1). The two model-first PRs were where the risk is, and both are written. A0 found that the fence cannot stand
-in for the head, so the 14 protections keep a lock of their own and A1 moves none of them. L1's is parked with its
-pull request (#585). On Node, the projector runs on a timer in the vault's process, where Workers use a Durable Object
-alarm. The beat is the app's scheduled run on both.
+**Where it stands (11-13, main `14dba0d98`).** On main: E4 (#584), V0 (#591), T1 (#580), the collapse's generator and
+parity test (#583, the larger half of C1) and the sweep's sealing (#586). Open and built: the contract (#581), P1
+(#588, lands with P2), P3's first PR (#587, after #581 and P1), V2a (#590), A0 (#573, lands with A1) and the 60 s
+statement timeout (#589). Being built: A1 and U1. Not opened: P2, V1, V2b, P3's swap, S1, C1's run, C2. Two things
+gate: #581, on which #587 and V1 stand, and P2, before which neither V1 nor A1 lands.
+
+**Estimate.** About 37 agent-days without L1's 4 (D202). From today the longest path is V1 (4), V2b (1.5), S1 (2), C1
+and C2 (0.5): 9 build days counting 1 for C1's run and its gate now that its generator is merged (my count), 10 if C1
+keeps its 2, against 10.5 before these landings and 14.5 with L1. P2 (3) is built beside V1 and has one day of slack
+against it; after that each day P2 waits is a day on the path. A1 (4, under way), P3's swap and the freeze fit beside
+V1 and V2b, and U1 beside A1, so none of them lengthens it. At the first estimate's ratio (14.5 build days for 15 to
+17 working days) that is 10 to 12 working days. The two model-first PRs were where the risk is, and both are written.
+A0 found that the fence cannot stand in for the head, so the 14 protections keep a lock of their own and A1 moves none
+of them. L1's is parked with its pull request (#585). On Node, the projector runs on a timer in the vault's process,
+where Workers use a Durable Object alarm. The beat is the app's scheduled run on both.
 
 ## 8. Decided
 
