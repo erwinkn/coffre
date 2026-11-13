@@ -7,8 +7,8 @@
 (* redeploy with overlap and narrow, a thief who holds a copy of the code  *)
 (* enrolls and leaves, and after each exchange and each tick the rule      *)
 (* reads the rows. WorkloadEnrollment.tla holds the races (the count under *)
-(* the head, renewal on the clock). docs/formal.md says what this covers,  *)
-(* what it abstracts and what it does not prove.                           *)
+(* the change lock, renewal on the clock). docs/formal.md says what this   *)
+(* covers, what it abstracts and what it does not prove.                   *)
 (*                                                                         *)
 (* A tick is a renewal period: each running instance renews within it, and *)
 (* a session that stops renewing lives `Life` ticks more. The run is       *)
@@ -50,8 +50,8 @@ CONSTANTS
     \* A tripwire run reads the rows and appends its freeze in two steps,
     \* outside the exchange's and the renewal's transactions (scenario).
     TripLags,
-    \* A run's freeze commits under the head only while the binding's
-    \* newest freeze or lift is still the one the run read...
+    \* A run's freeze commits under the change lock only while the
+    \* binding's newest freeze or lift is still the one the run read...
     TripFencedOnLift,
     \* ...which it reads before the rows it counts. Off, after them: a lift
     \* between the two reads passes the fence.
@@ -131,9 +131,9 @@ Trip(rows, t) ==
 
 \* A run's next step: it reads the binding's newest freeze or lift, the
 \* fence; it counts the rows, from the newest lift then; and once it has
-\* both, its freeze commits under the head only while the binding is not
-\* frozen and the entry it read is still the newest. A run on a frozen
-\* binding does nothing.
+\* both, its freeze commits under the change lock only while the binding
+\* is not frozen and the entry it read is still the newest. A run on a
+\* frozen binding does nothing.
 TripStep ==
     /\ \E run \in pending :
          LET rest == pending \ {run} IN

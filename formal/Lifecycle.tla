@@ -22,8 +22,9 @@
 (* the presented token's hash names, only if its row is its object's       *)
 (* newest sealed change, at its account's generation (W242).               *)
 (*                                                                         *)
-(* An unbind is still the app's transaction (0.14's head, the binding's    *)
-(* row, then the sweep of what it issued, the fence), as built.            *)
+(* An unbind is still the app's transaction (the change lock of            *)
+(* Coffre.tla, the binding's row, then the sweep of what it issued, the    *)
+(* fence), as built.                                                       *)
 (*                                                                         *)
 (* One step is one statement, or the part of one between two lock waits;   *)
 (* READ COMMITTED, each step reading what is committed.                    *)
@@ -64,8 +65,15 @@ CONSTANTS
     \* no use decided on the live row is numbered after the revoke.
     RevokeTakesFence,
     \* A revoke goes ahead only while the policy its right was weighed on
-    \* is still the newest, read under the fence, which every policy change
-    \* takes too (as `policyStill` under 0.14's head).
+    \* is still the one in force, read under the fence, which every policy
+    \* change takes too. What it compares is numbers: that of the newest
+    \* change, in the log, of each object its decision read (the roles
+    \* here), as the app's `policyStill` does under the change lock (0.16;
+    \* before it, one number for all of them, the seq of the newest
+    \* `policy.change`). Never the seal a row stores, which a row put back
+    \* brings back with it (Writing.tla's TodayPolicyOnLog). This model has
+    \* no such writer: its check reads what is true of the roles (Manages,
+    \* Narrowed), and the number is Writing.tla's to hold.
     RevokePolicyHeld,
     \* An issue or a sign-in never takes the fence: the issue lock, shared
     \* (0026, IssueOwnLock; T123, R58).
@@ -79,8 +87,12 @@ CONSTANTS
     IssuerCAS,
     \* An issue checks the policy it was weighed on only once it holds the
     \* issue lock shared, and is numbered under it; a policy change takes
-    \* it exclusive, so the two are ordered (as `policyStill` under 0.14's
-    \* head; review r3). Without it, the check comes before the lock.
+    \* it exclusive, so the two are ordered (as `policyStill` under the
+    \* change lock; review r3). The policy it was weighed on is the number
+    \* of the newest change, in the log, of each object the read answered
+    \* from, the roles here, which the statement compares to the log as it
+    \* is; never the rows' seals, as for a revoke. Without it, the check
+    \* comes before the lock.
     IssuePolicyHeld,
     \* A policy change takes the issue lock before the fence, as the
     \* checkpointer's barrier does (HotPathOne's BarrierIssueFirst): it
@@ -173,7 +185,7 @@ VARIABLES
     gen,        \* and its generation: a removal moves it on, an admission keeps it
     next,       \* the log's next number
     fx, fs,     \* the fence: its exclusive holder, its shared holders
-    hd,         \* 0.14's head (an admin's change, an unbind)
+    changeLock,         \* the change lock (an admin's change, an unbind)
     mx, ms,     \* members' rows: exclusive holder, shared holders
     cx, cs,     \* credentials' rows: exclusive holder, shared holders
     bx, bs,     \* binding b's row: its exclusive holder (FOR UPDATE), its sharers (FOR KEY SHARE)
@@ -192,14 +204,14 @@ VARIABLES
     dems,       \* each policy change committed: Ada's demotion, her right narrowed by the policy, or the revoker's taken away; its number
     used        \* each use decided
 
-locks == <<fx, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is>>
+locks == <<fx, fs, changeLock, mx, ms, cx, cs, bx, bs, bu, ix, is>>
 vars == <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, due, unbound, spent, pc, op, l, handed, answered, given, revs, dems, used>>
 
 -----------------------------------------------------------------------------
 (* Locks *)
 
 Holds(p) ==
-    \/ fx = p \/ p \in fs \/ hd = p \/ bx = p \/ p \in bs \/ bu = p \/ ix = p \/ p \in is
+    \/ fx = p \/ p \in fs \/ changeLock = p \/ bx = p \/ p \in bs \/ bu = p \/ ix = p \/ p \in is
     \/ \E m \in Members : mx[m] = p \/ p \in ms[m]
     \/ \E c \in Creds : cx[c] = p \/ p \in cs[c]
 
@@ -208,7 +220,7 @@ Holds(p) ==
 Release(p) ==
     /\ fx' = IF fx = p THEN None ELSE fx
     /\ fs' = fs \ {p}
-    /\ hd' = IF hd = p THEN None ELSE hd
+    /\ changeLock' = IF changeLock = p THEN None ELSE changeLock
     /\ mx' = [m \in Members |-> IF mx[m] = p THEN None ELSE mx[m]]
     /\ ms' = [m \in Members |-> ms[m] \ {p}]
     /\ cx' = [c \in Creds |-> IF cx[c] = p THEN None ELSE cx[c]]
@@ -256,7 +268,7 @@ Init ==
     /\ status = "active"
     /\ gen = 0
     /\ next = 1
-    /\ fx = None /\ fs = {} /\ hd = None /\ bx = None /\ bs = {} /\ bu = None /\ ix = None /\ is = {}
+    /\ fx = None /\ fs = {} /\ changeLock = None /\ bx = None /\ bs = {} /\ bu = None /\ ix = None /\ is = {}
     /\ due = TRUE
     /\ mx = [m \in Members |-> None] /\ ms = [m \in Members |-> {}]
     /\ cx = [c \in Creds |-> None] /\ cs = [c \in Creds |-> {}]
@@ -296,7 +308,7 @@ UseFence(u) ==
     /\ fs' = fs \cup {u}
     /\ l' = [l EXCEPT ![u].before = answered]
     /\ Goto(u, "read")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, hd, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, changeLock, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 UseRead(u) ==
     /\ pc[u] = "read"
@@ -352,7 +364,7 @@ IssueRows(p) ==
     /\ ms' = [m \in Members |-> IF (m = "ada" /\ IssuerLocked) \/ (m = "svc" /\ MemberLocked) THEN ms[m] \cup {p} ELSE ms[m]]
     /\ cs' = [cs EXCEPT !["cA"] = IF IssuerLocked THEN @ \cup {p} ELSE @]
     /\ Goto(p, IF IssuePolicyHeld THEN "ilock" ELSE "check")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, cx, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, changeLock, mx, cx, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 \* The issue lock, shared, which a policy change takes exclusive (an issue's, or a sign-in's, just before its number).
 IssueLock(p) ==
@@ -360,7 +372,7 @@ IssueLock(p) ==
     /\ ix = None
     /\ is' = is \cup {p}
     /\ Goto(p, IF p \in Issuers /\ IssuePolicyHeld THEN "check" ELSE "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, changeLock, mx, ms, cx, cs, bx, bs, bu, ix, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 \* Still the objects it decided on? Else "moved": the statement ends, and the vault reads again. The policy is still
 \* the one it was weighed on, which the statement always compares (`issue_token`): with IssuePolicyHeld, under the
@@ -371,7 +383,7 @@ IssueCheck(p) ==
                    /\ rows["cA"] = l[p].cA /\ Sealed(sealed["cA"]) = Sealed(l[p].cA)
                    /\ status = "active" /\ gen = l[p].gen
        IN IF (IssuerCAS => same) /\ ~Narrowed
-          THEN Goto(p, IF IssuePolicyHeld THEN "fence" ELSE "ilock") /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is>>
+          THEN Goto(p, IF IssuePolicyHeld THEN "fence" ELSE "ilock") /\ UNCHANGED <<fx, fs, changeLock, mx, ms, cx, cs, bx, bs, bu, ix, is>>
           ELSE Goto(p, "read") /\ Release(p)
     /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
@@ -381,7 +393,7 @@ IssueFence(p) ==
     /\ IssueOffFence \/ FenceFree
     /\ fx' = IF IssueOffFence THEN fx ELSE p
     /\ Goto(p, "number")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, changeLock, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 IssueNumber(p) ==
     /\ pc[p] = "number"
@@ -434,7 +446,7 @@ SignInRows(s) ==
     /\ bs' = IF LocksBinding(s) /\ SignInsShare THEN bs \cup {s} ELSE bs
     /\ bx' = IF LocksBinding(s) /\ ~SignInsShare THEN s ELSE bx
     /\ Goto(s, "body")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, cx, cs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, changeLock, mx, cx, cs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 \* The binding, the account and the token weighed as they are now; the token spent. No count of the binding's
 \* sign-ins (W331, D177): each ID token its issuer signed buys one credential, which SpentChecked holds.
@@ -451,7 +463,7 @@ SignInBody(s) ==
           THEN /\ l' = [l EXCEPT ![s].gen = gen]
                /\ spent' = spent \cup {tok}
                /\ Goto(s, "touch")
-               /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is>>
+               /\ UNCHANGED <<fx, fs, changeLock, mx, ms, cx, cs, bx, bs, bu, ix, is>>
           ELSE /\ Done(s) /\ UNCHANGED <<l, spent>>
     /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, bindings, bsealed, due, unbound, op, handed, answered, given, revs, dems, used>>
 
@@ -467,7 +479,7 @@ SignInTouch(s) ==
               \/ ~TouchFree(s) /\ TouchSkipsLocked /\ UNCHANGED bu
          ELSE UNCHANGED bu
     /\ Goto(s, "ilock")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cx, cs, bx, bs, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, changeLock, mx, ms, cx, cs, bx, bs, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 SignInCommit(s) ==
     /\ pc[s] = "commit"
@@ -492,7 +504,8 @@ EvilBinding(e) ==
 
 -----------------------------------------------------------------------------
 (* An unbind of b, the vault's one statement (PR 3a; before it, the app's
-   transaction under 0.14's head, which no other step here waits on): the
+   transaction under the change lock, which no other step here waits on):
+   the
    binding's row (its update) and the sweep of the live credentials it
    issued, in the order SweepAfterLock says, then the fence, the changes
    numbered, the commit. The vault reads the set before its statement and
@@ -517,7 +530,7 @@ UbLock(b) ==
          ELSE /\ bs' = bs \cup {b}
               /\ UNCHANGED bx
     /\ Goto(b, IF SweepAfterLock THEN "sweep" ELSE "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cx, cs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, changeLock, mx, ms, cx, cs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 UbSweep(b) ==
     /\ pc[b] = "sweep"
@@ -530,7 +543,7 @@ UbFence(b) ==
     /\ FenceFree
     /\ fx' = b
     /\ Goto(b, "commit")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, changeLock, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 UbCommit(b) ==
     /\ pc[b] = "commit"
@@ -563,7 +576,7 @@ RevRow(r) ==
     /\ cx[l[r].c] = None /\ cs[l[r].c] = {}
     /\ cx' = [cx EXCEPT ![l[r].c] = r]
     /\ Goto(r, "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, changeLock, mx, ms, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 RevFence(r) ==
     /\ pc[r] = "fence"
@@ -575,7 +588,7 @@ RevFence(r) ==
             /\ next' = next + 1
        ELSE UNCHANGED <<l, next>>
     /\ Goto(r, "commit")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, fs, changeLock, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 RevCommit(r) ==
     /\ pc[r] = "commit"
@@ -597,7 +610,8 @@ RevAnswer(r) ==
 
 -----------------------------------------------------------------------------
 (* The vault's own changes to a member (`change_input`): the member's row,
-   0.14's head, the fence, then the change; a removal revokes the account's
+   the change lock, the fence, then the change; a removal revokes the
+   account's
    live credentials in it. A removal and admission again is two such
    transactions. *)
 
@@ -613,13 +627,13 @@ AdminRow(a) ==
     /\ pc[a] = "row"
     /\ mx[Who(op[a].kind)] = None /\ ms[Who(op[a].kind)] = {}
     /\ mx' = [mx EXCEPT ![Who(op[a].kind)] = a]
-    /\ Goto(a, "head")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ Goto(a, "changelock")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, changeLock, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
-AdminHead(a) ==
-    /\ pc[a] = "head"
-    /\ hd = None
-    /\ hd' = a
+AdminChangeLock(a) ==
+    /\ pc[a] = "changelock"
+    /\ changeLock = None
+    /\ changeLock' = a
     /\ Goto(a, "fence")
     /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
@@ -628,7 +642,7 @@ AdminFence(a) ==
     /\ FenceFree
     /\ fx' = a
     /\ Goto(a, "body")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, changeLock, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 AdminBody(a) ==
     /\ pc[a] = "body"
@@ -660,16 +674,17 @@ AdminBody(a) ==
     /\ UNCHANGED <<bindings, bsealed, due, unbound, spent, l, handed, answered, given, used>>
 
 -----------------------------------------------------------------------------
-(* An Owner's policy change (`changePolicy`): a vault entry under 0.14's
-   head, whose trigger takes the fence. It narrows Ada's role: she may no
-   longer give sensitive reads, though her member row is as it was. With
-   IssuePolicyHeld it takes the issue lock exclusive, after the head and,
-   with PolicyIssueFirst, before the fence. *)
+(* An Owner's policy change (`changePolicy`): the vault's change under the
+   change lock, whose last statement takes the fence. It narrows Ada's
+   role (the roles' row, whose seal moves): she may no longer give
+   sensitive reads, though her member row is as it was. With
+   IssuePolicyHeld it takes the issue lock exclusive, after the change
+   lock and, with PolicyIssueFirst, before the fence. *)
 
 PolStart(a) ==
     /\ pc[a] = "start"
-    /\ hd = None
-    /\ hd' = a
+    /\ changeLock = None
+    /\ changeLock' = a
     /\ op' = [op EXCEPT ![a] = [kind |-> "narrow"]]
     /\ Goto(a, IF IssuePolicyHeld /\ PolicyIssueFirst THEN "ilock" ELSE "fence")
     /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, l, handed, answered, given, revs, dems, used>>
@@ -679,14 +694,14 @@ PolIssueLock(a) ==
     /\ IssueLockFree
     /\ ix' = a
     /\ Goto(a, IF PolicyIssueFirst THEN "fence" ELSE "body")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cx, cs, bx, bs, bu, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, changeLock, mx, ms, cx, cs, bx, bs, bu, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 PolFence(a) ==
     /\ pc[a] = "fence"
     /\ FenceFree
     /\ fx' = a
     /\ Goto(a, IF IssuePolicyHeld /\ ~PolicyIssueFirst THEN "ilock" ELSE "body")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, changeLock, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 PolBody(a) ==
     /\ pc[a] = "body"
@@ -726,7 +741,7 @@ Step(p) ==
     \/ p \in SignIns /\ (SignInStart(p) \/ SignInRows(p) \/ SignInBody(p) \/ SignInTouch(p) \/ IssueLock(p) \/ IssueFence(p) \/ IssueNumber(p) \/ SignInCommit(p))
     \/ p = "ub" /\ (UbStart(p) \/ UbLock(p) \/ UbSweep(p) \/ UbFence(p) \/ UbCommit(p))
     \/ p = "rev" /\ (RevStart(p) \/ RevRow(p) \/ RevFence(p) \/ RevCommit(p) \/ RevAnswer(p))
-    \/ p = "admin" /\ (AdminStart(p) \/ AdminRow(p) \/ AdminHead(p) \/ AdminFence(p) \/ AdminBody(p))
+    \/ p = "admin" /\ (AdminStart(p) \/ AdminRow(p) \/ AdminChangeLock(p) \/ AdminFence(p) \/ AdminBody(p))
     \/ p = "pol" /\ (PolStart(p) \/ PolIssueLock(p) \/ PolFence(p) \/ PolBody(p))
     \/ p = "writer" /\ WriterStep(p)
 
@@ -742,7 +757,7 @@ Spec == Init /\ [][Next]_vars
 
 TypeOK ==
     /\ fx \in Procs \cup {None}
-    /\ hd \in Procs \cup {None}
+    /\ changeLock \in Procs \cup {None}
     /\ bx \in Procs \cup {None}
     /\ bs \subseteq Procs /\ (bx /= None => bs = {})
     /\ bu \in Procs \cup {None} /\ (bu /= None => bx = None)
@@ -835,8 +850,8 @@ WaitsFor(s) ==
 SignInsRunTogether ==
     \A s \in SignIns : WaitsFor(s) \cap SignIns = {}
 
-\* R44: a sign-in never takes 0.14's head.
-SignInsTakeNoHead ==
-    \A s \in SignIns : hd /= s
+\* R44: a sign-in never takes the change lock.
+SignInsTakeNoChangeLock ==
+    \A s \in SignIns : changeLock /= s
 
 =============================================================================
