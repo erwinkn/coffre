@@ -27,7 +27,10 @@
  *     once if the gate asks for a fresh one;
  *   - logout on `close()`, and on SIGTERM.
  */
-import { base64url, bodyDigest, bodyLine, contentDigest, createProof, declaredDigest, generateProofKey, JSON_MESSAGE_BYTES, thumbprint, type ProofKey, type PublicJwk } from './dpop.ts';
+import type { Sealed } from './credential.ts';
+
+export type { Sealed };
+import { base64url, bodyDigest, bodyLine, contentDigest, createProof, declaredDigest, fromBase64url, generateProofKey, JSON_MESSAGE_BYTES, thumbprint, type ProofKey, type PublicJwk } from './dpop.ts';
 import { CoffreError } from './index.ts';
 import type { Proof, ProofContext } from './workload-proofs.ts';
 
@@ -101,6 +104,10 @@ export interface UsedCredential {
   sign(message: string | Uint8Array): Promise<string>;
   /** Whether `signature`, as its header carried it, is a verifier's HMAC of `message`, an inbound webhook's body as it came: checked without reading its secret. */
   verify(message: string | Uint8Array, signature: string): Promise<boolean>;
+  /** `plaintext` encrypted with a cipher's AES-256-GCM key, which stays in coffre, under `aad` if given and an IV coffre draws. */
+  encrypt(plaintext: string | Uint8Array, aad?: string | Uint8Array): Promise<Sealed>;
+  /** The plaintext `sealed` holds under the cipher's key and `aad`, or null when it does not decrypt. */
+  decrypt(sealed: Sealed, aad?: string | Uint8Array): Promise<Uint8Array | null>;
   /** A presigned GET or HEAD of `path` under an AWS-signed credential's upstream: the upstream's own URL, for anyone until `expiresAt`. */
   presign(path: string, options?: { expiresIn?: number; method?: 'GET' | 'HEAD'; query?: Record<string, string> }): Promise<{ url: string; expiresAt: string }>;
   /** A short-lived child of a minter (an AWS session, a GitHub installation token), where the binding lists it. */
@@ -528,6 +535,20 @@ function surface(core: Core): Workload {
         return body.signature;
       },
       verify: async (message, signature) => (await compute({ verify: { credential: name, message: bytesOf(message), signature } }, 'verified')).valid === true,
+      encrypt: async (plaintext, aad) => {
+        const body = await compute({ encrypt: { credential: name, plaintext: bytesOf(plaintext), ...(aad === undefined ? {} : { aad: bytesOf(aad) }) } }, 'encrypted');
+        const [iv, ciphertext, tag] = [body.iv, body.ciphertext, body.tag].map((part) => (typeof part === 'string' ? fromBase64url(part) : null));
+        if (!iv || !ciphertext || !tag) throw new Error('coffre encrypted nothing');
+        return { iv, ciphertext, tag };
+      },
+      decrypt: async ({ iv, ciphertext, tag }, aad) => {
+        const body = await compute({ decrypt: { credential: name, iv: bytesOf(iv), ciphertext: bytesOf(ciphertext), tag: bytesOf(tag), ...(aad === undefined ? {} : { aad: bytesOf(aad) }) } }, 'decrypted');
+        if (body.plaintext !== null && typeof body.plaintext !== 'string') throw new Error('coffre decrypted nothing');
+        if (body.plaintext === null) return null;
+        const plaintext = fromBase64url(body.plaintext);
+        if (plaintext === null) throw new Error('coffre decrypted nothing: its answer is no base64url');
+        return plaintext;
+      },
       presign: async (path, options = {}) => {
         const body = await compute({ presign: { credential: name, path, ...options } }, 'presigned');
         if (typeof body.url !== 'string' || typeof body.expiresAt !== 'string') throw new Error('coffre presigned nothing');

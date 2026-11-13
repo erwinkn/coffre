@@ -80,6 +80,8 @@ const refund = await stripe.fetch('/v1/refunds', { method: 'POST', body: new URL
 
 const signature = await coffre.credential('dfns-key').sign(challenge);               // base64url; the private key stays in coffre
 const valid = await coffre.credential('stripe-webhook').verify(rawBody, stripeSignature); // the webhook secret is never read
+const sealed = await coffre.credential('payer-session').encrypt(token, rowId);        // AES-256-GCM: { iv, ciphertext, tag }, coffre's IV
+const opened = await coffre.credential('payer-session').decrypt(sealed, rowId);       // the bytes, or null for anything that does not open
 const { url } = await coffre.credential('s3').presign('/uploads/report.pdf', { expiresIn: 900 });
 const { token } = await coffre.credential('github').mint<{ token: string }>();        // where the binding lists the minter
 ```
