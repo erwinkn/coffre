@@ -53,6 +53,10 @@ jobs:
           mkdir -p node_modules/@coffre
           ln -s "$RUNNER_TEMP/coffre-action-consumer/node_modules/@coffre/cli" node_modules/@coffre/cli
           ln -s ../@coffre/cli/dist/main.js node_modules/.bin/coffre
+      - name: Start Postgres, the deployment's database
+        run: |
+          ./scripts/ensure-postgres.sh
+          node scripts/ensure-database.mjs coffre
       - name: Boot and seed a real coffre deployment
         run: |
           node --conditions=coffre:source packages/conformance/scripts/action-test.ts serve "$RUNNER_TEMP/coffre-action-ready" > "$RUNNER_TEMP/coffre-action-fixture.log" 2>&1 &

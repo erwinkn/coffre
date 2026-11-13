@@ -8,8 +8,7 @@
 //
 // It asks for the backup login's connection string, at a hidden prompt or
 // on stdin, never the command line, and hands pg_dump its password in
-// PGPASSWORD, never an argument. Postgres only: a SQLite database is a file,
-// which its own `.backup` copies.
+// PGPASSWORD, never an argument.
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { chmodSync, closeSync, createReadStream, openSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -102,7 +101,7 @@ export async function readFacts(client: pg.ClientBase): Promise<Facts> {
 
 /** The migrations a ledger of `applied` ran, as this CLI names them: the newest's name. */
 export function migrationName(applied: number): string {
-  return applied === 0 ? 'no migration' : (KNOWN_MIGRATIONS.postgres[applied - 1] ?? `${applied} migrations, more than this CLI knows`);
+  return applied === 0 ? 'no migration' : (KNOWN_MIGRATIONS[applied - 1] ?? `${applied} migrations, more than this CLI knows`);
 }
 
 /**

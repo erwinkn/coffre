@@ -21,19 +21,18 @@ import { and, eq, inArray } from 'drizzle-orm';
 import pg from 'pg';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
-import { emptyDatabase, ENGINE, openTestDatabase, OWNER_URL, places, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
+import { emptyDatabase, openTestDatabase, OWNER_URL, places, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
 import { READ_HEAD_WAITERS } from '../src/vault.ts';
 
 const ROOT = 'user:root@acme.example';
-const skip = ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive';
 
 let db: TestDatabase;
 before(async () => {
-  if (!skip) db = await openTestDatabase();
+  db = await openTestDatabase();
 });
-after(() => db?.close());
+after(() => db.close());
 beforeEach(async () => {
-  if (!skip) await emptyDatabase(db.owner);
+  await emptyDatabase(db.owner);
 });
 
 /**
@@ -125,7 +124,7 @@ function assertAllAnswered(results: { ok: boolean; error?: string }[]): void {
   assert.deepEqual(failed, [], 'every call answered, none cancelled as hung');
 }
 
-test('a fresh isolate answers a page load of concurrent first calls', { skip, timeout: 120_000 }, async () => {
+test('a fresh isolate answers a page load of concurrent first calls', { timeout: 120_000 }, async () => {
   const database = await slowPostgres(20);
   const vault = await freshVault(database.url);
   try {
@@ -146,7 +145,7 @@ test('a fresh isolate answers a page load of concurrent first calls', { skip, ti
   }
 });
 
-test('a fresh isolate answers concurrent first key operations', { skip, timeout: 120_000 }, async () => {
+test('a fresh isolate answers concurrent first key operations', { timeout: 120_000 }, async () => {
   const placed = await places(db.owner);
   const secrets = await Promise.all(Array.from({ length: 6 }, () => placed.secret(placed.dev)));
   const database = await slowPostgres(20);
@@ -164,7 +163,7 @@ test('a fresh isolate answers concurrent first key operations', { skip, timeout:
   }
 });
 
-test('each call opens one connection at most: on Cloudflare, a call that opened several at once was cancelled as hung', { skip, timeout: 120_000 }, async () => {
+test('each call opens one connection at most: on Cloudflare, a call that opened several at once was cancelled as hung', { timeout: 120_000 }, async () => {
   const database = await slowPostgres(5);
   const vault = await freshVault(database.url);
   try {
@@ -195,7 +194,7 @@ test('each call opens one connection at most: on Cloudflare, a call that opened 
   }
 });
 
-test('in workerd too, a query on the database inside its own transaction is refused at once, not left to hang', { skip, timeout: 120_000 }, async () => {
+test('in workerd too, a query on the database inside its own transaction is refused at once, not left to hang', { timeout: 120_000 }, async () => {
   const database = await slowPostgres(5);
   const vault = await freshVault(database.url);
   try {
@@ -208,7 +207,7 @@ test('in workerd too, a query on the database inside its own transaction is refu
   }
 });
 
-test('through the entrypoint, the credential a CI run came in on is copied into the entries it caused, never decided on', { skip, timeout: 120_000 }, async () => {
+test('through the entrypoint, the credential a CI run came in on is copied into the entries it caused, never decided on', { timeout: 120_000 }, async () => {
   const placed = await places(db.owner);
   const secret = await placed.secret(placed.dev);
   const credentialId = randomUUID();
@@ -233,7 +232,7 @@ test('through the entrypoint, the credential a CI run came in on is copied into 
   }
 });
 
-test('through the entrypoint, a read past the head\'s places in line fails at once with its code, which the app answers as unavailable', { skip, timeout: 120_000 }, async () => {
+test('through the entrypoint, a read past the head\'s places in line fails at once with its code, which the app answers as unavailable', { timeout: 120_000 }, async () => {
   const placed = await places(db.owner);
   const secret = await placed.secret(placed.dev);
   const vault = await freshVault(VAULT_URL);

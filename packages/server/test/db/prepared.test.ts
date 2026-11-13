@@ -10,7 +10,7 @@ import { insert } from '../../src/db/queries.ts';
 import { openTestDatabase } from './engine.ts';
 
 // A query built once and run with new values each time answers as its
-// builder would, on whichever engine the suite runs: on the database, and
+// builder would: on the database, and
 // inside a transaction, through the transaction.
 
 let db: Database;

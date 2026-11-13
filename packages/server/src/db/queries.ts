@@ -21,9 +21,8 @@ import { authMac, checkAuthRow, issuedBy, issuingBinding, verifyAuthRow, type Au
  * drizzle out of the server and the pages.
  *
  * Each query builds on the tables of the database it is given (`tablesOf`),
- * so the one text runs on Postgres and SQLite; see portable.ts. The
- * server names a table for the generic writes by importing schema.ts, and
- * `own` swaps in the database's twin.
+ * and the server names a table for the generic writes by importing
+ * schema.ts, which `own` resolves to the database's own.
  *
  * Ordinary writes do not check first and do not read back. A unique constraint
  * answers "is it taken", and a conditional update's row count answers "was
@@ -294,7 +293,7 @@ export async function environmentPaths(db: Queryable, ids: readonly string[]): P
  * written yet.
  */
 export async function policyNow(db: Queryable, ids: readonly string[]): Promise<{ seq: bigint | null; slugs: Map<string, string> }> {
-  // Nothing protected, the newest change alone: a join on nothing still scans every environment on SQLite.
+  // Nothing protected: the newest change alone.
   if (ids.length === 0) return { seq: await newestVaultSeq(db, 'policy.change'), slugs: new Map() };
   const { projects, environments } = tablesOf(db);
   const live = sql`${and(inArray(environments.id, [...ids]), standing(environments.slug))}
@@ -879,8 +878,8 @@ export async function members(
   const principal = filter.member === undefined ? undefined : principalOf(filter.member);
   const of = (column: typeof vaultMembers.principal | typeof credentials.principal | typeof identities.principal) =>
     principal === undefined ? undefined : eq(column, principal);
-  // Read binary columns directly. Relational JSON encodes bytea on Postgres
-  // and cannot hold blobs on SQLite, so it cannot carry these MACs unchanged.
+  // Read binary columns directly. Relational JSON encodes bytea, so it
+  // cannot carry these MACs unchanged.
   const [rows, held, bound, granted, tampered] = await Promise.all([
     db
       .select({
@@ -1119,9 +1118,7 @@ export async function findBinding(db: Queryable, chainKey: Buffer, principal: st
 export async function tombstoned(db: Queryable, ids: readonly string[]): Promise<Set<string>> {
   if (ids.length === 0) return new Set();
   const { auditLog } = tablesOf(db);
-  const bindingId = dialect.engineOf(db) === 'postgres'
-    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`
-    : sql<string>`json_extract(${auditLog.metadata}, '$.bindingId')`;
+  const bindingId = sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`;
   const rows = await db
     .select({ id: bindingId })
     .from(auditLog)
@@ -1132,9 +1129,7 @@ export async function tombstoned(db: Queryable, ids: readonly string[]): Promise
 /** The expression `audit_log_unbind_idx` indexes: the binding an entry names. */
 function namedBinding(db: Queryable): SQL<string> {
   const { auditLog } = tablesOf(db);
-  return dialect.engineOf(db) === 'postgres'
-    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`
-    : sql<string>`json_extract(${auditLog.metadata}, '$.bindingId')`;
+  return sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`;
 }
 
 /** Whether the binding `id` (a column or a value) has a tombstone: an allowed app `token.unbind` naming it. */
@@ -1169,7 +1164,7 @@ export async function exchangeCandidates(
   token: Buffer,
 ): Promise<{ bindings: BindingRow[]; spent: boolean | null; policySeq: bigint | null }> {
   const { consumedTokens, serviceBindings, vaultMembers } = tablesOf(db);
-  const id = dialect.engineOf(db) === 'postgres' ? sql`${serviceBindings.id}::text` : sql`${serviceBindings.id}`;
+  const id = sql`${serviceBindings.id}::text`;
   const spent = db.select({ hash: consumedTokens.hash }).from(consumedTokens).where(eq(consumedTokens.hash, token));
   const rows = await db
     .select({
@@ -1268,9 +1263,7 @@ export async function exchangeStill(
 export async function exchangesOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, { seq: bigint; run: Record<string, unknown> }>> {
   if (credentialIds.length === 0) return new Map();
   const { auditLog } = tablesOf(db);
-  const credentialId = dialect.engineOf(db) === 'postgres'
-    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'credentialId')`
-    : sql<string>`json_extract(${auditLog.metadata}, '$.credentialId')`;
+  const credentialId = sql<string>`((${auditLog.metadata})::jsonb ->> 'credentialId')`;
   const rows = await db
     .select({ credentialId, seq: auditLog.seq, metadata: auditLog.metadata })
     .from(auditLog)
@@ -1289,9 +1282,7 @@ export async function exchangesOf(db: Queryable, credentialIds: readonly string[
 export async function personalTokensOf(db: Queryable, credentialIds: readonly string[]): Promise<Map<string, { label: string }>> {
   if (credentialIds.length === 0) return new Map();
   const { auditLog } = tablesOf(db);
-  const credentialId = dialect.engineOf(db) === 'postgres'
-    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'targetCredentialId')`
-    : sql<string>`json_extract(${auditLog.metadata}, '$.targetCredentialId')`;
+  const credentialId = sql<string>`((${auditLog.metadata})::jsonb ->> 'targetCredentialId')`;
   const rows = await db
     .select({ credentialId, metadata: auditLog.metadata })
     .from(auditLog)
@@ -1321,22 +1312,14 @@ export async function consumeToken(db: Queryable, hash: Buffer): Promise<boolean
 /**
  * Forget up to `atMost` spent tokens, those spent over two hours ago: an
  * exchange refuses a token issued over an hour ago (`MAX_TOKEN_AGE_SECONDS`),
- * so their records guard nothing. On Postgres the runtime login deletes no
- * row itself, and asks `prune_consumed_tokens`, which deletes only those
- * (migration 0016). How many went.
+ * so their records guard nothing. The runtime login deletes no row itself,
+ * and asks `prune_consumed_tokens`, which deletes only those (migration
+ * 0016). How many went.
  */
 export async function pruneSpentTokens(db: Queryable, atMost: number): Promise<number> {
-  if (dialect.engineOf(db) === 'postgres') {
-    const { rows } = await db.execute<{ pruned: number }>(sql`SELECT prune_consumed_tokens(${atMost}) AS pruned`);
-    return rows[0]!.pruned;
-  }
-  const { consumedTokens } = tablesOf(db);
-  const old = db.select({ hash: consumedTokens.hash }).from(consumedTokens).where(lt(consumedTokens.consumedAt, sql`${clockMillis(db)} - ${SPENT_TOKENS_KEPT_MS}`)).limit(atMost);
-  return changedRows(await db.delete(consumedTokens).where(inArray(consumedTokens.hash, old)));
+  const { rows } = await db.execute<{ pruned: number }>(sql`SELECT prune_consumed_tokens(${atMost}) AS pruned`);
+  return rows[0]!.pruned;
 }
-
-/** How long a spent token's record is kept: prune_consumed_tokens's two hours, which SQLite applies here. */
-export const SPENT_TOKENS_KEPT_MS = 2 * 60 * 60 * 1000;
 
 /**
  * How many credentials a binding issued since `since`, up to `atMost`: the
@@ -1361,20 +1344,13 @@ function issuedSince(db: Queryable, principal: string, createdBy: string, since:
  * Spend a token and, only if this spent it, insert the credential its
  * exchange issues and stamp the binding's last use: false, and nothing
  * written, when it was spent already, which the primary key decides. One
- * statement on Postgres, under the log's head; SQLite, with no
- * data-modifying CTE, runs them in turn.
+ * statement, under the log's head.
  */
 export async function exchangeToken(db: Queryable, token: Buffer, credential: NewRow<Tables['credentials']>, bindingId: string, at: Date): Promise<boolean> {
   const { consumedTokens, credentials, serviceBindings } = tablesOf(db);
-  if (dialect.engineOf(db) === 'sqlite') {
-    if (!(await consumeToken(db, token))) return false;
-    await insert(db, credentials, credential);
-    await update(db, serviceBindings, { id: bindingId }, { lastUsedAt: at });
-    return true;
-  }
   const spend = db.insert(consumedTokens).values({ hash: token }).onConflictDoNothing().returning({ hash: consumedTokens.hash });
   // The credential's row once for each token spent: none, or one. Its other columns take the database's defaults: a column
-  // added later with a default of Drizzle's own (`$defaultFn`) gets it from `insert` on SQLite, not here.
+  // added later with a default of Drizzle's own (`$defaultFn`) would not get it here.
   const columns = Object.entries(getTableColumns(credentials)).filter(([name]) => credential[name as keyof typeof credential] !== undefined);
   const names = sql.join(columns.map(([, column]) => sql.identifier(column.name)), sql`, `);
   const values = sql.join(columns.map(([name, column]) => sql.param(credential[name as keyof typeof credential], column)), sql`, `);
@@ -2011,7 +1987,7 @@ export type SecretPlaceRow = {
 
 /**
  * These secrets, where they are now, by id: any number of them, a thousand
- * a query, within every engine's bound on a statement's parameters (an
+ * a query, within Postgres's bound on a statement's parameters (an
  * offboarding report asks for each secret a member's reads listed).
  */
 export async function secretPlaces(db: Queryable, ids: readonly string[]): Promise<Map<string, SecretPlaceRow>> {
@@ -2190,11 +2166,8 @@ export type AuditFilter = {
  */
 function also(db: Queryable, field: 'projectId' | 'environmentId' | 'secretId', ids: readonly string[]): SQL {
   const { auditLog } = tablesOf(db);
-  const postgres = dialect.engineOf(db) === 'postgres';
-  const present = postgres ? sql`((${auditLog.metadata})::jsonb -> 'also') IS NOT NULL` : sql`json_extract(${auditLog.metadata}, '$.also') IS NOT NULL`;
-  const value = postgres
-    ? sql`(((${auditLog.metadata})::jsonb -> 'also') ->> ${sql.raw(`'${field}'`)})`
-    : sql`json_extract(${auditLog.metadata}, ${sql.raw(`'$.also.${field}'`)})`;
+  const present = sql`((${auditLog.metadata})::jsonb -> 'also') IS NOT NULL`;
+  const value = sql`(((${auditLog.metadata})::jsonb -> 'also') ->> ${sql.raw(`'${field}'`)})`;
   return and(present, inArray(value, [...ids]))!;
 }
 
@@ -2207,11 +2180,8 @@ function also(db: Queryable, field: 'projectId' | 'environmentId' | 'secretId', 
 function listed(db: Queryable, ids: readonly string[]): SQL {
   const { auditLog } = tablesOf(db);
   const named = (secret: SQL) => or(...ids.map((id) => sql`${secret} = ${id}`))!;
-  const among = dialect.engineOf(db) === 'postgres'
-    ? sql`EXISTS (SELECT 1 FROM jsonb_array_elements(((${auditLog.metadata})::jsonb -> 'secrets')) AS listed(secret)
-        WHERE ${named(sql`(listed.secret ->> 'secretId')`)} OR ${named(sql`((listed.secret -> 'also') ->> 'secretId')`)})`
-    : sql`EXISTS (SELECT 1 FROM json_each(${auditLog.metadata}, '$.secrets') AS listed
-        WHERE ${named(sql`json_extract(listed.value, '$.secretId')`)} OR ${named(sql`json_extract(listed.value, '$.also.secretId')`)})`;
+  const among = sql`EXISTS (SELECT 1 FROM jsonb_array_elements(((${auditLog.metadata})::jsonb -> 'secrets')) AS listed(secret)
+    WHERE ${named(sql`(listed.secret ->> 'secretId')`)} OR ${named(sql`((listed.secret -> 'also') ->> 'secretId')`)})`;
   return and(eq(auditLog.action, 'secret.read'), isNull(auditLog.secretId), among)!;
 }
 

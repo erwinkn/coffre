@@ -4,7 +4,7 @@
 and configures in code: `packages/server` (`@coffre/server`: `/api`, sign-in,
 its queries in `src/db`; `/cloudflare` and `/node` entry
 points; the optional plugins a deployment adds, in `src/plugins`,
-`docs/design/plugins.md`), `packages/db` (`@coffre/db`: the Drizzle schemas for Postgres and SQLite, their
+`docs/design/plugins.md`), `packages/db` (`@coffre/db`: the Drizzle schema for Postgres, its
 migrations and migrator, the dialect helpers, and the connections, Hyperdrive's
 included), `packages/ui` (`@coffre/ui`: the TanStack
 Start pages as a library, route options a deployment's own Start app mounts as file
@@ -107,7 +107,7 @@ terminal (`packages/cli/src/secret.ts`); a CI run signs in with `coffre login <u
 --token` and the like, which save its session. The env vars left are `DATABASE_URL` for `coffre-server
 migrate`, the platforms' own the CLI uses (GitHub's `ACTIONS_ID_TOKEN_REQUEST_*`,
 `GITHUB_ENV`), and the dev and test tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`,
-`COFFRE_TEST_ENGINE`, `COFFRE_TEST_DATABASE`, `COFFRE_POSTGRES_PORT`, `COFFRE_CLIENT_NODES`). Don't add another to a package or the
+`COFFRE_TEST_DATABASE`, `COFFRE_POSTGRES_PORT`, `COFFRE_CLIENT_NODES`). Don't add another to a package or the
 CLI.
 
 **Migrations: expand, then contract.** A deployment runs `coffre migrate` in
@@ -123,8 +123,8 @@ or have a default, indexes, grants. A migration that makes a table grants
 `pnpm test:schema` fails on a table the backup cannot read. What removes or tightens (dropping or
 renaming a table or a column, NOT NULL on an existing column, a narrower
 check or type, a unique or foreign key the old code may break) ships one
-release after the code stops using it. 0.4.0 is a clean break: one baseline
-per engine, for new databases only, and no code for earlier releases'
+release after the code stops using it. 0.4.0 is a clean break: one baseline,
+for new databases only, and no code for earlier releases'
 deployments or data. `pnpm test:compat` holds the newest release to this
 checkout's schema, through that release's own conformance, in CI on every
 change; it was off for 0.4.0, which had no earlier release on its schema.
@@ -168,25 +168,22 @@ The detector and gate tests run even on that fast path. Parse errors or an
 unsupported diff select full validation.
 
 - `pnpm test` = lint + migrate a scratch template + `node --test --test-concurrency=4`.
-  Each file gets a private Postgres clone or SQLite copy; cases within a file remain
+  Each file gets a private Postgres clone; cases within a file remain
   sequential and reset per test. Templates and clones are removed after the run.
   `COFFRE_TEST_DATABASE` sets the scratch name prefix; a random suffix isolates
   simultaneous runs and other checkouts sharing compose Postgres. `pnpm test:schema`
   still recreates the exact database it names. Needs Postgres.
-- `pnpm test:sqlite` runs the same suite on SQLite (`COFFRE_TEST_ENGINE`);
-  `pnpm test:all` runs Postgres and SQLite. SQLite needs nothing and is kept
-  for tests and local development; deployed app databases use Postgres.
 - `pnpm test:schema` verifies both runtime logins' privileges. It also runs the
   full migration as a non-superuser owner in a disposable Postgres cluster,
   checks TLS trust and hostname verification, and runs `coffre setup` against
   another disposable cluster (`scripts/test-setup.sh`), as its superuser and
   as such an owner: setup makes cluster-wide roles, so never on the shared
-  one. Postgres only.
+  one.
 - `pnpm test:upgrade` upgrades a 0.14 database with a row of every kind to
   0.16 (`docs/design/0.16.md`, "Upgrade from 0.14"), on a disposable
   cluster, since it sets the runtime logins NOLOGIN, which are the cluster's;
   then requires that database, one migrated from nothing and one made from
-  `schema.ts` alone to have the same schema. Postgres and Docker only.
+  `schema.ts` alone to have the same schema. It needs Docker.
 - `pnpm build` builds every package in dependency order (core and client first). The
   UI builds as a library, `vite build`, each page a module of its own
   (`@coffre/ui/pages/<name>`), which the examples' file routes name, and Start splits. Core and client build
@@ -200,18 +197,19 @@ unsupported diff select full validation.
   for another three. Each first builds the example's app with its own Vite, as it
   deploys; Workers then runs `app/dist/server/wrangler.json`, which wrangler does not
   bundle again, behind an entry of the harness's own that reads an unread request
-  body (locally, wrangler fails the next request otherwise; coffre never waits on one). Workers needs Postgres and makes its own
-  `coffre_conformance_<hex>` database, dropped after; Node runs on SQLite in a temp
-  dir, the built app under srvx, as its `pnpm start`. Each holds the build's client
+  body (locally, wrangler fails the next request otherwise; coffre never waits on one). Each needs Postgres and makes its own
+  `coffre_conformance_<hex>` database, dropped after, each component through its own
+  login; Node runs the built app under srvx, as its `pnpm start`. Each holds the build's client
   files to holding no server code (`packages/conformance/src/bundle.ts`): a deployment's
   own build no longer checks. A check that fails prints what it saw, then the processes'
   output.
-- `pnpm test:compat [--kind workers|node] [--release <v>] [--schema <v>]` installs
+- `pnpm test:compat [--release <v>] [--schema <v>]` installs
   the newest release of this checkout's line (`0.14.x`) from npm as `init` writes it, has its own conformance
   migrate with this checkout's migrations, and requires it conformant; then
   requires a synthetic destructive migration to fail it. `--schema` applies a
   published version's migrations instead, to check past releases. It needs
-  network and Postgres. CI runs it for both kinds.
+  network and Postgres. Workers only: the newest release's Node deployment
+  runs on SQLite, which this checkout no longer migrates.
 - `pnpm test:consumer [<dir>]` packs the eight packages, runs the packed CLI's
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,

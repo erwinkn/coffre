@@ -2,11 +2,11 @@
 // in as the environment its wrangler.jsonc or .env would give it, with
 // GitHub's URLs pointed at a stand-in IdP running in this process.
 //
-//   workers  two Workers under `wrangler dev`, on a Postgres database of
-//            their own, created for the run and dropped after, each through
-//            its own login
-//   node     the app's build under srvx and its vault process, on one SQLite
-//            file in a temp dir
+//   workers  two Workers under `wrangler dev`
+//   node     the app's build under srvx and its vault process
+//
+// Either on a Postgres database of its own, created for the run and dropped
+// after, each component through its own login.
 //
 // Ports: coffre on `port`, the IdP on the next, wrangler's inspector on the
 // one after.
@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { postgres, sqlite, using, type Sql } from './database.ts';
+import { postgres, using, type Sql } from './database.ts';
 import { KEYS } from './fixtures.ts';
 import { drainingConfig } from './draining.ts';
 import { DevIdp } from './idp/index.ts';
@@ -28,11 +28,11 @@ export type Kind = 'workers' | 'node';
 
 export type HarnessOptions = {
   port: number;
-  /** Postgres as a login that may create databases; workers only. */
+  /** Postgres as a login that may create databases. */
   postgres?: string;
-  /** The same server as coffre_runtime, the login the app runs as; workers only. */
+  /** The same server as coffre_runtime, the login the app runs as. */
   runtime?: string;
-  /** The same server as coffre_vault_runtime, the login the vault runs as; workers only. */
+  /** The same server as coffre_vault_runtime, the login the vault runs as. */
   vaultRuntime?: string;
 };
 
@@ -52,12 +52,10 @@ export type Deployment = {
   serving(): Record<string, number>;
   /** The app's database, as its owner. */
   database(): Promise<Sql>;
-  /** The app's database as the login the app runs as, on an engine that has logins. */
-  runtime: (() => Promise<Sql>) | null;
-  /** The database as the login the vault runs as, likewise. */
-  vaultRuntime: (() => Promise<Sql>) | null;
-  /** The file holding the database, when it is one. */
-  databaseFile: string | null;
+  /** The app's database as the login the app runs as. */
+  runtime: () => Promise<Sql>;
+  /** The database as the login the vault runs as. */
+  vaultRuntime: () => Promise<Sql>;
   /** The browser's half of the app's build: its static files. */
   clientDir: string;
   /** The processes' output: all of it, or the last `tail` characters of each. */
@@ -106,9 +104,9 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     );
     if (busy) throw new Failure(`port ${taken} is taken; pass --port for a free run of three`);
   }
-  if (kind === 'workers' && (options.postgres === undefined || options.runtime === undefined || options.vaultRuntime === undefined)) {
+  if (options.postgres === undefined || options.runtime === undefined || options.vaultRuntime === undefined) {
     throw new Failure(
-      'workers run on Postgres: pass --postgres <owner URL>, --runtime <coffre_runtime URL> and --vault-runtime <coffre_vault_runtime URL>',
+      'a deployment runs on Postgres: pass --postgres <owner URL>, --runtime <coffre_runtime URL> and --vault-runtime <coffre_vault_runtime URL>',
     );
   }
 
@@ -214,20 +212,25 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     throw error;
   }
 
-  async function startWorkers(): Promise<Deployment> {
+  /**
+   * The run's own database, made and migrated, as each login reaches it: migrated as the deployment's pipeline does
+   * before it deploys, by its own CLI's `coffre migrate`, in its folder, the owner's URL piped in.
+   */
+  async function ownDatabase() {
     const name = `coffre_conformance_${randomBytes(4).toString('hex')}`;
     const owner = withDatabase(options.postgres!, name);
-    const runtime = withDatabase(options.runtime!, name);
-    const vaultRuntime = withDatabase(options.vaultRuntime!, name);
     await using(postgres(withDatabase(options.postgres!, 'postgres')), (sql) => sql.exec(`CREATE DATABASE ${name}`));
     cleanup = () =>
       using(postgres(withDatabase(options.postgres!, 'postgres')), (sql) =>
         sql.exec(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`),
       );
-    // As the deployment's pipeline does before it deploys: its own CLI's
-    // `coffre migrate`, in its folder, the owner's URL piped in.
-    // A fresh log has no heartbeat: only the scheduled job can make /readyz pass.
     await run(process.execPath, [deploymentCli(dir), 'migrate', '--yes'], {}, `${owner}\n`);
+    return { owner, runtime: withDatabase(options.runtime!, name), vaultRuntime: withDatabase(options.vaultRuntime!, name) };
+  }
+
+  async function startWorkers(): Promise<Deployment> {
+    // A fresh log has no heartbeat: only the scheduled job can make /readyz pass.
+    const { owner, runtime, vaultRuntime } = await ownDatabase();
     // The app as it deploys: its Start app, built by its own Vite, which wrangler runs unbundled.
     await run(bin('vite'), ['build', 'app']);
     const state = join(scratch, 'state');
@@ -274,7 +277,6 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       database: () => postgres(owner),
       runtime: () => postgres(runtime),
       vaultRuntime: () => postgres(vaultRuntime),
-      databaseFile: null,
       clientDir: join(dir, 'app/dist/client'),
       output,
       stop,
@@ -282,14 +284,13 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
   }
 
   async function startNode(): Promise<Deployment> {
-    const database = join(scratch, 'coffre.db');
+    const { owner, runtime, vaultRuntime } = await ownDatabase();
     const socket = join(scratch, 'vault.sock');
-    await run(bin('coffre-server'), ['migrate', `file:${database}`]);
     const startVault = async () => {
       rmSync(socket, { force: true });
       const started = start('vault', process.execPath, ['src/vault.ts'], {
         VAULT_SOCKET: socket,
-        DATABASE_URL: `file:${database}`,
+        DATABASE_URL: vaultRuntime,
         VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
         VAULT_KEY: KEYS.VAULT_KEY,
         ...OWNER_VARS,
@@ -305,7 +306,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       start('server', bin('srvx'), ['--prod', '--host=127.0.0.1', 'app/dist/server/server.js'], {
         PORT: String(port),
         PUBLIC_URL: origin,
-        DATABASE_URL: `file:${database}`,
+        DATABASE_URL: runtime,
         VAULT_SOCKET: socket,
         AUDIT_ANCHOR: join(scratch, 'anchor.json'),
         APP_KEY: KEYS.APP_KEY,
@@ -319,12 +320,25 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       idp,
       owner: OWNER,
       beforeFirstBeat: false,
-      // `serve` runs the job as it starts, and every five minutes after:
-      // so restart the server.
+      // `serve` runs the job as it starts, and every five minutes after: so restart the server, then wait for the
+      // run's end, as the Cron trigger's request does on Workers: the vault's checkpoint entry, or the run's failure.
+      // The head is read once the old server is gone, and the checkpoint must reach past it: one the old run asked for
+      // and the vault commits late signs only what came before, so it counts for nothing.
       async scheduled() {
-        await halt(server);
-        server = startServer();
-        await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
+        await using(postgres(owner), async (sql) => {
+          await halt(server);
+          const [head] = await sql.query<{ next_seq: string }>('SELECT next_seq FROM audit_chain_head').catch(() => []);
+          const started = (server = startServer());
+          await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
+          await until(
+            'the scheduled run',
+            async () =>
+              Buffer.concat(started.output).toString('utf8').includes('scheduled job failed') ||
+              (await sql.query("SELECT 1 FROM audit_log WHERE action = 'audit.checkpoint' AND related_seq >= $1 LIMIT 1", [head?.next_seq ?? 0])).length > 0,
+            60,
+            alive,
+          );
+        });
       },
       async restart() {
         await halt(server);
@@ -334,10 +348,9 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
       },
       serving: () => ({ vault: vault.child.pid!, server: server.child.pid! }),
-      database: async () => sqlite(database),
-      runtime: null,
-      vaultRuntime: null,
-      databaseFile: database,
+      database: () => postgres(owner),
+      runtime: () => postgres(runtime),
+      vaultRuntime: () => postgres(vaultRuntime),
       clientDir: join(dir, 'app/dist/client'),
       output,
       stop,

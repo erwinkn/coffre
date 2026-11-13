@@ -7,9 +7,7 @@ export default defineConfig({
   entry: {
     index: 'src/database.ts',
     schema: 'src/schema.ts',
-    'schema-sqlite': 'src/schema.sqlite.ts',
     dialect: 'src/dialect.ts',
-    portable: 'src/portable.ts',
     'schema-version': 'src/schema-version.ts',
     hyperdrive: 'src/hyperdrive.ts',
     connect: 'src/connect.ts',

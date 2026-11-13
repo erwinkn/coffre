@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 
 import type { SecretRef, Through, WrappedKey } from '@coffre/core/vault';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
-import { openDatabase } from '@coffre/db/connect';
 import { forgetLogHeads } from '@coffre/db/log';
 import { and, eq, sql, type SQL } from 'drizzle-orm';
 import pg from 'pg';
@@ -12,13 +11,10 @@ import { openLocalVault as openRawVault, type LocalVault as RawLocalVault } from
 
 /**
  * The suite's database, as the vault's tests use it: the one the server's
- * tests use, on the engine `COFFRE_TEST_ENGINE` names, which
- * scripts/test-suite.sh prepares. Opened twice: as its owner, to set up
- * places and play someone who edits rows, and as the vault, which on
- * Postgres is the vault's own login.
+ * tests use, which scripts/test-suite.sh prepares. Opened twice: as its
+ * owner, to set up places and play someone who edits rows, and as the
+ * vault, through the vault's own login.
  */
-export const ENGINE = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'sqlite' : 'postgres';
-
 const name = process.env.COFFRE_TEST_DATABASE ?? 'coffre_test';
 const url = (login: string) => `postgresql://${login}@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${name}`;
 export const OWNER_URL = url('coffre_owner:local-dev-only');
@@ -70,16 +66,9 @@ export type TestDatabase = { owner: Database; vault: Database; connect(connectio
 export async function openTestDatabase(): Promise<TestDatabase> {
   const opened: (() => Promise<void>)[] = [];
   const open = async (login: string, connections?: number): Promise<Database> => {
-    if (ENGINE === 'postgres') {
-      const pool = new pg.Pool({ connectionString: login, ...(connections === undefined ? {} : { max: connections }) });
-      opened.push(() => pool.end());
-      return createDatabase(pool);
-    }
-    const file = process.env.COFFRE_TEST_DATABASE_URL;
-    if (!file) throw new Error('COFFRE_TEST_DATABASE_URL is required on sqlite; see scripts/test-suite.sh');
-    const { db, close } = await openDatabase(file);
-    opened.push(close);
-    return db;
+    const pool = new pg.Pool({ connectionString: login, ...(connections === undefined ? {} : { max: connections }) });
+    opened.push(() => pool.end());
+    return createDatabase(pool);
   };
   return {
     owner: await open(OWNER_URL),
@@ -91,55 +80,34 @@ export async function openTestDatabase(): Promise<TestDatabase> {
   };
 }
 
-/** Options that run a test on Postgres only, saying why. */
-export function postgresOnly(reason: string): { skip: string | false } {
-  return { skip: ENGINE === 'postgres' ? false : `Postgres only: ${reason}` };
-}
-
 /**
  * `work`, as the owner, with the audit log's append-only triggers lifted,
- * as someone who rewrites it would. Postgres disables them for one
- * transaction; SQLite has no such switch, so they are dropped and made again.
+ * as someone who rewrites it would: disabled for one transaction.
  */
 export async function withLogUnlocked<T>(owner: Database, work: (db: Queryable) => Promise<T>): Promise<T> {
-  if (ENGINE === 'postgres') {
-    return owner.transaction(async (tx) => {
-      await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER USER`);
-      const result = await work(tx);
-      await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER USER`);
-      return result;
-    });
-  }
-  const triggers = await rows<{ name: string; sql: string }>(
-    owner,
-    sql`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'audit_log'`,
-  );
-  for (const trigger of triggers) await run(owner, sql.raw(`DROP TRIGGER ${trigger.name}`));
-  try {
-    return await work(owner);
-  } finally {
-    for (const trigger of triggers) await run(owner, sql.raw(trigger.sql));
-  }
+  return owner.transaction(async (tx) => {
+    await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER USER`);
+    const result = await work(tx);
+    await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER USER`);
+    return result;
+  });
 }
 
-/** Rows of a raw query, on either engine. */
+/** Rows of a raw query. */
 export async function rows<Row>(db: Queryable, query: SQL): Promise<Row[]> {
-  if (ENGINE === 'postgres') return (await db.execute(query)).rows as Row[];
-  return (db as unknown as { all<R>(query: SQL): Promise<R[]> }).all<Row>(query);
+  return (await db.execute(query)).rows as Row[];
 }
 
-/** A raw statement, on either engine. */
+/** A raw statement. */
 export async function run(db: Queryable, query: SQL): Promise<void> {
-  if (ENGINE === 'postgres') await db.execute(query);
-  else await (db as unknown as { run(query: SQL): Promise<unknown> }).run(query);
+  await db.execute(query);
 }
 
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
   const { auditLog, auditChainHead, vaultGrants, vaultMembers, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys } = tablesOf(owner);
   await owner.delete(secretReferences);
-  // SQLite checks a RESTRICT foreign key row by row, so entries that point
-  // at others let go of them first.
+  // Entries that point at others let go of them first: a RESTRICT foreign key.
   await withLogUnlocked(owner, async (db) => {
     await db.update(auditLog).set({ relatedSeq: null });
     await db.delete(auditLog);

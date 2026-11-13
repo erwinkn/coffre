@@ -371,7 +371,7 @@ for (const as of ['superuser', 'owner'] as const) {
     const shown = json(first);
     assertNoAdministrator(first, url);
     assert.match(first.stderr, /✓ Created coffre_runtime, coffre_vault_runtime and coffre_backup_login\n/);
-    const count = KNOWN_MIGRATIONS.postgres.length;
+    const count = KNOWN_MIGRATIONS.length;
     assert.match(first.stderr, new RegExp(`✓ Migrated the database to coffre \\S+'s schema: ${count} migration${count === 1 ? '' : 's'} applied\n`));
     assert.match(first.stderr, /\n\s+coffre_backup_login is a member of coffre_backup, which reads every row and writes none\n/);
     assert.match(

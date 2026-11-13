@@ -22,7 +22,6 @@ import { sealAnchor } from '../src/anchor.ts';
 import { toErrorBody } from '../src/api/errors.ts';
 import { finishRotation, keyState, keyStateNow, rotateStep, SIGNED_TABLES } from '../src/key-rotation.ts';
 import { newestMove } from '../src/db/rotation.ts';
-import { postgresOnly } from './db/engine.ts';
 import { auditWatch, walkOn } from '../src/plugins/audit-watch.ts';
 import { watchContext } from '../src/watch.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
@@ -452,7 +451,7 @@ test('a CLI login approved but not yet taken is used up: everyone signs in again
   assert.deepEqual(await next.signin!.pollDevice(started.deviceCode, { requestId: randomUUID(), sourceIp: null }), { status: 'expired' });
 });
 
-test('the door reads where the key stands in one snapshot: a step committed between its reads changes nothing it decides', postgresOnly('SQLite runs one transaction at a time'), async () => {
+test('the door reads where the key stands in one snapshot: a step committed between its reads changes nothing it decides', async () => {
   const keys = startUnder(B, [A]);
   // Its first read sees no step yet; another start's first step commits before the next.
   const seen = await deps.db.transaction(async (tx) => {
@@ -466,7 +465,7 @@ test('the door reads where the key stands in one snapshot: a step committed betw
   assert.equal((await keyStateNow(deps.db, keys)).kind, 'rotating');
 });
 
-test('a step the door takes while another start holds the head leaves it to that one, and answers rotating at once', postgresOnly('SQLite runs one transaction at a time'), async () => {
+test('a step the door takes while another start holds the head leaves it to that one, and answers rotating at once', async () => {
   const next = startUnder(B, [A]);
   let release = () => {};
   const released = new Promise<void>((resolve) => (release = resolve));

@@ -22,7 +22,6 @@ import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { auditChainHead, auditLog, cappedAlerts } from './db/tables.ts';
-import { postgresOnly } from './db/engine.ts';
 import { answer, type Pages } from './start-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -223,7 +222,7 @@ test('a refusal capped out opens no transaction: the one that alerts opens its o
   assert.equal((await logged()).length, 1);
 });
 
-test('a refusal capped out answers while another transaction holds the log\'s head', postgresOnly('holds the head with a row lock'), async () => {
+test('a refusal capped out answers while another transaction holds the log\'s head', async () => {
   await bindCluster();
   assert.equal((await signIn(podToken('forged-a'))).reason, 'unknown_key');
   let release!: () => void;

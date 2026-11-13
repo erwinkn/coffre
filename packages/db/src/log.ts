@@ -4,7 +4,7 @@ import { and, asc, count, desc, eq, gt, gte, lt, lte, sql, type Placeholder, typ
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
 import { prepared } from './prepared.ts';
-import { clockMillis, engineOf, forUpdate } from './dialect.ts';
+import { clockMillis, forUpdate } from './dialect.ts';
 
 /**
  * Appending to the audit log, the one table both the app and the vault
@@ -154,14 +154,8 @@ export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; h
  * Lock the log's head if no one holds it, without waiting: whether it is
  * held now. For work any caller may do, of which one at a time is enough,
  * which a request that finds the head taken leaves to the one that has it.
- * SQLite's transactions hold the whole file, so the head is always free.
  */
 export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
-  if (engineOf(tx) === 'sqlite') {
-    const held = (await lockedHead(tx)).length > 0;
-    if (held) holding.add(tx);
-    return held;
-  }
   const { rows } = await (tx as unknown as { execute(query: SQL): Promise<{ rows: unknown[] }> }).execute(
     sql`SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE SKIP LOCKED`,
   );
@@ -179,10 +173,9 @@ export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
  * beyond them answers in one round trip rather than seconds later, holding
  * a connection all the while. One statement: the place, then, only if one
  * was free, the head; refused, one more says whether the head is there at
- * all. SQLite's transactions hold the whole file.
+ * all.
  */
 export async function lockLogHeadQueued(tx: Transaction, waiters: number): Promise<{ nextSeq: bigint; headHash: Buffer }> {
-  if (engineOf(tx) === 'sqlite') return lockLogHead(tx);
   const { rows } = await (tx as unknown as { execute(query: SQL): Promise<{ rows: { next_seq: string; head_hash: Buffer }[] }> }).execute(sql`
     SELECT next_seq, head_hash FROM audit_chain_head
     WHERE only_row AND (SELECT true FROM generate_series(1, ${waiters}::int) AS place WHERE pg_try_advisory_xact_lock(${HEAD_LINE}, place) LIMIT 1)
@@ -288,7 +281,7 @@ export async function appendEntries(
     seq += 1n;
   }
 
-  if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE) {
+  if (rows.length <= ROWS_AT_ONCE) {
     // The entries and the head that names the last of them, in one statement.
     await tx.execute(sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()})
       UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row`);

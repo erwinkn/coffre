@@ -1,7 +1,6 @@
 import type { WorkloadProfile } from '@coffre/core/identity';
 import { prepared, tablesOf, type Queryable } from '@coffre/db';
 import { newestSeqQuery } from '@coffre/db/log';
-import * as dialect from '@coffre/db/dialect';
 import { changedRows, clockMillis, truth } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
 import { and, asc, eq, inArray, isNotNull, isNull, lt, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
@@ -23,9 +22,7 @@ const FREEZE_ACTIONS = ['workload.freeze', 'workload.unfreeze'] as const;
 /** The expression `audit_log_freeze_idx` indexes: the target an entry names. */
 function namedTarget(db: Queryable): SQL<string> {
   const { auditLog } = tablesOf(db);
-  return dialect.engineOf(db) === 'postgres'
-    ? sql<string>`((${auditLog.metadata})::jsonb ->> 'target')`
-    : sql<string>`json_extract(${auditLog.metadata}, '$.target')`;
+  return sql<string>`((${auditLog.metadata})::jsonb ->> 'target')`;
 }
 
 /**
@@ -40,7 +37,7 @@ function frozen(db: Queryable, target: SQL | string): SQL<boolean> {
   const newest = sql`(SELECT ${auditLog.action} FROM ${auditLog} WHERE ${auditLog.author} = 'app'
     AND ${auditLog.action} IN (${sql.join(FREEZE_ACTIONS.map((action) => sql`${action}`), sql`, `)}) AND ${auditLog.decision} = 'allow'
     AND ${namedTarget(db)} = ${target} ORDER BY ${auditLog.seq} DESC LIMIT 1)`;
-  return truth(sql`COALESCE(${newest} = 'workload.freeze', ${dialect.engineOf(db) === 'postgres' ? sql`false` : sql`0`})`);
+  return truth(sql`COALESCE(${newest} = 'workload.freeze', false)`);
 }
 
 /** Whether binding `id` (a column, as text) has a tombstone, as a boolean (`hasTombstone`). */
@@ -50,7 +47,7 @@ function tombstoned(db: Queryable, id: SQL): SQL<boolean> {
 
 /** A binding's ID as text, to compare with what an entry or a target names. */
 function idText(db: Queryable, id: SQL | AnyColumn): SQL {
-  return dialect.engineOf(db) === 'postgres' ? sql`${id}::text` : sql`${id}`;
+  return sql`${id}::text`;
 }
 
 /** A place as a request names it: an environment's ID, or its path's slugs. */
@@ -76,14 +73,14 @@ function placeColumns(db: Queryable, otherwise: SQL) {
     WHERE ${projects.slug} = ${project} AND ${environments.slug} = CAST(${sql.placeholder('placeEnvironment')} AS text) AND ${environments.owner} IS NULL)`;
   const place = sql<string | null>`CASE WHEN ${byId} IS NOT NULL THEN ${byId} WHEN ${project} IS NOT NULL THEN ${byPath} ELSE ${otherwise} END`;
   const placePath = sql<string | null>`(SELECT ${projects.slug} || '/' || ${environments.slug} FROM ${environments} INNER JOIN ${projects} ON ${projects.id} = ${environments.projectId}
-    WHERE ${environments.id} = ${dialect.engineOf(db) === 'postgres' ? sql`CAST(${place} AS uuid)` : place} AND ${environments.slug} NOT LIKE '%~%' AND ${projects.slug} NOT LIKE '%~%')`;
+    WHERE ${environments.id} = CAST(${place} AS uuid) AND ${environments.slug} NOT LIKE '%~%' AND ${projects.slug} NOT LIKE '%~%')`;
   return { place, placePath };
 }
 
 /** A one-row source, for a statement that reads only expressions. */
 const single = sql`(SELECT 1 AS ${sql.identifier('one')}) AS ${sql.identifier('single')}`;
 
-/** Text joined: `||` on both engines. */
+/** Text joined with `||`. */
 const joined = (...parts: (SQL | string)[]) => sql.join(parts.map((part) => (typeof part === 'string' ? sql`${part}` : part)), sql` || `);
 
 /**
@@ -119,21 +116,14 @@ const sessionRows = prepared((db) => sessionStatement(db));
 /** Section 5.3's statement as built, before it is prepared: for a test that holds its plan to its indexes. */
 export function sessionStatement(db: Queryable) {
   const { credentials, serviceBindings, vaultMembers } = tablesOf(db);
-  const postgres = dialect.engineOf(db) === 'postgres';
   const tokenHash = sql.placeholder('tokenHash');
   // The binding a workload's row names, `binding:<id>`: every workload row has one, a child its root's.
-  const bindingId = postgres
-    ? sql`CASE WHEN ${credentials.kind} = 'workload' AND ${credentials.createdBy} LIKE 'binding:%' THEN CAST(substr(${credentials.createdBy}, 9) AS uuid) END`
-    : sql`CASE WHEN ${credentials.kind} = 'workload' AND ${credentials.createdBy} LIKE 'binding:%' THEN substr(${credentials.createdBy}, 9) END`;
+  const bindingId = sql`CASE WHEN ${credentials.kind} = 'workload' AND ${credentials.createdBy} LIKE 'binding:%' THEN CAST(substr(${credentials.createdBy}, 9) AS uuid) END`;
   // The session's ancestors, by the IDs its row lists (under its MAC): the IDs as uuids, an array, so each is a primary-key lookup.
-  const ancestors = postgres
-    ? sql`${credentials.id} = ANY(ARRAY(SELECT CAST(jsonb_array_elements_text(${sql.identifier('own')}.${sql.identifier('ancestors')}::jsonb) AS uuid) FROM ${credentials} AS ${sql.identifier('own')} WHERE ${sql.identifier('own')}.${sql.identifier('token_hash')} = ${tokenHash}))`
-    : sql`${credentials.id} IN (SELECT ${sql.identifier('listed')}.${sql.identifier('value')} FROM ${credentials} AS ${sql.identifier('own')}, json_each(${sql.identifier('own')}.${sql.identifier('ancestors')}) AS ${sql.identifier('listed')} WHERE ${sql.identifier('own')}.${sql.identifier('token_hash')} = ${tokenHash})`;
+  const ancestors = sql`${credentials.id} = ANY(ARRAY(SELECT CAST(jsonb_array_elements_text(${sql.identifier('own')}.${sql.identifier('ancestors')}::jsonb) AS uuid) FROM ${credentials} AS ${sql.identifier('own')} WHERE ${sql.identifier('own')}.${sql.identifier('token_hash')} = ${tokenHash}))`;
   // The credential it uses, in the environment named or else the row's one place: null when it names none, or the row several.
   const name = sql`CAST(${sql.placeholder('credential')} AS text)`;
-  const onlyPlace = postgres
-    ? sql`CASE WHEN jsonb_array_length(${credentials.places}::jsonb) = 1 THEN ${credentials.places}::jsonb -> 0 ->> 'environmentId' END`
-    : sql`CASE WHEN json_array_length(${credentials.places}) = 1 THEN json_extract(${credentials.places}, '$[0].environmentId') END`;
+  const onlyPlace = sql`CASE WHEN jsonb_array_length(${credentials.places}::jsonb) = 1 THEN ${credentials.places}::jsonb -> 0 ->> 'environmentId' END`;
   // The place it uses: named, or else the row's one.
   const { place, placePath } = placeColumns(db, onlyPlace);
   const used = sql`CASE WHEN ${name} IS NULL THEN NULL ELSE 'credential:' || ${place} || '/' || ${name} END`;
@@ -284,9 +274,7 @@ export const RENEW_MARGIN_MS = 5_000;
  */
 export async function renewSession(db: Queryable, chainKey: Buffer, old: SessionRow, expiresAt: Date): Promise<boolean> {
   const { credentials } = tablesOf(db);
-  const margin = dialect.engineOf(db) === 'postgres'
-    ? sql`${credentials.expiresAt} > clock_timestamp() + interval '${sql.raw(String(RENEW_MARGIN_MS))} milliseconds'`
-    : sql`${credentials.expiresAt} > CAST(unixepoch('subsec') * 1000 AS INTEGER) + ${RENEW_MARGIN_MS}`;
+  const margin = sql`${credentials.expiresAt} > clock_timestamp() + interval '${sql.raw(String(RENEW_MARGIN_MS))} milliseconds'`;
   const next = { ...old, expiresAt };
   const changed = await db.update(credentials)
     .set({ expiresAt, authMac: authMac(chainKey, 'credentials', next) })

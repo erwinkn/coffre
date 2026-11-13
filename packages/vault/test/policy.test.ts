@@ -17,7 +17,7 @@ import { tablesOf, type Database } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { emptyDatabase, newProject, openTestDatabase, places, postgresOnly, rows, storedVersions, type TestDatabase, openLocalVault, type LocalVault } from './database.ts';
+import { emptyDatabase, newProject, openTestDatabase, places, rows, storedVersions, type TestDatabase, openLocalVault, type LocalVault } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -225,7 +225,7 @@ test("a forged policy entry whose protected places are no objects is passed over
   await w.grant(ADA, w.dev, 'viewer');
   const dev = await w.stored(w.dev);
   assert.ok((await protect(w.vault, ROOT, w.project, [w.prod])).ok);
-  // Read with every decision, by the ids it names: a string, a number and null name none, on either engine.
+  // Read with every decision, by the ids it names: a string, a number and null name none.
   await forge({ policy: { roles: {}, instanceRoles: {}, protected: ['abc', 7, null] } });
   assert.equal((await w.vault.access(ADA)).status, 'active');
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: dev })).ok, true);
@@ -307,7 +307,7 @@ test('a protected environment keeps its slug: a person scoped to it by slug hold
   assert.ok(given.ok, JSON.stringify(given));
 });
 
-test('a read in flight when an environment is protected is decided as the policy is when it commits', { skip: process.env.COFFRE_TEST_ENGINE === 'sqlite' && 'SQLite runs one writer at a time' }, async () => {
+test('a read in flight when an environment is protected is decided as the policy is when it commits', async () => {
   const inner = LocalKekProvider.generate('test-kek-1');
   let hold: Promise<void> | null = null;
   // Said once the held unwrap is under way: the read has passed its first check, as the policy was.
@@ -396,7 +396,7 @@ async function overtaken<T>(config: ResolvedVaultConfig, change: (vault: LocalVa
   return deciding;
 }
 
-test('a reference made as prod is protected is decided under the head, as the policy is when it commits: refused', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('a reference made as prod is protected is decided under the head, as the policy is when it commits: refused', async () => {
   const w = await world();
   await w.grant(ADA, null, 'developer');
   const source = await w.secret(w.prod);
@@ -410,7 +410,7 @@ test('a reference made as prod is protected is decided under the head, as the po
   assert.equal(!made.ok && made.refusal.code, 'no_grant');
 });
 
-test('a service account removed by its manager as prod is protected is decided under the head: they manage it no more', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('a service account removed by its manager as prod is protected is decided under the head: they manage it no more', async () => {
   const w = await world();
   await w.grant(ADA, null, 'developer');
   // Ada sets up CI, a Viewer of all of market, while nothing is protected: it is hers to manage.

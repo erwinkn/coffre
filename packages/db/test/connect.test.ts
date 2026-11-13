@@ -4,21 +4,21 @@ import { createServer } from 'node:net';
 import { once } from 'node:events';
 import { sql } from 'drizzle-orm';
 
-import { engineOfUrl, openDatabase } from '../src/connect.ts';
+import { checkDatabaseUrl, openDatabase } from '../src/connect.ts';
 import { migrateDatabase } from '../src/migrate.ts';
 
 test('MySQL URLs are refused before opening a connection or running migrations', async () => {
   const url = 'mysql://unused:unused@127.0.0.1:1/coffre';
   const error = { message: 'coffre supports Postgres; MySQL support was removed' };
-  assert.throws(() => engineOfUrl(url), error);
+  assert.throws(() => checkDatabaseUrl(url), error);
   await assert.rejects(openDatabase(url), error);
   await assert.rejects(migrateDatabase(url), error);
 });
 
-test('Postgres and local SQLite URLs retain their database engines', () => {
-  assert.equal(engineOfUrl('postgres://localhost/coffre'), 'postgres');
-  assert.equal(engineOfUrl('postgresql://localhost/coffre'), 'postgres');
-  assert.equal(engineOfUrl('file:coffre.db'), 'sqlite');
+test('Postgres URLs are taken, and a SQLite file is refused', () => {
+  checkDatabaseUrl('postgres://localhost/coffre');
+  checkDatabaseUrl('postgresql://localhost/coffre');
+  assert.throws(() => checkDatabaseUrl('file:coffre.db'), { message: 'unsupported database URL scheme: file:' });
 });
 
 // Refusing SSL must stop before any startup packet or password reaches the server.

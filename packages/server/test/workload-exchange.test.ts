@@ -24,7 +24,6 @@ import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport
 import { auditWatch } from '../src/plugins/audit-watch.ts';
 import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, speaking, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
-import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
 import { testPostgresPool } from './db/postgres-pool.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -377,7 +376,7 @@ function counted(pool: pg.Pool, seen: Statement[]): pg.Pool {
   return watch(pool);
 }
 
-test('a token no binding can take costs its admission and one indexed read: no other query, no transaction, no vault call, no fetch', postgresOnly('it counts the statements that reach the server'), async () => {
+test('a token no binding can take costs its admission and one indexed read: no other query, no transaction, no vault call, no fetch', async () => {
   const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
   const seen: Statement[] = [];
   try {
@@ -450,7 +449,7 @@ function hyperdriveCached(pool: pg.Pool): pg.Pool {
   });
 }
 
-test("Hyperdrive's cache revives nothing: rows put back after a removal stay dead, and a replay never reaches the vault", postgresOnly('it models Hyperdrive, which caches Postgres reads'), async () => {
+test("Hyperdrive's cache revives nothing: rows put back after a removal stay dead, and a replay never reaches the vault", async () => {
   const pool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
   try {
     const cached = createRuntime(config, createDatabase(hyperdriveCached(pool)), deps.vault, transport);
@@ -510,7 +509,7 @@ async function planOf(pool: pg.Pool, statement: Statement, table: string): Promi
   };
 }
 
-test("an exchange's first read visits the live bindings only, whatever the retired and earlier history", postgresOnly('it reads Postgres query plans'), async () => {
+test("an exchange's first read visits the live bindings only, whatever the retired and earlier history", async () => {
   const [live] = await db.owner.select().from(serviceBindings);
   // 50,000 replaced over the years, and 5,000 left from before the service was removed and admitted again.
   for (const [count, generation, revoked] of [[50_000, live!.generation, true], [5_000, live!.generation - 1, false]] as const) {
@@ -533,7 +532,7 @@ test("an exchange's first read visits the live bindings only, whatever the retir
   }
 });
 
-test("a binding's rate is counted over its last minute, whatever the credentials it issued before", postgresOnly('it reads Postgres query plans'), async () => {
+test("a binding's rate is counted over its last minute, whatever the credentials it issued before", async () => {
   const [binding] = await db.owner.select().from(serviceBindings);
   // 50,000 runs a month ago, each with its credential, expired since; then one now.
   await run(sql`INSERT INTO credentials (kind, auth_mac, token_hash, token_hint, generation, principal, created_by, created_at, expires_at)
@@ -561,7 +560,7 @@ test("a binding's rate is counted over its last minute, whatever the credentials
   }
 });
 
-test('removing a binding revokes only what is live: its expired history costs nothing there, nor on the members page', postgresOnly('it counts the statements and rows that reach the server'), async () => {
+test('removing a binding revokes only what is live: its expired history costs nothing there, nor on the members page', async () => {
   const [binding] = await db.owner.select().from(serviceBindings);
   // A thousand runs long over, and one under way.
   const over = new Date(Date.now() - 3_600_000);
@@ -896,10 +895,9 @@ test('a binding issues at most 60 credentials a minute', async () => {
   assert.deepEqual([outcomes.filter((status) => status === 200).length, outcomes.at(-1)], [60, 429]);
 });
 
-/** Raw SQL as the owner, on either engine. */
+/** Raw SQL as the owner. */
 async function run(query: SQL): Promise<void> {
-  if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
-  else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
+  await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
 }
 
 test('every entry a run\'s credential causes names it, the vault\'s too; the audit page reads its run, after the credential row is gone', async () => {
