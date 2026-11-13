@@ -541,9 +541,9 @@ environment is deleted and those with no row that are older than the time a fork
 list is bounded by the live protected environments, and the policy row a use reads does not grow with history.
 
 The upgrade fills the list as it fills the settings. The migration takes it from the newest `policy.change` entry and
-leaves out an id with no live row: with the app off its route no fork is in flight. The vault's step checks it against
-that signed entry and against the flags of the live environments, which must agree, and writes the policy's change,
-the one existing object 0.16 seals again. One test per path: protect, unprotect, a protect of an id with no row, and a
+leaves out an id with no live row: behind 0.16's door no fork is in flight. The vault's step checks it against that
+signed entry and against the flags of the live environments, which must agree, and writes the policy's change, the one
+existing object 0.16 seals again. One test per path: protect, unprotect, a protect of an id with no row, and a
 creation, which must touch nothing. That change carries the `policy.change` entry (above), from the PR that deletes
 the vault's append of it to `audit_log`, not before. It is built with the carrier, and A1's two numbers stack on it.
 
@@ -714,30 +714,37 @@ tests and the `Reads.tla` scenario. Lost: its table, triggers and migration, whi
 
 ## 6. The upgrade from 0.15.0
 
-1. **Stop.** Run `coffre verify log` on 0.15.0: the full walk of the old chain, in steps, green. Run the upgrade's
+1. **Before.** On 0.15.0, run `coffre verify log`: the full walk of the old chain, in steps, green. Run the upgrade's
    precheck, which refuses before anything is touched: a log with an `audit.loss_accepted` entry (it prints the count
-   and their seqs), a member a finding stands for. Take the app off its route and let one 5-minute beat pass, so that
-   the chain ends in a checkpoint the watch's store holds; 0.15.0 has no command or route that runs the beat on
-   demand. Then stop the beat and back up. On Workers the cron fires whatever the routes are, so stopping it is
-   removing the cron trigger (the schedules API with an empty list, or the dashboard), read back to confirm; on Node
-   it is stopping the process. Nothing then writes the log or the store between the backup and the migration. Step 3's
-   deploy brings the trigger back, as redeploying 0.15.0 does on a rollback.
-2. **`coffre migrate`**, as the owner, one migration. It refuses a database that is not a cut-over 0.15.0 (no cutover
-   change in `log_changes`, or a schema past 0049 that is not 0.16's). In SQL it creates the tables; fills `settings`
-   and `log_keys` from the newest entries, unsealed, and the policy's protected set (section 3); drops the indexes,
+   and their seqs), a member a finding stands for.
+2. **Deploy 0.16.** This starts the downtime, and it is what stops 0.15.0: no route is taken off, no cron removed, no
+   beat waited for. The build's own `coffre migrate` skips this migration, loudly, and exits 0. Both Workers then run
+   below their migrations, where 0.16 does nothing: the app answers 503 `migrating` to all but `/livez` and `/readyz`,
+   an unreachable database included; the vault refuses every call; the checkpointer's and the projector's alarms
+   re-arm and return, with no write and no day made; the watch's store's alarm the same; the scheduled run the same.
+   0.15.0's cron goes with its deploy.
+3. **Back up**, once nothing of 0.15.0 still writes. A request or a scheduled run in flight at the deploy ends on
+   0.15.0's code, and nothing in 0.15.0 bounds how long: its app login has no statement timeout (0.16's is S1). So the
+   rule is a comparison and no wait: the backup notes the newest number of each of the three logs, and step 4 refuses
+   if any has moved since, to be backed up again. What a write after the backup would cost is a restore that loses it.
+4. **`coffre migrate`**, run by the operator as the owner, one migration. It refuses unless `/readyz` answers
+   `migrating` at this release, and it refuses a database that is not a cut-over 0.15.0 (no cutover change in
+   `log_changes`, or a schema past 0049 that is not 0.16's). In SQL it creates the tables; fills `settings` and
+   `log_keys` from the newest entries, unsealed, and the policy's protected set (section 3); drops the indexes,
    triggers, functions and tables of section 5; revokes INSERT on `audit_log`. It copies nothing into the projections.
    0.15.0's code cannot run on the result: the functions it calls are gone or changed, and a row it writes directly
    has no seal, which the vault refuses.
-3. **Deploy 0.16.**
-4. **The vault's step**, on its first call, while the app answers 503 `upgrading` at its one door. It is the same size
+5. **The vault's step**, on its first call, while the app answers 503 `upgrading` at its one door. It is the same size
    whatever the log holds. The vault cannot read the watch's store, so the app reads it at the door and hands the
    checkpoint it holds in on the call that runs the step; the vault verifies its own signature on it and requires the
    log to hold that entry at that hash. It checks the old chain from there to its last entry, as 0.15.0's own check
    does between beats: the app its entries' MACs, the vault its own, and the hashes that link them. That is one beat's
-   entries, 10,000 a call at most. It writes the change that names the chain's final seq and hash, the **anchor** the
-   old log answers to from then on. It checks the settings' and keys' rows and the policy's protected set against the
-   signed entries they came from and writes each one's change and seal. It signs the cursor at the anchor, writes the
-   change that marks the upgrade done, and the door opens.
+   entries at most, since no beat is waited for, 10,000 a call at most. It writes the change that names the chain's
+   final seq and hash, the **anchor** the old log answers to from then on. It checks the settings' and keys' rows and
+   the policy's protected set against the signed entries they came from and writes each one's change and seal. It
+   signs the cursor at the anchor, writes the change that marks the upgrade done, and the door opens. It checks
+   everything before its first write: the checkpoint handed in, the tail, the settings, the keys and the protected
+   set. A step that refuses has then written nothing.
 
 **The projector lists the old log; the migration does not.** From the anchor it walks `audit_log` backward, 5,000
 entries a batch. An entry's hash covers its content and the hash before it (`entryHash`), so each batch is
@@ -762,23 +769,25 @@ newest checkpoint entry `audit_log` itself holds, its signature verified, and th
 but the 0.15 cutover's change, which names the old chain's position at the cutover: the exposure such a deployment
 already has on 0.15.0. A record the app's key did not seal refuses the door, as it fails a beat today.
 
-**What a database writer can do in the gap.** Before the anchor: cut entries off the end of the old chain, back to
-the newest checkpoint held outside the database at most. Those are the last beat's entries, of the kinds 0.15.0
-writes to the old log alone (sign-ins, refusals, token issues), and 0.15.0 has the same window between two beats;
-the beat that step 1 waits for leaves nothing in it. They cannot add or alter an entry without a key. After the
-anchor: an old entry altered before the projector reaches it stops the walk there, with a finding; one altered after
-is the recheck's to find, and the rows the page shows carry MACs of their own.
+**What a database writer can do in the gap.** Before the anchor: cut entries off the end of the old chain, back to the
+newest checkpoint held outside the database at most. Those are the last beat's entries, of the kinds 0.15.0 writes to
+the old log alone (sign-ins, refusals, token issues), and 0.15.0 has the same window between two beats. The first
+draft waited for a beat to empty it; with 0.16 deployed first there is no 0.15.0 beat to wait for, and the window is
+the ordinary one. They cannot add or alter an entry without a key. After the anchor: an old entry altered before the
+projector reaches it stops the walk there, with a finding; one altered after is the recheck's to find, and the rows
+the page shows carry MACs of their own.
 
 **If the step dies halfway, it is rerun.** Each write is one change with a request id made from what it seals
 (`upgrade-0.16:settings`), compared-and-set on a null seal, so the next call skips what is done and goes on. It only
-adds changes and fills null seals. Restore is for a step that refuses: the old chain's tail does not verify, or a row
-disagrees with its entry. The door then says which, and the operator restores step 1's backup, which loses nothing:
-the app was off its route. The store cannot be ahead of that backup, because the beat was stopped before it (step 1).
-A store that is ahead all the same is the cut it looks like: the step refuses, and its message names step 1. No
-command or argument accepts a loss: the door answers 503 to the route `coffre audit accept-loss` calls, and nothing
-writes the store it moved.
+adds changes and fills null seals. A step that refuses (the old chain's tail does not verify, a row disagrees with its
+entry, the watch's store is ahead of the log) has written nothing, and the door says which. Going back is step 3's
+backup restored and 0.15.0 redeployed, which brings its cron back by itself, and the checkpointer's memory reset as
+after any restore (`docs/restore.md`, "On 0.15's log"): 0.16's checkpointer seals from the migration on, so it
+remembers pairs the backup lacks. No command or argument accepts a loss: the door answers 503 to the route `coffre
+audit accept-loss` calls, and nothing writes the store it moved.
 
-**How long.** The migration creates and drops, and the vault's step reads one beat's entries and writes a handful of
+**How long.** The downtime runs from step 2's deploy to the door opening: the deploy, the backup, the migration and
+the step. The migration creates and drops, and the vault's step reads one beat's entries and writes a handful of
 changes: seconds, whatever the log holds. The walk runs behind the open door. Its SQL equivalent took 6 s for 440,000
 entries on my Postgres (3.2 s the events, 2.3 s their 607,200 place rows, 0.4 s the summary), so I expect about a
 minute through the projector. The rehearsal on a copy of Equisafe's database (T265) measures the migration, the step,
@@ -787,11 +796,12 @@ heartbeats and checkpoints are left out), the first audit page, and the sweep at
 
 **How it is tested.** One script, `scripts/upgrade-check.sh`, built on `test:compat`'s installer: install 0.14.5 from
 npm, run its own conformance to fill a database, update to 0.15.0 and let it cut over, save the audit API's pages
-(heartbeats and checkpoints filtered out) and one offboarding report, then run this checkout's migrate and start.
-Once the walk is done it requires the same entries in the same order, the same report, a green `coffre verify log`,
-a use, a change, a second run of the vault's step killed between two of its writes, and a walk killed between two
-batches. `pnpm test:compat` is off for 0.16.0, as it was for 0.4.0, and returns with 0.16.1. A dev database on main's
-unreleased migrations starts over.
+(heartbeats and checkpoints filtered out) and one offboarding report, then start this checkout on that database,
+require every door to answer `migrating` and no row to be written, run its migrate, and let the step run. Once the
+walk is done it requires the same entries in the same order, the same report, a green `coffre verify log`, a use, a
+change, a second run of the vault's step killed between two of its writes, a step made to refuse that leaves no
+change, no seal and the signer's pair as it was, and a walk killed between two batches. `pnpm test:compat` is off for
+0.16.0, as it was for 0.4.0, and returns with 0.16.1. A dev database on main's unreleased migrations starts over.
 
 ## 7. The work graph
 
