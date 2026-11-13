@@ -69,7 +69,8 @@
 (*   barrier  the checkpointer's: the issue lock exclusive, then the fence *)
 (*            exclusive;                                                   *)
 (*   revoke   the credential revoked (`revoke_credential`, 0034): the      *)
-(*            change lock, the row, the fence shared, the credential's     *)
+(*            change lock, the row, the issue lock shared (L1: it compares *)
+(*            the policy under it), the fence shared, the credential's     *)
 (*            lock;                                                        *)
 (*   use      a use: the fence shared, then the credential's lock and the  *)
 (*            key's, shared.                                               *)
@@ -169,17 +170,23 @@
 (*            removed with their credentials): the change lock, the issue  *)
 (*            lock shared, the fence shared, a's lock, b's, exclusive. Its *)
 (*            calls come b first;                                          *)
-(*   revoke   a credential's revoke, of b (`revoke_credential`), which     *)
-(*            takes no issue lock: the change lock, the fence shared, b's  *)
-(*            lock;                                                        *)
+(*   revoke   a credential's revoke, of b (`revoke_credential`): the       *)
+(*            change lock, the issue lock shared, under which it compares  *)
+(*            the policy its right was weighed on (a policy change takes   *)
+(*            it exclusive; until L1 the fence, exclusive on both sides,   *)
+(*            ordered the two), the fence shared, b's lock;                *)
 (*   barrier  as above.                                                    *)
-(*   FenceBeforeObjectsa change takes the fence before its objects' locks, *)
-(*               as a use does. Without, the revoke holds b's lock and     *)
-(*               waits for the fence, shared, behind the barrier, which    *)
-(*               waits for a use that holds the fence and waits for b's. A *)
-(*               change that takes the issue lock is ordered against the   *)
-(*               barrier there, and closes no such cycle either way; the   *)
-(*               rule is one for all.                                      *)
+(* `change_bindings` has no proc of its own. An unbind, a replacement and  *)
+(* a sweep that revokes are `change` here (the change lock, the issue lock *)
+(* shared, the fence, their objects sorted), their rows, locked by id      *)
+(* before the change lock, a member's in Flow = "add" (MembersFirst). A    *)
+(* bind that only makes a binding and a sweep that only closes take no     *)
+(* fence today and no object's lock after: nobody names a binding before   *)
+(* its commit, and no use reads `closed`.                                  *)
+(* A change takes the fence before its objects' locks, as a use does: one  *)
+(* helper for both. No wait cycle needs it: every change takes the issue   *)
+(* lock first, which orders it against the barrier, so the flow holds with *)
+(* the two the other way round too (run once, not kept as a scenario).     *)
 (*   UsesInKeyOrdera use takes its objects' locks in key order, all before *)
 (*               its first read: a batch every key's, sorted, not each     *)
 (*               key's as its turn comes in the request. Without, the      *)
@@ -191,8 +198,9 @@
 (*               waits for b's.                                            *)
 (*   PrincipalLasta batch takes its principal's lock after its objects'    *)
 (*               locks, as a single use does, which learns that it needs   *)
-(*               it from what it reads under them (`use_batch` took it     *)
-(*               before its first key until L1). Without, the batch holds  *)
+(*               it from what it reads under them (`use_batch` and         *)
+(*               `use_route` took it before their first key until L1).     *)
+(*               Without, the batch holds                                  *)
 (*               it and waits for a's lock behind the change, queued for   *)
 (*               a's behind the use, which holds a's and waits for the     *)
 (*               principal's lock.                                         *)
@@ -201,7 +209,7 @@ EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS Flow, TouchFirst, WriteTakesChangeLock, MembersFirst,
           ChangeLockFirst, IssueBeforeFence, BarrierIssueFirst,
-          FenceBeforeObjects, UsesInKeyOrder, ChangesInKeyOrder, PrincipalLast
+          UsesInKeyOrder, ChangesInKeyOrder, PrincipalLast
 
 Procs == CASE Flow = "write" -> {"write", "patch", "issue", "barrier", "revoke", "use"}
            [] Flow = "add" -> {"add", "demote", "issue", "barrier", "revoke", "use"}
@@ -214,6 +222,8 @@ Changing(takes) == IF takes THEN << <<"change", "X">> >> ELSE << >>
 \* A change's last statement, after the issue lock: the fence shared, then the object it writes.
 Last(object) == << <<"fence", "S">>, <<object, "X">> >>
 \* A two-trip change's hold: the fence shared, then the caller's credential, which it read, shared, and the object it writes.
+\* The credential stands for every object the hold read (the member, the roles, the policy, the environment): each shared,
+\* in key order with those it writes.
 Hold(object) == << <<"fence", "S">>, <<"@cred", "S">>, <<object, "X">> >>
 Plan(p) ==
     CASE p = "write" ->
@@ -235,9 +245,9 @@ Plan(p) ==
       [] p = "issue" /\ Flow # "write" -> << <<"member", "S">>, <<"cred", "S">>, <<"issue", "S">> >>
       [] p = "barrier" -> IF BarrierIssueFirst THEN << <<"issue", "X">>, <<"fence", "X">> >>
                                                ELSE << <<"fence", "X">>, <<"issue", "X">> >>
-      [] p = "revoke" /\ Flow # "objects" -> << <<"change", "X">>, <<"cred", "X">> >> \o Last("@cred")
+      [] p = "revoke" /\ Flow # "objects" -> << <<"change", "X">>, <<"cred", "X">>, <<"issue", "S">> >> \o Last("@cred")
       [] p = "revoke" /\ Flow = "objects" ->
-            IF FenceBeforeObjects THEN << <<"change", "X">> >> \o Last("@b") ELSE << <<"change", "X">>, <<"@b", "X">>, <<"fence", "S">> >>
+            << <<"change", "X">>, <<"issue", "S">> >> \o Last("@b")
       [] p = "use" /\ Flow = "write" -> << <<"fence", "S">>, <<"@cred", "S">>, <<"@key", "S">> >>
       [] p = "use" /\ Flow = "add" -> << <<"fence", "S">>, <<"@cred", "S">>, <<"@member", "S">> >>
       [] p = "use" /\ Flow = "change" -> << <<"fence", "S">>, <<"@cred", "S">>, <<"@env", "S">>, <<"@member", "S">>, <<"@policy", "S">> >>
@@ -249,8 +259,7 @@ Plan(p) ==
                                 ELSE << <<"fence", "S">>, <<"principal", "X">> >> \o objects
       [] p = "change" ->
             LET objects == IF ChangesInKeyOrder THEN << <<"@a", "X">>, <<"@b", "X">> >> ELSE << <<"@b", "X">>, <<"@a", "X">> >>
-            IN << <<"change", "X">>, <<"issue", "S">> >> \o
-               (IF FenceBeforeObjects THEN << <<"fence", "S">> >> \o objects ELSE objects \o << <<"fence", "S">> >>)
+            IN << <<"change", "X">>, <<"issue", "S">>, <<"fence", "S">> >> \o objects
 
 Locks == {"member", "change", "cred", "key", "issue", "fence", "principal", "@cred", "@key", "@member", "@policy", "@env", "@a", "@b"}
 

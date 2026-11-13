@@ -361,6 +361,8 @@ REMOVALS=(
   # A key made a reference between the call's read of its ids and its locks (HotPathOneLinks): the use reads the source
   # unlocked, beside a change of it.
   "HotPathOneLinks LockedAsRead TotalOrder"
+  # A reference re-pointed to another source between the two (HotPathOneRepoint): the same, of the new source.
+  "HotPathOneRepoint LockedAsRead TotalOrder"
   # Liveness, under weak fairness (HotPathOneLive's PROPERTIES).
   "HotPathOneLive WorkerHonoursDeadline UseAnswered"
   "HotPathOneLive ChangeRereads ChangeAnswered"
@@ -601,11 +603,9 @@ REMOVALS=(
   "ChangeLocks IssueBeforeFence NoWaitCycle"
   "ChangeLocks BarrierIssueFirst NoWaitCycle"
   # Object locks (ObjectLocks, L1, T282): the fence shared, then each object's lock in key order, all before the first
-  # read or write, then a use's principal's lock. A change taking its objects before the fence waits for it behind the
-  # barrier, which waits for a use that waits for the object; a batch taking each key's lock as its turn comes, or a
+  # read or write, then a use's principal's lock. A batch taking each key's lock as its turn comes, or a
   # change each call's, holds one and waits for the other, held by one that waits for the first; a batch taking its
   # principal's lock before its objects holds it against a use that holds the objects a change waits for.
-  "ObjectLocks FenceBeforeObjects NoWaitCycle"
   "ObjectLocks UsesInKeyOrder NoWaitCycle"
   "ObjectLocks ChangesInKeyOrder NoWaitCycle"
   "ObjectLocks PrincipalLast NoWaitCycle"

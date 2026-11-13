@@ -326,7 +326,7 @@ VARIABLES
     next,       \* the log's next number
     sealedTo,   \* the checkpointer has sealed every number below this
     changeLock,       \* who holds the change lock across steps, or None
-    held,       \* who holds the change lock and the fence from its hold to its COMMIT
+    held,       \* who holds its hold's locks from the hold to its COMMIT (L1: the fence shared and its objects'; before, the fence)
     pc, l, tries,
     trips,      \* round trips each process made on its path
     requests,   \* ghost: each write's request, as decided live and by the replay

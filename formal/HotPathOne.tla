@@ -485,10 +485,13 @@ NoSeen == [i \in Inputs |-> 0]
 \* one of ReadSets (all the inputs, with none given), and, while the key is a reference, its source's too (Extra). The
 \* key's row says which: here, the newest change of the secret, whose entry records the link it leaves (none: plain).
 ReadSetsOr == IF ReadSets = {} THEN {Inputs} ELSE ReadSets
+\* A reference names one source, one of Extra, and a later change of the key may name another (the reference ended and
+\* made again, re-pointed): the link is which, NoLink for a plain key.
+NoLink == "-"
 LinkIn(L) ==
     LET cs == {e \in ChangesIn(L) : e.input = "secret"}
-    IN cs /= {} /\ (CHOOSE e \in cs : \A d \in cs : d.seq <= e.seq).link
-ReadsWith(base, linked) == base \cup (IF linked /\ "secret" \in base THEN Extra ELSE {})
+    IN IF cs = {} THEN NoLink ELSE (CHOOSE e \in cs : \A d \in cs : d.seq <= e.seq).link
+ReadsWith(base, link) == base \cup (IF link /= NoLink /\ "secret" \in base THEN {link} ELSE {})
 
 \* An input's value as the newest change to it in L left it (all start allowing; the policy at
 \* BulkCount).
@@ -642,7 +645,7 @@ UseEntry(x, durable) ==
     [seq |-> u[x].seq, kind |-> "use", id |-> x, seen |-> u[x].seen, allow |-> u[x].allow, code |-> u[x].code,
      answeredAt |-> answered, key |-> u[x].key, at |-> u[x].at, deadline |-> u[x].deadline, decidedAt |-> u[x].decidedAt,
      admitted |-> u[x].admitted, input |-> None, value |-> FALSE, seal |-> FALSE, made |-> <<>>, fresh |-> u[x].fresh, durable |-> durable,
-     phased |-> Phased(x), reads |-> u[x].reads, link |-> FALSE]
+     phased |-> Phased(x), reads |-> u[x].reads, link |-> NoLink]
 ChangeEntry(seq, input, value, link, made, durable) ==
     [seq |-> seq, kind |-> "change", id |-> Change, seen |-> NoSeen, allow |-> FALSE, code |-> None, answeredAt |-> NoSeen,
      key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE,
@@ -653,9 +656,9 @@ IssueEntry(seq, i, durable) ==
     [seq |-> seq, kind |-> "issue", id |-> i, seen |-> NoSeen, allow |-> FALSE, code |-> None, answeredAt |-> NoSeen,
      key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE,
      input |-> None, value |-> FALSE, seal |-> FALSE, made |-> <<i>>, fresh |-> None, durable |-> durable, phased |-> FALSE,
-     reads |-> {}, link |-> FALSE]
+     reads |-> {}, link |-> NoLink]
 
-IdleUse == [pc |-> "idle", seq |-> 0, seen |-> NoSeen, snap |-> NoSeen, base |-> {}, resolved |-> {}, reads |-> {}, snapLink |-> FALSE,
+IdleUse == [pc |-> "idle", seq |-> 0, seen |-> NoSeen, snap |-> NoSeen, base |-> {}, resolved |-> {}, reads |-> {}, snapLink |-> NoLink,
             snapRows |-> AllTrue, snapNewest |-> AllTrue,
             snapForged |-> {}, forged |-> {}, snapNewestChange |-> NoChange, covered |-> 0, coverId |-> None, allow |-> FALSE, code |-> None,
             probed |-> FALSE, newest |-> AllTrue, newestChange |-> NoChange,
@@ -674,7 +677,7 @@ Init ==
     /\ plock = NoPlock
     /\ u = [x \in Uses |-> IdleUse]
     /\ c = [h \in Changers |-> [pc |-> "idle", n |-> 0, seq |-> 0, aborts |-> 0, input |-> None, read |-> TRUE, forged |-> FALSE, pin |-> NoPin, value |-> FALSE,
-                                link |-> FALSE]]
+                                link |-> NoLink]]
     /\ answered = NoSeen
     /\ released = {}
     /\ cp = [open |-> FALSE, from |-> 0, upto |-> 0, readFloor |-> 0, floor |-> 0 - D]
@@ -1064,8 +1067,9 @@ ChangeRun(h) ==
           \/ ChangePinsChecked /\ h \in PinnedChangers /\ PinMoved(h)
        THEN /\ c' = [c EXCEPT ![h].pc = IF ChangeRereads THEN "refused" ELSE "started"]
             /\ UNCHANGED <<nextSeq, answered, issueVars>>
-       \* A change of the key may make it a reference, or plain again (with Extra): the link its row then says.
-       ELSE /\ \E l \in IF c[h].input = "secret" /\ Extra /= {} THEN BOOLEAN ELSE {FALSE} :
+       \* A change of the key may make it a reference to any of its sources (Extra), the one it was or another, or plain
+       \* again: the link its row then says.
+       ELSE /\ \E l \in IF c[h].input = "secret" THEN {NoLink} \cup Extra ELSE {NoLink} :
                   c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "ran", !.value = ~c[h].read, !.link = l,
                                                   !.seq = IF ChangeNumberUnderLock THEN nextSeq ELSE @]]
             /\ nextSeq' = IF ChangeNumberUnderLock THEN nextSeq + 1 ELSE nextSeq
