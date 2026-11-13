@@ -12,6 +12,7 @@ import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
 
 import { bearer } from '../browser.ts';
+import { settled } from './audit.ts';
 import { canary, deviceLogin, DEV, personaOn, PROD, PROJECT, touching, valuesIn, type Canaries, type People, type Person } from './people.ts';
 
 const NAME = 'Conformance MCP client';
@@ -208,6 +209,7 @@ export async function mcpConnect(deployment: Deployment, people: People): Promis
   expect((await people.reader.api.apps.list()).apps.length === 0, 'a disconnected app is still listed');
 
   // Every step in the log, under the client.
+  await settled(deployment);
   const { entries } = await people.admin.api.audit.list({ actor: people.reader.member, detail: '1', limit: 500 });
   const mine = entries.filter((entry) => entry.metadata.clientId === clientId);
   const count = (action: string) => mine.filter((entry) => entry.action === action && entry.decision === 'allow').length;
@@ -306,6 +308,7 @@ export async function mcpRead(deployment: Deployment, people: People, canaries: 
   expect(leaked.length === 0, 'a Read tool answered with a secret value', leaked);
 
   // Every call in the log, under the client; the API's own refusal names the connection.
+  await settled(deployment);
   const { entries } = await people.admin.api.audit.list({ actor: people.reader.member, detail: '1', limit: 500 });
   const mine = entries.filter((entry) => (entry.metadata.via as { clientId?: string } | undefined)?.clientId === clientId);
   const reads = mine.filter((entry) => entry.action === 'mcp.read').length;
@@ -447,6 +450,7 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   // No value in any answer; each change made once, by the person, via the client and its approval.
   const leaked = Object.entries(canaries).filter(([, value]) => answers.some((answer) => answer.includes(value))).map(([path]) => path);
   expect(leaked.length === 0, 'a change tool answered with a secret value', leaked);
+  await settled(deployment);
   const { entries } = await admin.api.audit.list({ actor: changer.member, limit: 500 });
   const viaApproval = (action: string) => entries.filter((entry) => entry.action === action && entry.decision === 'allow' && typeof (entry.metadata.via as { approvalId?: unknown } | undefined)?.approvalId === 'string');
   const once = { archive: viaApproval('secret.archive').length, rename: viaApproval('secret.rename').length, write: viaApproval('secret.write').length };

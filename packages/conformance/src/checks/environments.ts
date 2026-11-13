@@ -10,7 +10,7 @@ import type { Deployment } from '../harness.ts';
 import { expect, refused } from '../report.ts';
 import { canary, DEV, PROD, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
 import { query } from './storage.ts';
-import { listed } from './audit.ts';
+import { listed, settled } from './audit.ts';
 
 /** A read of one key refused, whatever the reason: `outcome`'s status and code. */
 const NO = '404 not_available';
@@ -265,7 +265,7 @@ const LOOSE = 'CONFORMANCE_LOOSENED';
  * own `secret.loosen`, which "keys behind writes" holds to the vault's
  * `key.rewrap`. The key is archived after.
  */
-export async function loosening({ admin, reader, leaver }: People): Promise<string> {
+export async function loosening(deployment: Deployment, { admin, reader, leaver }: People): Promise<string> {
   const value = canary();
   const path = `${DEV}/${LOOSE}`;
   await admin.api.secrets.set(DEV, { [LOOSE]: { value, sensitivity: 'sensitive' } });
@@ -282,6 +282,7 @@ export async function loosening({ admin, reader, leaver }: People): Promise<stri
     expect(read.values[LOOSE] === value, "the reader did not read the loosened value as dev's secret");
     const versions = (await admin.api.secrets.history(path)).versions.map((version) => version.sensitivity);
     expect(versions.join() === 'secret,sensitive', 'the loosening changed the old version too, or made none', versions);
+    await settled(deployment);
     const logged = (await admin.api.audit.list({ path, limit: 50 })).entries.filter((entry) => entry.action === 'secret.loosen');
     expect(logged.length === 1 && logged[0]!.metadata.from === 'sensitive' && logged[0]!.metadata.to === 'secret', 'the loosening is not its own entry, saying both levels', logged);
   } finally {

@@ -12,6 +12,7 @@ import { connect, discovers, modern, redeem, refused, register } from './mcp.ts'
 import { BULK, canary, ceremonyOf, deviceLogin, DEV, keepPasskey, passkeyOf, personaOn, PROJECT, provider, signIn, signInAdmin, stepUp, touching, withPasskey, type Canaries, type People, type Person, type Touch } from './people.ts';
 import { pollDevice, startDevice } from './signin.ts';
 import { query } from './storage.ts';
+import { settled } from './audit.ts';
 
 /** How long a touch keeps a session fresh: five minutes, which a session left alone outlives. */
 const FRESH_MS = 5 * 60 * 1000;
@@ -693,6 +694,7 @@ export async function passkeysRequired(deployment: Deployment, { admin, bulk }: 
   };
   const answers = [await reveal(existing!), await reveal('REQUIRED_SENSITIVE'), await reveal('NEVER_MADE')];
   expect(answers.every((each) => each.required && each.said === answers[0]!.said), 'a refused credential told keys apart, or was not answered 401 passkey_required', answers.map((each) => each.said));
+  await settled(deployment);
   const { entries } = await admin.api.audit.list({ actor: bulk.member, limit: 100 });
   const uses = entries.filter((entry) => entry.occurredAt >= since && entry.action.startsWith('secret.') && entry.decision === 'allow');
   expect(uses.length === 0, 'a refused credential has a use of a key in the log', uses);
