@@ -652,12 +652,13 @@ cap's row), which no statement asks for by name.
   (`api/keys.ts:65`, `:145`, `:445`). Each takes the reader's row shared and, with a key service, holds it across the
   service's call. That is the stream the queue was made for, and `a removal amid a steady stream of one member's reads
   is not starved` (`vault/test/vault.test.ts:1193`: a removal and a revocation, beside reads of 150 ms every 40 ms) is
-  the test that fails without it. No row of section 7 deletes these callers. V1 moves their entries off `audit_log`,
-  so V1 decides their shape (the plan's open point: which 0.16 request still reaches `unwrap`). If V1 keeps a decision
-  that holds a member's row shared across a key service's call, the queue stays, and is necessary. If V1 decides them
-  as a use is decided, no member's row held, only changes take the queue, exclusive, in the statement that locks the
-  same row, and it orders nothing the row does not: `lockMembers` and `change_input` drop their
-  `pg_advisory_xact_lock` in V1's PR, with the check of the pair's order in `scripts/test-schema.sh` and that test.
+  the test that fails without it. No row of section 7 deletes these callers, and A1 keeps all five with the queue
+  (W392, at `fd39887b7`). V1 moves their entries off `audit_log`, so V1 decides their shape (the plan's open point:
+  which 0.16 request still reaches `unwrap`). If V1 keeps a decision that holds a member's row shared across a key
+  service's call, the queue stays, and is necessary. If V1 decides them as a use is decided, no member's row held,
+  only changes take the queue, exclusive, in the statement that locks the same row, and it orders nothing the row does
+  not: `lockMembers` and `change_input` drop their `pg_advisory_xact_lock` in V1's PR, with the check of the pair's
+  order in `scripts/test-schema.sh` and that test.
 
   The queue never ordered the others that share a member's row. A sign-in (`sign_in`, `FOR SHARE`, lines 847 and 939
   of `0082_flat_history.sql`), an issue (`issue_token`, issuer and member, line 677) and a bind (`change_bindings`,
@@ -700,8 +701,9 @@ cap's row), which no statement asks for by name.
   issue through a credential on it (`FOR SHARE`) and the last-use stamps wait for the step. No test fails without it
   that I can find by reading: `key-rotation.test.ts` has 21, none writes a signed row beside a step, and the two that
   race are steps, both under the head. Not run without it. The smallest deletion: `.for('update')` and the comment's
-  claim, with the dead branch of `renew` (`keeps015`), in A1 if it already deletes that branch, else the same
-  follow-up.
+  claim, with the dead branch of `renew` (`keeps015`), in the same follow-up. A1 deletes neither (W392, and read at
+  its head `fd39887b7`: `rotation.ts` is untouched, and `renew` still ends in a plain transaction when its vault does
+  not log).
 
 **What does not go now: the issue lock into the fence.** They do different jobs today. The fence orders uses against
 changes. The issue lock lets a transaction number a new credential, and compare the policy it was weighed on, without
