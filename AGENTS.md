@@ -228,194 +228,171 @@ caller, whom the app reads from the vault's rows, unchecked, and no other
 route takes such a caller (`docs/architecture.md`, "The API").
 
 **Tests / checks.**
-No pull request runs CI (Erwin, 11-07). A change merges on the checks its
-author ran locally on its exact head, rebased on `main`: `pnpm validate` runs
-the jobs of `Validate` that the diff against `origin/main` can change (all of
-them with `--all`, the image's aside; `--list` shows which and why), on a
-Postgres of its own (a compose project and a free port, never :55432), and
-prints the commit, its tree, the base and each step's result, for the pull
-request. When `main` moves after a gate and the rebase is mechanical (clean, or
-conflicting only in a migration or `CHANGELOG.md`, with `git range-diff` showing
-the patch unchanged), rerun only install, build, typecheck, lint, `check:*`,
-`test`, `test:schema` and `test:compat`, plus the matrices,
-formal, conformance, consumer or Terraform steps when the new commits touch their
-inputs; the earlier run still counts for the rest. Any other conflict gets a
-scoped review of the changes and the full gate. The pull request's comment lists
-each check with the exact head it passed on, and the range-diff verdict.
-`Validate` (`.github/workflows/validate.yml`) itself runs when
-dispatched on any ref (`gh workflow run validate.yml --ref main`) and nightly
-on `main`; it runs everything, TLC when the model's inputs have no green run
-yet, and gates releases: a tag's commit needs a green run of it and of the
-Action test. The Action names no version: its
-CLI, `action/coffre.mjs`, is this checkout's, which a change to the CLI or
-anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`), and
-`pnpm check:action` holds it to what the sources build.
+No pull request runs CI (Erwin, 11-07). A change merges on `pnpm validate`, run by
+its author on its exact head, rebased on `main`. It runs what the diff against
+`origin/main` can change (`scripts/affected.mjs` decides, `--list` shows what and
+why), side by side, each step logging to a file of its own and each that needs
+Postgres on a container and ports of its own (never :55432), removed however the step
+ends (but with `--keep-db`), the run's containers on one network of its own (one of Docker's subnets a run,
+never `COFFRE_POSTGRES_SUBNET`'s), and prints the commit, its tree, the base and each
+step's result, for the pull request. With a Postgres step, it first removes what runs
+killed outright left on this host: the containers and networks of a `validate.mjs` of
+this boot no longer alive (an earlier boot's are removed by hand). `--full` runs everything, as the
+release's `Validate` does, but the image and the packed client on every Node CI
+names (here, the Nodes `COFFRE_CLIENT_NODES` lists, or the current one), and the
+growth sweep, which `Validate` has no job for: before a tag, a local `--full` is its
+only run. What a diff runs:
 
-- `pnpm test` = lint + migrate a scratch template + `node --test --test-concurrency=4`.
-  Each file gets a private Postgres clone; cases within a file remain
-  sequential and reset per test. Templates and clones are removed after the run.
-  `COFFRE_TEST_DATABASE` sets the scratch name prefix; a random suffix isolates
-  simultaneous runs and other checkouts sharing compose Postgres. `pnpm test:schema`
-  still recreates the exact database it names. Then the files that run alone
-  (`packages/*/test/*.alone.ts`), one at a time: those that hold a statement's
-  work, its pages or its locks, to a budget or to the same call by call. Any commit of thousands of catalog changes in
-  the cluster (a test's migration) resets every backend's caches, and the call
-  it lands in plans everything again; a run beside another checkout's on the
-  same Postgres can still land one, a Postgres of your own cannot. Needs Postgres.
-- `pnpm test:matrices` runs the generated matrices of 0.15's use by name
-  (every `packages/*/test/*.matrix.ts`: `packages/vault/test/use.matrix.ts`,
-  `packages/vault/test/forks.matrix.ts`, `packages/vault/test/many.matrix.ts`, `packages/server/test/named.matrix.ts`): every key a caller may not have
-  answered alike, whatever the vault's map holds, each statement slowed. On
-  Postgres the server's alone takes 7,600 s on CI and 8,800 s on a busy host,
-  past its own 7,200 s timeout, so `pnpm test` leaves them out and an unsharded
-  run never passes. Needs Postgres. CI runs
-  them in shards, six, each from a database of
-  its own: `COFFRE_TEST_SHARD=<k>/<n>` runs the k-th of n, case i in shard
+- The test files that import, name by path or scan with a glob a changed file
+  (a build's `dist/` stands for its sources), through the file graph of
+  `scripts/graph.mjs`; every one when it touches the harness
+  (`scripts/test-suite.sh`, what it runs, the migrations among them, the compose
+  file); a package's own tests for a file of it that no test reaches.
+- Lint on the changed files, the typecheck of the packages that read them, and the
+  other checks and conformance runs on what each runs: Workers' conformance on what
+  its deployment runs. Node's is off at both gates, and in the consumer's run, until
+  0.16.1 (T270; `nodeConformance` in `scripts/affected.mjs`, which `validate.yml`
+  follows): Node is built and typechecked, nothing more.
+- The slow tier on its own inputs: the use matrices on the matrix files, their worlds
+  and the vault's use path (not the core rules it calls, which the proofs and the
+  suite hold); TLC on the scenarios whose configuration or module, or a
+  module it extends or instantiates, changed (`scripts/formal.sh`'s own lines for a
+  scenario count as its); Terraform on its provider and the routes it calls; the
+  packed consumer on manifests, build configs and the examples. The growth sweep
+  (`pnpm sweep:growth`) runs with `--full` alone.
+- A lockfile, a manifest's fields beyond its scripts or the pinned Node: everything
+  but the matrices, TLC and the sweep. A file no rule claims: everything but TLC
+  and the sweep, so a miss fails safe. A deleted file: what reads or runs the
+  files beside it. A docs-only diff: `pnpm check:docs` alone.
+
+At most `--jobs` (4) heavy steps run at once; run it under the host's CPU cap if it
+has one. When `main` moves after a gate and the rebase is mechanical (clean, or
+conflicting only in a migration or `CHANGELOG.md`, with `git range-diff` showing the
+patch unchanged), run it again on the new head; any other conflict gets a scoped
+review of the changes too. The pull request's comment gives the summary of each run
+and the range-diff verdict. `Validate` (`.github/workflows/validate.yml`) runs
+everything when dispatched (`gh workflow run validate.yml --ref main`) and nightly
+on `main`, TLC only when the model's inputs have no green run yet, and gates
+releases: a tag's commit needs a green run of it and of the Action test. The Action
+names no version: its CLI, `action/coffre.mjs`, is this checkout's, which a change
+to the CLI or anything it bundles rebuilds (`pnpm build`, then `pnpm build:action`),
+and `pnpm check:action` holds it to what the sources build.
+
+- `pnpm test` = lint + migrate a scratch template + `node --test --test-concurrency=4`,
+  then the files that run alone (`packages/*/test/*.alone.ts`), one at a time: those
+  that hold a statement's work, pages or locks to a budget or to the same call by
+  call, which another test's migration in the same cluster would upset (any commit
+  of thousands of catalog changes resets every backend's caches). Each file gets a
+  private Postgres clone, its cases sequential and reset per test; templates and
+  clones are removed after the run. `COFFRE_TEST_DATABASE` sets the scratch prefix;
+  a random suffix isolates simultaneous runs. `pnpm test:schema` still recreates the
+  exact database it names. `./scripts/test-suite.sh --files <file>...` runs some
+  files (`--serial` first: one at a time). Needs Postgres.
+- `pnpm test:matrices` runs the generated matrices of 0.15's use by name (every
+  `packages/*/test/*.matrix.ts`): every key a caller may not have answered alike,
+  whatever the vault's map holds, each statement slowed. Unsharded, the server's
+  outlasts its own 7,200 s timeout on Postgres, so `pnpm test` leaves them out and
+  they run in shards: `COFFRE_TEST_SHARD=<k>/<n>` runs the k-th of n, case i in shard
   i mod n + 1 (`scripts/matrix-shard.ts`), and `COFFRE_TEST_SHARD_REPORT=<dir>`
-  writes which cases each matrix ran, which `Use matrices` holds to every case
-  run exactly once (`scripts/matrix-coverage.mjs`); `pnpm validate` runs the same
-  six shards one at a time, then that check. A new matrix passes its
-  generated cases through `shardOf`, or that check fails. The four files run side
-  by side on one Postgres, each within a share of the connections it lets open
-  (`max_connections` less its reserved slots), split among the files still
-  running (`scripts/matrix-connections.ts`): a file whose row is past its share
-  fails before its first cell, and `use.matrix.ts` takes as many rows at once as
-  its share holds. A cell that fails fails its file once the others have settled,
-  and every pool its cells opened is ended, so the file exits rather than wait
-  out its timeout (`packages/vault/test/matrix-cells.test.ts`).
-- `pnpm test:schema` verifies both runtime logins' privileges. It also runs the
-  full migration as a non-superuser owner in a disposable Postgres cluster,
-  checks TLS trust and hostname verification, and runs `coffre setup` against
-  another disposable cluster (`scripts/test-setup.sh`), as its superuser and
-  as such an owner: setup makes cluster-wide roles, so never on the shared
-  one. Postgres only.
-- `pnpm build` builds every package in dependency order (core and client first). The
-  UI builds as a library, `vite build`, each page a module of its own
-  (`@coffre/ui/pages/<name>`), which the examples' file routes name, and Start splits. Core's tests use
-  conformance's dev IdP, and conformance runs the CLI, which bundles core,
-  so the graph has a cycle, which pnpm refuses in a run (`ERR_PNPM_TASK_CYCLE`,
-  through packages outside the run too): the build runs core and client,
-  then db, then the CLI, then the rest, each run free of it. The CLI's build fails on an import it cannot
-  resolve rather than ship it. Conformance, the examples' typecheck and
-  `test:consumer` want it first.
-- `pnpm conformance:workers` / `pnpm conformance:node` run an example's own
-  `pnpm conformance` (`docs/conformance.md`), on ports 3082 to +2; add `--port <n>`
-  for another three. Each first builds the example's app with its own Vite, as it
-  deploys; Workers then runs `app/dist/server/wrangler.json`, which wrangler does not
-  bundle again, behind an entry of the harness's own that reads an unread request
-  body (locally, wrangler fails the next request otherwise; coffre never waits on one); Node runs
-  the built app under srvx, as its `pnpm start`. Each needs Postgres and makes its own
-  `coffre_conformance_<hex>` database, dropped after. Each holds the build's client
-  files to holding no server code (`packages/conformance/src/bundle.ts`): a deployment's
-  own build no longer checks. A check that fails prints what it saw, then the processes'
-  output.
-- `pnpm test:compat [--kind workers|node] [--release <v>] [--schema <v>]` installs
-  the newest release from npm as `init` writes it, has its own conformance
-  migrate with this checkout's migrations, and requires it conformant; then
-  requires a synthetic destructive migration to fail it. `--schema` applies a
-  published version's migrations instead, to check past releases. It needs
-  network and Postgres. CI runs it for Workers alone, the default: 0.15.0's
-  Node deployment runs on SQLite, which this checkout cannot migrate, and
-  node rejoins once the newest release runs Node on Postgres.
-- `pnpm test:consumer [--port <n>] [<dir>]` packs the eight packages, runs the packed CLI's
-  `init` for both kinds outside the workspace, diffs them against the examples,
-  installs the tarballs (pnpm overrides, no workspace links), then typechecks,
-  builds and runs conformance on each, on conformance's ports (3082 to +2, or
-  `--port`'s). It also loads and calls the packed
-  client, which declares Node >= 20, with each Node `COFFRE_CLIENT_NODES`
-  lists (`scripts/client-smoke.cjs`; the current one when unset; CI names 20,
-  22 and 24). It needs network for third-party packages.
-- `pnpm test:image` builds the CLI's image (`packages/cli/Dockerfile`) from
-  this revision's packed CLI for linux/amd64 and linux/arm64, then runs the
-  native one: `--version`, its non-root user, and `coffre serve` on a
-  read-only root against the fake coffre on the host's network
-  (`packages/cli/scripts/image-smoke.ts`). It needs Docker on Linux and
-  removes its images. The release builds the same Dockerfile from npm's
-  tarball and pushes it to `ghcr.io/erwinkn/coffre-cli`.
-- `pnpm bench:workers` / `pnpm bench:node` (after `pnpm build`) boot an example as
-  conformance does, on ports 3182 to +2, and print the CPU each hot path costs, cold (a
-  new isolate or process) and warm, read from Linux's per-thread counters: on Workers,
-  the workerd that runs both Workers, not wrangler's own; on Node, the server and the
-  vault apart. `--entries` and `--members` grow the instance first. Workers' Free plan
-  gives an invocation 10 ms of CPU; `request-cost.alone.ts` holds a request's
-  statements and rows to the same however the instance grows.
-- `pnpm sweep:growth [--size <n>] [--out <dir>] [--write-known]` runs every
-  GET route, the audit page's filters and the main writes and background jobs
-  (`docs/growth-sweep.md` lists what it leaves out) on a history of each shape
-  `--size` long (2,000), then ten times that, and lists each runtime statement
-  that read twice the pages at the larger, or ran there alone. It fails on one
-  that `scripts/growth-sweep-known.txt` does not list: a change that fixes one
-  deletes its lines. On a Postgres of your own only (`COMPOSE_PROJECT_NAME`,
-  `COFFRE_POSTGRES_PORT`), since it logs every plan; neither `pnpm test` nor
-  `pnpm validate` runs it.
-- `pnpm formal` model-checks the locking protocol, `formal/Coffre.tla`, and
-  the credentials, issuing, bulk-limit, audit-chain and tunnel protocols
-  beside it, with TLC
-  (`docs/formal.md`): every scenario must hold, and each again without one
-  of the code's protections must fail. It needs Java 11+, and downloads TLC's
-  jar once, checked against its pinned SHA-256. A change to the locks a flow
-  takes, or what it re-checks under the head, changes the model too. CI skips
-  it when the model's inputs are unchanged (`scripts/formal-key.sh`), and
-  otherwise runs it as eleven shards (`scripts/formal.sh --shard`;
-  `docs/formal.md`, "In CI").
-- `pnpm formal:lean` checks the Lean proofs in `formal/lean` (`docs/formal.md`,
-  "Proofs in Lean") and holds their model to `@coffre/core/access`, the
-  vault's per-key decision (`packages/vault/src/decide.ts`), the AAD and the
-  chain verifier on about 120,000 generated cases (`--long`, `--seed=<n>`).
-  It uses elan's Lean if it is the pinned release, or downloads that release
-  once, checked against its SHA-256. A change to any of those rules changes
-  `formal/lean` in the same pull request, or the cases disagree.
-- `pnpm test:terraform` (after `pnpm build`) checks the Terraform provider,
-  a Go module in `terraform-provider/` that no `@coffre/*` package imports:
-  gofmt, `go vet`, its unit tests, then its acceptance tests on Terraform
-  and OpenTofu 1.11 against a coffre that
-  `packages/conformance/scripts/terraform-fixture.ts` boots, the Node example
-  on Postgres on ports 3482 and 3483 (`scripts/terraform-provider.sh`; `--unit`
-  for the first three alone). Go and both CLIs are pinned by version and
-  SHA-256 and downloaded once. A change to a route the provider calls (the
-  secrets list and write, `POST /api/auth/oidc`) runs it in the same pull
-  request.
-- `pnpm lint`, `pnpm check:pins`, `pnpm check:workflows`, `pnpm check:contrast`
-  and `pnpm check:docs` (every path, script and link the docs name exists) do
-  not need Postgres. `check:pins` holds, beside the manifests, every tracked
-  workflow, action, compose file, Dockerfile, shell script and
-  `pnpm-workspace.yaml` to a short list of plain rules, which
-  `scripts/pins.mjs`'s header lists: an action by its commit
-  (`owner/repo@<sha> # vX.Y.Z`; the same repository's through `$/`); an image
-  in compose, a workflow's `container` or `services`, or a Dockerfile's `FROM`
-  by its digest (`name:tag@sha256:<index digest>`); a Dockerfile's `ADD` of a
-  URL with `--checksum=sha256:…`; every other download through
-  `scripts/fetch.sh <url> <sha256> <file>`, which keeps the file only if its
-  SHA-256 is the pinned one, with curl and wget banned everywhere else; no
-  package runner or install outside the lockfile (npx, `npm install`, `pnpm
-  dlx` or `add`, `gh … download`, `git clone`, `nvm install`, `apt-get
-  install`, …), and `pnpm install` with `--frozen-lockfile`; an action's
-  `*-version` input exact; no `corepack`; pnpm's 7-day age gate and
-  `strictDepBuilds`. YAML it reads with js-yaml (a root dependency), each
-  string's lines as a shell's. A health check of this machine is curl marked
-  `# pins: local`, every URL on the line 127.0.0.1, localhost or [::1]; a
-  line no rule can hold carries `# unpinned: <reason>`, on itself or right
-  above it (in YAML, a shell comment inside the string). That is all it
-  checks: anything else (an image `docker run` pulls, a build context, a
-  fetch through another program or hidden from those names) is the
-  maintainer's, and review's, and is not enforced. `check:workflows` runs zizmor
-  (`scripts/zizmor.sh`, `.github/zizmor.yml`), downloaded once and checked
-  against its pinned SHA-256; with `GH_TOKEN` set, as in CI, it also asks
-  GitHub whether each pinned commit is its repository's. `pnpm validate` and
-  `Validate` run both (`Pins`).
-- `scripts/restore-drill.sh` (after `pnpm build`) backs up a seeded Workers
-  stack with `coffre backup`, restores it with `coffre restore --keys`, and
-  checks it came back, then the wrong-key cases, on ports 3400 to 3402 and 8481
-  and databases `coffre_drill`, `coffre_drill_restored` and `coffre_drill_scratch`
-  (`COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT`, `COFFRE_DRILL_DATABASE`;
-  `docs/restore.md`). It drops its databases and stops its processes however it
-  ends. The commands run `pg_dump` and `pg_restore` from `PATH`, which must be
-  PostgreSQL 16's, the compose server's: a newer `pg_restore` cannot restore into
-  it. `packages/cli/test/backup.test.ts` skips without them.
+  records which cases ran, which `scripts/matrix-coverage.mjs` holds to every case
+  exactly once (CI's six Postgres shards, and `pnpm validate`'s, one at a time). A new
+  matrix passes its cases through `shardOf`. The files run side by side on one
+  Postgres, each within its share of the connections (`scripts/matrix-connections.ts`),
+  and a failing cell ends every pool its cells opened
+  (`packages/vault/test/matrix-cells.test.ts`).
+- `pnpm test:schema` verifies both runtime logins' privileges, runs the full
+  migration as a non-superuser owner in a disposable cluster, checks TLS trust and
+  hostname verification, and runs `coffre setup` against another
+  (`scripts/test-setup.sh`), as its superuser and as such an owner: setup makes
+  cluster-wide roles, so never on the shared one. Postgres only.
+- `pnpm build` builds every package in dependency order: core and client, then db,
+  then the CLI, then the rest, each run free of the cycle core's tests make through
+  conformance's dev IdP (`ERR_PNPM_TASK_CYCLE`). The UI builds as a library, each
+  page a module (`@coffre/ui/pages/<name>`). The CLI's build fails on an import it
+  cannot resolve. Conformance, the examples' typecheck and `test:consumer` want it.
 - `pnpm typecheck` covers every package, `dev/deployment` and both examples, unsorted
-  (`--no-sort`: each reads the `dist/` the build wrote, and the cycle above would stop a sorted run). It does
-  not need Postgres, but on a fresh checkout it fails until `pnpm build` has run:
-  that writes the `dist/` the deployments typecheck against.
+  (`--no-sort`, for the same cycle); the deployments read the `dist/` the build
+  writes, so on a fresh checkout it fails until `pnpm build` has run.
+- `pnpm conformance:workers` / `pnpm conformance:node` run an example's own
+  `pnpm conformance` (`docs/conformance.md`) on ports 3082 to +2, or `--port <n>`'s
+  three. Each builds the example's app with its own Vite first, as it deploys;
+  Workers then runs `app/dist/server/wrangler.json` behind an entry of the harness's
+  own that reads an unread request body (locally, wrangler fails the next request
+  otherwise); Node runs the built app under srvx. Each needs Postgres and makes its
+  own `coffre_conformance_<hex>` database, dropped after. Each holds
+  the build's client files to holding no server code
+  (`packages/conformance/src/bundle.ts`), and a failing check prints what it saw,
+  then the processes' output.
+- `pnpm test:compat [--kind workers|node] [--release <v>] [--schema <v>]` installs
+  the newest release from npm as `init` writes it, has its own conformance migrate
+  with this checkout's migrations and requires it conformant, then requires a
+  synthetic destructive migration to fail it. `--schema` applies a published
+  version's migrations instead. Needs network and Postgres. Off, in `Validate` and
+  `pnpm validate`, until 0.16.0 is tagged: 0.16 is a clean break (D197).
+- `pnpm test:consumer [--port <n>] [<dir>]` builds and packs the eight packages
+  (`--built` packs the `dist/` there is: `pnpm validate`'s, read by its other steps meanwhile), runs the packed
+  CLI's `init` for both kinds outside the workspace, diffs them against the
+  examples, installs the tarballs, then typechecks, builds and runs conformance on
+  each (`--skip-conformance node`, as both gates pass until 0.16.1, leaves Node's out). It also loads and calls the packed client with each Node
+  `COFFRE_CLIENT_NODES` lists (`scripts/client-smoke.cjs`; CI names 20, 22 and 24).
+  Needs network.
+- `pnpm test:image` builds the CLI's image (`packages/cli/Dockerfile`) from this
+  revision's packed CLI for linux/amd64 and linux/arm64, then runs the native one:
+  `--version`, its non-root user, and `coffre serve` on a read-only root
+  (`packages/cli/scripts/image-smoke.ts`). Needs Docker on Linux. The release pushes
+  the same Dockerfile, built from npm's tarball, to `ghcr.io/erwinkn/coffre-cli`.
+- `pnpm bench:workers` / `pnpm bench:node` (after `pnpm build`) boot an example as
+  conformance does, on ports 3182 to +2, and print the CPU each hot path costs, cold
+  and warm, from Linux's per-thread counters (on Workers, the workerd that runs both
+  Workers; on Node, the server and the vault apart). `--entries` and `--members` grow
+  the instance first. Workers' Free plan gives an invocation 10 ms of CPU.
+- `pnpm sweep:growth [--size <n>] [--out <dir>] [--write-known]` runs every GET
+  route, the audit page's filters and the main writes and background jobs on a
+  history of each shape `--size` long (2,000), then ten times that, and fails on a
+  runtime statement that read twice the pages at the larger, or ran there alone,
+  unless `scripts/growth-sweep-known.txt` lists it; a fix deletes its lines
+  (`docs/growth-sweep.md`). On a Postgres of your own only (`COMPOSE_PROJECT_NAME`,
+  `COFFRE_POSTGRES_PORT`), since it logs every plan; `pnpm validate --full` runs it
+  on its step's, `pnpm test` never.
+- `pnpm formal` model-checks the locking protocol, `formal/Coffre.tla`, and the
+  protocols beside it with TLC (`docs/formal.md`): every scenario must hold, and each
+  again without one of the code's protections must fail. Needs Java 11+; downloads
+  TLC's jar once, checked against its pinned SHA-256. A change to the locks a flow
+  takes, or what it re-checks under the head, changes the model too. CI runs it as
+  thirteen shards (`scripts/formal.sh --shard`), skipped when the model's inputs
+  have a green run (`scripts/formal-key.sh`).
+- `pnpm formal:lean` checks the Lean proofs in `formal/lean` (`docs/formal.md`,
+  "Proofs in Lean") and holds their model to `@coffre/core/access`, the vault's
+  per-key decision (`packages/vault/src/decide.ts`), the AAD and the chain verifier
+  on about 120,000 generated cases (`--long`, `--seed=<n>`). A change to those rules
+  changes `formal/lean` in the same pull request.
+- `pnpm test:terraform` (after `pnpm build`) checks the Terraform provider, a Go
+  module in `terraform-provider/`: gofmt, `go vet`, its unit tests, then its
+  acceptance tests on Terraform and OpenTofu 1.11 against the Node example on
+  Postgres that `packages/conformance/scripts/terraform-fixture.ts` boots on ports 3482 and 3483
+  (`scripts/terraform-provider.sh`; `--unit` for the first three alone). Go and both
+  CLIs are pinned by version and SHA-256.
+- `pnpm lint`, `pnpm check:pins`, `pnpm check:workflows`, `pnpm check:contrast` and
+  `pnpm check:docs` (every path, script and link the docs name exists) need no
+  Postgres. `check:pins` holds the manifests, and every tracked workflow, action,
+  compose file, Dockerfile, shell script and `pnpm-workspace.yaml`, to the rules
+  `scripts/pins.mjs`'s header lists: an action by its commit; an image by its
+  digest; a Dockerfile's `ADD` of a URL with `--checksum`; every other download
+  through `scripts/fetch.sh <url> <sha256> <file>` (curl and wget banned elsewhere,
+  but a health check of this machine marked `# pins: local`); no package runner or
+  install outside the lockfile, `pnpm install` with `--frozen-lockfile`; an action's
+  `*-version` input exact; no `corepack`; pnpm's 7-day age gate and
+  `strictDepBuilds`. A line no rule can hold carries `# unpinned: <reason>`.
+  Anything else (an image `docker run` pulls, a fetch hidden from those names) is
+  review's. `check:workflows` runs zizmor (`scripts/zizmor.sh`,
+  `.github/zizmor.yml`), which with `GH_TOKEN` set also asks GitHub whether each
+  pinned commit is its repository's.
+- `scripts/restore-drill.sh` (after `pnpm build`) backs up a seeded Workers stack
+  with `coffre backup`, restores it with `coffre restore --keys`, checks it came
+  back, then the wrong-key cases, on ports 3400 to 3402 and 8481 (`docs/restore.md`).
+  It drops its databases and stops its processes however it ends. `pg_dump` and
+  `pg_restore` on `PATH` must be PostgreSQL 16's, the compose server's;
+  `packages/cli/test/backup.test.ts` skips without them.
 - Run an example's scripts from the root, `pnpm --filter coffre-workers <script>`, not
   with `--dir`: each example has its own `pnpm-workspace.yaml` (as `init` output
   needs), so pnpm would treat it as a separate, uninstalled workspace.

@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { nodeConformance } from './affected.mjs';
 
 // Exercise the expression the real final job runs, including rejected states.
 const workflow = readFileSync(new URL('../.github/workflows/validate.yml', import.meta.url), 'utf8');
 const expression = workflow.match(/Require every job[\s\S]*?jq -e '([\s\S]*?)' <<</)[1];
-const jobs = ['action', 'pins', 'checks', 'tests', 'matrices', 'schema', 'formal', 'proofs', 'workers', 'node', 'terraform', 'consumer', 'compat', 'image'];
+const jobs = ['action', 'pins', 'checks', 'tests', 'matrices', 'schema', 'formal', 'proofs', 'workers', 'terraform', 'consumer', 'image'];
 function needs() {
     return Object.fromEntries(jobs.map((name) => [name, { result: 'success' }]));
 }
@@ -37,7 +38,17 @@ test('Validate waits for exactly the jobs this list names, each of them', () => 
     // Every job of the workflow is waited on, or is a step of one: the Formal model's plan and shards.
     const defined = [...workflow.matchAll(/\n  ([a-z0-9-]+):\n    (?:name|needs|if):/g)].map((match) => match[1]);
     const inside = new Set(['validate', 'matrices-shard', 'formal-plan', 'formal-shard']);
-    assert.deepEqual(defined.filter((job) => !waits.includes(job) && !inside.has(job)), []);
+    const off = [...workflow.matchAll(/\n  ([a-z0-9-]+):\n    if: false\n/g)].map((match) => match[1]);
+    assert.deepEqual(defined.filter((job) => !waits.includes(job) && !inside.has(job) && !off.includes(job)), []);
+});
+
+// Node's conformance is one switch, `nodeConformance` (scripts/affected.mjs), which `pnpm validate` reads; the
+// workflow follows it by hand, in its `node` job and the consumer's run, and this holds the two in step (T270).
+test('Validate runs Node conformance exactly when pnpm validate does', () => {
+    const off = [...workflow.matchAll(/\n  ([a-z0-9-]+):\n    if: false\n/g)].map((match) => match[1]);
+    assert.deepEqual(off, nodeConformance ? [] : ['node']);
+    const consumer = workflow.match(/run: pnpm test:consumer (.*)\n/)[1];
+    assert.equal(consumer.includes('--skip-conformance node'), !nodeConformance);
 });
 
 // A job that judges the results of the ones before it runs even when they failed, or the failure would skip it
