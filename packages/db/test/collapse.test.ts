@@ -175,10 +175,10 @@ async function state(url: string, { history = false, digest = false } = {}): Pro
   try {
     const lines = (await client.unsafe<{ line: string; def: string | null }[]>(CATALOG, [history])).map(({ line, def }) =>
       `${line}: ${line.startsWith('relation ') ? (def ?? '').replace(/'\d{13}'/g, "'<at>'") : def}`.replace(/_20\d{6}\b/g, '_<day>'));
-    // A table's columns in their order, which the catalog's lines hold alike.
+    // A table's columns in their order, which the catalog's lines hold alike; a table of none still has rows (r6).
     const tables = await client.unsafe<{ name: string; kind: string; columns: string[] }[]>(`
-      SELECT c.relname::text AS name, c.relkind::text AS kind, array_agg(a.attname::text ORDER BY a.attnum) AS columns
-        FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+      SELECT c.relname::text AS name, c.relkind::text AS kind, array_remove(array_agg(a.attname::text ORDER BY a.attnum), NULL) AS columns
+        FROM pg_class c LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
        WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p', 'm', 'S') AND NOT c.relispartition GROUP BY c.oid`);
     for (const { name, kind, columns } of tables) {
       const compared = kind === 'S' ? ['last_value', 'is_called'] : columns.filter((column) => history || !(WHEN_MIGRATED[name] ?? []).includes(column));
@@ -329,14 +329,15 @@ test('on a 0.15.0 database with rows, the upgrade writes what the numbered migra
   same(await state(stepped, { history: true }), await state(upgraded, { history: true }));
 });
 
-test('parity tells apart rows that are equal only as JSON (r5)', async () => {
-  for (const [left, right] of [[`'-0'::float8`, `'0'::float8`], [`'{"a": 1}'::json`, `'{"a":1}'::json`]]) {
+test('parity tells apart rows that are equal only as JSON (r5), and the rows of a table without columns (r6)', async () => {
+  const pairs = [[`'-0'::float8 AS v`, `'0'::float8 AS v`], [`'{"a": 1}'::json AS v`, `'{"a":1}'::json AS v`], ['FROM generate_series(1, 1)', 'FROM generate_series(1, 2)']];
+  for (const [left, right] of pairs) {
     const urls: string[] = [];
     for (const value of [left!, right!]) {
       const url = await database(`as_text_${made.length}`);
       const client = postgresClient(url, { max: 1 });
       // The catalog's query names the ledger's schema.
-      await client.unsafe('CREATE SCHEMA drizzle').then(() => client.unsafe(`CREATE TABLE probe AS SELECT ${value} AS v`)).finally(() => client.end());
+      await client.unsafe('CREATE SCHEMA drizzle').then(() => client.unsafe(`CREATE TABLE probe AS SELECT ${value}`)).finally(() => client.end());
       urls.push(url);
     }
     for (const digest of [false, true]) assert.notDeepEqual(await state(urls[0]!, { digest }), await state(urls[1]!, { digest }));
