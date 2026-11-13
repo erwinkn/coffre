@@ -30,6 +30,8 @@ const [ada, root] = [user('ada'), user('root')];
 
 let store: ReturnType<typeof memoryStore>;
 const signer = () => Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store });
+/** The adoption, by the signer the object opens from its storage. */
+const adopting = async (by?: Signer) => adopt(by ?? (await signer()), vault, config);
 /** A signer told of what the vault committed, run once: what it found. */
 async function signed(on?: Signer, full = false): Promise<Finding[]> {
   const running = on ?? (await signer());
@@ -88,7 +90,9 @@ const versions: (typeof secretVersions.$inferInsert)[] = [];
  */
 async function upgraded() {
   const market = project('market');
-  const [prod, vaulted] = [environment(market, 'prod'), environment(market, 'vault')];
+  const [prod, vaulted, gone] = [environment(market, 'prod'), environment(market, 'vault'), environment(market, 'old~deleted-2026-10-05')];
+  const dropped = project('legacy~deleted-2026-10-05');
+  const within = environment(dropped, 'prod');
   const mine = environment(market, 'prod-ada', { parentId: prod.id, owner: ada });
   const database = await value14(await value14(secret(prod, 'DATABASE_URL'), 'postgres://old'), 'postgres://prod');
   const flag = await value14(secret(prod, 'FLAG'), 'on', { plain: true });
@@ -96,14 +100,14 @@ async function upgraded() {
   const own = await value14(secret(mine, 'DATABASE_URL'), 'postgres://ada', { owner: ada });
   const erased = { ...secret(prod, 'ERASED'), versions: 1, currentVersion: 1 };
   versions.push({ ...versions.at(-1)!, id: crypto.randomUUID(), secretId: erased.id, version: 1, ciphertext: Buffer.alloc(0), wrappedDek: Buffer.alloc(0), plaintext: null, sensitive: false });
-  await vault.owner.insert(projects).values(market);
-  await vault.owner.insert(environments).values([prod, vaulted, mine]);
+  await vault.owner.insert(projects).values([market, dropped]);
+  await vault.owner.insert(environments).values([prod, vaulted, mine, gone, within]);
   await vault.owner.insert(secrets).values([database, flag, stripe, own, erased]);
   await vault.owner.insert(secretVersions).values(versions.splice(0));
   await vault.owner.insert(principals).values([principal(ada)]);
   await vault.owner.insert(grants).values([grant(ada, 'viewer', { project: market })]);
   await vault.owner.insert(credentials).values([credential('ada', ada)]);
-  await archived('policy.change', { policy: { roles: { viewer: { ...ROLES.viewer, name: 'Reader' } }, instanceRoles: {}, protected: [{ projectId: market.id, environmentId: vaulted.id, at: 0 }] } });
+  await archived('policy.change', { policy: { roles: { viewer: { ...ROLES.viewer, name: 'Reader' } }, instanceRoles: {}, protected: [vaulted, gone, within].map((place) => ({ projectId: place.projectId, environmentId: place.id, at: 0 })) } });
   await archived('settings.change', { serviceAccounts: { projects: { only: [market.id] }, environments: 'all' } });
   // The instance's freeze is the app's, whose MAC the vault cannot check.
   await archived('workload.freeze', { target: 'instance' }, { author: 'app', occurredAt: Date.UTC(2026, 9, 2) });
@@ -119,20 +123,21 @@ async function reveal(label: string, place: string, keys: string[], mine = false
 
 test('a database as the upgrade leaves it is adopted: policy from the archive, every key wrapped again, every row sealed, then served', async () => {
   const w = await upgraded();
-  assert.equal(await adopt(vault, config), true);
+  assert.equal(await adopting(), true);
 
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT id, name FROM roles WHERE NOT instance AND id = 'viewer'`), [{ id: 'viewer', name: 'Reader' }]);
   assert.equal(await count('roles'), Object.keys(ROLES).length + Object.keys(INSTANCE_ROLES).length);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT slug FROM environments WHERE protected`), [{ slug: 'vault' }]);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT service_accounts, workloads_frozen_at IS NOT NULL AS frozen FROM policy`), [{ service_accounts: JSON.stringify({ projects: { only: [w.market.id] }, environments: 'all' }), frozen: true }]);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT id, role, status FROM principals ORDER BY id`), [{ id: ada, role: 'member', status: 'active' }, { id: root, role: 'owner', status: 'active' }]);
+  // A deleted place the policy names, or one in a deleted project, protects nothing, as in 0.14.
   // Every key wrapped again, but the erased version's, which keeps its label and has nothing to open.
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT envelope_version AS format, count(*)::int AS n FROM secret_versions GROUP BY 1 ORDER BY 1`), [{ format: 1, n: 1 }, { format: 2, n: 5 }]);
   assert.equal(await unsealed(), 0);
   const [first] = await rowsOf<{ body: { action: string; detail: { archive: { seq: number }; rows: Record<string, number> } } }>(vault.owner, sql`SELECT body::jsonb AS body FROM log_pending`);
   assert.equal(first!.body.action, 'vault.adopt');
   assert.equal(first!.body.detail.archive.seq, Number(seq));
-  assert.deepEqual(first!.body.detail.rows, { secret_versions: 5, projects: 1, environments: 3, secrets: 5, dismissed_keys: 0, principals: 2, grants: 1, roles: 12, policy: 1, identities: 0, bindings: 0, credentials: 1, device_logins: 0, enrollment_codes: 0, oauth_clients: 0 });
+  assert.deepEqual(first!.body.detail.rows, { secret_versions: 5, projects: 2, environments: 5, secrets: 5, dismissed_keys: 0, principals: 2, grants: 1, roles: 12, policy: 1, identities: 0, bindings: 0, credentials: 1, device_logins: 0, enrollment_codes: 0, oauth_clients: 0 });
 
   // Not served before the signer has its mirror.
   assert.equal(await adopted(vault.db), false);
@@ -154,7 +159,7 @@ test('a database as the upgrade leaves it is adopted: policy from the archive, e
 });
 
 test('a fresh database is adopted with the roles as they ship and the Owners the configuration names, then served', async () => {
-  assert.equal(await adopt(vault, config), true);
+  assert.equal(await adopting(), true);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT id, role, status FROM principals`), [{ id: root, role: 'owner', status: 'active' }]);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT service_accounts, workloads_frozen_at FROM policy`), [{ service_accounts: '{"projects":"all","environments":"all"}', workloads_frozen_at: null }]);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT id, name FROM roles WHERE NOT instance AND id = 'viewer'`), [{ id: 'viewer', name: ROLES.viewer.name }]);
@@ -179,64 +184,62 @@ async function untouched(): Promise<void> {
   assert.equal(await count('log_pending'), 0);
   assert.equal(await count('secret_versions', sql`envelope_version <> 1`), 0);
   assert.equal(await count('principals', sql`octet_length(mac) <> 0`), 0);
-  assert.deepEqual(vault.woken, []);
+  assert.ok((await signer()).blank);
 }
 
 test("a policy.change in the vault's name it did not write stops the adoption, and so does a settings.change", async () => {
   await upgraded();
   await vault.owner.execute(sql`UPDATE audit_archive SET metadata = ${JSON.stringify({ policy: { roles: {}, instanceRoles: {}, protected: [] } })} WHERE action = 'policy.change'`);
-  await assert.rejects(adopt(vault, config), /newest policy\.change, entry \d+ of audit_archive, does not carry its vault's MAC/);
+  await assert.rejects(adopting(), /newest policy\.change, entry \d+ of audit_archive, does not carry its vault's MAC/);
   await untouched();
 
   await emptyDatabase(vault.owner);
   await upgraded();
   await archived('settings.change', { serviceAccounts: { projects: 'all', environments: 'all' } }, { forged: true });
-  await assert.rejects(adopt(vault, config), /newest settings\.change, entry \d+ of audit_archive, does not carry its vault's MAC/);
+  await assert.rejects(adopting(), /newest settings\.change, entry \d+ of audit_archive, does not carry its vault's MAC/);
   await untouched();
 });
 
 test('a value marked plain that is not its plaintext column stops the adoption, and so does a value that does not open as its row says', async () => {
   const w = await upgraded();
   await vault.owner.execute(sql`UPDATE secret_versions SET plaintext = 'postgres://prod' WHERE secret_id = ${w.database.id} AND version = 1`);
-  await assert.rejects(adopt(vault, config), /version 1 of secret .* is marked plain, and its value is not its plaintext column/);
+  await assert.rejects(adopting(), /version 1 of secret .* is marked plain, and its value is not its plaintext column/);
   await untouched();
 
   // Its sensitivity is in 0.14's wrap: relabelled, it does not open.
   await vault.owner.execute(sql`UPDATE secret_versions SET plaintext = NULL, sensitive = false WHERE secret_id = ${w.stripe.id}`);
   await vault.owner.execute(sql`UPDATE secret_versions SET plaintext = NULL WHERE secret_id = ${w.database.id}`);
-  await assert.rejects(adopt(vault, config), /version 1 of secret .* does not open/);
+  await assert.rejects(adopting(), /version 1 of secret .* does not open/);
   await untouched();
 
   // A ciphertext moved under another version's key does not decrypt.
   await vault.owner.execute(sql`UPDATE secret_versions SET sensitive = true WHERE secret_id = ${w.stripe.id}`);
   await vault.owner.execute(sql`UPDATE secret_versions v SET ciphertext = o.ciphertext, iv = o.iv, auth_tag = o.auth_tag FROM secret_versions o WHERE v.secret_id = ${w.database.id} AND o.secret_id = v.secret_id AND o.version <> v.version`);
-  await assert.rejects(adopt(vault, config), /version \d of secret .* does not open: .*(authenticate|auth)/i);
+  await assert.rejects(adopting(), /version \d of secret .* does not open: .*(authenticate|auth)/i);
   await untouched();
 });
 
 test('a database is adopted once: again, it changes nothing, and two vaults at once adopt it once', async () => {
   await upgraded();
-  assert.equal(await adopt(vault, config), true);
+  assert.equal(await adopting(), true);
   const before = await rowsOf(vault.owner, sql`SELECT body FROM log_pending`);
-  assert.equal(await adopt(vault, config), false);
+  assert.equal(await adopting(), false);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT body FROM log_pending`), before);
   assert.deepEqual(await signed(), []);
-  assert.equal(await adopt(vault, config), false);
+  assert.equal(await adopting(), false);
 
   await emptyDatabase(vault.owner);
-  vault.woken.length = 0;
   store = memoryStore();
   await upgraded();
-  assert.deepEqual((await Promise.all([adopt(vault, config), adopt(vault, config)])).sort(), [false, true]);
+  assert.deepEqual((await Promise.all([adopting(), adopting()])).sort(), [false, true]);
   assert.equal(await count('log_pending'), 1);
   assert.deepEqual(await signed(), []);
 });
 
 test('a signer that died before signing the adoption finds its entry, and only fills its mirror and signs it', async () => {
   await upgraded();
-  assert.equal(await adopt(vault, config), true);
+  assert.equal(await adopting(), true);
   const dying = await signer();
-  for (const hash of vault.woken.splice(0)) await dying.wake(hash);
   store.down = true;
   await assert.rejects(dying.run(false), /storage is down/);
   store.down = false;
@@ -256,4 +259,62 @@ test('a signer that died before signing the adoption finds its entry, and only f
   // A row the writer changes since is found at the next check, as any.
   await vault.owner.execute(sql`UPDATE principals SET mac = (SELECT mac FROM principals WHERE id = ${root}) WHERE id = ${ada}`);
   assert.deepEqual((await signed(next, true)).map((each) => each.found), ['row']);
+});
+
+/** Everything the log is, gone: what a database writer can do, and not to the signer's storage. */
+const emptied = () => vault.owner.execute(sql`TRUNCATE log, log_pending, log_head, log_tiles, log_index`);
+
+test('a database whose log was emptied behind its signer is not adopted again, and what was planted in it stays unsealed', async () => {
+  await upgraded();
+  assert.equal(await adopting(), true);
+  const running = await signer();
+  assert.deepEqual(await signed(running), []);
+  // The writer plants an Owner and their session, then makes the database look as the upgrade leaves it.
+  const mallory = user('mallory');
+  await vault.owner.insert(principals).values(principal(mallory, { role: 'owner' }));
+  await vault.owner.insert(credentials).values(credential('mallory', mallory));
+  await emptied();
+  await vault.owner.execute(sql`DELETE FROM roles; DELETE FROM policy`);
+  await assert.rejects(adopting(running), /its signer has signed one or is told of one: someone emptied it/);
+  await assert.rejects(adopting(), /someone emptied it/);
+  assert.equal(await count('principals', sql`id = ${mallory} AND octet_length(mac) = 0`), 1);
+  assert.equal(await count('roles'), 0);
+  assert.equal(await adopted(vault.db), false);
+
+  // Emptied between the commit and the signature: the signer was told of the entry.
+  await emptyDatabase(vault.owner);
+  store = memoryStore();
+  await upgraded();
+  assert.equal(await adopting(), true);
+  await emptied();
+  await assert.rejects(adopting(), /someone emptied it/);
+});
+
+test('an entry that waited before the adoption is refused, and the adoption follows', async () => {
+  await upgraded();
+  await vault.owner.execute(sql`INSERT INTO log_pending (kept, body, mac) VALUES (true, '{}', ${randomBytes(36)})`);
+  // Something waits: the log may have begun, and only the signer can tell.
+  assert.equal(await adopting(), false);
+  const running = await signer();
+  assert.deepEqual((await signed(running)).map((each) => each.found), ['forged']);
+  // Its refusal leaves a head of no entry, which is no adoption.
+  assert.equal(await count('log_head'), 1);
+  assert.equal(await adopted(vault.db), false);
+  assert.equal(await adopting(running), true);
+  assert.deepEqual(await signed(running), []);
+  assert.equal(await adopted(vault.db), true);
+});
+
+test('a full read that fails with the adoption waiting fails the run with its own error, and the next run signs it', async () => {
+  await upgraded();
+  const running = await signer();
+  assert.equal(await adopting(running), true);
+  const read = running.read.bind(running);
+  running.read = (full) => (full ? Promise.reject(new Error('a table flooded')) : read(full));
+  await assert.rejects(running.run(true), /a table flooded/);
+  assert.equal(running.dead, false);
+  assert.equal(await adopted(vault.db), false);
+  running.read = read;
+  assert.deepEqual(await signed(running), []);
+  assert.equal(await adopted(vault.db), true);
 });

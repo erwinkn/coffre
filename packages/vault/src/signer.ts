@@ -234,6 +234,16 @@ export class Signer {
     }
   }
 
+  /**
+   * Whether it has signed nothing and is told of nothing: the one signer
+   * that may adopt its database (adopt.ts). A database that shows no log
+   * to one that has was emptied behind it, and is not adopted again.
+   */
+  get blank(): boolean {
+    this.#alive();
+    return this.#trees.kept.size + this.#trees.aging.size === 0 && this.#moving === null && this.#expected.size === 0;
+  }
+
   /** The rows and the trees the last check found wrong. */
   get standing(): Finding[] {
     return [...this.#stands];
@@ -483,8 +493,12 @@ export class Signer {
           return [await this.read(false), error] as const;
         },
       );
-      // The adoption's entry is signed with the rows it sealed (`sign`): a quick read that finds it waiting reads them too.
-      if (snapshot.rows === null && failed === null && this.#trees.kept.size === 0 && snapshot.pending.some((row) => entryOf(this.#on.keys, row)?.action === ADOPTION)) snapshot = await this.read(true);
+      // The adoption's entry is signed with the rows it sealed (`sign`): a quick read that finds it waiting reads them too,
+      // and fails as the full read did if it does again.
+      if (snapshot.rows === null && this.#trees.kept.size === 0 && snapshot.pending.some((row) => entryOf(this.#on.keys, row)?.action === ADOPTION)) {
+        snapshot = await this.read(true);
+        failed = null;
+      }
       await this.sign(snapshot);
       await this.move();
       this.#behind = !snapshot.drained;

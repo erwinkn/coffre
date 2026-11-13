@@ -48,9 +48,9 @@ async function vaultOn(database: string): Promise<TestVault> {
 
 /** Adopted, and its first entry signed: a signer, run once, that found nothing. */
 async function adoptedOn(vault: TestVault): Promise<Signer> {
-  assert.equal(await adopt(vault, { keks, owners: ['root@acme.example'], signingKeys: [SEED] }), true);
-  for (const table of MIRRORED) assert.deepEqual(await rowsOf(vault.owner, sql`SELECT count(*)::int AS n FROM ${table} WHERE octet_length(mac) = 0`), [{ n: 0 }], shapeOf(table).name);
   const signer = await Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store: memoryStore() });
+  assert.equal(await adopt(signer, vault, { keks, owners: ['root@acme.example'], signingKeys: [SEED] }), true);
+  for (const table of MIRRORED) assert.deepEqual(await rowsOf(vault.owner, sql`SELECT count(*)::int AS n FROM ${table} WHERE octet_length(mac) = 0`), [{ n: 0 }], shapeOf(table).name);
   assert.deepEqual(await runOf(signer, vault), []);
   assert.equal(await adopted(vault.db), true);
   return signer;

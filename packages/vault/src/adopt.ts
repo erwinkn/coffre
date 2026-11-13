@@ -3,15 +3,15 @@ import { createHash, createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 import { definitionProblem, EVERYWHERE, INSTANCE_ROLES, isInstanceRole, isScope, ROLES, type RoleDefinition } from '@coffre/core/access';
 import { decrypt, ownerKey } from '@coffre/core/envelope';
 import type { Database, Transaction } from '@coffre/db';
-import { rowsOf } from '@coffre/db/dialect';
-import { auditArchive, environments, policy, principals, roles, secrets, secretVersions } from '@coffre/db/schema';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { rowsOf, tombstone } from '@coffre/db/dialect';
+import { auditArchive, environments, policy, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
+import { and, desc, eq, inArray, not, notInArray, sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from './config.ts';
 import { CHANGE_LOCK, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, seal, shapeOf, toWire, type Wire } from './rows.ts';
-import { ADOPTION, MIRRORED } from './signer.ts';
+import { ADOPTION, MIRRORED, type Signer } from './signer.ts';
 
 /**
  * The vault's adoption of a database (docs/design/0.16.md, "Upgrade from
@@ -32,6 +32,10 @@ import { ADOPTION, MIRRORED } from './signer.ts';
  *
  * Then the signer, taking that first entry, fills its mirror from the rows
  * (`sign` in signer.ts). Until it has, the database is not `adopted`.
+ *
+ * The signer's object calls it, for the signer: what says the database is
+ * new is that signer, which has signed nothing, and not the database, whose
+ * writer could empty its log and have rows they planted adopted.
  */
 
 /** Who wrote what the vault writes of itself, as 0.14 named it. */
@@ -41,17 +45,20 @@ const VAULT = 'system:vault';
 type Config = Pick<ResolvedVaultConfig, 'keks' | 'owners' | 'signingKeys'>;
 
 /**
- * Adopt the database, unless it began a log already: then nothing is done.
- * Whether it adopted it now. Taken under the change lock, so two vaults
- * starting at once adopt once: the second waits, then finds the first's
- * entry. Throws, having written nothing, on anything it cannot vouch for.
+ * Adopt the database for `signer`, unless it began a log already: then
+ * nothing is done. Whether it adopted it now. Taken under the change lock,
+ * so two calls at once adopt once: the second waits, then finds the first's
+ * entry. Throws, having written nothing, on anything it cannot vouch for,
+ * and on a database that shows no log to a signer that has signed one.
  */
-export async function adopt(vault: Running, config: Config): Promise<boolean> {
+export async function adopt(signer: Signer, vault: Pick<Running, 'db' | 'keys' | 'now'>, config: Config): Promise<boolean> {
   const entry = await vault.db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
-    // An entry waiting is a log begun, as much as a head: one adopted and not yet signed.
-    const [{ begun }] = await rowsOf<{ begun: boolean }>(tx, sql`SELECT EXISTS (SELECT FROM log_head) OR EXISTS (SELECT FROM log) OR EXISTS (SELECT FROM log_pending) AS begun`);
+    // An entry waiting is a log begun, as much as a head that holds one: one adopted and not yet signed. A head
+    // alone, of no entry, is the signer's refusal of what waited before anything was adopted.
+    const [{ begun }] = await rowsOf<{ begun: boolean }>(tx, sql`SELECT EXISTS (SELECT FROM log_head WHERE kept_size > 0) OR EXISTS (SELECT FROM log) OR EXISTS (SELECT FROM log_pending) AS begun`);
     if (begun) return null;
+    if (!signer.blank) throw new Error('the database shows no log, and its signer has signed one or is told of one: someone emptied it; it is not adopted again');
     const archive = { keys: config.signingKeys.map(legacyKey), tx };
     const edits = editsOf(await newest(archive, 'policy.change'));
     const stored = await newest(archive, 'settings.change');
@@ -68,7 +75,11 @@ export async function adopt(vault: Running, config: Config): Promise<boolean> {
     const at = new Date(vault.now());
     await tx.insert(roles).values([...roleRows(false, { ...ROLES, ...edits.roles }), ...roleRows(true, { ...INSTANCE_ROLES, ...edits.instanceRoles })]);
     await tx.insert(policy).values({ onlyRow: true, serviceAccounts: JSON.stringify(settings), workloadsFrozenAt: freeze?.action === 'workload.freeze' ? new Date(freeze.at) : null, changedAt: at, changedBy: VAULT });
-    if (edits.protected.length > 0) await tx.update(environments).set({ protected: true }).where(inArray(environments.id, edits.protected));
+    // One deleted, or in a project deleted, stays as 0.14 held it: protecting nothing.
+    if (edits.protected.length > 0) {
+      const deleted = tx.select({ id: projects.id }).from(projects).where(tombstone(projects.slug));
+      await tx.update(environments).set({ protected: true }).where(and(inArray(environments.id, edits.protected), not(tombstone(environments.slug)), notInArray(environments.projectId, deleted)));
+    }
     if (config.owners.length > 0) {
       const named = config.owners.map((email) => ({ id: `user:${email}`, status: 'active', role: 'owner', scope: null, generation: 0, createdAt: at, createdBy: VAULT, statusChangedAt: at, statusChangedBy: VAULT, frozenAt: null }));
       // One the deployment names is an Owner of the whole instance, brought back if removed, as 0.14 made one at each start.
@@ -96,13 +107,13 @@ export async function adopt(vault: Running, config: Config): Promise<boolean> {
     return first;
   });
   if (entry === null) return false;
-  vault.wake(entry.hash);
+  await signer.wake(entry.hash);
   return true;
 }
 
 /** Whether the vault may serve: the adoption's entry is signed, and the signer's mirror filled. */
 export async function adopted(db: Database): Promise<boolean> {
-  const [{ signed }] = await rowsOf<{ signed: boolean }>(db, sql`SELECT EXISTS (SELECT FROM log_head) AS signed`);
+  const [{ signed }] = await rowsOf<{ signed: boolean }>(db, sql`SELECT EXISTS (SELECT FROM log_head WHERE kept_size > 0) AS signed`);
   return signed;
 }
 
@@ -201,7 +212,10 @@ const FIELDS = ['seq', 'author', 'keyId', 'occurredAt', 'actor', 'action', 'deci
  * The newest entry 0.14's vault allowed with `action`, by what it holds,
  * once held to its MAC: HMAC-SHA256 over a domain, the previous hash, then
  * each field, its length first (-1 for null), numbers in decimal. One in
- * the vault's name it did not write stops the adoption.
+ * the vault's name it did not write stops the adoption: a tripwire for a
+ * vault given another signing key than 0.14's, not a defence, since a
+ * writer can delete the entry instead (docs/design/0.16.md, "What it
+ * trusts").
  */
 async function newest(archive: { keys: { id: string; key: Buffer }[]; tx: Transaction }, action: string): Promise<Record<string, unknown> | null> {
   const [entry] = await archive.tx.select().from(auditArchive).where(and(eq(auditArchive.author, 'vault'), eq(auditArchive.action, action), eq(auditArchive.decision, 'allow'))).orderBy(desc(auditArchive.seq)).limit(1);
