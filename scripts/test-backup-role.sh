@@ -118,10 +118,12 @@ if [[ "$accepted" == true ]] || ! grep -Fq 'coffre_backup owns database objects'
     exit 1
 fi
 
-# 0019 grants the group coffre's tables on a new database, made by the owner
-# or the superuser, and a later migrate, by either or by a member of the
-# owner, leaves a table of another role in public, as migrate.test.ts's
-# reporting table, ungranted. A member never migrates a new database: the
+# 0019 grants the group coffre's tables by name, never another role's table
+# in public, as migrate.test.ts's reporting table: on a new database where
+# that table was there first (a superuser migrates over one; the owner
+# cannot, as the baseline's REVOKE on every table in public needs to own
+# them), and in a later migrate, by the owner or by a member of it, of a
+# database the owner made. A member never migrates a new database: the
 # baseline alters the runtime roles, which takes CREATEROLE. Nor does a
 # database from before 0019 migrate: this version upgrades only from 0.15.0
 # (T273).
@@ -131,7 +133,8 @@ for logins in migration_owner:local-owner-only,migration_owner:local-owner-only 
     maker="${logins%%,*}" login="${logins#*,}"
     database="foreign_${login%%:*}"
     as_superuser -c "CREATE DATABASE $database OWNER ${maker%%:*}"
-    for step in empty foreign; do
+    steps='empty foreign'; [[ "$maker" == postgres:* ]] && steps='foreign'
+    for step in $steps; do
         if [[ "$step" == foreign ]]; then
             as_superuser -d "$database" <<'SQL'
 CREATE TABLE public.reporting_rows (n integer);
@@ -145,7 +148,7 @@ SQL
     [[ "$(as_superuser -d "$database" -At -c "SELECT has_table_privilege('coffre_backup', 'projects', 'SELECT') AND NOT has_table_privilege('coffre_backup', 'projects', 'INSERT')")" == t ]] \
         || { echo "0019 then a migrate as ${login%%:*} did not leave the group exactly SELECT on projects" >&2; exit 1; }
     [[ "$(as_superuser -d "$database" -At -c "SELECT has_table_privilege('coffre_backup', 'reporting_rows', 'SELECT')")" == f ]] \
-        || { echo "0019, as ${login%%:*}, granted the group another role's table" >&2; exit 1; }
+        || { echo "a migrate as ${login%%:*} granted the group another role's table" >&2; exit 1; }
 done
 
 as_owner -d postgres -c 'CREATE DATABASE backed_up'

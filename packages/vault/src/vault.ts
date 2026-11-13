@@ -3054,7 +3054,7 @@ class VaultService implements Vault {
     // Every place it holds a grant on, lapsed ones too, as 0.15's log holds its row (T159): one that is not holds nothing,
     // and so would leave the account easier to manage, not harder. Refused instead.
     const ids = subject.stored.flatMap((grant) => (grant.environmentId === null ? [] : [grant.environmentId]));
-    // The decision's own read of them, their grants' places among it (`asked.seals`); else read.
+    // The decision's own read of them, which reads its grants' places with its snapshot; else read.
     const missing = ids.filter((id) => !reads.environments.has(id));
     const slugs = missing.length === 0 ? reads.environments : new Map([...reads.environments, ...await store.environmentsById(db, missing)]);
     if (ids.some((id) => !slugs.has(id))) throw new Refused(refusal('tampered', TAMPERED_PLACE), []);

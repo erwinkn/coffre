@@ -263,13 +263,8 @@ before(async () => {
   append = async (count, entry = () => ({ actor: 'system:load', action: 'secret.read', decision: 'allow', metadata: '{}' })) => {
     for (let done = 0; done < count; done += 1000) {
       const entries = Array.from({ length: Math.min(1000, count - done) }, (_, i) => entry(done + i));
-      // Writes of 0.14's among them (a sign-in, a token made) as an upgraded instance's log holds them: the trigger that
-      // refuses them once 0.15 cut over lifted while they go in. Reads it lets through.
-      await db.owner.transaction(async (tx) => {
-        await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_refuse_old`);
-        await appendEntries(tx, appLogKey(base.chainKey), entries);
-        await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_refuse_old`);
-      });
+      // Writes of 0.14's among them (a sign-in, a token made), as an upgraded instance's log holds them below its cutover.
+      await db.owner.transaction((tx) => appendEntries(tx, appLogKey(base.chainKey), entries));
     }
   };
   // The vault's answers kept between requests, as a configuration keeps them (`Accesses`).
@@ -884,11 +879,9 @@ test("each hot request's statements read as many pages however long the log grow
       await db.owner.transaction(async (tx) => {
         // Planned for thousands of times the rows it makes, a part would compile them first (JIT), longer than it runs.
         await tx.execute(sql`SET LOCAL jit = off`);
-        // And 0.14's access changes among the copies, as an upgraded instance's log holds them below its cutover: the
-        // trigger that refuses them after it is off too.
-        await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_releases, DISABLE TRIGGER audit_log_refuse_old`);
+        await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER audit_log_releases`);
         await tx.execute(more(Math.min(5000, left)));
-        await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_releases, ENABLE TRIGGER audit_log_refuse_old`);
+        await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER audit_log_releases`);
       });
     }
     assert.deepEqual(await releases(), released, 'the copies released no key later than the log did');

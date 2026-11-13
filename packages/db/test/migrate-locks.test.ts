@@ -66,11 +66,6 @@ before(async () => {
     await migrate(createDatabase(session) as unknown as Parameters<typeof migrate>[0], { migrationsFolder: folder });
     const [found] = await session.unsafe<{ relation: string | null }[]>(`SELECT to_regclass('public.${TABLE}')::text AS relation`);
     assert.equal(found?.relation, TABLE, `${TABLE} is there before ${TAG}`);
-    // The change 0.15.0's vault writes at its first start, without which migrateDatabase refuses the database.
-    await session.unsafe(
-      `INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-        VALUES (1, 0, 'cutover', log_object('log', 'cutover'), 'system:vault', '{"op":"cutover"}', NULL, '\\x${'00'.repeat(16)}')`,
-    );
   } finally {
     await session.end();
   }

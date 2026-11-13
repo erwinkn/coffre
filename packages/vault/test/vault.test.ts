@@ -1943,25 +1943,14 @@ test('only those who run the instance set roles, never their own, and a scoped a
   assert.equal((await w.vault.verifyLog({})).ok, true);
 });
 
-/**
- * A grant on every project as 0.4 wrote it: its row, its `access.grant`
- * entry under the vault's key, and the member's row sealed over it, as the
- * vault of 0.4 would have left them.
- */
-async function everyProjectGrant(principal: string, slug: string | null, role: string, expiresAt: number | null = null): Promise<void> {
-  const metadata = JSON.stringify({ role, expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(), previousRole: null, place: slug === null ? '*' : `*/${slug}` });
-  const appended = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: principal, metadata }], undefined, undefined, [], true));
-  await db.owner.insert(grants).values({ principal, projectId: null, environmentId: null, environmentSlug: slug, role, expiresAt, grantedAt: appended.occurredAt, grantedBy: ROOT });
-  await db.owner.update(principals).set({ accessSeq: appended.seqStart }).where(eq(principals.principal, principal));
-  await reseal(principal);
-}
-
 test("a grant on a slug in every project of 0.4, converted after the cutover, becomes none on a place a writer renamed to that slug and back (T159, review r7)", async () => {
   // As 0.4 left it: dev and prod, and CI a Viewer of every project's staging, which none is.
   const where = await places(db.owner);
   await rowOf05('token:ci', { role: 'member' }, ROOT);
   await everyProjectGrant('token:ci', 'staging', 'viewer');
-  // The cutover, by a vault that makes no call after it: nothing converted yet, dev and prod sealed as they are.
+  // 0.15.0's cutover, then no call after it: CI sealed with its grant, nothing converted yet, dev and prod sealed as
+  // they are (the fixture seals the places a first vault finds).
+  await cutOver('token:ci');
   await openLocalVault(db.vault, configure());
   // A writer renames prod to staging, its seal kept; a new vault converts on its first call; the writer puts prod back.
   await run(db.owner, sql`UPDATE environments SET slug = 'staging' WHERE id = ${where.prod}`);
@@ -4179,7 +4168,7 @@ test('an Owner\'s scope written another way around the vault is still everywhere
 /**
  * A grant on every project as 0.4 wrote it: its row, its `access.grant`
  * entry under the vault's key, and the member's row sealed over it, as the
- * vault of 0.4 would have left them. 0.15's cutover seals the member after
+ * vault of 0.4 would have left them. 0.15's cutover sealed the member after
  * (`cutOver`).
  */
 async function everyProjectGrant(principal: string, slug: string | null, role: string, expiresAt: number | null = null): Promise<void> {

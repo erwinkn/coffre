@@ -493,7 +493,7 @@ test('a database a coffre before 0.4.0 made is refused, with what to do instead,
 test('a database a release before 0.15.0 made, or a 0.15.0 whose vault has not cut its log over, is refused, and nothing changes', needsCluster, async () => {
   const url = await fresh('setup_migrate_uncut');
   const dir = deploymentFolder(pinnedAt(cliVersion()));
-  // 0.14.5's schema: the migrations before 0.15.0's last.
+  // One short of 0.15.0's last migration: a database a release before 0.15.0 left.
   const before = KNOWN[KNOWN.indexOf('0049_reads') - 1]!;
   await migrateThrough(url, before);
   const old = await migrateIn(dir, url);
