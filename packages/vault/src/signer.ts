@@ -349,7 +349,8 @@ export class Signer {
         this.#last[tree] = hashes[tree].at(-1)?.toString('hex') ?? this.#last[tree];
       }
       if (snapshot.drained) {
-        this.#drained = snapshot.at;
+        // Never back: under a clock set back, an entry it has forgotten signing would be taken again.
+        this.#drained = Math.max(this.#drained, snapshot.at);
         // What it would no longer take, it need not remember.
         for (const [hex, at] of this.#signed) {
           if (at + FRESH_MS >= this.#drained) continue;

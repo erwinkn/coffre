@@ -146,6 +146,12 @@ test('a signer that was away takes what waited for it; an entry put back is refu
   assert.deepEqual(await run(), []);
   await putBack();
   assert.deepEqual(kinds(await run()), ['stale']);
+  // And still once its clock is set back, before the entry's own date.
+  vault.tick(-10 * 60_000);
+  assert.deepEqual(await run(), []);
+  await putBack();
+  assert.deepEqual(kinds(await run()), ['stale']);
+  vault.tick(10 * 60_000);
   assert.deepEqual([(await logged()).length, await waiting()], [2, 0]);
   // A twin beside an entry not yet signed: one is taken.
   await wait(reading('a'));
