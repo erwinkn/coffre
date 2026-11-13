@@ -288,6 +288,22 @@ test('a database whose log was emptied behind its signer is not adopted again, a
   assert.equal(await adopting(), true);
   await emptied();
   await assert.rejects(adopting(), /someone emptied it/);
+
+  // Emptied before the signature, and the signer's run has reported the entry missing since: told of it, all the same.
+  await emptyDatabase(vault.owner);
+  store = memoryStore();
+  await upgraded();
+  const told = await signer();
+  assert.equal(await adopting(told), true);
+  await emptied();
+  await vault.owner.execute(sql`DELETE FROM roles; DELETE FROM policy`);
+  await vault.owner.insert(principals).values(principal(mallory, { role: 'owner' }));
+  await vault.owner.insert(credentials).values(credential('mallory', mallory));
+  assert.deepEqual((await signed(told)).map((each) => each.found), ['missing']);
+  await assert.rejects(adopting(told), /someone emptied it/);
+  await assert.rejects(adopting(), /someone emptied it/);
+  assert.equal(await count('principals', sql`id = ${mallory} AND octet_length(mac) = 0`), 1);
+  assert.equal(await adopted(vault.db), false);
 });
 
 test('an entry that waited before the adoption is refused, and the adoption follows', async () => {

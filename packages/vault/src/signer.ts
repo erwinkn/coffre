@@ -153,6 +153,8 @@ export class Signer {
   readonly #mirror = new Map<string, string>();
   /** The entries the vault told of, not yet signed, by hash. */
   readonly #expected = new Set<string>();
+  /** Whether the vault ever told it of one: kept once an entry it was told of is signed, or goes missing. */
+  #told = false;
   /** The entries signed that it would still take, by hash, with their dates. */
   readonly #signed = new Map<string, number>();
   /** When it last read everything that waited. */
@@ -199,6 +201,7 @@ export class Signer {
       const [kind, name] = space < 0 ? [key, ''] : [key.slice(0, space), key.slice(space + 1)];
       if (kind === 'row') signer.#mirror.set(name, value as string);
       else if (kind === 'expected') signer.#expected.add(name);
+      else if (kind === 'told') signer.#told = true;
       else if (kind === 'signed') signer.#signed.set(name, value as number);
       else if (kind === 'moving') signer.#moving = value as Move;
       else if (kind === 'found') signer.#found = value as Finding[];
@@ -241,7 +244,7 @@ export class Signer {
    */
   get blank(): boolean {
     this.#alive();
-    return this.#trees.kept.size + this.#trees.aging.size === 0 && this.#moving === null && this.#expected.size === 0;
+    return this.#trees.kept.size + this.#trees.aging.size === 0 && this.#moving === null && !this.#told;
   }
 
   /** The rows and the trees the last check found wrong. */
@@ -274,6 +277,9 @@ export class Signer {
       if (this.#signed.has(hex) || this.#expected.has(hex)) return;
       this.#expected.add(hex);
       changes.set(`expected ${hex}`, true);
+      if (this.#told) return;
+      this.#told = true;
+      changes.set('told', true);
     });
   }
 
