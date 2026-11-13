@@ -188,7 +188,6 @@ test("a 0.15 instance backed up and restored comes back on 0.15: cut over, its t
       { database: restoredVault.db, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], hotDatabase: urlOf(restored, 'coffre_vault_hot:local-hot-only') },
       { sealThrough: fresh.sealThrough, heldOutside: fresh.heldOutside },
     ));
-    assert.deepEqual(await again.cutover!(), { ok: true, done: true });
     const trees = await again.verifyTrees!();
     assert.ok(trees.kept && trees.ok && trees.checkpoint !== null, JSON.stringify(trees));
     // The token serves the value it served at the backup, and the log replays to every use it decided.

@@ -14,7 +14,6 @@ import { postgresSession } from '@coffre/db/connect';
 import { and, asc, count, desc, eq } from 'drizzle-orm';
 
 import { loggedChange, type ChangeKeys } from '../src/changes.ts';
-import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { objectKey, sealKey, sealOf } from '../src/inputs.ts';
 import { authentic, changeEntry, entryMac, logMacKey } from '../src/log-entry.ts';
@@ -115,7 +114,7 @@ async function written() {
 /** The log replayed: each entry's MAC the vault's, and the credential's row the replay's object, under its newest change's seal. */
 async function holdsReplay(keys: ChangeKeys, id: string): Promise<void> {
   const holds = authentic(keys.mac);
-  const changes = (await db.owner.select().from(logChanges).orderBy(asc(logChanges.number))).filter((raw) => raw.object !== CUTOVER_OBJECT).map((raw) => {
+  const changes = (await db.owner.select().from(logChanges).orderBy(asc(logChanges.number))).map((raw) => {
     const row = { ...raw, number: BigInt(raw.number), seal: raw.seal ?? null };
     assert.ok(holds(changeEntry(row)), `entry ${row.number}'s MAC is the vault's`);
     return loggedChange(row)!;

@@ -1,6 +1,6 @@
 import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { StoredEntry } from '@coffre/core/audit';
-import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type CredentialColumns, type EnvironmentColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, type CredentialColumns, type EnvironmentColumns, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { later, laterRows, prepared, type Queryable, type Transaction } from '@coffre/db';
 import { clockMillis, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
@@ -8,7 +8,7 @@ import { accessAllowed, authoredBy, changesOf, entriesOf, entryColumns, firstEnt
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref, type RoleInput } from './inputs.ts';
-import { changeHolds, CUTOVER_OBJECT, type ChangeRow, type LogMacKey } from './log-entry.ts';
+import { changeHolds, type ChangeRow, type LogMacKey } from './log-entry.ts';
 import type { StoredRole } from './role-rows.ts';
 import { configObject, environmentObject, memberStanding, policyObject, principalObject, secretObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
@@ -277,9 +277,12 @@ export type EnvironmentRow = {
   parentId: string | null;
   deleted: boolean;
   archived: boolean;
-  /** Read when asked (`seals`): what 0.15's log holds the row to. */
+  /** What 0.15's log holds the row to: on every row read from the database (`ReadEnvironment`); none on one built from the log's own objects. */
   sealed?: EnvironmentSeal;
 };
+
+/** An environment's row as read from the database, with what 0.15's log holds it to, which the vault checks before it decides on it. */
+export type ReadEnvironment = EnvironmentRow & { sealed: EnvironmentSeal };
 
 /**
  * What 0.15's log holds an environment's row to (T159): the row's object
@@ -294,19 +297,11 @@ export type EnvironmentSeal = { object: EnvironmentInput; seal: Buffer | null; n
  * Each of these environments that exists, by id, with its project, its
  * slug, what grants on one slug in every project match, and whether it was
  * deleted, alone or with its project: then no key under it opens, or is
- * wrapped, whatever grant would cover it; `all`, every one. With `seals`,
- * what 0.15's log holds each to as well, in the same statement.
+ * wrapped, whatever grant would cover it; `all`, every one. And what 0.15's
+ * log holds each to, in the same statement.
  */
-export async function environmentsById(
-  db: Queryable,
-  ids: readonly string[] | 'all',
-  { seals = false }: { seals?: boolean } = {},
-): Promise<Map<string, EnvironmentRow>> {
+export async function environmentsById(db: Queryable, ids: readonly string[] | 'all'): Promise<Map<string, ReadEnvironment>> {
   if (ids !== 'all' && ids.length === 0) return new Map();
-  return environmentRows(db, ids, seals);
-}
-
-async function environmentRows(db: Queryable, ids: readonly string[] | 'all', seals: boolean): Promise<Map<string, EnvironmentRow>> {
   const columns = {
     id: environments.id,
     projectId: environments.projectId,
@@ -317,8 +312,6 @@ async function environmentRows(db: Queryable, ids: readonly string[] | 'all', se
     deleted: truth(or(tombstone(environments.slug), tombstone(projects.slug))!),
     // Only what names a fork asks it: nothing is decided on it.
     archived: truth(or(isNotNull(environments.archivedAt), isNotNull(projects.archivedAt))!),
-  };
-  const sealColumns = {
     protected: environments.protected,
     ownArchived: truth(isNotNull(environments.archivedAt)),
     projectArchived: truth(isNotNull(projects.archivedAt)),
@@ -327,23 +320,21 @@ async function environmentRows(db: Queryable, ids: readonly string[] | 'all', se
     newest: sql<NewestColumns | string | null>`${newestChangeJson(sql`log_object('environment', ${environments.id}::text)`)}`,
   };
   const rows = (await db
-    .select(seals ? { ...columns, ...sealColumns } : columns)
+    .select(columns)
     .from(environments)
     .innerJoin(projects, eq(projects.id, environments.projectId))
-    .where(ids === 'all' ? undefined : inArray(environments.id, [...new Set(ids)]))) as (Omit<EnvironmentRow, 'sealed'> & { id: string } & Partial<SealedColumns>)[];
+    .where(ids === 'all' ? undefined : inArray(environments.id, [...new Set(ids)]))) as (Omit<EnvironmentRow, 'sealed'> & { id: string } & SealedColumns)[];
   // An id asked with no row, which the log holds a change of: deleted outright around it (review r5). A statement more,
   // only when a row is missing.
-  const rowless = seals && ids !== 'all' ? [...new Set(ids)].filter((id) => !rows.some((row) => row.id === id)) : [];
+  const rowless = ids !== 'all' ? [...new Set(ids)].filter((id) => !rows.some((row) => row.id === id)) : [];
   const gone = await loggedEnvironments(db, rowless);
-  return new Map<string, EnvironmentRow>([...[...gone].map(([id, last]) => [id, goneEnvironment(id, last)] as const), ...rows.map(({ id, protected: guarded, ownArchived, projectArchived, seal, newest: last, ...environment }) => [id, {
+  return new Map<string, ReadEnvironment>([...[...gone].map(([id, last]) => [id, goneEnvironment(id, last)] as const), ...rows.map(({ id, protected: guarded, ownArchived, projectArchived, seal, newest: last, ...environment }) => [id, {
     ...environment,
-    ...(seals ? {
-      sealed: environmentSeal(
-        { id, projectId: environment.projectId, slug: environment.slug, owner: environment.owner, parentId: environment.parentId, protected: guarded ?? null, archived: Boolean(ownArchived), projectArchived: Boolean(projectArchived) },
-        seal ?? null,
-        last ?? null,
-      ),
-    } : {}),
+    sealed: environmentSeal(
+      { id, projectId: environment.projectId, slug: environment.slug, owner: environment.owner, parentId: environment.parentId, protected: guarded ?? null, archived: Boolean(ownArchived), projectArchived: Boolean(projectArchived) },
+      seal,
+      last,
+    ),
   }] as const)]);
 }
 
@@ -352,7 +343,7 @@ async function environmentRows(db: Queryable, ids: readonly string[] | 'all', se
  * as a row whose seal is none, which no check passes (`#placeFault`), so that every decision on it fails closed as on
  * any other row the log does not hold, a protection on it kept (review r5). Its other columns name nothing.
  */
-export function goneEnvironment(id: string, newest: Buffer | null): EnvironmentRow {
+export function goneEnvironment(id: string, newest: Buffer | null): ReadEnvironment {
   const columns = { id, projectId: '', slug: '', owner: null, parentId: null, protected: null, archived: false, projectArchived: false };
   return { projectId: '', slug: '', owner: null, parentId: null, deleted: false, archived: false, sealed: { object: environmentObject(columns), seal: null, newest, change: null } };
 }
@@ -371,7 +362,7 @@ async function loggedEnvironments(db: Queryable, ids: readonly string[]): Promis
   return new Map(rows.map((row) => [row.id, bytes(row.seal)]));
 }
 
-/** The columns `environmentsById` reads with `seals`, as the drivers answer them. */
+/** The columns `environmentsById` reads of what the log holds a row to, as the drivers answer them. */
 type SealedColumns = { protected: boolean | null; ownArchived: boolean; projectArchived: boolean; seal: Buffer | Uint8Array | null; newest: NewestColumns | string | null };
 
 /** An environment's row as 0.15's log holds it to (`EnvironmentSeal`), from its columns, its seal and its newest change as read. */
@@ -534,13 +525,12 @@ export async function places(
   db: Queryable,
   projectIds: readonly string[],
   environmentIds: readonly string[],
-  { seals = false }: { seals?: boolean } = {},
-): Promise<{ projects: Set<string>; environments: Map<string, EnvironmentRow>; deleted: Set<string> }> {
+): Promise<{ projects: Set<string>; environments: Map<string, ReadEnvironment>; deleted: Set<string> }> {
   const [foundProjects, foundEnvironments] = await Promise.all([
     projectIds.length === 0
       ? []
       : db.select({ id: projects.id, deleted: truth(tombstone(projects.slug)) }).from(projects).where(inArray(projects.id, [...projectIds])),
-    environmentsById(db, environmentIds, { seals }),
+    environmentsById(db, environmentIds),
   ]);
   return {
     projects: new Set(foundProjects.map((row) => row.id)),
@@ -801,17 +791,6 @@ export async function talliedAfter(db: Queryable, after: bigint, limit: number):
     .orderBy(asc(auditLog.seq))
     .limit(limit);
   return rows.map(({ seq, signs }) => ({ seq, signs: signs! }));
-}
-
-/** The vault's newest allowed access entry about each member who has one. */
-export async function newestAccessEntries(db: Queryable): Promise<Map<string, StoredEntry>> {
-  const newest = db
-    .select({ seq: sql`max(${auditLog.seq})` })
-    .from(auditLog)
-    .where(accessAllowed())
-    .groupBy(auditLog.subjectPrincipal);
-  const rows = stored(await db.select(entryColumns()).from(auditLog).where(inArray(auditLog.seq, newest)));
-  return new Map(rows.flatMap((row) => (row.subjectPrincipal === null ? [] : [[row.subjectPrincipal, row]])));
 }
 
 /** Up to `limit` of the vault's checks of a KEK, oldest first: steps of `audit_log_key_check_idx` (`KINDS`; T245, R48). */
@@ -1370,170 +1349,6 @@ export async function issuingCredential(db: Queryable, id: string, macs: readonl
       holds: changeHolds(macs, { at: Number(row.at), requestId: row.request_id!, object, actor: row.actor!, payload: row.payload!, seal, mac: Buffer.from(row.mac!) }),
     },
   };
-}
-
-// --- the cutover (cutover.ts) ------------------------------------------------
-
-/** Whether the log is cut over from 0.14: its cutover change, one probe of `log_changes_object_idx`, no lock. */
-export async function cutOver(db: Queryable): Promise<boolean> {
-  return (await cutoverNumber(db)) !== null;
-}
-
-/** The cutover change's number, null for none: one probe of `log_changes_object_idx`, no lock. */
-export async function cutoverNumber(db: Queryable): Promise<bigint | null> {
-  const [row] = await rowsOf<{ number: string | number }>(db, sql`SELECT number FROM log_changes WHERE object = ${CUTOVER_OBJECT} LIMIT 1`);
-  return row === undefined ? null : BigInt(row.number);
-}
-
-/** Every object the log has a change of, by its key: before the cutover, the few 0.15's changes made already. */
-export async function loggedObjects(db: Queryable): Promise<Set<string>> {
-  const rows = await rowsOf<{ object: string }>(db, sql`SELECT DISTINCT object FROM log_changes`);
-  return new Set(rows.map((row) => row.object));
-}
-
-/** The configuration objects' rows there are, by kind: only `change_input` writes one, sealed (the roles' in `log_config`, the policy's in `policy`). */
-export async function configRows(db: Queryable): Promise<Set<string>> {
-  const rows = await rowsOf<{ name: string }>(db, sql`SELECT name FROM log_config WHERE name = 'roles' UNION ALL SELECT 'policy' FROM policy`);
-  return new Set(rows.map((row) => row.name));
-}
-
-/** A member's row's seal, by principal. */
-export async function memberSeals(db: Queryable): Promise<Map<string, Buffer | null>> {
-  const rows = await rowsOf<{ principal: string; seal: Buffer | Uint8Array | null }>(db, sql`SELECT principal, seal FROM principals`);
-  return new Map(rows.map((row) => [row.principal, bytes(row.seal)]));
-}
-
-export type ProjectRow = { id: string; slug: string; archived: boolean };
-export type EnvironmentRead = { id: string; projectId: string; slug: string; owner: string | null; parentId: string | null; archived: boolean; seal: Buffer | null };
-/** A key's rows, archived or not: its current version, and its newest reference row, ended or not. */
-export type SecretRead = {
-  id: string;
-  projectId: string;
-  environmentId: string;
-  archived: boolean;
-  seal: Buffer | null;
-  /**
-   * Whether its current version is one of its own and its newest by the
-   * versions' own order, as 0.14 holds a source's (`versions`, which joins a
-   * version to its key): the app may write `current_version_id`, never a
-   * version. False for a pointer to another key's version, or to none.
-   */
-  newest: boolean;
-  version: { id: string; sensitive: boolean; plaintext: string | null; kekProvider: string; kekId: string; kekVersion: string; wrappedDek: string } | null;
-  /** Its newest reference row: its id, its source, the `reference.create` it names, and whether its row says it ended. */
-  reference: { id: string; source: string; createdSeq: bigint; ended: boolean } | null;
-};
-
-export async function everyProject(db: Queryable): Promise<ProjectRow[]> {
-  const rows = await rowsOf<{ id: string; slug: string; archived: boolean }>(db, sql`SELECT id, slug, archived_at IS NOT NULL AS archived FROM projects`);
-  return rows.map((row) => ({ id: row.id, slug: row.slug, archived: row.archived }));
-}
-
-export async function everyEnvironment(db: Queryable): Promise<EnvironmentRead[]> {
-  const rows = await rowsOf<{ id: string; project_id: string; slug: string; owner: string | null; parent_id: string | null; archived: boolean; seal: Buffer | Uint8Array | null }>(
-    db, sql`SELECT id, project_id, slug, owner, parent_id, archived_at IS NOT NULL AS archived, seal FROM environments`,
-  );
-  return rows.map((row) => ({ id: row.id, projectId: row.project_id, slug: row.slug, owner: row.owner, parentId: row.parent_id, archived: row.archived, seal: bytes(row.seal) }));
-}
-
-/** Every key, archived or not, as `readObject` makes one (store.ts), with its newest reference row whole. */
-export async function everySecret(db: Queryable): Promise<SecretRead[]> {
-  const reference = (column: string) => ofNewestReference(sql`s.id`, sql.raw(`y.${column}`));
-  const rows = await rowsOf<{
-    id: string; project_id: string; environment_id: string; archived: boolean; seal: Buffer | Uint8Array | null; version_id: string | null;
-    sensitive: boolean | null; plaintext: string | null; kek_provider: string | null; kek_id: string | null; kek_version: string | null; wrapped_dek: Buffer | Uint8Array | null;
-    reference_id: string | null; reference_source: string | null; reference_seq: string | number | null; reference_ended: boolean | null;
-    newest: boolean | null;
-  }>(db, sql`SELECT s.id, s.project_id, s.environment_id, s.archived_at IS NOT NULL AS archived, s.seal, s.current_version_id AS version_id,
-      s.current_version_id IS NULL OR (v.secret_id = s.id AND v.version = (SELECT max(w.version) FROM secret_versions w WHERE w.secret_id = s.id)) AS newest,
-      v.sensitive, v.plaintext, v.kek_provider, v.kek_id, v.kek_version, v.wrapped_dek,
-      ${reference('id')} AS reference_id, ${reference('source_secret_id')} AS reference_source, ${reference('created_seq')} AS reference_seq,
-      ${reference('ended_at')} IS NOT NULL AS reference_ended
-    FROM secrets s LEFT JOIN secret_versions v ON v.id = s.current_version_id`);
-  return rows.map((row) => ({
-    id: row.id,
-    projectId: row.project_id,
-    environmentId: row.environment_id,
-    archived: row.archived,
-    seal: bytes(row.seal),
-    newest: row.newest === true,
-    // As `readObject` takes a version: none without a wrapped key.
-    version: row.version_id === null || row.wrapped_dek === null ? null : {
-      id: row.version_id, sensitive: Boolean(row.sensitive), plaintext: row.plaintext,
-      kekProvider: row.kek_provider!, kekId: row.kek_id!, kekVersion: row.kek_version!, wrappedDek: Buffer.from(row.wrapped_dek).toString('base64'),
-    },
-    reference: row.reference_id === null ? null : {
-      id: row.reference_id, source: row.reference_source!, createdSeq: BigInt(row.reference_seq!), ended: Boolean(row.reference_ended),
-    },
-  }));
-}
-
-/** A credential the app vouched for, as its row is now (`cutover_credentials`): its object's columns, its seal, and whether the log has a change of it. */
-export type CredentialRead = { columns: CredentialColumns; seal: Buffer | null; logged: boolean };
-/** A binding the app vouched for, as its row is now: its columns but the instance it was made on, its row's `origin` apart (null on one of 0.14's, which the cutover writes), its seal. */
-export type BindingRead = { columns: Omit<BindingColumns, 'origin'>; origin: string | null; seal: Buffer | null; logged: boolean };
-
-export async function credentialsAt(db: Queryable, ids: readonly string[]): Promise<Map<string, CredentialRead>> {
-  if (ids.length === 0) return new Map();
-  type Read = { id: string; principal: string; kind: string; scope: string | null; revoked: boolean; expires_at: string | number; not_after: string | number | null; generation: number; seal: Buffer | Uint8Array | null; logged: boolean };
-  const rows = await rowsOf<Read>(db, sql`SELECT * FROM cutover_credentials(${sql.param([...ids])}::uuid[])`);
-  return new Map(rows.map((row) => {
-    // As `issuingCredential` reads one (store.ts): its end the earlier of its expiry and its hard end.
-    const ends = [Number(row.expires_at), ...(row.not_after == null ? [] : [Number(row.not_after)])];
-    const columns: CredentialColumns = { id: row.id, principal: row.principal, kind: row.kind, scope: row.scope, revoked: row.revoked, expiresAt: Math.min(...ends), generation: Number(row.generation) };
-    return [row.id, { columns, seal: bytes(row.seal), logged: row.logged }];
-  }));
-}
-
-/** An MCP connection the app vouched for, as its row is now (`cutover_connections`, T147): its object's columns, its seal, and whether the log has a change of it. */
-export type ConnectionRead = { columns: ConnectionColumns; seal: Buffer | null; logged: boolean };
-
-export async function connectionsAt(db: Queryable, ids: readonly string[]): Promise<Map<string, ConnectionRead>> {
-  if (ids.length === 0) return new Map();
-  type Read = { id: string; principal: string; generation: number; expires_at: string | number; revoked: boolean; seal: Buffer | Uint8Array | null; logged: boolean };
-  const rows = await rowsOf<Read>(db, sql`SELECT * FROM cutover_connections(${sql.param([...ids])}::uuid[])`);
-  return new Map(rows.map((row) => {
-    const columns: ConnectionColumns = { id: row.id, principal: row.principal, generation: Number(row.generation), expiresAt: Number(row.expires_at), revoked: row.revoked };
-    return [row.id, { columns, seal: bytes(row.seal), logged: row.logged }];
-  }));
-}
-
-export async function bindingsAt(db: Queryable, ids: readonly string[]): Promise<Map<string, BindingRead>> {
-  if (ids.length === 0) return new Map();
-  type Read = { id: string; principal: string; generation: number; profile: string; issuer: string; origin: string | null; jwks_uri: string; claims: string; scope: string | null; policy: string | null; revoked: boolean; seal: Buffer | Uint8Array | null; logged: boolean };
-  const rows = await rowsOf<Read>(db, sql`SELECT * FROM cutover_bindings(${sql.param([...ids])}::uuid[])`);
-  return new Map(rows.map((row) => {
-    const columns: Omit<BindingColumns, 'origin'> = {
-      id: row.id, principal: row.principal, generation: Number(row.generation), profile: row.profile, issuer: row.issuer, jwksUri: row.jwks_uri,
-      claims: row.claims, scope: row.scope, policy: row.policy, revoked: row.revoked,
-    };
-    return [row.id, { columns, origin: row.origin, seal: bytes(row.seal), logged: row.logged }];
-  }));
-}
-
-/** Whether the app wrote any entry of 0.14's after `seq`: what it vouched for may have moved since. */
-export async function appEntriesAfter(db: Queryable, seq: bigint): Promise<boolean> {
-  const rows = await rowsOf<{ found: number }>(db, sql`SELECT 1 AS found FROM audit_log WHERE seq > ${seq} AND author = 'app' LIMIT 1`);
-  return rows.length > 0;
-}
-
-/** The places 0.14 deleted made as 0.15 leaves them: each environment given `<slug>~deleted`, each key archived (`cutover_places`). */
-export async function cutoverPlaces(tx: Transaction, at: number, environments: readonly string[], secrets: readonly string[]): Promise<void> {
-  if (environments.length === 0 && secrets.length === 0) return;
-  await rowsOf(tx, sql`SELECT cutover_places(${at}::bigint, ${sql.param([...environments])}::uuid[], ${sql.param([...secrets])}::uuid[])`);
-}
-
-/** A binding's genesis (`seal_binding`): its number, or null if its row is not as its object says, or the log holds it. */
-export async function sealBinding(tx: Transaction, call: ChangeCall): Promise<bigint | null> {
-  const [row] = await rowsOf<{ n: string | number | null }>(tx, sql`SELECT seal_binding(${call.ref.id}::uuid, ${call.requestId}, ${call.at}::bigint, ${call.actor}, ${call.payload},
-    ${call.seal}::bytea, ${call.mac}::bytea) AS n`);
-  return row?.n == null ? null : BigInt(row.n);
-}
-
-/** The cutover's change (`log_cutover`): its number. */
-export async function logCutover(tx: Transaction, row: { requestId: string; at: number; actor: string; payload: string; mac: Buffer }): Promise<bigint> {
-  const [found] = await rowsOf<{ n: string | number }>(tx, sql`SELECT log_cutover(${row.requestId}, ${row.at}::bigint, ${row.actor}, ${row.payload}, ${row.mac}::bytea) AS n`);
-  return BigInt(found!.n);
 }
 
 function bytes(value: Buffer | Uint8Array | null): Buffer | null {

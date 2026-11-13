@@ -405,6 +405,14 @@ async function applied(url: string): Promise<number> {
   }
 }
 
+/** The change 0.15.0's vault writes in its log at its first start (0041's `log_cutover`), without which 0.15.0's database is refused. */
+async function cutOver(name: string): Promise<void> {
+  await asSuperuser(name, (client) => client.unsafe(
+    `INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+      VALUES (1, 0, 'cutover', log_object('log', 'cutover'), 'system:vault', '{"op":"cutover"}', NULL, '\\x${'00'.repeat(16)}')`,
+  ));
+}
+
 /** What a coffre's own migrator records, written straight into the ledger. */
 async function record(url: string, hash: string, createdAt: number): Promise<void> {
   const client = postgresClient(url, { max: 1 });
@@ -480,6 +488,34 @@ test('a database a coffre before 0.4.0 made is refused, with what to do instead,
   assert.equal(run.code, 1);
   assert.match(run.output, /the database was made by a coffre before 0\.4\.0, which is a clean break: deploy afresh, on a new database \(docs\/deploy\.md\)/);
   assert.equal(await applied(url), 1);
+});
+
+test('a database a release before 0.15.0 made, or a 0.15.0 whose vault has not cut its log over, is refused, and nothing changes', needsCluster, async () => {
+  const url = await fresh('setup_migrate_uncut');
+  const dir = deploymentFolder(pinnedAt(cliVersion()));
+  // One short of 0.15.0's last migration: a database a release before 0.15.0 left.
+  const before = KNOWN[KNOWN.indexOf('0049_reads') - 1]!;
+  await migrateThrough(url, before);
+  const old = await migrateIn(dir, url);
+  assert.equal(old.code, 1);
+  assert.match(old.output, /the database was made by a coffre before 0\.15\.0, which this version does not upgrade from: upgrade it to 0\.15\.0 and start it once/);
+  assert.equal(await applied(url), KNOWN.indexOf(before) + 1);
+  // 0.15.0's schema, its vault never started: no cutover change in its log.
+  await migrateThrough(url, '0049_reads');
+  const uncut = await migrateIn(dir, url);
+  assert.equal(uncut.code, 1);
+  assert.match(uncut.output, /the database's audit log is not moved to 0\.15's yet, which 0\.15\.0's vault does at its first start: start 0\.15\.0 once/);
+  await assert.rejects(migrateDatabase(url), /the database's audit log is not moved to 0\.15's yet/);
+  assert.equal(await applied(url), KNOWN.indexOf('0049_reads') + 1);
+});
+
+test("a 0.15.0 database whose vault cut its log over migrates to this version", needsCluster, async () => {
+  const url = await fresh('setup_migrate_cut');
+  await migrateThrough(url, '0049_reads');
+  await cutOver('setup_migrate_cut');
+  const run = await migrateIn(deploymentFolder(pinnedAt(cliVersion())), url);
+  assert.equal(run.code, 0, run.output);
+  assert.equal(await applied(url), KNOWN.length);
 });
 
 test("a database that applied 0022's text from before 0.16.0, which gave the hot login generic plans, migrates on; any other text there is refused", needsCluster, async () => {
@@ -626,7 +662,8 @@ async function migrateThrough(url: string, last: string): Promise<void> {
     await client.begin(async (tx) => {
       await tx.unsafe('CREATE SCHEMA IF NOT EXISTS drizzle');
       await tx.unsafe('CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at bigint)');
-      for (const { tag, when } of journal.entries.slice(0, KNOWN.indexOf(last) + 1)) {
+      const [{ n }] = await tx.unsafe<[{ n: string }]>('SELECT count(*) AS n FROM drizzle.__drizzle_migrations');
+      for (const { tag, when } of journal.entries.slice(Number(n), KNOWN.indexOf(last) + 1)) {
         const text = readFileSync(join(migrationsFolder(), `${tag}.sql`), 'utf8');
         for (const statement of text.split('--> statement-breakpoint')) await tx.unsafe(statement);
         await tx.unsafe('INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ($1, $2)', [createHash('sha256').update(text).digest('hex'), when]);
@@ -708,9 +745,9 @@ test("a member of the owner hands it, before the migrations commit, what it made
   await migrateDatabase(deployer.href);
 });
 
-test("a superuser migrates with its own attributes, 0019's and 0022's roles included, and hands the owner what a member made, which the owner itself is told to have handed", needsCluster, async () => {
+test("a superuser migrates with its own attributes, and hands the owner what a member made, which the owner itself is told to have handed", needsCluster, async () => {
   await emptyCluster();
-  // A release before 0019, whose owner then lost CREATEROLE: 0019 and 0022 make roles, which only the superuser may.
+  // 0.15.0, cut over, whose owner then lost CREATEROLE: the superuser migrates.
   const owned = await database('setup_migrate_superuser', 'owner');
   const owner = postgresClient(owned, { max: 1 });
   try {
@@ -719,7 +756,8 @@ test("a superuser migrates with its own attributes, 0019's and 0022's roles incl
   } finally {
     await owner.end();
   }
-  await migrateThrough(owned, '0018_rotate_app_key');
+  await migrateThrough(owned, '0049_reads');
+  await cutOver('setup_migrate_superuser');
   await asSuperuser('postgres', (client) => client.unsafe("CREATE ROLE setup_deployer LOGIN PASSWORD 'deployer-only-p4ss' IN ROLE setup_owner"));
   await asSuperuser('setup_migrate_superuser', (client) => client.unsafe('ALTER TABLE vault_members OWNER TO setup_deployer'));
 
@@ -735,17 +773,13 @@ test("a superuser migrates with its own attributes, 0019's and 0022's roles incl
     "coffre's tables are owned by setup_deployer, and this login, setup_owner, is neither it nor a member of it: " +
       "migrate once with setup_deployer's connection string, or a superuser's, which hands its objects to the owner of coffre's ledger",
   );
-  assert.equal(await applied(owned), KNOWN.indexOf('0018_rotate_app_key') + 1);
+  assert.equal(await applied(owned), KNOWN.indexOf('0049_reads') + 1);
 
   await asSuperuser('postgres', (client) => client.unsafe('ALTER ROLE setup_owner NOCREATEROLE'));
   await migrateDatabase(`${CLUSTER}/setup_migrate_superuser`);
   assert.equal(await applied(owned), KNOWN.length);
   assert.equal(await notTheOwners('setup_migrate_superuser', 'setup_owner'), null, "what the superuser made and the member's table are the owner's");
-  await asSuperuser('postgres', async (client) => {
-    const roles = await client.unsafe<{ rolname: string }[]>("SELECT rolname FROM pg_roles WHERE rolname IN ('coffre_backup', 'coffre_vault_hot') ORDER BY rolname");
-    assert.deepEqual(roles.map(({ rolname }) => rolname), ['coffre_backup', 'coffre_vault_hot']);
-    await client.unsafe('ALTER ROLE setup_owner CREATEROLE');
-  });
+  await asSuperuser('postgres', (client) => client.unsafe('ALTER ROLE setup_owner CREATEROLE'));
   // The owner, and its member, migrate on.
   await migrateDatabase(owned);
   const deployer = new URL(owned);

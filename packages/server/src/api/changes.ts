@@ -25,8 +25,8 @@ import { ApiError, vaultRefused } from './errors.ts';
  * 2. **In it** (`audited`), once the rows are written: `app_change`, in
  *    the statement that appends 0.14's entries (no round trip of its own),
  *    under the head the transaction holds, then the issue lock and, but for
- *    an issue, the fence: head, row, issue lock, fence (Migration015.tla's
- *    AppHeadFirst, IssueBeforeFence). A row whose seal moved since it was
+ *    an issue, the fence: head, row, issue lock, fence (AppHeadFirst;
+ *    WriteLocks.tla's IssueBeforeFence). A row whose seal moved since it was
  *    read refuses (`ObjectMoved`): the write is read and prepared again
  *    (`retrying`).
  * 3. **After its commit:** the vault answers once the newest is sealed.
@@ -42,7 +42,7 @@ type Kept = { log: boolean; uses: boolean; batches: boolean; namedBatches: boole
 
 /**
  * What the vault keeps of 0.15, as it says (`about()`): asked once per vault (asked-once.ts), then kept, settled. An
- * isolate's first call settles the vault's keys, its cutover and its bulk cap (vault.ts, `#settled`): its concurrent
+ * isolate's first call settles the vault's keys and its bulk cap (vault.ts, `#settled`): its concurrent
  * first requests wait for that one call's answer rather than each settling the vault again (T201).
  */
 const keeping = new WeakMap<Vault, AskedOnce<Kept>>();

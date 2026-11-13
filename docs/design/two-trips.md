@@ -763,7 +763,7 @@ then contract). Each direction:
   while it rolls out (each app with a vault of its own release: the app
   answers 503 `deploying` to another's, below) and after a rollback: they
   serve the members they knew, and refuse, failing closed, a member 0.16.0
-  added. That is the price (docs/deploy.md, "From 0.14.5 to 0.16"); and why
+  added. That is the price (docs/deploy.md, "From 0.14 to 0.16"); and why
   0.16.0's changes still take 0.14's head ("A session's revoke takes 0.14's
   head too"). That move comes before `write_request` too (PR 2, below): the
   0.14 check is a walk back through the member's access entries, by MAC

@@ -7,7 +7,7 @@ import type { GrantRow } from '@coffre/db/grants';
 import { snapshotQuery } from './snapshot.postgres.ts';
 import { exactly } from './exact.ts';
 import * as store from './store.ts';
-import type { EnvironmentRow, Member, MemberLog, NewestColumns } from './store.ts';
+import type { Member, MemberLog, NewestColumns, ReadEnvironment } from './store.ts';
 
 /**
  * What a decision reads, or `access`, in one statement: one round trip, and
@@ -37,7 +37,7 @@ export type Snapshot = {
   grants: Map<string, GrantRow[]>;
   /** The newest allowed access entry in the vault's name about each asked principal, unchecked. */
   newestAccess: Map<string, StoredEntry>;
-  /** With `asked.seals`, each asked principal's row as 0.15's log holds it to (`MemberLog`); otherwise empty. */
+  /** Each asked principal's row as 0.15's log holds it to (`MemberLog`). */
   memberLogs: Map<string, MemberLog>;
   /** The newest allowed `policy.change` in the vault's name, unchecked. */
   newestPolicy: StoredEntry | null;
@@ -45,11 +45,11 @@ export type Snapshot = {
   newestSettings: StoredEntry | null | undefined;
   /**
    * The asked environments, the environments each personal config among
-   * them is a config of, and those the newest `policy.change` names, by id;
-   * with `asked.seals`, those the asked principals' grants are on too, each
-   * with what 0.15's log holds it to (`EnvironmentRow.sealed`).
+   * them is a config of, those the newest `policy.change` names and those
+   * the asked principals' grants are on, by id, each with what 0.15's log
+   * holds it to (`ReadEnvironment`).
    */
-  environments: Map<string, EnvironmentRow>;
+  environments: Map<string, ReadEnvironment>;
   /** Of the asked `reference.create` entries, those a `reference.end` of the vault's names, allowed. */
   ended: Set<bigint>;
   /**
@@ -81,12 +81,6 @@ export type Asked = {
   /** The newest `settings.change` too (`newestSettings`). */
   settings?: boolean;
   environments?: readonly string[];
-  /**
-   * Each environment read with what 0.15's log holds it to, and the asked
-   * principals' grants' too, whose projects their grants are read with
-   * (T159): asked once 0.15's log is cut over, before which no row is sealed.
-   */
-  seals?: boolean;
   references?: readonly bigint[];
   /**
    * One principal's releases within the last `windowMs` of the clock, moved
@@ -139,28 +133,26 @@ async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
 
 /** A snapshot from its statement's row. */
 function snapshotOf(asked: Asked, raw: Raw): Snapshot {
-  const gone = (raw.gone ?? []).map(({ id, newest: last }) => [id, hex(last)] as const);
+  const gone = raw.gone.map(({ id, newest: last }) => [id, hex(last)] as const);
   return {
     at: Number(raw.at),
     members: new Map(raw.members.map((member) => [member.principal, memberOf(member)])),
     grants: new Map(asked.principals.map((principal) => [principal, raw.grants.filter((grant) => grant.principal === principal).map(grantOf)])),
     newestAccess: new Map(raw.access.map((entry) => [entry.subjectPrincipal!, entryOf(entry)])),
-    memberLogs: new Map((raw.memberLogs ?? []).map(({ principal, seal, number, at, requestId, object, actor, payload, newest: last, mac }) => [principal, store.memberLogOf({
+    memberLogs: new Map(raw.memberLogs.map(({ principal, seal, number, at, requestId, object, actor, payload, newest: last, mac }) => [principal, store.memberLogOf({
       seal: hex(seal), number, at, request_id: requestId, object, actor, payload, newest: hex(last), mac: hex(mac),
     })])),
     newestPolicy: raw.policy === null ? null : entryOf(raw.policy),
     newestSettings: asked.settings !== true ? undefined : raw.settings == null ? null : entryOf(raw.settings),
-    environments: new Map<string, EnvironmentRow>([...gone.map(([id, last]) => [id, store.goneEnvironment(id, last)] as const), ...raw.environments.map(({ id, projectId, slug, owner, parentId, deleted, archived, ...sealed }) => [id, {
+    environments: new Map<string, ReadEnvironment>([...gone.map(([id, last]) => [id, store.goneEnvironment(id, last)] as const), ...raw.environments.map(({ id, projectId, slug, owner, parentId, deleted, archived, ...sealed }) => [id, {
       projectId, slug, owner, parentId,
       deleted,
       archived,
-      ...(asked.seals === true ? {
-        sealed: store.environmentSeal(
-          { id, projectId, slug, owner, parentId, protected: sealed.protected ?? null, archived: Boolean(sealed.ownArchived), projectArchived: Boolean(sealed.projectArchived) },
-          hex(sealed.seal),
-          sealed.newest ?? null,
-        ),
-      } : {}),
+      sealed: store.environmentSeal(
+        { id, projectId, slug, owner, parentId, protected: sealed.protected, archived: sealed.ownArchived, projectArchived: sealed.projectArchived },
+        hex(sealed.seal),
+        sealed.newest,
+      ),
     }] as const)]),
     ended: new Set(raw.ended.map((seq) => BigInt(seq))),
     released: Number(raw.released ?? 0),
@@ -199,21 +191,21 @@ type Raw = {
   settings?: RawEntry | null;
   environments: {
     id: string; projectId: string; slug: string; owner: string | null; parentId: string | null; deleted: boolean; archived: boolean;
-    /** With `asked.seals`: the object's own columns, the row's seal, as hex, and its newest change, whole (`newestChangeJson`). */
-    protected?: boolean | null; ownArchived?: boolean; projectArchived?: boolean; seal?: string | null; newest?: NewestColumns | null;
+    /** What 0.15's log holds the row to: the object's own columns, the row's seal, as hex, and its newest change, whole (`newestChangeJson`). */
+    protected: boolean | null; ownArchived: boolean; projectArchived: boolean; seal: string | null; newest: NewestColumns | null;
   }[];
-  /** With `asked.seals`: each asked principal's row's seal and its newest change (`MemberLog`). */
-  memberLogs?: {
+  /** Each asked principal's row's seal and its newest change (`MemberLog`). */
+  memberLogs: {
     principal: string; seal: string | null; number: string | null; at: string | null; requestId: string | null; object: string | null; actor: string | null;
     payload: string | null; newest: string | null; mac: string | null;
   }[];
-  /** With `asked.seals`: the places asked that the log holds a change of and no row answers to. */
-  gone?: { id: string; newest: string | null }[];
+  /** The places asked that the log holds a change of and no row answers to. */
+  gone: { id: string; newest: string | null }[];
   ended: Int[];
   released: Int | null;
 };
 
-function hex(value: string | null | undefined): Buffer | null {
+function hex(value: string | null): Buffer | null {
   return value == null ? null : Buffer.from(value, 'hex');
 }
 

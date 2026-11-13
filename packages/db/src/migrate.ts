@@ -371,6 +371,8 @@ interface Migrator {
   online(indexes: readonly OnlineIndex[]): Promise<UnbuiltIndex[]>;
   /** Why this login cannot change the objects migrations change, `managed` among them, or hand them to their owner, or null when it can. */
   notOwner(managed: Managed): Promise<NotOwner | null>;
+  /** Whether the database's log holds 0.15's cutover change (`requireCutOver`). */
+  cutOver(): Promise<boolean>;
   close(): Promise<void>;
 }
 
@@ -682,6 +684,38 @@ function verifyHistory(
   }
 }
 
+/** The last migration of 0.15.0, the one release 0.16 upgrades from (D197). */
+const UPGRADES_FROM = '0049_reads';
+
+/**
+ * Refuse a database this version cannot upgrade: it has no code that cuts a
+ * log over from 0.14, which 0.15.0's vault does at its first start. So a
+ * database a release before 0.15.0 made steps through 0.15.0 first, and
+ * 0.15.0's own is migrated only once its log holds the cutover's change. A
+ * new database has nothing to cut over, and one past 0.15.0's migrations was
+ * migrated by this version or a later one (the migrations of a run commit
+ * together).
+ */
+async function requireCutOver(expected: readonly ExpectedMigration[], done: number, migrator: Migrator): Promise<void> {
+  const at = expected.findIndex((entry) => entry.tag === UPGRADES_FROM);
+  // A journal without 0.15.0's last migration would wave every database through: refused instead.
+  if (at < 0) throw new Error(`the migrations have no ${UPGRADES_FROM}, 0.15.0's last: this version cannot tell which databases it upgrades`);
+  const release = at + 1;
+  if (done === 0 || done > release) return;
+  if (done < release) {
+    throw new Error(
+      'the database was made by a coffre before 0.15.0, which this version does not upgrade from: ' +
+        "upgrade it to 0.15.0 and start it once, so that its vault moves the audit log to 0.15's, then to this version (docs/deploy.md)",
+    );
+  }
+  if (!(await migrator.cutOver())) {
+    throw new Error(
+      "the database's audit log is not moved to 0.15's yet, which 0.15.0's vault does at its first start: " +
+        'start 0.15.0 once, then migrate to this version (docs/deploy.md)',
+    );
+  }
+}
+
 async function postgresMigrator(url: string): Promise<Migrator> {
   // One session: the advisory lock and lock_timeout are the session's, and a statement after it is lost fails.
   const client = postgresSession(url, { application_name: 'coffre-migrations' });
@@ -789,6 +823,10 @@ async function postgresMigrator(url: string): Promise<Migrator> {
       const [{ login }] = await client.unsafe<[{ login: string }]>('SELECT current_user AS login');
       return new NotOwner(login, [{ name: ledger.owner, member: ledger.member }], { grantsInherit: ledger.grants_inherit, inherits: ledger.inherits, settable: false });
     },
+    async cutOver() {
+      const [{ cut }] = await client.unsafe<[{ cut: boolean }]>("SELECT EXISTS (SELECT 1 FROM log_changes WHERE object = log_object('log', 'cutover')) AS cut");
+      return cut;
+    },
     async close() {
       await client.end();
     },
@@ -841,6 +879,7 @@ export async function migrationStatus(url: string): Promise<{ applied: string[];
     });
     verifyHistory(expected, history, false);
     const applied = history?.length ?? 0;
+    await requireCutOver(expected, applied, migrator);
     return {
       applied: expected.slice(0, applied).map((entry) => entry.tag),
       pending: expected.slice(applied).map((entry) => entry.tag),
@@ -884,6 +923,7 @@ export async function migrateDatabase(
     const applied = await migrator.applied();
     verifyHistory(expected, applied, false);
     const done = applied?.length ?? 0;
+    await requireCutOver(expected, done, migrator);
     await onPlan?.({ applied: done, total: expected.length, pending: expected.slice(done).map((entry) => entry.tag) });
     await migrator.migrate(expected.slice(done), managed);
     verifyHistory(expected, await migrator.applied(), true);

@@ -91,16 +91,7 @@
 (*                    is the row's alone: a writer clears it, and the      *)
 (*                    unarchive restores the kept object, live; with       *)
 (*                    RestoreFromLog and no tampering, an honest unarchive *)
-(*                    after an end would be refused (HonestUnarchive);     *)
-(*   GenesisKeepsArchived with ArchivedAtCutover, the holder archived      *)
-(*                    before the cutover (0.14's alone, no change of it):  *)
-(*                    the cutover gives it the object its rows make,       *)
-(*                    unarchived, and deletes it again (`genesis`, then    *)
-(*                    `secret.delete`: T144), so its log keeps one for an  *)
-(*                    unarchive to restore. Without, its log never held    *)
-(*                    it: the unarchive logs nothing, and leaves a row no  *)
-(*                    seal covers, refused to every use                    *)
-(*                    (HonestUnarchiveServes).                             *)
+(*                    after an end would be refused (HonestUnarchive).     *)
 (*                                                                         *)
 (* So every input an end decides on is a MAC'd 0.14 entry (the end itself) *)
 (* or an object checked against its seal (R53): no row alone.             *)
@@ -111,9 +102,7 @@ CONSTANTS
     Values,          \* the texts V may hold
     MaxTampers,      \* columns the writer sets
     EndInRow, EndWithEntry, ProjectInObject, ArchivedApart, DigestInSeal, ReferenceInObject, LivenessFromLog,
-    RestoreFromLog, RestorePinned, EndWhileArchived,
-    ArchivedAtCutover,  \* the holder was archived before the cutover: its log starts there
-    GenesisKeepsArchived
+    RestoreFromLog, RestorePinned, EndWhileArchived
 
 VARIABLES
     rows,      \* the columns: H's newest reference row's id (ref: r1 the genuine one) and its end (ended), H's archived_at
@@ -172,15 +161,11 @@ Idle == [on |-> FALSE, object |-> [gone |-> TRUE, src |-> None, ref |-> None], a
 
 Start == [ref |-> "r1", ended |-> FALSE, harch |-> FALSE, env |-> FALSE, project |-> FALSE, text |-> CHOOSE v \in Values : TRUE]
 
-\* With ArchivedAtCutover, the cutover found the holder archived: with GenesisKeepsArchived it sealed the object its rows
-\* make unarchived, then deleted it (no object, no seal), as it found it.
-Begin == IF ArchivedAtCutover THEN [Start EXCEPT !.harch = TRUE] ELSE Start
-
 Init ==
-    /\ rows = Begin
-    /\ truth = Begin
-    /\ seals = Sealed(Begin)
-    /\ kept = IF ArchivedAtCutover /\ ~GenesisKeepsArchived THEN Never ELSE Holder(Start)
+    /\ rows = Start
+    /\ truth = Start
+    /\ seals = Sealed(Start)
+    /\ kept = Holder(Start)
     /\ prepared = Idle
     /\ pending = FALSE
     /\ tampers = 0

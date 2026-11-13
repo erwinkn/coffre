@@ -6,6 +6,20 @@
   run `coffre migrate`, then deploy 0.16: 0.15.0's code cannot run on
   the new schema. To go back, restore the backup taken before the
   upgrade.
+- **0.16 upgrades from 0.15.0, once it has cut over: a deployment on 0.14
+  steps through 0.15.0 first.** 0.15.0's vault moves the audit log to
+  0.15's at its first start (its cutover), and 0.16 has no code that does:
+  the cutover is gone, with its vault and app halves, its seven SQL
+  functions (migration 0085) and its model. Upgrade 0.14.5 to 0.15.0 as
+  its release notes say, let it serve until `/readyz` is green, then
+  upgrade to 0.16 ([deploy.md](docs/deploy.md#from-014-to-016)). `coffre
+  migrate` refuses, before it changes anything, a database a release before
+  0.15.0 made ("the database was made by a coffre before 0.15.0") and a
+  0.15.0 whose vault has not cut over ("the database's audit log is not
+  moved to 0.15's yet"); a new database migrates as before. The vault no
+  longer answers `cutover`, readiness no longer says `cutover: false`, and
+  on a new instance the roles object is made by the first role an Owner
+  edits, as the policy is by its first cap.
 - **The vault's `log: '0.14'` option is gone.** Every vault keeps 0.15's
   log, the default since 0.15.0, and `VaultOptions` no longer takes `log`.
   A Node deployment that passes `log: '0.14'` or `log: '0.15'` to
@@ -706,9 +720,10 @@
      served stale.
   3. **0.18** drops `log_config`.
 
-  The foreign key waits for 0.17 because 0.14.5, which serves on this
-  release's schema on a one-step upgrade ([deploy.md](docs/deploy.md#from-0145-to-016)),
-  grants roles it writes no row of.
+  The foreign key waits for 0.17 because 0.15.0, which serves on this
+  release's schema until the deploy, grants roles it writes no row of.
+  0.14.5 never does: 0.16 upgrades from 0.15.0 alone
+  ([deploy.md](docs/deploy.md#from-014-to-016)).
 
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
@@ -1043,16 +1058,15 @@
   `log_changes`, and statistics on their conditions, serve the pages
   (migration 0065). AGENTS.md's rule ships what stops a write one
   release after the code stops reading it; this release breaks it once,
-  on Erwin's call (D169). The releases before 0.16.0 check a member
-  against their newest 0.14 access entry and refuse one who has none. Example: upgrade
-  0.14.5 to 0.16.0, an Owner adds Ada, roll back to 0.14.5: 0.14.5 finds
-  no `member.add` entry for Ada, reads her row as tampered and refuses
-  her. 0.15.0, upgraded and rolled back to, does the same, and can neither
-  add her again nor remove her (its 0.14 log never admitted her). Going
-  forward to 0.16.0 again serves her as before; restoring the backup taken
-  before the upgrade loses her with everything since. So add no member
-  while you might still roll back (docs/deploy.md, "From 0.14.5 to 0.16",
-  step 6). Keys 0.16.0 wrote still open on a rollback, but its audit page
+  on Erwin's call (D169). 0.15.0 checks a member against their newest
+  0.14 access entry and refuses one who has none. Example: upgrade 0.15.0
+  to 0.16.0, an Owner adds Ada, roll back to 0.15.0: 0.15.0 finds no
+  `member.add` entry for Ada, reads her row as tampered and refuses her,
+  and can neither add her again nor remove her (its 0.14 log never
+  admitted her). Going forward to 0.16.0 again serves her as before;
+  restoring the backup taken before the upgrade loses her with everything
+  since. So add no member while you might still roll back (docs/deploy.md,
+  "From 0.14 to 0.16"). Keys 0.16.0 wrote still open on a rollback, but its audit page
   lists none of those writes and adds.
 
 - **A write names the version it made, and a mark the one it marks (T108).**

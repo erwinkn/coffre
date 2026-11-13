@@ -18,7 +18,6 @@ import { openDatabase } from '@coffre/db/connect';
 
 import { SEAL_WAIT_MS } from '../src/checkpointer.ts';
 import { fileMemory, keepCheckpointer, type KeptCheckpointer } from '../src/checkpointer-node.ts';
-import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { stallProxy } from './stall-proxy.ts';
 import { ask, change, emptyLog, isolate, SIGNING_KEY, useDatabases, world } from './use-world.ts';
@@ -121,8 +120,7 @@ test('T169, Node: statements the checkpointer sends go unanswered: its tick stal
     const outcome = await use(ask(w, id));
     assert.ok(outcome.ok, JSON.stringify(outcome));
     assert.ok(Date.now() - t0 < 1000, `the use took ${Date.now() - t0} ms`);
-    // So does a fresh isolate's first use, its checkpointer never answering: the cutover was sealed long ago, as a pair
-    // the vault's key signed past it says, and it asks no seal.
+    // So does a fresh isolate's first use, its checkpointer never answering: a use asks no seal.
     const fresh = await isolate({ sealThrough: () => new Promise(() => {}), heldOutside: kept.heldOutside });
     t0 = Date.now();
     assert.ok((await fresh.use(ask(w, id))).ok);
@@ -227,33 +225,6 @@ test("T169, review r8 of #437, Node, Postgres: a reads' projection hung in the d
   } finally {
     for (const release of releases) release();
     await Promise.all(holdings.map((h) => h.catch(() => {})));
-    await kept.stop();
-  }
-});
-
-test('T169, review r1, Postgres: a cutover change a writer moved into a gap a signed pair covers is no shortcut: a fresh isolate asks for its seal, which proves it', { timeout: 60_000 }, async () => {
-  const w = await world();
-  const id = await w.key('postgres://prod');
-  const { kept, vault } = await opened(db.vault, join(dir, 'memory-postgres-3'));
-  try {
-    await until(() => kept.sealing().ok, 5000, 'sealing at first');
-    // A number handed out and never used, then a change past it, sealed: a signed pair covers the gap.
-    const [gap] = await rows<{ n: string }>(db.owner, sql`SELECT nextval('log_number')::text AS n`);
-    const number = await commitChange(w);
-    assert.ok((await vault.waitSealed!({ number: String(number) })).ok);
-    // The cutover's change moved into the gap: its MAC holds, the number is not under it, and the pair covers it.
-    await run(db.owner, sql`UPDATE log_changes SET number = ${BigInt(gap!.n)} WHERE object = ${CUTOVER_OBJECT}`);
-    const asked: bigint[] = [];
-    const fresh = await isolate({
-      sealThrough: async (n) => {
-        asked.push(n);
-        throw new Error('refused: the change is not in the signed changes tree');
-      },
-      heldOutside: kept.heldOutside,
-    });
-    await fresh.use(ask(w, id)).catch(() => null);
-    assert.deepEqual(asked, [BigInt(gap!.n)], 'the shortcut proved nothing, so the seal was asked');
-  } finally {
     await kept.stop();
   }
 });

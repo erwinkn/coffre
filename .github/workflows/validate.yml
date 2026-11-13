@@ -297,7 +297,7 @@ jobs:
         # was, which took 45 and was cancelled on the runners of 2026-11-06 (1.75 times slower than before, run
         # 42220741374): each of the three is 11 to 18 minutes there. 4g, not the script's 1g: Tampering
         # took 11 on a 4-core, 16 GB runner at 1g and 7 at 4g or 8g, and 11 to 12 at 12g, or at 8g with 2 or 8 workers.
-        # The hotpath* and seal* shards: 0.15's models (HotPathOne in five; Seal and Migration015 in three), each 18 to 25 minutes
+        # The hotpath* and seal* shards: 0.15's models (HotPathOne in five; Seal in three), each 18 to 25 minutes
         # on CI by 2026-10-28 (hotpath-bulk, -policy and -skew timed out at 25 on slower runners): 45 leaves room.
         shard: [tampering, large, probing, routing, rest, hotpath, hotpath-policy, hotpath-bulk, hotpath-phases, hotpath-skew, seal, seal-plugin, seal-retention]
     runs-on: ubuntu-24.04

@@ -197,27 +197,13 @@ export function laterHead(tx: Transaction): void {
  * slug) takes it, after its own rows and before the fence its append's
  * trigger takes, as the checkpointer's barrier does: so the issue is
  * ordered against it, and no use waits behind an issue (formal/Lifecycle.tla's
- * IssuePolicyHeld, Migration015.tla's PolicyIssueFirst; T149, review r3).
+ * IssuePolicyHeld; T149, review r3).
  */
 export async function holdIssues(tx: Transaction, { final = false }: { final?: boolean } = {}): Promise<void> {
   const statement = sql`SELECT pg_advisory_xact_lock(1668244070, 1)`;
   // `final`: nothing awaits it, it goes with what the transaction asks next, in its place (`later`), as `appendEntries`'s.
   if (final) later(tx, statement);
   else await tx.execute(statement);
-}
-
-/**
- * The issue lock shared, then 0.15's fence exclusive (`1668244070, 0`), as
- * 0.14's trigger takes them for an entry that changes access: what 0.15's
- * cutover holds, its member rows and 0.14's head taken first, so that its
- * own 0.14 entry's trigger waits on nothing (formal/Migration015.tla,
- * CutoverIssueFirst; T132). Every use and every change waits for its
- * commit; the checkpointer's barrier, which takes the issue lock exclusive
- * first, too.
- */
-export async function holdFence(tx: Transaction): Promise<void> {
-  await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(1668244070, 1)`);
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244070, 0)`);
 }
 
 /**

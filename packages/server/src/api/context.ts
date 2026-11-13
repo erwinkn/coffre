@@ -259,7 +259,7 @@ export async function audited<T>(
   changes: AppChanges | null = null,
   factor: string | null = null,
 ): Promise<T> {
-  // Under 0.15's log, its entries say so: once cut over, the log refuses a write's entry that does not (migration 0047).
+  // Under 0.15's log, its entries say so (`log015`).
   const log015 = await keeps015(ctx.vault);
   try {
     const result = await ctx.db.transaction(async (tx) => {

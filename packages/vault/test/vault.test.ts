@@ -32,13 +32,16 @@ import { checkOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultC
 import { signer } from '../src/checkpoint.ts';
 import { entryView, vaultLogKey } from '../src/log.ts';
 import { memberMac, rowKey, sealed } from '../src/rows.ts';
+import { genesisCall } from '../src/changes.ts';
+import { sealKey } from '../src/inputs.ts';
+import { logMacKey } from '../src/log-entry.ts';
+import { principalObject } from '../src/objects.ts';
 import { snapshot as readSnapshot } from '../src/snapshot.ts';
 import * as store from '../src/store.ts';
 import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
 import { openVault, prepareVault, CALL_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
 import { openLocalVault as openEntry, spoken } from '../src/local.ts';
 import {
-  cutOver,
   emptyDatabase,
   locksHere,
   newEnvironment,
@@ -1940,25 +1943,14 @@ test('only those who run the instance set roles, never their own, and a scoped a
   assert.equal((await w.vault.verifyLog({})).ok, true);
 });
 
-/**
- * A grant on every project as 0.4 wrote it: its row, its `access.grant`
- * entry under the vault's key, and the member's row sealed over it, as the
- * vault of 0.4 would have left them.
- */
-async function everyProjectGrant(principal: string, slug: string | null, role: string, expiresAt: number | null = null): Promise<void> {
-  const metadata = JSON.stringify({ role, expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(), previousRole: null, place: slug === null ? '*' : `*/${slug}` });
-  const appended = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: principal, metadata }], undefined, undefined, [], true));
-  await db.owner.insert(grants).values({ principal, projectId: null, environmentId: null, environmentSlug: slug, role, expiresAt, grantedAt: appended.occurredAt, grantedBy: ROOT });
-  await db.owner.update(principals).set({ accessSeq: appended.seqStart }).where(eq(principals.principal, principal));
-  await reseal(principal);
-}
-
 test("a grant on a slug in every project of 0.4, converted after the cutover, becomes none on a place a writer renamed to that slug and back (T159, review r7)", async () => {
   // As 0.4 left it: dev and prod, and CI a Viewer of every project's staging, which none is.
   const where = await places(db.owner);
   await rowOf05('token:ci', { role: 'member' }, ROOT);
   await everyProjectGrant('token:ci', 'staging', 'viewer');
-  // The cutover, by a vault that makes no call after it: nothing converted yet, dev and prod sealed as they are.
+  // 0.15.0's cutover, then no call after it: CI sealed with its grant, nothing converted yet, dev and prod sealed as
+  // they are (the fixture seals the places a first vault finds).
+  await cutOver('token:ci');
   await openLocalVault(db.vault, configure());
   // A writer renames prod to staging, its seal kept; a new vault converts on its first call; the writer puts prod back.
   await run(db.owner, sql`UPDATE environments SET slug = 'staging' WHERE id = ${where.prod}`);
@@ -2124,7 +2116,6 @@ test('a log of large entries is checked whole and signed, a batch of it in memor
 });
 
 test('a checkpoint signs the log up to its last entry, in an entry of its own', async () => {
-  // No log is empty: the cutover's entry is the vault's first.
   const w = await world();
   const { checkpointKeys } = await w.vault.about();
   const signed = async () => (await vaultLog(w)).filter((entry) => entry.action === 'audit.checkpoint' && entry.outcome === 'allow');
@@ -2218,8 +2209,8 @@ test('a full check covers the head the app verified up to, and refuses an entry 
   await member(w, ADA, []);
   const [last] = (await db.owner.select().from(auditLog).orderBy(asc(auditLog.seq))).slice(-1) as StoredEntry[];
   const upTo = { seq: Number(last.seq), hash: last.hash.toString('hex') };
-  // Root made an Owner, as the deployment names them, and Ada's admission (and under 0.15's log, the cutover's entry).
-  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: 3, through: upTo.seq });
+  // Root made an Owner, as the deployment names them, and Ada's admission.
+  assert.deepEqual(await w.vault.verifyLog({ upTo }), { ok: true, entries: 2, through: upTo.seq });
   assert.deepEqual(await w.vault.verifyLog({ upTo: { ...upTo, hash: 'f'.repeat(64) } }), {
     ok: false,
     failedAtSeq: upTo.seq,
@@ -2675,8 +2666,8 @@ test("a stretch holds each tally to the walk as it stood at that tally's prefix,
   );
   const vault = await fresh();
   const first = await vault.checkpoint();
-  // The cutover's entry after it, which lets the vault name its Owner at its first call.
-  assert.ok(first.ok && first.checkpoint.seq === 2, JSON.stringify(first));
+  // Nothing of the vault's yet: the first checkpoint signs the app's entry alone.
+  assert.ok(first.ok && first.checkpoint.seq === 0, JSON.stringify(first));
   await reads(3);
   const second = await vault.checkpoint();
   assert.ok(second.ok);
@@ -2696,8 +2687,8 @@ test('an app older than 0.10.1, which names no `from`, gets an ok only for the w
   const current = await short.verifyLog({ upTo, from: 'start' });
   assert.ok(current.ok && current.through! < upTo.seq, JSON.stringify(current));
   // A walk whose budget ends at the last entry is done, and holds the rows to it.
-  const exact = await openLocalVault(db.vault, configure(), { walks: { verify: 7 } });
-  assert.deepEqual(await exact.verifyLog({ upTo, from: 'start' }), { ok: true, entries: 7, through: upTo.seq });
+  const exact = await openLocalVault(db.vault, configure(), { walks: { verify: 6 } });
+  assert.deepEqual(await exact.verifyLog({ upTo, from: 'start' }), { ok: true, entries: 6, through: upTo.seq });
   void w;
 });
 
@@ -2871,8 +2862,8 @@ test('a 0.14 write about a member that the log does not account for makes the va
   const secret = await w.secret(w.dev);
   const items = [{ secret, wrapped: await wrapped(w, secret) }];
   assert.equal((await w.vault.access(ADA)).status, 'active');
-  // A late 0.14 grant to Ada (an old isolate's), its entry genuine, landed past the cutover's refusal, whose trigger the
-  // database's owner dropped: her row and its seal are untouched, so only the entry tells.
+  // A late 0.14 grant to Ada, its entry genuine (an old isolate's, which 0.15.0's cutover refused, or one written with
+  // the vault's key): her row and its seal are untouched, so only the entry tells.
   await withLogUnlocked(db.owner, (tx) => appendEntries(tx as never, VAULT_KEY, [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: ADA, metadata: '{}' }]));
   assert.equal((await w.vault.access(ADA)).status, 'tampered');
   const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
@@ -3744,8 +3735,8 @@ for (const overdue of [false, true]) {
       assert.equal(verification.failedAtSeq, Number(appended.seqStart));
       assert.match(verification.reason, /overdue/);
     } else {
-      // Root made an Owner, as the deployment names them, and the intent (and under 0.15's log, the cutover's entry).
-      assert.deepEqual(verification, { ok: true, entries: 3, through: Number(appended.seqStart), pending: 1 });
+      // Root made an Owner, as the deployment names them, and the intent.
+      assert.deepEqual(verification, { ok: true, entries: 2, through: Number(appended.seqStart), pending: 1 });
     }
   });
 }
@@ -3870,9 +3861,8 @@ test('on a new instance, the first person its deployment names to sign in become
   await places(db.owner);
   const vault = await namingOwners('root@acme.example', 'sam@acme.example');
   // Ada, whom it does not name, is nobody, and makes nobody anything: before the vault's first entry, nobody is.
-  // The cutover's entry is that, and its first call after names them all.
   assert.equal((await vault.access(ADA)).status, 'unknown');
-  assert.deepEqual(await ownership(), [['member.add', ROOT, 'allow', 'owners'], ['member.add', SAM, 'allow', 'owners']]);
+  assert.deepEqual(await ownership(), []);
   const root = await vault.access(ROOT);
   assert.deepEqual([root.status, root.role, root.scope], ['active', 'owner', EVERYWHERE]);
   // The vault's next call, whoever's, makes Sam one too: he never signed in.
@@ -4175,6 +4165,20 @@ test('an Owner\'s scope written another way around the vault is still everywhere
   assert.deepEqual(await deployed.access(SAM).then(({ status, role }) => [status, role]), ['active', 'owner']);
   assert.equal((await ownership()).length, before);
 });
+/**
+ * A grant on every project as 0.4 wrote it: its row, its `access.grant`
+ * entry under the vault's key, and the member's row sealed over it, as the
+ * vault of 0.4 would have left them. 0.15's cutover sealed the member after
+ * (`cutOver`).
+ */
+async function everyProjectGrant(principal: string, slug: string | null, role: string, expiresAt: number | null = null): Promise<void> {
+  const metadata = JSON.stringify({ role, expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(), previousRole: null, place: slug === null ? '*' : `*/${slug}` });
+  const appended = await db.vault.transaction((tx) => appendEntries(tx, VAULT_KEY, [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: principal, metadata }], undefined, undefined, [], true));
+  await db.owner.insert(grants).values({ principal, projectId: null, environmentId: null, environmentSlug: slug, role, expiresAt, grantedAt: appended.occurredAt, grantedBy: ROOT });
+  await db.owner.update(principals).set({ accessSeq: appended.seqStart }).where(eq(principals.principal, principal));
+  await reseal(principal);
+}
+
 /** A root admin's row as 0.5 gave them one the first time anyone asked about them: a Member, `rootAdmin: true`. */
 function rootRowOf05(principal: string): Promise<void> {
   return rowOf05(principal, { role: 'member', rootAdmin: true }, 'system:vault');
@@ -4191,12 +4195,28 @@ async function rowOf05(principal: string, detail: Record<string, unknown>, actor
   await reseal(principal);
 }
 
+/**
+ * `principal` as 0.15.0's cutover left them, which 0.16 upgrades from: their
+ * row and grants, every-project ones included, sealed by a genesis that
+ * accounts for every 0.14 entry about them (`old`).
+ */
+async function cutOver(principal: string): Promise<void> {
+  const row = (await store.member(db.owner, principal))!;
+  const object = principalObject(row, await store.grants(db.owner, principal));
+  const [newest] = await rows<{ seq: string | number | null }>(db.owner, sql`SELECT max(seq) AS seq FROM audit_log WHERE author = 'vault' AND decision = 'allow' AND subject_principal = ${principal}`);
+  const keys = { seals: [sealKey(SIGNING_KEY)], mac: logMacKey(SIGNING_KEY) };
+  const call = genesisCall(keys, { kind: 'principal', id: principal }, object, Date.now(), 'system:cutover', newest?.seq == null ? undefined : BigInt(newest.seq));
+  const [number] = await db.vault.transaction((tx) => store.changeInputs(tx, [call]));
+  assert.ok(number !== null, `${principal} sealed`);
+}
 
 test('on an instance that ran 0.5, everyone the deployment names becomes an Owner, root admins who signed in or not, and nobody else 0.5 let in', async () => {
   await places(db.owner);
   // 0.5 named root and Sam root admins; root signed in, Sam never did. Carol did, under a list since changed.
   await rootRowOf05(ROOT);
   await rootRowOf05(CAROL);
+  await cutOver(ROOT);
+  await cutOver(CAROL);
   const upgraded = await namingOwners('root@acme.example', 'sam@acme.example');
   // Its first call, whatever it is, makes root and Sam Owners: Carol stays the Member 0.5 made her.
   assert.equal((await upgraded.access(ADA)).status, 'unknown');
@@ -4208,22 +4228,22 @@ test('on an instance that ran 0.5, everyone the deployment names becomes an Owne
   assert.deepEqual(await ownership(), [
     ['member.add', ROOT, 'allow', null], ['member.add', CAROL, 'allow', null], ['member.role', ROOT, 'allow', 'owners'], ['member.add', SAM, 'allow', 'owners'],
   ]);
-  // Sam, taken off the list, is demoted. Rolled back to 0.5, whose list names him still and lets Dan in as a
-  // root admin, then forward: the vault reads the list it is given, not 0.5's, so both stay as they are.
+  // Sam, taken off the list, is demoted; a vault started again reads the list it is given, and leaves him so.
   const without = await namingOwners('root@acme.example');
   assert.ok((await without.admit({ actor: ROOT, principal: SAM, role: 'developer' })).ok);
-  await rootRowOf05(DAN);
-  const forward = await namingOwners('root@acme.example');
-  assert.deepEqual([(await forward.access(SAM)).role, (await forward.access(DAN)).role], ['developer', 'member']);
-  assert.equal((await forward.verifyLog({})).ok, true, 'the log replays to every row');
+  const again = await namingOwners('root@acme.example');
+  assert.deepEqual([(await again.access(SAM)).role, (await again.access(CAROL)).role], ['developer', 'member']);
+  assert.equal((await again.verifyLog({})).ok, true, 'the log replays to every row');
 });
 
 test('a root admin of 0.5 still holding grants on every project gets what `coffre migrate` says, then becomes an Owner', async () => {
   await places(db.owner);
   const other = await laterProject();
-  // 0.5 left a root admin's grants on every project as they were; root's row is older than the list, a Member's.
+  // 0.5 left a root admin's grants on every project as they were, and 0.15's cutover sealed them so; root's row is
+  // older than the list, a Member's.
   await rowOf05(ROOT, { role: 'member' }, 'user:someone@acme.example');
   await everyProjectGrant(ROOT, null, 'maintainer');
+  await cutOver(ROOT);
   const [preview] = await everyProjectPreview(db.owner, Date.now());
   assert.deepEqual([preview!.principal, preview!.conversion.role, preview!.conversion.grants.map((grant) => [grant.projectId, grant.role]).sort()], [
     ROOT, 'developer', [[other.project, 'maintainer'], [(await store.liveProjects(db.owner)).find((project) => project.id !== other.project)!.id, 'maintainer']].sort(),
@@ -4237,6 +4257,7 @@ test('a root admin of 0.5 still holding grants on every project gets what `coffr
   assert.deepEqual(roles.map((entry) => [entry.subject, entry.detail.role, entry.detail.reason]), [[ROOT, 'developer', 'every-project'], [ROOT, 'owner', 'owners']]);
   assert.equal((await upgraded.verifyLog({})).ok, true);
 });
+
 /**
  * `database`, whose first read about `principal` in `table`, once armed,
  * waits after its answer arrived until released: another request runs in

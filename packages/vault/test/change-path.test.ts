@@ -1,6 +1,6 @@
 // 0.15's change path (docs/design/0.15-plan.md, PR 4a): every change a vault decision makes to an input of 0.15's log is
 // one call of `change_input` (migration 0023), in the decision's transaction, after 0.14's writes. Each case names the
-// part of formal/HotPathOne.tla or formal/Migration015.tla it holds.
+// part of formal/HotPathOne.tla it holds.
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,7 +15,6 @@ import { forgetLogHeads, isMovedChange, newestCommitted } from '@coffre/db/log';
 import { asc, eq, sql } from 'drizzle-orm';
 
 import { Changes, genesisCall, loggedChange, NotLogged, payloadOf, type ChangeKeys } from '../src/changes.ts';
-import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import type { Sealed } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { decideUse, type UseRequest } from '../src/decide.ts';
@@ -74,10 +73,10 @@ async function changeRows(): Promise<LogRow[]> {
   return found.map((row) => ({ ...row, number: BigInt(row.number), seal: row.seal ?? null }));
 }
 
-/** The changes of the log as the replay takes them: each names its object, and each MAC holds under the vault's key. The cutover's own, which names none, passed over. */
+/** The changes of the log as the replay takes them: each names its object, and each MAC holds under the vault's key. */
 async function logged(keys: ChangeKeys): Promise<LoggedChange[]> {
   const holds = authentic(keys.mac);
-  return (await changeRows()).filter((row) => row.object !== CUTOVER_OBJECT).map((row) => {
+  return (await changeRows()).map((row) => {
     assert.ok(holds(changeEntry(row)), `entry ${row.number}'s MAC is the vault's`);
     const change = loggedChange(row);
     assert.ok(change !== null, `entry ${row.number} names its object`);
@@ -145,9 +144,9 @@ test('every change a decision makes to a member is an entry of 0.15\'s log, op b
     'access.revoke', 'member.role', 'member.remove',
   ]);
   assert.deepEqual(await opsOf(w.keys, member('token:ci')), ['member.add', 'access.grant']);
-  // The deployment's Owner, made at the vault's start, and the cap the cutover sealed first.
+  // The deployment's Owner, made at the vault's start, and its cap, which makes the policy.
   assert.deepEqual(await opsOf(w.keys, member(ROOT)), ['member.add']);
-  assert.deepEqual(await opsOf(w.keys, { kind: 'policy', id: 'instance' }), ['genesis']);
+  assert.deepEqual(await opsOf(w.keys, { kind: 'policy', id: 'instance' }), ['bulk.limit']);
   await holdsReplay(w.keys, [member(ADA), member('token:ci'), member(ROOT), { kind: 'policy', id: 'instance' }]);
   // 0.14's log has every one of them too, until 0.16 (dual fencing).
   const old = await rows<{ seq: string; action: string }>(db.owner, sql`SELECT seq, action FROM audit_log WHERE subject_principal = ${ADA} AND decision = 'allow' ORDER BY seq`);
@@ -334,14 +333,15 @@ test('renaming staging to prod takes a Developer scoped to staging off it, live 
     id: credentialId, kind: 'browser', authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, principal: ADA,
     createdBy: ADA, expiresAt: new Date(Date.now() + 3_600_000),
   });
-  // What the use reads, made since the cutover around the vault, sealed as it would have (plan PR 9): the
-  // environment, Ada's session and the key; the roles are the cutover's own. PR 5's statement reads a credential's and
-  // a key's rows; here their objects are these geneses'.
+  // What the use reads, made around the vault, each sealed by its genesis: the environment, Ada's session, the key and
+  // the roles, as an instance 0.15.0 cut over holds them. PR 5's statement reads a credential's and a key's rows; here
+  // their objects are these geneses'.
   const credential: CredentialInput = { kind: 'credential', id: credentialId, principal: ADA, caller: 'person', scope: null, expiresAt: null, revoked: false, generation: 0 };
   const secret: SecretInput = { kind: 'secret', id: secretId, projectId: project, environmentId: staging, version: randomUUID(), nature: 'secret', key: { kekProvider: 'local', kekId: 'k', kekVersion: '1', bytes: 'AA==' }, digest: null, source: null, reference: null };
   await genesis(w.keys, { kind: 'environment', id: staging }, environment(project, staging, 'staging'));
   await genesis(w.keys, { kind: 'credential', id: credentialId }, credential);
   await genesis(w.keys, { kind: 'secret', id: secretId }, secret);
+  await genesis(w.keys, ROLES_REF, noEdits());
 
   const request = (): UseRequest => ({ credential: credentialId, secretId, place: null, purpose: 'reveal', keepsSensitive: false, at: Date.now() });
   /** The use decided on the rows (live, as the use's statement reads them) and on the log's replay: they agree. */
@@ -452,21 +452,21 @@ test('an Owner the deployment names again after a removal is restored by the vau
   await holdsReplay(keysOf(config), [member(eve)]);
 });
 
-test('an Owner\'s role edit is a change of the roles object, which the cutover made', async () => {
+test('an Owner\'s role edit is a change of the roles object, which the first one makes', async () => {
   const w = await world();
   const define = (role: string, permissions: Permission[]) => w.vault.changePolicy({
     actor: ROOT, change: { kind: 'role', role, definition: { ...ROLES.viewer, name: role, permissions, protected: permissions } },
   });
-  // The cutover made it from 0.14's policy, which held no edit.
-  assert.deepEqual(await opsOf(w.keys, { kind: 'roles', id: 'instance' }), ['genesis']);
+  // No edit yet: no object, which a use reads as no edits.
+  assert.deepEqual(await opsOf(w.keys, { kind: 'roles', id: 'instance' }), []);
   assert.ok((await define('reader', ['secret.read', 'secret.use'])).ok);
   assert.ok((await define('user', ['secret.use'])).ok);
   assert.ok((await w.vault.changePolicy({ actor: ROOT, change: { kind: 'role', role: 'reader', definition: null } })).ok);
-  assert.deepEqual(await opsOf(w.keys, { kind: 'roles', id: 'instance' }), ['genesis', 'role.define', 'role.define', 'role.define']);
+  assert.deepEqual(await opsOf(w.keys, { kind: 'roles', id: 'instance' }), ['role.define', 'role.define', 'role.define']);
   // Each edit names the policy.change entry it came with (UsesSeeOldWrites).
   const policies = await rows<{ seq: string }>(db.owner, sql`SELECT seq FROM audit_log WHERE action = 'policy.change' AND decision = 'allow' ORDER BY seq`);
   const cited = (await changeRows()).filter((row) => row.object === objectKey({ kind: 'roles', id: 'instance' })).map((row) => (JSON.parse(row.payload) as { old?: string }).old);
-  assert.deepEqual(cited, [undefined, ...policies.slice(-3).map(({ seq }) => seq.toString())]);
+  assert.deepEqual(cited, policies.slice(-3).map(({ seq }) => seq.toString()));
   const replayed = await holdsReplay(w.keys, [{ kind: 'roles', id: 'instance' }]);
   const roles = replayed.rows.get(objectKey({ kind: 'roles', id: 'instance' }))!.row;
   assert.deepEqual(roles.kind === 'roles' && Object.keys(roles.roles), ['user']);
@@ -480,7 +480,7 @@ async function rolesNow(keys: ChangeKeys): Promise<{ whole: RolesInput; behind: 
   return { whole, rows, behind: roleChanges(keys.seals, whole, rows).map(({ ref }) => ref.id) };
 }
 
-/** `world()`, then one call: the vault's start steps run at the first call after the cutover, which `world` makes after its own. */
+/** `world()`, then one call: the vault's start steps run at its first call. */
 async function rolesWorld(): Promise<Awaited<ReturnType<typeof world>>> {
   const w = await world();
   assert.equal((await w.vault.access(ROOT)).role, 'owner');
@@ -603,8 +603,8 @@ test('the vault writes its bulk cap into the log at its start, once, and again w
   await start(10);
   await start(10);
   await start(20);
-  // The first the cutover's, sealing the deployment's cap as it starts.
-  assert.deepEqual(await opsOf(keysOf(config), policy), ['genesis', 'bulk.limit']);
+  // The first makes the policy, the deployment's cap as it starts.
+  assert.deepEqual(await opsOf(keysOf(config), policy), ['bulk.limit', 'bulk.limit']);
   const replayed = await holdsReplay(keysOf(config), [policy]);
   assert.deepEqual(replayed.limit, { count: 20, windowMs: 60_000 });
 });
@@ -612,13 +612,15 @@ test('the vault writes its bulk cap into the log at its start, once, and again w
 test('a change answers only once its entry is sealed (R51, CommitBeforeAnswer)', async () => {
   let release!: () => void;
   const held = new Promise<void>((resolve) => (release = resolve));
-  // The start's own changes are sealed at once (the cutover, the bulk cap, the roles' rows); the one this case watches
+  // The start's own changes are sealed at once (the bulk cap, the roles' rows, the Owner); the one this case watches
   // waits until released.
+  let holding = false;
   const seal = sealThroughDouble(async () => {
-    if (seal.asked.length > 3) await held;
+    if (holding) await held;
     return {} as Sealed;
   });
   const w = await world({ sealThrough: seal });
+  holding = true;
   let answered = false;
   const admitted = w.vault.admit({ actor: ROOT, principal: ADA }).then((outcome) => {
     answered = true;
@@ -631,10 +633,8 @@ test('a change answers only once its entry is sealed (R51, CommitBeforeAnswer)',
   assert.equal(seal.asked.at(-1), (await changeRows()).at(-1)!.number);
   release();
   assert.ok((await admitted).ok);
-  // A seal that fails fails the call, though the change stands: it never answers done. (The cutover's own, which a
-  // vault starting finds and waits for, sealed.)
-  const cutover = await store.cutoverNumber(db.owner);
-  const failing = await world({ sealThrough: sealThroughDouble((number) => (number === cutover ? ({} as Sealed) : new Error('its entry is not in the signed tree'))) }, w.config);
+  // A seal that fails fails the call, though the change stands: it never answers done.
+  const failing = await world({ sealThrough: sealThroughDouble(() => new Error('its entry is not in the signed tree')) }, w.config);
   await assert.rejects(failing.vault.admit({ actor: ROOT, principal: BO }), /signed tree/);
 });
 

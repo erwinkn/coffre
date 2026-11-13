@@ -474,8 +474,9 @@ export type UsePath = {
   /** The call's places in admission, which its entry (`seated`) takes and every statement it starts holds (`raced`). */
   seat?: Seat;
   /**
-   * What a call waits for first, within its admission: an isolate's first, the log's cutover (vault.ts, `#cutOverYet`).
-   * Within it, as on Workers it reads on the call's one connection; however long it waits, its place lapses as any does.
+   * What a call waits for first, within its admission: nothing the vault asks since 0.15's cutover marker went
+   * (T273); the tests' stand-in for any wait before its statement (T170). However long it waits, its place lapses as
+   * any does.
    */
   ready?: () => Promise<void>;
   /**
@@ -1483,7 +1484,7 @@ async function raced<R, T>(path: UsePath, deadline: number, call: (sends: () => 
  * Whether the access entry the statement's probe found past what the
  * principal's newest change accounts for (`viewOf`'s `accounted` false) is
  * one forged in the vault's name, as is every one past it up to the probe's:
- * then it is passed over, as Migration015.tla's UsesSeeOldWrites reads only
+ * then it is passed over, as UsesSeeOldWrites reads only
  * authentic writes, and the use is decided as its replay decides it.
  */
 async function forgedPast(path: UsePath, row: UseRow, starts: () => void, known?: CachedSeals): Promise<boolean> {
@@ -1670,7 +1671,7 @@ function grantsOf(row: UseRow): InputGrant[] {
 /**
  * The view checked as PR 3's decision takes it, with the principal `stale`
  * too while 0.14 holds an access entry about it that the new log does not
- * account for (Migration015.tla, UsesSeeOldWrites): a seal the principal's
+ * account for (UsesSeeOldWrites): a seal the principal's
  * row passes could still be one a late 0.14 revoke moved past. Checked with
  * the seals, before any row (StaleFirst).
  */

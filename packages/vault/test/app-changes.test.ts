@@ -1,7 +1,6 @@
 // 0.15's change path for the app's own rows (docs/design/0.15-plan.md, "As built: PR 4b"): the vault seals a change
 // from the row's columns as the app read them and as it will write them (`prepare`), and the app's transaction commits
-// it beside its row (`app_change`, migration 0025). Each case names the part of formal/HotPathOne.tla or
-// formal/Migration015.tla it holds. The app's transaction is the owner's here: the grants are test:schema's.
+// it beside its row (`app_change`, migration 0025). Each case names the part of formal/HotPathOne.tla it holds. The app's transaction is the owner's here: the grants are test:schema's.
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,7 +17,6 @@ import { appChanges, appendEntries, isMovedChange, isStaleChange, laterChanges, 
 import { asc, eq, sql } from 'drizzle-orm';
 
 import { genesisCall, loggedChange, type ChangeKeys } from '../src/changes.ts';
-import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import type { Sealed } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { objectKey, sealKey, sealOf, type EnvironmentInput, type Ref } from '../src/inputs.ts';
@@ -115,7 +113,7 @@ class Moved extends Error {}
 async function logged(keys: ChangeKeys): Promise<LoggedChange[]> {
   const holds = authentic(keys.mac);
   // The cutover's own change, which names no object, passed over.
-  return (await db.owner.select().from(logChanges).orderBy(asc(logChanges.number))).filter((raw) => raw.object !== CUTOVER_OBJECT).map((raw) => {
+  return (await db.owner.select().from(logChanges).orderBy(asc(logChanges.number))).map((raw) => {
     const row = { ...raw, number: BigInt(raw.number), seal: raw.seal ?? null };
     assert.ok(holds(changeEntry(row)), `entry ${row.number}'s MAC is the vault's`);
     const change = loggedChange(row);

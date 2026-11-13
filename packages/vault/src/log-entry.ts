@@ -103,11 +103,8 @@ export function authentic(key: LogMacKey): (entry: LogEntry) => boolean {
 export const RETENTION_OBJECT = logObject('log', 'retention');
 export const RETENTION_ACTOR = 'system:retention';
 
-/** The log's own object for the cutover's change from 0.14 (plan PR 9; cutover.ts), its marker: one, ever. */
+/** The log's own object for 0.15's cutover from 0.14 (plan PR 9), its one change, which a log cut over still holds. */
 export const CUTOVER_OBJECT = logObject('log', 'cutover');
-
-/** Who makes the cutover's changes. */
-export const CUTOVER_ACTOR = 'system:vault';
 
 /**
  * The log's own object for its rotations (T168; docs/design/audit-tree.md,

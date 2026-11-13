@@ -59,7 +59,6 @@ const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   // and every member's newest access entry, a pass over the vault (its start on 0.14's log alone, a cutover).
   'packages/db/src/grants.ts#tamperedMembers': { none: "every member's findings, grouped: T248" },
   'packages/db/src/grants.ts#tamperedMembers#2': { none: "the newest access entry of each member with 0.14's findings, grouped: T248" },
-  'packages/vault/src/store.ts#newestAccessEntries': { none: "every member's newest access entry, grouped, a pass over the vault: T248" },
   'packages/server/src/db/audit.ts#appVerifier': { none: "the first of the app's moves from each previous key, grouped: the moves alone, a few for each change of key" },
   'packages/db/src/log.ts#underHead': { none: 'the newest entry of all: the primary key\'s first step, with nothing to filter' },
   'packages/db/src/log.ts#missingEntry': { none: 'the first entry after a gap, by the primary key, with nothing to filter' },
@@ -102,12 +101,14 @@ const LOG_STORE = 'packages/vault/test/log-store.test.ts';
  * Each `EXISTS` gate over a log (0.14's, 0.15's changes or uses), by the function it is in: the test that holds it to
  * the same cost however long the run of other entries.
  */
-const GATES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> = {
+const GATES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | { none: string }> = {
   // 0.15's named findings, by `audit_log_tamper_idx` and the change it names.
   'packages/db/src/grants.ts#findingsOf': { by: VAULT, as: 'findingsOf' },
   // Whether an append's key was moved from, by `audit_log_subject_idx` keyed by the key.
   'packages/db/src/log.ts#underHead': { by: VAULT, as: 'lockLogHeadRead' },
   'packages/server/src/db/queries.ts#hasTombstone': { by: SERVER, as: 'hasTombstone' },
+  // Whether the log holds 0.15's cutover change, by `log_changes_object_idx` keyed by its object: once per migrate.
+  'packages/db/src/migrate.ts#postgresMigrator': { none: 'one probe of the object index, once per migrate, on no request' },
 };
 
 /**
@@ -282,7 +283,9 @@ test('every `EXISTS` gate over a log in the sources is listed, with the test tha
   const found = gateSites();
   assert.deepEqual(found.filter((site) => !(site in GATES)), [], 'an `EXISTS` over a log the list does not name: list it with its test, which seeds a long run of the entries it must not walk');
   assert.deepEqual(Object.keys(GATES).filter((site) => !found.includes(site)), [], 'a gate listed that no longer reads so');
-  for (const [site, held] of Object.entries(GATES)) assert.match(readFileSync(`${ROOT}${held.by}`, 'utf8'), new RegExp(`\\b${held.as}\\b`), `${site}: ${held.by} asks ${held.as}`);
+  for (const [site, held] of Object.entries(GATES)) {
+    if ('as' in held) assert.match(readFileSync(`${ROOT}${held.by}`, 'utf8'), new RegExp(`\\b${held.as}\\b`), `${site}: ${held.by} asks ${held.as}`);
+  }
 });
 
 test("every least or greatest of 0.15's uses in the sources is listed, with the test that holds it, or why none needs one (T245, R48, Sol r8 of #556)", () => {

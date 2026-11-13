@@ -367,8 +367,6 @@ REMOVALS=(
   "SealedObjects RestorePinned AllowedAsOld"
   "SealedObjects EndWhileArchived AllowedAsOld"
   "SealedObjects EndWhileArchived HonestUnarchive"
-  # A key archived before the cutover keeps its object in the log, which its unarchive restores (T144).
-  "SealedObjectsCutover GenesisKeepsArchived HonestUnarchiveServes"
   # 0.15's sealing into Merkle checkpoints, two trees as one pair (Seal.tla; W209, W212; the plan's PR 6).
   "Seal NumberUnderLock Complete"
   "Seal CloseLocks Complete"
@@ -404,48 +402,6 @@ REMOVALS=(
   "SealRetentionCrash CutUsesOnly NoFalseAlarm"
   # A tick given up on (T169): another signer opens while its database write may still land; fenced, it starts nothing more.
   "SealStall Fenced NoFalseAlarm"
-  # 0.15's cutover from 0.14 (Migration015.tla; docs/design/0.15-plan.md, PR 9).
-  "Migration015 CutoverHeadLock+CutoverFence+RowFirst OneCutover"
-  "Migration015 CutoverHeadLock+VerifyRows+OldWritesFence+RowFirst NewLogFollowsOld"
-  "Migration015 Marker OneCutover"
-  "Migration015 DualFence NothingAllowedAfterAnswer"
-  # A late 0.14 write across a 0.15 use: the trigger's fence makes it wait, its refusal (PR 9b) keeps it out.
-  "Migration015 OldWritesFence+OldWritesRefused NothingAllowedAfterAnswer"
-  "Migration015 ChangeHeadFirst NoWaitCycle"
-  "Migration015 RowFirst NoWaitCycle"
-  # An object of the app's rows, changed in the app's own transaction (plan PR 4b): head, row, fence.
-  "Migration015App AppHeadFirst NoWaitCycle"
-  "Migration015App DualFence NothingAllowedAfterAnswer"
-  "Migration015App OldWritesFence+OldWritesRefused NothingAllowedAfterAnswer"
-  # Sign-ins and the barrier: the issue lock in the order row, head, issue lock, fence (T123).
-  "Migration015Issue IssueBeforeFence NoWaitCycle"
-  "Migration015Issue BarrierIssueFirst NoWaitCycle"
-  "Migration015Issue ExchangeOnlyIssues ExchangeChangesNoInput"
-  "Migration015Issue ExchangeOnlyIssues+OldWritesRefused NothingAllowedAfterAnswer"
-  # A policy change takes the issue lock before the fence (T149, review r3): the barrier holds it while it waits for the fence.
-  "Migration015Policy PolicyIssueFirst NoWaitCycle"
-  # The cutover's own 0.14 entry is fenced by the trigger: the issue lock before the fence, as everywhere (T132).
-  "Migration015Issue CutoverIssueFirst NoWaitCycle"
-  # A place 0.14 deleted is deleted as its chain says, never its slugs, which a writer renames either way (T130).
-  "Migration015Deleted DeletedFromChain NoneInDeleted"
-  "Migration015Deleted DeletedFromChain PlaceFollowsOld"
-  # An app's row (a credential, a binding: T160) is checked by the app, under its key, and held to that by the vault.
-  "Migration015AppTamper VerifyRows AllowedOnlyWhenGranted"
-  "Migration015AppTamper VouchedHeld AllowedOnlyWhenGranted"
-  # 0.14's code writes nothing after the cutover (PR 9b): its append is refused once the cutover is there.
-  "Migration015 OldWritesRefused OldWritesBeforeAnchor"
-  "Migration015App OldWritesRefused OldWritesBeforeAnchor"
-  "Migration015Tamper VerifyChain AnchorHolds"
-  "Migration015Tamper VerifyRows AllowedOnlyWhenGranted"
-  # A row put back over a late write: the refusal keeps the write from landing, the probe reads past the row. The
-  # refusal is a trigger the database's owner can drop; the probe needs the key.
-  "Migration015Tamper UsesSeeOldWrites+OldWritesRefused AllowedOnlyWhenGranted"
-  # A 0.15 change that writes no 0.14 entry (T149's revoke, an unbind) takes 0.14's head all the same (PR 9b).
-  "Migration015EntryLess EntryLessHead NothingAllowedAfterAnswer"
-  # The marker PR 5 did not take (the plan's PR 5): it holds only while the writer leaves it alone.
-  "Migration015Marker OldWriteMarksRow AllowedOnlyWhenGranted"
-  # … and a writer who clears it (MaxClears=1) breaks it with every protection on: why PR 5 keeps the probe.
-  "Migration015Marker MaxClears=1 AllowedOnlyWhenGranted"
   # The vault owns a credential's life (Lifecycle.tla, T149): a sign-in, an issue and a revoke, each one vault call.
   # An issue's write holds the issuer's rows, and goes ahead only on the objects its read decided on: each is needed.
   "LifecycleIssue IssuerLocked SensitiveOnlyFromOwners"
@@ -575,6 +531,11 @@ REMOVALS=(
   # fence and waits for an issue's shared hold on its credential, that issue queued behind the barrier, which waits
   # for the write's issue lock.
   "WriteLocks TouchFirst NoWaitCycle"
+  # The issue lock before the fence, everywhere (T123, T149): the barrier, a policy change, a sign-in's trigger. Each
+  # without it holds one of the two and waits for the other, held by the barrier or the write that waits for the first.
+  "WriteLocks BarrierIssueFirst NoWaitCycle"
+  "WriteLocks PolicyIssueFirst NoWaitCycle"
+  "WriteLocks IssueBeforeFence NoWaitCycle"
   # A member add taking 0.14's head before the members' rows (AddLocks, T179 PR 5): a demotion holds the row and
   # waits for the head, which the add holds while it waits for the row.
   "AddLocks MembersFirst NoWaitCycle"
@@ -736,13 +697,12 @@ EXPECTED=(
 #   rest      every other scenario, the Writing ones' 63 and 59 seconds the
 #             largest: 11 to 13 minutes.
 # T165's ProbingMany scenarios, about 10 minutes of CI (ProbingManyFork 7 of
-# them), are in `large`. 0.15's models (HotPathOne, Seal,
-# Migration015) have eight of their own, each about 5 minutes of TLC with 4
+# them), are in `large`. 0.15's models (HotPathOne, Seal) have eight of their own, each about 5 minutes of TLC with 4
 # workers on a shared host, which CI's runners took about twice as long to
 # run: hotpath, hotpath-policy (the policy, liveness and stale-bulk
 # scenarios), hotpath-bulk (the bulk cap's main scenario), hotpath-phases
 # (its keys' phases, and beside the previous release's statement, T204),
-# hotpath-skew (its slack and clock-skew scenarios), seal (Seal and Migration015),
+# hotpath-skew (its slack and clock-skew scenarios), seal (Seal),
 # seal-plugin (SealPlugin and SealCore) and seal-retention (SealRetention,
 # SealRetentionCrash and the key's Rotation scenarios). A scenario in no case
 # below is in `rest`; `scripts/formal-shards.test.mjs` holds the shards to a
@@ -761,7 +721,7 @@ shard_of() {
     HotPathOne*) echo hotpath ;;
     SealPlugin|SealCore|SealStall) echo seal-plugin ;;
     SealRetention*|Rotation*) echo seal-retention ;;
-    Seal|Migration015*) echo seal ;;
+    Seal) echo seal ;;
     *) echo rest ;;
   esac
 }

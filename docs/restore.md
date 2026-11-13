@@ -347,10 +347,10 @@ the newest pair signed by the vault's key and every entry above it by its
 MAC.
 
 The wrong vault key fails here too: its checkpointer refuses the log's
-checkpoints ("not a pair signed by this log"). The app cannot then ask
-whether 0.15's log is cut over, so it answers every request but `/livez`
-503, sign-in and every use of a value included, and `/readyz` is red; the
-server's log says why (`cutover_refused`).
+checkpoints ("not a pair signed by this log"), so `/readyz` is red
+(`sealing: false`) and every change answers 503 until it is sealed, which
+it never is; the server's log says why ("the audit checkpointer does not
+seal").
 
 A backup from before a rotation of the vault key restores the same way,
 under the configuration after it (the old key in `previousKeks`, or the old

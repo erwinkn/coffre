@@ -38,16 +38,15 @@ import { isStale, laterInputs, loggedChanges, newestChange, readObject, type Cha
  *
  * Locks: the decision took its members' rows, then the log's head, before
  * any of this; `change_input` takes the same, then the fence: row, head,
- * fence, Migration015.tla's RowFirst and ChangeHeadFirst.
+ * fence (RowFirst and ChangeHeadFirst; WriteLocks.tla holds the issue lock's place).
  *
- * An object that has a row but no seal, and no change in the log, is one
- * from before the cutover (plan PR 9): 0.14's log is its record, and the
- * cutover's genesis seals it as 0.14 left it. A decision changes it as
- * 0.14 does, and logs nothing of it here. So are the roles with no row
- * yet, whose edits 0.14's policy holds until the cutover. The roles' and
- * the policy's rows are written only sealed, by `change_input`: one with
- * no seal was planted, and is refused. Any other object with neither row
- * nor change is new: only an op that makes it applies.
+ * An object that has a row but no seal, and no change in the log, is
+ * 0.14's, which 0.15.0's cutover (plan PR 9) left unsealed: 0.14's log is
+ * its record. A decision changes it as 0.14 did, and logs nothing of it
+ * here. The roles' and the policy's rows are written only sealed, by
+ * `change_input`: one with no seal was planted, and is refused. Any other
+ * object with neither row nor change is new, the roles and the policy
+ * included: only an op that makes it applies.
  */
 
 /** Why an object a decision would change is not the log's: its seal is not the vault's over it, or not its newest change's. */
@@ -154,7 +153,7 @@ export class Changes {
    * row names), or the `policy.change` an environment's protection or a
    * role came with. Each of its changes carries it (`payloadOf`'s `old`),
    * so that a use sees a 0.14 write the new log has not accounted for
-   * (Migration015.tla's UsesSeeOldWrites, plan PR 5).
+   * (UsesSeeOldWrites, plan PR 5).
    */
   cite(ref: Ref, seq: bigint): void {
     const staged = this.#staged.get(objectKey(ref));
@@ -227,12 +226,12 @@ export class Changes {
     // back with its old seal, written into that change too, would pass every check below, and this change would seal
     // the writer's row as the log's. Refused, as a row its seal does not cover is.
     if (newest !== null && !newest.holds) throw new NotLogged(ref, 'tampered');
-    // Before the cutover: a row, unsealed, that the log has never heard of; or the roles, whose edits 0.14's policy
-    // holds until the cutover's genesis writes them (a role defined before it is 0.14's alone). Not the roles' or the
-    // policy's row, which only change_input writes, sealed: one with no seal was planted.
-    if (newest === null && seal === null) {
-      if (row === null ? ref.kind === 'roles' : ref.kind !== 'roles' && ref.kind !== 'policy') return { logged: false };
-      if (row !== null) throw new NotLogged(ref, 'tampered');
+    // A row, unsealed, that the log has never heard of: 0.14's alone, which 0.15's cutover left unsealed. Not the roles'
+    // or the policy's row, which only change_input writes, sealed: one with no seal was planted. With no row, the roles
+    // and the policy are made by their first change (a role defined, a cap set), as any object is.
+    if (newest === null && seal === null && row !== null) {
+      if (ref.kind === 'roles' || ref.kind === 'policy') throw new NotLogged(ref, 'tampered');
+      return { logged: false };
     }
     if (row !== null && !sealed(this.#keys.seals, ref, row, seal)) throw new NotLogged(ref, 'tampered');
     // Gone (a key archived: `secret.delete`), its row no object and no seal: only an op that makes one applies.
@@ -610,14 +609,14 @@ export function loggedChange(row: { number: bigint; at: number; object: string; 
 }
 
 /**
- * The cutover's change for one object (plan PR 9): its row sealed as it
- * is, the object it holds the payload's `value`. An environment's carries
- * the object as `value` too, which writes its protection, which 0.14 kept
- * in its policy; the roles' and the policy's rows are made from the
- * payload. From no seal: an object the log has never held. `old`: the
- * newest entry of 0.14's it accounts for (`cite`): a member's `access_seq`,
- * or the `policy.change` an environment's protection or the roles came
- * from.
+ * An object's first change, its genesis (`change_input`, from no seal: an
+ * object the log has never held): its row sealed as it is, the object it
+ * holds the payload's `value`, as 0.15's cutover from 0.14 sealed each
+ * object. An environment's carries the object as `value` too, which writes
+ * its protection; the roles' and the policy's rows are made from the
+ * payload. `old`: the newest entry of 0.14's it accounts for (`cite`): a
+ * member's `access_seq`, or the `policy.change` an environment's protection
+ * or the roles came from.
  */
 export function genesisCall(keys: ChangeKeys, ref: Ref, input: Input, at: number, actor: string, old?: bigint): ChangeCall {
   const op: Op = { op: 'genesis', value: input };

@@ -310,11 +310,8 @@ export function testVault(
   config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey' | 'owners'>> & { database?: Database; hotDatabase?: string | Database } = {},
   keys: { kek: Buffer } = { kek: randomBytes(32) },
   walks: VaultOptions['walks'] = {},
-  /**
-   * `cutover: 'app'`: a 0.15 vault left for the app's door to cut over (cutover.test.ts), not cut over as it opens.
-   * `throttled: false`: its throttle off, for a suite whose answers are `late` on purpose (`VaultOptions.throttled`).
-   */
-  { cutover, ...options }: Pick<VaultOptions, 'sealThrough' | 'heldOutside' | 'uses' | 'throttled'> & { cutover?: 'app' } = { sealThrough: sealedNow, heldOutside: nothingHeld },
+  /** `throttled: false`: its throttle off, for a suite whose answers are `late` on purpose (`VaultOptions.throttled`). */
+  options: Pick<VaultOptions, 'sealThrough' | 'heldOutside' | 'uses' | 'throttled'> = { sealThrough: sealedNow, heldOutside: nothingHeld },
 ): TestVault {
   const { kek } = keys;
   const signingKey = derivedSigningKey(kek);
@@ -333,8 +330,6 @@ export function testVault(
       },
       { clockOffset: () => offset, walks, ...options },
     ));
-    // Cut over from 0.14 first, as the app's door has it (cutover.ts).
-    if (cutover !== 'app') await cutOverAtOpen(opened, database);
     const [first, ...others] = owners.map((email) => `user:${email}`);
     // A vault given the wrong keys checks no row and answers nobody: its own tests ask it.
     const signedIn = first === undefined ? null : await opened.access(first).catch(() => null);
@@ -375,7 +370,6 @@ export function testVault(
     revokeCredential: call('revokeCredential'),
     issueToken: call('issueToken'),
     changeBindings: call('changeBindings'),
-    cutover: call('cutover'),
     verifyTrees: call('verifyTrees'),
     verifyReads: call('verifyReads'),
     vouch: call('vouch'),
@@ -422,23 +416,6 @@ export function testVault(
   } as TestVault;
   vaults.add(vault);
   return vault;
-}
-
-/**
- * The cutover (plan PR 9) as the app asks for it, of a vault the suite opens
- * on a database nothing of the app's was written to yet: it vouches for no
- * credential, binding or deleted place, and its chain is checked to its
- * head. The app's own half, which vouches, is cutover.test.ts's. Refused,
- * the vault stays as it is: the test asks what it asks of it.
- */
-export async function cutOverAtOpen(vault: Vault, db: Database): Promise<void> {
-  // Refused (a test that broke 0.14's chain before its vault's first call): left so, as the door leaves it; 0.14's
-  // own checks go on, and nothing of 0.15's is served.
-  const asked = await vault.cutover!();
-  if (!asked.ok || asked.done) return;
-  const [head] = await db.select({ nextSeq: auditChainHead.nextSeq, headHash: auditChainHead.headHash }).from(auditChainHead);
-  const to = { seq: (BigInt(head!.nextSeq) - 1n).toString(), hash: Buffer.from(head!.headHash).toString('hex') };
-  await vault.cutover!({ checked: { from: asked.from, to }, credentials: [], bindings: [], connections: [], deleted: [] });
 }
 
 /** A handler context for one principal, loaded the way a request loads it. */
@@ -642,8 +619,7 @@ export async function credentialsLogged(owner: Database): Promise<void> {
  * vault's access entries in 0.14's log, whose newest a use probes),
  * and 0.14's bindings but their last use, table by table, but the credentials
  * `except` names: what a write that only issues a credential must leave as
- * it was, since it takes no fence (migration 0026; Migration015.tla's
- * ExchangeOnlyIssues).
+ * it was, since it takes no fence (migration 0026, ExchangeOnlyIssues).
  */
 export async function decisionInputs(owner: Database, except: readonly string[] = []): Promise<Record<string, string[]>> {
   const inputs = { principals, grants, credentials, secrets,

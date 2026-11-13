@@ -15,7 +15,7 @@ import { postgresClient } from '@coffre/db/connect';
 
 import { resolveVaultConfig } from '../src/config.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { cutOver, emptyDatabase, nothingHeld, openTestDatabase, places, sealed, type TestDatabase } from './database.ts';
+import { emptyDatabase, nothingHeld, openLocalVault, openTestDatabase, places, sealed, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 
@@ -59,16 +59,19 @@ function config() {
   return resolveVaultConfig({ kek: { id: 'vault-isolate-test', key: randomBytes(32).toString('base64') }, owners: ['root@acme.example'] });
 }
 
-/** The vault's options, and the database cut over under them, as a deployment has it before any call: the prepared vault returned has settled nothing. */
-async function preparedCutOver() {
+/**
+ * The vault's options, as a deployment has them before any call: the prepared vault returned has settled nothing.
+ * Opened once as the suite opens one, so that the places a test makes after are sealed under its keys (`places`).
+ */
+async function preparedVault() {
   const resolved = config();
   const options = { sealThrough: sealed, heldOutside: nothingHeld };
-  await cutOver(openVault(db.vault, await prepareVault(resolved, options)), db.vault);
+  await openLocalVault(db.vault, resolved, options);
   return prepareVault(resolved, options);
 }
 
 test('a first call answers while another first call waits on its own I/O', async () => {
-  const prepared = await preparedCutOver();
+  const prepared = await preparedVault();
   const stuck = await neverAnswers();
   // The isolate's first call: its database never answers, so whatever it starts never settles.
   const first = openVault(stuck.database, prepared).access(ROOT).catch(() => null);
@@ -83,9 +86,9 @@ test('a first call answers while another first call waits on its own I/O', async
 });
 
 test("a first key operation answers while another waits on its own key check", async () => {
+  const prepared = await preparedVault();
   const placed = await places(db.owner);
   const [one, two] = [await placed.secret(placed.dev), await placed.secret(placed.dev)];
-  const prepared = await preparedCutOver();
   // Settled once already: what is left to share is the key check before the first key operation.
   assert.equal((await openVault(db.vault, prepared).access(ROOT)).status, 'active');
   const stuck = await neverAnswers();

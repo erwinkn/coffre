@@ -273,13 +273,11 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
   // deadline (T198). Warmed, the same took 10 ms, 51 ms and 218 ms (756 calls), and answers at most 2.15 s: that the
   // difference is planning is inferred from this comparison, not measured apart. An isolate of its
   // own makes that call, by a token no credential has: it writes nothing, and the measured isolate's map stays as its
-  // row set it. It knows the log cut over, so that its call is the one statement on this connection and reads nothing
-  // on the vault's pool: one that checked the cutover there, every cell at once, left the matrices unfinished on CI.
+  // row set it.
   const connect = async () => {
     await client.unsafe('SELECT 1');
     const at = Date.now();
     const prepared = await prepareVault(CONFIG, LOG_015);
-    prepared.cutover = true;
     const warming = openVault(db.vault, prepared, createDatabase(client));
     await warming.useNamedMany!({
       tokenHash: randomBytes(32).toString('base64'), place: { project: 'warm', environment: 'dev' }, keys: ['WARM'],
