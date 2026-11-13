@@ -14,7 +14,7 @@ import { type Database, type Queryable } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import { resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
-import { objectKey, roleObject, roleRef, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
+import { objectKey, refOf as inputRef, roleObject, roleRef, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
 import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
@@ -319,7 +319,7 @@ export function refOf(op: Op & { ref?: Ref }, key: string, seen: Map<string, Ref
     seen.set(key, op.ref);
   } else if (op.op === 'genesis') {
     const value = op.value;
-    const ref: Ref = value.kind === 'principal' ? { kind: 'principal', id: value.principal } : value.kind === 'roles' || value.kind === 'policy' || value.kind === 'proxy-reserved' ? { kind: value.kind, id: 'instance' } : { kind: value.kind, id: value.id };
+    const ref: Ref = inputRef(value);
     assert.equal(objectKey(ref), key);
     seen.set(key, ref);
   }

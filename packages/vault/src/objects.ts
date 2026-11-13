@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto';
 
 import { isCredentialScope, type CallerKind, type CredentialScope, type InstanceRole, type Scope } from '@coffre/core/access';
 import { TOMBSTONE } from '@coffre/core/schemas';
-import type { BindingColumns, ConnectionColumns, CredentialColumns, EnvironmentColumns, SecretColumns, VersionColumns } from '@coffre/core/vault';
+import { settingsOf, type BindingColumns, type ConnectionColumns, type CredentialColumns, type EnvironmentColumns, type LogKeyColumns, type SecretColumns, type SettingsColumns, type VersionColumns } from '@coffre/core/vault';
 import { storedRole } from '@coffre/db/grants';
 
-import type { BindingInput, ConnectionInput, CredentialInput, EnvironmentInput, Input, InputGrant, Nature, PolicyInput, PrincipalInput, SecretInput } from './inputs.ts';
+import type { BindingInput, ConnectionInput, CredentialInput, EnvironmentInput, Input, InputGrant, LogKeyInput, Nature, PolicyInput, PrincipalInput, SecretInput, SettingsInput } from './inputs.ts';
 
 /**
  * The tables' rows as the objects of the 0.15 log (inputs.ts): what a seal
@@ -147,4 +147,28 @@ export function configObject(value: string): Input {
  */
 export function policyObject(row: { bulkCount: number; bulkWindowMs: number }): PolicyInput {
   return { kind: 'policy', bulk: { count: Number(row.bulkCount), windowMs: Number(row.bulkWindowMs) } };
+}
+
+/** The settings' columns (`settings`), as the app reads them too (@coffre/core/vault). */
+export type { SettingsColumns };
+
+/**
+ * The instance's settings: its one row of `settings`, read as the app shows it (`settingsOf`), filed
+ * under `SETTINGS_REF`. The seal covers the scope as the row's typed columns make it, so a filter's kind and its list
+ * are under it alike.
+ */
+export function settingsObject(row: SettingsColumns): SettingsInput {
+  return { kind: 'settings', ...settingsOf(row) };
+}
+
+/** A log key's columns (`log_keys`) (@coffre/core/vault). */
+export type { LogKeyColumns };
+
+/**
+ * A key the app or the vault wrote its entries under: its row of `log_keys`, filed under its own id. A
+ * holder that is neither is no object the vault seals (null), as the table's CHECK holds it.
+ */
+export function logKeyObject(row: LogKeyColumns): LogKeyInput | null {
+  if (row.holder !== 'app' && row.holder !== 'vault') return null;
+  return { kind: 'log-key', id: row.keyId, holder: row.holder, retired: row.retired };
 }

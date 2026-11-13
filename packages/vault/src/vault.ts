@@ -149,6 +149,10 @@ import {
   type WrapInput,
   type AdmitReadInput,
   type AdmitReadOutcome,
+  type CheckInput,
+  type CheckOutcome,
+  type NoteInput,
+  type NoteOutcome,
   type RecordRefusalInput,
   type RecordRefusalOutcome,
   type AdmitWriteInput,
@@ -3739,6 +3743,8 @@ class VaultService implements Vault {
   async prepare(input: PrepareInput): Promise<Outcome<Prepared>> {
     const log015 = this.#prepared.log015;
     if (typeof input?.actor !== 'string' || input.actor.length === 0 || !Array.isArray(input.changes)) throw new Error('prepare takes an actor and the changes the app will write');
+    // No event is signed yet: a call that asks for some is refused, never answered without them.
+    if (input.events !== undefined && input.events.length > 0) throw new Error('this vault prepares no event: prepared events are not built yet');
     try {
       // Each object's newest change, its MAC checked (T190), in one statement: `app_change` holds the row to that
       // change's seal, which SQL compares and cannot authenticate. An unarchive reads the write its archive ended too.
@@ -3972,6 +3978,18 @@ class VaultService implements Vault {
     const number = await callRefusal(this.#db, refusalRow(log015.mac, opened, now));
     await log015.sealThrough(number);
     return { recorded: true, number: number.toString() };
+  }
+
+  /**
+   * An event no change records (`Vault.note`; its row is packages/vault/src/note.ts's). Not built, and nothing calls it.
+   */
+  async note(_input: NoteInput): Promise<NoteOutcome> {
+    throw new Error('this vault notes no event: note is not built yet');
+  }
+
+  /** The audit page's check (`Vault.check`). Not built, and nothing calls it. */
+  async check(_input: CheckInput): Promise<CheckOutcome> {
+    throw new Error('this vault checks no audit page: check is not built yet');
   }
 
   /** Whether this vault serves `writeKeys`: its key-encryption key in memory (a key service's intent and outcome are records of their own, PR 7). */

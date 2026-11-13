@@ -174,10 +174,10 @@ function routeDecision(keys: SealKeys, replayed: Replayed, view: UseView, reques
 }
 
 /**
- * The ops of the log's own changes, which change no input: a retention's (PR 7), the cutover's (PR 9), a rotation's
- * (T168); and a refusal's record (T179 PR 6), of its request's own object.
+ * The ops of the log's own changes, which change no input: a retention's, the cutover's, a rotation's; a refusal's
+ * record, of its request's own object; and an event (note.ts), of its own, which only the audit projector reads.
  */
-const LOGS_OWN = new Set(['retention', 'cutover', 'rotate', ...REFUSALS]);
+const LOGS_OWN = new Set(['retention', 'cutover', 'rotate', 'event', ...REFUSALS]);
 
 function change(keys: SealKeys, replayed: Replayed, entry: LoggedChange): void {
   const key = objectKey(entry.ref);

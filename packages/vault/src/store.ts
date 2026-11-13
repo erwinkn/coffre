@@ -981,8 +981,9 @@ export async function loggedRows(db: Queryable): Promise<{
 /**
  * The kinds whose objects the change path reads: the vault's own, an
  * environment's, a key's (its reference's end), the roles' and the policy's.
+ * Not the settings or a log key: no change of either is made yet.
  */
-export type ReadKind = Exclude<Kind, 'credential' | 'connection' | 'binding'>;
+export type ReadKind = Exclude<Kind, 'credential' | 'connection' | 'binding' | 'settings' | 'log-key'>;
 
 /** `archived`: a key's rows read even while it is archived, as its unarchive would make them (an end's check, T134). */
 export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, { archived = false } = {}): Promise<HeldObject> {

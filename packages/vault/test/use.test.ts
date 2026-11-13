@@ -17,7 +17,7 @@ import { createDatabase, type Database, type Queryable } from '@coffre/db';
 import { newestAccess } from '@coffre/db/grants';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
-import { postgresClient, postgresSession } from '@coffre/db/connect';
+import { postgresClient, postgresSession, type PostgresClient } from '@coffre/db/connect';
 
 import { periodOf, phaseOf } from '../src/bulk.ts';
 import { logOrigin } from '../src/checkpointer.ts';
@@ -27,10 +27,11 @@ import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { authentic, entryMac } from '../src/log-entry.ts';
 import { purposeCode } from '../src/log-replay.ts';
 import { logStore } from '../src/log-store.ts';
+import { eventRow } from '../src/note.ts';
 import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, useMany, type UsePath } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
-import { HOT_URL, openTestDatabase, OWNER_URL, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
+import { APP_URL, HOT_URL, openTestDatabase, OWNER_URL, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, DAY, emptyLog, failing, FENCE, genesis, heldKeks, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, timingOut, until, useDatabases, world } from './use-world.ts';
 import { resolveVaultConfig } from '../src/config.ts';
 import { environments, grants, projects, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
@@ -110,6 +111,48 @@ test("the checkpointer seals real uses: each entry's MAC is the log's, over the 
   assert.ok(!refused.signed && /MAC does not hold/.test(refused.failures.join()), refused.failures.join());
   assert.ok(alarms.some((alarm) => /MAC does not hold/.test(alarm)), alarms.join());
 });
+
+// A row whose MAC does not hold, written by the app's login: it calls both functions that write the chain's
+// rows, `app_change` since 0.15 and `log_events` since 0.16, with a MAC the database cannot check, the key being the
+// vault's. The tick refuses the row and alerts, as it does any tampering, and seals nothing past it until it is
+// repaired; a use still answers. `log_events` adds no way to stop the seal that `app_change` does not have.
+const forgeries: [string, (app: PostgresClient, environmentId: string) => Promise<unknown>][] = [
+  ['log_events', (app) => {
+    const places = { projectId: null, environmentId: null, secretId: null, versionId: null };
+    const row = eventRow(MAC, Date.now(), { id: randomUUID(), requestId: null, action: 'project.create', allowed: true, code: null, actor: ROOT, subject: null, places, credential: null, operationId: null, sourceIp: null, detail: {} }, 'app');
+    return app.unsafe('SELECT log_events(ARRAY[$1]::text[], ARRAY[$2::bigint], ARRAY[$3]::text[], ARRAY[$4]::text[], ARRAY[$5::bytea])', [row.requestId, row.at, row.actor, row.payload, randomBytes(16)]);
+  }],
+  ['app_change', async (app, environmentId) => {
+    const [held] = await app.unsafe<{ seal: Buffer }[]>('SELECT seal FROM environments WHERE id = $1', [environmentId]);
+    const payload = JSON.stringify({ op: 'environment.rename', ref: { kind: 'environment', id: environmentId }, slug: 'renamed' });
+    return app.unsafe('SELECT app_change($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL)', ['environment', environmentId, randomUUID(), Date.now(), ROOT, payload, held!.seal, randomBytes(held!.seal.length), randomBytes(16)]);
+  }],
+];
+for (const [through, forge] of forgeries) {
+  test(`a row whose MAC does not hold, written by the app's login through ${through}, stops the seal and alerts, as tampering does; a use still answers`, async () => {
+    for (const table of ['log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+    const w = await world();
+    const id = await w.key();
+    const fork = await environment(w, 'fork');
+    const alarms: string[] = [];
+    const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [SIGNING_KEY], memory: variableMemory(), record: (alarm) => void alarms.push(alarm.message) });
+    const sealed = await cp.tick();
+    assert.ok(sealed.signed, sealed.failures.join('; '));
+    const app = postgresSession(APP_URL);
+    try {
+      await forge(app, fork);
+    } finally {
+      await app.end();
+    }
+    for (const _ of [1, 2]) {
+      const refused = await cp.tick();
+      assert.ok(!refused.signed && /MAC does not hold/.test(refused.failures.join()), refused.failures.join());
+    }
+    assert.ok(alarms.some((alarm) => /MAC does not hold/.test(alarm)), alarms.join());
+    const used = heard(await (await isolate()).use(ask(w, id)));
+    assert.ok(used.ok, JSON.stringify(used));
+  });
+}
 
 test("a use the rules refuse is logged as its request all the same, and refused by the replay too; one that would take its principal's lock is decided first, and logs nothing (review r2 of D153)", async () => {
   const w = await world();

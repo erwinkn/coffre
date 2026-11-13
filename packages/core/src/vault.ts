@@ -25,6 +25,7 @@ export {
   readEdits,
   roleOf,
   settingsFrom,
+  settingsOf,
   view,
   type GrantFacts,
   type MemberFacts,
@@ -372,6 +373,58 @@ export interface Vault {
    * stands for the 0.14 deny entry today's path writes. Only with `about().writes` or `about().admits`.
    */
   recordRefusal?(input: RecordRefusalInput): Promise<RecordRefusalOutcome>;
+  /**
+   * An event no object's change records: a refusal the app decides alone
+   * (a route the caller may not use, an unknown environment), a refused sign-in. The chain has one signer, the vault,
+   * so the app hands the event over here, and `audit_log` takes no entry of it. The vault's own events are the same
+   * rows, written by the vault without this call: a refusal it decides (a read with no grant, a key write or a member
+   * add refused, a token's issue or a binding's change refused), in the call that decided it, and the beat's finding.
+   *
+   * The vault writes one row of `log_changes` (`NotedRow`, through `log_events`, migration 0086): its `request_id` the
+   * event's own `id`, its object `log_object('event', id)`, which no other row's is, so that no reader that asks an
+   * object's newest change ever takes it; no seal; the payload `NotePayload` as canonical JSON; the vault's MAC over
+   * the same columns as a change's. One statement under the fence shared, as a use's, and it answers once the row is written, without waiting for its
+   * seal, as a use does: an event changes no state a later request relies on, and `waitSealed`'s wait is for changes. A retry of the same event finds its row and answers its number: the same id, object, actor
+   * and payload (its `at` and MAC are each signing's own); a different event under an id already written is refused,
+   * `invalid`, and nothing is written. The payload's `author` is `app` for every event this takes: who decided is
+   * never the app's to say (`NotePayload`).
+   *
+   * An input the app may not send is the app's bug, so it throws, as a malformed `operationId` does, and nothing is
+   * written: any field not of `NoteInput`'s type; a field `NoteInput` does not have (`author` among them); an `id` that
+   * is not a lowercase UUID (the derived forms, `findingEventId`'s `system:…`, are the vault's alone, so the app can
+   * never take one before the beat writes it); the actor `system:vault`. `prepare` throws the same for a call whose `events` hold one, its changes
+   * unsigned. Only the decision above, an id already written with another event, comes back as `invalid`.
+   *
+   *   Ada, a Developer, PUTs /api/settings: 403, the app's decision (`requireInstance`)
+   *     note({ id: '<a UUID the app drew>', requestId: '<request id>', action: 'settings.change', allowed: false,
+   *            code: 'requires_instance_admin', actor: 'user:ada@acme.example', … })
+   *     → log_changes { request_id: '<id>', object: log_object('event', '<id>'), seal: NULL,
+   *                     payload: '{"action":"settings.change","allowed":false,"code":"requires_instance_admin",…}' }
+   *
+   * An event that must commit with the request's own writes (a project made, a passkey added: no change records them)
+   * is not noted but prepared: `prepare` signs it beside the changes (`PrepareInput.events`) and the app's transaction
+   * commits it with `log_events`, the same row. An event of no request that may be written twice (the beat's finding)
+   * has an id its writer derives from what it reports, in its one pinned form (`findingEventId`,
+   * packages/vault/src/note.ts), so that a beat that runs twice writes it once.
+   *
+   * Action names and detail fields are `audit_log`'s, unchanged (its `action` and `metadata`), so that the projector
+   * and the pages need no new vocabulary. Not built: the vault throws, and nothing calls it.
+   */
+  note?(input: NoteInput): Promise<NoteOutcome>;
+  /**
+   * The audit page's check, flat: one call a visit, whose cost does
+   * not grow with the log. The app hands in what the page shows, the rows of `audit_events` it read and the row of
+   * `audit_cursor`; the vault reads, in one round trip, the newest signed checkpoint, the entries of both chains above
+   * it (at most `CHECK_TAIL_ENTRIES`, packages/vault/src/audit-check.ts) and the frozen log's last row with the anchor
+   * (packages/vault/src/upgrade.ts). It asks the signer first, then reads: the signer answers the pair the database must
+   * have reached (the one it remembers, or the one before while that row's write is pending, so `behind` does not
+   * flap during a checkpoint's write) and, in the same answer, whether it is sealing. It writes nothing. The beat runs the same check, with no rows, and writes a
+   * finding, an event of the vault's (`findingEventId`), when it is not `ok`. The full walk is the Verify button's and `coffre verify log`'s, never this.
+   * Retention's floor, for this check and the full walk alike, is read from the sealed retention change, never from
+   * `audit_cursor.reads_from`, which no MAC covers (`AuditCursorRow`). What each row's MAC and the cursor's cover is
+   * the audit projector's to say. Not built: the vault throws, and nothing calls it.
+   */
+  check?(input: CheckInput): Promise<CheckOutcome>;
   /**
    * Answers once the log's entry `number` is sealed in a signed checkpoint
    * and, if a witness is configured, witnessed or past its 2 s (R51): what a
@@ -878,6 +931,164 @@ export type RecordRefusalInput = { ticket: string };
 /** The record written and sealed, its number; or `expired`, the ticket's time past, nothing written. */
 export type RecordRefusalOutcome = { recorded: true; number: string } | { recorded: false; why: 'expired' };
 
+/**
+ * Where an event happened: the four places an `audit_log` entry names (`project_id`, `environment_id`, `secret_id`,
+ * `secret_version_id`), each a uuid or null, which the projector lists it under (`audit_events`, `audit_event_places`).
+ */
+export type NotePlaces = { projectId: string | null; environmentId: string | null; secretId: string | null; versionId: string | null };
+
+/**
+ * An event as the app hands it to `note`: its fields are an `audit_log` entry's, by today's
+ * names. `detail` is the entry's `metadata`, the same keys for the same action, which the API returns as `metadata`.
+ */
+export type NoteInput = {
+  /** `audit_log`'s action names: `secret.read`, `token.exchange`, `access.check`, … */
+  action: string;
+  /** The entry's decision: `allow` is true, `deny` false. */
+  allowed: boolean;
+  /** A refusal's reason, as `audit_log.code` holds it; null for none. */
+  code: string | null;
+  /**
+   * Who acted: `user:<email>`, `token:<id>` or `system:<name>`, as `audit_log.actor`: the caller, also for a refusal
+   * the vault decides. `system:vault` is the vault's own (the beat's finding), and `note` and `prepare` refuse it from
+   * the app (they throw, as `Vault.note` says). Who decided is not read from it: it is the payload's `author` (`NotePayload`).
+   */
+  actor: string;
+  /** The member it is about (`audit_log.subject_principal`); null for none. */
+  subject: string | null;
+  places: NotePlaces;
+  /** The credential the request came in on, its id; null for none (a sign-in refused before any). */
+  credential: string | null;
+  /**
+   * The event's own id: the row's `request_id` and the key of its object, unique in `log_changes`. Opaque: its writer
+   * draws it, a UUID, and sends it unchanged if it sends the event again. Only a writer of no request that may run
+   * twice (the beat) derives it from what it reports, in the form pinned for it (`findingEventId`,
+   * packages/vault/src/note.ts), so that it writes the event once.
+   */
+  id: string;
+  /** The app's request id the event is part of (`audit_log.request_id`); null for one of no request. */
+  requestId: string | null;
+  /** The action the request is part of (`audit_log.operation_id`); null for none. */
+  operationId: string | null;
+  /** The caller's address as the app saw it (`audit_log.source_ip`); null for none. */
+  sourceIp: string | null;
+  /** `audit_log.metadata`'s object for this action, as today's entry holds it. */
+  detail: Readonly<Record<string, unknown>>;
+};
+
+/**
+ * Who decided an event (`audit_events.author`): `app` for every event `note` and `prepare` take from the app, `vault`
+ * for the vault's own (a refusal it decided, the beat's finding).
+ */
+export type EventAuthor = 'app' | 'vault';
+
+/**
+ * What `note` writes in the row's `payload`: the input but its `actor` and `id`, which are the row's own columns,
+ * with `op: 'event'`, the object it is filed under (`ref`), as every payload of the chain names its object, and
+ * `author`, who decided it. The app never sends `author`: `NoteInput` has none, and `note` and `prepare` refuse
+ * an input that carries one; the vault sets it, under its MAC, and the projector reads it, never the actor. Canonical
+ * JSON (keys sorted, undefined left out), so that a retry sends the same bytes.
+ *
+ *   {"action":"settings.change","allowed":false,"author":"app","code":"requires_instance_admin","credential":"<id>",
+ *    "detail":{…},"op":"event","operationId":null,"places":{"environmentId":null,…},"ref":{"id":"<id>","kind":"event"},
+ *    "requestId":"<request id>","sourceIp":null,"subject":null}
+ */
+export type NotePayload = Omit<NoteInput, 'actor' | 'id'> & { author: EventAuthor; op: 'event'; ref: { kind: 'event'; id: string } };
+
+/**
+ * The row `note` writes in `log_changes`, and `prepare` signs for the app to commit (`log_events`, migration 0086,
+ * every event of the request in one call, `SELECT log_events(ids, ats, actors, payloads, macs)`), every column but its
+ * number: `requestId` is the event's
+ * `id`, `object` `log_object('event', id)`, `payload` a `NotePayload`, `seal` always null, `mac` the vault's over `at`,
+ * `requestId`, `object`, `actor`, `payload` and `seal`, as a change's (`entryMac`, tree `changes`), in base64. `at` is
+ * the vault's clock when it signed: as a prepared change's, the app commits it within its request, and the
+ * checkpointer refuses an entry older than its pair by more than `FRESH_MS` (10 minutes) as a replay.
+ */
+export type NotedRow = { at: number; requestId: string; object: string; actor: string; payload: string; seal: null; mac: string };
+
+/**
+ * A row of `audit_events` as the app read it, for `check`: every column, numbers that may pass 2^53 in decimal, the
+ * MAC in base64. The vault holds it to its MAC.
+ */
+export type AuditEventRow = {
+  at: number;
+  number: string;
+  /** 14: `audit_log`; 15: `log_changes`; 16: `log_uses`. */
+  log: 14 | 15 | 16;
+  author: EventAuthor;
+  action: string;
+  shown: boolean;
+  allowed: boolean;
+  code: string | null;
+  actor: string;
+  subject: string | null;
+  credential: string | null;
+  project: string | null;
+  environment: string | null;
+  secret: string | null;
+  version: string | null;
+  /** Every place it is listed at (`audit_event_places`), sorted. */
+  places: string[];
+  requestId: string | null;
+  operationId: string | null;
+  related: string | null;
+  sourceIp: string | null;
+  detail: string;
+  mac: string;
+};
+
+/**
+ * The row of `audit_cursor` as the app read it, for `check`: how far the projector has listed the chains (`through`,
+ * `pair`, `at`) and the frozen log (`oldFrom`, `oldHash` in hex), numbers in decimal, the MAC in base64. The MAC is
+ * null only on the row the migration inserts, before the projector's first batch: every number `0` and `oldHash` 32
+ * zero bytes. `check` takes a null MAC with exactly those values, as nothing listed yet, and answers `broken` for any
+ * other cursor without one. Its MAC covers these five, in this order. Not `reads_from`, retention's floor, which
+ * carries no MAC: an app-DB writer could raise it and have entries still due pass as retired, so the floor is always
+ * the sealed retention change's, never that column's.
+ */
+export type AuditCursorRow = {
+  through: string;
+  pair: string;
+  at: number;
+  oldFrom: string;
+  oldHash: string;
+  mac: string | null;
+};
+
+/** What the page hands `check`: the rows it shows, in its order, and the cursor it read with them. */
+export type CheckInput = { events: readonly AuditEventRow[]; cursor: AuditCursorRow };
+
+/**
+ * What a visit's check says, the first that holds of:
+ *
+ * - `broken`: something a key vouches for does not hold: an entry above the checkpoint, a row shown (`forged`), the
+ *   cursor, or the frozen log's last row against the anchor. `reason` says which.
+ * - `behind`: the database's newest checkpoint is below the pair its signer answers outside the database
+ *   (`Vault.check`: the one it remembers, or the one before while that row's write is pending): a checkpoint deleted,
+ *   or an older one served.
+ * - `late`: the checkpointer is late, and nothing past the checkpoint is said verified: more entries above the newest
+ *   checkpoint than `CHECK_TAIL_ENTRIES`, or the signer says, in the same answer as its pair, that it is not sealing
+ *   (`sealing`: its last tick did not end well in the last 5 s; no answer within 2 s counts as not). A
+ *   checkpointer dead for an hour with 10 unsealed uses under it is `late`, where the count alone would say `ok`.
+ * - `ok`: none of these.
+ *
+ * `listedThrough` is how far the projection goes, the cursor's signed time (`at`) and number (`through`), which the
+ * page shows ("listed through 14:05:03") beside `checkpoint`, the newest signed one; a cursor behind it is shown, not
+ * `broken`. `forged`, the positions in `events` of the rows whose MAC does not hold.
+ */
+export type CheckState = 'ok' | 'behind' | 'late' | 'broken';
+
+export type CheckOutcome = Outcome<{
+  state: CheckState;
+  reason: string | null;
+  checkpoint: { number: string; at: number } | null;
+  listedThrough: { number: string; at: number };
+  forged: number[];
+}>;
+
+/** The event written, its number in the chain, before any checkpoint seals it; `invalid` for another event's id. */
+export type NoteOutcome = Outcome<{ number: string }>;
+
 /** The add `admitRead` prepared, as it answered it. */
 /** The ticket `admitRead` answered, and what confirmed the add (`Confirmation`), which its change records: the add is a fresh check's. */
 export type AdmitWriteInput = { ticket: string; confirmed?: Confirmation | null };
@@ -892,6 +1103,22 @@ export type PrepareInput = {
   /** Who makes the changes, as their entries name them: `user:…`, `token:…`, or the app's own (`coffre`). */
   actor: string;
   changes: ObjectChange[];
+  /**
+   * Events that must commit with the request's changes, or alone in its transaction: what has no change
+   * of its own (a project made or moved, a passkey added, an identity linked), whose record is its event. The vault
+   * signs each (`NotedRow`, in `Prepared.events`, in this order); the app commits them all in one `log_events` call,
+   * after the request's changes (`app_change`, `app_change_strict`), in its transaction's last statement. The locks
+   * come in one order: the change lock, the issue lock and the fence as each change takes them, then `log_events`, the
+   * transaction's last lock. After, never before: `log_events` takes the fence shared, and a change takes the issue
+   * lock before the fence (IssueBeforeFence, formal/WriteLocks.tla), so a fence held before a change's issue lock
+   * closes a wait cycle with the barrier. A transaction of events alone takes the fence alone and commits. The
+   * `log_events` call answers a number per event, in this order: a new event's ascending, a retried one's the number it
+   * was first written under. An id twice in one call is a retry of its first; twice with another event, the whole call
+   * is refused and writes nothing; `prepare` signs each event asked, duplicates included, and leaves that to
+   * `log_events`. Each event's `actor` is its own. Not built: the vault prepares no event, and refuses a call that asks
+   * for some.
+   */
+  events?: NoteInput[];
 };
 
 /**
@@ -917,7 +1144,11 @@ export type PreparedChange = {
   restores: string | null;
 };
 
-export type Prepared = { changes: PreparedChange[] };
+export type Prepared = {
+  changes: PreparedChange[];
+  /** The events asked for (`PrepareInput.events`), each signed, in the order asked; absent when none was. */
+  events?: NotedRow[];
+};
 
 /**
  * A sign-in through a trust binding (`Vault.signIn`). Times in ms since the
@@ -1710,6 +1941,26 @@ export type Settings = {
   /** Where people set up service accounts themselves (`ServiceSetting` in @coffre/core/access), projects by id. */
   serviceAccounts: ServiceSetting;
 };
+
+/**
+ * The instance's settings as their row of `settings` holds them: one `Filter` of the scope as two typed
+ * columns, its kind and its list: projects by id (`uuid[]`), environments by slug (`text[]`), the list empty for
+ * `all`. `seal` is the vault's over its object (`settings`/`instance`), null until the vault's upgrade step seals the
+ * row the migration filled.
+ *
+ *   { projects: 'all', environments: { except: ['prod'] } }
+ *     → service_accounts_projects 'all', service_accounts_project_ids '{}',
+ *       service_accounts_environments 'except', service_accounts_environment_slugs '{prod}'
+ */
+export type SettingsColumns = {
+  serviceAccountsProjects: string;
+  serviceAccountsProjectIds: readonly string[];
+  serviceAccountsEnvironments: string;
+  serviceAccountsEnvironmentSlugs: readonly string[];
+};
+
+/** A key the app or the vault wrote its log entries under, as its row of `log_keys` holds it: its id is `deriveLogKey`'s, `<holder>:<16 hex>`. */
+export type LogKeyColumns = { holder: string; keyId: string; retired: boolean };
 
 export type SetSettingsInput = Correlation & Through & {
   actor: string;

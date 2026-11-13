@@ -9,13 +9,14 @@ import {
   isScope,
   ROLES,
   UNWRITTEN_FORK_MS,
+  type Filter,
   type InstanceRole,
   type Policy,
   type Role,
   type RoleDefinition,
   type Scope,
 } from './access.ts';
-import { accessRevision, type Access, type Grant, type Settings } from './vault.ts';
+import { accessRevision, type Access, type Grant, type Settings, type SettingsColumns } from './vault.ts';
 
 // What the vault answers about a principal, the policy and its settings,
 // from the rows that hold them: the vault, once it has checked each row by
@@ -210,6 +211,22 @@ export const DEFAULT_SETTINGS: Settings = { serviceAccounts: EVERYWHERE };
 
 /** The settings when the log has some, but none the vault wrote within reach: people set up no service accounts. */
 export const CLOSED_SETTINGS: Settings = { serviceAccounts: { projects: { only: [] }, environments: 'all' } };
+
+/**
+ * The settings their row of `settings` holds (`SettingsColumns`), unchecked: the vault holds the row to its
+ * seal, the app shows it. A filter whose kind is none of the three reaches nothing (`{ only: [] }`), as
+ * `CLOSED_SETTINGS` does.
+ */
+export function settingsOf(row: SettingsColumns): Settings {
+  return { serviceAccounts: { projects: filterOf(row.serviceAccountsProjects, row.serviceAccountsProjectIds), environments: filterOf(row.serviceAccountsEnvironments, row.serviceAccountsEnvironmentSlugs) } };
+}
+
+function filterOf(kind: string, list: readonly string[]): Filter {
+  if (kind === 'all') return 'all';
+  if (kind === 'only') return { only: [...list] };
+  if (kind === 'except') return { except: [...list] };
+  return { only: [] };
+}
 
 /** The settings the newest `settings.change` says, from its metadata: none for no entry, the default; closed for one that does not hold. */
 export function settingsFrom(metadata: string | null): Settings {
