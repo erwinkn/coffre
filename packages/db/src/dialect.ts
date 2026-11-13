@@ -124,6 +124,15 @@ export function isUnreachable(error: unknown): boolean {
 /** Postgres's codes for a statement that gave up waiting: on a lock (55P03), or past its own bound (57014). */
 const GAVE_UP = new Set(['55P03', '57014']);
 
+/** Postgres's code for a statement that gave up waiting, when `error` or a cause of it is one. */
+export function gaveUpCode(error: unknown): string | undefined {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    const { code } = cause as { code?: unknown };
+    if (typeof code === 'string' && GAVE_UP.has(code)) return code;
+  }
+  return undefined;
+}
+
 /**
  * Whether a statement gave up waiting, on a lock or past its bound: the
  * database too busy to answer in time, or a transaction held too long,
@@ -131,10 +140,7 @@ const GAVE_UP = new Set(['55P03', '57014']);
  * decision, which waits on it).
  */
 export function gaveUp(error: unknown): boolean {
-  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
-    if (GAVE_UP.has((cause as { code?: unknown }).code as string)) return true;
-  }
-  return false;
+  return gaveUpCode(error) !== undefined;
 }
 
 /**

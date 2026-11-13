@@ -26,9 +26,10 @@ export type Entry = {
   /** What it mentions, `secret:<id>` and the like: one `log_index` row each. */
   objects: readonly string[];
   /**
-   * A change's rows, each by its name (`nameOf`), with the MAC it replaced
-   * and the MAC it wrote, hex, null for none. The signer takes the entry
-   * only if each `was` is what its mirror holds.
+   * A change's rows, each by its name (`nameOf`): those it wrote, with the
+   * MAC it replaced and the MAC it wrote, hex, null for none; and those its
+   * decision read and left, with the MAC they carried, twice. The signer
+   * holds each `was` to its mirror.
    */
   rows: readonly { row: string; was: string | null; now: string | null }[];
   /** What else the action's page shows. Never a value. */

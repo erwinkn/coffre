@@ -185,6 +185,41 @@ test('a change that replaced a MAC the mirror does not hold is false history', a
   assert.deepEqual(await run(), [{ found: 'rewritten', of: named(bo) }]);
 });
 
+test('a change decided on a row put back for it is false history, though the row is withdrawn before any check', async () => {
+  /** `by`, an Owner, makes `id` one. */
+  const promote = async (by: string, id: string) => {
+    const read = { caller: part(principals, sql`id = ${by}`), found: part(principals, sql`id = ${id}`) };
+    const result = await change(vault, {
+      read,
+      decide: ({ caller: [owner], found: [was] }) =>
+        owner?.role !== 'owner' ? { refused: 'not_owner' } : { writes: [put(principals, principal(id, { role: 'owner' }), was!)], entry: { kept: true, action: 'member.role', actor: by, credential: null, request: null, ip: null, objects: [`principal:${id}`], detail: {} }, answer: null },
+    });
+    return 'refused' in result ? result.refused : 'done';
+  };
+  await member(ada, 'owner');
+  await member(bo, 'owner');
+  await member(cy, 'member');
+  const [owning] = await vault.owner.select().from(principals).where(sql`id = ${bo}`);
+  await member(bo, 'member');
+  const [demoted] = await vault.owner.select().from(principals).where(sql`id = ${bo}`);
+  assert.deepEqual(await run(), []);
+  assert.equal(await promote(bo, cy), 'not_owner');
+  // An Owner's change names the row it was decided on, and the signer finds nothing in it.
+  assert.equal(await promote(ada, cy), 'done');
+  await member(cy, 'member');
+  assert.deepEqual(await run(), []);
+
+  // The writer puts Bo's Owner row back, Bo promotes Cy, and the writer withdraws the row: all between two runs.
+  await vault.owner.update(principals).set(owning!).where(sql`id = ${bo}`);
+  assert.equal(await promote(bo, cy), 'done');
+  await vault.owner.update(principals).set(demoted!).where(sql`id = ${bo}`);
+  // A quick run finds it, with no row to compare: the entry says which row Bo's change was decided on.
+  assert.deepEqual(await run(false), [{ found: 'rewritten', of: named(bo) }]);
+  // The mirror stays what the entries wrote: Bo a Member, as his row is again, and Cy an Owner.
+  assert.deepEqual(await run(), []);
+  assert.deepEqual([store.kept.get(`row ${named(bo)}`), store.kept.get(`row ${named(cy)}`) === store.kept.get(`row ${named(bo)}`)], [demoted!.mac.toString('hex'), false]);
+});
+
 test('the full run finds a row put back, one deleted, one written behind the vault, and a log cut short; a quick run looks at none', async () => {
   await member(bo, 'owner');
   const [{ mac }] = (await rowsOf<{ mac: string }>(vault.owner, sql`SELECT encode(mac, 'hex') AS mac FROM principals`)) as [{ mac: string }];

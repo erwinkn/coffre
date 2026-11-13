@@ -5,7 +5,8 @@
 //   quint run log.qnt --main logSound --mbt --n-traces 1000 --max-samples 1000 --max-steps 30 --out-itf 'l{seq}.itf.json'
 //   node --conditions=coffre:source test/replay-log.ts l*.itf.json
 //
-// The model's row is a member's: MAC 0 is no row, 1 a Member, 2 an Owner. Its
+// and `--main logTwo`, with two rows, where a change to one is decided on the
+// other too. The model's row is a member's: MAC 0 is no row, 1 a Member, 2 an Owner. Its
 // clock ticks the signer's window, a minute. After each step the log and the
 // signer's mirror must be the model's; what waits must be what waits in the
 // model, less what the signer refused, which it removes and the model
@@ -35,7 +36,7 @@ import { principal, user } from './world.ts';
 
 type State = {
   actionTaken: string;
-  nondetPicks: { row?: string; v?: number; sent?: boolean; n?: number; full?: boolean };
+  nondetPicks: { row?: string; v?: number; read?: string; sent?: boolean; n?: number; full?: boolean };
   db: { rows: Record<string, number>; pending: number[]; log: number[] };
   signer: { mirror: Record<string, number>; expected: number[]; moving: number[]; alert: boolean };
   world: { attacks: number; slow: boolean };
@@ -65,7 +66,7 @@ try {
     let snapshot: Snapshot | undefined;
 
     for (const [i, state] of states.entries()) {
-      const { row, v, n, full } = state.nondetPicks;
+      const { row, v, read, n, full } = state.nondetPicks;
       const before = states[i - 1];
       const where = `${file} step ${i}: ${state.actionTaken || 'the writer'}`;
       if (state.actionTaken === 'commit') {
@@ -78,7 +79,8 @@ try {
           ({ hash } = entry);
         } else {
           const result = await change(vault, {
-            read: { found: part(principals, eq(principals.id, id)) },
+            // Decided on the row the model read, too: found, its entry names it; missing, it cannot.
+            read: { found: part(principals, eq(principals.id, id)), beside: part(principals, read === row ? sql`false` : eq(principals.id, user(read!))) },
             decide: ({ found: [row] }) => ({
               writes: [v === 0 ? drop(principals, row!) : put(principals, principal(id, { role: ROLES[v!]! }), row ?? null)],
               entry: { kept: true, action: 'member.role', actor: null, credential: null, request: null, ip: null, objects: [`principal:${id}`], detail: {} },

@@ -7,7 +7,7 @@ import { bindings, credentials, dismissedKeys, environments, grants, identities,
 import { sql, type SQL } from 'drizzle-orm';
 
 import { callerOf, type Caller, type Workloads } from './caller.ts';
-import type { Refusal, Running } from './change.ts';
+import { bounded, type Refusal, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, sealedBy, type Row, type Sealed, type Wire } from './rows.ts';
 
@@ -318,6 +318,8 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
   const fresh = read.filter((item) => (memory.logged.get(mark(item))?.at ?? -Infinity) + LOGGED_MS <= at);
   if (fresh.length > 0) {
     const ids = [...new Set(fresh.map((item) => item.held.id))];
+    // Dated now, as its write is sent, not when the use was decided: opening its values, through a key service, takes as long as it takes.
+    const written = vault.now();
     const entry = pending(vault.keys[0]!, {
       kept: false,
       action: 'secret.read',
@@ -327,13 +329,13 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
       ip: ask.ip,
       objects: [...new Set([`project:${project.id}`, `environment:${environment.id}`, `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...fresh.flatMap((item) => [`secret:${item.held.id}`, `secret:${item.asked.id}`])])],
       detail: { purpose: ask.purpose, ...(ask.credential === null ? {} : { credential: ask.credential }), keys: fresh.map(({ key, held, asked, version }) => ({ key, secret: held.id, version: version.version, ...(asked === held ? {} : { through: asked.id }) })) },
-    }, at, []);
-    const time = sql`${new Date(at).toISOString()}::timestamptz`;
-    const since = sql`${new Date(at - vault.cap.windowMs).toISOString()}::timestamptz`;
+    }, written, []);
+    const time = sql`${new Date(written).toISOString()}::timestamptz`;
+    const since = sql`${new Date(written - vault.cap.windowMs).toISOString()}::timestamptz`;
     // The cap counts the keys this principal was given in the window, these among them. Uses side by side each count
     // without the other's, so it can be overshot by what is in flight (D217). The rows are written in one order,
     // `ORDER BY id`, by every use: two that write the same ones wait in line, never on each other.
-    const [{ ok }] = await rowsOf<{ ok: boolean }>(vault.db, sql`
+    const [{ ok }] = await bounded<{ ok: boolean }>(vault.db, sql`
       WITH ids AS (SELECT id FROM unnest(${sql.param(ids)}::uuid[]) AS id),
         cap AS (SELECT (SELECT count(*) FROM exposures WHERE principal = ${caller.principal} AND seen_at > ${since} AND secret_id NOT IN (SELECT id FROM ids)) + ${ids.length} <= ${vault.cap.count} AS ok),
         seen AS (INSERT INTO exposures (principal, secret_id, seen_at) SELECT ${caller.principal}, id, ${time} FROM ids, cap WHERE cap.ok ORDER BY id ON CONFLICT (principal, secret_id) DO UPDATE SET seen_at = greatest(exposures.seen_at, excluded.seen_at)),
@@ -341,8 +343,9 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
       SELECT ok FROM cap`) as [{ ok: boolean }];
     if (!ok) return { refused: 'bulk_limit' };
     vault.wake(entry.hash);
-    for (const item of fresh) memory.logged.set(mark(item), { at });
-    keep(memory.logged, mark(fresh[0]!), { at }, at - LOGGED_MS);
+    // Remembered by the entry's own date: the minute a use is logged once in starts there.
+    for (const item of fresh) memory.logged.set(mark(item), { at: written });
+    keep(memory.logged, mark(fresh[0]!), { at: written }, at - LOGGED_MS);
   }
 
   // When the credential was last used: its row's own statement, since it shares one with nothing a change may lock.
