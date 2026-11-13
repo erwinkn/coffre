@@ -272,28 +272,6 @@ export function secretRef(
 }
 
 /**
- * The current value of every live secret in an environment, or of one
- * secret. What reveals decrypt.
- */
-export async function currentEnvelopes(
-  db: Queryable,
-  environmentId: string,
-  secretId?: string,
-): Promise<{ secretId: string; secretVersionId: string; key: string; version: number; envelope: Envelope }[]> {
-  return (await environmentSecrets(db, environmentId, secretId === undefined ? undefined : { secretId })).flatMap((secret) =>
-    secret.archivedAt === null && secret.current !== null
-      ? [{
-          secretId: secret.id,
-          secretVersionId: secret.current.id,
-          key: secret.key,
-          version: secret.current.version,
-          envelope: secret.current.envelope,
-        }]
-      : [],
-  );
-}
-
-/**
  * Secret names, who last changed them and when, never values; and the days
  * a value may go unchanged before it is flagged (`rotateAfterDays`). A
  * fork lists what it inherits too, each key under `parent`, and `parents`
