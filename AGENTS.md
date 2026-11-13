@@ -21,6 +21,7 @@ this file only adds what they leave implicit.
 - Before adding a branch for an edge case, try to make the case impossible.
 - Comments say what the code does now, in plain sentences. No worker, task, decision or review IDs, no history.
 - Prefer the PR that deletes.
+- A PR title and a commit subject say what changes. IDs go in the PR body only.
 
 ## Packages
 
@@ -45,7 +46,9 @@ Running a package's `.ts` with plain `node` outside those scripts needs the flag
 **Toolchain.** Node and pnpm are pinned by `.node-version` and `packageManager`.
 Node 24 is the floor for workspace source: the CLI, dev IdP, migrations and the
 `node --test` suite run `*.ts` directly with native type-stripping. The published CLI
-and client target Node 20.
+and client target Node 20. A toolchain move picks the latest release of the latest major
+(Node: its latest LTS line) with no known vulnerability and at least 7 days old.
+In a Cursor Cloud Agent, see `.cursor/README.md` (Docker restart, Node on PATH).
 
 **Database.** Postgres runs in Docker via `docker compose` on **:55432** (owner
 `coffre_owner`; restricted logins `coffre_runtime`, `coffre_vault_runtime` and
@@ -91,6 +94,9 @@ renaming a table or a column, NOT NULL on an existing column, a narrower
 check or type, a unique or foreign key the old code may break) ships one
 release after the code stops using it. `pnpm test:compat` holds the newest
 release to this checkout's schema; it is off until 0.16.0 is tagged.
+0.16.0 is a clean break: one offline upgrade from 0.15.0. Until the 0.16.0 tag a migration
+may drop, rename and tighten, and keeps no overload, column or branch for 0.15.0's code.
+Expand-then-contract applies again from 0.16.0 on.
 
 **Transactions and the vault.** No app database transaction may stay open across
 any vault call. Prepare outside SQL; commit app writes and their audit together,
@@ -123,19 +129,20 @@ by its author on its exact head, rebased on `main`. It runs what the diff agains
 runs everything, and before a tag a local `--full` is the growth sweep's only run.
 When `main` moves after a gate and the rebase is mechanical (clean, or conflicting only
 in a migration or `CHANGELOG.md`, `git range-diff` showing the patch unchanged), run
-it again; any other conflict gets a scoped review too.
+it again and put the summary and the `git range-diff` verdict on the PR; any other
+conflict gets a scoped review too.
 Node's conformance is off at the gates until 0.16.1: Node is built and typechecked, nothing more.
 
 - `./scripts/test-suite.sh --files <file>...` runs some test files (`--serial` first:
-  one at a time). `pnpm test` runs the files that hold a statement's work, pages or
-  locks to a budget (`packages/*/test/*.alone.ts`) one at a time, since another test's
-  migration in the same cluster would upset them. Needs Postgres.
+  one at a time). `pnpm test` runs lint and the whole suite, then the files that hold a
+  statement's work, pages or locks to a budget (`packages/*/test/*.alone.ts`) one at a
+  time, since another test's migration in the same cluster would upset them. Needs Postgres.
 - `pnpm test:matrices` outlasts its own timeout unsharded, so `pnpm test` leaves it out:
   `COFFRE_TEST_SHARD=<k>/<n>` runs one shard. A new matrix passes its cases through `shardOf`.
 - `pnpm test:schema` runs `coffre setup`, which makes cluster-wide roles, against
   disposable clusters (`scripts/test-setup.sh`): never on the shared Postgres.
-- `pnpm typecheck` reads the `dist/` the build writes, so on a fresh checkout it fails
-  until `pnpm build` has run.
+- `dev/deployment` and the examples typecheck against the `dist/` the build writes, so
+  on a fresh checkout `pnpm typecheck` fails until `pnpm build` has run.
 - `pnpm sweep:growth` logs every plan: run it on a Postgres of your own only.
 - A change to the locks a flow takes, or what it re-checks under the head, changes
   `formal/Coffre.tla` too (`pnpm formal`). A change to the access rules, the vault's
@@ -145,8 +152,10 @@ Node's conformance is off at the gates until 0.16.1: Node is built and typecheck
   with `--dir`: each example has its own `pnpm-workspace.yaml` (as `init` output
   needs), so pnpm would treat it as a separate, uninstalled workspace.
 
-**Dependencies.** `pnpm install` enforces exact pins, no install script that
-`allowBuilds` does not name, and a 7-day `minimumReleaseAge`, which `check:pins` refuses to shorten. Add deps with
+**Dependencies.** `pnpm install` enforces exact pins, no install script
+unless `allowBuilds` names it `true` with its reason (none is), and a 7-day
+`minimumReleaseAge`, which `check:pins` refuses to shorten. Each example carries the same
+age gate, with `@coffre/*` exempt so a coffre fix is not held back a week. Add deps with
 `pnpm run add:dep` (`--save-exact`), never a bare `pnpm add` (it writes caret ranges).
 `@coffre/ui`'s peers (React, react-dom, TanStack Router, Start, Query, its SSR
 integration, and Vite) are exact pins too, and each example pins them at exactly those
