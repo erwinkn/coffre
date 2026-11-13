@@ -1,8 +1,10 @@
+import type { Generation } from '../recipe.ts';
+
 /** The changes of keys and their values (`packages/vault/src/ops/secrets.ts`). */
 export type SecretsChanges = SecretWrite;
 
 export type SecretsAnswers = {
-  /** The version each key is at now. */
+  /** The version each key given a value is at now. */
   'secret.write': { versions: Record<string, number> };
 };
 
@@ -10,16 +12,36 @@ export type SecretsAnswers = {
 export type Nature = 'secret' | 'sensitive' | 'plain';
 
 /**
- * Write values in one environment: each key's next version, the key made
- * if the environment has none by that name. 1 to 2,000 keys, each once and
- * named as a key is (`[A-Za-z_][A-Za-z0-9_]{0,127}`); a value is
- * well-formed text with no NUL, 64 Ki characters at most, and the values
- * of one write 1 MiB of UTF-8 in all. Past any of these the call is a
- * fault, not a refusal: the app checks them first.
+ * What a write does to one key of its environment, one thing or several:
+ *
+ * - `value`, with its `nature`: the key's next version, the key made if
+ *   the environment has none by that name. `generated` says how a client
+ *   made it (`@coffre/core/recipe`), for a secret or a sensitive value: a
+ *   key pair's recipe names its two keys, each written in the same write
+ *   with the same recipe and pair.
+ * - `archived`: true archives the key, false brings it back. A key is
+ *   archived with no value written.
+ * - `folder`: the folder it is listed in, null for none.
+ *
+ * A key that gets no value is one the environment holds.
+ */
+export type KeyWrite = { key: string; archived?: boolean; folder?: string | null } & (
+  | { value: string; nature: Nature; generated?: Generation }
+  | { value?: undefined; nature?: undefined; generated?: undefined }
+);
+
+/**
+ * Write keys in one environment, all of them or none. 1 to 2,000 keys,
+ * each once and named as a key is (`[A-Za-z_][A-Za-z0-9_]{0,127}`); a value
+ * is well-formed text with no NUL, 64 Ki characters at most, and the values
+ * of one write 1 MiB of UTF-8 in all; a recipe is one `recipeProblem`
+ * takes; a folder 1 to 64 characters, with no slash or control character
+ * and no space at either end. Past any of these the call is a fault, not a
+ * refusal: the app checks them first.
  */
 export type SecretWrite = {
   op: 'secret.write';
   project: string;
   environment: string;
-  values: { key: string; value: string; nature: Nature }[];
+  keys: KeyWrite[];
 };

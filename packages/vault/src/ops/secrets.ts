@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Answers, Presented, SecretsChanges, SecretWrite } from '@coffre/core/vault';
+import type { Permission } from '@coffre/core/access';
+import { formatRecipe, parseRecipe, recipeProblem } from '@coffre/core/recipe';
+import type { Answers, KeyWrite, Presented, SecretsChanges, SecretWrite } from '@coffre/core/vault';
 import { environments, projects, secrets } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
@@ -17,33 +19,99 @@ const MOST_KEYS = 2000;
 const WRITE_BYTES = 1024 * 1024;
 const NATURES = ['secret', 'sensitive', 'plain'];
 
-/** A value as text Postgres stores and a reader gets back as written: no NUL, no half of a surrogate pair. */
-const written = (value: unknown): value is string => typeof value === 'string' && value.length <= VALUE_LENGTH && !value.includes('\0') && Buffer.from(value).toString() === value;
+/** Text as Postgres stores it and a reader gets it back: no NUL, no half of a surrogate pair. */
+const wellFormed = (value: string) => !value.includes('\0') && Buffer.from(value).toString() === value;
+const written = (value: unknown): value is string => typeof value === 'string' && value.length <= VALUE_LENGTH && wellFormed(value);
+/** A folder as the table's check has it (`secrets_folder_check`): 1 to 64 characters, no slash or control character, no space at either end. */
+const filed = (value: unknown) => value === null || (typeof value === 'string' && wellFormed(value) && [...value].length >= 1 && [...value].length <= 64 && !/[/\p{Cc}]/u.test(value) && !value.startsWith(' ') && !value.endsWith(' '));
+
+const wrong = () => new TypeError('a write names a place by its slugs and 1 to 2,000 keys, each once, with a value of well-formed text, 64 Ki characters at most and 1 MiB in all, its nature and how it was generated, an archiving or a folder');
+
+/** One key's item, on its own: what it does, with what it says it with. */
+function valid(item: KeyWrite): boolean {
+  if (typeof item !== 'object' || item === null || typeof item.key !== 'string' || !KEY.test(item.key)) return false;
+  if (!(item.archived === undefined || typeof item.archived === 'boolean') || !(item.folder === undefined || filed(item.folder))) return false;
+  // A key is archived with no value written over it.
+  if (item.value !== undefined) return written(item.value) && NATURES.includes(item.nature) && item.archived !== true;
+  return item.nature === undefined && item.generated === undefined && (item.archived !== undefined || item.folder !== undefined);
+}
+
+type Made = { recipe: string; pairId: string | null; pairHalf: 'private' | 'public' | null };
 
 /**
- * Values written in one environment (docs/design/0.16.md, "A change"):
- * each key's next version, and the key itself where the environment has
- * none by that name. Whoever holds `secret.write` there, on a credential
- * that reaches it. A key that was a reference holds its own value from
- * here on. All of them, or none.
+ * How each generated value was made, as its version stores it: its recipe,
+ * canonical, and for a key pair the id its two halves share, drawn here,
+ * and which half it is. A pair is written whole: each of its two keys
+ * names both, with the same recipe. A plain value is never generated.
+ */
+function generations(items: readonly KeyWrite[]): Map<string, Made> {
+  const byKey = new Map(items.map((item) => [item.key, item]));
+  const recipeOf = (generated: unknown) => {
+    const recipe = (generated as { recipe?: unknown } | null | undefined)?.recipe;
+    return typeof recipe === 'string' && recipeProblem(recipe) === null ? formatRecipe(parseRecipe(recipe)) : null;
+  };
+  const pairs = new Map<string, string>();
+  const made = new Map<string, Made>();
+  for (const { key, generated, nature } of items) {
+    if (generated === undefined) continue;
+    const recipe = recipeOf(generated);
+    if (recipe === null || nature === 'plain') throw wrong();
+    const { pair } = generated;
+    if (parseRecipe(recipe).kind !== 'pair') {
+      if (pair !== undefined) throw wrong();
+      made.set(key, { recipe, pairId: null, pairHalf: null });
+      continue;
+    }
+    if (typeof pair !== 'object' || pair === null || pair.private === pair.public || (key !== pair.private && key !== pair.public)) throw wrong();
+    const theirs = byKey.get(key === pair.private ? pair.public : pair.private)?.generated;
+    if (recipeOf(theirs) !== recipe || theirs?.pair?.private !== pair.private || theirs.pair.public !== pair.public) throw wrong();
+    const names = `${pair.private}/${pair.public}`;
+    if (!pairs.has(names)) pairs.set(names, randomUUID());
+    made.set(key, { recipe, pairId: pairs.get(names)!, pairHalf: key === pair.private ? 'private' : 'public' });
+  }
+  return made;
+}
+
+/**
+ * Keys written in one environment (docs/design/0.16.md, "A change"), all
+ * of them or none, one line each in one entry: a key's next version, the
+ * key made where the environment has none by that name; its archiving, or
+ * its return; the folder it is listed in. A value or a folder takes
+ * `secret.write` there, an archiving or a return `secret.archive`, and a
+ * return `secret.read` too: the value serves again, and only whoever
+ * could read it brings it back. A key that was a reference holds its own
+ * value from a write on.
  */
 function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation<Parts, Answers['secret.write']> {
   const shown = presented(input);
-  const { project: projectSlug, environment: environmentSlug, values } = input;
-  const items = Array.isArray(values) ? [...values] : [];
-  const valid = items.every((item) => typeof item === 'object' && item !== null && typeof item.key === 'string' && KEY.test(item.key) && written(item.value) && NATURES.includes(item.nature));
-  if (!text(projectSlug) || !text(environmentSlug) || items.length === 0 || items.length > MOST_KEYS || !valid || new Set(items.map((item) => item.key)).size !== items.length || items.reduce((sum, item) => sum + Buffer.byteLength(item.value), 0) > WRITE_BYTES) {
-    throw new TypeError('a write names a place by its slugs and 1 to 2,000 keys, each once, with its nature and a value of well-formed text, 64 Ki characters at most, and 1 MiB in all');
+  const { project: projectSlug, environment: environmentSlug, keys } = input;
+  const items = Array.isArray(keys) ? [...keys] : [];
+  if (!text(projectSlug) || !text(environmentSlug) || items.length === 0 || items.length > MOST_KEYS || !items.every(valid) || new Set(items.map((item) => item.key)).size !== items.length
+    || items.reduce((sum, item) => sum + Buffer.byteLength(item.value ?? ''), 0) > WRITE_BYTES) {
+    throw wrong();
   }
+  const made = generations(items);
   // A key the environment does not have yet is made under an id drawn here: a decision draws nothing.
   const fresh = new Map(items.map((item) => [item.key, { secret: randomUUID(), version: randomUUID() }]));
+  const needs = new Set<Permission>(items.flatMap((item): Permission[] => [
+    ...(item.value !== undefined || item.folder !== undefined ? ['secret.write' as const] : []),
+    ...(item.archived === undefined ? [] : ['secret.archive' as const]),
+    ...(item.archived === false ? ['secret.read' as const] : []),
+  ]));
+  const archiving = items.flatMap((item) => (item.archived === true ? [item.key] : []));
 
   const project = sql`(SELECT p.id FROM projects p WHERE p.slug = ${projectSlug})`;
+  const here = sql`(SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${environmentSlug})`;
+  // The references that read a key this write archives, from wherever they are held.
+  const readers = sql`(SELECT r.id FROM secrets r WHERE r.source_id IN (SELECT s.id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(archiving)}::text[])))`;
   const read = {
     ...callerParts(shown.token, project),
     project: part(projects, sql`${projects.slug} = ${projectSlug}`),
     environment: part(environments, sql`${environments.projectId} = ${project} AND ${environments.slug} = ${environmentSlug}`),
-    secret: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} = (SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${environmentSlug}) AND ${secrets.key} = ANY(${sql.param(items.map((item) => item.key))}::text[])`),
+    secret: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} = ${here} AND ${secrets.key} = ANY(${sql.param(items.map((item) => item.key))}::text[])`),
+    reader: part(secrets, sql`${secrets.id} IN ${readers}`),
+    readerPlace: part(environments, sql`${environments.id} IN (SELECT r.environment_id FROM secrets r WHERE r.id IN ${readers})`),
+    readerProject: part(projects, sql`${projects.id} IN (SELECT r.project_id FROM secrets r WHERE r.id IN ${readers})`),
   };
   /** The place asked about, as far as it is there. */
   const placed = (seen: Seen<typeof read>) => {
@@ -67,28 +135,53 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       if (caller.workload?.narrowed === true) return { refused: 'narrowed' };
       const { place, environment } = placed(seen);
       // The same answer whether the place is not there, is someone's personal config, or is not theirs to write in: none says which.
-      if (place === undefined || environment === undefined || environment.owner !== null || !caller.may('secret.write', environment)) return { refused: 'no_access' };
+      if (place === undefined || environment === undefined || environment.owner !== null || ![...needs].every((permission) => caller.may(permission, environment))) return { refused: 'no_access' };
 
       const now = new Date(at);
       const held = new Map(seen.secret.map((row) => [row.key, row]));
-      // An archived key keeps its name: it is brought back, not written over.
-      if (items.some((item) => held.get(item.key)?.archivedAt != null)) return { refused: 'archived' };
       const writes: Write[] = [];
       const sealed: Value[] = [];
-      const keys = items.map(({ key, value, nature }) => {
+      const lines: Record<string, unknown>[] = [];
+      const leaves = new Map<string, Fresh<typeof secrets>>();
+      for (const { key, value, nature, archived, folder } of items) {
         const was = held.get(key) ?? null;
+        // Only a value makes a key: there is nothing else to archive or file.
+        if (was === null && value === undefined) return { refused: 'unknown_key' };
+        // An archived key keeps its name: it is brought back, not written over.
+        if (was?.archivedAt != null && value !== undefined && archived !== false) return { refused: 'archived' };
         const ids = fresh.get(key)!;
-        const { mac: _, ...kept } = was ?? { mac: null, id: ids.secret, projectId: place.id, environmentId: environment.id, key, createdAt: now, versions: 0, archivedAt: null, folder: null };
-        const version = kept.versions + 1;
-        const secret: Fresh<typeof secrets> = { ...kept, versions: version, currentVersion: version, updatedAt: now, sourceId: null };
+        const { mac: _, ...kept } = was ?? { mac: null, id: ids.secret, projectId: place.id, environmentId: environment.id, key, createdAt: now, updatedAt: now, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: null };
+        let secret: Fresh<typeof secrets> = { ...kept, archivedAt: archived === undefined ? kept.archivedAt : archived ? (kept.archivedAt ?? now) : null, folder: folder === undefined ? kept.folder : folder };
+        const line: Record<string, unknown> = { key, secret: secret.id };
+        if (value !== undefined) {
+          const version = kept.versions + 1;
+          const how = made.get(key);
+          secret = { ...secret, versions: version, currentVersion: version, updatedAt: now, sourceId: null };
+          sealed.push({
+            version: { id: ids.version, secretId: secret.id, version, createdAt: now, createdBy: caller.principal, recipe: how?.recipe ?? null, pairId: how?.pairId ?? null, pairHalf: how?.pairHalf ?? null, plaintext: nature === 'plain' ? value : null, sensitive: nature === 'sensitive' },
+            text: Buffer.from(value),
+          });
+          // `source`: the secret it referred to until now.
+          Object.assign(line, { version, nature }, how === undefined ? {} : { recipe: how.recipe }, how?.pairId == null ? {} : { pair: how.pairId, half: how.pairHalf }, was === null ? { made: true } : {}, was?.sourceId == null ? {} : { source: was.sourceId });
+        }
+        if ((secret.archivedAt === null) !== (kept.archivedAt === null)) line.archived = secret.archivedAt !== null;
+        if (secret.folder !== kept.folder) line.folder = secret.folder;
+        // What changes nothing writes nothing: archived already, filed where it is.
+        if (Object.keys(line).length === 2) continue;
         writes.push(put(secrets, secret, was));
-        sealed.push({
-          version: { id: ids.version, secretId: secret.id, version, createdAt: now, createdBy: caller.principal, recipe: null, pairId: null, pairHalf: null, plaintext: nature === 'plain' ? value : null, sensitive: nature === 'sensitive' },
-          text: Buffer.from(value),
-        });
-        // `source`: the secret it referred to until now.
-        return { key, secret: secret.id, version, nature, ...(was === null ? { made: true } : {}), ...(was?.sourceId == null ? {} : { source: was.sourceId }) };
+        leaves.set(secret.id, secret);
+        lines.push(line);
+      }
+      // A key archived stops every reference that reads it, so it is not while one does: one held in a key, an
+      // environment or a project archived or deleted reads nothing. A place not found is not known to be one.
+      const gone = (row: { slug: string; archivedAt: Date | null } | undefined) => row !== undefined && !live(row);
+      const stopped = new Set(lines.filter((line) => line.archived === true).map((line) => line.secret));
+      const reads = seen.reader.some((row) => {
+        const reader = leaves.get(row.id) ?? row;
+        return reader.sourceId !== null && stopped.has(reader.sourceId) && reader.archivedAt === null
+          && !gone(seen.readerPlace.find((where) => where.id === reader.environmentId)) && !gone(seen.readerProject.find((whose) => whose.id === reader.projectId));
       });
+      if (reads) return { refused: 'referenced' };
       return {
         writes,
         values: sealed,
@@ -99,10 +192,10 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           credential: caller.credential.id,
           request: shown.request,
           ip: shown.ip,
-          objects: [`project:${place.id}`, `environment:${environment.id}`, `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...keys.map((item) => `secret:${item.secret}`)],
-          detail: { keys },
+          objects: [`project:${place.id}`, `environment:${environment.id}`, `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...lines.map((line) => `secret:${line.secret as string}`)],
+          detail: { keys: lines },
         },
-        answer: { versions: Object.fromEntries(keys.map((item) => [item.key, item.version])) },
+        answer: { versions: Object.fromEntries(lines.flatMap((line) => (line.version === undefined ? [] : [[line.key, line.version]]))) },
       };
     },
   };
