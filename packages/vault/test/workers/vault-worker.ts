@@ -41,7 +41,7 @@ export default {
     const [project, environment] = path.split('/') as [string, string];
     const token = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(bearer))).toString('hex');
     try {
-      const answer = await env.VAULT.use({ token, proof: null, request: crypto.randomUUID(), ip: request.headers.get('cf-connecting-ip'), project, environment, mine: false, keys, purpose: 'reveal', credential: null });
+      const answer = await env.VAULT.use({ token, proof: null, request: crypto.randomUUID(), ip: request.headers.get('cf-connecting-ip'), project, environment, mine: false, keys, purpose: 'reveal', upstream: null });
       return Response.json(answer, { status: !('refused' in answer) ? 200 : answer.refused === 'unauthenticated' ? 401 : 403 });
     } catch (error) {
       // Its code too, as the app reads it on the other side of the binding (`isUnavailable`).

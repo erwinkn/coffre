@@ -10,7 +10,7 @@ import { sql } from 'drizzle-orm';
 
 import { resolveVaultConfig } from '../src/config.ts';
 import { openLocalVault } from '../src/local.ts';
-import { prepareVault } from '../src/vault.ts';
+import { openVault, prepareVault } from '../src/vault.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
 import { credential, environment, grant, principal, project, role, rows, secret, tokenOf, user, value, write } from './world.ts';
 
@@ -28,14 +28,14 @@ beforeEach(async () => {
   world.woken.length = 0;
   const market = project('market');
   const prod = environment(market, 'prod');
-  const url = await value(world, secret(prod, 'DATABASE_URL'), 'postgres://market');
+  const url = await value(world, secret(prod, 'DATABASE_URL'), 'postgres://märkt:p€ss@db');
   await write(world, ...rows('projects', market), ...rows('environments', prod), ...rows('secrets', url, secret(prod, 'EMPTY')), ...rows('roles', role(false, 'viewer', ['secret.read'])),
     ...rows('principals', principal(ada)), ...rows('grants', grant(ada, 'viewer', { project: market })), ...rows('credentials', credential('ada-cli', ada)));
   world.woken.length = 0;
 });
 
 const reveal = (label: string, keys: string[] | null, more: Partial<UseInput> = {}): UseInput =>
-  ({ token: tokenOf(label).toString('hex'), proof: null, request: 'req-1', ip: '192.0.2.7', project: 'market', environment: 'prod', mine: false, keys, purpose: 'reveal', credential: null, ...more });
+  ({ token: tokenOf(label).toString('hex'), proof: null, request: 'req-1', ip: '192.0.2.7', project: 'market', environment: 'prod', mine: false, keys, purpose: 'reveal', upstream: null, ...more });
 const waiting = async () => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM log_pending`))[0]!.n;
 
 test('a reveal answers who asked and each key, its value as text or why not, and tells the signer of its entry', async () => {
@@ -45,7 +45,7 @@ test('a reveal answers who asked and each key, its value as text or why not, and
   assert.equal(answer.principal, ada);
   assert.equal(answer.workload, null);
   assert.deepEqual(answer.values.map((item) => ('refused' in item ? item : { key: item.key, version: item.version, sensitive: item.sensitive, value: item.value })), [
-    { key: 'DATABASE_URL', version: 1, sensitive: false, value: 'postgres://market' },
+    { key: 'DATABASE_URL', version: 1, sensitive: false, value: 'postgres://märkt:p€ss@db' },
     { key: 'EMPTY', refused: 'no_value' },
     { key: 'NOPE', refused: 'unknown_key' },
   ]);
@@ -62,18 +62,47 @@ test('a refusal is an answer, which wrote nothing and woke nobody', async () => 
 });
 
 test('a use that is not what the contract says is a fault, before any read', async () => {
-  const bad: Partial<Record<keyof UseInput, unknown>>[] = [{ token: 'ada-cli' }, { token: tokenOf('ada-cli').toString('hex').toUpperCase() }, { project: 7 }, { mine: 'yes' }, { keys: ['A', 7] }, { keys: Array.from({ length: 1001 }, (_, i) => `K${i}`) }, { ip: 7 }];
+  const sparse = ['A'];
+  sparse[2] = 'C';
+  const bad: Partial<Record<keyof UseInput, unknown>>[] = [
+    { token: 'ada-cli' }, { token: tokenOf('ada-cli').toString('hex').toUpperCase() }, { project: 7 }, { environment: 'x'.repeat(257) }, { mine: 'yes' },
+    { keys: ['A', 7] }, { keys: sparse }, { keys: 'A' }, { keys: Array.from({ length: 1001 }, (_, i) => `K${i}`) }, { keys: ['A\0'] },
+    { purpose: 'copy' }, { purpose: 7 }, { ip: 7 }, { request: {} }, { proof: 7 }, { upstream: 'x'.repeat(257) },
+  ];
   for (const more of bad) {
     await assert.rejects(vault.use(reveal('ada-cli', ['DATABASE_URL'], more as Partial<UseInput>)), TypeError, JSON.stringify(more).slice(0, 60));
   }
+  // Over a Workers binding nothing goes through JSON, and an array arrives with its holes.
+  await assert.rejects(openVault(world.db, prepared, { wake: world.wake, now: world.now }).use(reveal('ada-cli', sparse)), TypeError);
   assert.equal(world.woken.length, 0);
+  // What the contract does say: every key, and a thousand of them.
+  const every = await vault.use(reveal('ada-cli', null));
+  assert.ok(!('refused' in every) && every.values.map(({ key }) => key).join() === 'DATABASE_URL,EMPTY', JSON.stringify(every));
+  const thousand = await vault.use(reveal('ada-cli', Array.from({ length: 1000 }, (_, i) => `K${i}`)));
+  assert.ok(!('refused' in thousand) && thousand.values.length === 1000);
+});
+
+test('the vault runs as its configuration says: its memory, and what it takes of workloads', () => {
+  const config = { kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') }, owners: ['root@acme.example'] };
+  const plain = prepareVault(resolveVaultConfig(config));
+  assert.deepEqual([plain.memory.seconds, plain.workloads, plain.cap], [2, null, { count: 1000, windowMs: 15 * 60_000 }]);
+  const told = prepareVault(resolveVaultConfig({ ...config, memorySeconds: 0, workloads: { useOnly: true }, bulkLimit: { count: 5, windowMinutes: 1 } }));
+  assert.deepEqual([told.memory.seconds, told.workloads, told.cap], [0, { noReads: false, useOnly: true }, { count: 5, windowMs: 60_000 }]);
+  for (const memorySeconds of [-1, 601, Number.NaN]) assert.throws(() => resolveVaultConfig({ ...config, memorySeconds }), /memorySeconds/);
 });
 
 test('a wake-up that fails costs the caller nothing: the entry is written, and the value given', async (t) => {
-  t.mock.method(console, 'error', () => {});
-  const deaf = openLocalVault(world.db, prepared, { now: world.now, wake: () => { throw new Error('no signer'); } });
+  const logged = t.mock.method(console, 'error', () => {});
   const before = await waiting();
-  const answer = await deaf.use(reveal('ada-cli', ['DATABASE_URL']));
-  assert.ok(!('refused' in answer) && 'value' in answer.values[0]! && answer.values[0].value === 'postgres://market', JSON.stringify(answer));
-  assert.equal(await waiting(), before + 1);
+  const wakes: (() => void | Promise<void>)[] = [() => { throw new Error('no signer'); }, () => Promise.reject(new Error('the signer is down'))];
+  for (const [index, wake] of wakes.entries()) {
+    prepared.memory.logged.clear();
+    const deaf = openLocalVault(world.db, prepared, { now: world.now, wake });
+    const answer = await deaf.use(reveal('ada-cli', ['DATABASE_URL']));
+    assert.ok(!('refused' in answer) && 'value' in answer.values[0]! && answer.values[0].value === 'postgres://märkt:p€ss@db', JSON.stringify(answer));
+    assert.equal(await waiting(), before + index + 1);
+  }
+  // The rejection is caught, not left for the process: said in the log, once each.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(logged.mock.callCount(), 2);
 });

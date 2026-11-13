@@ -16,7 +16,7 @@ import { openTestVault } from './database.ts';
 // socket (src/node.ts).
 
 /** A use by a token nobody holds: a call that reads and is refused. */
-const NOBODY = { token: '00'.repeat(32), proof: null, request: null, ip: null, project: 'market', environment: 'prod', mine: false, keys: null, purpose: 'reveal' as const, credential: null };
+const NOBODY = { token: '00'.repeat(32), proof: null, request: null, ip: null, project: 'market', environment: 'prod', mine: false, keys: null, purpose: 'reveal' as const, upstream: null };
 
 /** One call as `connectVault` makes it, on `agent`: the socket it went on. */
 function call(socket: string, agent: Agent): Promise<Socket> {

@@ -24,6 +24,8 @@ export const MAX_BULK_WINDOW_MINUTES = 24 * 60;
 
 /** How long an instance remembers a use's rows unless told (`memorySeconds`): what a revocation waits at most. */
 export const DEFAULT_MEMORY_SECONDS = 2;
+/** The longest it remembers them: up to a thousand reads, each with the values it opened, sit in an isolate for as long. */
+export const MAX_MEMORY_SECONDS = 600;
 
 /** The vault as it runs: keys decoded, emails checked. */
 export type ResolvedVaultConfig = {
@@ -84,8 +86,8 @@ export type VaultConfig = {
   bulkLimit?: { count: number; windowMinutes: number };
   /**
    * How long an instance remembers the rows a use read, and the values it
-   * opened from them, in seconds: 2 unless set, 0 for never, an hour at
-   * most. A revocation takes effect within it (docs/design/0.16.md, "The
+   * opened from them, in seconds: 2 unless set, 0 for never, ten minutes
+   * at most. A revocation takes effect within it (docs/design/0.16.md, "The
    * vault's short memory").
    */
   memorySeconds?: number;
@@ -230,7 +232,7 @@ function checkBulkLimit({ count, windowMinutes }: { count: number; windowMinutes
 }
 
 function checkMemory(seconds: number): number {
-  if (!(seconds >= 0 && seconds <= 3600)) throw new Error('memorySeconds is 0 to 3600 seconds');
+  if (!(seconds >= 0 && seconds <= MAX_MEMORY_SECONDS)) throw new Error(`memorySeconds is 0 to ${MAX_MEMORY_SECONDS} seconds`);
   return seconds;
 }
 

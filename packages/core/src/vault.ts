@@ -36,7 +36,7 @@ export interface Vault {
  * who is asking: the vault finds the credential by its token.
  */
 export type Presented = {
-  /** The SHA-256 of the token the request presented, hex. */
+  /** The SHA-256 of the token the request presented, in lowercase hex. */
   token: string;
   /**
    * The thumbprint of the key that signed the request's proof (RFC 9449),
@@ -60,9 +60,19 @@ export type UseInput = Presented & {
   keys: string[] | null;
   /** `use`: the value is used for the caller, by the credential proxy, and never handed back. Any other hands it back. */
   purpose: Purpose;
-  /** The upstream credential the values are used for, by its name in the deployment's configuration. Null for none. */
-  credential: string | null;
+  /** The upstream credential the values are used for, by its name in the deployment's configuration (`stripe`). Null for none. */
+  upstream: string | null;
 };
+
+/**
+ * Why someone reads, which the log shows. `use`: the credential proxy
+ * injects the value into a request and never hands it back. Every other
+ * hands the value back: `reveal` of one key, `run` of an environment,
+ * `compare` of a guess in a dry run, `expose` by the proxy to a person's
+ * own app.
+ */
+export const PURPOSES = ['reveal', 'run', 'compare', 'expose', 'use'] as const;
+export type Purpose = (typeof PURPOSES)[number];
 
 /** One key's value, or why this caller is not given it. `secret` is where the value is held: a reference's source. */
 export type UsedValue = { key: string; secret: string; version: number; sensitive: boolean; value: string } | { key: string; refused: string };
@@ -213,14 +223,6 @@ export type WrappedKey = { kekProvider: string; kekId: string; kekVersion: strin
  * entry that carries the vault's MAC, at `seq`.
  */
 export type KeyChecks = { current: { kekProvider: string; kekId: string }; checks: (WrappedKey & { seq: number })[] };
-
-/**
- * Why someone reads: shown in the log, and the same rules apply to each. A
- * fork reads to `copy`. The credential proxy reads to `use`, a value it
- * injects into a request and never hands back, or to `expose`, one it
- * gives a person's app as it is (`coffre run`'s plan).
- */
-export type Purpose = 'reveal' | 'run' | 'compare' | 'copy' | 'use' | 'expose';
 
 /**
  * Whether a read hands values back to whoever asked, which a person never

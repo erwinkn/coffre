@@ -1,4 +1,4 @@
-import type { UseInput, Vault } from '@coffre/core/vault';
+import { PURPOSES, type UseInput, type Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
 import type { ResolvedVaultConfig } from './config.ts';
@@ -23,28 +23,38 @@ export function prepareVault(config: ResolvedVaultConfig): PreparedVault {
 }
 
 /** What one call runs on: its database, and the signer's wake-up, which never holds the reply nor fails the call. */
-export type VaultOptions = { wake(hash: Buffer): void; now?(): number };
+export type VaultOptions = { wake(hash: Buffer): void | Promise<void>; now?(): number };
 
 const TOKEN = /^[0-9a-f]{64}$/;
-const text = (value: unknown): value is string => typeof value === 'string';
+/** A name as the vault takes one: text of a bounded length, which Postgres stores. What it names is the decision's to find, or not. */
+const text = (value: unknown): value is string => typeof value === 'string' && value.length <= 256 && !value.includes('\0');
 
-/** A use as the engine takes it. The app is the caller's word for what a request showed, not for its shape: a use that is not what the contract says is a fault. */
-function asked({ token, proof, request, ip, project, environment, mine, keys, purpose, credential }: UseInput): Ask {
-  const named = keys === null || (Array.isArray(keys) && keys.length <= 1000 && keys.every(text));
-  const optional = [proof, request, ip, credential].every((value) => value === null || text(value));
-  if (!text(token) || !TOKEN.test(token) || !text(project) || !text(environment) || typeof mine !== 'boolean' || !named || !text(purpose) || !optional) {
-    throw new TypeError('a use names a token by its SHA-256 in hex, a place by its slugs, and 1,000 keys at most');
+/**
+ * A use as the engine takes it. The app is the caller's word for what a
+ * request showed, not for its shape: a use that is not what the contract
+ * says is a fault, before any read. Its purpose goes into the log under
+ * the vault's MAC, so it is one the contract names.
+ */
+function asked(input: UseInput): Ask {
+  const { token, proof, request, ip, project, environment, mine, purpose, upstream } = input;
+  // A copy: an array that crossed from another isolate may have holes, which no check of its items sees.
+  const keys = input.keys === null ? null : Array.isArray(input.keys) ? [...input.keys] : undefined;
+  const named = keys === null || (keys !== undefined && keys.length <= 1000 && keys.every(text));
+  const optional = [proof, request, ip, upstream].every((value) => value === null || text(value));
+  if (!text(token) || !TOKEN.test(token) || !text(project) || !text(environment) || typeof mine !== 'boolean' || !named || !PURPOSES.includes(purpose) || !optional) {
+    throw new TypeError('a use names a token by its SHA-256 in lowercase hex, a place by its slugs, 1,000 keys at most, and a purpose the contract has');
   }
-  return { token: Buffer.from(token, 'hex'), proof, request, ip, project, environment, mine, keys, purpose, credential };
+  return { token: Buffer.from(token, 'hex'), proof, request, ip, project, environment, mine, keys: keys as string[] | null, purpose, credential: upstream };
 }
 
 export function openVault(db: Database, prepared: PreparedVault, { wake, now = Date.now }: VaultOptions): Vault {
-  // A wake-up that throws fails nothing: the write it tells of has committed, and its answer is owed.
+  // A wake-up that throws, or whose promise rejects, fails nothing: the write it tells of has committed, and its answer is owed.
+  const failed = (error: unknown) => console.error('coffre: the signer was not told of an entry', error);
   const told = (hash: Buffer) => {
     try {
-      wake(hash);
+      void Promise.resolve(wake(hash)).catch(failed);
     } catch (error) {
-      console.error('coffre: the signer was not told of an entry', error);
+      failed(error);
     }
   };
   const serving: Serving = { ...prepared, db, now, wake: told };

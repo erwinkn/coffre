@@ -214,6 +214,9 @@ test('a fresh isolate answers a burst of first calls, each on one connection: on
     assert.deepEqual(answers.flatMap(given), KEYS.map((key) => ({ key, value: `value of ${key}` })));
     // One a call, its read and its write on it, and the signer's own: its runs a second apart share one.
     assert.ok(database.opened <= KEYS.length + 2, `${database.opened} connections for ${KEYS.length} calls`);
+    // The same use eight times at once: none waits on a read another began, which Cloudflare would cancel with it.
+    const same = await Promise.all(KEYS.map(() => vault.reveal('ada-cli', 'market/prod', ['KEY_0', 'KEY_1'])));
+    assert.deepEqual(same.map((answer) => [answer.status, given(answer).length]), KEYS.map(() => [200, 2]));
   } finally {
     await vault.stop();
     await database.close();

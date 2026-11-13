@@ -62,7 +62,8 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
       this.ctx.waitUntil(
         (async () => {
           try {
-            await signerOf(SIGNER).wake(hash);
+            // A copy of its own: what crosses is the bytes' whole buffer.
+            await signerOf(SIGNER).wake(Uint8Array.from(hash));
           } catch (error) {
             console.error('coffre: the signer was not told of an entry', error);
           }
