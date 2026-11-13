@@ -672,23 +672,6 @@ forward. A key it replaced counts for no entry, row or checkpoint after
 that, and a vault still running with it writes nothing more
 ([keys.md](keys.md#a-local-key)).
 
-The app's key rotates the same way, in steps where the vault's is one
-transaction, since it signs far more rows than the vault has members
-([deploy.md](deploy.md#rotating-the-app-key)). The first start under a new
-`auditChainKey`, with the old one in `previousAuditChainKeys`, signs every
-signed row (below) the old key signed again under the new one, a step of
-100 rows a transaction under the head, and signs people's sessions out.
-Each step appends a `key.reseal` entry under the new key, naming the old
-key as its subject and saying where the next step goes on. Once no row is
-left, a last
-transaction appends `key.rotate`. Until then, the app serves nothing but
-health, 503 `rotating`, each request taking it a step further, so no row
-is ever checked under the old key. From the first step, an append under a
-key an entry of its author's names so refuses (`KeyRetired`, in the
-statement that reads the log's last entry under the head), and a
-verification takes the old key's entries only before that step: a key the
-app replaced writes and vouches for nothing from then on.
-
 An append locks the head, reads the database clock, and refuses a head that
 does not name the last entry or is behind one the process remembers. A new
 head is remembered only after commit. Postgres forbids both runtime logins

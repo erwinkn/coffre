@@ -32,6 +32,9 @@ export type { GatesNamespace, SocketsNamespace };
 /** The part of the Workers `ExecutionContext` coffre uses. */
 export type WaitUntil = { waitUntil(promise: Promise<unknown>): void };
 
+/** 0.14's audit anchor's Durable Object, with nothing left to answer (`CoffreWorker.Anchor`). */
+class CoffreAnchor {}
+
 /** coffre on Workers: what the deployment's server entry runs. */
 export type CoffreWorker<Env> = {
   /**
@@ -51,6 +54,14 @@ export type CoffreWorker<Env> = {
   Sockets: ReturnType<typeof socketsObject<Env>>;
   /** The workloads' gates' Durable Object class, which `GATES` binds: `export const CoffreGates = coffre.Gates` (docs/design/workload-access.md, section 5.2). */
   Gates: typeof CoffreGates;
+  /**
+   * 0.14's audit anchor's Durable Object, inert: a 0.14 deployment's app still
+   * binds and exports it (`export const CoffreAnchor = coffre.Anchor`), and
+   * keeping the class keeps its storage for going back (docs/design/0.16.md,
+   * "At Equisafe"). The release after 0.16.0 removes it, with the
+   * `deleted_classes` migration the deployment then needs.
+   */
+  Anchor: typeof CoffreAnchor;
   /** The entrypoint another Worker binds with `props` naming its service: `export const CoffreWorkload = coffre.Workload` (section 9.2). */
   Workload: typeof CoffreWorkload;
 };
@@ -126,6 +137,7 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
       return (request, sourceIp, hold) => admitSocket(request, runtime, sourceIp, hold);
     }),
     Gates: CoffreGates,
+    Anchor: CoffreAnchor,
     Workload: CoffreWorkload,
   };
 }

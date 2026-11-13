@@ -43,7 +43,7 @@
     { "tag": "sockets", "new_sqlite_classes": ["CoffreSockets"] },
     { "tag": "gates", "new_sqlite_classes": ["CoffreGates"] }
   ],
-  // The heartbeat and audit checkpoints.
+  // coffre's scheduled job.
   "triggers": { "crons": ["*/5 * * * *"] },
   // What a CI run's exchange of its ID token passes first: per address, and
   // for everyone. Cloudflare counts each per location.
