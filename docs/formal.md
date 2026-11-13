@@ -3233,26 +3233,32 @@ though no wait cycle needs it there.
 
 **The policy revision.** A change that decided on the policy commits only
 while that policy is in force. 0.15 compared one number, the seq of the
-newest `policy.change` in 0.14's log. 0.16 compares one number for each
-object the request read of the policy: the roles, the policy row, the
-protection of the environments it touches. Each is the number of that
-object's newest change in `log_changes`, which the request's reads seek
-already and `hold_inputs` compares already (`ReadOnLog`, `ReadByNumber`).
+newest `policy.change` in 0.14's log. 0.16 compares two: the number of the
+newest change, in `log_changes`, of the roles object and of the policy
+object, as `hold_inputs` compares numbers already (`ReadOnLog`,
+`ReadByNumber`). The protected environments are the policy object's, one
+list on its row, so a protect moves the policy's number as a change of the
+cap does, and no request has a set of environments to compare. The slugs of
+the protected environments the caller was loaded with are read again, as
+before.
 
 Never the seal a row stores, though the design calls this a digest of seals.
 A seal is a MAC over the row's values, so the same values have the same
 seal: a database writer who puts an old row back puts its genuine seal back
 with it. Take an environment that was unprotected when the caller was
-loaded. An Owner protects it, and the writer puts the row back as it was. A
-commit that compares the rows' seals finds the one it loaded, and writes to
-a protected environment; the log's newest change of it is the protection,
-with another number. A number also tells a policy changed and changed back
+loaded. An Owner protects it, which changes the policy's row, and the
+writer puts that row back as it was. A commit that compares the rows' seals
+finds the one it loaded, and writes to a protected environment; the log's
+newest change of the policy is the protection, with another number. A number also tells a policy changed and changed back
 from one that never moved, as 0.15's seq did: both answer 409
 `policy_changed`.
 
 Writing.tla's `WritingDigest` holds today's commit to each number
 (`TodayUnheld`, one run per object left out) and to the log
-(`TodayPolicyOnLog`, with that writer). Lifecycle.tla's issue holds to the
+(`TodayPolicyOnLog`, with that writer). The model keeps an environment's
+protection an object apart from the policy row, three numbers where the
+code has two: the code's two differ whenever the model's three do, and
+when any other environment's protection moves too. Lifecycle.tla's issue holds to the
 roles under the issue lock (`IssuePolicyHeld`) and its revoke under the fence
 (`RevokePolicyHeld`). Its runs have no such writer and compare what is true
 of the roles; the statements they stand for compare the roles' number, never
