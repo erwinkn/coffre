@@ -136,6 +136,23 @@ verifier never signs, so a stolen session cannot forge the provider's calls.
 The details, and each provider's scheme, are in
 [credential-proxy.md](design/credential-proxy.md), section 5.
 
+### A long message to sign: SumSub's document upload
+
+SumSub signs each request as HMAC-SHA256(secret, `ts + method + path + body`),
+hex, and a document upload's body is the whole file. The deployment lets its
+signer take one (`hmac('SUMSUB_SECRET_KEY', { encoding: 'hex', maxBytes: 11 *
+1024 * 1024 })`, 12 MiB at most), and the app signs the bytes it will send:
+`ts + method + path`, then the multipart body, boundary and all, as one
+message: `await coffre.credential('sumsub-key').sign(message)`.
+
+A message past 1 MiB goes raw: its bytes are the request's body, which coffre
+signs as they come and never holds, and the signature answers once they match
+the `Content-Digest` the SDK declares and the proof signs. From another
+language, through `coffre serve`: `POST
+http://127.0.0.1:7300/use/market/prod?sign=sumsub-key` with `Content-Type:
+application/octet-stream`, `Content-Length` and `Content-Digest:
+sha-256=:<base64>:`, the message as the body, answers `{"signature": "…"}`.
+
 ### A key in the body
 
 Some upstreams take their key in a body field: Turnstile's siteverify takes

@@ -27,7 +27,7 @@
  *     once if the gate asks for a fresh one;
  *   - logout on `close()`, and on SIGTERM.
  */
-import { base64url, bodyDigest, bodyLine, contentDigest, createProof, declaredDigest, generateProofKey, thumbprint, type ProofKey, type PublicJwk } from './dpop.ts';
+import { base64url, bodyDigest, bodyLine, contentDigest, createProof, declaredDigest, generateProofKey, JSON_MESSAGE_BYTES, thumbprint, type ProofKey, type PublicJwk } from './dpop.ts';
 import { CoffreError } from './index.ts';
 import type { Proof, ProofContext } from './workload-proofs.ts';
 
@@ -94,7 +94,10 @@ export interface Workload {
 export interface UsedCredential {
   /** `<credential's URL>/<path>`, signed: the proxy forwards it to the upstream with the real key. */
   fetch(path: string, init?: RequestInit): Promise<Response>;
-  /** A signature by a signer's key, which stays in coffre: a private key's base64url, an HMAC secret's as its `hmac()` writes it. */
+  /**
+   * A signature by a signer's key, which stays in coffre: a private key's base64url, an HMAC secret's as its `hmac()` writes it.
+   * A message past 1 MiB goes raw, its bytes as the body, signed as they come and never held: an `hmac()` signer's whose `maxBytes` takes it.
+   */
   sign(message: string | Uint8Array): Promise<string>;
   /** Whether `signature`, as its header carried it, is a verifier's HMAC of `message`, an inbound webhook's body as it came: checked without reading its secret. */
   verify(message: string | Uint8Array, signature: string): Promise<boolean>;
@@ -491,8 +494,9 @@ function surface(core: Core): Workload {
   const url = (name: string) => (core.places().length === 1 ? `${origin}/use/${encodeURIComponent(name)}` : `${placeUrl()}/${encodeURIComponent(name)}`);
 
   /** What coffre makes with the environment's values, at the environment's URL: a signature, a verdict, a presigned URL, a minted child. */
-  const compute = async (asked: Record<string, unknown>, what: string): Promise<Record<string, unknown>> => {
-    const response = await signed(placeUrl(), { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(asked) });
+  const compute = (asked: Record<string, unknown>, what: string) => computed(placeUrl(), { 'content-type': 'application/json' }, JSON.stringify(asked), what);
+  const computed = async (at: string, headers: Record<string, string>, sent: BodyInit, what: string): Promise<Record<string, unknown>> => {
+    const response = await signed(at, { method: 'POST', headers: { ...headers, accept: 'application/json' }, body: sent });
     const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (!response.ok || body === null) throw refusal(response.status, body, `coffre ${what} nothing`);
     return body;
@@ -515,7 +519,11 @@ function surface(core: Core): Workload {
         return signed(target.href, init);
       },
       sign: async (message) => {
-        const body = await compute({ sign: { credential: name, message: bytesOf(message) } }, 'signed');
+        const bytes = typeof message === 'string' ? new TextEncoder().encode(message) : message;
+        // Past what JSON takes, raw: its bytes as the body, which the proof binds by the Content-Digest `signed` declares.
+        const body = await (bytes.length > JSON_MESSAGE_BYTES
+          ? computed(`${placeUrl()}?sign=${encodeURIComponent(name)}`, { 'content-type': 'application/octet-stream' }, bytes as Uint8Array<ArrayBuffer>, 'signed')
+          : compute({ sign: { credential: name, message: bytesOf(bytes) } }, 'signed'));
         if (typeof body.signature !== 'string') throw new Error('coffre signed nothing');
         return body.signature;
       },

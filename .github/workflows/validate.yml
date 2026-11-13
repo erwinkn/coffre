@@ -312,7 +312,7 @@ jobs:
         with:
           # The schema comes from this checkout's sources; the release from npm.
           build: 'false'
-      - name: The newest release, migrated with this revision's migrations
+      - name: The newest release of this line, migrated with this revision's migrations
         run: pnpm test:compat --kind ${{ matrix.kind }}
 
   validate:

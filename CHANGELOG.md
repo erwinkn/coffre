@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **An `hmac()` signer signs a message of up to 12 MiB, streamed, never
+  held: SumSub's document upload.** SumSub signs `ts + method + path +
+  body`, and a document's body is the whole file, up to 10.1 MiB; a
+  message to sign was read whole as JSON, 1 MiB at most. Now a message
+  goes raw too: `POST /use/<project>/<env>?sign=<signer>` with
+  `Content-Type: application/octet-stream`, its bytes the body, fed to the
+  HMAC 64 KiB at a time as they come. `credential(name).sign` and the
+  workload SDK's send a message past 1 MiB this way on their own, and
+  `coffre serve` streams it through. A signer takes one if its `maxBytes`
+  says so, up to 12 MiB (a signer's default stays 64 KiB, a verifier's
+  1 MiB at most). Everything is refused before a byte is read; a
+  workload's raw message declares its `Content-Digest`, which its proof
+  signs, and the signature answers only once the bytes match it and the
+  length, and before its values lapse (503 `late`, so a handle revoked
+  during an upload signs nothing past `cacheSeconds`, 60 s under
+  `cacheSeconds: 0`). JSON past 1 MiB is
+  a 413 that names the raw shape. The JSON sign
+  and verify are unchanged. No migration.
+
 ## 0.14.5 (2026-10-26)
 
 - **Upgrading to 0.14.5, in short.** One migration, `0021_prune_vault_releases`

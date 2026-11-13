@@ -1219,7 +1219,7 @@ previous release working:
 0.4.0 began again from one baseline per engine, for new databases only
 ([deploy.md](deploy.md#from-a-release-before-040)): `coffre migrate` refuses
 a database an earlier release made. `pnpm test:compat` holds the newest
-release to the schema of the change under review: it installs that release
+release of the change's own line (0.14.x here) to the schema of the change under review: it installs that release
 from npm as `coffre init` writes a deployment, and lets its own conformance
 boot it, with the database migrated by the change's migrations instead of
 the release's. A synthetic destructive migration on top must then fail it,

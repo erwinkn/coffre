@@ -4,10 +4,11 @@
 // a key of the app's own signs too. Here Yousign's, DFNS's and Lemonway's
 // schemes, each signed as the provider signs it with `node:crypto`, the
 // app's own HS256 token, the log once a minute, and no byte of a secret in
-// anything coffre answers, logs or says on the console.
+// anything coffre answers, logs or says on the console. And SumSub's
+// document upload, a message of 12 MiB signed raw, as its bytes come.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac, generateKeyPairSync } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync } from 'node:crypto';
 
 import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
@@ -18,14 +19,17 @@ import { clientFor } from './api-fixture.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { auditLog } from '@coffre/db/schema';
 import { checkPlugins, type PluginContext, type UseAsked } from '../src/plugins.ts';
-import { credentialProxy, hmac, privateKey, type CredentialProxyOptions, type Encoding } from '../src/plugins/credential-proxy.ts';
+import { credentialProxy, form, hmac, privateKey, type CredentialProxyOptions, type Encoding } from '../src/plugins/credential-proxy.ts';
 
 const SECRETS = {
   YOUSIGN_WEBHOOK_SECRET: 'ys_whsec_0123456789abcdefABCDEF',
   DFNS_WEBHOOK_SECRET: 'dfns_whsec_9876543210zyxwvu',
   LEMONWAY_WEBHOOK_SECRET: 'lw_whsec_ab12cd34ef56gh78',
   IFRAME_TOKEN_SECRET: 'iframe_secret_5f4dcc3b5aa765d61d8327deb882cf99',
+  SUMSUB_SECRET_KEY: 'sumsub_sk_0f1e2d3c4b5a69788796a5b4c3d2e1f0',
 };
+/** sumsub-key's maxBytes: the ceiling, `MAX_RAW_MESSAGE_BYTES`. */
+const SUMSUB_BYTES = 12 * 1024 * 1024;
 const options: CredentialProxyOptions = {
   credentials: {},
   verifiers: {
@@ -38,6 +42,7 @@ const options: CredentialProxyOptions = {
   signers: {
     'iframe-token': hmac('IFRAME_TOKEN_SECRET', { encoding: 'base64url' }),
     'dfns-key': privateKey('DFNS_PRIVATE_KEY'),
+    'sumsub-key': hmac('SUMSUB_SECRET_KEY', { encoding: 'hex', maxBytes: SUMSUB_BYTES }),
   },
 };
 
@@ -57,6 +62,7 @@ useMcp(async () => {
     DFNS_WEBHOOK_SECRET: SECRETS.DFNS_WEBHOOK_SECRET,
     LEMONWAY_WEBHOOK_SECRET: SECRETS.LEMONWAY_WEBHOOK_SECRET,
     IFRAME_TOKEN_SECRET: SECRETS.IFRAME_TOKEN_SECRET,
+    SUMSUB_SECRET_KEY: SECRETS.SUMSUB_SECRET_KEY,
     DFNS_PRIVATE_KEY: generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
   });
   await root.secrets.set('market/bare', { OTHER: 'x' });
@@ -98,7 +104,7 @@ test("each provider's signature verifies as the provider made it, over the raw b
   const { env, plan } = await run();
   // The app holds the handle where each secret was, never a value; each verifier and HMAC signer is named for credential(name).
   for (const key of Object.keys(SECRETS)) assert.equal(plan.env[key], env.COFFRE_HANDLE, key);
-  assert.deepEqual(Object.keys(plan.credentials).sort(), ['dfns', 'dfns-key', 'iframe-token', 'lemonway', 'yousign']);
+  assert.deepEqual(Object.keys(plan.credentials).sort(), ['dfns', 'dfns-key', 'iframe-token', 'lemonway', 'sumsub-key', 'yousign']);
   const yousign = used(env, 'yousign');
   const header = `sha256=${hmacOf(SECRETS.YOUSIGN_WEBHOOK_SECRET, YOUSIGN_BODY)}`;
   assert.equal(await yousign.verify(YOUSIGN_BODY, header), true);
@@ -167,14 +173,160 @@ test("a webhook body is 64 KiB at most, or its hmac()'s maxBytes; one past it is
   const check = (name: string, secret: string, body: Buffer) => used(env, name).verify(body, `sha256=${hmacOf(secret, body)}`);
   await assert.rejects(check('yousign', SECRETS.YOUSIGN_WEBHOOK_SECRET, sized(64 * 1024 + 1)), /yousign checks a message of 64 KiB at most: its hmac\(\)'s maxBytes takes a longer one/);
   await assert.rejects(check('dfns', SECRETS.DFNS_WEBHOOK_SECRET, sized(512 * 1024 + 1)), /dfns checks a message of 512 KiB at most/);
-  // Past what the longest takes, the request is not read whole.
-  await assert.rejects(check('dfns', SECRETS.DFNS_WEBHOOK_SECRET, sized(600 * 1024)), /a message to sign or verify is at most 512 KiB here/);
+  // Past what the longest takes as JSON, 1 MiB (sumsub-key signs a longer one raw), the request is not read whole.
+  await assert.rejects(check('dfns', SECRETS.DFNS_WEBHOOK_SECRET, sized(2 * 1024 * 1024)), /a message to sign or verify is at most 1 MiB here as JSON/);
   assert.equal((await entries('credential.use')).length, before, 'nothing opened for a message past its bound');
   assert.equal(await check('yousign', SECRETS.YOUSIGN_WEBHOOK_SECRET, sized(64 * 1024)), true);
   assert.equal(await check('dfns', SECRETS.DFNS_WEBHOOK_SECRET, sized(512 * 1024)), true);
   // A private key signs up to the same 64 KiB, and past it is 413 too.
   await assert.rejects(used(env, 'dfns-key').sign(sized(64 * 1024 + 1)), /dfns-key signs a message of 64 KiB at most/);
   assert.equal(typeof (await used(env, 'dfns-key').sign(sized(64 * 1024))), 'string');
+});
+
+/**
+ * A body that sends `first` bytes, then waits, never ending: what coffre must refuse without reading on. How much a
+ * reader asked of it: nothing is pulled ahead (no queue, `highWaterMark` 0), so 0 is a body nobody read.
+ */
+function stalled(first: number): { body: ReadableStream<Uint8Array>; pulled: () => number } {
+  let pulled = 0;
+  return {
+    body: new ReadableStream<Uint8Array>({
+      pull: (out) => {
+        if (pulled > 0) return new Promise(() => undefined);
+        pulled += first;
+        out.enqueue(new Uint8Array(first).fill(1));
+      },
+    }, { highWaterMark: 0 }),
+    pulled: () => pulled,
+  };
+}
+
+/** A raw sign at `place`, the body as given, its headers coffre's client sends but those `headers` changes. */
+function signRaw(handle: string, name: string, body: BodyInit, headers: Record<string, string | null> = {}, place = 'market/dev'): Promise<Response> {
+  const sent = new Headers({ authorization: `Bearer ${handle}`, 'content-type': 'application/octet-stream' });
+  for (const [header, value] of Object.entries(headers)) value === null ? sent.delete(header) : sent.set(header, value);
+  return route(`/use/${place}?sign=${encodeURIComponent(name)}`, { method: 'POST', headers: sent, body, duplex: 'half' } as RequestInit);
+}
+
+const digestOf = (bytes: Uint8Array | string) => `sha-256=:${createHash('sha256').update(bytes).digest('base64')}:`;
+
+test("SumSub's document upload, 12 MiB (the ceiling), signs raw as Node's createHmac signs it, never read whole; past 1 MiB as JSON is a 413 that names the raw shape", async () => {
+  const { env } = await run();
+  // ts + method + path, then the file: one message, as SumSub signs it, of exactly the ceiling.
+  const head = Buffer.from('1761480000POST/resources/applicants/abc/info/idDoc');
+  const file = Buffer.alloc(SUMSUB_BYTES - head.length);
+  for (let i = 0; i + 4 <= file.length; i += 4) file.writeUInt32LE((i * 2654435761) >>> 0, i);
+  const message = Buffer.concat([head, file]);
+  assert.equal(message.length, SUMSUB_BYTES);
+  assert.equal(await used(env, 'sumsub-key').sign(message), hmacOf(SECRETS.SUMSUB_SECRET_KEY, message));
+  // The same through the route, with no digest: a handle's raw message need not declare one.
+  const plain = await signRaw(env.COFFRE_HANDLE!, 'sumsub-key', message, { 'content-length': String(message.length) });
+  assert.deepEqual(await plain.json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, message) });
+  // As JSON, past 1 MiB: refused, naming the raw shape, for a signer whose maxBytes takes it or not.
+  const json = await route('/use/market/dev', { method: 'POST', headers: { authorization: `Bearer ${env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ sign: { credential: 'sumsub-key', message: message.subarray(0, 1024 * 1024 + 1).toString('base64url') } }) });
+  assert.equal(json.status, 413);
+  assert.match(((await json.json()) as { message: string }).message, /goes raw, its bytes as the body: POST \?sign=sumsub-key, Content-Type: application\/octet-stream/);
+  // A message to verify is JSON's, 1 MiB at most, whatever the signer's maxBytes takes.
+  const long = message.subarray(0, 1024 * 1024 + 2000);
+  const verify = await route('/use/market/dev', { method: 'POST', headers: { authorization: `Bearer ${env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ verify: { credential: 'sumsub-key', message: long.toString('base64url'), signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, long) } }) });
+  assert.deepEqual([verify.status, ((await verify.json()) as { message: string }).message], [413, 'sumsub-key checks a message of 1 MiB at most']);
+  // A signer whose maxBytes is the default signs 64 KiB raw, as it does as JSON.
+  assert.equal(await used(env, 'iframe-token').sign(message.subarray(0, 1024 * 1024 + 1)).catch((error: Error) => error.message), 'coffre signed nothing: iframe-token signs a message of 64 KiB at most: its hmac()\'s maxBytes takes a longer one, up to 12 MiB');
+});
+
+test('a raw sign is refused before its body is read: the handle, the signer, its kind, the length, the digest, the secret', async () => {
+  const { env } = await run();
+  const handle = env.COFFRE_HANDLE!;
+  const before = (await entries('credential.use')).length;
+  const asked = async (name: string, headers: Record<string, string | null>, place = 'market/dev', who = handle) => {
+    const body = stalled(64 * 1024);
+    const answer = await signRaw(who, name, body.body, { 'content-length': String(SUMSUB_BYTES), ...headers }, place);
+    const text = await answer.text();
+    assert.equal(body.pulled(), 0, `${name}: its body read`);
+    return [answer.status, (JSON.parse(text) as { message?: string }).message ?? text] as const;
+  };
+  assert.deepEqual(await asked('sumsub-key', {}, 'market/dev', `coffre_use_${'x'.repeat(43)}`).then(([status]) => status), 401);
+  assert.deepEqual(await asked('sumsub-key', { authorization: null }).then(([status]) => status), 401);
+  assert.match((await asked('nope', {}))[1], /\?sign= names the hmac\(\) signer of a raw message/);
+  assert.deepEqual(await asked('yousign', {}), [404, '?sign= names the hmac() signer of a raw message: yousign is a verifier, which checks signatures and makes none']);
+  assert.deepEqual((await asked('dfns-key', {}))[0], 415);
+  assert.deepEqual((await asked('sumsub-key', { 'content-length': String(SUMSUB_BYTES + 1) }))[0], 413);
+  assert.deepEqual((await asked('iframe-token', { 'content-length': String(64 * 1024 + 1) }))[0], 413);
+  assert.deepEqual((await asked('sumsub-key', { 'content-length': null }))[0], 411);
+  assert.deepEqual((await asked('sumsub-key', { 'content-digest': 'sha-256=:bm90IGEgZGlnZXN0:' }))[0], 400);
+  assert.equal((await entries('credential.use')).length, before, 'nothing opened for a raw sign refused by its shape');
+  // An environment that holds no secret for it, and one whose secret is empty: answered as JSON's, with the body unread.
+  const bare = await run(['market/bare']);
+  const json = await route('/use/market/bare', { method: 'POST', headers: { authorization: `Bearer ${bare.env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ sign: { credential: 'sumsub-key', message: 'aGk' } }) });
+  const asJson = [json.status, ((await json.json()) as { message: string }).message] as const;
+  assert.notEqual(asJson[0], 200);
+  assert.deepEqual(await asked('sumsub-key', {}, 'market/bare', bare.env.COFFRE_HANDLE!), asJson);
+  const empty = await run(['market/empty']);
+  const [status, message] = await asked('iframe-token', { 'content-length': '10' }, 'market/empty', empty.env.COFFRE_HANDLE!);
+  assert.equal(status, 409);
+  assert.match(message, /market\/empty's IFRAME_TOKEN_SECRET is empty/);
+});
+
+test("a project named as a form rule's credential: a raw sign at /use/<project>/<env> is refused before its body is read, and signs", async () => {
+  // `/use/market/dev` is also the stable URL of a credential `market`, whose form rule would read a body for the handle.
+  const proxy = credentialProxy({
+    credentials: { market: { upstream: 'https://forms.example/v1', inject: form('secret', '{SUMSUB_SECRET_KEY}') } },
+    signers: { 'sumsub-key': hmac('SUMSUB_SECRET_KEY', { encoding: 'hex', maxBytes: SUMSUB_BYTES }) },
+  });
+  const ask = (name: string, body: BodyInit, length: number) => proxy.routes!.fetch(new Request(`https://coffre.example/use/market/dev?sign=${name}`, {
+    method: 'POST', headers: { authorization: `Bearer coffre_use_${'h'.repeat(43)}`, 'content-type': 'application/octet-stream', 'content-length': String(length) }, body, duplex: 'half',
+  } as RequestInit), fake('SUMSUB_SECRET_KEY', SECRETS.SUMSUB_SECRET_KEY));
+  const body = stalled(64 * 1024);
+  const refused = await ask('nope', body.body, SUMSUB_BYTES);
+  assert.equal(refused.status, 404, await refused.text());
+  assert.equal(body.pulled(), 0, 'its body read');
+  const message = Buffer.alloc(100 * 1024, 'p');
+  assert.deepEqual(await (await ask('sumsub-key', message, message.length)).json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, message) });
+});
+
+test('a raw message whose body comes after its values lapse is signed by nothing: 503 late, sent again it signs', async () => {
+  const proxy = credentialProxy({ credentials: {}, cacheSeconds: 1, signers: { 'sumsub-key': hmac('SUMSUB_SECRET_KEY', { encoding: 'hex', maxBytes: SUMSUB_BYTES }) } });
+  const context = fake('SUMSUB_SECRET_KEY', SECRETS.SUMSUB_SECRET_KEY);
+  const message = Buffer.alloc(128 * 1024, 's');
+  const ask = (body: BodyInit) => proxy.routes!.fetch(new Request('https://coffre.example/use/market/dev?sign=sumsub-key', {
+    method: 'POST', headers: { authorization: `Bearer coffre_use_${'h'.repeat(43)}`, 'content-type': 'application/octet-stream', 'content-length': String(message.length) }, body, duplex: 'half',
+  } as RequestInit), context);
+  // Half, then the rest past the second its values serve: a handle revoked meanwhile would still be signing.
+  let sent = 0;
+  const slow = new ReadableStream<Uint8Array>({
+    pull: async (out) => {
+      if (sent === message.length) return out.close();
+      if (sent > 0) await new Promise((resolve) => setTimeout(resolve, 1_200));
+      out.enqueue(message.subarray(sent, sent + message.length / 2));
+      sent += message.length / 2;
+    },
+  }, { highWaterMark: 0 });
+  const late = await ask(slow);
+  const text = await late.text();
+  assert.deepEqual([late.status, (JSON.parse(text) as { reason: string }).reason], [503, 'late'], text);
+  assert.ok(!text.includes('signature'), text);
+  assert.deepEqual(await (await ask(message)).json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, message) });
+});
+
+test('a raw message longer or shorter than it declares, or other than its Content-Digest, is signed by nothing', async () => {
+  const { env } = await run();
+  const handle = env.COFFRE_HANDLE!;
+  const message = Buffer.alloc(200 * 1024, 'm');
+  const refused = async (body: BodyInit, headers: Record<string, string>) => {
+    const answer = await signRaw(handle, 'sumsub-key', body, headers);
+    const text = await answer.text();
+    assert.equal(answer.status, 400, text);
+    assert.ok(!text.includes('signature'), text);
+    return (JSON.parse(text) as { message: string }).message;
+  };
+  assert.equal(await refused(message, { 'content-length': String(message.length - 1) }), 'the body ran past the length it declared');
+  assert.equal(await refused(new Blob([message]).stream(), { 'content-length': String(message.length + 1) }), 'the body ended short of the length it declared');
+  assert.equal(await refused(message, { 'content-length': String(message.length), 'content-digest': digestOf(message.subarray(1)) }), "the body is not what its Content-Digest says");
+  const signed = await signRaw(handle, 'sumsub-key', message, { 'content-length': String(message.length), 'content-digest': digestOf(message) });
+  assert.deepEqual(await signed.json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, message) });
+  // The empty message, raw: its HMAC, as Node's.
+  const none = await signRaw(handle, 'sumsub-key', '', { 'content-length': '0' });
+  assert.deepEqual(await none.json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, '') });
 });
 
 test("verifies and HMAC signatures are logged once a minute per handle and name, as a credential's requests are, the vault asked once", async () => {
@@ -213,7 +365,7 @@ test('no byte of a secret leaves coffre: not in an answer, an entry of the log, 
       answered.push(`${answer.status} ${JSON.stringify([...answer.headers])} ${await answer.text()}`);
     };
     const message = Buffer.from(YOUSIGN_BODY).toString('base64url');
-    for (const name of ['yousign', 'dfns', 'lemonway', 'absent', 'iframe-token', 'dfns-key', 'nope']) {
+    for (const name of ['yousign', 'dfns', 'lemonway', 'absent', 'iframe-token', 'dfns-key', 'sumsub-key', 'nope']) {
       for (const [handle, path] of [[env.COFFRE_HANDLE!, '/use/market/dev'], [bare.env.COFFRE_HANDLE!, '/use/market/bare']] as const) {
         for (const signature of ['', 'sha256=', `sha256=${'f'.repeat(64)}`, '%%%', `sha256=${hmacOf(SECRETS.YOUSIGN_WEBHOOK_SECRET, YOUSIGN_BODY)}`]) {
           await ask(handle, path, { verify: { credential: name, message, signature } });
@@ -251,6 +403,9 @@ test('the configuration refuses what is no HMAC-SHA256 of these schemes', () => 
   refused({ credentials: { x: { upstream: 'https://api.example', inject: { kind: 'header', name: 'x-key', template: '{KEY}' } } }, verifiers: { x: hmac('KEY', { encoding: 'hex' }) } }, /x names a credential and a verifier/);
   refused({ verifiers: { x: hmac('KEY', { encoding: 'hex', limit: { perMinute: 0 } }) } }, /limit is \{ perMinute\?, perDay\? \}/);
   for (const maxBytes of [0, 1.5, 1024 * 1024 + 1]) refused({ verifiers: { x: hmac('KEY', { encoding: 'hex', maxBytes }) } }, /maxBytes is a whole number of bytes, 1 MiB at most/);
+  // A signer's message past 1 MiB goes raw, up to 12 MiB: what 20 ms of CPU holds of two SHA-256 passes over it.
+  for (const maxBytes of [0, 12 * 1024 * 1024 + 1]) refused({ signers: { x: hmac('KEY', { encoding: 'hex', maxBytes }) } }, /maxBytes is a whole number of bytes, 12 MiB at most/);
+  assert.doesNotThrow(() => credentialProxy({ credentials: {}, signers: { x: hmac('KEY', { encoding: 'hex', maxBytes: 12 * 1024 * 1024 }) } }));
 });
 
 /** coffre, as a plugin sees it: the handle stands for `market/dev`, whose one value is `secret`. */
@@ -293,4 +448,18 @@ test(`whatever the secret, message and scheme, coffre signs as Node's createHmac
   // Another message: no match.
   const longer = Buffer.concat([message, Buffer.from([tc.draw(gs.integers({ minValue: 0, maxValue: 255 }))])]);
   assert.deepEqual(await ask({ verify: { credential: 'mac', message: longer.toString('base64url'), signature: text } }), { valid: false });
+}, settings));
+
+test(`a raw message signs the same however its bytes are split as they come, its digest declared or not, seed ${settings.seed}`, () => hegel.testAsync(async (tc) => {
+  const secret = tc.draw(gs.text({ minSize: 1, maxSize: 64, excludeCategories: ['Cs'] }));
+  const message = Buffer.from(tc.draw(gs.binary({ maxSize: 3000 })));
+  const cuts = [...new Set(tc.draw(gs.arrays(gs.integers({ minValue: 0, maxValue: message.length }), { maxSize: 12 })))].sort((a, b) => a - b);
+  const declare = tc.draw(gs.booleans());
+  const proxy = credentialProxy({ credentials: {}, signers: { mac: hmac('SECRET', { encoding: 'hex', maxBytes: SUMSUB_BYTES }) } });
+  const parts = [0, ...cuts, message.length].slice(1).map((end, i, ends) => message.subarray(i === 0 ? 0 : ends[i - 1], end));
+  const body = new ReadableStream<Uint8Array>({ pull: (out) => (parts.length > 0 ? out.enqueue(parts.shift()!) : out.close()) });
+  const headers: Record<string, string> = { authorization: `Bearer coffre_use_${'h'.repeat(43)}`, 'content-type': 'application/octet-stream', 'content-length': String(message.length) };
+  if (declare) headers['content-digest'] = digestOf(message);
+  const answer = await proxy.routes!.fetch(new Request('https://coffre.example/use/market/dev?sign=mac', { method: 'POST', headers, body, duplex: 'half' } as RequestInit), fake('SECRET', secret));
+  assert.deepEqual(await answer.json(), { signature: createHmac('sha256', secret).update(message).digest('hex') });
 }, settings));
