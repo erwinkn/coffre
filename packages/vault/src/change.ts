@@ -1,5 +1,6 @@
 import type { Database } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
+import { later, laterRows } from '@coffre/db/later';
 import { sql, type SQL } from 'drizzle-orm';
 
 import { pending, type Entry, type Said } from './entry.ts';
@@ -193,23 +194,29 @@ function label(name: string): string {
  * it waited. For the same reason the transaction is read committed, said
  * here and not left to the database's default: under repeatable read every
  * statement sees the database as of the first, the one that waits.
+ *
+ * One round trip: neither statement is waited for inside the transaction,
+ * so the driver sends BEGIN, both and COMMIT together (`later` in
+ * @coffre/db). Postgres still runs them one after the other, and skips the
+ * rest once one fails.
  */
 export async function commit<A>(vault: Running, prepared: Prepared<A>): Promise<boolean> {
-  const ok = await vault.db
+  let wrote!: Promise<{ ok: boolean }[]>;
+  await vault.db
     .transaction(
       async (tx) => {
         // The bound is set for this transaction, ahead of the wait it bounds: a select list is worked out in order.
-        await tx.execute(sql`SELECT set_config('lock_timeout', ${String(LOCK_WAIT_MS)}, true), pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
-        const [same] = await rowsOf<{ ok: boolean }>(tx, prepared.statement);
-        return same!.ok;
+        later(tx, sql`SELECT set_config('lock_timeout', ${String(LOCK_WAIT_MS)}, true), pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
+        wrote = laterRows<{ ok: boolean }>(tx, prepared.statement);
       },
       { isolationLevel: 'read committed' },
     )
     .catch((error: unknown) => {
       throw waitedOut(error) ? new Busy(`a change waited ${LOCK_WAIT_MS} ms for a lock`) : error;
     });
-  if (ok) vault.wake(prepared.hash);
-  return ok;
+  const [same] = await wrote;
+  if (same!.ok) vault.wake(prepared.hash);
+  return same!.ok;
 }
 
 /** Make a change: its answer, once committed, or why it is refused. */

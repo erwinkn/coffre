@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { after, beforeEach, test } from 'node:test';
 
 import { leafHash } from '@coffre/core/log';
+import { openDatabase } from '@coffre/db/connect';
 import { rowsOf } from '@coffre/db/dialect';
 import * as schema from '@coffre/db/schema';
 import { and, eq, is, not, sql, type SQL } from 'drizzle-orm';
@@ -11,7 +12,8 @@ import { PgTable } from 'drizzle-orm/pg-core';
 import { Busy, CHANGE_LOCK, change, commit, drop, part, prepare, put, type Operation, type Parts, type Refusal, type Seen, type Write } from '../src/change.ts';
 import { entryOf, type Said } from '../src/entry.ts';
 import { keyOf, nameOf, sealedBy, shapeOf, type Fresh, type Row, type Sealed } from '../src/rows.ts';
-import { emptyDatabase, openTestVault } from './database.ts';
+import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
+import { emptyDatabase, openTestVault, VAULT_URL } from './database.ts';
 
 const { bindings, credentials, deviceLogins, enrollmentCodes, environments, grants, identities, oauthClients, policy, principals, projects, roles, secrets } = schema;
 
@@ -126,6 +128,30 @@ test('every sealed table has a row that reads back as the vault sealed it', asyn
       delete read.activeSubject;
       assert.deepEqual(read, row, `${shapeOf(table).name} reads back as written`);
     }
+  }
+});
+
+test('a change is two round trips: its read, and its write, with the lock ahead of it and the commit behind', async () => {
+  // Through a proxy that counts what a pooler like Hyperdrive sends on one at a time.
+  const proxy = await postgresProxy(VAULT_URL);
+  const through = await openDatabase(proxy.url);
+  try {
+    const counted = { ...vault, db: through.db };
+    // The first opens the connection.
+    assert.ok('answer' in (await change(counted, writing(put(principals, member(ada, 'owner')), put(principals, member(bo, 'owner'))))));
+    const before = { trips: proxy.trips, syncs: proxy.syncs };
+    assert.deepEqual(await change(counted, setRole(ada, bo, 'member')), { answer: 'member' });
+    assert.deepEqual({ trips: proxy.trips - before.trips, syncs: proxy.syncs - before.syncs }, { trips: 2, syncs: 2 });
+    // And a write that lost to another is one more of each, read and write.
+    const stale = await prepare(counted, setRole(ada, bo, 'owner'));
+    assert.ok(!('refused' in stale));
+    await done(setRole(ada, bo, 'removed'));
+    const again = { trips: proxy.trips, syncs: proxy.syncs };
+    assert.equal(await commit(counted, stale), false);
+    assert.deepEqual({ trips: proxy.trips - again.trips, syncs: proxy.syncs - again.syncs }, { trips: 1, syncs: 1 });
+  } finally {
+    await through.close();
+    await proxy.close();
   }
 });
 

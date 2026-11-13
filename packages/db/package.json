@@ -32,6 +32,11 @@
       "types": "./dist/dialect.d.ts",
       "default": "./dist/dialect.js"
     },
+    "./later": {
+      "coffre:source": "./src/later.ts",
+      "types": "./dist/later.d.ts",
+      "default": "./dist/later.js"
+    },
     "./schema-version": {
       "coffre:source": "./src/schema-version.ts",
       "types": "./dist/schema-version.d.ts",

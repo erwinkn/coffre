@@ -11,6 +11,7 @@ export default defineConfig({
     index: 'src/database.ts',
     schema: 'src/schema.ts',
     dialect: 'src/dialect.ts',
+    later: 'src/later.ts',
     'schema-version': 'src/schema-version.ts',
     hyperdrive: 'src/hyperdrive.ts',
     connect: 'src/connect.ts',
