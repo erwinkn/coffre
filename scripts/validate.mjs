@@ -144,10 +144,10 @@ const STEPS = {
     run: () => [`pnpm test:consumer --built --port "$COFFRE_VALIDATE_PORT"${nodeConformance ? '' : ' --skip-conformance node'}`],
   },
   // No job of validate.yml: the growth sweep (docs/growth-sweep.md), on the step's own Postgres, as it requires. --full runs
-  // it, and a change to its own files, the migrations or the source it runs (scripts/affected.mjs).
+  // it, and a change to its own files, its Postgres, the migrations or the source it runs (scripts/affected.mjs).
   sweep: { install: true, postgres: true, run: () => [`pnpm sweep:growth --out ${quote([join(logs, 'sweep')])}`] },
   // A database of 0.14.5's through 0.15.0 to this revision (scripts/upgrade-check.sh), about 4.5 min: --full
-  // runs it, and a change to its own scripts, the migrations or the migrator (scripts/affected.mjs). Its Postgres is a compose project the script starts and removes
+  // runs it, and a change to its own scripts, its Postgres, the migrations, the migrator or the vault's upgrade step (scripts/affected.mjs). Its Postgres is a compose project the script starts and removes
   // itself, on a network of its own, beside the run's.
   upgrade: { job: 'upgrade', install: true, build: true, ports: true, run: () => ['pnpm upgrade:check --port "$COFFRE_VALIDATE_PORT"'] },
 }

@@ -29,9 +29,9 @@
 // - `--full` runs everything, as the release's Validate does, and the growth sweep,
 //   which Validate has no job for: before a tag, a local `--full` runs it. The upgrade
 //   check (0.14.5 through 0.15.0 to this revision, minutes, from npm) runs there, and on a
-//   change to its own scripts or to its direct input, the migrations and the migrator
-//   with its precheck; not on the pages and reports it reads, which nearly every change
-//   reaches.
+//   change to its own scripts, its Postgres or its direct input, the migrations, the
+//   migrator with its precheck and the vault's upgrade step; not on the pages and reports
+//   it reads, which nearly every change reaches.
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -65,10 +65,11 @@ const dependencies = any('pnpm-lock.yaml', /(?:^|\/)pnpm-workspace\.yaml$/, /(?:
 const compose = any('docker-compose.yml', 'docker-compose.subnet.yml', 'docker-compose.network.yml')
 // What scripts/check-pins.mjs reads, beside its own sources.
 const pinned = any(/(?:^|\/)package\.json$/, /\.ya?ml$/, /(?:^|\/)Dockerfile[^/]*$/, /\.sh$/, '.github/', 'action/', 'pnpm-workspace.yaml', /(?:^|\/)\.node-version$/)
-// The upgrade check's own scripts and command, the migrator and its precheck (`migrate.ts`), the CLI's
-// `coffre migrate` it runs this checkout's migrations through, the vault's upgrade step,
-// and the migrations: the files that select it short of --full.
+// The upgrade check's own scripts and command, the Postgres it starts and the logins it makes there,
+// the migrator and its precheck (`migrate.ts`), the CLI's `coffre migrate` it runs this checkout's
+// migrations through, the vault's upgrade step, and the migrations: the files that select it short of --full.
 const UPGRADE_CHECK = ['package.json#upgrade:check', 'scripts/upgrade-check.sh', 'scripts/upgrade-check.mjs', 'scripts/compat/release.sh',
+  'scripts/ensure-postgres.sh', 'scripts/ensure-database.mjs', 'docker-compose.yml', 'docker-compose.subnet.yml', 'docker-compose.network.yml',
   'packages/db/src/migrate.ts', 'packages/db/src/online-indexes.ts', 'packages/cli/src/migrate.ts', 'packages/vault/src/upgrade.ts']
 // The growth sweep's own files (its command, its runner, the requests it makes and the growths it knows) and the
 // Postgres it starts and reads the plans from.

@@ -271,8 +271,8 @@ test('--full runs every step that is on, every file and every scenario', () => {
   assert.equal(steps.upgrade.why, '--full')
 })
 
-test('the upgrade check runs on a change to its own scripts, the migrations or the migrator, not to the pages it reads', () => {
-  for (const f of ['package.json#upgrade:check', 'scripts/upgrade-check.sh', 'packages/db/src/migrations/postgres/0001.sql', 'packages/db/src/migrate.ts', 'packages/cli/src/migrate.ts', 'packages/vault/src/upgrade.ts']) {
+test('the upgrade check runs on a change to its own scripts, its Postgres, the migrations or the migrator, not to the pages it reads', () => {
+  for (const f of ['package.json#upgrade:check', 'scripts/upgrade-check.sh', 'scripts/ensure-postgres.sh', 'scripts/ensure-database.mjs', 'docker-compose.yml', 'packages/db/src/migrations/postgres/0001.sql', 'packages/db/src/migrate.ts', 'packages/cli/src/migrate.ts', 'packages/vault/src/upgrade.ts']) {
     assert.equal(run([f]).steps.upgrade?.why, `${f} changed`)
   }
   assert.ok(!run(['packages/core/src/access.ts']).names.includes('upgrade'))
