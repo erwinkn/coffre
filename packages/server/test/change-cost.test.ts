@@ -363,7 +363,8 @@ test('each change route answers within its budget of round trips', async () => {
       } else assertOver(name, { trips: total }, { budget: { trips: over }, of: BUDGET.change }, trace);
       if (process.env.COFFRE_CHANGE_COST_VERBOSE) console.log(`\n${name}\n  ${ran.join('\n  ')}`);
     } catch (error) {
-      failures.push(`${name}: ${(error as Error).message}`);
+      const { message } = error as Error;
+      failures.push(message.startsWith(name) ? message : `${name}: ${message}`);
     }
   }
   // A reset grows with nothing it removes: exactly as many round trips for ten passkeys as for one. A fork sets each

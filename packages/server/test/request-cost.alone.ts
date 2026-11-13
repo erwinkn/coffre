@@ -894,6 +894,7 @@ test("each hot request's statements read as many pages however long the log grow
  * the vault's rows as they are. One call, one statement, as any other.
  */
 test("a reveal after the reader's access changed costs what any other does", async () => {
+  await inBulkPeriod(PERIOD_ROOM_MS, db.owner, [`user:${READER}`], 'market/dev');
   await reader.secrets.reveal('market/dev/API_KEY');
   const before = spentOf(await cost(() => reader.secrets.reveal('market/dev/API_KEY')));
   await root.access.set(`user:${READER}`, { 'market/dev': 'developer' });

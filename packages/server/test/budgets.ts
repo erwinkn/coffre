@@ -42,10 +42,14 @@ export const BUDGET = {
  * fails, to be struck off. The change routes over theirs are held in change-cost.test.ts, beside each route.
  */
 export const OVER = {
-  /** A use whose cache lapsed: the credential and the place read first, then the vault's use; 3 times a use's. */
+  /** A workload's call whose cache lapsed: the credential and the place read first, then the vault's use. */
   coldUse: { budget: { statements: 3, vaultCalls: 1 }, of: BUDGET.use },
+  /** A handle's first `/use` in the vault's isolate: its touch of when it was last used, then two uses. */
+  coldHandleUse: { budget: { statements: 3, vaultCalls: 1 }, of: BUDGET.use },
   /** A Worker's `/use` through its service binding: the binding and the place read by the app first, then the use. */
   bindingUse: { budget: { statements: 3, vaultCalls: 1 }, of: BUDGET.use },
+  /** A reveal of one key through an MCP connection or behind Access: the project and the key read by the app first, then the use. */
+  wayInReveal: { budget: { statements: 3, vaultCalls: 1 }, of: BUDGET.use },
 } as const satisfies Record<string, Over>;
 
 /** Each measure `spent` takes beyond `budget`, as a line: none if it fits. */
@@ -63,8 +67,12 @@ export function assertWithin(name: string, spent: Budget, budget: Budget, trace 
   assert.deepEqual(over, [], `${name}: ${over.join(', ')}${trace}`);
 }
 
-/** A route of `OVER`: within its own budget, and still over its class's. */
+/** A route over its class's budget: at exactly its own, so that it may only come down, and still over its class's. */
 export function assertOver(name: string, spent: Budget, { budget, of }: Over, trace = ''): void {
-  assertWithin(name, spent, budget, trace);
-  assert.notDeepEqual(overBudget(spent, of), [], `${name} fits its class now: strike it off OVER (budgets.ts)`);
+  const moved = Object.entries(spent).flatMap(([measure, value]) => {
+    const held = budget[measure as Measure];
+    return value === held ? [] : [`${value} ${measure}, held at ${held}`];
+  });
+  assert.deepEqual(moved, [], `${name}: ${moved.join(', ')}${trace}`);
+  assert.notDeepEqual(overBudget(spent, of), [], `${name} fits its class now: drop its own budget`);
 }

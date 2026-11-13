@@ -160,6 +160,8 @@ const shown = (ran: Statement[]) => ran.map(({ text }) => text.replace(/\s+/g, '
 
 /** What a request's statements spent, as a budget measures it. */
 const spent = (ran: { app: Statement[]; vault: Statement[]; hot: Statement[] }) => ({ statements: ran.app.length + ran.vault.length + ran.hot.length });
+/** `credentialStill`'s read, after the vault released: what a reveal does not need. */
+const STILL = 'select "principals"."status",';
 const trace = (ran: { app: Statement[]; vault: Statement[]; hot: Statement[] }) => `\n${JSON.stringify({ app: shown(ran.app), vault: shown(ran.vault), hot: shown(ran.hot) })}`;
 
 test("a handle's /use, at its environment's URL or the stable one, runs within a use's budget, and over it only when cold", async () => {
@@ -170,7 +172,7 @@ test("a handle's /use, at its environment's URL or the stable one, runs within a
   // Cold: a handle the vault's isolate has not seen, its names read by the use's own statement, then used by their ids;
   // and its first use in five minutes notes when it was last used (`verify`'s touch).
   const fresh = (await setupRuntime.signin!.issueHandle({ ...(await contextFor(deps, DEV)), personalToken: null }, { label: 'cold', expiresInMinutes: 600, paths: ['market/dev'] })).token;
-  assertOver('a cold /use', spent(await statements(NAMED, fresh, { warm: false })), OVER.coldUse);
+  assertOver('a cold /use', spent(await statements(NAMED, fresh, { warm: false })), OVER.coldHandleUse);
 });
 
 test("a handle's /use reads as many rows and pages however the log and the instance grow", async () => {
@@ -288,5 +290,6 @@ test("a reveal through the API, of one key, several or an environment, by a pers
   for (const [name, token, body, budget] of cases) {
     const ran = await revealed(token, body);
     assertWithin(name, spent(ran), budget, trace(ran));
+    assert.ok(!ran.app.some(({ text }) => text.startsWith(STILL)), `${name}: no check of the credential after the use${trace(ran)}`);
   }
 });
