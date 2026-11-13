@@ -13,10 +13,11 @@
 // of the log; it cannot make a MAC. Of the log, the check holds only that it
 // ends with the entry signed last: one step whatever its size. An entry
 // deleted further back, or the last one once another has been signed after
-// it, is the re-check of old entries' to find (D222), and not modelled. `quiet`: without tampering, and with the signer on time, nothing
-// alerts. `caught`: no full check passes over a row that differs from what
-// the entries say, a change decided on such a row, a missing entry the signer
-// heard of, or a shortened log. The one exception is a row with an entry
+// it, is the re-check of old entries' to find (D222), and not modelled.
+// `quiet`: without tampering, and with the signer on time, nothing alerts.
+// `caught`: no full check passes over a row that differs from what the
+// entries say, a change that wrote or found such a row, a missing entry the
+// signer heard of, or a shortened log. The one exception is a row with an entry
 // whose wake-up never arrived.
 module log {
   type Entry = { row: str, was: int, now: int, read: str, saw: int, at: int }
@@ -42,7 +43,7 @@ module log {
   const KeepIntent: bool    // what was signed is kept until it is moved
   const SizeCheck: bool     // the log must end with the entry signed last
   const Chain: bool         // a change must replace the MAC the mirror holds
-  const Reads: bool         // and must have decided on the MAC the mirror holds, of a row it read and did not write
+  const Reads: bool         // and must have decided on the MAC the mirror holds, of a row it read, found, and did not write
 
   var db: Db          // what the writer can change
   var vault: Vault    // made: every entry it MAC'd, by number; lost: wake-ups that never left
@@ -72,7 +73,7 @@ module log {
   val due = range(0, made.length()).foldl(Rows.mapBy(_ => 0), (r, n) =>
     if (made[n].was == made[n].now) r else r.set(made[n].row, made[n].now))
   def excused(row: str): bool = made.indices().exists(n => made[n].row == row and unheard(n) and gone(n))
-  // A change decided on a row that was not what the entries say: on its own row, or on the row it read.
+  // A change decided on a row that was not what the entries say: its own, or the one it read and found.
   def decidedOn(n: int): bool = not(excused(made[n].row)) and not(excused(made[n].read))
   def offBook(row: str): bool = db.rows.get(row) != due.get(row) and not(excused(row))
   val wrong = or {
@@ -93,8 +94,11 @@ module log {
 
   // A change (v is a new MAC) or a use (v is the row's own): one statement
   // writes the row and the entry. A change is decided on a row it reads, its
-  // own or another: the caller's, say, for a change to someone else's. `sent`
-  // false: the vault dies before the wake-up.
+  // own or another: the caller's, say, for a change to someone else's. Its
+  // entry names the row it found. One it looked for and did not find it cannot
+  // name, so a row taken away for the decision and put back after is not
+  // caught: a decision must take nothing from a missing row. `sent` false: the
+  // vault dies before the wake-up.
   action commit(row: str, v: int, read: str, sent: bool): bool = {
     val n = made.length()
     all {
@@ -106,7 +110,7 @@ module log {
         lost: if (sent) vault.lost else vault.lost.union(Set(n)),
       },
       signer' = signer,
-      world' = if (v != db.rows.get(row) and (offBook(row) or offBook(read))) { ...world, tainted: world.tainted.union(Set(n)) } else world,
+      world' = if (v != db.rows.get(row) and (offBook(row) or (db.rows.get(read) != 0 and offBook(read)))) { ...world, tainted: world.tainted.union(Set(n)) } else world,
     }
   }
 
@@ -137,7 +141,7 @@ module log {
       if (not(good.contains(n)) or made[n].was == made[n].now) m
       else {
         rows: m.rows.set(made[n].row, made[n].now),
-        ok: m.ok and (not(Chain) or m.rows.get(made[n].row) == made[n].was) and (not(Reads) or made[n].read == made[n].row or m.rows.get(made[n].read) == made[n].saw),
+        ok: m.ok and (not(Chain) or m.rows.get(made[n].row) == made[n].was) and (not(Reads) or made[n].read == made[n].row or made[n].saw == 0 or m.rows.get(made[n].read) == made[n].saw),
       })
     val found = or {
       good != s.pending,
