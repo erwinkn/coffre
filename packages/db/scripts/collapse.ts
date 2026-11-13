@@ -16,6 +16,12 @@
 // the migrations' own transaction (`HANDED_OVER`, migrate.ts), so they are moot, and they name each function by a
 // signature of the time, which the collapsed upgrade no longer makes.
 //
+// An index the path builds online (CONCURRENTLY, after the migrations' transaction) is built plainly where it stands,
+// for 0.16.0's upgrade is offline; one the path drops later is left out. A statement holds one command (`several`).
+//
+// What proves the output is the parity test, not this script: the two paths leave the same database, on an empty
+// one, on a seeded 0.15.0 database where each data statement writes rows, and on a restored one when a test names it.
+//
 //   pnpm collapse:migrations <dir>   writes <dir>/baseline.sql, <dir>/upgrade.sql and <dir>/functions/<name>.sql
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -24,7 +30,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { migrationsFolder } from '../src/migrate.ts';
-import { onlineIndex } from '../src/online-indexes.ts';
+import { onlineIndex, type OnlineIndex } from '../src/online-indexes.ts';
 import { postgresClient, quoteIdentifier, type PostgresClient } from '../src/postgres.ts';
 
 export const BREAK = '--> statement-breakpoint';
@@ -74,6 +80,15 @@ export function assemble(sql: string, functions: ReadonlyMap<string, string>): s
 
 /** The statement without the comment lines before it. */
 const bare = (statement: string) => statement.replace(/^(?:\s*--[^\n]*\n)*\s*/, '');
+/**
+ * A statement that holds more than one command: a `;` with more than blanks and comments after it, outside a
+ * dollar-quoted body and a comment line (one in a string is refused too). The parity test holds each data statement
+ * to the seed by its command, which is the statement's first.
+ */
+export const several = (statement: string) => {
+  const code = statement.replace(/\$(\w*)\$[\s\S]*?\$\1\$/g, '').replace(/^\s*--[^\n]*$/gm, '');
+  return [...code.matchAll(/;/g)].some(({ index }) => code.slice(index + 1).replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, '').trim() !== '');
+};
 /** A statement about a function of the session's own (`pg_temp`), which a migration makes to run its own statements. */
 const temporary = (statement: string) => /^(?:CREATE (?:OR REPLACE )?FUNCTION|DROP FUNCTION(?: IF EXISTS)?|ALTER FUNCTION)\s+pg_temp\./i.test(bare(statement));
 const aboutFunctions = (statement: string) =>
@@ -114,166 +129,43 @@ function changed(before: Snapshot, after: Snapshot): string[] {
   return [...new Set([...before.keys(), ...after.keys()])].filter((id) => JSON.stringify(before.get(id)) !== JSON.stringify(after.get(id))).sort();
 }
 
-/**
- * What may run what, by name, and when: a relation runs its triggers' and defaults' functions when written (`write`),
- * its policies' and its view's (functions and relations) when read (`read`), its checks', indexes', generated columns'
- * and its columns' domains' when written or rebuilt (`structure`), its partitions however it is touched (`all`), the
- * tables its foreign keys cascade to when written; a domain its checks' functions; a function every name its body holds
- * (a function, a table, a view; words in its strings too, for what it runs by EXECUTE), however it is called. Collected
- * at every step, so it holds every edge the path ever had, and every function name (`functions`).
- */
-type Kind = 'write' | 'read' | 'structure' | 'all';
-type Runs = { edges: Map<string, Set<`${Kind} ${string}`>>; functions: Set<string> };
+/** `index` built plainly, in the transaction: 0.16.0's upgrade is offline (D197), so it builds no index online. */
+const plain = (index: OnlineIndex) => `CREATE ${index.unique ? 'UNIQUE ' : ''}INDEX ${quoteIdentifier(index.name)} ON ${quoteIdentifier(index.table)} ${index.body}`;
+const run = (client: PostgresClient, statement: string) => {
+  const online = onlineIndex(statement);
+  return client.unsafe(online === null ? statement : plain(online));
+};
+const INDEXES = `SELECT oid::text FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind IN ('i', 'I')`;
+const indexes = async (client: PostgresClient) => new Set((await client.unsafe<{ oid: string }[]>(INDEXES)).map(({ oid }) => oid));
 
-const RELATION_EDGES = `
-  WITH used AS (
-    SELECT coalesce(t.tgrelid, ad.adrelid, nullif(co.conrelid, 0), rw.ev_class, po.polrelid, ix.indrelid) AS rel,
-           CASE WHEN t.oid IS NOT NULL OR (ad.oid IS NOT NULL AND ga.attgenerated = '') THEN 'write' WHEN po.oid IS NOT NULL OR rw.oid IS NOT NULL THEN 'read' ELSE 'structure' END AS kind,
-           p.proname::text AS runs
-      FROM pg_depend d
-      JOIN pg_proc p ON d.refclassid = 'pg_proc'::regclass AND p.oid = d.refobjid AND p.pronamespace = 'public'::regnamespace
-      LEFT JOIN pg_trigger t ON d.classid = 'pg_trigger'::regclass AND t.oid = d.objid
-      LEFT JOIN pg_attrdef ad ON d.classid = 'pg_attrdef'::regclass AND ad.oid = d.objid
-      LEFT JOIN pg_attribute ga ON ga.attrelid = ad.adrelid AND ga.attnum = ad.adnum
-      LEFT JOIN pg_constraint co ON d.classid = 'pg_constraint'::regclass AND co.oid = d.objid
-      LEFT JOIN pg_rewrite rw ON d.classid = 'pg_rewrite'::regclass AND rw.oid = d.objid
-      LEFT JOIN pg_policy po ON d.classid = 'pg_policy'::regclass AND po.oid = d.objid
-      LEFT JOIN pg_index ix ON d.classid = 'pg_class'::regclass AND ix.indexrelid = d.objid
-  )
-  SELECT rel::regclass::text AS runner, kind, runs FROM used WHERE rel IS NOT NULL
-  UNION
-  SELECT rw.ev_class::regclass::text, 'read', d.refobjid::regclass::text FROM pg_depend d JOIN pg_rewrite rw ON d.classid = 'pg_rewrite'::regclass AND rw.oid = d.objid
-   WHERE d.refclassid = 'pg_class'::regclass AND d.refobjid <> rw.ev_class
-  UNION
-  SELECT co.contypid::regtype::text, 'all', p.proname::text FROM pg_depend d JOIN pg_proc p ON d.refclassid = 'pg_proc'::regclass AND p.oid = d.refobjid
-    JOIN pg_constraint co ON d.classid = 'pg_constraint'::regclass AND co.oid = d.objid WHERE co.contypid <> 0
-  UNION
-  SELECT a.attrelid::regclass::text, 'structure', ty.oid::regtype::text FROM pg_attribute a JOIN pg_type ty ON ty.oid = a.atttypid
-   WHERE ty.typtype = 'd' AND ty.typnamespace = 'public'::regnamespace AND a.attnum > 0 AND NOT a.attisdropped
-  UNION
-  SELECT i.inhparent::regclass::text, 'all', i.inhrelid::regclass::text FROM pg_inherits i
-  UNION
-  SELECT k.confrelid::regclass::text, 'write', k.conrelid::regclass::text FROM pg_constraint k WHERE k.contype = 'f'`;
-
-/** A statement without its comment lines. */
-const uncommented = (sql: string) => sql.replace(/^\s*--[^\n]*$/gm, '');
-/** The words of a statement or a body, as names: lowercased, unquoted. */
-const words = (sql: string) => new Set(uncommented(sql).toLowerCase().match(/[a-z_][a-z0-9_$]*/g) ?? []);
-const named = (name: string) => name.replaceAll('"', '').replace(/^public\./, '');
-
-/**
- * What runs a function by a path `runs` does not follow, or names a thing in a case `words` loses: an operator, a cast,
- * an aggregate, an event trigger, a partition key's expression, a name in capitals. Coffre has none, and the collapse
- * refuses one, rather than miss what it runs.
- */
-const UNFOLLOWED = `
-  SELECT 'operator ' || oid::regoperator::text AS what FROM pg_operator WHERE oprnamespace = 'public'::regnamespace
-  UNION ALL SELECT 'cast ' || c.castsource::regtype || ' to ' || c.casttarget::regtype FROM pg_cast c JOIN pg_proc p ON p.oid = c.castfunc WHERE p.pronamespace = 'public'::regnamespace
-  UNION ALL SELECT 'aggregate ' || aggfnoid::regprocedure::text FROM pg_aggregate a JOIN pg_proc p ON p.oid = a.aggfnoid WHERE p.pronamespace = 'public'::regnamespace
-  UNION ALL SELECT 'event trigger ' || evtname FROM pg_event_trigger
-  UNION ALL SELECT 'partition key of ' || partrelid::regclass::text FROM pg_partitioned_table WHERE partexprs IS NOT NULL
-  UNION ALL SELECT 'name ' || quote_ident(relname) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname <> lower(relname)
-  UNION ALL SELECT 'name ' || quote_ident(proname) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname <> lower(proname)`;
-
-async function collectRuns(client: PostgresClient, runs: Runs, fns: Snapshot, ids: readonly string[], at: string): Promise<void> {
-  const unfollowed = await client.unsafe<{ what: string }[]>(UNFOLLOWED);
-  if (unfollowed.length > 0) throw new Error(`${at} leaves ${unfollowed.map(({ what }) => what).join(', ')}, which the collapse cannot follow`);
-  const add = (runner: string, kind: Kind, what: Iterable<string>) => {
-    const set = runs.edges.get(runner) ?? new Set();
-    for (const name of what) set.add(`${kind} ${name}`);
-    runs.edges.set(runner, set);
-  };
-  for (const fn of fns.values()) runs.functions.add(fn.name);
-  if (ids.length > 0) {
-    const bodies = await client.unsafe<{ name: string; src: string }[]>(
-      `SELECT p.proname::text AS name, p.prosrc AS src FROM pg_proc p WHERE p.oid::regprocedure::text = ANY($1)`,
-      [ids as string[]],
-    );
-    for (const { name, src } of bodies) add(name, 'all', words(src));
-  }
-  for (const { runner, kind, runs: name } of await client.unsafe<{ runner: string; kind: Kind; runs: string }[]>(RELATION_EDGES)) add(named(runner), kind, [named(name)]);
-}
-
-/** The edges each way of touching a relation follows; a function, once reached, is run whole. */
-const FOLLOWS: Record<'full' | 'read' | 'structure', readonly Kind[]> = { full: ['write', 'read', 'structure', 'all'], read: ['read', 'all'], structure: ['structure', 'all'] };
-
-/** A statement Postgres can plan, whose plan names every relation it writes (`writes`). */
-const PLANNED = /^(?:INSERT|UPDATE|DELETE|MERGE|WITH|SELECT|VALUES|TABLE)\s/i;
-
-/** The relations a statement writes, as its plan names them, or undefined when Postgres cannot plan it. */
-async function writes(client: PostgresClient, statement: string): Promise<string[] | undefined> {
-  if (!PLANNED.test(bare(uncommented(statement)))) return undefined;
-  const plan = await client.unsafe<{ 'QUERY PLAN': unknown }[]>(`EXPLAIN (VERBOSE, FORMAT JSON) ${statement}`).catch(() => undefined);
-  if (plan === undefined) return undefined;
-  type Node = { 'Node Type'?: string; 'Relation Name'?: string; Schema?: string; 'Target Tables'?: Node[]; Plans?: Node[]; Plan?: Node };
-  const out: string[] = [];
-  const walk = (node: Node) => {
-    if (node['Node Type'] === 'ModifyTable') for (const target of [node, ...(node['Target Tables'] ?? [])]) out.push(named(`${target.Schema}.${target['Relation Name']}`));
-    for (const child of [...(node.Plans ?? []), ...(node.Plan === undefined ? [] : [node.Plan])]) walk(child);
-  };
-  for (const node of plan[0]!['QUERY PLAN'] as Node[]) walk(node);
-  return out;
-}
-
-/**
- * The functions a statement may run, through `runs`, from the names it holds (in its strings too, for a DO block's
- * EXECUTE), so each kind errs on the side of running more: an index runs the functions it names, over the rows; an
- * ALTER TABLE those it names and every name's checks, indexes, generated columns and domains, which a rewrite runs
- * again; a statement Postgres planned reads every name and writes the relations its plan writes (`written`);
- * anything else is taken to write every name it holds.
- */
-function mayRun(statement: string, runs: Runs, written: readonly string[] | undefined): Set<string> {
-  const text = bare(uncommented(statement));
-  const all = [...words(text)];
-  const seeds: (readonly [string, keyof typeof FOLLOWS])[] = /^CREATE (?:UNIQUE )?INDEX\s/i.test(text)
-    ? all.filter((word) => runs.functions.has(word)).map((word) => [word, 'full'] as const)
-    : /^ALTER TABLE\s/i.test(text)
-      ? all.map((word) => [word, 'structure'] as const)
-      : written !== undefined
-        ? [...all.map((word) => [word, 'read'] as const), ...written.map((name) => [name, 'full'] as const)]
-        : all.map((word) => [word, 'full'] as const);
-  const ran = new Set<string>();
-  const seen = new Set<string>();
-  const queue = [...seeds];
-  for (let next = queue.pop(); next !== undefined; next = queue.pop()) {
-    const [name, how] = next;
-    const mode = runs.functions.has(name) ? 'full' : how;
-    if (seen.has(`${mode} ${name}`)) continue;
-    seen.add(`${mode} ${name}`);
-    if (runs.functions.has(name)) ran.add(name);
-    for (const edge of runs.edges.get(name) ?? []) {
-      const [kind, target] = edge.split(' ') as [Kind, string];
-      if (FOLLOWS[mode].includes(kind)) queue.push([target, mode]);
-    }
-  }
-  return ran;
-}
-
-type Replayed = { start: Snapshot; steps: Snapshot[]; touched: string[][]; end: Snapshot; runs: Runs; written: (string[] | undefined)[] };
+/** Besides the functions: the indexes (object IDs) each statement made and removed, and those left at the end. */
+type Replayed = { start: Snapshot; steps: Snapshot[]; touched: string[][]; end: Snapshot; made: string[][]; gone: string[][]; kept: Set<string> };
 
 /**
  * `list` run one at a time, autocommitted, a CONCURRENTLY index built plainly: the functions after each statement,
- * which each changed, and, when asked (`collect`), what may run what (`Runs`). Refused: a function outside the public schema, which the
+ * which each changed, and the indexes it made and removed. Refused: a function outside the public schema, which the
  * collapse does not write, and a function renamed or moved, which the collapse would drop and make anew, breaking
  * what holds it by its object ID (a trigger, a view).
  */
-async function replay(client: PostgresClient, where: readonly string[], list: readonly string[], { collect = false } = {}): Promise<Replayed> {
+async function replay(client: PostgresClient, where: readonly string[], list: readonly string[]): Promise<Replayed> {
   const outside = (fns: Snapshot, at: string) => {
     for (const [id, fn] of fns) if (fn.schema !== 'public') throw new Error(`${at} makes ${id} outside the public schema, which the collapse does not write`);
   };
   const first = await snapshot(client);
   outside(first.fns, 'the database the replay starts from');
-  const runs: Runs = { edges: new Map(), functions: new Set() };
-  if (collect) await collectRuns(client, runs, first.fns, [...first.fns.keys()], 'the database the replay starts from');
   let before = first;
+  let had = await indexes(client);
   const steps: Snapshot[] = [];
   const touched: string[][] = [];
-  const written: (string[] | undefined)[] = [];
+  const made: string[][] = [];
+  const gone: string[][] = [];
   for (const [index, statement] of list.entries()) {
-    if (collect) written.push(await writes(client, statement));
-    const online = onlineIndex(statement);
-    await client.unsafe(online === null ? statement : `CREATE ${online.unique ? 'UNIQUE ' : ''}INDEX ${quoteIdentifier(online.name)} ON ${quoteIdentifier(online.table)} ${online.body}`);
+    await run(client, statement);
     const after = await snapshot(client);
+    const now = await indexes(client);
+    made.push([...now].filter((oid) => !had.has(oid)));
+    gone.push([...had].filter((oid) => !now.has(oid)));
+    had = now;
     outside(after.fns, where[index]!);
     for (const [id, oid] of before.oids) {
       const now = after.oids.has(id) ? undefined : [...after.oids].find(([, other]) => other === oid);
@@ -281,11 +173,10 @@ async function replay(client: PostgresClient, where: readonly string[], list: re
     }
     const ids = changed(before.fns, after.fns);
     touched.push(ids);
-    if (collect) await collectRuns(client, runs, after.fns, ids.filter((id) => after.fns.has(id)), where[index]!);
     steps.push(after.fns);
     before = after;
   }
-  return { start: first.fns, steps, touched, end: before.fns, runs, written };
+  return { start: first.fns, steps, touched, end: before.fns, made, gone, kept: had };
 }
 
 const everyone = (grantees: string[] | null) => grantees ?? ['PUBLIC'];
@@ -329,14 +220,23 @@ function placement({ start, steps, touched, end }: Replayed) {
  * those `end` does not give.
  */
 function collapse(where: readonly string[], list: readonly string[], replayed: Replayed): string {
-  const { start, touched, end } = replayed;
+  const { start, touched, end, made, gone, kept } = replayed;
   const { placeAt, last, remade } = placement(replayed);
+  // An online index the path drops (by DROP INDEX or with its table) is left out, with a DROP INDEX that would fail
+  // without it: building one on audit_log only to drop it would cost the upgrade's downtime for nothing.
+  const left = new Set(list.flatMap((statement, index) => (onlineIndex(statement) !== null && !made[index]!.some((oid) => kept.has(oid)) ? made[index]! : [])));
   const out: string[] = [];
   const placed = new Set<string>();
   list.forEach((statement, index) => {
     if (!aboutFunctions(statement) && !ownerGrant(statement)) {
       if (touched[index]!.length > 0) throw new Error(`${where[index]} changes ${touched[index]!.join(', ')} but is no statement about functions`);
-      out.push(statement);
+      const online = onlineIndex(statement);
+      const lost = gone[index]!.filter((oid) => left.has(oid));
+      if (online !== null) {
+        if (!left.has(made[index]![0]!)) out.push(`${statement.slice(0, statement.length - bare(statement).length)}${plain(online)};`);
+      } else if (lost.length > 0 && /^DROP INDEX\s(?!IF EXISTS\s)/i.test(bare(statement))) {
+        if (lost.length < gone[index]!.length) throw new Error(`${where[index]} drops an index the collapse leaves out with others: give it a statement of its own`);
+      } else out.push(statement);
       return;
     }
     for (const id of touched[index]!) {
@@ -365,46 +265,6 @@ function collapse(where: readonly string[], list: readonly string[], replayed: R
   // until the transaction ends, as a restore of pg_dump's does. Each body was checked where the path made it.
   return [UNCHECKED, ...out, CHECKED].join(`\n${BREAK}\n`) + '\n';
 }
-
-/** Statements that run no function, whatever rows the database holds. */
-const INERT = /^(?:CREATE (?:OR REPLACE )?(?:TRIGGER|POLICY|VIEW|SCHEMA|SEQUENCE|TYPE|STATISTICS)\s|COMMENT ON\s|GRANT\s|REVOKE\s|DROP\s|ALTER (?:POLICY|SEQUENCE)\s|ALTER (?:TABLE|INDEX|VIEW) \S+ RENAME\s)/i;
-const inert = (statement: string) => INERT.test(bare(statement)) || (/^CREATE TABLE\s/i.test(bare(statement)) && !/\bAS\b/i.test(uncommented(statement)));
-
-/**
- * The collapse moves functions, not the statements that run them: a function is written in its final form where the
- * path first changed it, so a statement kept between there and the path's last change of it would run a form the
- * numbered path never ran there (a backfill calling it, an insert firing a trigger it is, an index or a check on it
- * over the rows). On a new database that runs over no rows, and the parity test compares what it writes; on an
- * upgrade it runs over rows no test holds, so the collapse refuses each statement kept in the upgrade that may run
- * (`mayRun`) a function whose form there differs between the two paths. Refused, the upgrade is no longer
- * mechanical: a person writes it.
- */
-function refuseDiverged(where: readonly string[], list: readonly string[], replayed: Replayed): void {
-  const { start, steps, end, runs, written } = replayed;
-  const { placeAt, last } = placement(replayed);
-  const form = (fn: Fn | undefined) => (fn === undefined ? 'none' : `${fn.digest} ${fn.owner}`);
-  const collapsedAt = (index: number, id: string) => {
-    const final = end.get(id);
-    if (final !== undefined) return (placeAt.get(final.name) ?? Infinity) < index ? final : start.get(id);
-    return start.has(id) && last.get(id)! < index ? undefined : start.get(id);
-  };
-  const refused: string[] = [];
-  list.forEach((statement, index) => {
-    // An online index is built after the transaction, by both paths, so with every function in its final form.
-    if (aboutFunctions(statement) || ownerGrant(statement) || inert(statement) || onlineIndex(statement) !== null) return;
-    const numberedAt = index === 0 ? start : steps[index - 1]!;
-    const diverged = new Set<string>();
-    for (const id of new Set([...numberedAt.keys(), ...start.keys(), ...end.keys()])) {
-      const fn = numberedAt.get(id) ?? start.get(id) ?? end.get(id)!;
-      if (form(numberedAt.get(id)) !== form(collapsedAt(index, id))) diverged.add(fn.name);
-    }
-    if (diverged.size === 0) return;
-    const hit = [...mayRun(statement, runs, written[index])].filter((name) => diverged.has(name)).sort();
-    if (hit.length > 0) refused.push(`${where[index]} may run ${hit.join(', ')}, in another form than the numbered path ran there`);
-  });
-  if (refused.length > 0) throw new Error(`the upgrade cannot keep these statements as they are:\n${refused.join('\n')}`);
-}
-
 const UNCHECKED = 'SET LOCAL check_function_bodies = off;';
 const CHECKED = 'RESET check_function_bodies;';
 
@@ -466,17 +326,18 @@ const located = (migrations: readonly Migration[]) =>
   migrations.flatMap(({ tag, sql }) => statements(sql).map((statement, index) => ({ where: `${tag} statement ${index + 1}`, statement })));
 
 /**
- * The collapse of this checkout's numbered migrations, made on the cluster `cluster` (a URL to its `postgres`
+ * The collapse of this checkout's numbered migrations (or of `migrations`), made on the cluster `cluster` (a URL to its `postgres`
  * database, as the owner: the runtime logins must be there, as `scripts/setup-test-database.sh` makes them).
  */
-export async function collapseMigrations(cluster: string): Promise<Collapsed> {
-  const all = await numbered();
+export async function collapseMigrations(cluster: string, migrations?: readonly Migration[]): Promise<Collapsed> {
+  const all = migrations ?? (await numbered());
   const release = released();
   release.forEach(({ tag }, index) => {
     if (all[index]?.tag !== tag) throw new Error(`the journal does not start with ${RELEASE}'s: ${all[index]?.tag ?? 'nothing'} where it has ${tag}`);
   });
   const whole = located(all);
   const after = located(all.slice(release.length));
+  for (const { where, statement } of after) if (several(statement)) throw new Error(`${where} holds more than one command: give each a statement of its own`);
 
   const owned = async (client: PostgresClient, fns: Snapshot) => {
     // A function's file sets no owner: the login migrating owns what it makes, so the path must leave it that.
@@ -489,17 +350,12 @@ export async function collapseMigrations(cluster: string): Promise<Collapsed> {
     return { replayed, functions: await files(client, replayed.end, lastComments(whole.map(({ statement }) => statement), replayed.touched)) };
   });
   const fromRelease = await scratch(cluster, async (client) => {
-    for (const { statement } of located(release)) {
-      const online = onlineIndex(statement);
-      await client.unsafe(online === null ? statement : `CREATE ${online.unique ? 'UNIQUE ' : ''}INDEX ${quoteIdentifier(online.name)} ON ${quoteIdentifier(online.table)} ${online.body}`);
-    }
-    return replay(client, after.map(({ where }) => where), after.map(({ statement }) => statement), { collect: true });
+    for (const { statement } of located(release)) await run(client, statement);
+    return replay(client, after.map(({ where }) => where), after.map(({ statement }) => statement));
   });
   // Both paths end in the same functions, or the numbered migrations disagree with themselves.
   const differ = changed(fromEmpty.replayed.end, fromRelease.end);
   if (differ.length > 0) throw new Error(`0.15.0 then its successors and the whole path end in different functions: ${differ.join(', ')}`);
-  // Only the upgrade meets rows no test holds; the baseline starts empty, and its parity test compares every row.
-  refuseDiverged(after.map(({ where }) => where), after.map(({ statement }) => statement), fromRelease);
 
   return {
     baseline: collapse(whole.map(({ where }) => where), whole.map(({ statement }) => statement), fromEmpty.replayed),

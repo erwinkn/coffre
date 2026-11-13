@@ -4,12 +4,12 @@
 // function's definition, and every grant: of the logins, the backup group and everyone), and every row.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
-import { assemble, collapseMigrations, LEDGER, numbered, released, statements, type Collapsed } from '../scripts/collapse.ts';
+import { assemble, collapseMigrations, LEDGER, numbered, RELEASE, released, several, statements, type Collapsed } from '../scripts/collapse.ts';
 import { migrateDatabase, restrictDatabase } from '../src/migrate.ts';
 import { buildOnline, onlineIndex, onlineIndexes } from '../src/online-indexes.ts';
-import { postgresClient, postgresSession, quoteIdentifier } from '../src/postgres.ts';
+import { postgresClient, postgresSession, quoteIdentifier, quoteLiteral } from '../src/postgres.ts';
 
 const BASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 // Short, not the suite's database name with a suffix: Postgres cuts a name at 63 bytes, which made two of these one.
@@ -34,8 +34,11 @@ async function database(name: string, template?: string): Promise<string> {
   return urlOf(`${PREFIX}_${name}`);
 }
 
-/** A statement applied: the rows it inserted, updated or deleted, and the tables it rewrote and their rows then. */
-type Applied = { statement: string; written: number; rewritten: { table: string; held: number }[] };
+/**
+ * A statement applied: its command, as Postgres names it (CREATE TABLE … AS is a SELECT), the rows it inserted,
+ * updated or deleted, and the tables it rewrote (by object ID, which a rename keeps) and their rows then.
+ */
+type Applied = { statement: string; command: string; written: number; rewritten: { oid: string; table: string; held: number }[] };
 
 /**
  * `migrations` applied as the migrator applies them, but for its ledger's rows: in one transaction, then the indexes
@@ -45,28 +48,28 @@ async function apply(url: string, migrations: readonly string[]): Promise<Applie
   const client = postgresSession(url);
   const WRITTEN = `SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0)::int8::text AS n FROM pg_stat_xact_user_tables`;
   // A table rewritten (a column converted, a volatile default added) gets a new file: Postgres says which, not the SQL.
-  const FILES = `SELECT relname::text AS name, relfilenode::text AS file FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'`;
+  const FILES = `SELECT oid::text, oid::regclass::text AS name, relfilenode::text AS file FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'`;
   const applied: Applied[] = [];
   try {
     await client.begin(async (tx) => {
       await tx.unsafe(LEDGER);
-      const files = async () => new Map((await tx.unsafe<{ name: string; file: string }[]>(FILES)).map(({ name, file }) => [name, file]));
+      const files = async () => new Map((await tx.unsafe<{ oid: string; name: string; file: string }[]>(FILES)).map((row) => [row.oid, row]));
       let was = await files();
       for (const sql of migrations) {
         for (const statement of statements(sql)) {
           if (onlineIndex(statement) !== null) continue;
           const [before] = await tx.unsafe<{ n: string }[]>(WRITTEN);
-          await tx.unsafe(statement);
+          const { command } = await tx.unsafe(statement);
           const [after] = await tx.unsafe<{ n: string }[]>(WRITTEN);
           const now = await files();
           const rewritten: Applied['rewritten'] = [];
-          for (const [table, file] of now) {
-            if (!was.has(table) || was.get(table) === file) continue;
-            const [held] = await tx.unsafe<{ n: string }[]>(`SELECT count(*)::text AS n FROM ${quoteIdentifier(table)}`);
-            rewritten.push({ table, held: Number(held!.n) });
+          for (const [oid, { name, file }] of now) {
+            if (!was.has(oid) || was.get(oid)!.file === file) continue;
+            const [held] = await tx.unsafe<{ n: string }[]>(`SELECT count(*)::text AS n FROM ${name}`);
+            rewritten.push({ oid, table: name, held: Number(held!.n) });
           }
           was = now;
-          applied.push({ statement, written: Number(after!.n) - Number(before!.n), rewritten });
+          applied.push({ statement, command: command ?? '', written: Number(after!.n) - Number(before!.n), rewritten });
         }
       }
     });
@@ -81,15 +84,18 @@ async function apply(url: string, migrations: readonly string[]): Promise<Applie
 
 /** A statement without its comment lines. */
 const code = (statement: string) => statement.replace(/^\s*--[^\n]*(?:\n|$)/gm, '').trim();
-/** A statement that writes no rows of its own: CREATE TABLE … AS and a materialized view do, so they are none of these. */
-const DDL = /^(?:CREATE\s(?!(?:UNLOGGED |TEMP(?:ORARY)? )?TABLE\b[^;]*?\bAS\s+\(?\s*(?:SELECT|WITH|VALUES|TABLE|EXECUTE)\b|MATERIALIZED\s)|(?:ALTER|DROP|GRANT|REVOKE|COMMENT|SET|RESET)\s)/i;
+/** A command that writes no rows of its own, by the name Postgres gives it; any other is held to the seed. */
+const DDL = /^(?:CREATE|ALTER|DROP|GRANT|REVOKE|COMMENT|SET|RESET)\b/;
 
 /** One line per object, sorted; a table partitioned by day has days named by the date the database was made. */
 const CATALOG = `
   WITH fn AS (
     SELECT p.oid FROM pg_proc p WHERE p.pronamespace NOT IN ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)
   ), rel AS (
-    SELECT c.oid, CASE WHEN c.relnamespace = 'public'::regnamespace THEN '' ELSE c.relnamespace::regnamespace::text || '.' END || c.relname AS name
+    -- A day's index is named by its parent and its day: the online build names those of the days it finds its own way,
+    -- a plain CREATE INDEX Postgres's way (as it names a day made later on either path), and nothing names one.
+    SELECT c.oid, coalesce((SELECT 'index ' || h.inhparent::regclass::text || ' on ' || x.indrelid::regclass::text FROM pg_inherits h JOIN pg_index x ON x.indexrelid = c.oid WHERE h.inhrelid = c.oid AND c.relkind = 'i'),
+                           CASE WHEN c.relnamespace = 'public'::regnamespace THEN '' ELSE c.relnamespace::regnamespace::text || '.' END || c.relname) AS name
       FROM pg_class c WHERE c.relnamespace IN ('public'::regnamespace, 'drizzle'::regnamespace)
   ), acl AS (
     SELECT 'grant on ' || r.name AS object, coalesce(c.relacl, acldefault(CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END::"char", c.relowner)) AS acl
@@ -106,7 +112,7 @@ const CATALOG = `
   SELECT 'relation ' || r.name AS line, concat_ws(' | ', pg_get_userbyid(c.relowner), c.relkind, c.relpersistence, c.relrowsecurity, c.relforcerowsecurity, c.reloptions::text,
          pg_get_partkeydef(c.oid), pg_get_expr(c.relpartbound, c.oid), (SELECT i.inhparent::regclass::text FROM pg_inherits i WHERE i.inhrelid = c.oid),
          CASE WHEN c.relkind IN ('v', 'm') THEN pg_get_viewdef(c.oid) END,
-         CASE WHEN c.relkind IN ('i', 'I') THEN pg_get_indexdef(c.oid) || (SELECT ' valid ' || i.indisvalid FROM pg_index i WHERE i.indexrelid = c.oid) END,
+         CASE WHEN c.relkind IN ('i', 'I') THEN replace(pg_get_indexdef(c.oid), ' INDEX ' || quote_ident(c.relname) || ' ON ', ' INDEX ON ') || (SELECT ' valid ' || i.indisvalid FROM pg_index i WHERE i.indexrelid = c.oid) END,
          (SELECT concat_ws(' ', format_type(s.seqtypid, NULL), s.seqstart, s.seqincrement, s.seqmax, s.seqmin, s.seqcache, s.seqcycle) FROM pg_sequence s WHERE s.seqrelid = c.oid)) AS def
     FROM rel r JOIN pg_class c ON c.oid = r.oid
   UNION ALL
@@ -152,7 +158,8 @@ const CATALOG = `
 /** Rows a migration wrote at the time it ran: equal only where both databases ran it at once. */
 const WHEN_MIGRATED: Record<string, string[]> = { checkpoint_fence: ['at_floor'] };
 
-async function state(url: string, { timed = false } = {}): Promise<string[]> {
+/** The catalog and every row, or, for a table's rows when asked (`digest`), their count and one digest of each row's. */
+async function state(url: string, { timed = false, digest = false } = {}): Promise<string[]> {
   const client = postgresClient(url, { max: 1 });
   try {
     const lines = (await client.unsafe<{ line: string; def: string | null }[]>(CATALOG)).map(({ line, def }) =>
@@ -161,6 +168,14 @@ async function state(url: string, { timed = false } = {}): Promise<string[]> {
       `SELECT c.relname::text AS name, c.relkind::text AS kind FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p', 'S') AND NOT c.relispartition`,
     );
     for (const { name, kind } of tables) {
+      if (digest && kind !== 'S') {
+        const row = `to_jsonb(t)${timed ? '' : (WHEN_MIGRATED[name] ?? []).map((column) => ` - ${quoteLiteral(column)}`).join('')}`;
+        const [{ n, sum }] = await client.unsafe<{ n: string; sum: string }[]>(
+          `SELECT count(*)::text AS n, md5(coalesce(string_agg(h, '' ORDER BY h), '')) AS sum FROM (SELECT md5((${row})::text) AS h FROM ${quoteIdentifier(name)} t) r`,
+        );
+        lines.push(`rows of ${name}: ${n}, digest ${sum}`);
+        continue;
+      }
       const rows = await client.unsafe<{ row: Record<string, unknown> }[]>(
         kind === 'S' ? `SELECT jsonb_build_object('last_value', last_value, 'is_called', is_called) AS row FROM ${quoteIdentifier(name)}` : `SELECT to_jsonb(t) AS row FROM ${quoteIdentifier(name)} t`,
       );
@@ -238,6 +253,8 @@ test('each function is made once, by its own file, which the baseline names once
   for (const sql of [collapsed.baseline, collapsed.upgrade]) {
     assert.equal(new Set(named(sql)).size, named(sql).length);
     assert.doesNotMatch(sql, /CREATE (OR REPLACE )?FUNCTION (?!pg_temp\.)/i);
+    // 0.16.0's upgrade is offline (D197): it builds every index in its transaction, none after it.
+    assert.deepEqual(statements(assemble(sql, collapsed.functions)).filter((statement) => onlineIndex(statement) !== null), []);
   }
   assert.deepEqual(named(collapsed.baseline).sort(), [...collapsed.functions.keys()].sort());
 });
@@ -266,7 +283,7 @@ test('on a 0.15.0 database with rows, the upgrade writes what the numbered migra
   const atRelease = new Set<string>();
   try {
     await client.unsafe(SEED);
-    for (const { name } of await client.unsafe<{ name: string }[]>(`SELECT tablename::text AS name FROM pg_tables WHERE schemaname = 'public'`)) atRelease.add(name);
+    for (const { oid } of await client.unsafe<{ oid: string }[]>(`SELECT oid::text FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'`)) atRelease.add(oid);
   } finally {
     await client.end();
   }
@@ -275,16 +292,77 @@ test('on a 0.15.0 database with rows, the upgrade writes what the numbered migra
   const upgraded = await database('seeded_upgraded', `${PREFIX}_seeded`);
   const applied = await apply(upgraded, [assemble(collapsed.upgrade, collapsed.functions)]);
   // Every statement but DDL may write rows: an unknown kind is held to the seed too.
-  const writers = applied.filter(({ statement }) => code(statement) !== '' && !DDL.test(code(statement)));
+  const writers = applied.filter(({ statement, command }) => code(statement) !== '' && !DDL.test(command));
   assert.ok(writers.length > 0);
   for (const { statement, written } of writers) {
     if (WRITES_NOTHING.some(({ matches }) => matches.test(statement))) continue;
     assert.ok(written > 0, `the seed gives this statement no rows to write; seed what it reads:\n${code(statement).slice(0, 300)}`);
   }
   for (const { statement, rewritten } of applied) {
-    for (const { table, held } of rewritten) {
-      if (atRelease.has(table)) assert.ok(held > 0, `the seed gives ${table} no rows for this statement to rewrite:\n${code(statement).slice(0, 300)}`);
+    for (const { oid, table, held } of rewritten) {
+      if (atRelease.has(oid)) assert.ok(held > 0, `the seed gives ${table} no rows for this statement to rewrite:\n${code(statement).slice(0, 300)}`);
     }
   }
   same(await state(stepped, { timed: true }), await state(upgraded, { timed: true }));
+});
+
+/** A database restored from a 0.15.0 deployment's backup on the test cluster (T265's rehearsal), which both paths upgrade. */
+const RESTORED = process.env.COFFRE_TEST_RESTORED_DATABASE;
+
+test('on the restored database COFFRE_TEST_RESTORED_DATABASE names, the upgrade leaves what the numbered migrations leave', { skip: RESTORED === undefined }, async () => {
+  const client = postgresClient(urlOf(RESTORED!), { max: 1 });
+  try {
+    const ledger = await client.unsafe<{ hash: string }[]>('SELECT hash FROM drizzle.__drizzle_migrations ORDER BY created_at, id');
+    const hashes = release.map((sql) => createHash('sha256').update(sql).digest('hex'));
+    assert.deepEqual(ledger.map(({ hash }) => hash), hashes, `${RESTORED} is not a database ${RELEASE} migrated, and no later release`);
+  } finally {
+    await client.end();
+  }
+  const stepped = await database('restored_stepped', RESTORED);
+  await apply(stepped, (await numbered()).slice(release.length).map(({ sql }) => sql));
+  const upgraded = await database('restored_upgraded', RESTORED);
+  await apply(upgraded, [assemble(collapsed.upgrade, collapsed.functions)]);
+  same(await state(stepped, { timed: true, digest: true }), await state(upgraded, { timed: true, digest: true }));
+});
+
+const probe = async (sql: string) => collapseMigrations(BASE, [...(await numbered()), { tag: '9999_probe', sql: statements(sql).join(`\n--> statement-breakpoint\n`) }]);
+
+test('a statement of the migrations after 0.15.0 holds one command', async () => {
+  // Two commands in one statement (r3's probe): the seed check would sort the INSERT by the DROP before it.
+  await assert.rejects(probe('DROP TABLE IF EXISTS "probe_no_such"; INSERT INTO "log_changes" SELECT * FROM "log_changes";'), /9999_probe statement 1 holds more than one command/);
+  assert.equal(several('DO $$ BEGIN PERFORM 1; PERFORM 2; END $$;  -- one block\n'), false);
+  assert.equal(several('-- one; two\nINSERT INTO t VALUES (1);'), false);
+  assert.equal(several("INSERT INTO t VALUES (';x');"), true);
+});
+
+test('an index built online is built plainly, unless the path drops it', async () => {
+  const collapsedProbe = await probe(`
+    CREATE TABLE "probe_a" ("n" integer);
+    --> statement-breakpoint
+    CREATE INDEX CONCURRENTLY "probe_a_n" ON "probe_a" USING btree ("n");
+    --> statement-breakpoint
+    DROP INDEX "probe_a_n";
+    --> statement-breakpoint
+    CREATE INDEX CONCURRENTLY "probe_a_kept" ON "probe_a" USING btree ("n");
+    --> statement-breakpoint
+    CREATE INDEX CONCURRENTLY "probe_a_gone" ON "probe_a" USING btree ("n");
+    --> statement-breakpoint
+    DROP INDEX IF EXISTS "probe_a_gone";
+    --> statement-breakpoint
+    CREATE TABLE "probe_b" ("n" integer);
+    --> statement-breakpoint
+    CREATE INDEX CONCURRENTLY "probe_b_n" ON "probe_b" USING btree ("n");
+    --> statement-breakpoint
+    DROP TABLE "probe_b";`);
+  for (const sql of [collapsedProbe.baseline, collapsedProbe.upgrade]) {
+    const kept = statements(sql).filter((statement) => statement.includes('probe_'));
+    assert.deepEqual(kept, [
+      'CREATE TABLE "probe_a" ("n" integer);',
+      'CREATE INDEX "probe_a_kept" ON "probe_a" USING btree ("n");',
+      'DROP INDEX IF EXISTS "probe_a_gone";',
+      'CREATE TABLE "probe_b" ("n" integer);',
+      'DROP TABLE "probe_b";',
+    ]);
+  }
+  await apply(await database('probe'), [assemble(collapsedProbe.baseline, collapsedProbe.functions)]);
 });

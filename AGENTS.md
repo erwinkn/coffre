@@ -156,7 +156,7 @@ terminal (`packages/cli/src/secret.ts`); a CI run signs in with `coffre login <u
 --token` and the like, which save its session. The env vars left are `DATABASE_URL` for `coffre-server
 migrate`, the platforms' own the CLI uses (GitHub's `ACTIONS_ID_TOKEN_REQUEST_*`,
 `GITHUB_ENV`), and the dev and test tooling's (`COFFRE_DEV_*`, `COFFRE_STATE_DIR`,
-`COFFRE_TEST_DATABASE`, `COFFRE_TEST_SHARD`, `COFFRE_TEST_SHARD_REPORT`, `COFFRE_POSTGRES_PORT`, `COFFRE_CLIENT_NODES`, `COFFRE_SWEEP_SIZE`, `COFFRE_SWEEP_OUTCOMES`, `COFFRE_SWEEP_KEEP`). Don't add another to a package or the
+`COFFRE_TEST_DATABASE`, `COFFRE_TEST_RESTORED_DATABASE`, `COFFRE_TEST_SHARD`, `COFFRE_TEST_SHARD_REPORT`, `COFFRE_POSTGRES_PORT`, `COFFRE_CLIENT_NODES`, `COFFRE_SWEEP_SIZE`, `COFFRE_SWEEP_OUTCOMES`, `COFFRE_SWEEP_KEEP`). Don't add another to a package or the
 CLI.
 
 **Migrations: expand, then contract.** A deployment runs `coffre migrate` in
