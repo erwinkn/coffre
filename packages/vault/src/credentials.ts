@@ -35,23 +35,23 @@ import { bindingObject, credentialObject } from './objects.ts';
 
 /**
  * The vault makes and ends credentials itself, each in one statement
- * (T149, D146; docs/design/credential-lifecycle.md; formal/Lifecycle.tla):
+ * (docs/design/credential-lifecycle.md; formal/Lifecycle.tla):
  * a sign-in through a trust binding (`sign_in`, migration 0034) and a
  * revoke (`revoke_credential`). It decides here, on the columns the app
  * names, and seals what it decides; the statement goes ahead only while
  * those columns are the rows', under their locks, and numbers the change.
- * Then the caller waits for the seal (R51).
+ * Then the caller waits for the seal.
  *
- * The app still verifies the proof (the ID token's signature and claims,
- * against the binding it read): the vault's own check of it is D148's,
- * next (Lifecycle.tla's VaultVerifiesToken, BindingSealed).
+ * The app verifies the proof (the ID token's signature and claims,
+ * against the binding it read): the vault does not check it yet
+ * (Lifecycle.tla's VaultVerifiesToken, BindingSealed).
  */
 
 
 /**
  * A sign-in's statements in all, before it is refused `busy`, asked again shortly: each one after the first because the
  * account's or the binding's newest change moved since it was read (`moved`), read again. Three, as a key write's
- * (two-trips.md, "Retries"): a churn fails fast (R44), never queues.
+ * (two-trips.md, "Retries"): a churn fails fast, never queues.
  */
 export const SIGN_IN_TRIES = 3;
 
@@ -59,13 +59,13 @@ export const SIGN_IN_TRIES = 3;
 
 /**
  * How seldom a sign-in stamps its binding's `last_used_at`: when a minute
- * old (Erwin, D177; W331), so one binding's sign-ins do not take turns on
+ * old, so one binding's sign-ins do not take turns on
  * its row. `sign_in` holds the same minute (migration 0079), which
  * test/sql-copies.test.ts holds to this.
  */
 export const BINDING_LAST_USED_MS = 60_000;
 
-/** What the change of a sign-in records besides its op (D147): its binding, proof, issuer, the run's claims, and a session's key and hard end. */
+/** What the change of a sign-in records besides its op: its binding, proof, issuer, the run's claims, and a session's key and hard end. */
 type SignInRecord = { binding: string; proof: string; issuer: string; run: Record<string, string | number>; jkt?: string; notAfter?: number };
 
 /** A sign-in as the vault decided it: the statement's arguments. */
@@ -79,12 +79,12 @@ export type SignInCall = {
 
 /**
  * What a sign-in's statement holds the account's and the binding's newest
- * changes to, under their rows' locks (T192, ChangePinsChecked): each the
+ * changes to, under their rows' locks (ChangePinsChecked): each the
  * change whose MAC the vault checked, whole (ChangePinsWhole): its number and
  * every column its MAC covers, and the MAC. Its number and seal alone would
  * not do: no MAC covers a number, so an app could hand back an old, authentic
  * change of the account under the number of its removal, whose seal column a
- * writer had set to the old change's (review r2). The binding's seal is the
+ * writer had set to the old change's. The binding's seal is the
  * one the vault checked over its columns (`bindingSeal`), which must be that
  * change's. Another newest change is `moved`: the vault reads them again.
  */
@@ -93,7 +93,7 @@ export type SignInPins = { member: SignInPin; binding: SignInPin };
 
 /**
  * The pins of the account's and the binding's newest changes as the app read
- * them beside the binding (T192, `SignInInput.newest`), each held to its MAC
+ * them beside the binding (`SignInInput.newest`), each held to its MAC
  * over its object, which the vault derives: null where either is missing, its
  * MAC fails, or the binding's is not of the seal the vault checked
  * (`bindingSeal`). Null asks the vault to read them itself (`changesHold`),
@@ -108,7 +108,7 @@ export function givenPins(macs: readonly LogMacKey[], input: SignInInput, bindin
   return { member, binding };
 }
 
-/** Postgres's largest `bigint`, a change number's type: a number past it is none, not an error at its cast (review r4). */
+/** Postgres's largest `bigint`, a change number's type: a number past it is none, not an error at its cast. */
 const BIGINT_MAX = 9223372036854775807n;
 
 /** A change as the app read it, if it is `ref`'s and its MAC holds: what the statement holds its object's newest change to. */
@@ -139,7 +139,7 @@ export function readPins(found: ReadonlyMap<string, readonly CheckedChange[]>, i
 /** The statement's answer: its change's number, or why it made nothing. */
 export type Answer = { number?: string | null; state?: SignInRefusal | IssueTokenRefusal | 'moved' | 'stale' | 'policy' | 'unbound' | 'full' };
 
-/** A lock not had within the functions' `lock_timeout`, or a statement cancelled: overloaded, refused at once (R44). */
+/** A lock not had within the functions' `lock_timeout`, or a statement cancelled: overloaded, refused at once. */
 const BUSY_CODES = new Set(['55P03', '57014']);
 
 function isBusy(error: unknown): boolean {
@@ -239,7 +239,7 @@ export function checkBinding(columns: BindingColumns | undefined): BindingColumn
   return c;
 }
 
-/** An instance's public URL, http or https, as a binding's `origin` must be: checked where it enters, so a sign-in never parses a bad one (Fable on PR 3b). */
+/** An instance's public URL, http or https, as a binding's `origin` must be: checked where it enters, so a sign-in never parses a bad one. */
 function webUrl(value: string): boolean {
   try {
     const { protocol } = new URL(value);
@@ -302,7 +302,7 @@ export async function revokeCredential(db: Database, keys: ChangeKeys, at: numbe
   if (!sealed(keys.seals, ref, now, sealFrom)) throw new NotLogged(ref, 'tampered');
   const after = applyOp(now, ref, { op: 'credential.revoke' })!;
   const seal = sealOf(keys.seals[0]!, ref, after);
-  // What a revoke's record says besides (D147): why, the credential the request came in on, whose act it was (T164), and
+  // What a revoke's record says besides: why, the credential the request came in on, whose act it was, and
   // whose credential of what kind it ends.
   const payload = canonical({ ...JSON.parse(payloadOf(ref, { op: 'credential.revoke' })), revoke: { reason, via, trace: trace ?? undefined, kind: columns.kind, principal: columns.principal } });
   const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload, seal };
@@ -332,7 +332,7 @@ export type RevokeCall = {
   change: { at: number; actor: string; requestId: string; object: string; payload: string; seal: Buffer; sealFrom: Buffer; mac: Buffer };
 };
 
-// --- a token's issue (PR 2) -----------------------------------------------------
+// --- a token's issue ------------------------------------------------------------
 
 /** What an issue was weighed on, read by the vault before its statement: the rows the statement then holds to. */
 export type IssueRead = {
@@ -399,7 +399,7 @@ function isTrace(trace: unknown): trace is RequestTrace | null | undefined {
  * scope and kind through it), may give `principal` a token of this kind,
  * scope and end: null if so, or why not. The app's own checks, made
  * again on the vault's reads, with the same rules (`@coffre/core/access`):
- * - a service account's (R15, R32): its issuer, a person, manages it, and could give
+ * - a service account's: its issuer, a person, manages it, and could give
  *   it each grant, which the account holds (`issuesCredential`); sensitive
  *   reads only where the issuer is an Owner of the project (`ownsProject`);
  *   each grant's columns within its role; at most the deployment's `services.tokenMaxDays`, `MAX_SERVICE_TOKEN_DAYS` at most;
@@ -436,11 +436,11 @@ export function weighIssue(
     return ofRole(grant, roles) && permissions.every((p) => columns.normal.includes(p)) && guarded.every((p) => columns.protected.includes(p));
   };
   // Whether it came in on a scoped credential (a personal token's, a handle's, a connected app's) or a session: the
-  // credential's object seals its scope, never its row's kind, so the vault decides on that (R53).
+  // credential's object seals its scope, never its row's kind, so the vault decides on that.
   const scoped = holder.credentialScope != null;
   switch (credential.kind) {
     case 'service':
-      // The deployment's longest (`services.tokenMaxDays`), which the app holds an issue to as well: never past R76's year.
+      // The deployment's longest (`services.tokenMaxDays`), which the app holds an issue to as well: never past a year (`MAX_SERVICE_TOKEN_DAYS`).
       if (credential.expiresAt > at + Math.min(tokenMaxDays, MAX_SERVICE_TOKEN_DAYS) * 86_400_000 + CLOCK_SKEW_MS) return `a service token lasts at most ${Math.min(tokenMaxDays, MAX_SERVICE_TOKEN_DAYS)} days here`;
       return weighService(actor, principal, scope, holder, at_, service);
     case 'personal': {
@@ -481,11 +481,11 @@ function ofRole(grant: ScopeGrant, roles: Policy): boolean {
  * Whether `actor`, as the vault read them (`holder`), may give service
  * account `principal` a grant of `scope` (`places`, by its environments'
  * slugs): a service token's issue, or a trust binding's, whose sign-ins
- * reach the same (PR 3a). Null if so, or why not. A person gives it, as the
+ * reach the same. Null if so, or why not. A person gives it, as the
  * app's `managedAccount` has it, who manages the account and could give it
- * each grant, which the account holds (`issuesCredential`; R15); each
+ * each grant, which the account holds (`issuesCredential`); each
  * grant's columns within its role; sensitive reads only where they are an
- * Owner of the project (`ownsProject`, R32).
+ * Owner of the project (`ownsProject`).
  */
 export function weighService(
   actor: string,
@@ -525,7 +525,7 @@ export function issueCall(keys: ChangeKeys, input: IssueTokenInput, read: IssueR
   const ref: Ref = { kind: 'credential', id: c.id };
   const object = credentialObject({ id: c.id, principal: input.principal, kind: c.kind, scope: c.scope, revoked: false, expiresAt: c.expiresAt, generation: input.generation });
   const op: Op = { op: 'credential.issue', principal: input.principal, caller: object.caller, scope: object.scope, expiresAt: object.expiresAt, generation: object.generation };
-  // What the change records of the issue besides (D147): who, on which credential, whose act it was (T164), which kind,
+  // What the change records of the issue besides: who, on which credential, whose act it was, which kind,
   // its label.
   const payload = canonical({ ...JSON.parse(payloadOf(ref, op)), issue: { by: input.actor, via: input.via, trace: input.trace ?? undefined, confirmed: input.confirmed ?? undefined, kind: c.kind, label: c.label } });
   const seal = sealOf(keys.seals[0]!, ref, object);
@@ -546,7 +546,7 @@ export async function issueToken(db: Database, call: IssueCall): Promise<Answer>
   }
 }
 
-// --- a service's bindings (PR 3a) -----------------------------------------------
+// --- a service's bindings ---------------------------------------------------------
 
 /** A change of bindings as the vault decided it: the statement's arguments, and each object's change in order. */
 export type BindingsCall = {
@@ -577,7 +577,7 @@ export type BindingsCall = {
 export function checkChangeBindings(input: ChangeBindingsInput): void {
   const { actor, via, actorAccess, make, live, reads, ends, reason, revokedAt, revokedBy, policy, appKey } = input ?? ({} as ChangeBindingsInput);
   const member = /^(user:[^\s]{1,320}|token:[a-z0-9][a-z0-9._-]{0,99})$/;
-  // The scheduled run going on with a removal a request left under way (W331): an unbind only, naming whom it continues.
+  // The scheduled run going on with a removal a request left under way: an unbind only, naming whom it continues.
   const resumes = actor === 'system:schedule' && make === null && reason === 'unbound' && typeof input.continues?.by === 'string' && member.test(input.continues.by)
     && Number.isSafeInteger(input.continues.at);
   if (input?.continues !== undefined && !resumes) throw new Error('a change of bindings continues a removal only as the scheduled run, an unbind, naming its remover and when it closed them');
@@ -641,12 +641,12 @@ export function bindingsCall(
     const ref: Ref = { kind: 'binding', id: make.id };
     const value = bindingObject(make);
     const seal = sealOf(keys.seals[0]!, ref, value);
-    // What the change records besides (D147): who made it, on which credential, its label, and those it replaces. A
-    // replacement's sweep makes it too, as it closes those it replaces (reviews r8, r9; Unbinding.tla's MakesAtClose).
+    // What the change records besides: who made it, on which credential, its label, and those it replaces. A
+    // replacement's sweep makes it too, as it closes those it replaces (Unbinding.tla's MakesAtClose).
     change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.make', value })), bind: { by: actor, via: input.via, label: make.label, replaces: ends.map((end) => end.before.columns.id) } }), seal);
     made = { row: make, authMac: Buffer.from(make.authMac, 'base64'), seal, read: read!, via: input.via, connection: input.connection };
   }
-  // Whom the scheduled run continues, in each change's record (W331): who asked for the removal, and when it closed.
+  // Whom the scheduled run continues, in each change's record: who asked for the removal, and when it closed.
   const continuing = input.continues === undefined ? {} : { continues: { by: input.continues.by, at: input.continues.at } };
   const ended: BindingsCall['ends'] = [];
   const swept: BindingsCall['credentials'] = [];
@@ -660,7 +660,7 @@ export function bindingsCall(
       if (end.before.seal !== null && !sealed(keys.seals, ref, bindingObject(columns), Buffer.from(end.before.seal, 'base64'))) return { refused: 'tampered' };
       ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom: end.before.seal === null ? null : Buffer.from(end.before.seal, 'base64'), authMac: Buffer.from(end.authMacFrom, 'base64'), seal: null });
     } else if (end.before.seal === null) {
-      // One 0.14 made, which the log never held: its row ended, with no change; the statement holds it to having none (review r2).
+      // One 0.14 made, which the log never held: its row ended, with no change; the statement holds it to having none.
       ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom: null, authMac: Buffer.from(end.authMac, 'base64'), seal: null });
     } else {
       const sealFrom = Buffer.from(end.before.seal, 'base64');

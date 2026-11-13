@@ -1,6 +1,6 @@
-// The 0.15 checkpointer behind its seam, over an in-memory database a writer
-// can tamper with: W209's attacks (docs/design/audit-tree.md, "What it
-// catches"), the pair's rules (W212), and R51's change rule with witnesses.
+// The checkpointer behind its seam, over an in-memory database a writer can
+// tamper with: the attacks of docs/design/audit-tree.md, "What it catches",
+// the pair's rules, and how a change waits for its seal and witnesses.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
@@ -54,7 +54,7 @@ test('an honest log: both trees sealed every tick as one pair, verified, and eve
     assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, cp.pair.pair[p.tree].root), `${number}`);
   }
   assert.equal(await cp.prove(unsealed), null, 'not sealed yet');
-  // An incremental walk from the head verified before reads only what came after (R25).
+  // An incremental walk from the head verified before reads only what came after.
   await traffic(store, cp, 2);
   const again = await verify(store, k, { from: v.head! });
   assert.ok(again.ok && again.checkpoints === 2 && again.sealed === 43, again.problems.join('\n'));
@@ -284,7 +284,7 @@ test('review r3: a memory behind the database is checked by a consistency proof,
   store.rollBack(0n);
   const forked = await open({ memory: variableMemory() });
   for (let i = 0; i < 65_792; i += 1) store.append('uses', `fork-${i}`);
-  // A part of the window a tick (T169, WINDOW_MAX), until it is all sealed.
+  // A part of the window a tick (WINDOW_MAX), until it is all sealed.
   for (let t = await forked.tick(); t.more; t = await forked.tick()) assert.ok(t.signed);
   const tile = Buffer.from(store.tileStore.uses.get('1/0')!);
   mine.uses.root.copy(tile, 0);
@@ -369,7 +369,7 @@ test('PR 8 review r4: a change whose proof the database answers wrongly for is r
   await traffic(store, await open(), 1);
   const number = store.append('changes', 'revoke');
   await (await open()).tick();
-  // Sealed before this checkpointer opened: proved from the database (T171).
+  // Sealed before this checkpointer opened: proved from the database.
   const cp = await open();
   // As `locate` refuses a use changed since its tick that holds the change's number.
   store.locate = async () => {
@@ -378,7 +378,7 @@ test('PR 8 review r4: a change whose proof the database answers wrongly for is r
   await assert.rejects(cp.sealThrough(number), /cannot be proved in the signed changes tree: use 9 is in none/);
   assert.ok(alerts.some((a) => /cannot be proved in the signed changes tree/.test(a)));
   // A failure of the database's to answer at all (a connection dropped) is no refusal: the change, committed, is not
-  // sealed in time (T169), the app's 503, and no alarm.
+  // sealed in time, the app's 503, and no alarm.
   const before = alerts.length;
   store.locate = async () => {
     throw new Error('Connection terminated unexpectedly');
@@ -507,7 +507,7 @@ test('review r4: prove() refuses an index past the tree; open() re-syncs a memor
   store.locate = locate;
   const { pair } = cp.pair;
   // The memory holds the same heads signed earlier: it takes the row's notes. Signed later, or at a higher floor, than
-  // the row: time would run back, refused (review r11).
+  // the row: time would run back, refused.
   const earlier = await signPair(k.signers, pair.upto, pair.at - 7, { changes: pair.changes, uses: pair.uses }, pair.floor);
   memory.record = encodePair(earlier.notes);
   await open();
@@ -752,7 +752,7 @@ test('6b review r3: a closed checkpointer ends its tick in flight, then refuses 
   const { store, open } = await setup();
   const cp = await open();
   await traffic(store, cp, 1);
-  // A change it sealed, whose proof it keeps (T171).
+  // A change it sealed, whose proof it keeps.
   const cached = store.append('changes', 'cached');
   await cp.sealThrough(cached);
   store.append('uses', 'x');
@@ -771,7 +771,7 @@ test('6b review r3: a closed checkpointer ends its tick in flight, then refuses 
   const closing = cp.close().then(() => (closed = true));
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(closed, false, 'close waits for the tick in flight');
-  // Its write lands, and its answer, come after the fence closed, is not read (T169): the tick fails, and the next
+  // Its write lands, and its answer, come after the fence closed, is not read: the tick fails, and the next
   // checkpointer finds the pair it remembered in the database.
   const writes = store.writes;
   release();
@@ -780,11 +780,11 @@ test('6b review r3: a closed checkpointer ends its tick in flight, then refuses 
   await closing;
   await assert.rejects(cp.tick(), /was closed/);
   await assert.rejects(cp.sealThrough(store.append('changes', 'c')), /was closed/);
-  // Nor one it sealed and kept the proof of (T171, review r1): a checkpointer closed answers no change.
+  // Nor one it sealed and kept the proof of: a checkpointer closed answers no change.
   await assert.rejects(cp.sealThrough(cached), (error: Error) => error instanceof Unsealed && /was closed/.test(error.message));
 });
 
-// R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.
+// A change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.
 
 test('a change answers once sealed: witnessed null without a witness, and its proof checks against the pair', async () => {
   const { store, open } = await setup();
@@ -1051,7 +1051,7 @@ test('T169: a tick whose barrier never answers stalls within its bound; a change
   t0 = performance.now();
   await assert.rejects(cp.sealThrough(change), (error: Error) => error instanceof Unsealed && isUnsealed(error));
   assert.ok(performance.now() - t0 < 100);
-  // Nor a change it sealed before, whose proof it kept (T171, review r1).
+  // Nor a change it sealed before, whose proof it kept.
   await assert.rejects(cp.sealThrough(cached), (error: Error) => error instanceof Unsealed && /ran past/.test(error.message));
   // Another opens over the same memory while the stalled tick still waits, and seals the change.
   const next = await open();
@@ -1065,7 +1065,7 @@ test('T169: a tick whose barrier never answers stalls within its bound; a change
   assert.equal(memory.record, record, 'its memory is the new checkpointer\'s');
   assert.equal(store.writes, writes, 'nothing written');
   // The floor it raised is no higher than the next barrier's own, and the answer it got came too late to be read: no
-  // alarm of any kind (review r1), and the next tick seals.
+  // alarm of any kind, and the next tick seals.
   store.append('uses', 'after');
   const t = await next.tick();
   assert.ok(t.signed, t.failures.join('; '));

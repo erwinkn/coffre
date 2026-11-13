@@ -1,5 +1,5 @@
-// `serveVault` hands its options to the vault it runs (T230): a deployment's `uses` took no effect on Node, where the
-// vault in its own process kept the default admission, the hot pool's size, whatever it set.
+// `serveVault` hands its options to the vault it runs: on Node, a deployment's `uses` sets the admission and the hot
+// pool's size of the vault in its own process.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';

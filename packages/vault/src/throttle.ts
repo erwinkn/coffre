@@ -8,7 +8,7 @@ import { USE_DEADLINE_MS } from '@coffre/core/vault';
  *   p = max(0, (requests − K × accepts) ÷ (requests + 1)),   K = 1.5,   window = 2 × 3 s
  *
  * So it lets through about K times what it answered in time, and refuses the rest before it costs a statement or a
- * place. The book's numbers, K = 2 and two minutes, failed on Cloudflare (W363's first run, config.md): the excess
+ * place. The book's numbers, K = 2 and two minutes, failed on Cloudflare (the first run, config.md): the excess
  * this vault lets through is not refused cheaply downstream but goes `late`, holding its place and a hot connection
  * for the whole 3 s, so K = 2 let half the burst go late; and a two-minute window kept refusing a light load three
  * minutes after the burst. Each number here comes from that, as config.md derives:

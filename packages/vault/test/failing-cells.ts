@@ -1,4 +1,4 @@
-// A matrix's batch, one of its cells failing while the others still run (matrix-cells.test.ts, T246): a test file of its
+// A matrix's batch, one of its cells failing while the others still run (matrix-cells.test.ts): a test file of its
 // own, shaped as a matrix is, run as a process that must exit by itself once its test fails. node:test reports a failed
 // test and leaves the process to exit when nothing is left open, as the matrices' processes do: a pool still open keeps
 // it running. Each cell opens its isolate's pool and its connection, as a cell's measured isolate does; the others are

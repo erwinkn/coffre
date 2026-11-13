@@ -9,8 +9,8 @@ import {
 } from './inputs.ts';
 
 /**
- * The pure part of the proxy's decisions (0.16, T186;
- * docs/design/proxy-ui.md, sections 2 and 8): what a save freezes of its
+ * The pure part of the proxy's decisions (docs/design/proxy-ui.md,
+ * sections 2 and 8): what a save freezes of its
  * editor, whether each key of an item clears for them, and what the tab is
  * shown. vault.ts reads the sealed objects these weigh, and logs.
  */
@@ -18,7 +18,7 @@ import {
 /** The most names one `proxy.code` reserves at once: far more than any deployment's code defines. */
 export const MAX_RESERVED = 1000;
 
-/** A key of an item as the save resolved it: where it is held (nearest first), which decides it (R71), and its value's nature, a reference's source's. */
+/** A key of an item as the save resolved it: where it is held (nearest first), which decides it, and its value's nature, a reference's source's. */
 export type ResolvedKey = { name: string; holder: EnvironmentInput; nature: SecretInput['nature'] };
 
 /**
@@ -26,7 +26,7 @@ export type ResolvedKey = { name: string; holder: EnvironmentInput; nature: Secr
  * scope and what it holds, and each live grant with what its role holds,
  * each as the policy defines it now (`FrozenHoldings`). A use weighs the
  * item's keys for these wherever the item serves, a fork made later
- * included, intersected with what its editor holds then (PR C).
+ * included, intersected with what its editor holds then.
  */
 export function frozenHoldings(reader: Reader): FrozenHoldings {
   const { live } = reader;
@@ -56,16 +56,16 @@ export function frozenAllows(frozen: FrozenHoldings, permission: Permission, pla
   return frozen.grants.some((grant) => covers(grant, place) && holds(scopeDefinition(grant), permission, place, holder));
 }
 
-/** Whether what a save froze owns `projectId` (`ownsProject`): who alone routes its sensitive values (R66). Owner is a fixed role. */
+/** Whether what a save froze owns `projectId` (`ownsProject`): who alone routes its sensitive values. Owner is a fixed role. */
 export function frozenOwns(frozen: FrozenHoldings, projectId: string): boolean {
   return (frozen.role === 'owner' && inScope(frozen.scope, { projectId })) || frozen.grants.some((grant) => grant.role === 'owner' && covers(grant, { projectId }));
 }
 
 /**
  * Why `reader` may not route `key`, or null (section 8): read it where it is
- * held (a fork's parent for an inherited key, R8; a reference's holder, R20),
+ * held (a fork's parent for an inherited key; a reference's holder),
  * and, for a sensitive value, own the project it is held in, a reference's
- * holder's as any key's there (R66, R71, as R32 has it for service tokens).
+ * holder's as any key's there (as for service tokens).
  * A deleted or archived holder routes nothing.
  */
 export function routeRefusal(reader: Reader, key: ResolvedKey, chain: readonly EnvironmentInput[]): string | null {
@@ -294,7 +294,7 @@ export function editorRefusal(frozen: FrozenHoldings, now: Reader, key: Resolved
  * The second decision of a route use's key (decision 5(b)): for the item's editor, as their save froze them and as they
  * stand now (`editor`, their principal as the use read it, its seals checked; `roles`, the instance's), at the key as
  * the use read it (`view`: the key, a reference's source, the places it weighed). The same function decides it live
- * (use.ts) and replayed (log-replay.ts), on the same rows (R53). Null: allowed; else why not, naming the key.
+ * (use.ts) and replayed (log-replay.ts), on the same rows. Null: allowed; else why not, naming the key.
  */
 export function routeEditorRefusal(
   item: ProxyItem, editor: PrincipalInput | null, roles: RolesInput,

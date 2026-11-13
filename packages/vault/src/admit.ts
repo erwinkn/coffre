@@ -12,7 +12,7 @@ import type { ChangeRow, LogMacKey } from './log-entry.ts';
 import { bytes, callerFirst, callerInputs, changeOf, holds, memberHolds, oldOf, stands, writeStanding, type MemberSealed, type CallerInputs, type RawCaller, type ReadObject, type Refused, type Unserved } from './write.ts';
 
 /**
- * A member add in three round trips (T179 PR 5; docs/design/two-trips.md, "A member add", "As built: PR 5";
+ * A member add in three round trips (docs/design/two-trips.md, "A member add", "As built: PR 5";
  * formal/Writing.tla, the add): the vault's side. Its read (`admit_read`, migration 0062) reads everything the decision
  * weighs, in one snapshot, with no lock; the Worker decides on that read and nothing else (DecideOnRead) and prepares
  * the add; the app checks the caller's rows' `auth_mac` on what the read answered and hands the prepared add back,
@@ -24,7 +24,7 @@ import { bytes, callerFirst, callerInputs, changeOf, holds, memberHolds, oldOf, 
  * instance (an admin or an Owner of all of it, with no credential scope), as a person with an instance role and its
  * scope, or a service account with neither. Anything else, a refusal included, is `unserved`, and the request goes down
  * today's path (`admit`), which answers it, logged, as ever: a re-admit, a role change, first grants, a set-up by
- * someone who does not run the instance (PR 5b: the read holds the places and the services setting).
+ * someone who does not run the instance (the read holds neither the places nor the services setting).
  *
  *   Bob's PUT /members/user:ada { role: "developer" }   admit_read    the read                              one round trip
  *                                                        the Worker    decides, prepares                     none
@@ -87,13 +87,13 @@ export type AdmitDecided = {
 /**
  * The decision, on the read alone (DecideOnRead), in the order the write's takes (`decideWrite`): the caller's
  * credential first (`callerFirst`); then, a member that has a row already (a re-admit, a role change) or a scope this
- * path does not resolve, today's (`shape`); then every newest change held to its MAC (T190) and each row to its newest
+ * path does not resolve, today's (`shape`); then every newest change held to its MAC and each row to its newest
  * change's seal (StaleFirst), the member asked for among them, whose object has no change while it has no row; then
  * `admit`'s rules for a first add by someone who runs the instance. What `admit` refuses whatever else it reads (a
- * person or a role asked by someone who runs no instance; an Owner asked by someone who owns none) is `Refused` (PR 6),
+ * person or a role asked by someone who runs no instance; an Owner asked by someone who owns none) is `Refused`,
  * which the vault records and the app answers as today's path would; anything else it would refuse is `refused` or
  * `shape`: today's path refuses it, logged (a service account set up by someone who runs no instance, as the services
- * setting lets them, is that path's to decide: PR 5b).
+ * setting lets them, is that path's to decide).
  */
 export function decideAdmit(
   keys: { seals: SealKeys; macs: readonly LogMacKey[]; members: MemberSealed },
@@ -115,7 +115,7 @@ export function decideAdmit(
     // The member asked for, no row: its object none, which its newest change must leave (none, or an end).
     { held: { row: null, seal: null, newest: subject.newest } as ReadObject['held'], ref: { kind: 'principal', id: subject.principal } },
   ];
-  // The caller's row under its 0.4 MAC too, as today's path checks it first (`#integrity`; review r1 of #474).
+  // The caller's row under its 0.4 MAC too, as today's path checks it first (`#integrity`).
   if (!objects.every((object) => holds(keys, object)) || !memberHolds(keys, principal)) return 'tampered';
   if (!objects.every((object) => stands(keys, object))) return 'stale';
   // 0.14's newest access entry about the caller, which its newest change must account for (UsesSeeOldWrites); and none
@@ -125,8 +125,8 @@ export function decideAdmit(
   if (subject.access !== null || subject.grants > 0) return 'stale';
   if (principal.row === null || policy.row === null) return 'credential';
   // A session of the caller's membership before a removal (its generation not the row's): ended, whatever its own row
-  // says until the app's sweep revokes it, 401 as on every other path, on a retry too (review r1 of #474: removed and
-  // restored as an admin between two tries, the old session added).
+  // says until the app's sweep revokes it, 401 as on every other path, on a retry too (say, removed and restored as an
+  // admin between two tries: the old session adds nobody).
   if (credentialEnded(caller.row, principal.row, request.at)) return 'ended';
   const reader = readerOf(principal.row, caller.row, roles.row ?? noEdits(), [], request.at);
   if (reader.status !== 'active') return 'refused';
@@ -214,8 +214,7 @@ export type AdmitTicket = {
 
 /**
  * How long a ticket the vault prepares is taken, a prepared add's and a refusal's record (`refusal.ts`) alike: the
- * write follows its read by the app's check, in memory (#474, #498). A bound the design chose, not measured
- * (the limits audit, #501, V13).
+ * write follows its read by the app's check, in memory. A bound the design chose, not measured.
  */
 export const TICKET_MS = 30_000;
 

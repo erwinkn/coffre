@@ -1,7 +1,7 @@
-// 0.15's uses through a way in with no credentials row (T147; formal/WaysIn.tla): an MCP connection,
+// 0.15's uses through a way in with no credentials row (formal/WaysIn.tla): an MCP connection,
 // a Cloudflare service binding, and a browser behind Cloudflare Access. Each is one `use_credential` call, its entry
 // naming its way in (the purpose's bits above 512), decided on that way in's sealed object, read as the credential it
-// stands for, or behind Access on the account alone. Every live answer is held to the replay of the log (R53).
+// stands for, or behind Access on the account alone. Every live answer is held to the replay of the log.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -133,7 +133,7 @@ test('a connection of an earlier generation of its account (removed, admitted ag
   const w = await world({ caller: 'person' });
   const id = await w.key();
   const k = await connection(w);
-  // Allowed first, its key entering the cap's set: the refusal after is logged (a first use refused logs nothing: D153).
+  // Allowed first, its key entering the cap's set: the refusal after is logged (a first use refused logs nothing).
   assert.ok((heard(await (await isolate()).use({ ...ask(w, id), credential: k.id, way: 'connection' }))).ok);
   await removeAndRestore(w);
   assert.equal(code(heard(await (await isolate()).use({ ...ask(w, id), credential: k.id, way: 'connection' }))), 'credential');
@@ -210,7 +210,7 @@ test('a binding no Cloudflare call comes through (a CI provider\'s) reaches noth
   const github = await binding(w, { profile: 'github' });
   const b = await binding(w);
   const via = (binding: string) => ({ ...ask(w, id, { purpose: 'use' }), credential: binding, way: 'binding' as const });
-  // Allowed first, its key entering the cap's set: the refusals after are logged (a first use refused logs nothing: D153).
+  // Allowed first, its key entering the cap's set: the refusals after are logged (a first use refused logs nothing).
   assert.ok((heard(await (await isolate()).use(via(b.id)))).ok);
   assert.equal(code(heard(await (await isolate()).use(via(github.id)))), 'credential');
   await removeAndRestore(w);

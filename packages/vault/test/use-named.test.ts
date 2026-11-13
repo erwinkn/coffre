@@ -1,4 +1,4 @@
-// 0.15's use as the request names it (T145, PR B; D153; use.ts, `useNamed`; formal/Probing.tla): the vault's call reads
+// The use as the request names it (use.ts, `useNamed`; formal/Probing.tla): the vault's call reads
 // what a token's hash, a place's slugs and a key's name name, by them, whatever its isolate's map of names holds, whose
 // ids only let that call make the use (`moved` otherwise, nothing written). A key the place does not hold, and a plain
 // value, are decided on the caller's standing there, and leave no entry; every refusal is one call, whatever the map
@@ -79,7 +79,7 @@ test('a key the place does not hold is answered as the caller stands there: miss
   assert.equal(codeOf(await vault.useNamed!(w.ask('NEVER_MADE'))), 'no_grant');
   assert.equal(codeOf(await vault.useNamed!(w.ask(await w.nameOf(id)))), 'no_grant');
   // Neither key held has a row of the cap's of theirs: each use would take the principal's lock, so their standing
-  // decides first, refuses them there, and nothing is written, as for the key never made (T158, DecideBeforeLock). The
+  // decides first, refuses them there, and nothing is written, as for the key never made (DecideBeforeLock). The
   // app's own entry records each request, as for a key the place does not hold.
   assert.equal(await uses(), 0, 'refused before the lock: no entry, for a key held or not');
   assert.equal(await bulk(), 0, "nor a row of the cap's");
@@ -202,7 +202,7 @@ test("revoked, someone whose isolate holds a name as none, or a key's id, is ref
     });
     for (const key of ['LATER', gone, 'NEVER_MADE']) assert.deepEqual(await cost(key), ['no_grant', 1], key);
     // Nothing written, the key held fresh in the set included: a caller who does not stand there has no key read, and
-    // the app's entry alone records their request (W268, NoKeyBeforeStanding).
+    // the app's entry alone records their request (NoKeyBeforeStanding).
     assert.equal(await uses(), entries);
   } finally {
     await end();
@@ -364,7 +364,7 @@ test("revoked, their principal's lock held and every statement 1.1 s slow (revie
   const deleted = await w.nameOf(deletedId);
   // The key used before stays fresh in the cap's set only within its period (a minute, at the 15-minute window): one
   // passed between its use and its request would move it on, a `share` that decides first and writes no entry. Its
-  // period started as it was made (T204, `freshKeyId`), and the test takes far less than a minute.
+  // period started as it was made (`freshKeyId`), and the test takes far less than a minute.
   const { vault, statements, slow, end } = await slowed();
   try {
     // Allowed, before: two keys used (each now fresh in the cap's set), one never made asked (`missing`); the isolate
@@ -400,7 +400,7 @@ test("revoked, their principal's lock held and every statement 1.1 s slow (revie
     for (const { key, ms } of answers) assert.ok(ms < 2900, `${key}: ${Math.round(ms)} ms`);
     assert.equal(await bulk(), rowsOfCap, "no row of the cap's written");
     // None wrote anything, the key used before, fresh in the set, included: no key is read for a caller who does not
-    // stand there, so no use of one is made (W268, NoKeyBeforeStanding).
+    // stand there, so no use of one is made (NoKeyBeforeStanding).
     assert.equal(await uses(), entries);
   } finally {
     await end();
@@ -574,7 +574,7 @@ test("no use is kept for a later one to take the principal's lock on: each that 
     assert.deepEqual(await cost(a), ['ok', 2]);
     // A 0.14 write of the principal's access, mid-upgrade, which is no change of the log's: decided, and the rows it read
     // refuse it (UsesSeeOldWrites), before any lock, the principal's lock held all the while. Under the vault's key, as
-    // 0.14's code writes one at its head, past the cutover's refusal, whose trigger the database's owner dropped (PR 9b).
+    // 0.14's code writes one at its head, past the cutover's refusal, whose trigger the database's owner dropped.
     // Its MAC is checked after the statement, on the vault's own login here, which these hot statements do not count.
     await withLogUnlocked(db.owner, (tx) => appendEntries(tx as never, vaultLogKey(SIGNING_KEY), [{ actor: 'system:vault', action: 'access.grant', decision: 'allow', subjectPrincipal: w.principal, metadata: '{}' }]));
     await passed();
@@ -671,7 +671,7 @@ test("an isolate's map of names keeps the most recently used, up to its cap, and
   const none = new UseCache(useLimits({ names: 0 }));
   none.name('a', ids('a'));
   assert.equal(none.named('a'), undefined);
-  // Key ids apart, by environment and name, bounded alike: names asked and dropped leave none behind (review r3 of #412).
+  // Key ids apart, by environment and name, bounded alike: names asked and dropped leave none behind.
   const keys = new UseCache(useLimits({ names: 2 }));
   for (const name of ['A', 'B', 'C', 'D']) keys.key('e', name, { id: `id-${name}`, through: false });
   assert.deepEqual([...keys.keyIds.keys()], ['e\nC', 'e\nD']);

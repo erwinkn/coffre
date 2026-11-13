@@ -253,7 +253,7 @@ test("a sensitive value is never handed back to a person, an Owner included: use
   await member(w, ADA, [[w.dev, 'developer']]);
   const SERVICE = 'token:deploy';
   await member(w, SERVICE, [[w.dev, 'viewer']]);
-  // Its token, issued by an Owner of the project, which reads its sensitive values (`readsSensitive`, R32), or by anyone else.
+  // Its token, issued by an Owner of the project, which reads its sensitive values (`readsSensitive`), or by anyone else.
   const issued = (sensitive: boolean) => [{ projectId: w.project, environmentId: w.dev, role: 'viewer', sensitive }];
   const secret = { ...(await w.secret(w.dev)), sensitive: true };
   const key = randomBytes(32).toString('base64');
@@ -268,7 +268,7 @@ test("a sensitive value is never handed back to a person, an Owner included: use
     }
     assert.deepEqual(await w.vault.unwrap({ principal, purpose: 'use', items }), { ok: true, keys: [key] });
     assert.deepEqual(await w.vault.unwrap({ principal, purpose: 'copy', keepsSensitive: true, items }), { ok: true, keys: [key] });
-    // A copy by an app before 0.10, which would write the value as a secret anyone with read sees.
+    // A copy that keeps nothing sensitive, which would write the value as a secret anyone with read sees.
     const old = await w.vault.unwrap({ principal, purpose: 'copy', items });
     assert.equal(!old.ok && old.refusal.code, 'sensitive', `${principal}'s copy that keeps nothing sensitive`);
   }
@@ -281,7 +281,7 @@ test("a sensitive value is never handed back to a person, an Owner included: use
     assert.equal(!refused.ok && refused.refusal.code, 'not_owner_issued', 'on what no Owner issued, or on no credential at all');
   }
   assert.deepEqual(await w.vault.unwrap({ principal: SERVICE, purpose: 'use', items, credentialScope: issued(false) }), { ok: true, keys: [key] }, 'used, never handed back');
-  // A service account's fork, through an app of 0.9 that would write the copy as a secret, copies nothing sensitive either.
+  // A service account's fork, whose copy would be written as a secret, copies nothing sensitive either.
   const serviceCopy = await w.vault.unwrap({ principal: SERVICE, purpose: 'copy', items });
   assert.equal(!serviceCopy.ok && serviceCopy.refusal.code, 'sensitive');
   assert.deepEqual(await w.vault.unwrap({ principal: SERVICE, purpose: 'copy', keepsSensitive: true, items }), { ok: true, keys: [key] });
@@ -301,7 +301,7 @@ test("a sensitive version's key opens as nothing else: its column flipped back i
   const flipped = await versionItems([{ secret: { ...secret, sensitive: false }, wrapped: sealed }]);
   const SERVICE = 'token:deploy';
   await member(w, SERVICE, [[w.dev, 'viewer']]);
-  // On a token an Owner issued, which reads sensitive values (R32): only the key's claim refuses it.
+  // On a token an Owner issued, which reads sensitive values: only the key's claim refuses it.
   const credentialScope = [{ projectId: w.project, environmentId: w.dev, role: 'viewer', sensitive: true }];
   const read = await w.vault.unwrap({ principal: SERVICE, purpose: 'run', items: flipped, credentialScope });
   assert.equal(!read.ok && read.refusal.code, 'bad_claim');
@@ -720,7 +720,6 @@ test('a key service that cannot answer fails the call, with each key it was aske
 });
 
 test('a key service failing part of a batch leaves each key\'s outcome, and the keys it opened are withheld', async () => {
-  // Review F5: a KMS failure halfway through a batch left no record of the keys KMS did open.
   const { keks, seen } = service();
   const w = await world({ keks });
   await member(w, ADA, [[w.dev, 'viewer']]);
@@ -971,8 +970,8 @@ test('a thousand keys, the default limit, then one more trips it', async () => {
 });
 
 test('two instances share one log, one bulk limit and one set of generations', async () => {
-  // Review F2: a second Durable Object loaded the same KEK with an empty log
-  // and a fresh bulk counter. Every instance now decides in the database.
+  // Every instance decides in the database: a second one loading the same KEK
+  // starts on the same log and bulk counter, never empty ones.
   const w = await world({ bulkLimit: { count: 5, windowMs: 60_000 } });
   const other = await w.twin();
   await member(w, ADA, [[w.dev, 'viewer']]);
@@ -1101,7 +1100,7 @@ test('a vault moved to a new signing key while a read is at the key service logs
   const rotation = log.find((entry) => entry.action === 'key.rotate')!;
   const outcome = log.find((entry) => entry.action === 'secret.read' && entry.detail.relatedSeq === String(intent.seq))!;
   assert.ok(outcome.seq > rotation.seq && outcome.outcome === 'refuse' && outcome.code === 'wrong_kek', 'its outcome logged by the rotation, refused');
-  // Where the read would have logged it, so that its place's audit finds it (review r7): the place, the version and the
+  // Where the read would have logged it, so that its place's audit finds it: the place, the version and the
   // purpose, and the request and the action it was part of; what `auditPage`'s filters read (server db/queries.ts).
   const [row] = await rows<{ project_id: string | null; environment_id: string | null; secret_id: string | null; secret_version_id: string | null; request_id: string | null; operation_id: string | null }>(db.owner,
     sql`SELECT project_id, environment_id, secret_id, secret_version_id, request_id, operation_id FROM audit_log WHERE seq = ${outcome.seq}`);
@@ -1373,7 +1372,7 @@ test("a burst of reads at a held head: those past its places in line are refused
     (error: unknown) => ({ ok: false, error, ms: Date.now() - started }),
   ).then((outcome) => (first ??= outcome, outcome));
   const waiting = Array.from({ length: READ_HEAD_WAITERS }, timed);
-  // Places in this database: another file's reads, in a clone of their own, take the same keys (T153).
+  // Places in this database: another file's reads, in a clone of their own, take the same keys.
   const inLine = () => locksHere(db.owner, sql`locktype = 'advisory' AND classid::bigint = ${0x636f6668} AND granted`);
   let outcomes: Awaited<ReturnType<typeof timed>>[];
   try {
@@ -2217,8 +2216,8 @@ test('a full check covers the head the app verified up to, and refuses an entry 
     reason: 'not the entry the app verified up to: the log changed between the two checks',
   });
 
-  // Review of #28, F1: a vault entry anyone could link to the chain, with a
-  // MAC made up, is the vault's to refuse.
+  // A vault entry anyone could link to the chain, with a MAC made up, is
+  // the vault's to refuse.
   const fields = {
     seq: last.seq + 1n, author: 'vault' as const, keyId: 'vault:0000000000000000', occurredAt: Date.now(),
     actor: 'user:victim@acme.example', action: 'secret.read', decision: 'allow', code: null, subjectPrincipal: null,
@@ -2368,7 +2367,7 @@ test('a grant written around the vault while it decides about its member is refu
   // The decision finds the table holds more than it decided, and is refused; the finding is logged.
   assert.equal(!change.ok && change.refusal.code, 'tampered');
   assert.deepEqual(await tamperings(w), [[ADA, 'mac']]);
-  // It names her newest change, read as it appends: her check had found her row as it was (T179 PR 4a).
+  // It names her newest change, read as it appends: her check had found her row as it was.
   assert.deepEqual(await weighedFindings(ADA), [(await changeNames(ADA)).at(-1)]);
   const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
   assert.equal(!read.ok && read.refusal.code, 'tampered', 'a grant the database owner wrote is not honoured');
@@ -2910,10 +2909,10 @@ test('an old member row put back with the newest change\'s seal edited to match 
   assert.deepEqual(await tamperings(w), [[ADA, 'mac']]);
 });
 
-// --- findings against 0.15's log (T179 PR 4a) -------------------------------------------------------
+// --- findings against 0.15's log -------------------------------------------------------
 
 
-/** How a finding names each of `principal`'s changes in 0.15's log (`changeName`: its MAC), by number, oldest first. */
+/** How a finding names each of `principal`'s changes in `log_changes` (`changeName`: its MAC), by number, oldest first. */
 async function changeNames(principal: string): Promise<string[]> {
   const found = await rows<{ mac: Uint8Array }>(db.owner, sql`SELECT mac FROM log_changes WHERE object = ${logObject('principal', principal)} ORDER BY number`);
   return found.map((row) => Buffer.from(row.mac).toString('hex'));
@@ -2927,7 +2926,7 @@ async function renumber(principal: string, name: string, to: bigint): Promise<bi
   return BigInt(row!.n);
 }
 
-/** The number of the newest change in 0.15's log, of anyone's. */
+/** The number of the newest change in `log_changes`, of anyone's. */
 async function logNewest(): Promise<bigint> {
   const [row] = await rows<{ n: string }>(db.owner, sql`SELECT CAST(max(number) AS text) AS n FROM log_changes`);
   return BigInt(row!.n);
@@ -3566,8 +3565,7 @@ test('configuration', () => {
   assert.throws(() => checkOwners([]), /at least one/);
   assert.throws(() => checkOwners(['admin@example,com']), /human email/);
   assert.throws(() => checkOwners(['ci-deploy.access']), /human email/);
-  // 0.5's name, which a deployment's vault reads until 0.7, is the same list.
-  // `bootstrapOwners`, and 0.5's `rootAdmins`, name them until 0.7.
+  // `bootstrapOwners`, and 0.5's `rootAdmins`, name the same list.
   const { owners: _, ...unnamed } = base;
   assert.deepEqual(resolveVaultConfig({ ...unnamed, bootstrapOwners: ['Sam@example.com'] }).owners, ['sam@example.com']);
   assert.deepEqual(resolveVaultConfig({ ...unnamed, rootAdmins: ['Old.Root@example.com'] }).owners, ['old.root@example.com']);

@@ -1,5 +1,5 @@
 // Witnesses on Workers for 0.15's log (docs/design/audit-tree.md,
-// "Witnesses"; R40: the deployment opts in). The checkpointer hands each
+// "Witnesses"; the deployment opts in). The checkpointer hands each
 // pair it signs to every witness the vault's config lists:
 //
 // - `durableWitness(env.WITNESS)`: a Durable Object of its own that holds
@@ -11,7 +11,7 @@
 //   slow put skipped over is not kept; the next one, which extends it, is). It checks
 //   nothing: the verifier holds the rows to it later. Under a bucket lock
 //   rule a Worker or a database writer cannot overwrite or delete what it
-//   holds; an admin of the Cloudflare account can lift the rule (R54).
+//   holds; an admin of the Cloudflare account can lift the rule.
 import { decodePair, encodePair, noteSigner, openPairUnder, pairVerifiers, witnessPair, type PairNotes, type TreeName, type WitnessAnswer, type WitnessState } from '@coffre/core/merkle';
 
 import type { Witness } from './checkpointer.ts';
@@ -26,7 +26,7 @@ export type WitnessSettings = {
   log: Record<TreeName, string>;
   /**
    * The log's verifier keys under each signing key the vault replaced, the
-   * newest first (T168): the pair this witness holds may be under one, and
+   * newest first: the pair this witness holds may be under one, and
    * the first pair under `log` it cosigns must extend it. No pair under one
    * of these is cosigned: a replaced key vouches for nothing new.
    */

@@ -1,4 +1,4 @@
-// The named statement's gate, `use_stands` (0045, W268), is the vault's own rule on the rows as read (`namedStanding`,
+// The named statement's gate, `use_stands` (0045), is the vault's own rule on the rows as read (`namedStanding`,
 // decide.ts): a caller it finds standing nowhere is answered on the place alone, before any key is read
 // (formal/Probing.tla, StandingFirst). So the two must agree on every caller a release writes: one the gate refuses
 // and the rule allows would be refused a key they may use; one the gate lets through and the rule refuses would have
@@ -53,7 +53,7 @@ function caller(seed: number) {
   const slug = pick(['dev', 'prod', 'qa']);
   const person = chance(0.6);
   const principal = `${person ? 'user' : 'token'}:${randomUUID()}`;
-  // The place (T165): an environment of its own; a fork of the sibling, weighed as any (R18); or a personal config of
+  // The place: an environment of its own; a fork of the sibling, weighed as any; or a personal config of
   // the sibling, its owner's while they read or use it, mostly the caller's, weighed with it (`use_stands_personal`).
   const kind = pick(['own', 'own', 'fork', 'personal'] as const);
   const owner = kind !== 'personal' ? null : person && chance(0.85) ? principal : `user:${randomUUID()}`;
@@ -90,8 +90,8 @@ function caller(seed: number) {
   const grants: { project: string | null; environment: string | null; role: string; expires: number | null }[] = [];
   const targets = [{ project, environment: null }, { project: other, environment: null }, { project: null, environment: place }, { project: null, environment: sibling }];
   for (const target of targets.filter(() => chance(0.6))) grants.push({ ...target, role: pick(GRANT_ROLES), expires: pick([null, null, at - 1, at, at + 1, at + 60_000]) });
-  // The credential's scope: none (a session's), grants as issued (both columns) or as kept before 0.10 (a built-in's
-  // name), or none that parses, which reaches nothing.
+  // The credential's scope: none (a session's), grants as issued (both columns) or as a built-in's name alone, or
+  // none that parses, which reaches nothing.
   const scopeGrant = (target: { project: string; environment: string | null }) => {
     const role = pick(['viewer', 'contributor', 'developer', 'custom-a']);
     const issued = role === 'custom-a' || chance(0.6);

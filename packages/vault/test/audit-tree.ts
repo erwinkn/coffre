@@ -68,7 +68,7 @@ export class MemoryStore implements CheckpointStore {
     this.floor = Math.max(this.floor, ceiling);
     // Changes by number; uses by `at` from the floor the signer holds, as 6b's store reads them through their index.
     const all = this.between(after, upto).filter((e) => e.tree === 'changes' || e.at >= from);
-    // The first `limit` by number (T169), and the lowest `at` of the uses left above them.
+    // The first `limit` by number, and the lowest `at` of the uses left above them.
     // As the stores cap it: an entry past the cut that holds the last one's number is kept, for the tick to refuse.
     const entries = limit === undefined || all.length <= limit ? all : all[limit]!.number === all[limit - 1]!.number ? all.slice(0, limit + 1) : all.slice(0, limit);
     const left = all.slice(entries.length).filter((e) => e.tree === 'uses').map((e) => e.at);
@@ -179,7 +179,7 @@ export async function keys(seed = 1): Promise<Keys> {
 }
 
 /**
- * A stand-in for the checkpointer, for the change path's tests (plan PR 4):
+ * A stand-in for the checkpointer, for the change path's tests:
  * each change it is asked to seal is recorded, and answered as `answer`
  * says: a `Sealed` (witnessed, unwitnessed, or with no witness), or an
  * error, as a change refused because its entry was lost.

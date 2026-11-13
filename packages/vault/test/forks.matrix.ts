@@ -1,4 +1,4 @@
-// use.matrix.ts at a fork and at `dev@me` (T165, B2; migration 0051; formal/Probing.tla, Where): no key a caller may
+// use.matrix.ts at a fork and at `dev@me` (migration 0051; formal/Probing.tla, Where): no key a caller may
 // not know of shows through the use by name there either. The vault's one call reads the place (a fork; a fork of a
 // fork; the caller's personal config of dev; or dev, for `dev@me` while they have none), decides their standing there
 // first, then resolves the key through what the place inherits, and decides it where it is held too.
@@ -12,7 +12,7 @@
 // of a row they may not have must answer the same, in as many of the vault's calls, writing no row of the cap's: on
 // Postgres with the principal's lock held and every statement slow, so that a lock waited for, or a statement more,
 // shows as busy. Without standing at the place, no cell's call reads anything of its key: the blocks of the key's own
-// relations it fetches are the same for every key (W268, NoKeyBeforeStanding).
+// relations it fetches are the same for every key (NoKeyBeforeStanding).
 //
 // Admission, the floor of `at`, a place archived and the credential's own dimensions are use.matrix.ts's: decided
 // before the place is read, or on it alone, the same at a fork as anywhere.
@@ -35,7 +35,7 @@ import { emptyLog, useDatabases } from './use-world.ts';
 let db: TestDatabase;
 before(async () => {
   // Pools of `POOL`: this file runs beside the other matrices, a process each, on one Postgres, and its row's 8 cells
-  // need no more (CI, #453: 10 each, and a holder a cell, took use.matrix.ts's).
+  // need no more (on CI, 10 each, and a holder a cell, took use.matrix.ts's).
   db = await openTestDatabase({ connections: POOL });
   await useDatabases(db);
   await emptyLog();
@@ -190,14 +190,14 @@ test(`at a fork and at \`dev@me\`, a caller learns nothing of a key they may not
   // A cell made and never asked, a row failed beside it, holds its pool until the file ends them all.
   try {
     for (const row of ROWS) {
-      // Each cell's keys are made as their periods start (T204, `freshKeyId`): made and asked within a minute, each within one.
+      // Each cell's keys are made as their periods start (`freshKeyId`): made and asked within a minute, each within one.
       const made = await each(KEYS, (key) => cell(row, key));
       // Each cell's principal's lock held by another connection, all of the row's on one (a connection each would take as
       // many of Postgres's as the row has cells), while its cells are asked.
       const measureAll = () => each(made, async (c) => ({ key: c.key, ...(await c.measure()) }));
       const results = await holding(db, principalLocks(made.map((c) => c.principal)), measureAll);
       const label = labelOf(row);
-      // The keys they may not have: each answered alike (D153).
+      // The keys they may not have: each answered alike.
       const refused = results.filter((r) => !usable(row, r.key));
       const [first] = refused;
       for (const r of refused) {
@@ -214,7 +214,7 @@ test(`at a fork and at \`dev@me\`, a caller learns nothing of a key they may not
       // Without standing at the place, no call reads anything of its key: as many blocks of the key's relations for each.
       if (!stands(row)) {
         // The rows of the cap's the window passed deleted, taken out first: left in, a new session read them, a block or
-        // three of `bulk_cap`, whenever a transaction ended before it, in another database too (T240, `removeDeleted`).
+        // three of `bulk_cap`, whenever a transaction ended before it, in another database too (`removeDeleted`).
         const watcher = postgresClient(OWNER_URL, { max: 1 });
         try {
           await deletesSettled(watcher, t.signal);
@@ -233,7 +233,7 @@ test(`at a fork and at \`dev@me\`, a caller learns nothing of a key they may not
         if (blocks.size > 1) differing.push(`${label}: blocks of the key's tables ${refused.map((r) => `${r.key} ${r.keyBlocks}`).join(', ')}`);
         // And at each of a new session's first calls, at the server's planner settings, before its plan cache settles:
         // as many as its world's twin, of a key never made, and as that twin asked with no id, cover or seal the isolate
-        // kept, at the same call (T207, Sol's reviews r2 and r4; `turnsApart`).
+        // kept, at the same call (`turnsApart`).
         for (const r of refused) {
           const read = await weighedInTurn(r.sent);
           if (read !== null) for (const line of turnsApart(r.key, read.asked, read)) differing.push(`${label}: ${line}`);

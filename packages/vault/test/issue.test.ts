@@ -1,4 +1,4 @@
-// The vault issues tokens itself (T149, PR 2; credentials.ts; migration 0036): a service account's token, a person's
+// The vault issues tokens itself (credentials.ts; migration 0036): a service account's token, a person's
 // personal token, a handle, each weighed by the vault on what it reads (formal/Lifecycle.tla's IssueRead), then written
 // in one statement that holds those rows as read (IssuerLocked, IssuerCAS).
 import { defineDeployment } from '@coffre/core/deployment';
@@ -425,10 +425,10 @@ test('an issue takes the issue lock, never the fence: it commits while a change 
   }
 });
 
-// --- the person's factor lock and the passkey an issue carries (T176 PR 3; docs/design/passkeys.md, sections 6.1 and 6.3;
+// --- the person's factor lock and the passkey an issue carries (docs/design/passkeys.md, sections 6.1 and 6.3;
 // migration 0064; formal/Factor.tla) -------------------------------------------------------------------------------------
 
-/** A passkey of `principal`'s, as the app writes one at enrollment (PR 4); its MAC is the app's, which the vault never reads. */
+/** A passkey of `principal`'s, as the app writes one at enrollment; its MAC is the app's, which the vault never reads. */
 async function passkeyOf(principal: string, generationsAgo = 0): Promise<string> {
   const [member] = await db.owner.select({ generation: principals.generation }).from(principals).where(eq(principals.principal, principal));
   const id = randomUUID();
@@ -443,7 +443,7 @@ async function passkeyOf(principal: string, generationsAgo = 0): Promise<string>
 async function confirmedToken(w: World, passkey: string | null): Promise<IssueTokenInput> {
   const token = personal(w, ROOT, null, Date.now() + 3_600_000);
   assert.ok((await w.vault.issueToken!(token)).ok);
-  // Written as the app's sign-in will (PR 4); the vault reads the column, which its seal does not cover.
+  // Written as the app's sign-in will; the vault reads the column, which its seal does not cover.
   await db.owner.update(credentials).set({ passkeyId: passkey }).where(eq(credentials.id, token.credential.id));
   return token;
 }
@@ -496,7 +496,7 @@ test("a change to a person's passkeys that holds their factor lock: an issue on 
   const token = await confirmedToken(w, passkey);
   const change = postgresSession(OWNER_URL);
   try {
-    // A removal (PR 4): the factor lock, then the person's credentials read, then each revoked; the commit.
+    // A removal: the factor lock, then the person's credentials read, then each revoked; the commit.
     await change.unsafe('BEGIN');
     await change.unsafe(factorLock(ROOT));
     const issuing = w.vault.issueToken!(carrying(handleOf(w, token.credential.id, undefined, onViewerToken), passkey));

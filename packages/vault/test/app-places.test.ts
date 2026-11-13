@@ -1,7 +1,7 @@
 // 0.15's change path for the app's keys and environments (docs/design/0.15-plan.md, "As built: PR 4b", part 2): each
 // write of the app's to a key or an environment is a change the vault seals before the app's transaction (`prepare`) and
 // the transaction commits beside its rows (`app_change`, 0025). These cases play the app's writes on use-world's sealed
-// world, then hold the use path's live answers to the replay of the log (R53): a write that left a row other than its
+// world, then hold the use path's live answers to the replay of the log: a write that left a row other than its
 // change sealed would make a use `stale` or `tampered` where the replay allows or refuses otherwise.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -346,7 +346,7 @@ test('a key put back to an earlier version with that version\'s seal: valid, but
   assert.deepEqual(await opsOf({ kind: 'secret', id }), ['genesis', 'secret.write']);
 });
 
-// --- an unarchive restores what the log sealed (0030; formal/SealedObjects.tla, T134) ---------------------------------
+// --- an unarchive restores what the log sealed (0030; formal/SealedObjects.tla) ---------------------------------
 
 /** `id` archived through the app: its object gone, its row's seal none. */
 async function archive(id: string): Promise<void> {
@@ -481,7 +481,7 @@ test("what an unarchive restores is read with two probes of each key's changes, 
   };
   const small = await grown(1_000);
   const large = await grown(100_000);
-  // Four probes (each key's newest change and the one before it, T190), each and its row's index entry a B-tree level
+  // Four probes (each key's newest change and the one before it), each and its row's index entry a B-tree level
   // deeper at most.
   assert.ok(large - small <= 8, `${small} index buffers at 1k changes a key, ${large} at 100k`);
 });
@@ -852,7 +852,7 @@ test("a break by a Developer in a protected environment after a writer marked it
   await run(db.owner, sql`UPDATE projects SET slug = ${`${slug}~deleted`} WHERE id = ${w.project}`);
   const refused = await vault.endReferences({ principal: dana, caller: 'person', reason: 'broken', items: [via] });
   assert.ok(!refused.ok, JSON.stringify(refused));
-  // Nor beside a reference held in an environment the log does not hold, a writer's rows (T159, review r12).
+  // Nor beside a reference held in an environment the log does not hold, a writer's rows.
   const legacy = randomUUID();
   await db.owner.insert(environments).values({ id: legacy, projectId: w.project, slug: 'legacy', name: 'legacy', protected: false });
   const [old, oldRef] = [randomUUID(), randomUUID()];

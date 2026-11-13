@@ -7,7 +7,7 @@ import type { BulkLimit } from './config.ts';
 export { USE_DEADLINE_MS };
 
 /**
- * The bulk cap of 0.15 (R28, R52, docs/design/sealed-inputs.md): at most
+ * The bulk cap (docs/design/sealed-inputs.md): at most
  * `count` distinct keys per principal in any rolling `windowMs`, both the
  * log's policy object, as the deployment configured it.
  *
@@ -22,12 +22,12 @@ export { USE_DEADLINE_MS };
  * by less than `refresh`, which the set's bound adds back. Uses that move
  * one key on at once write the same period, or the greatest is kept: the
  * row ends where the replay's does whichever commits first, so they never
- * wait for one another (T127). Other keys count over a longer bound,
+ * wait for one another. Other keys count over a longer bound,
  * `window + refresh + deadline + ahead`: uses are decided in number order,
  * not by their time, so a key that entered at a later `at` may already be
  * in when an earlier use is decided (TLC's finding, HotPathOneClock), up
  * to the deadline after it, or the minute a Worker's clock may run ahead
- * before it (HotPathOneBulkSkew, W228).
+ * before it (HotPathOneBulkSkew).
  *
  * Every request counts, whatever else refuses it but the cap: the log keeps
  * requests, not outcomes, and the use's one statement writes the row before
@@ -38,8 +38,8 @@ export { USE_DEADLINE_MS };
 
 /**
  * How far past the database's clock a use may be stamped (`ahead` refuses past it): no use is decided earlier than
- * this before its `at`. A Worker's clock against Postgres's, so `CLOCK_SKEW_MS` (W228, migration 0028; hot-path-one.md,
- * "Amended by W228"). The functions of 0024 on write it as `+ 60000`, which a test holds to this.
+ * this before its `at`. A Worker's clock against Postgres's, so `CLOCK_SKEW_MS` (migration 0028; hot-path-one.md,
+ * "The bulk cap"). The functions of 0024 on write it as `+ 60000`, which a test holds to this.
  */
 export const USE_AHEAD_MS = CLOCK_SKEW_MS;
 
@@ -58,9 +58,9 @@ export function refreshMs(limit: BulkLimit): number {
 
 /**
  * Where a principal's key's refresh periods start, in [0, `refresh`): the first 6 bytes of SHA-256 of
- * `<principal>/<key>`, a whole number, modulo `refresh` (T204). With one phase for every row, every hot key moved on
- * at the same instant, each of their uses there a second call, two locks and two writes, and 1,000 uses a second
- * came out of it with a burst of busy answers every period. Phases spread the moves over the period. The functions of
+ * `<principal>/<key>`, a whole number, modulo `refresh`. With one phase for every row, every hot key would move on
+ * at the same instant, each of their uses there a second call, two locks and two writes: at 1,000 uses a second,
+ * a burst of busy answers every period. Phases spread the moves over the period. The functions of
  * 0074 compute it as `bulk_period` does, which a test holds to this.
  */
 export function phaseOf(principal: string, key: string, refresh: number): number {

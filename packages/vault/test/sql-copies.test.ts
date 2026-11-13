@@ -81,7 +81,7 @@ test("no function works out a key's period but through bulk_period", () => {
 test('no function holds another copy of the minute or the deadline than the ones above', () => {
   // sign_in's own minute (0037): a credential's expiry may run that far past its longest by the app's clock, which is
   // CLOCK_SKEW_MS, the app's clock against the vault's, as the TypeScript checks (credentials.ts).
-  // Once in each overload: 0037's, which the previous release's vault calls, and 0075's (T192).
+  // Once in each overload: 0037's, which the previous release's vault calls, and 0075's.
   const signIn = found(/now_ms \+ p_longest \+ (\d+)\b/g);
   const overloads = functions.filter(({ name }) => name === 'sign_in').length;
   assert.deepEqual(signIn.map(({ name }) => name), Array<string>(overloads).fill('sign_in'), "sign_in's minute is sign_in's alone, and written once in each of its overloads");
@@ -108,7 +108,7 @@ test("the hot login's timeouts are HOT_LOCK_TIMEOUT_MS and HOT_STATEMENT_TIMEOUT
 });
 
 test("a grant's role check and a role row's name check take a role id as ROLE_ID does: 2 to ROLE_ID_MAX characters", async () => {
-  // A role row's name too (T178): a longer ROLE_ID with no migration would fail the vault's start sync on its CHECK.
+  // A role row's name too: a longer ROLE_ID with no migration would fail the vault's start sync on its CHECK.
   for (const [, check] of [['grants', 'grants_role_check'], ['roles', 'roles_name_check']] as const) {
     const [row] = await rows<{ definition: string }>(db.owner, sql`
       SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conname = ${check}`);

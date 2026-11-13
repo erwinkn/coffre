@@ -1,4 +1,4 @@
-// The worlds the tests of 0.15's use by name run in (use-named.test.ts, use.matrix.ts): a sealed world whose
+// The worlds the tests of the use by name run in (use-named.test.ts, use.matrix.ts): a sealed world whose
 // credential's token is known, a vault whose hot path's calls are counted and may be slowed, and a lock held beside.
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -100,7 +100,7 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
   const environments = new Map<string, Environment>([[w.dev, w.objects.environment as Environment]]);
   /**
    * Another environment of the project, `slug`, archived or not: made as the app makes one, sealed. `parentId`, a fork of
-   * that one; with `owner` too, its owner's personal config of it (T165).
+   * that one; with `owner` too, its owner's personal config of it.
    */
   const environment = async (slug: string, archived = false, { parentId = null, owner = null }: { parentId?: string | null; owner?: string | null } = {}) => {
     const id = randomUUID();
@@ -223,7 +223,7 @@ export async function holding<T>(db: TestDatabase, lock: ReturnType<typeof sql>,
 
 /**
  * `work` over `items`, side by side. One failing fails them all, but once every other has settled: one still running past it would open a pool after its file's last `endSlowed`,
- * and the file would never exit (T246: a cell refused a connection, 53300, left 18 of its row's open for four hours).
+ * and the file would never exit (a cell refused a connection, 53300, would leave its row's others open).
  */
 export async function each<T, R>(items: readonly T[], work: (item: T) => Promise<R>): Promise<R[]> {
   const settled = await Promise.allSettled(items.map(work));
@@ -242,7 +242,7 @@ export async function endSlowed(): Promise<void> {
 
 /**
  * A vault over a hot path of its own, each of its calls counted as it is sent, and sent `delay` ms late when set: a
- * database slow alike for every statement, as review r4 of #412 ran its probes on. A call is a statement.
+ * database slow alike for every statement. A call is a statement.
  */
 export async function slowed(db: TestDatabase, options: { connections?: number } = {}) {
   let statements = 0;
@@ -267,10 +267,10 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
   const vault = openVault(db.vault, prepared, createDatabase(pool));
   // `connect`: the pool's connection opened, and the hot path's plans made on it, by statements no count or delay sees,
   // so that a measured call's time is its own: an isolate's first, as cold as its row makes it, on a connection that has
-  // served before. A connection's first call plans every form of the use functions (T131). On CI's runners, beside the
+  // served before. A connection's first call plans every form of the use functions. On CI's runners, beside the
   // other cells and matrices, a cold connection's first statement took 135 ms past its delay at the median, 377 ms at
   // p90 and 585 ms at most (636 calls); a two-statement answer then took up to 2.48 s, and a slower one crossed the 3 s
-  // deadline (T198). Warmed, the same took 10 ms, 51 ms and 218 ms (756 calls), and answers at most 2.15 s: that the
+  // deadline. Warmed, the same took 10 ms, 51 ms and 218 ms (756 calls), and answers at most 2.15 s: that the
   // difference is planning is inferred from this comparison, not measured apart. An isolate of its
   // own makes that call, by a token no credential has: it writes nothing, and the measured isolate's map stays as its
   // row set it.
@@ -302,9 +302,9 @@ export { absentOf, keyBlocksOf, turnsApart, twinOf, type HotCall, type Weighed }
 /**
  * The shared buffers `call` reads, the least of a few runs, each of `EXPLAIN (ANALYZE, BUFFERS)` in a transaction rolled
  * back, on the hot login: what the statement's own work costs inside, which its calls and the statements counted do not
- * show (Fable's review and review r12 of D153: a form of the statement an isolate's history chose). Null for no
+ * show (a form of the statement an isolate's history chose). Null for no
  * call. `on`: a session to weigh it in, whose plans, made once, weigh every call it is given alike (a session of
- * its own makes them anew, on the statistics of the moment: W268 saw one call of a row read hundreds of buffers more).
+ * its own makes them anew, on the statistics of the moment: one call of a row was seen to read hundreds of buffers more).
  */
 export async function bufferedBy(call: HotCall | null, on?: WeighingSession): Promise<number | null> {
   return (await weighed(call, on))?.buffers ?? null;

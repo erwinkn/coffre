@@ -2,7 +2,7 @@
 // Object ticking on its alarm with one connection through the vault's
 // Hyperdrive, a change sealed through it, cosigned by the witness's object
 // and archived in R2 (test/workers/checkpointer-worker.ts); then deployed
-// again under a new signing key, over the objects' storage (T168).
+// again under a new signing key, over the objects' storage.
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';

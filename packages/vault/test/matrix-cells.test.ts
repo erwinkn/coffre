@@ -1,6 +1,6 @@
-// A matrix whose cell fails ends its file (T246): its batch's other cells settle, every pool they opened is ended, and
-// the process exits by itself, failed. A cell refused a connection (53300) used to leave its row's others running, their
-// pools open past the failure, and the file's process idle until its 2-hour timeout.
+// A matrix whose cell fails ends its file: its batch's other cells settle, every pool they opened is ended, and
+// the process exits by itself, failed, rather than a cell refused a connection (53300) leaving its row's others running,
+// their pools open past the failure, and the file's process idle until its 2-hour timeout.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

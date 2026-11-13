@@ -360,8 +360,8 @@ test('a fresh isolate\'s first call starts in a handful of round trips: the read
     const trips = database.tripsOf(2);
     t.diagnostic(`a fresh isolate's first access: ${trips} round trips`);
     // Its start's first reads, one round trip; the cutover's seal proved, two (its checkpoint's place, then its tiles);
-    // the Owners the deployment names, one; the caller's own read, one. Asked one after another, each read of the
-    // start took one: 16 in all before (T206).
+    // the Owners the deployment names, one; the caller's own read, one. Asked one after another, the start's reads
+    // would take one each: 16 in all.
     assert.ok(trips <= 5, `a fresh isolate's first access took ${trips} round trips`);
   } finally {
     await vault.stop();

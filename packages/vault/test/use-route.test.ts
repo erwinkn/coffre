@@ -1,4 +1,4 @@
-// A route use (0.16, T186 PR C; docs/design/proxy-ui.md, sections 3, 4 and 6; migration 0058, `use_route`;
+// A route use (docs/design/proxy-ui.md, sections 3, 4 and 6; migration 0058, `use_route`;
 // formal/Routing.tla): the vault's one call (two on a map miss) finds a UI definition by its name at
 // the place, through the fork chain, its seal checked against its object's newest change, and uses every key it sends,
 // each decided twice: for the caller, as a use, and for the item's editor, what their save froze intersected with what
@@ -35,7 +35,7 @@ beforeEach(emptyLog);
 
 /**
  * A use's time and its deadline, 3 s on, from one reading of the clock: two readings may straddle a millisecond, and a
- * deadline 3001 ms past its time is past the most a use may ask, answered `late` at once (T238).
+ * deadline 3001 ms past its time is past the most a use may ask, answered `late` at once.
  */
 const now = () => {
   const at = Date.now();
@@ -71,7 +71,7 @@ function refused(outcome: RouteUseOutcome): { code: string; key: string | null }
 
 const count = async (table: string) => (await rows(db.owner, sql.raw(`SELECT 1 FROM ${table}`))).length;
 
-/** Every use's decision, replayed from the log alone, held to what each live answer logged (R53). */
+/** Every use's decision, replayed from the log alone, held to what each live answer logged. */
 async function replayAgrees(live: Map<string, string | null>): Promise<void> {
   const { decided, faults } = await replayStored(db.owner, [SIGNING_KEY]);
   assert.deepEqual(faults, []);
@@ -525,7 +525,7 @@ test("T205: the route's named call at a reading of the URL the map picked wrong 
   assert.deepEqual(await state({ handle: true, unless: [`${w.slug}/dev`] }), { state: 'reread', read: null });
   assert.deepEqual(await state({ handle: true, unless: [`${w.slug}/other`] }), { state: 'moved', read: { keyed: true, made: false, place: w.dev } });
   // The levels and editor it reads are `use_route`'s, field for field: a copy of its SQL left behind would read `stale`
-  // only through `chainFault` or `editorOf` (Fable's review of #507).
+  // only through `chainFault` or `editorOf`.
   const { route: read } = await postgresNamed(hot, call({ project: w.slug, environment: 'dev', unless: [w.slug] }));
   const routed = await postgresRoute(hot, {
     tokenHash: w.tokenHash, accepts: { signin: true, issuers: [], passkeys: 'off' as const }, project: w.slug, environment: 'dev', named: 'openai', stable: w.slug, reading: 1,
@@ -901,7 +901,7 @@ test("OneVersion holds the roles too: a role edit landing between a use's rounds
       return (...args: unknown[]) => {
         const sent = (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
         statements += 1;
-        // After the use's first round, the route's named call (T205, a key entering the cap's set: `decide`), before its second.
+        // After the use's first round, the route's named call (a key entering the cap's set: `decide`), before its second.
         if ((String(args[0]).includes('use_route') || String(args[0]).includes('use_credential')) && edits === 0 && statements > 1) {
           edits += 1;
           return Promise.resolve(sent).then(async (result) => {
@@ -927,8 +927,8 @@ test("OneVersion holds the roles too: a role edit landing between a use's rounds
   }
 });
 
-// --- T190: each newest change the route reads, its seal forged --------------------------------------------------------
-// The attack T190 closes on every input of a use (use-forged.test.ts), on the three a route use reads beside its caller's:
+// --- Each newest change the route reads, its seal forged --------------------------------------------------------------
+// The attack use-forged.test.ts holds every input of a use against, on the three a route use reads beside its caller's:
 // a writer with no key puts a row back as the vault once sealed it, then writes that old seal into its object's newest
 // change, whose MAC then no longer holds. The rows alone are the vault's; only the MAC says the change is not.
 
@@ -1002,12 +1002,12 @@ test("T190: a level's environment archived, its row put back and the archive's e
   for (const one of [vault, (await isolate()).vault]) assert.deepEqual(refused(await one.useRoute(atFork())), { code: 'stale', key: null });
 });
 
-// --- T200: the light gate --------------------------------------------------------------------------------------------
+// --- The light gate --------------------------------------------------------------------------------------------------
 // A statement made with the map's ids reads its caller's rows once, by its first key's use, under the fence the gate
 // took, and the vault decides the caller on that row; the gate only decides, in SQL, that they stand there before the
 // route is read (`use_stands`, GateBeforeKeys). Where it makes no use, it asks the whole gate, and answers as without it.
 
-/** An isolate whose hot pool notes each route statement's gate as it answered: `stood`, light (T200), or the whole gate's state. */
+/** An isolate whose hot pool notes each route statement's gate as it answered: `stood`, light, or the whole gate's state. */
 async function watched(): Promise<{ vault: ReturnType<typeof openVault>; gates: string[]; end: () => Promise<void> }> {
   const gates: string[] = [];
   const client = postgresClient(HOT_URL, { max: 2 });
@@ -1024,7 +1024,7 @@ async function watched(): Promise<{ vault: ReturnType<typeof openVault>; gates: 
             const [row] = result as { route: string }[];
             gates.push((JSON.parse(row!.route) as { gate: { state: string | null } }).gate.state ?? 'null');
           } else {
-            // A route's named call (T205, 0071), its key's row's state; any other use by ids or name is no route's.
+            // A route's named call (0071), its key's row's state; any other use by ids or name is no route's.
             const [row] = result as { use: string }[];
             const read = JSON.parse(row!.use) as { row?: { state: string | null } };
             if (read.row !== undefined) gates.push(`one:${read.row.state ?? 'null'}`);
@@ -1116,7 +1116,7 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
     never: { definition: route('never', [names.never]), editor: ada },
   });
   await w.markSensitive(sensitive);
-  // Each use_route call as the vault sends it, and each route's named call (T205, `use_credential` naming its route).
+  // Each use_route call as the vault sends it, and each route's named call (`use_credential` naming its route).
   const calls: HotCall[] = [];
   const client = postgresClient(HOT_URL, { max: 2 });
   const pool = new Proxy(client, {
@@ -1147,8 +1147,8 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
         asked.push({ label: `${label} ${name}`, call: calls.at(-1)! });
       }
     }
-    // Where the map was warm, the route's named call (T205): `use_credential`, its route its last argument but the
-    // passkey policy (`p_passkeys`, T216, named after it), which read no route for one who stands nowhere; where cold,
+    // Where the map was warm, the route's named call: `use_credential`, its route its last argument but the
+    // passkey policy (`p_passkeys`, named after it), which read no route for one who stands nowhere; where cold,
     // `use_route`, its gate asked whole.
     const routeAt = (call: HotCall): number => (call.query.includes('use_route') ? 3 : call.args.length - 2);
     assert.ok(asked.slice(0, 3).every(({ call }) => call.query.includes('use_credential') && call.query.includes('p_passkeys =>') && typeof call.args[routeAt(call)] === 'string'), 'the warm map asked the route\'s named call');
@@ -1157,10 +1157,10 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
     // Every row the file's cases deleted or wrote over dead to every session first: a transaction that could still see
     // them (an autovacuum worker's ANALYZE of this database, say) keeps their versions from the VACUUM below, and each
     // scan reads them until it ends; ending between a call and its twin, it left the call 9 to 35 buffers above its twin
-    // (CI, T238; forced, 13 to 42), as T225 found of the matrices' `bulk_cap`. Then weighed with the horizon held where
+    // (CI; forced, 13 to 42), as the matrices' `bulk_cap` does too. Then weighed with the horizon held where
     // it is, so that a transaction of another database ending between a call and its twin moves nothing either
-    // (`horizonHeld`; T238 r2: 146 buffers beside 111), nor one of this database that took its snapshot while such a
-    // transaction ran (T238 r3: 40 and 42).
+    // (`horizonHeld`; 146 buffers beside 111), nor one of this database that took its snapshot while such a
+    // transaction ran (40 and 42).
     // The twin: the same call of a route the world never saved (`use_route`'s place reading's route; the named call's route).
     const twinOf = (call: HotCall): HotCall => {
       const args = [...call.args];

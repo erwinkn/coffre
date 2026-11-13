@@ -66,7 +66,7 @@ export const TALLY_VERSION = 1;
  * prefix it rehashes to, signed when the lap began, and the last entry it
  * rehashed. Null between laps. `count`: where the next checkpoint's count
  * of the prefix goes on from, on a log longer than one count holds
- * (`countWindow` in @coffre/db/log, T245); null or absent, from the first
+ * (`countWindow` in @coffre/db/log); null or absent, from the first
  * entry, as before 0.16.
  */
 export type TalliedCheckpoint = Checkpoint & { tally: StoredTally; scrub: { at: LogHead; end: LogHead } | null; count?: number | null };

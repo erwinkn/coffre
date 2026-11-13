@@ -1,4 +1,4 @@
-// 0.15's log on Workers (T136): the vault's entrypoint configured with its
+// 0.15's log on Workers: the vault's entrypoint configured with its
 // hot path's Hyperdrive and its checkpointer's Durable Object
 // (test/workers/log-worker.ts), as a deployment is. Its first call starts
 // the object; it says it answers uses, and answers one, through the

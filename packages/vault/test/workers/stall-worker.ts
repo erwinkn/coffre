@@ -1,4 +1,4 @@
-// T169: the vault's entrypoint and its checkpointer's object as
+// For a checkpointer's stall: the vault's entrypoint and its checkpointer's object as
 // log-worker.ts has them, the object's tick bounded at `TICK_BOUND_MS` ms
 // rather than 10 s, so that a test waits for a stall no longer than that.
 import { checkpointerObject } from '../../src/checkpointer-workers.ts';

@@ -190,7 +190,7 @@ export function resolveVaultConfig(config: VaultConfig, moved: readonly MovedSet
  * included: a KEK rotation changes the derived signing key, and what the
  * old one signed before the rotation must still verify, for as long as the
  * old key stays configured. Nothing after it does (`#settle` in vault.ts;
- * 0.15's log, from its rotation entry: T168).
+ * 0.15's log, from its rotation entry).
  */
 function signingKeys(given: string | undefined, previous: readonly string[], keks: { provider: KekProvider; signingKey: Buffer | null }[]): Buffer[] {
   const derived = keks.flatMap((entry) => (entry.signingKey === null ? [] : [entry.signingKey]));

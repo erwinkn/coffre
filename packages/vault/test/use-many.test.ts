@@ -1,8 +1,8 @@
-// B2 (T167): a request's several keys as one vault call, `useMany`, one
-// statement (`use_batch`, migration 0048) where each key had a call of its own.
+// A request's several keys as one vault call, `useMany`, one
+// statement (`use_batch`, migration 0048) rather than a call a key.
 // Each case is named for what formal/Batching.tla holds of it;
 // every key's use is `use_credential`'s, whose own guarantees use.test.ts holds.
-// Every run's live answers are held to the replay of the log (R53).
+// Every run's live answers are held to the replay of the log.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';

@@ -1,6 +1,6 @@
-// The reads' projection across a rotation of the vault's signing key (T168; keyring.ts; formal/Rotation.tla's
+// The reads' projection across a rotation of the vault's signing key (keyring.ts; formal/Rotation.tla's
 // BoundaryChecked; docs/design/audit-tree.md, "A rotation"): the projector, the whole log's check of it (`coffre verify
-// log`) and the vault's `vouch` hold to one rule, R41's: the key the log moved on from vouches for a pair, an entry, a
+// log`) and the vault's `vouch` hold to one rule: the key the log moved on from vouches for a pair, an entry, a
 // read or the cursor only below its rotation's number; the current key for any.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -196,7 +196,7 @@ test('vouch holds a replaced key to its rotation (R41): never any key the vault 
   assert.deepEqual((await vault.vouch({ entries: [asVouched(below), asVouched({ ...planted, mac: readMac(A_MAC, planted) })] })).forged, [String(planted.number)]);
   assert.deepEqual((await vault.vouch({ entries: [asVouched(below)] })).forged, []);
   // The rotation's row gone, with the newest pair under B: A vouches for nothing, its reads from before included (fail
-  // closed), in the same isolate, which kept no bound from the call before (SnapshotRead, review r1).
+  // closed), in the same isolate, which kept no bound from the call before (SnapshotRead).
   await run(db.owner, sql`DELETE FROM log_changes WHERE object = ${KEY_OBJECT}`);
   assert.deepEqual((await vault.vouch({ entries: [asVouched(below)] })).forged, [String(below.number)]);
 });

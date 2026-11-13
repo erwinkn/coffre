@@ -1,4 +1,4 @@
-// 0.15's use by name at a fork and at `dev@me` (T165, B2; migration 0051; formal/Probing.tla, Where): the vault's one
+// The use by name at a fork and at `dev@me` (migration 0051; formal/Probing.tla, Where): the vault's one
 // call reads the place a fork's path names, or the caller's personal config of dev (dev while they have none), decides
 // the caller's standing there first, then resolves the key through what the place inherits, its own first, then each
 // parent's unless the place removed it, and decides it where it is held too. A chain cut (a parent archived) reads

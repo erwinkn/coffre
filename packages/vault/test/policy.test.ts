@@ -267,7 +267,7 @@ test("a policy the vault cannot read is written again by an Owner of the whole i
   const ada = await protect(w.vault, ADA, w.project, [w.dev]);
   assert.equal(!ada.ok && ada.refusal.code, 'not_allowed');
   assert.match(!ada.ok ? ada.refusal.message : '', /cannot read its own policy/);
-  // Nor does unprotecting market's prod, though an Owner of market unprotects it while the policy reads (R30).
+  // Nor does unprotecting market's prod, though an Owner of market unprotects it while the policy reads.
   const unprotect = await protect(w.vault, ADA, w.project, [w.prod], false);
   assert.match(!unprotect.ok ? unprotect.refusal.message : '', /cannot read its own policy/);
   // An Owner of the whole instance writes it again, from the roles as they ship: what the forged rows hid is for them to restore.

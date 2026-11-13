@@ -1,4 +1,4 @@
-// T169: a TCP proxy in front of Postgres that can stop answering, as a
+// A TCP proxy in front of Postgres that can stop answering, as a
 // connection that went dead, or a connect Hyperdrive never gets a slot for,
 // is to its client: held, nothing goes either way and nothing is closed;
 // let go, what was held goes on.

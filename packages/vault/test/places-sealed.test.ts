@@ -1,6 +1,6 @@
-// The vault decides on no environment row 0.15's log does not hold (T159; R53, every decision input sealed; R64, fail
+// The vault decides on no environment row 0.15's log does not hold (every decision input sealed; fail
 // closed): a place re-parented, renamed, or brought back from its deletion around the log, its seal kept, or put back
-// after a change with that change's seal column forged (T190, T191: its MAC does not hold), is checked against its
+// after a change with that change's seal column forged (its MAC does not hold), is checked against its
 // object's seal and its newest change's before anything is decided on it. `access` holds no grant on it,
 // and keeps it protected with its slug unknown; an issue that names it, an issue to a service account that holds a
 // grant on it, a change of that account by its manager, a grant there and a key's wrap there are refused. Uses decide on the place's seal too (use.test.ts, use-named.test.ts).
@@ -80,7 +80,7 @@ type World = Awaited<ReturnType<typeof world>>;
 /**
  * `regrants`: the tamper moves what the grants on `dev` read as (an environment's grant reads its project from the
  * environment's row), so the object of every member holding one is not the one their seal covers: such a member is
- * refused whole, by the vault's decisions as by their uses (T179 PR 2, `#onLog`), and reported, not only the place.
+ * refused whole, by the vault's decisions as by their uses (`#onLog`), and reported, not only the place.
  */
 const TAMPERS: Record<string, { tamper: (w: World) => Promise<void>; projectOf: (w: World) => string; regrants?: true }> = {
   're-parented': {
@@ -101,7 +101,7 @@ const TAMPERS: Record<string, { tamper: (w: World) => Promise<void>; projectOf: 
     projectOf: (w) => w.project,
   },
   // Moved as the app moves it, a change the log holds, MAC and all; then the row put back as it was before, and that
-  // change's seal column made the old seal (`putBack`): the seal comparison alone passes (T190, review r3; T191).
+  // change's seal column made the old seal (`putBack`): the seal comparison alone passes.
   'put back after its archive, the archive\'s seal column made the old one': {
     tamper: (w) => putBack(w.dev, { archived: true }),
     projectOf: (w) => w.project,
@@ -116,7 +116,7 @@ const TAMPERS: Record<string, { tamper: (w: World) => Promise<void>; projectOf: 
  * What a writer with the database does to place `id` once an honest change has moved it (`honest`, made as the app
  * makes one, `changePlace`): the row put back as it was before, its old seal the vault's, and that change's seal column
  * made the old seal. Row and newest seal agree; only the change's MAC, which covers its seal, says the log never left
- * the row so (T190, review r3; T191).
+ * the row so.
  */
 async function putBack(id: string, honest: { slug?: string; archived?: boolean }): Promise<void> {
   const [row] = await rows<{ slug: string; archived_at: unknown; seal: Buffer }>(db.owner, sql`SELECT slug, archived_at, seal FROM environments WHERE id = ${id}`);
@@ -246,7 +246,7 @@ for (const [how, { tamper, projectOf, regrants }] of Object.entries(TAMPERS)) {
     const none = await credentialRows();
     const issued = await w.vault.issueToken!(await issueOn(w.vault, issue(MAYA, atProd)));
     if (regrants) {
-      // CI's own object no longer its seal's: refused before any place is weighed, as tampered, not gone (review r1).
+      // CI's own object no longer its seal's: refused before any place is weighed, as tampered, not gone.
       assert.deepEqual(issued, { ok: false, refused: 'refused', why: TAMPERED_SUBJECT });
       assert.equal(await credentialRows(), none);
       return;
@@ -322,7 +322,7 @@ test('a read through a place archived, then put back unarchived with the archive
 });
 
 // A key held in the forged place itself, read once so the vault keeps the answer: the kept answer does not outlive the
-// place's MAC, warm or fresh (T191, review r2).
+// place's MAC, warm or fresh.
 for (const how of ['put back after its archive, the archive\'s seal column made the old one', 'put back after its rename, the rename\'s seal column made the old one']) {
   test(`a read of a key held in a place ${how} around the log is refused, warm and fresh, and reported as a MAC (T191)`, async () => {
     const w = await world();

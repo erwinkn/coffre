@@ -1,6 +1,6 @@
-// T169 on Workers, in workerd: the vault's entrypoint and its checkpointer's
-// object (test/workers/stall-worker.ts), the object's connection through a
-// proxy that stops answering (stall-proxy.ts), as W278's bench met on
+// A checkpointer's stall on Workers, in workerd: the vault's entrypoint and its
+// checkpointer's object (test/workers/stall-worker.ts), the object's connection
+// through a proxy that stops answering (stall-proxy.ts), as a bench met on
 // Cloudflare. Meanwhile a use answers through the entrypoint as ever, a
 // change committed answers unsealed within its bound, and `sealing` says
 // the checkpointer does not seal; answered again, it seals by itself.

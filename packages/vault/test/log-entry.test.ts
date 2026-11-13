@@ -1,5 +1,5 @@
-// The MAC of a 0.15 log entry (log-entry.ts; D162): 16 bytes, the key's public tag in the first four, then twelve of
-// HMAC-SHA256 under the key. The tag names the key, so that a rotation of the vault's signing key (T168) can tell its
+// The MAC of a 0.15 log entry (log-entry.ts): 16 bytes, the key's public tag in the first four, then twelve of
+// HMAC-SHA256 under the key. The tag names the key, so that a rotation of the vault's signing key can tell its
 // keys' entries apart; it vouches for nothing by itself, which these hold.
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';

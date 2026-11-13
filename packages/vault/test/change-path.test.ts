@@ -1,4 +1,4 @@
-// 0.15's change path (docs/design/0.15-plan.md, PR 4a): every change a vault decision makes to an input of 0.15's log is
+// 0.15's change path (docs/design/0.15-plan.md): every change a vault decision makes to an input of 0.15's log is
 // one call of `change_input` (migration 0023), in the decision's transaction, after 0.14's writes. Each case names the
 // part of formal/HotPathOne.tla it holds.
 import { defineDeployment } from '@coffre/core/deployment';
@@ -116,7 +116,7 @@ function change(calls: store.ChangeCall[]): Promise<(bigint | null)[]> {
   return db.vault.transaction((tx) => store.changeInputs(tx, calls));
 }
 
-/** The cutover's genesis of `input` (plan PR 9), as `genesisCall` makes it: what the tests stand in for the cutover with. */
+/** The cutover's genesis of `input`, as `genesisCall` makes it: what the tests stand in for the cutover with. */
 async function genesis(keys: ChangeKeys, ref: Ref, input: Input): Promise<void> {
   const [number] = await change([genesisCall(keys, ref, input, Date.now(), 'system:cutover')]);
   assert.ok(number !== null, `${ref.kind} ${ref.id} sealed`);
@@ -152,7 +152,7 @@ test('every change a decision makes to a member is an entry of 0.15\'s log, op b
   const old = await rows<{ seq: string; action: string }>(db.owner, sql`SELECT seq, action FROM audit_log WHERE subject_principal = ${ADA} AND decision = 'allow' ORDER BY seq`);
   assert.deepEqual(old.map(({ action }) => action), ['member.add', 'access.grant', 'access.grant', 'access.grant', 'access.revoke', 'member.role', 'access.revoke', 'member.remove']);
   // And each change names the newest of 0.14's entries it accounts for: its decision's newest about her, the access_seq
-  // her row names (UsesSeeOldWrites, plan PR 5).
+  // her row names (UsesSeeOldWrites).
   const cited = (await changeRows()).filter((row) => row.object === objectKey(member(ADA))).map((row) => (JSON.parse(row.payload) as { old?: string }).old);
   assert.deepEqual(cited.at(-1), old.at(-1)!.seq.toString());
   const [{ accessSeq }] = await db.owner.select({ accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, ADA));
@@ -284,13 +284,13 @@ test('change_input_strict, with the COMMIT: its number answers after it; a chang
   const [number] = await numbers.answer;
   assert.ok(number !== undefined && number > 0n);
   assert.equal((await written(ADA)).length, 1, 'committed with its change');
-  // Committed, its answer unread by the client: read again by request id, through the vault's own login (review r1).
+  // Committed, its answer unread by the client: read again by request id, through the vault's own login.
   assert.equal(await newestCommitted(db.vault, { answer: Promise.reject(new Error('unread')), requests: numbers.requests }), number);
   // The second from the same seal: refused in Postgres, the transaction with it.
   await assert.rejects(commit(protect(false), BO), (error: unknown) => isMovedChange(error) && !store.isStale(error));
   assert.deepEqual(await written(BO), [], 'rolled back with the change');
   // The row's seal put back to the one before (ChangeChecksSeal): the wrapper lets the inner refusal through as stale,
-  // `NotLogged`, not as moved, which would read again (review r3).
+  // `NotLogged`, not as moved, which would read again.
   await db.owner.update(environments).set({ seal: from }).where(eq(environments.id, w.prod));
   await assert.rejects(commit(protect(false), BO), (error: unknown) => store.isStale(error) && !isMovedChange(error));
   assert.deepEqual(await written(BO), [], 'rolled back with the change');
@@ -334,7 +334,7 @@ test('renaming staging to prod takes a Developer scoped to staging off it, live 
     createdBy: ADA, expiresAt: new Date(Date.now() + 3_600_000),
   });
   // What the use reads, made around the vault, each sealed by its genesis: the environment, Ada's session, the key and
-  // the roles, as an instance 0.15.0 cut over holds them. PR 5's statement reads a credential's and a key's rows; here
+  // the roles, as an instance 0.15.0 cut over holds them. The use's statement reads a credential's and a key's rows; here
   // their objects are these geneses'.
   const credential: CredentialInput = { kind: 'credential', id: credentialId, principal: ADA, caller: 'person', scope: null, expiresAt: null, revoked: false, generation: 0 };
   const secret: SecretInput = { kind: 'secret', id: secretId, projectId: project, environmentId: staging, version: randomUUID(), nature: 'secret', key: { kekProvider: 'local', kekId: 'k', kekVersion: '1', bytes: 'AA==' }, digest: null, source: null, reference: null };
@@ -420,7 +420,7 @@ test('protecting two sealed environments in one call is two changes, each from i
   await genesis(w.keys, { kind: 'environment', id: w.prod }, environment(w.project, w.prod, 'prod'));
   // A deleted one's object holds its slug before the tombstone (objects.ts; 0025).
   await genesis(w.keys, { kind: 'environment', id: gone }, { ...environment(w.project, gone, 'old'), deleted: true });
-  // An Owner protects all three, from a page shown before one of them was deleted: 0.14 takes it, as it did.
+  // An Owner protects all three, from a page shown before one of them was deleted: 0.14's rules take it.
   const outcome = await w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.project, environmentIds: [w.dev, w.prod, gone], protected: true } });
   assert.ok(outcome.ok, JSON.stringify(outcome));
   for (const id of [w.dev, w.prod]) assert.deepEqual(await opsOf(w.keys, { kind: 'environment', id }), ['genesis', 'environment.protect']);
@@ -682,7 +682,7 @@ test('a 0.15 change beside a 0.14 decision holding its member\'s row: row, head,
   try {
     // 0.14's vault: the member's queue and row, then, a moment later, the head, then an entry that changes access,
     // which takes the fence (OldWritesFence). Marked as a writer under 0.15's log marks it: once cut over, 0.14's own is
-    // refused at its append (PR 9b), after its row and head, which this holds all the same.
+    // refused at its append, after its row and head, which this holds all the same.
     await old.unsafe('BEGIN');
     await old.unsafe(`SELECT pg_advisory_xact_lock(1668245101, hashtext(principal)) FROM principals WHERE principal = $1 FOR NO KEY UPDATE`, [ADA]);
     const changed = w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }] });

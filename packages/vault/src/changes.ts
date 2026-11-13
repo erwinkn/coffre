@@ -11,13 +11,12 @@ import { connectionObject, credentialObject, environmentObject, secretObject } f
 import { isStale, laterInputs, loggedChanges, newestChange, readObject, type ChangeCall, type CheckedChange, type NewestChange, type ReadKind } from './store.ts';
 
 /**
- * 0.15's change path (plan PR 4a; formal/HotPathOne.tla's change actions):
+ * The change path (formal/HotPathOne.tla's change actions):
  * the changes one decision makes to the objects of the log, each logged
  * by `change_input` (migration 0023) in the decision's own transaction.
  *
- * A decision of 0.14's writes members, grants and its entries as it always
- * has, until 0.16 (the plan's dual fencing); with 0.15's log on, it also
- * stages, beside each write, the op that write is (`stage`), and once its
+ * A decision of 0.14's writes members, grants and its entries; with 0.15's
+ * log on, it also stages, beside each write, the op that write is (`stage`), and once its
  * writes have run, `commit` logs them:
  *
  * 1. **Before the writes:** each object is read once, its seal checked
@@ -41,7 +40,7 @@ import { isStale, laterInputs, loggedChanges, newestChange, readObject, type Cha
  * fence (RowFirst and ChangeHeadFirst; WriteLocks.tla holds the issue lock's place).
  *
  * An object that has a row but no seal, and no change in the log, is
- * 0.14's, which 0.15.0's cutover (plan PR 9) left unsealed: 0.14's log is
+ * 0.14's, which 0.15.0's cutover left unsealed: 0.14's log is
  * its record. A decision changes it as 0.14 did, and logs nothing of it
  * here. The roles' and the policy's rows are written only sealed, by
  * `change_input`: one with no seal was planted, and is refused. Any other
@@ -89,7 +88,7 @@ export function macsOf(keys: ChangeKeys): readonly LogMacKey[] {
 
 /** `heldByLog`, on an object's row and its newest change as read. */
 export function heldFrom(keys: SealKeys, ref: Ref & { kind: ReadKind }, { row, seal }: { row: Input | null; seal: Buffer | null }, newest: NewestChange | null): Held {
-  // Its newest change's MAC does not hold over the seal it records (T190): the log, not only the row, was written around.
+  // Its newest change's MAC does not hold over the seal it records: the log, not only the row, was written around.
   if (newest !== null && !newest.holds) throw new NotLogged(ref, 'tampered');
   if (newest === null) {
     if (seal !== null) throw new NotLogged(ref, 'stale');
@@ -114,7 +113,7 @@ export type ChangeKeys = {
   mac: LogMacKey;
   /**
    * The MAC keys of every signing key the vault holds, `mac` first: what the newest change a row is held to is checked
-   * under (T190, `changeHolds`), as `seals` are every one's. Absent: `mac` alone, a vault of one signing key.
+   * under (`changeHolds`), as `seals` are every one's. Absent: `mac` alone, a vault of one signing key.
    */
   macs?: readonly LogMacKey[];
 };
@@ -153,7 +152,7 @@ export class Changes {
    * row names), or the `policy.change` an environment's protection or a
    * role came with. Each of its changes carries it (`payloadOf`'s `old`),
    * so that a use sees a 0.14 write the new log has not accounted for
-   * (UsesSeeOldWrites, plan PR 5).
+   * (UsesSeeOldWrites).
    */
   cite(ref: Ref, seq: bigint): void {
     const staged = this.#staged.get(objectKey(ref));
@@ -177,7 +176,7 @@ export class Changes {
 
   /**
    * That an archived key's rows make its kept object, as its unarchive
-   * would read them, before a decision changes that object (an end, T134):
+   * would read them, before a decision changes that object (an end):
    * `stale` otherwise, as a live object's rows not its seal's refuse it.
    */
   async rowsAsKept(db: Queryable, ref: Ref & { kind: 'secret' }, kept: Input): Promise<void> {
@@ -192,7 +191,7 @@ export class Changes {
   async prepare(db: Queryable): Promise<void> {
     const unread = [...this.#staged.values()].filter((staged) => staged.read === undefined);
     // Each object's reads asked together: one round trip for them all.
-    // A role's row is written whole too (0.16): from its newest change's seal, whatever the row holds, which 0.15.0's
+    // A role's row is written whole too: from its newest change's seal, whatever the row holds, which 0.15.0's
     // changes leave unsealed and the vault's start rewrites (formal/Roles.tla).
     const reads = await Promise.all(unread.map((staged) => this.#read(db, staged.ref, staged.ref.kind === 'role' || (staged.steps[0]?.op.op === 'proxy.save' && staged.steps[0].op.replace))));
     for (const [i, staged] of unread.entries()) {
@@ -222,7 +221,7 @@ export class Changes {
       return { logged: true, seal: newest?.seal ?? null, now: null, afters: [] };
     }
     const [{ row, seal }, newest] = this.#seen.get(objectKey(ref)) ?? await Promise.all([readObject(db, ref), newestChange(db, ref, macsOf(this.#keys))]);
-    // Its newest change's MAC does not hold over the seal it records (T190; HotPathOne.tla, ChangeChecksMac): a row put
+    // Its newest change's MAC does not hold over the seal it records (HotPathOne.tla, ChangeChecksMac): a row put
     // back with its old seal, written into that change too, would pass every check below, and this change would seal
     // the writer's row as the log's. Refused, as a row its seal does not cover is.
     if (newest !== null && !newest.holds) throw new NotLogged(ref, 'tampered');
@@ -245,7 +244,7 @@ export class Changes {
    * Log every staged change, in the decision's transaction, once its writes
    * have run, at `at`, `written` holding the members' objects as the
    * decision read them back after its writes, if it did: the numbers of their entries, which the decision
-   * waits to see sealed before it answers (R51), and which answer with its COMMIT, which they go with
+   * waits to see sealed before it answers, and which answer with its COMMIT, which they go with
    * (`laterInputs`). A row a writer put back (ChangeChecksSeal), or whose seal moved since it was read
    * (ChangeCAS), fails the transaction, which `failed` says is `NotLogged`, or `Moved`, read again.
    */
@@ -297,7 +296,7 @@ export class Changes {
  * key's newest change is its archive (`secret.delete`, which leaves no
  * seal), and the one before it the write or genesis it archived, its whole
  * object: both read in one statement (`loggedChanges`), both held to their
- * MACs (T190), so that a writer who blanks that write's seal cannot make an
+ * MACs, so that a writer who blanks that write's seal cannot make an
  * older one look the newest sealed. That change's seal is checked over the
  * object its payload makes (`tampered` otherwise). Read outside any
  * transaction: `app_change` holds the seal to the log's newest sealed one
@@ -324,7 +323,7 @@ export function keptFrom(keys: SealKeys, ref: Ref & { kind: 'secret' }, changes:
 
 /**
  * Throws `tampered` for the first of `refs` whose newest change's MAC does
- * not hold (T190): what a write goes on from where its statement holds a
+ * not hold: what a write goes on from where its statement holds a
  * row to its object's newest seal in SQL, which cannot check a MAC. A row
  * put back and its object's newest change's seal written to match would
  * pass that comparison, and the write would seal the rollback, a revoked
@@ -338,8 +337,8 @@ export async function changesHold(keys: ChangeKeys, db: Queryable, refs: readonl
 }
 
 /**
- * The changes the app is about to write to objects its own rows hold (plan
- * PR 4b, `prepare`): credentials, keys and environments, sealed for its
+ * The changes the app is about to write to objects its own rows hold
+ * (`prepare`): credentials, keys and environments, sealed for its
  * transaction to commit (`app_change`, 0025), at `at`, by `actor`. Pure:
  * what the vault reads is `kept`, each unarchived key's object as its log
  * last sealed it (`keptObjects`).
@@ -363,7 +362,7 @@ export async function changesHold(keys: ChangeKeys, db: Queryable, refs: readonl
  *   the call. Columns no object holds (a credential's MAC, a key's name, an
  *   environment's display name) are no change.
  * - **An unarchive** (`restores`) restores the object its key's log last
- *   sealed, its rows having no seal while archived (T134): rows that make
+ *   sealed, its rows having no seal while archived: rows that make
  *   any other (a version, a reference row or a source edited meanwhile, an
  *   older version put back, an end cleared) are `stale`. Its change carries
  *   that seal, which `app_change` holds to the log's newest sealed one. A
@@ -372,7 +371,7 @@ export async function changesHold(keys: ChangeKeys, db: Queryable, refs: readonl
 export function prepareChanges(
   keys: ChangeKeys, at: number, actor: string, changes: readonly ObjectChange[], kept: ReadonlyMap<string, { object: Input; seal: Buffer } | null>,
   /**
-   * A key write's request, decided on one read (T179 PR 3, write.ts): each change carries it in its payload, under the
+   * A key write's request, decided on one read (write.ts): each change carries it in its payload, under the
    * vault's MAC, its number, the credential and identity it was decided for, and the read's digest (`inputs`), which
    * `app_change_strict` holds to the read its transaction held (`hold_inputs`); and each change's request id is derived
    * from the request's number and the change's object, so that one write's two keys never share one.
@@ -542,8 +541,8 @@ export function payloadOf(ref: Ref, op: Op, old?: bigint, extra?: { request: Wri
 export type WriteRequest = { number: bigint; credential: string; identity: string | null; inputs: string } & Asked;
 
 /**
- * The app's ids of the request and of the one action it is part of (`Correlation`), as its 0.14 entries carried them:
- * 0.16.0 writes none on the two-trip routes, so their changes carry them, under the vault's MAC, for the audit pages.
+ * The app's ids of the request and of the one action it is part of (`Correlation`): the two-trip routes write no 0.14
+ * entry, so their changes carry them, under the vault's MAC, for the audit pages.
  */
 type Asked = { operationId: string | null; requestId: string | null };
 
@@ -554,11 +553,11 @@ type WriteRequestPart = { number: string; credential: string; identity: string |
 type AdmitRequestPart = { credential: string; identity: string | null; confirmed?: Confirmation } & Asked;
 
 /**
- * A member's first add's change (T179, admit.ts), made from the read its decision weighed: from no object (no row, no
+ * A member's first add's change (admit.ts), made from the read its decision weighed: from no object (no row, no
  * seal) to the member's, `member.add`, its request in its payload (the credential and identity it was decided for, the
  * app's ids, the read's digest, `inputs`, which `change_input_strict` holds to the read its transaction held), sealed
  * and MAC'd by the vault's keys. As `Changes.commit` makes a decision's, but that it accounts for no 0.14 entry (no
- * `old`): 0.16.0 writes none on this path, and the change is the add's only record.
+ * `old`): this path writes none, and the change is the add's only record.
  */
 export function admitChange(
   keys: Pick<ChangeKeys, 'seals' | 'mac'>,
@@ -599,7 +598,7 @@ export function writeRequestId(number: bigint, object: string): string {
  */
 export function loggedChange(row: { number: bigint; at: number; object: string; payload: string; seal: Buffer | null }): LoggedChange | null {
   // What a change records besides its op, which the replay leaves: the 0.14 entry it accounts for, and a sign-in's, a revoke's, an issue's or a binding's own (credentials.ts).
-  // And a key write's request and the digest of the read it was decided on (T179 PR 3, `prepareChanges`).
+  // And a key write's request and the digest of the read it was decided on (`prepareChanges`).
   const { ref: named, old: _, signIn: _signIn, revoke: _revoke, issue: _issue, bind: _bind, unbind: _unbind, request: _request, inputs: _inputs, ...op } = JSON.parse(row.payload) as Op & {
     ref?: Ref; old?: string; signIn?: unknown; revoke?: unknown; issue?: unknown; bind?: unknown; unbind?: unknown; request?: unknown; inputs?: unknown;
   };
@@ -611,8 +610,7 @@ export function loggedChange(row: { number: bigint; at: number; object: string; 
 /**
  * An object's first change, its genesis (`change_input`, from no seal: an
  * object the log has never held): its row sealed as it is, the object it
- * holds the payload's `value`, as 0.15's cutover from 0.14 sealed each
- * object. An environment's carries the object as `value` too, which writes
+ * holds the payload's `value`. An environment's carries the object as `value` too, which writes
  * its protection; the roles' and the policy's rows are made from the
  * payload. `old`: the newest entry of 0.14's it accounts for (`cite`): a
  * member's `access_seq`, or the `policy.change` an environment's protection

@@ -20,7 +20,7 @@ export async function logKey(seed: Uint8Array): Promise<LogKey> {
 /**
  * The vault's keys of the log, from its signing keys (`signingKeys`, the one
  * it signs with first): no two may share a MAC tag, which is how the
- * database tells a replaced key's entries from the current one's (T168).
+ * database tells a replaced key's entries from the current one's.
  */
 export async function logKeys(seeds: readonly Uint8Array[]): Promise<{ current: LogKey; previous: LogKey[] }> {
   const [current, ...previous] = await Promise.all(seeds.map((seed) => logKey(seed)));
@@ -36,10 +36,10 @@ export async function logKeys(seeds: readonly Uint8Array[]): Promise<{ current: 
  * The checkpointer as a host runs it, on Node (`runCheckpointer`) or in its
  * Durable Object (`CheckpointerObject`): the trees' keys and the MAC key
  * from each of the vault's signing keys, the log's origin from each, the log
- * moved on to the first when it is under another (T168), and every alarm
+ * moved on to the first when it is under another, and every alarm
  * handed to `record` as well as returned by `alarms`, where whoever watches
- * the log reads them (R40's plugin): refused ticks, changes answered
- * unwitnessed (R51), a memory found behind the database.
+ * the log reads them: refused ticks, changes answered
+ * unwitnessed, a memory found behind the database.
  */
 export type HostOptions = {
   store: LogStore;
@@ -50,7 +50,7 @@ export type HostOptions = {
   /** Where each alarm is kept; it is also logged. */
   record?: (alarm: Alarm) => void | Promise<void>;
   now?: () => number;
-  /** What closes it for good, when its host bounds the open (T169); `TICK_BOUND_MS` otherwise, for the tests. */
+  /** What closes it for good, when its host bounds the open; `TICK_BOUND_MS` otherwise, for the tests. */
   fence?: Fence;
   tickBoundMs?: number;
   /** The most entries a tick seals in one pair (`WINDOW_MAX` otherwise): a backlog is sealed a part at a time, for the tests. */
@@ -94,7 +94,7 @@ export async function openLogCheckpointer(options: HostOptions): Promise<Checkpo
   });
 }
 
-/** How often the checkpointer seals (R51, R54): a change waits at most about this long for a tick, and seals sooner if it asks. */
+/** How often the checkpointer seals: a change waits at most about this long for a tick, and seals sooner if it asks. */
 export const TICK_MS = 500;
 
 /** An error as an alarm says it: the database's own reason, when a query wrapped it, rather than the query's text. */
@@ -107,7 +107,7 @@ export function reasonOf(error: unknown): string {
 export const DAYS_AHEAD = 3;
 /** How often retention runs: hourly, so that a day goes within the hour it is due, and a run that waits tries again. */
 export const RETAIN_EVERY_MS = 3_600_000;
-/** How often the bulk cap's old rows are pruned, at most `PRUNED` a time (R52's window, in `prune_bulk`). */
+/** How often the bulk cap's old rows are pruned, at most `PRUNED` a time (past the policy's bulk window, in `prune_bulk`). */
 export const PRUNE_EVERY_MS = 60_000;
 const PRUNED = 10_000;
 
@@ -118,7 +118,7 @@ export const WAITING_ALARM_MS = DAY_MS;
 export const daysAround = (t: number) => Array.from({ length: DAYS_AHEAD + 2 }, (_, i) => dayOf(t + (i - 1) * DAY_MS));
 
 /**
- * What a host runs after each tick (plan PR 7): the next days' partitions
+ * What a host runs after each tick: the next days' partitions
  * made once a day, retention once an hour when `keepDays` is set, the bulk
  * cap's old rows pruned once a minute. A failure is an alarm, said once while
  * it stands; retention waiting is none, but for a lock: one that has kept a
@@ -159,7 +159,7 @@ export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: n
       failed = null;
     } catch (error) {
       // Its checkpointer closed under it, given up on or replaced: the next one's upkeep does the work, and this is no
-      // alarm (review by Fable).
+      // alarm.
       if (error instanceof FenceClosed || (error as { cause?: unknown })?.cause instanceof FenceClosed) return;
       const message = `the log's upkeep failed: ${reasonOf(error)}`;
       if (message !== failed) options.alert(message);

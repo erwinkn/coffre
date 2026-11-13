@@ -1,6 +1,6 @@
-// A call's connection closed by a time on workerd (`HyperdrivePool.end(by)`, T170): what it had not written yet is
+// A call's connection closed by a time on workerd (`HyperdrivePool.end(by)`): what it had not written yet is
 // never sent, a write stuck under backpressure included, and the connection goes once the call's request ends.
-// workerd's own `close()` waits for every write to go (reviews r2 and r3 of #438), so the driver aborts the socket's
+// workerd's own `close()` waits for every write to go, so the driver aborts the socket's
 // streams first (platform.workerd.ts, `destroy`); the TCP connection itself workerd closes with the request, which for
 // a use's call is right after (cloudflare.ts: the pool's `end` is the last thing it waits for).
 import test from 'node:test';
