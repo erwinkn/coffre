@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **A key in the path: `path()`.** Telegram's Bot API takes its token in
+  the URL's path (`/bot<token>/sendMessage`, and files under
+  `/file/bot<token>/…`), so a credential may now name a segment's
+  template: `inject: path('bot{TELEGRAM_BOT_TOKEN}')`; Alchemy's
+  `/v2/<key>` is `path('{ALCHEMY_KEY}')` under `…/v2`. The app's SDK points
+  its base URL at `/use/telegram` and holds its placeholder as the token;
+  coffre puts the value, percent-encoded, in the first segment under the
+  upstream that the template frames, after `methods` and `paths` have read
+  the path as the app sent it. A value a server could read as another
+  path (empty, or with `/`, `\`, `?`, `#`, `%`, `;`, `..`, whitespace or a
+  control character) is a 409 naming the key, with nothing sent; a path
+  with no such segment is a 400. A redirect under the upstream that quotes
+  the segment, however encoded, gets the app's back; a relative one
+  resolves against the URL the app sent; a `Location` that still holds the
+  value once decoded is a 502; and the value is redacted from answers, its
+  encoded form and the segment included. aiogram, which checks the token's
+  shape, takes `placeholder: prefix('<bot id>:')`. A port of main's #483
+  and #523 (docs/design/credential-proxy.md, section 5, "A segment of the
+  path").
+
 ## 0.14.6 (2026-11-13)
 
 - **An `hmac()` signer signs a message of up to 12 MiB, streamed, never
