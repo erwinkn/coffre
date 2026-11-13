@@ -153,7 +153,7 @@ export class Signer {
   #found: Finding[] = [];
   /** When its last full check completed. */
   #checked: number;
-  /** A full run asked for and not yet done, and whether entries waited past the last read. In memory only: the next minute asks again. */
+  /** A full run asked for and not yet done, or failed, and whether entries waited past the last read. In memory only: the next minute asks again. */
   #owed = false;
   #behind = false;
   #running = false;
@@ -177,7 +177,10 @@ export class Signer {
 
   static async open(on: Signing): Promise<Signer> {
     const signer = new Signer(on);
-    for (const [key, value] of await on.store.read()) {
+    const kept = await on.store.read();
+    // From its first opening, not its latest: a signer that has never completed a check does not look new each time it is opened.
+    if (!kept.has('checked')) await on.store.write(new Map([['checked', signer.#checked]]));
+    for (const [key, value] of kept) {
       const space = key.indexOf(' ');
       const [kind, name] = space < 0 ? [key, ''] : [key.slice(0, space), key.slice(space + 1)];
       if (kind === 'row') signer.#mirror.set(name, value as string);
@@ -260,8 +263,7 @@ export class Signer {
       this.#found = [];
       if (found.length > 0) changes.set('found', undefined);
     });
-    // A step before this one may have failed since: its findings were never kept, and the next signer finds them again.
-    this.#alive();
+    // Given even if a step beside this one failed meanwhile: the next signer may find its findings again, and twice is better than never.
     return found;
   }
 
@@ -419,7 +421,7 @@ export class Signer {
    * reads the rows once nothing waited past the last read; until then it is
    * owed. A full read that fails, on a lock held or a table flooded, does
    * not stop the signing: the run reads what waits alone, and fails once it
-   * has moved it. Its answer: whether to run again at once. What it found
+   * has moved it; the next full run asked for tries again. Its answer: whether to run again at once. What it found
    * is `take`'s, whether it ends or fails.
    */
   async run(full: boolean): Promise<boolean> {
@@ -439,8 +441,9 @@ export class Signer {
       await this.sign(snapshot);
       await this.move();
       this.#behind = !snapshot.drained;
+      // Done, or failed: a check that fails is tried again by the next minute's run, not by every run until then.
+      if (failed !== null || (snapshot.drained && snapshot.rows !== null)) this.#owed = false;
       if (failed !== null) throw failed;
-      if (snapshot.drained && snapshot.rows !== null) this.#owed = false;
       return this.#behind || this.#owed;
     } finally {
       this.#running = false;

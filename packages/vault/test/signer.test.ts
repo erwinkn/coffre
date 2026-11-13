@@ -126,7 +126,10 @@ test('entries are numbered in the order written, each under its tree, and every 
 
 test('a signer that was away takes what waited for it; an entry put back is refused, whether it remembers signing it or not', async () => {
   await member(ada, 'owner');
+  const opened = signer.checked;
   vault.tick(60 * 60_000);
+  // One that has never checked says since when, however often it is opened.
+  assert.deepEqual([opened, (await open()).checked], [vault.now() - 60 * 60_000, opened]);
   assert.deepEqual(await run(), []);
   assert.equal((await logged()).length, 1);
 
@@ -269,13 +272,6 @@ test('a run that died before its move, or before it could say it had moved, is f
   assert.deepEqual(await run(), []);
   assert.deepEqual((await logged()).map((entry) => entry.seq), [0, 1, 2, 3, 4]);
   await proven();
-
-  // Nothing is taken from a signer whose step before failed meanwhile: what that step found was never kept, and the next signer finds it again.
-  store.down = true;
-  const waking = signer.wake(Buffer.alloc(32, 1));
-  store.down = false;
-  await assert.rejects(signer.take(), /open another/);
-  await assert.rejects(waking, /storage is down/);
 });
 
 test('an entry that is nobody\'s is refused and removed, alone; one changed between its signing and its move is lost, and said so', async () => {
@@ -388,8 +384,10 @@ test('a run is two round trips, its read and its move, each bounded; only one ru
       release();
       await locked;
     }
-    // The check stayed owed: the next run does it, whatever it is asked, and the next signer knows when.
+    // The next minute's run checks, not every run until then; and the next signer knows when.
     assert.deepEqual(await run(false), []);
+    assert.equal(signer.checked, checked);
+    assert.deepEqual(await run(), []);
     assert.equal(signer.checked, vault.now());
     vault.tick(5000);
     assert.equal((await Signer.open({ db: through.db, keys: vault.keys, now: vault.now, store })).checked, vault.now() - 5000);
