@@ -14,7 +14,7 @@ Three [Quint](https://quint.sh) models of the design in
   runs against the vault's change and its use on Postgres (its header says
   how).
 - `log.qnt`: the log, the signer and its mirror of the access rows' MACs,
-  against a database writer without the key. `logSound` passes, 52,048,877
+  against a database writer without the key. `logSound` passes, 76,059,593
   states, with one row, MACs 0 to 2, three entries and two moves by the
   writer. Nine modules, each with one protection off, must fail.
 - `rotate.qnt`: a rotation of the vault's key, with a vault not yet replaced

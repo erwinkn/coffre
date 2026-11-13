@@ -17,23 +17,23 @@
 // whose wake-up never arrived.
 module log {
   type Entry = { row: str, was: int, now: int, at: int }
-  type Snap = { on: bool, full: bool, pending: Set[int], expected: Set[int], rows: str -> int, logSize: int, wrong: bool }
+  type Snap = { on: bool, full: bool, at: int, pending: Set[int], expected: Set[int], rows: str -> int, logSize: int, wrong: bool }
   type Db = { rows: str -> int, pending: Set[int], log: Set[int] }
   type Vault = { made: List[Entry], calls: Set[int], lost: Set[int] }
-  type Signer = { expected: Set[int], root: Set[int], mirror: str -> int, moving: Set[int], snap: Snap, alert: bool }
+  type Signer = { expected: Set[int], root: Set[int], mirror: str -> int, moving: Set[int], snap: Snap, drained: int, alert: bool }
   type World = { clock: int, attacks: int, slow: bool, tainted: Set[int], missed: bool }
 
   const Rows: Set[str]
   const MaxVal: int
   const MaxEntries: int
   const MaxClock: int
-  const Fresh: int          // how long after its date the signer takes an entry
+  const Fresh: int          // how long before its last read the signer still takes an entry's date
   const Attacks: int        // how many times the writer acts
   // The protections: each run again with one off must fail.
   const Wake: bool          // the vault tells the signer of each entry
   const Dedupe: bool        // a wake-up for an entry already signed is dropped
   const Once: bool          // an entry the signer remembers signing is refused
-  const FreshOnly: bool     // an entry past its date is refused
+  const FreshOnly: bool     // an entry dated before the window is refused
   const CaptureFirst: bool  // what is expected is noted before the read, not after
   const OneSnapshot: bool   // the rows and the waiting entries come from one read
   const KeepIntent: bool    // what was signed is kept until it is moved
@@ -46,12 +46,15 @@ module log {
   var world: World
 
   val made = vault.made
-  val idle: Snap = { on: false, full: false, pending: Set(), expected: Set(), rows: Rows.mapBy(_ => 0), logSize: 0, wrong: false }
+  val idle: Snap = { on: false, full: false, at: 0, pending: Set(), expected: Set(), rows: Rows.mapBy(_ => 0), logSize: 0, wrong: false }
 
-  // The signer remembers what it signed for as long as it would still take it.
-  val remembered = signer.root.filter(n => world.clock <= made[n].at + Fresh)
+  // The window opens `Fresh` before the signer's last read and slides with the
+  // signer, not the clock: a signer that was away takes what waited for it. It
+  // remembers what it signed for as long as it would still take it.
+  def fresh(n: int): bool = made[n].at + Fresh >= signer.drained
+  val remembered = signer.root.filter(n => fresh(n))
   def taken(ns: Set[int]): Set[int] = ns.filter(n => and {
-    not(FreshOnly) or world.clock <= made[n].at + Fresh,
+    not(FreshOnly) or fresh(n),
     not(Once) or not(remembered.contains(n)),
   })
 
@@ -70,13 +73,13 @@ module log {
     made.indices().exists(n => not(unheard(n)) and gone(n)),
     db.log != signer.root,
   }
-  val late = made.indices().exists(n =>
-    made[n].at + Fresh == world.clock and (not(signer.root.contains(n)) or vault.calls.contains(n)))
+  // A wake-up still on its way when its entry leaves the window: only then does an honest run alert.
+  def late(read: int): bool = vault.calls.exists(n => made[n].at + Fresh < read)
 
   action init = all {
     db' = { rows: Rows.mapBy(_ => 0), pending: Set(), log: Set() },
     vault' = { made: [], calls: Set(), lost: Set() },
-    signer' = { expected: Set(), root: Set(), mirror: Rows.mapBy(_ => 0), moving: Set(), snap: idle, alert: false },
+    signer' = { expected: Set(), root: Set(), mirror: Rows.mapBy(_ => 0), moving: Set(), snap: idle, drained: 0, alert: false },
     world' = { clock: 0, attacks: Attacks, slow: false, tainted: Set(), missed: false },
   }
 
@@ -109,7 +112,7 @@ module log {
   action runRead(full: bool): bool = all {
     not(signer.snap.on), signer.moving == Set(),
     signer' = { ...signer, snap: {
-      on: true, full: full, pending: db.pending, expected: signer.expected,
+      on: true, full: full, at: world.clock, pending: db.pending, expected: signer.expected,
       rows: if (full) db.rows else idle.rows, logSize: if (full) db.log.size() else 0, wrong: full and wrong,
     } },
     db' = db, vault' = vault, world' = world,
@@ -134,9 +137,9 @@ module log {
       s.on,
       signer' = {
         expected: signer.expected.exclude(good), root: signer.root.union(good), mirror: held.rows,
-        moving: good, snap: idle, alert: signer.alert or found,
+        moving: good, snap: idle, drained: s.at, alert: signer.alert or found,
       },
-      world' = { ...world, missed: world.missed or (s.wrong and not(signer.alert or found)) },
+      world' = { ...world, slow: world.slow or late(s.at), missed: world.missed or (s.wrong and not(signer.alert or found)) },
       db' = db, vault' = vault,
     }
   }
@@ -157,7 +160,7 @@ module log {
 
   action tick: bool = all {
     world.clock < MaxClock,
-    world' = { ...world, clock: world.clock + 1, slow: world.slow or late },
+    world' = { ...world, clock: world.clock + 1 },
     db' = db, vault' = vault, signer' = signer,
   }
 
