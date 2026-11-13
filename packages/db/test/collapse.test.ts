@@ -1,7 +1,9 @@
 // The parity of 0.16's collapsed migrations (T285): a database migrated to 0.15.0 and then upgraded is the database
 // the baseline makes, and both are what the numbered migrations make, until those are deleted. Compared: the catalog
 // (tables, columns, types, defaults, checks, keys, indexes, triggers, sequences, views, policies, statistics, each
-// function's definition, and every grant: of the logins, the backup group and everyone), and every row.
+// function's definition, and every grant: of the logins, the backup group and everyone), and every row, a
+// materialized view's included. An index's contents are compared by its definition, so no index may compute over a
+// function of ours (one would keep what an earlier body computed); an upgrade's columns, by what an older row reads.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
@@ -117,7 +119,9 @@ const CATALOG = `
     FROM rel r JOIN pg_class c ON c.oid = r.oid
   UNION ALL
   SELECT 'column ' || r.name || '.' || a.attname, concat_ws(' | ', rank() OVER (PARTITION BY r.oid ORDER BY a.attnum), format_type(a.atttypid, a.atttypmod),
-         a.attnotnull, pg_get_expr(d.adbin, d.adrelid), a.attidentity, a.attgenerated, CASE WHEN a.attcollation <> 0 THEN a.attcollation::regcollation::text END)
+         a.attnotnull, pg_get_expr(d.adbin, d.adrelid), a.attidentity, a.attgenerated, CASE WHEN a.attcollation <> 0 THEN a.attcollation::regcollation::text END,
+         -- What a row older than its column reads (a default added without a rewrite), which only a path that added it holds.
+         CASE WHEN a.atthasmissing AND $1::boolean THEN 'missing ' || a.attmissingval::text END)
     FROM rel r JOIN pg_attribute a ON a.attrelid = r.oid AND a.attnum > 0 AND NOT a.attisdropped
     LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
   UNION ALL
@@ -158,18 +162,22 @@ const CATALOG = `
 /** Rows a migration wrote at the time it ran: equal only where both databases ran it at once. */
 const WHEN_MIGRATED: Record<string, string[]> = { checkpoint_fence: ['at_floor'] };
 
-/** The catalog and every row, or, for a table's rows when asked (`digest`), their count and one digest of each row's. */
-async function state(url: string, { timed = false, digest = false } = {}): Promise<string[]> {
+/**
+ * The catalog and every row, or, for a table's rows when asked (`digest`), their count and one digest of each row's.
+ * Two databases upgraded from one 0.15.0 database (`history`) hold what only their path made too: the rows written as
+ * a migration ran, and what a row older than a column added since reads in it.
+ */
+async function state(url: string, { history = false, digest = false } = {}): Promise<string[]> {
   const client = postgresClient(url, { max: 1 });
   try {
-    const lines = (await client.unsafe<{ line: string; def: string | null }[]>(CATALOG)).map(({ line, def }) =>
+    const lines = (await client.unsafe<{ line: string; def: string | null }[]>(CATALOG, [history])).map(({ line, def }) =>
       `${line}: ${line.startsWith('relation ') ? (def ?? '').replace(/'\d{13}'/g, "'<at>'") : def}`.replace(/_20\d{6}\b/g, '_<day>'));
     const tables = await client.unsafe<{ name: string; kind: string }[]>(
-      `SELECT c.relname::text AS name, c.relkind::text AS kind FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p', 'S') AND NOT c.relispartition`,
+      `SELECT c.relname::text AS name, c.relkind::text AS kind FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p', 'm', 'S') AND NOT c.relispartition`,
     );
     for (const { name, kind } of tables) {
       if (digest && kind !== 'S') {
-        const row = `to_jsonb(t)${timed ? '' : (WHEN_MIGRATED[name] ?? []).map((column) => ` - ${quoteLiteral(column)}`).join('')}`;
+        const row = `to_jsonb(t)${history ? '' : (WHEN_MIGRATED[name] ?? []).map((column) => ` - ${quoteLiteral(column)}`).join('')}`;
         const [{ n, sum }] = await client.unsafe<{ n: string; sum: string }[]>(
           `SELECT count(*)::text AS n, md5(coalesce(string_agg(h, '' ORDER BY h), '')) AS sum FROM (SELECT md5((${row})::text) AS h FROM ${quoteIdentifier(name)} t) r`,
         );
@@ -180,7 +188,7 @@ async function state(url: string, { timed = false, digest = false } = {}): Promi
         kind === 'S' ? `SELECT jsonb_build_object('last_value', last_value, 'is_called', is_called) AS row FROM ${quoteIdentifier(name)}` : `SELECT to_jsonb(t) AS row FROM ${quoteIdentifier(name)} t`,
       );
       for (const { row } of rows) {
-        if (!timed) for (const column of WHEN_MIGRATED[name] ?? []) delete row[column];
+        if (!history) for (const column of WHEN_MIGRATED[name] ?? []) delete row[column];
         lines.push(`row of ${name}: ${JSON.stringify(row)}`);
       }
     }
@@ -252,7 +260,10 @@ test('each function is made once, by its own file, which the baseline names once
   const named = (sql: string) => [...sql.matchAll(/^-- @function (\S+)$/gm)].map(([, name]) => name!);
   for (const sql of [collapsed.baseline, collapsed.upgrade]) {
     assert.equal(new Set(named(sql)).size, named(sql).length);
-    assert.doesNotMatch(sql, /CREATE (OR REPLACE )?FUNCTION (?!pg_temp\.)/i);
+    // Inline, only a function the path made and dropped again (an overload, or 0085's), which the same statements drop.
+    const inline = [...sql.matchAll(/^CREATE (?:OR REPLACE )?FUNCTION (?!pg_temp\.)(?:public\.)?(\w+)\(/gim)].map(([, name]) => name!);
+    const dropped = [...sql.matchAll(/^DROP FUNCTION public\.(\w+)\(/gm)].map(([, name]) => name!);
+    for (const name of inline) assert.ok(dropped.includes(name), `${name} is made inline, yet never dropped`);
     // 0.16.0's upgrade is offline (D197): it builds every index in its transaction, none after it.
     assert.deepEqual(statements(assemble(sql, collapsed.functions)).filter((statement) => onlineIndex(statement) !== null), []);
   }
@@ -265,6 +276,18 @@ test('the baseline makes what the numbered migrations make', async () => {
   const baseline = await database('baseline');
   await apply(baseline, [assemble(collapsed.baseline, collapsed.functions)]);
   same(await state(numberedPath), await state(baseline));
+  // An index stores what its expressions compute when a row is written, and parity compares an index by its
+  // definition alone: one over a function of ours would keep what an earlier body of it computed on one path.
+  const client = postgresClient(numberedPath, { max: 1 });
+  try {
+    const over = await client.unsafe<{ index: string; on: string }[]>(`
+      SELECT d.objid::regclass::text AS index, pg_describe_object(d.refclassid, d.refobjid, 0) AS on FROM pg_depend d JOIN pg_class c ON c.oid = d.objid
+       WHERE d.classid = 'pg_class'::regclass AND c.relkind IN ('i', 'I') AND d.refclassid IN ('pg_proc'::regclass, 'pg_operator'::regclass, 'pg_opclass'::regclass)
+         AND d.refobjid >= 16384`);
+    assert.deepEqual([...over], [], 'an index over a function of ours: decide at the collapse whether its contents may differ, then rebuild it');
+  } finally {
+    await client.end();
+  }
 });
 
 test('0.15.0 upgraded makes what the baseline makes', async () => {
@@ -303,7 +326,7 @@ test('on a 0.15.0 database with rows, the upgrade writes what the numbered migra
       if (atRelease.has(oid)) assert.ok(held > 0, `the seed gives ${table} no rows for this statement to rewrite:\n${code(statement).slice(0, 300)}`);
     }
   }
-  same(await state(stepped, { timed: true }), await state(upgraded, { timed: true }));
+  same(await state(stepped, { history: true }), await state(upgraded, { history: true }));
 });
 
 /** A database restored from a 0.15.0 deployment's backup on the test cluster (T265's rehearsal), which both paths upgrade. */
@@ -322,7 +345,7 @@ test('on the restored database COFFRE_TEST_RESTORED_DATABASE names, the upgrade 
   await apply(stepped, (await numbered()).slice(release.length).map(({ sql }) => sql));
   const upgraded = await database('restored_upgraded', RESTORED);
   await apply(upgraded, [assemble(collapsed.upgrade, collapsed.functions)]);
-  same(await state(stepped, { timed: true, digest: true }), await state(upgraded, { timed: true, digest: true }));
+  same(await state(stepped, { history: true, digest: true }), await state(upgraded, { history: true, digest: true }));
 });
 
 const probe = async (sql: string) => collapseMigrations(BASE, [...(await numbered()), { tag: '9999_probe', sql: statements(sql).join(`\n--> statement-breakpoint\n`) }]);
@@ -333,6 +356,8 @@ test('a statement of the migrations after 0.15.0 holds one command', async () =>
   assert.equal(several('DO $$ BEGIN PERFORM 1; PERFORM 2; END $$;  -- one block\n'), false);
   assert.equal(several('-- one; two\nINSERT INTO t VALUES (1);'), false);
   assert.equal(several("INSERT INTO t VALUES (';x');"), true);
+  // r4's: a `$$` in a string opens no body that would hide the second command.
+  assert.equal(several("CREATE TABLE t (c text DEFAULT '$$'); INSERT INTO log_changes SELECT * FROM log_changes WHERE 'x' = '$$';"), true);
 });
 
 test('an index built online is built plainly, unless the path drops it', async () => {

@@ -7,7 +7,8 @@
 // which functions it made, replaced, altered, granted or dropped (`pg_proc`). Every statement about functions alone
 // is then left out, and each function that lives to the end is written where the path first made or changed it,
 // as the catalog holds it at the end (`pg_get_functiondef`, with its grants); one that does not is dropped where
-// the path last touched it. Every other statement stays, in its order. So does every row a migration writes, and so
+// the path last touched it, and, if the path made it too and an object held it meanwhile (0047's trigger, which 0085
+// drops with its function), is made where the path made it, in the form it last had. Every other statement stays, in its order. So does every row a migration writes, and so
 // does a function of the session's own (`pg_temp`, 0084's), which lives only for the statements of its migration that
 // call it, and which the migration's one session runs as the collapsed one does.
 //
@@ -81,14 +82,13 @@ export function assemble(sql: string, functions: ReadonlyMap<string, string>): s
 /** The statement without the comment lines before it. */
 const bare = (statement: string) => statement.replace(/^(?:\s*--[^\n]*\n)*\s*/, '');
 /**
- * A statement that holds more than one command: a `;` with more than blanks and comments after it, outside a
- * dollar-quoted body and a comment line (one in a string is refused too). The parity test holds each data statement
- * to the seed by its command, which is the statement's first.
+ * A statement that holds more than one command: a `;` with more than blanks after it, once its comments and
+ * dollar-quoted bodies are gone, read left to right so that a `$$` or `--` inside a string is the string's (a `;`
+ * inside one is refused too). The parity test holds each data statement to the seed by its command, which is the
+ * statement's first. A guard against a slip, not a parser.
  */
-export const several = (statement: string) => {
-  const code = statement.replace(/\$(\w*)\$[\s\S]*?\$\1\$/g, '').replace(/^\s*--[^\n]*$/gm, '');
-  return [...code.matchAll(/;/g)].some(({ index }) => code.slice(index + 1).replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, '').trim() !== '');
-};
+export const several = (statement: string) =>
+  /;\s*\S/.test(statement.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|--[^\n]*|\/\*[\s\S]*?\*\/|\$(\w*)\$[\s\S]*?\$\1\$/g, (token) => (/^['"]/.test(token) ? token : ' ')));
 /** A statement about a function of the session's own (`pg_temp`), which a migration makes to run its own statements. */
 const temporary = (statement: string) => /^(?:CREATE (?:OR REPLACE )?FUNCTION|DROP FUNCTION(?: IF EXISTS)?|ALTER FUNCTION)\s+pg_temp\./i.test(bare(statement));
 const aboutFunctions = (statement: string) =>
@@ -138,8 +138,21 @@ const run = (client: PostgresClient, statement: string) => {
 const INDEXES = `SELECT oid::text FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind IN ('i', 'I')`;
 const indexes = async (client: PostgresClient) => new Set((await client.unsafe<{ oid: string }[]>(INDEXES)).map(({ oid }) => oid));
 
+/** The functions an object depends on, as Postgres records it: a trigger's, a default's, a view's (not a body's calls). */
+const HELD = `SELECT DISTINCT refobjid::regprocedure::text AS id FROM pg_depend WHERE refclassid = 'pg_proc'::regclass AND refobjid >= 16384`;
+
 /** Besides the functions: the indexes (object IDs) each statement made and removed, and those left at the end. */
-type Replayed = { start: Snapshot; steps: Snapshot[]; touched: string[][]; end: Snapshot; made: string[][]; gone: string[][]; kept: Set<string> };
+type Replayed = {
+  start: Snapshot;
+  steps: Snapshot[];
+  touched: string[][];
+  end: Snapshot;
+  made: string[][];
+  gone: string[][];
+  kept: Set<string>;
+  /** The last definition of each function the path made and dropped again, while an object held it (a trigger). */
+  dead: Map<string, string>;
+};
 
 /**
  * `list` run one at a time, autocommitted, a CONCURRENTLY index built plainly: the functions after each statement,
@@ -159,6 +172,8 @@ async function replay(client: PostgresClient, where: readonly string[], list: re
   const touched: string[][] = [];
   const made: string[][] = [];
   const gone: string[][] = [];
+  const defs = new Map<string, string>();
+  const held = new Set<string>();
   for (const [index, statement] of list.entries()) {
     await run(client, statement);
     const after = await snapshot(client);
@@ -172,11 +187,17 @@ async function replay(client: PostgresClient, where: readonly string[], list: re
       if (now !== undefined) throw new Error(`${where[index]} renames or moves ${id} to ${now[0]}, which the collapse would drop and make anew`);
     }
     const ids = changed(before.fns, after.fns);
+    for (const id of ids.filter((id) => after.fns.has(id) && !first.fns.has(id))) {
+      const [{ def }] = await client.unsafe<[{ def: string }]>('SELECT pg_get_functiondef($1::regprocedure) AS def', [id]);
+      defs.set(id, def.trimEnd());
+    }
+    for (const { id } of await client.unsafe<{ id: string }[]>(HELD)) held.add(id);
     touched.push(ids);
     steps.push(after.fns);
     before = after;
   }
-  return { start: first.fns, steps, touched, end: before.fns, made, gone, kept: had };
+  const dead = new Map([...defs].filter(([id]) => held.has(id) && !before.fns.has(id)));
+  return { start: first.fns, steps, touched, end: before.fns, made, gone, kept: had, dead };
 }
 
 const everyone = (grantees: string[] | null) => grantees ?? ['PUBLIC'];
@@ -187,13 +208,16 @@ const qualified = (id: string) => (id.startsWith('public.') ? id : `public.${id}
  * `end` lacks. A name goes where the path first changed it, but one with an overload CREATE OR REPLACE cannot turn
  * into its final form (its head changed, or a default went) is dropped and made where the path itself dropped that
  * overload, not before, when what the path dropped with it may still hold it. A function `end` lacks is dropped where
- * the path last touched it.
+ * the path last touched it; one the path made and dropped again while an object held it (a trigger) is made where the
+ * path first made it, in the form it last had, and dropped where the path last touched it.
  */
 function placement({ start, steps, touched, end }: Replayed) {
   const placeAt = new Map<string, number>();
+  const first = new Map<string, number>();
   const last = new Map<string, number>();
   touched.forEach((ids, index) =>
     ids.forEach((id) => {
+      if (!first.has(id)) first.set(id, index);
       last.set(id, index);
       const name = end.get(id)?.name;
       if (name !== undefined && !placeAt.has(name)) placeAt.set(name, index);
@@ -210,7 +234,7 @@ function placement({ start, steps, touched, end }: Replayed) {
     if (dropped === -1) throw new Error(`${id} changes in a way CREATE OR REPLACE refuses, yet the numbered path never drops it`);
     placeAt.set(fn.name, Math.max(placeAt.get(fn.name)!, dropped));
   }
-  return { placeAt, last, remade };
+  return { placeAt, first, last, remade };
 }
 
 /**
@@ -220,8 +244,8 @@ function placement({ start, steps, touched, end }: Replayed) {
  * those `end` does not give.
  */
 function collapse(where: readonly string[], list: readonly string[], replayed: Replayed): string {
-  const { start, touched, end, made, gone, kept } = replayed;
-  const { placeAt, last, remade } = placement(replayed);
+  const { start, touched, end, made, gone, kept, dead } = replayed;
+  const { placeAt, first, last, remade } = placement(replayed);
   // An online index the path drops (by DROP INDEX or with its table) is left out, with a DROP INDEX that would fail
   // without it: building one on audit_log only to drop it would cost the upgrade's downtime for nothing.
   const left = new Set(list.flatMap((statement, index) => (onlineIndex(statement) !== null && !made[index]!.some((oid) => kept.has(oid)) ? made[index]! : [])));
@@ -242,7 +266,8 @@ function collapse(where: readonly string[], list: readonly string[], replayed: R
     for (const id of touched[index]!) {
       const final = end.get(id);
       if (final === undefined) {
-        if (start.has(id) && last.get(id) === index) out.push(`DROP FUNCTION ${qualified(id)};`);
+        if (dead.has(id) && first.get(id) === index) out.push(`${dead.get(id)!};`);
+        if ((start.has(id) || dead.has(id)) && last.get(id) === index) out.push(`DROP FUNCTION ${qualified(id)};`);
         continue;
       }
       if (placed.has(final.name) || placeAt.get(final.name) !== index) continue;
