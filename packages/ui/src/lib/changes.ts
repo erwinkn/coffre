@@ -366,19 +366,6 @@ export function createProject(client: CoffreClient): Change<Projects, ProjectSum
 
 type Environment = ProjectSummary['environments'][number];
 
-/** One project's environments, held in the project list. */
-/** File a project in a folder, or in none: shown at once, under its new heading. */
-export function moveProject(client: CoffreClient): Change<Projects, ProjectSummary, { slug: string; folder: string | null }, unknown> {
-  return {
-    list: projectsList,
-    label: (vars) => `project ${vars.slug}`,
-    targets: (vars) => [saving(vars.slug)],
-    apply: (projects, vars) => projects.map((project) => (project.slug === vars.slug ? { ...project, folder: vars.folder } : project)),
-    affects: () => affects.places(),
-    run: (vars) => client.projects.update(vars.slug, { folder: vars.folder }),
-  };
-}
-
 export function environmentsList(project: string): ListShape<Projects, Environment> {
   const environmentsOf = (data: Projects) =>
     data.ok ? (data.projects.find((entry) => entry.slug === project)?.environments ?? []) : [];

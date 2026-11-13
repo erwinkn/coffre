@@ -159,12 +159,6 @@ export function intersect(parent: Constraints | null, child: Constraints): Const
   return result;
 }
 
-/** The constraints as a row's `constraints` column and its MAC hold them: `checkConstraints`'s keys in order. */
-export function constraintsText(constraints: Constraints): string {
-  const { places, credentials, methods, paths } = constraints;
-  return JSON.stringify({ places, credentials, methods, paths });
-}
-
 /**
  * Whether one operation is within the constraints: its place and credential
  * named, and, for one that sends a request upstream, its method and the
