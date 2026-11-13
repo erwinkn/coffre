@@ -516,7 +516,10 @@ so rolled back to 0.15.0, a member 0.16.0 added is refused as tampered,
 and 0.15.0 cannot repair them: add no member while you might still roll
 back, or restore the backup taken before the upgrade. While on 0.15.0,
 don't rotate the vault's signing key or a local vault key: every change
-would fail at its seal. 0.16 supports the rotation.
+would fail at its seal. 0.16 supports the rotation. Nor change the names
+`credentialProxy` defines in code: 0.15.0 reserves none, so a Proxy-tab
+item of a name added and dropped again while on 0.15.0 serves again after
+the next upgrade ([proxy-ui.md](design/proxy-ui.md#6-code-definitions-and-ui-definitions-together)).
 
 ### From a release before 0.4.0
 
