@@ -8,7 +8,7 @@ export { postgresClient, postgresOptions, postgresSession, quoteIdentifier, quot
  * `postgresql://…`, on a Node server: postgres.js, a pool of up to 10
  * connections. The Worker does not come through here; it builds its
  * database from the Hyperdrive pool with createDatabase. `max`, for a pool
- * of its own beside another, as the vault's checkpointer has (T169).
+ * of its own beside another, as the vault's checkpointer has.
  * `lockWaitMs`: each transaction's lock waits (`createDatabase`).
  */
 export async function openDatabase(url: string, options: { max?: number; lockWaitMs?: number } = {}): Promise<OpenDatabase> {
@@ -18,7 +18,7 @@ export async function openDatabase(url: string, options: { max?: number; lockWai
   return { db: createDatabase(client, { lockWaitMs: options.lockWaitMs }), close: () => client.end(), cut: () => client.end({ timeout: 0 }) };
 }
 
-/** `close` once what was asked has answered; `cut` at once, what is in flight failing (T169). */
+/** `close` once what was asked has answered; `cut` at once, what is in flight failing. */
 export type OpenDatabase = { db: Database; close: () => Promise<void>; cut: () => Promise<void> };
 
 /** Refuse a URL that names no Postgres database, before anything connects. */

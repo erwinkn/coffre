@@ -2,12 +2,12 @@ import { ACCESS_ACTIONS } from '@coffre/core/vault';
 import { asc, desc, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
- * The vault's allowed access entries in 0.14's log: an add, restore, role
+ * The vault's allowed access entries in `audit_log`: an add, restore, role
  * change or removal of a member, a grant or a revoke, as `ACCESS_ACTIONS`
  * names them. `audit_log_access_idx` holds them alone, by principal: a principal's allowed
  * access entries, or the principals that have any, read in as many steps
- * however many other entries the log holds about them, refusals included
- * (T239, R48). A read that is to use the index repeats this condition word
+ * however many other entries the log holds about them, refusals included.
+ * A read that is to use the index repeats this condition word
  * for word, with no parameter, as `recorded` does for `log_changes`:
  * Postgres proves a partial index's condition only from constants.
  */
@@ -20,8 +20,7 @@ export function accessAllowed(alias?: string): SQL {
 /**
  * Entries written by `author`, and with `decision` when given, as constants:
  * the condition of the audit log's partial indexes by author
- * (`audit_log_app_idx`, `audit_log_vault_idx`;
- * T245, R48). Bound as parameters, the
+ * (`audit_log_app_idx`, `audit_log_vault_idx`). Bound as parameters, the
  * values let a plan made for them alone use those indexes: coffre's
  * statements are unnamed, each planned with its values, but a generic plan
  * (a named statement's from its sixth run, or `plan_cache_mode =
@@ -35,7 +34,7 @@ export function authoredBy(author: 'app' | 'vault', decision?: 'allow' | 'deny')
 /**
  * Each kind of entry a runtime read asks the newest of (or the first, or a
  * page back from the newest), and the condition of the index that holds it
- * alone (T245, R48): one place for both, so that the read and its index
+ * alone: one place for both, so that the read and its index
  * cannot drift, as constants, which every plan proves the index's
  * condition from (`authoredBy`). Postgres walks back any index that yields
  * `seq` order (the primary key, `audit_log_vault_idx`, `audit_log_app_idx`,
@@ -92,8 +91,8 @@ export function entriesOf(kind: Kind): SQL {
 /**
  * The entries whose `column` is one value, and the order that reads them
  * by `seq` (newest first, `desc`, or oldest first): through the index
- * keyed `(column, seq)` that holds them, whatever else the log holds
- * (T245, R48). An index keyed by a value is wider than the author's by
+ * keyed `(column, seq)` that holds them, whatever else the log holds.
+ * An index keyed by a value is wider than the author's by
  * `seq` alone (`audit_log_vault_idx`, `audit_log_app_idx`), and where
  * Postgres's statistics hold the value common, as the current key's, it
  * expects to meet one at once walking the narrower index by `seq`, and
@@ -111,10 +110,10 @@ export function keyedBy(column: SQLWrapper, seq: SQLWrapper, order: 'asc' | 'des
 }
 
 /**
- * One object's changes in 0.15's log (`log_changes`, as `alias`), and the
+ * One object's changes in `log_changes` (as `alias`), and the
  * order that reads them by number, newest first (`desc`) or oldest:
  * through `log_changes_object_idx`, `(object, number)`, whatever else the
- * log holds (R48). `where` the condition on the object, `order` the order,
+ * log holds. `where` the condition on the object, `order` the order,
  * for `… WHERE ${where} ORDER BY ${order} LIMIT 1`. Asked plainly
  * (`object = $1 ORDER BY number DESC`), Postgres drops the object from the
  * order, which the primary key then yields, and where its statistics hold
@@ -134,11 +133,11 @@ export function changesOf(alias: string, object: SQLWrapper | string, order: 'as
 
 /**
  * The change a tamper report names (its metadata's `change`, a string): a
- * report of 0.15's log, which stands while that change is its member's
- * newest; null for 0.14's, which name none. As `audit_log_tamper_idx` keys
+ * report of a change in `log_changes`, which stands while that change is
+ * its member's newest; null for one 0.14 wrote, which names none. As `audit_log_tamper_idx` keys
  * it, after the member: a lookup of either kind (`tamperReportsAbout`,
  * `findingsOf`) reads its member's reports of that kind alone, never the
- * other's (T245, R48).
+ * other's.
  */
 export function changeNamed(metadata: SQLWrapper): SQL<string | null> {
   return sql`(CASE WHEN jsonb_typeof(${metadata}::jsonb -> 'change') = 'string' THEN ${metadata}::jsonb ->> 'change' END)`;

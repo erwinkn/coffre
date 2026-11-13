@@ -1,4 +1,4 @@
-// 0.16 upgrades only from a 0.15.0 that cut its log over (D197, T273): a database a release before 0.15.0 left is
+// 0.16 upgrades only from a 0.15.0 that cut its log over: a database a release before 0.15.0 left is
 // refused before anything changes, through `migrateDatabase` as through `coffre migrate`.
 import test from 'node:test';
 import assert from 'node:assert/strict';

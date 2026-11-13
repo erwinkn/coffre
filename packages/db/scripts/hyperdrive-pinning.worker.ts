@@ -57,7 +57,7 @@ async function failed(shape: string, pool: HyperdrivePool, tag: string, work: (t
 
 /** Each shape, run once on `pool`. */
 const SHAPES: Record<string, (pool: HyperdrivePool, tag: string) => Promise<Outcome>> = {
-  // 0.15's: the first statement with a parameter, then another.
+  // The first statement with a parameter, then another.
   'first with a parameter': async (pool) => alike('first with a parameter', await begin(pool, async (tx) => [await here(tx, 1), await here(tx)])),
   // Without one: one Query message, `begin;\n<statement>`.
   'first without a parameter': async (pool) => alike('first without a parameter', await begin(pool, async (tx) => [await here(tx), await here(tx, 2)])),
@@ -66,12 +66,12 @@ const SHAPES: Record<string, (pool: HyperdrivePool, tag: string) => Promise<Outc
     await tx.unsafe('SET LOCAL lock_timeout = 5000');
     return [await here(tx), await here(tx, 3)];
   })),
-  // T179's: BEGIN with a group of three, then a statement alone.
+  // BEGIN with a group of three, then a statement alone.
   'BEGIN with a group': async (pool) => alike('BEGIN with a group', await begin(pool, async (tx) => [
     ...(await Promise.all([here(tx, 4), here(tx), here(tx, 5)])),
     await here(tx),
   ])),
-  // T179's, the vault's decision as it opens: SET LOCAL, a row locked, a read, in one group behind BEGIN.
+  // The vault's decision as it opens: SET LOCAL, a row locked, a read, in one group behind BEGIN.
   'SET LOCAL in a group': async (pool) => alike('SET LOCAL in a group', await begin(pool, async (tx) => {
     const [, [locked], read] = await Promise.all([
       tx.unsafe('SET LOCAL lock_timeout = 5000'),
@@ -80,7 +80,7 @@ const SHAPES: Record<string, (pool: HyperdrivePool, tag: string) => Promise<Outc
     ]);
     return [{ pid: Number(locked!.pid), xid: String(locked!.xid) }, read, await here(tx)];
   })),
-  // T179's: reads together, then writes nothing awaits, which go with the COMMIT under one Sync: kept, each on the
+  // Reads together, then writes nothing awaits, which go with the COMMIT under one Sync: kept, each on the
   // reads' backend and in their transaction.
   'writes with the COMMIT': async (pool, tag) => {
     const read = await begin(pool, async (tx) => {

@@ -1,4 +1,4 @@
-// Indexes built without blocking writes (T245). A plain CREATE INDEX holds
+// Indexes built without blocking writes. A plain CREATE INDEX holds
 // its table's SHARE lock while it builds, which every insert waits behind:
 // half a second on an audit log of 440,000 entries, and minutes on a day of
 // uses. CREATE INDEX CONCURRENTLY holds only SHARE UPDATE EXCLUSIVE, which no
