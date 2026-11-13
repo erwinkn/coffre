@@ -51,8 +51,8 @@ class ContextBlindKekProvider implements KekProvider {
 test('the envelope AAD alone blocks cross-environment relocation', async () => {
   const projectId = randomUUID();
   const secretId = randomUUID();
-  const dev: SecretContext = { projectId, environmentId: randomUUID(), secretId };
-  const prod: SecretContext = { projectId, environmentId: randomUUID(), secretId };
+  const dev = { projectId, environmentId: randomUUID(), secretId, version: 1 } satisfies SecretContext;
+  const prod = { projectId, environmentId: randomUUID(), secretId, version: 1 } satisfies SecretContext;
 
   const keks = new KekRegistry(new ContextBlindKekProvider());
 

@@ -225,7 +225,8 @@ export const secretVersions = pgTable(
     pairId: uuid('pair_id'),
     pairHalf: text('pair_half'),
     // The value itself, for a plain one: a key marked not secret, an account's
-    // id, which whoever lists the environment sees. Null for a secret.
+    // id, which whoever lists the environment sees. Null for a secret. A copy
+    // for the pages, under no MAC: a use opens the ciphertext, never this.
     plaintext: text(),
     // A sensitive value: never handed back to a person, Owners included, only
     // used for them through the credential proxy, or read by a service

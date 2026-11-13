@@ -15,12 +15,17 @@ const TAG_BYTES = 16;
  * names (`SecretContext`). In 1, all 0.14 wrote, its secret, a personal
  * config's owner and whether it is sensitive. In 2 the version's number too:
  * without it, a database writer could copy a secret's old version over its
- * current one, and it would open. A row relabelled from one to the other
- * opens as neither.
+ * current one, and it would open.
+ *
+ * `seal` writes format 2 and `open` reads nothing else. Were format 1 still
+ * read, a row of 0.14's kept aside could be put back over any later version
+ * of its secret, relabelled 1, and open. The vault's adoption of a 0.14
+ * database wraps every key again with its number, through the two halves
+ * below, and from then on a format-1 row is one nobody wrote.
  */
 export const ENVELOPE_VERSION = 2;
 
-/** Format 1: a wrap that names no version number. */
+/** Format 1: a wrap that names no version number. What `encrypt`'s other callers pair it with. */
 const UNNUMBERED = 1;
 
 /**
@@ -92,24 +97,27 @@ function valueAad(ctx: SecretIds): Buffer {
   return encodeAad({ projectId: ctx.projectId, environmentId: ctx.environmentId, secretId: ctx.secretId });
 }
 
+/** A version's context as 0.16 writes and reads it: its number is in the wrap. */
+export type NumberedContext = SecretContext & { version: number };
+
 /**
  * Encrypt a secret value under a fresh DEK, and wrap that DEK under the
  * registry's primary KEK: `encrypt` and the wrap in one, where both halves
- * are in one place. The envelope is format 2 when `ctx` names the version's
- * number, which the vault's always does.
+ * are in one place.
  */
 export async function seal(
   plaintext: Buffer,
-  ctx: SecretContext,
+  ctx: NumberedContext,
   keks: KekRegistry,
 ): Promise<Envelope> {
+  requireNumber(ctx);
   const dek = freshDek();
   try {
     const sealed = encrypt(plaintext, ctx, dek);
     const wrapped = await keks.wrap(dek, ctx);
     return {
       ...sealed,
-      envelopeVersion: ctx.version === undefined ? UNNUMBERED : ENVELOPE_VERSION,
+      envelopeVersion: ENVELOPE_VERSION,
       kekProvider: wrapped.kekProvider,
       kekId: wrapped.kekId,
       kekVersion: wrapped.kekVersion,
@@ -120,21 +128,16 @@ export async function seal(
   }
 }
 
-/**
- * Unwrap the envelope's DEK under the registry and decrypt: `decrypt` and
- * the unwrap in one. `ctx` is the version's as its rows give it, number
- * included; the envelope's format says whether its wrap names the number.
- */
+/** Unwrap the envelope's DEK under the registry and decrypt: `decrypt` and the unwrap in one. Format 2 only (`ENVELOPE_VERSION`). */
 export async function open(
   envelope: Envelope,
-  ctx: SecretContext,
+  ctx: NumberedContext,
   keks: KekRegistry,
 ): Promise<Buffer> {
-  if (envelope.envelopeVersion !== UNNUMBERED && envelope.envelopeVersion !== ENVELOPE_VERSION) {
+  if (envelope.envelopeVersion !== ENVELOPE_VERSION) {
     throw new Error(`unsupported envelope version: ${envelope.envelopeVersion}`);
   }
-  if (envelope.envelopeVersion === UNNUMBERED) ctx = { ...ctx, version: undefined };
-  else if (ctx.version === undefined) throw new Error('an envelope of format 2 opens under its version\'s number');
+  requireNumber(ctx);
   const dek = await keks.unwrap(
     {
       kekProvider: envelope.kekProvider,
@@ -149,4 +152,9 @@ export async function open(
   } finally {
     dek.fill(0);
   }
+}
+
+/** The type says it, and a caller that is not typed is told. */
+function requireNumber(ctx: SecretContext): void {
+  if (ctx.version === undefined) throw new Error("a value is sealed and opened under its version's number");
 }

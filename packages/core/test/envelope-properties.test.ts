@@ -4,7 +4,7 @@ import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 
 import { checkContext, encodeAad, ownerKey, type SecretContext } from '../src/context.ts';
-import { decrypt, encrypt, ENVELOPE_VERSION, open, seal, type Envelope } from '../src/envelope.ts';
+import { decrypt, encrypt, ENVELOPE_VERSION, open, seal, type Envelope, type NumberedContext } from '../src/envelope.ts';
 import { deriveKey, seal as sealValue, unseal } from '../src/identity/signin/sealed.ts';
 import { awsKms } from '../src/kek/aws-kms.ts';
 import { LocalKekProvider } from '../src/kek/local.ts';
@@ -19,13 +19,11 @@ import { propertySettings } from './properties.ts';
 
 const key = gs.binary({ minSize: 32, maxSize: 32 }).map((bytes) => Buffer.from(bytes));
 const member = gs.oneOf(gs.sampledFrom(PEOPLE), gs.text({ codec: 'utf-8', maxSize: 16 }).map((name) => `user:${name}`));
-const context = gs.composite((tc): SecretContext => {
-  const ctx: SecretContext = { projectId: tc.draw(uuid), environmentId: tc.draw(uuid), secretId: tc.draw(uuid) };
+const context = gs.composite((tc): NumberedContext => {
+  const ctx: NumberedContext = { projectId: tc.draw(uuid), environmentId: tc.draw(uuid), secretId: tc.draw(uuid), version: tc.draw(gs.integers({ minValue: 1, maxValue: 1_000_000 })) };
   const owner = tc.draw(gs.optional(member));
   if (owner !== null) ctx.owner = ownerKey(owner);
   if (tc.draw(gs.booleans())) ctx.sensitive = true;
-  const version = tc.draw(gs.optional(gs.integers({ minValue: 1, maxValue: 1_000_000 })));
-  if (version !== null) ctx.version = version;
   return ctx;
 });
 /** Empty, short, or a repeated pattern up to 64 KiB: Hegel shrinks the pattern and the length, not 64 KiB of draws. */
@@ -61,16 +59,15 @@ function sameContext(a: SecretContext, b: SecretContext): boolean {
   return sameIds(a, b) && a.owner === b.owner && (a.sensitive === true) === (b.sensitive === true) && a.version === b.version;
 }
 
-/** `ctx` moved: one to three fields changed, ids to fresh ones or to one of its other ids, an owner added, removed or changed, sensitivity toggled, a numbered version given another number. */
-function relocate(tc: hegel.TestCase, ctx: SecretContext): SecretContext {
-  const fields = new Set(tc.draw(gs.arrays(gs.sampledFrom(['projectId', 'environmentId', 'secretId', 'owner', 'sensitive', ...(ctx.version === undefined ? [] : (['version'] as const))] as const), { minSize: 1, maxSize: 3 })));
+/** `ctx` moved: one to three fields changed, ids to fresh ones or to one of its other ids, an owner added, removed or changed, sensitivity toggled, the version given another number. */
+function relocate(tc: hegel.TestCase, ctx: NumberedContext): NumberedContext {
+  const fields = new Set(tc.draw(gs.arrays(gs.sampledFrom(['projectId', 'environmentId', 'secretId', 'owner', 'sensitive', 'version'] as const), { minSize: 1, maxSize: 3 })));
   const moved = { ...ctx };
   for (const field of fields) {
     if (field === 'sensitive') {
       if (moved.sensitive) delete moved.sensitive;
       else moved.sensitive = true;
     } else if (field === 'version') {
-      // An unnumbered one has no number to move: its envelope is the format that names none, whatever the reader gives.
       moved.version = tc.draw(gs.integers({ minValue: 1, maxValue: 1_000_000 }).filter((version) => version !== ctx.version));
     } else if (field === 'owner') {
       if (ctx.owner !== undefined && tc.draw(gs.booleans())) delete moved.owner;
@@ -120,7 +117,7 @@ test(`any value sealed under any context opens under it, and decrypts under its 
   const envelope = await seal(value, ctx, keks);
   assert.deepEqual(
     [envelope.envelopeVersion, envelope.kekProvider, envelope.kekId, envelope.kekVersion],
-    [ctx.version === undefined ? 1 : ENVELOPE_VERSION, 'local', 'kek-a', keks.primary.keyVersion],
+    [ENVELOPE_VERSION, 'local', 'kek-a', keks.primary.keyVersion],
   );
   assert.deepEqual(await open(envelope, ctx, keks), value);
   assert.deepEqual(decrypt(envelope, ctx, await unwrapOf(envelope, ctx, keks)), value);
@@ -146,8 +143,8 @@ test(`an envelope with any stored byte string or key claim changed fails to open
     await assert.rejects(open({ ...envelope, [field]: claimed === envelope[field] ? `${claimed}\0` : claimed }, ctx, keks), `${field} claimed`);
   }
   const version = tc.draw(gs.integers({ minValue: -1, maxValue: 1_000 }));
-  // Another format, known or not: its wrap names its version's number, or does not.
-  await assert.rejects(open({ ...envelope, envelopeVersion: version === envelope.envelopeVersion ? version + 1 : version }, ctx, keks));
+  // Any other format, 0.14's included.
+  await assert.rejects(open({ ...envelope, envelopeVersion: version === ENVELOPE_VERSION ? 1 : version }, ctx, keks), /unsupported envelope version/);
   // Nothing above touched the original.
   assert.deepEqual(await open(envelope, ctx, keks), value);
 }, mutations));
@@ -224,16 +221,22 @@ const nearUuid = gs.oneOf<unknown>(near(uuid), gs.sampledFrom([undefined, null, 
 const nearOwner = gs.oneOf<unknown>(near(member.map(ownerKey)), member, gs.sampledFrom([undefined, null, 0, '']));
 
 const validation = propertySettings(128);
-test(`a context is refused unless its ids are lowercase UUIDs, its owner a lowercase SHA-256 and sensitive true or absent, seed ${validation.seed}`, () => hegel.testAsync(async (tc) => {
+test(`a context is refused unless its ids are lowercase UUIDs, its owner a lowercase SHA-256, sensitive true or absent and its version a number from 1 or absent, seed ${validation.seed}`, () => hegel.testAsync(async (tc) => {
   const ctx = tc.draw(context) as Record<string, unknown>;
-  const field = tc.draw(gs.sampledFrom(['projectId', 'environmentId', 'secretId', 'owner', 'sensitive'] as const));
-  const candidate = tc.draw(field === 'owner' ? nearOwner : field === 'sensitive' ? gs.sampledFrom<unknown>([undefined, true, false, 'true', 1, null]) : nearUuid);
+  const field = tc.draw(gs.sampledFrom(['projectId', 'environmentId', 'secretId', 'owner', 'sensitive', 'version'] as const));
+  const candidate = tc.draw(
+    field === 'owner' ? nearOwner
+      : field === 'sensitive' ? gs.sampledFrom<unknown>([undefined, true, false, 'true', 1, null])
+        : field === 'version' ? gs.sampledFrom<unknown>([undefined, 1, 7, 0, -1, 1.5, NaN, '1', 2 ** 53, null])
+          : nearUuid,
+  );
   if (candidate === undefined) delete ctx[field];
   else ctx[field] = candidate;
   tc.note(`${field} = ${JSON.stringify(candidate)}`);
   const valid = field === 'owner' ? candidate === undefined || isOwner(candidate)
     : field === 'sensitive' ? candidate === undefined || candidate === true
-      : isUuid(candidate);
+      : field === 'version' ? candidate === undefined || candidate === 1 || candidate === 7
+        : isUuid(candidate);
   const bad = ctx as SecretContext;
   if (valid) {
     checkContext(bad);
@@ -270,7 +273,7 @@ test(`through any rotations, an envelope opens while its vault key is configured
   const steps = tc.draw(gs.arrays(step, { minSize: 1, maxSize: 12 }));
   let primary = 0;
   const configured = new Set([0]);
-  const sealed: { envelope: Envelope; kek: number; ctx: SecretContext; value: Buffer }[] = [];
+  const sealed: { envelope: Envelope; kek: number; ctx: NumberedContext; value: Buffer }[] = [];
   for (const each of steps) {
     const keks = () => new KekRegistry(providers[primary]!, [...configured].filter((kek) => kek !== primary).map((kek) => providers[kek]!));
     if (each.kind === 'seal') {
@@ -300,7 +303,7 @@ test(`through any rotations, an envelope opens while its vault key is configured
 }, rotation));
 
 const kmsContext = propertySettings(32);
-test(`the KMS encryption context names the secret's ids, owner and sensitivity, and binds exactly what the local wrap does, seed ${kmsContext.seed}`, () => hegel.testAsync(async (tc) => {
+test(`the KMS encryption context names the secret's ids, owner, sensitivity and version, and binds exactly what the local wrap does, seed ${kmsContext.seed}`, () => hegel.testAsync(async (tc) => {
   const kms = fakeKms();
   const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: kms.fetch });
   const local = new LocalKekProvider(tc.draw(key), 'kek-a');

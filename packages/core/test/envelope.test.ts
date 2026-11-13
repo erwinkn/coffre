@@ -17,8 +17,8 @@ function fixture() {
   const projectId = randomUUID();
   const secretId = randomUUID();
 
-  const dev: SecretContext = { projectId, environmentId: randomUUID(), secretId };
-  const prod: SecretContext = { projectId, environmentId: randomUUID(), secretId };
+  const dev = { projectId, environmentId: randomUUID(), secretId, version: 1 } satisfies SecretContext;
+  const prod = { projectId, environmentId: randomUUID(), secretId, version: 1 } satisfies SecretContext;
 
   const keks = new KekRegistry(LocalKekProvider.generate('kek-test-1'));
   return { dev, prod, keks, projectId, secretId };
@@ -29,33 +29,42 @@ test('seal then open round-trips the plaintext', async () => {
   const plaintext = Buffer.from('postgres://user:pw@host/db', 'utf8');
 
   const envelope = await seal(plaintext, dev, keks);
-  assert.equal(envelope.envelopeVersion, 1);
+  assert.equal(envelope.envelopeVersion, ENVELOPE_VERSION);
 
   const opened = await open(envelope, dev, keks);
   assert.deepEqual(opened, plaintext);
 });
 
-test('a version opens under its own number only, and as its own format only', async () => {
+test('a version opens under its own number only', async () => {
   const { dev, keks } = fixture();
   const old = await seal(Buffer.from('rotated away', 'utf8'), { ...dev, version: 1 }, keks);
-  const current = await seal(Buffer.from('current', 'utf8'), { ...dev, version: 2 }, keks);
-  assert.equal(current.envelopeVersion, ENVELOPE_VERSION);
-  assert.deepEqual(await open(current, { ...dev, version: 2 }, keks), Buffer.from('current', 'utf8'));
+  const current = await seal(Buffer.from('current', 'utf8'), { ...dev, version: 3 }, keks);
+  assert.deepEqual(await open(current, { ...dev, version: 3 }, keks), Buffer.from('current', 'utf8'));
 
-  // A database writer copies version 1's row over version 2's: the old value, as the current one.
-  await assert.rejects(open(old, { ...dev, version: 2 }, keks), KekBadClaimError);
-  // Relabelled as the format that names no number, or read with none.
-  await assert.rejects(open({ ...current, envelopeVersion: 1 }, { ...dev, version: 2 }, keks), KekBadClaimError);
-  await assert.rejects(open(current, dev, keks), /version's number/);
-  // And its sensitivity is in the wrap as before.
-  await assert.rejects(open(current, { ...dev, version: 2, sensitive: true }, keks), KekBadClaimError);
+  // A database writer copies version 1's row over version 3's: the old value, as the current one.
+  await assert.rejects(open(old, { ...dev, version: 3 }, keks), KekBadClaimError);
+  // Its sensitivity is in the wrap as before, and no caller leaves the number out.
+  await assert.rejects(open(current, { ...dev, version: 3, sensitive: true }, keks), KekBadClaimError);
+  const { version: _, ...unnumbered } = dev;
+  await assert.rejects(open(current, unnumbered as typeof dev, keks), /version's number/);
+  await assert.rejects(seal(Buffer.from('x'), unnumbered as typeof dev, keks), /version's number/);
 });
 
-test('a value written by 0.14 opens under its rows as 0.16 reads them, number included, and not relabelled', async () => {
+test("a row in 0.14's format does not open, as itself or relabelled: one kept aside is not put back over a later version", async () => {
   const { dev, keks } = fixture();
-  const legacy = await seal(Buffer.from('from 0.14', 'utf8'), dev, keks);
-  assert.deepEqual(await open(legacy, { ...dev, version: 3 }, keks), Buffer.from('from 0.14', 'utf8'));
+  const { version: _, ...unnumbered } = dev;
+  // As 0.14 wrote one: the value under its data key, and the key wrapped with no number.
+  const dek = randomBytes(32);
+  const wrapped = await keks.wrap(dek, unnumbered);
+  const legacy = { ...encrypt(Buffer.from('from 0.14', 'utf8'), dev, dek), kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, wrappedDek: wrapped.bytes };
+  assert.equal(legacy.envelopeVersion, 1);
+  await assert.rejects(open(legacy, { ...dev, version: 3 }, keks), /unsupported envelope version: 1/);
   await assert.rejects(open({ ...legacy, envelopeVersion: ENVELOPE_VERSION }, { ...dev, version: 3 }, keks), KekBadClaimError);
+  // What adoption does: the same data key, wrapped again with its number, opens as that version alone.
+  const again = await keks.wrap(await keks.unwrap(wrapped, unnumbered), { ...dev, version: 3 });
+  const adopted = { ...legacy, envelopeVersion: ENVELOPE_VERSION, wrappedDek: again.bytes };
+  assert.deepEqual(await open(adopted, { ...dev, version: 3 }, keks), Buffer.from('from 0.14', 'utf8'));
+  await assert.rejects(open(adopted, { ...dev, version: 2 }, keks), KekBadClaimError);
 });
 
 test('ciphertext is not the plaintext and a fresh DEK is used per seal', async () => {
