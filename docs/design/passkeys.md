@@ -27,8 +27,8 @@ Three rules carry it:
    client, approving its change) approves that act alone: it opens no window
    and leaves the session as it was.
 2. **Changes to a person's passkeys end credentials by revoking them**, under
-   one per-person lock that every issue takes too, and every request checks
-   that a live passkey still stands behind its credential (section 6).
+   one per-person lock that the vault's issue takes too, and every request
+   checks that a live passkey still stands behind its credential (section 6).
    Nothing is inferred from timestamps, so nothing revoked comes back.
 3. **The app decides; the vault carries the passkey on what it issues**
    (section 8).
@@ -652,15 +652,18 @@ goes to the step-up, the CLI says to `coffre login` again, a token or MCP
 client is made again. The revocations of 6.1 end what a change marks; this
 check is for what none marks: sessions from before `required`, or from an
 `off` window (`Factor.tla`'s `RequestChecks`; without it `ServedBacked`
-fails). Handles, services' credentials and workload sessions are not checked
-(`passkeyChecked`).
+fails). A passkey row that fails its MAC is no step-up: it throws
+`AuthRowTampered`, refused as any tampered auth row. Handles, services'
+credentials and workload sessions are not checked (`passkeyChecked`).
 
-**It costs no statement.** The statement that reads the credential
-(`credentialRow`) joins the passkey it names by primary key and asks the two
-indexes whether the person holds a live passkey, rows but none live, or none
-ever. "Rows but none live", for a credential naming none, reads the rows and
-holds each to its MAC, so a removal forged in the database does not pass a
-session made while the passkey was live. An MCP connection's read
+**It costs no statement, but in one case.** The statement that reads the
+credential (`credentialRow`) joins the passkey it names by primary key and
+asks the two indexes whether the person holds a live passkey, rows but none
+live, or none ever. "Rows but none live", for a credential naming none, reads the rows in
+one statement more (`passkeyHistory`) and holds each to its MAC, so a removal
+forged in the database does not pass a session made while the passkey was
+live. That statement is paid on each request of a person readmitted after
+holding passkeys and holding none since. An MCP connection's read
 (`findConnection`) does the same on every call and refresh.
 
 A use by name (`useByName`, `useManyByName`), a key write (`writeAhead`) and
@@ -889,8 +892,8 @@ library (`PublicKeyCredential.parseRequestOptionsFromJSON` and its kin).
   (`signin-cost.test.ts`). Two more browser round trips, one the touch.
 - **A fresh check** is a step-up, about a sign-in's issue, at most once per
   five minutes per person.
-- **Every other request**: no statement more (6.2). Issues take the person's
-  lock, which no other request waits on.
+- **Every other request**: no statement more, but for the one case of 6.2.
+  Issues take the person's lock, which no other request waits on.
 - **`/use`, CI and workload sign-in**: unchanged.
 
 ## 11. Audit
