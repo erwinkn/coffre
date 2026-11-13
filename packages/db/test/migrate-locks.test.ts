@@ -21,6 +21,7 @@ import {
   migrationsFolder,
 } from '../src/migrate.ts';
 import { postgresClient, postgresSession, quoteIdentifier, type PostgresClient } from '../src/postgres.ts';
+import { holdingRoles } from './roles-lock.ts';
 
 const BASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 const NAME = `${new URL(BASE).pathname.slice(1)}_locks_${randomBytes(4).toString('hex')}`;
@@ -63,7 +64,7 @@ before(async () => {
   }
   const session = postgresSession(url);
   try {
-    await migrate(createDatabase(session) as unknown as Parameters<typeof migrate>[0], { migrationsFolder: folder });
+    await holdingRoles(BASE, () => migrate(createDatabase(session) as unknown as Parameters<typeof migrate>[0], { migrationsFolder: folder }));
     const [found] = await session.unsafe<{ relation: string | null }[]>(`SELECT to_regclass('public.${TABLE}')::text AS relation`);
     assert.equal(found?.relation, TABLE, `${TABLE} is there before ${TAG}`);
   } finally {

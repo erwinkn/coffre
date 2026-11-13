@@ -399,7 +399,7 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
       return toPair(await one<RawPair | null>(db, sql`SELECT ${PAIR} AS v FROM log_checkpoints k WHERE k.at_floor >= ${ms} ORDER BY k.at_floor, k.upto LIMIT 1`));
     },
     async appendRetention(change) {
-      const [row] = await rowsOf<{ n: string }>(db, sql`SELECT log_retention(${change.requestId}, ${change.at}::bigint, ${change.payload}, ${change.mac}::bytea)::text AS n`);
+      const [row] = await rowsOf<{ n: string }>(db, sql`SELECT append_retention(${change.requestId}, ${change.at}::bigint, ${change.payload}, ${change.mac}::bytea)::text AS n`);
       return BigInt(row!.n);
     },
     async rotations() {

@@ -45,13 +45,13 @@ if (process.env.BENCH_LOADER === '1') {
         ? (() => {
           const row = { at, requestId: `c-${randomUUID()}`, object: randomUUID(), actor: 'vault', payload: '{"op":"genesis"}', seal: randomBytes(16) };
           return pool.unsafe(`WITH l AS (SELECT pg_advisory_xact_lock_shared(1668244070, 0))
-            INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) SELECT nextval('log_number'), $1, $2, $3, $4, $5, $6, $7 FROM l`,
+            INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) SELECT nextval('log_next'), $1, $2, $3, $4, $5, $6, $7 FROM l`,
           [row.at, row.requestId, row.object, row.actor, row.payload, row.seal, entryMac(key, { tree: 'changes', row })]);
         })()
         : (() => {
           const row = { at, requestId: BigInt.asIntN(64, randomBytes(8).readBigUInt64BE()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
           return pool.unsafe(`WITH l AS (SELECT pg_advisory_xact_lock_shared(1668244070, 0))
-            INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) SELECT nextval('log_number'), $1, $2, $3, $4, $5, $6, $7 FROM l`,
+            INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) SELECT nextval('log_next'), $1, $2, $3, $4, $5, $6, $7 FROM l`,
           [row.at, String(row.requestId), row.credential, row.secret, row.purpose, entryMac(key, { tree: 'uses', row }), row.place]);
         })();
       // Sent now: postgres.js sends a query only once it is executed or awaited.

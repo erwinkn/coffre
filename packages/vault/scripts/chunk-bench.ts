@@ -53,7 +53,7 @@ for (let done = 0; done < backlog; done += 5000) {
     mac.push(entryMac(macKey, { tree: 'uses', row }));
   }
   await owner.unsafe(`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
-    SELECT nextval('log_number'), a, r, c, s, 1, m, NULL FROM unnest($1::bigint[], $2::bigint[], $3::uuid[], $4::uuid[], $5::bytea[]) AS x (a, r, c, s, m)`,
+    SELECT nextval('log_next'), a, r, c, s, 1, m, NULL FROM unnest($1::bigint[], $2::bigint[], $3::uuid[], $4::uuid[], $5::bytea[]) AS x (a, r, c, s, m)`,
     [at, rid, cred, sec, mac] as never);
 }
 console.log(`backlog: ${backlog} uses in ${Date.now() - t0} ms; round trip ${rtt} ms`);
@@ -62,7 +62,7 @@ await new Promise((resolve) => setTimeout(resolve, 3500));
 // The plans, at the start of the backlog: the window read by number, and the probe past its first part.
 const db = createDatabase(owner);
 const after = cp.pair.pair.upto;
-const [{ upto }] = await owner.unsafe(`SELECT pg_sequence_last_value('log_number')::text AS upto`) as unknown as [{ upto: string }];
+const [{ upto }] = await owner.unsafe(`SELECT pg_sequence_last_value('log_next')::text AS upto`) as unknown as [{ upto: string }];
 const explain = async (label: string, query: ReturnType<typeof sql>) => {
   const rows = (await db.execute(sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${query}`)) as unknown as { 'QUERY PLAN': [{ Plan: { 'Actual Rows': number }; 'Execution Time': number }] }[];
   const plan = rows[0]!['QUERY PLAN'][0]!;

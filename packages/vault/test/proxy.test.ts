@@ -617,9 +617,12 @@ test('a reserved set sealed before 0084 verifies after it: the same names, in th
   assert.equal(typeof old!.names === 'string' ? old!.names : JSON.stringify(old!.names), JSON.stringify((before.row as ReservedInput).names), "0.15.0's row: the names as JSON");
 
   // 0084 itself, on one session (its function is `pg_temp`'s): the migrator would apply the migrations after it again too.
+  // Its columns alone: `change_input` is already 0084's, as the migrations after it left it (0089 points it at `log_next`).
   const client = postgresClient(OWNER_URL, { max: 1 });
   try {
-    for (const statement of readFileSync(join(migrationsFolder(), '0084_text_lists.sql'), 'utf8').split('--> statement-breakpoint')) await client.unsafe(statement);
+    for (const statement of readFileSync(join(migrationsFolder(), '0084_text_lists.sql'), 'utf8').split('--> statement-breakpoint')) {
+      if (!statement.includes('CREATE OR REPLACE FUNCTION public.')) await client.unsafe(statement);
+    }
   } finally {
     await client.end();
   }

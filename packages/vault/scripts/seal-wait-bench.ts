@@ -60,7 +60,7 @@ const load = (async () => {
       const row = { at: Date.now(), requestId: BigInt.asIntN(64, randomBytes(8).readBigUInt64BE()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
       // Sent now: postgres.js sends a statement once it is awaited, or asked to.
       const p = owner.unsafe(`WITH l AS (SELECT pg_advisory_xact_lock_shared(1668244070, 0))
-        INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) SELECT nextval('log_number'), $1, $2, $3, $4, $5, $6, $7 FROM l`,
+        INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) SELECT nextval('log_next'), $1, $2, $3, $4, $5, $6, $7 FROM l`,
       [row.at, String(row.requestId), row.credential, row.secret, row.purpose, entryMac(key, { tree: 'uses', row }), row.place]).execute();
       inflight.add(p);
       void p.finally(() => inflight.delete(p));
@@ -76,7 +76,7 @@ async function change(): Promise<{ commitMs: number; sealMs: number }> {
     await tx.unsafe('SELECT pg_advisory_xact_lock(1668244070, 0)');
     const row = { at: Date.now(), requestId: `c-${randomUUID()}`, object: randomUUID(), actor: 'bench', payload: '{"op":"credential.issue"}', seal: randomBytes(16) };
     const [inserted] = await tx.unsafe(
-      `INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_number'), $1, $2, $3, $4, $5, $6, $7) RETURNING number`,
+      `INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_next'), $1, $2, $3, $4, $5, $6, $7) RETURNING number`,
       [row.at, row.requestId, row.object, row.actor, row.payload, row.seal, entryMac(key, { tree: 'changes', row })],
     );
     return BigInt(inserted!.number as string);

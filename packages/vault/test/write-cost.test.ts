@@ -30,10 +30,10 @@ async function grow(total: number, tag = ''): Promise<void> {
   const others = Math.max(50_000, Math.round(total * 0.09));
   const now = Date.now();
   await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
-    SELECT nextval('log_number'), ${now - 80_000_000}::bigint + (g * 80000000::bigint / ${uses}), g, gen_random_uuid(), gen_random_uuid(), 1, ${randomBytes(16)}, NULL
+    SELECT nextval('log_next'), ${now - 80_000_000}::bigint + (g * 80000000::bigint / ${uses}), g, gen_random_uuid(), gen_random_uuid(), 1, ${randomBytes(16)}, NULL
       FROM generate_series(1, ${uses}) g`);
   await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-    SELECT nextval('log_number'), ${now}, 'history-' || g || '-' || ${String(total) + tag}, gen_random_uuid(), 'system:x', '{"op":"x"}', NULL, ${randomBytes(16)}
+    SELECT nextval('log_next'), ${now}, 'history-' || g || '-' || ${String(total) + tag}, gen_random_uuid(), 'system:x', '{"op":"x"}', NULL, ${randomBytes(16)}
       FROM generate_series(1, ${changes}) g`);
   await run(db.owner, sql`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, subject_principal, metadata, prev_hash, mac, hash, log015)
     SELECT (SELECT coalesce(max(seq), 0) FROM audit_log) + g, 'vault', 'vault:x', ${now}, 'system:x', CASE WHEN g % 10 = 0 THEN 'access.grant' ELSE 'secret.read' END, 'allow',

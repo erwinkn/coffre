@@ -34,7 +34,7 @@ BEGIN
         $q$UPDATE secrets SET seal = NULL$q$,
         $q$UPDATE log_config SET seal = NULL$q$,
         $q$UPDATE policy SET bulk_count = 1$q$,
-        $q$SELECT nextval('log_number')$q$,
+        $q$SELECT nextval('log_next')$q$,
         $q$CREATE TABLE log_uses_19700101 PARTITION OF log_uses FOR VALUES FROM (0) TO (86400000)$q$
     ] LOOP
         BEGIN
@@ -111,7 +111,7 @@ DO $$
 DECLARE
     f text;
 BEGIN
-    FOREACH f IN ARRAY ARRAY['log_retention(text, bigint, text, bytea)', 'log_cut()', 'drop_day(date)', 'drop_tiles(bigint)'] LOOP
+    FOREACH f IN ARRAY ARRAY['append_retention(text, bigint, text, bytea)', 'log_cut()', 'drop_day(date)', 'drop_tiles(bigint)'] LOOP
         IF NOT has_function_privilege('coffre_vault', f, 'EXECUTE') OR has_function_privilege('coffre_app', f, 'EXECUTE')
            OR has_function_privilege('coffre_backup', f, 'EXECUTE') THEN
             RAISE EXCEPTION 'FAIL: % is not the vault''s alone', f;

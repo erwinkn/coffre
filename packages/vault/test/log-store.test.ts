@@ -293,7 +293,7 @@ test('PR 8 review r2 (W240): a use renumbered into a change\'s place is refused 
 test('PR 8 review r3 (W240): a bounded read stops at its limit in the database too: 100,000 changes above, a few pages read', async () => {
   // Changes a writer planted above the newest pair, as many as a long log holds.
   await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-    SELECT nextval('log_number'), 0, 'planted-' || g, gen_random_uuid(), 'x', '{}', NULL, '\\x00000000000000000000000000000000'::bytea FROM generate_series(1, 100000) g`);
+    SELECT nextval('log_next'), 0, 'planted-' || g, gen_random_uuid(), 'x', '{}', NULL, '\\x00000000000000000000000000000000'::bytea FROM generate_series(1, 100000) g`);
   await run(db.owner, sql`ANALYZE log_changes`);
   const buffers = async (limit?: number) => {
     const [plan] = await rows<{ 'QUERY PLAN': [{ Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }] }>(db.vault,
@@ -310,7 +310,7 @@ test('PR 8 review r3 (W240): a bounded read stops at its limit in the database t
 test('T245: the window by number reads its first entries in one step of the index, however long the backlog: 400,000 uses behind, a few pages', async () => {
   // A backlog as a stall leaves: uses numbered past the newest pair, stamped now, in today's day.
   await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
-    SELECT nextval('log_number'), (extract(epoch FROM now()) * 1000)::bigint, g, gen_random_uuid(), gen_random_uuid(), 1, '\\x00000000000000000000000000000000'::bytea
+    SELECT nextval('log_next'), (extract(epoch FROM now()) * 1000)::bigint, g, gen_random_uuid(), gen_random_uuid(), 1, '\\x00000000000000000000000000000000'::bytea
       FROM generate_series(1, 400000) g`);
   // The rows earlier tests deleted gone from the indexes too, as a vacuum leaves a live log.
   await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) log_changes, log_uses`);
@@ -371,7 +371,7 @@ for (const [what, stamp, todo] of [
     const t0 = Date.now() - 60_000;
     await run(db.owner, sql`SELECT make_day(${new Date(t0).toISOString().slice(0, 10)}::date)`);
     await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
-      SELECT nextval('log_number'), ${stamp(t0)}, g, gen_random_uuid(), gen_random_uuid(), 1, '\\x00000000000000000000000000000000'::bytea
+      SELECT nextval('log_next'), ${stamp(t0)}, g, gen_random_uuid(), gen_random_uuid(), 1, '\\x00000000000000000000000000000000'::bytea
         FROM generate_series(1, 22 * ${PART}) g`);
     await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) log_uses`);
     // The vault's store on a client of its own, each statement it sends kept.

@@ -1283,7 +1283,7 @@ export const logKeys = pgTable(
 
 /**
  * 0.15's log (0022_log_015, docs/design/hot-path-one.md): two tables numbered
- * from one sequence, `log_number`, each number taken under the fence's lock
+ * from one sequence, `log_next` (`log_number` before 0089), each number taken under the fence's lock
  * (a credential's issue: under the issue lock, which the barrier waits for;
  * 0026), so that the number alone orders uses against changes. Nothing reads or
  * writes them before 0.15's vault; the vault login reads them and writes

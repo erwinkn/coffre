@@ -914,7 +914,7 @@ test("a refusal's record copied to another object, by a database writer, Ada's r
   await db.owner.insert(grants).values(held);
   await db.owner.update(principals).set(member!).where(eq(principals.principal, `user:${ADA}`));
   await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-    SELECT nextval('log_number'), c.at, ${randomUUID()}, ${logObject('principal', `user:${ADA}`)}::uuid, c.actor, c.payload, ${member!.seal}, c.mac
+    SELECT nextval('log_next'), c.at, ${randomUUID()}, ${logObject('principal', `user:${ADA}`)}::uuid, c.actor, c.payload, ${member!.seal}, c.mac
       FROM log_changes c WHERE c.number = ${record!.number}::bigint`);
   const before = (await keyRow('API_KEY'))!;
   const wrote = await w.write({ API_KEY: 'fake-ada-2' });
@@ -923,7 +923,7 @@ test("a refusal's record copied to another object, by a database writer, Ada's r
   assert.deepEqual(await keyRow('API_KEY'), before);
   // Copied whole under a request id of its own (its own object then names another request): its MAC covers both.
   await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-    SELECT nextval('log_number'), c.at, ${randomUUID()}, c.object, c.actor, c.payload, c.seal, c.mac FROM log_changes c WHERE c.number = ${record!.number}::bigint`);
+    SELECT nextval('log_next'), c.at, ${randomUUID()}, c.object, c.actor, c.payload, c.seal, c.mac FROM log_changes c WHERE c.number = ${record!.number}::bigint`);
   // Neither copy is listed: the projector lists what the vault signed, and it signs no change its MAC refuses.
   assert.deepEqual(await denied(), [false]);
 });

@@ -280,7 +280,7 @@ async function grow(): Promise<void> {
       const batch = changes.slice(done, done + 5_000);
       await rowsOf(tx, sql`
         INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-        SELECT nextval('log_number'), r.at, r.request_id, r.object, 'system:sweep', r.payload, ${ZERO16}::bytea, r.mac
+        SELECT nextval('log_next'), r.at, r.request_id, r.object, 'system:sweep', r.payload, ${ZERO16}::bytea, r.mac
           FROM unnest(${sql.param(batch.map((c) => String(c.at)))}::bigint[], ${sql.param(batch.map((c) => c.requestId))}::text[],
                       ${sql.param(batch.map((c) => c.object))}::uuid[], ${sql.param(batch.map((c) => c.payload))}::text[],
                       ${sql.param(batch.map((c) => c.mac))}::bytea[]) AS r(at, request_id, object, payload, mac)`);
@@ -316,7 +316,7 @@ async function grow(): Promise<void> {
     for (const leaver of LEAVERS) await rowsOf(db.owner, sql`
       INSERT INTO audit_events (at, number, log, author, action, shown, allowed, code, actor, subject, credential, project, environment, secret, version, places,
                                 request_id, operation_id, related, source_ip, detail, mac)
-      SELECT ${back === 0 ? sql`greatest(${start}::bigint, ${now - Math.min(SIZE, 1_000)}::bigint + g)` : sql`${start}::bigint + g`}, nextval('log_number'), 16, 'vault', 'secret.read', true, true, NULL, ${`user:${leaver}`}, NULL,
+      SELECT ${back === 0 ? sql`greatest(${start}::bigint, ${now - Math.min(SIZE, 1_000)}::bigint + g)` : sql`${start}::bigint + g`}, nextval('log_next'), 16, 'vault', 'secret.read', true, true, NULL, ${`user:${leaver}`}, NULL,
              ${place!.credential}::uuid, CAST(${pick('project')} AS uuid), CAST(${pick('environment')} AS uuid), CAST(${pick('secret')} AS uuid),
              CAST(${pick('version')} AS uuid),
              CASE WHEN ${ref} THEN ARRAY[${place!.project}::uuid, ${place!.environment}::uuid, ${place!.secret}::uuid, ${through!.project}::uuid, ${through!.environment}::uuid, ${through!.secret}::uuid]
@@ -352,7 +352,7 @@ async function grow(): Promise<void> {
     const batch = uses.slice(done, done + 5_000);
     await rowsOf(db.owner, sql`
       INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
-      SELECT nextval('log_number'), r.at, r.request_id, ${place!.credential}::uuid, ${place!.secret}::uuid, 1, r.mac
+      SELECT nextval('log_next'), r.at, r.request_id, ${place!.credential}::uuid, ${place!.secret}::uuid, 1, r.mac
         FROM unnest(${sql.param(batch.map((u) => String(u.at)))}::bigint[], ${sql.param(batch.map((u) => String(u.requestId)))}::bigint[],
                     ${sql.param(batch.map((u) => u.mac))}::bytea[]) AS r(at, request_id, mac)`);
   }

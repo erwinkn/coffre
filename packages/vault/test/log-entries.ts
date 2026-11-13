@@ -19,7 +19,7 @@ export function logWriter(owner: Database, macKey: LogMacKey) {
   const append = async (insert: (number: SQL) => SQL): Promise<bigint> => {
     return owner.transaction(async (tx) => {
       await run(tx, sql`SELECT pg_advisory_xact_lock_shared(1668244070, 0)`);
-      const [row] = await rows<{ n: string }>(tx, sql`${insert(sql`nextval('log_number')`)} RETURNING number::text AS n`);
+      const [row] = await rows<{ n: string }>(tx, sql`${insert(sql`nextval('log_next')`)} RETURNING number::text AS n`);
       return BigInt(row!.n);
     });
   };
@@ -51,7 +51,7 @@ export function logWriter(owner: Database, macKey: LogMacKey) {
       for (let done = 0; done < n; done += 1000) {
         const batch = Array.from({ length: Math.min(1000, n - done) }, () => {
           const row = { at: Date.now(), requestId: BigInt.asIntN(64, randomBytes(8).readBigUInt64BE()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
-          return sql`(nextval('log_number'), ${row.at}, ${row.requestId}, ${row.credential}, ${row.secret}, ${row.purpose}, ${entryMac(macKey, { tree: 'uses', row })}, NULL)`;
+          return sql`(nextval('log_next'), ${row.at}, ${row.requestId}, ${row.credential}, ${row.secret}, ${row.purpose}, ${entryMac(macKey, { tree: 'uses', row })}, NULL)`;
         });
         await owner.transaction(async (tx) => {
           await run(tx, sql`SELECT pg_advisory_xact_lock_shared(1668244070, 0)`);

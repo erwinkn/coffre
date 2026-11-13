@@ -258,7 +258,7 @@ test('a retention change in the log is the log\'s own, and the uses below its cu
   const w = await instance();
   for (let i = 0; i < 3; i += 1) assert.ok((await w.use(await w.key())).ok);
   await w.cp.tick();
-  // A retention change, sealed, as retention writes it (retention.ts), for a day ten days ago. log_retention holds
+  // A retention change, sealed, as retention writes it (retention.ts), for a day ten days ago. append_retention holds
   // its cut to the first pair past the day's end, the first of this log.
   const store = logStore(db.vault);
   const day = dayOf(Date.now() - 10 * DAY_MS);

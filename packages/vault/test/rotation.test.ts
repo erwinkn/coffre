@@ -311,7 +311,7 @@ async function plantUse(key: ChangeKeys['mac']): Promise<bigint> {
   const at = Date.now();
   const row = { at, requestId: BigInt(newRequestId()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
   const mac = entryMac(key, { tree: 'uses', row });
-  const [planted] = await rows<{ number: string | number }>(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES (nextval('log_number'), ${at}, ${row.requestId}, ${row.credential}, ${row.secret}, 1, ${mac}, NULL) RETURNING number`);
+  const [planted] = await rows<{ number: string | number }>(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES (nextval('log_next'), ${at}, ${row.requestId}, ${row.credential}, ${row.secret}, 1, ${mac}, NULL) RETURNING number`);
   return BigInt(planted!.number);
 }
 
@@ -407,7 +407,7 @@ test('a backlog sealed a part at a time across the rotation: a pair under the ne
 async function plantRotationIntoOld(w: Awaited<ReturnType<typeof underOldKey>>, oldOrigin: string): Promise<{ planted: bigint; number: bigint }> {
   const planted = await plantUse(w.old.keys.mac);
   await run(db.owner, sql`UPDATE checkpoint_fence SET retired = '{}'`);
-  const [next] = await rows<{ n: string | number }>(db.owner, sql`SELECT nextval('log_number') AS n`);
+  const [next] = await rows<{ n: string | number }>(db.owner, sql`SELECT nextval('log_next') AS n`);
   const number = BigInt(next!.n);
   const row = { at: Date.now(), requestId: randomUUID(), object: KEY_OBJECT, actor: 'system:vault', payload: rotationPayload(`coffre.log/${randomBytes(8).toString('hex')}`, oldOrigin, number), seal: null };
   const mac = entryMac(w.old.keys.mac, { tree: 'changes', row });
@@ -545,7 +545,7 @@ test('two rotations, A to B to C, and someone who holds A and B: a rotation from
     const use = await plantUse(ka!.mac);
     // The fence's `retired` emptied first: a row she writes, and its trigger would refuse a change under B.
     await run(db.owner, sql`UPDATE checkpoint_fence SET retired = '{}'`);
-    const [next] = await rows<{ n: string | number }>(db.owner, sql`SELECT nextval('log_number') AS n`);
+    const [next] = await rows<{ n: string | number }>(db.owner, sql`SELECT nextval('log_next') AS n`);
     const number = BigInt(next!.n);
     const row = { at: Date.now(), requestId: randomUUID(), object: KEY_OBJECT, actor: 'system:vault', payload: rotationPayload(ka!.origin, kb!.origin, number), seal: null };
     await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (${number}, ${row.at}, ${row.requestId}, ${KEY_OBJECT}, 'system:vault', ${row.payload}, NULL, ${entryMac(kb!.mac, { tree: 'changes', row })})`);

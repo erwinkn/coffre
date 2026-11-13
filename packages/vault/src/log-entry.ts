@@ -94,7 +94,7 @@ export function authentic(key: LogMacKey): (entry: LogEntry) => boolean {
 }
 
 /**
- * A retention change (plan PR 7, migration 0027's `log_retention`): an entry
+ * A retention change (plan PR 7, migration 0027's `log_retention`, `append_retention` since 0089): an entry
  * of the changes tree, kept for good, that cuts the uses tree. Its object is
  * the log's own, its actor the system's, and its payload names the day it
  * drops and the cut: the pair at or past the day's end, by its upto, its time

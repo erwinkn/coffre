@@ -96,6 +96,12 @@
 - **Node deployments are not tested in 0.16.0.** A Node deployment stays
   on 0.15.0 until 0.16.1, which brings Node back on Postgres; SQLite is
   gone.
+- **The log numbers from `log_next` (0089).** The sequence
+  `log_number` is gone, and the function `log_retention` is now
+  `append_retention`: a 0.15.0 call still running when the upgrade
+  commits fails rather than append, and one sent after finds no
+  function. A script of your own that draws from `log_number` names
+  `log_next`.
 - **Three lists are `text[]` columns, no longer JSON (0084).** The
   proxy's reserved names, a passkey's transports and a registered MCP
   client's redirects. The migration converts them in place, the same

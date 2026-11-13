@@ -53,7 +53,7 @@ type Tx = { unsafe: (text: string, values?: unknown[]) => Promise<Record<string,
 
 async function change(ref: Ref, object: Input, client: Tx): Promise<Buffer> {
   const seal = sealOf(SEAL, ref, object);
-  await client.unsafe(`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_number'), $1, $2, $3, 'system:bench', $4, $5, $6)`,
+  await client.unsafe(`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_next'), $1, $2, $3, 'system:bench', $4, $5, $6)`,
     [Date.now(), randomUUID(), objectKey(ref), JSON.stringify({ op: 'genesis', value: object, ...(object.kind === 'principal' ? { old: '0' } : {}) }), seal, randomBytes(16)]);
   return seal;
 }
@@ -162,10 +162,10 @@ async function grow(total: number): Promise<void> {
   for (let done = 0; done < more; done += 200_000) {
     const n = Math.min(200_000, more - done);
     await q(`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
-      SELECT nextval('log_number'), $1::bigint - (g * 86000000::bigint / $2), g + $3, gen_random_uuid(), gen_random_uuid(), 1, $4, NULL FROM generate_series(1, $2) g`, [now, n, done + have, randomBytes(16)]);
+      SELECT nextval('log_next'), $1::bigint - (g * 86000000::bigint / $2), g + $3, gen_random_uuid(), gen_random_uuid(), 1, $4, NULL FROM generate_series(1, $2) g`, [now, n, done + have, randomBytes(16)]);
   }
   await q(`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-    SELECT nextval('log_number'), $1, 'history-' || g || '-' || $3, gen_random_uuid(), 'system:x', '{"op":"x"}', NULL, $4 FROM generate_series(1, $2) g`, [now, Math.round(more / 100), String(total), randomBytes(16)]);
+    SELECT nextval('log_next'), $1, 'history-' || g || '-' || $3, gen_random_uuid(), 'system:x', '{"op":"x"}', NULL, $4 FROM generate_series(1, $2) g`, [now, Math.round(more / 100), String(total), randomBytes(16)]);
   await q(`INSERT INTO bulk_cap (principal, secret, last) SELECT 'token:other-' || (g % 1000), gen_random_uuid(), $1 FROM generate_series(1, $2) g ON CONFLICT DO NOTHING`, [now, Math.round(more / 10)]);
   await q(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, subject_principal, metadata, prev_hash, mac, hash)
     SELECT (SELECT coalesce(max(seq), 0) FROM audit_log) + g, 'vault', 'vault:x', $1, 'system:x', 'secret.read', 'allow', NULL, '{}', $3, $3, $3 FROM generate_series(1, $2) g`,

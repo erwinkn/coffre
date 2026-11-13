@@ -393,7 +393,7 @@ spans those tries too, a few round trips. `write-held.test.ts` pins this
 
 What an abandoned try leaves behind, with nothing waiting on it:
 
-- **its number**, drawn from `log_number` by `write_request`: a gap in the
+- **its number**, drawn from `log_next` by `write_request`: a gap in the
   log, which a checkpoint seals past as it does a rolled-back change's;
 - **before the contraction, its 0.14 `key.wrap` entries**, one per key, committed by the vault
   before it answered (0.16.0 writes none): records of wraps that were
@@ -419,7 +419,7 @@ served try abandoned at its hold, then refused StaleFirst, adds its one
 ## The request and its refusals
 
 The statement records the request, not its outcome (R53), as a use does:
-one row per request, naming all its keys, numbered from `log_number`, in a
+one row per request, naming all its keys, numbered from `log_next`, in a
 table of its own beside `log_uses`. Not `log_uses` itself: its row names
 one key (`secret`), and `(at, request_id)` is unique there, so a row per
 key under the request's one id would collide. The Worker can only MAC what
@@ -896,7 +896,7 @@ What it serves, and what keeps today's path, `served: false` (the app writes as 
 
 What it does not build yet, and why that is sound meanwhile:
 
-- **No request row, no outcome record.** The statement numbers the request from `log_number`, in the read's own
+- **No request row, no outcome record.** The statement numbers the request from `log_next`, in the read's own
   statement under the fence (RequestUnderFence), and each change carries that number, the credential and identity
   it was decided for and the read's digest in its payload, under the vault's MAC. The stored read and the outcome
   record (`write_outcome`) are for the replay of a decision and for the audit pages' refusals, which read 0.14's

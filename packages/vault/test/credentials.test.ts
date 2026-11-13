@@ -288,7 +288,7 @@ test("a sign-in that waits on its account's row while a change to it commits goe
     const [last] = await holder.unsafe<{ at: string; object: string; actor: string; payload: string }[]>(`SELECT c.at::text AS at, c.object::text AS object, c.actor, c.payload
       FROM log_changes c WHERE c.object = log_object('principal', '${CI}') ORDER BY c.number DESC LIMIT 1`);
     const row = { at: Number(last!.at), requestId: randomUUID(), object: last!.object, actor: last!.actor, payload: last!.payload, seal };
-    await holder.unsafe(`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_number'), $1, $2, $3, $4, $5, $6, $7)`,
+    await holder.unsafe(`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_next'), $1, $2, $3, $4, $5, $6, $7)`,
       [String(row.at), row.requestId, row.object, row.actor, row.payload, seal, entryMac(w.keys.mac, { tree: 'changes', row })]);
     const signing = w.vault.signIn!(asked(w));
     await sleep(200);

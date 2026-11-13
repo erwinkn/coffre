@@ -630,7 +630,7 @@ export async function numbersFrom(owner: Database, from: bigint, chainKey: Buffe
     await owned.insert(auditLog).values(entry);
   });
   await owner.update(auditChainHead).set({ nextSeq: from + 1n, headHash: entry.hash });
-  await rowsOf(owner, sql`SELECT setval('log_number', greatest(${from.toString()}::bigint, (SELECT coalesce(max(number), 0) FROM log_changes)))`);
+  await rowsOf(owner, sql`SELECT setval('log_next', greatest(${from.toString()}::bigint, (SELECT coalesce(max(number), 0) FROM log_changes)))`);
 }
 
 /**

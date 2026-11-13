@@ -369,7 +369,7 @@ test('a dropped use put back is never sealed again', async () => {
   // it.) Stamped weeks before the floor of `at`, no tick's window reads it (BarrierChecksFloor); one that did would find
   // it older than the signer's pair (FRESH_MS). The walk from genesis reads it, under a pair that does not hold it.
   await run(db.owner, sql`SELECT make_day(${D10}::date)`);
-  const [n] = await rows<{ n: string }>(db.owner, sql`SELECT nextval('log_number')::text AS n`);
+  const [n] = await rows<{ n: string }>(db.owner, sql`SELECT nextval('log_next')::text AS n`);
   const uses = cp.pair.pair.uses.size;
   await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
     VALUES (${BigInt(n!.n)}, ${copy!.at as number}, ${copy!.request_id as bigint}, ${copy!.credential as string}, ${copy!.secret as string}, ${copy!.purpose as number}, ${copy!.mac as Buffer}, NULL)`);
@@ -606,17 +606,17 @@ test('the database drops nothing a sealed retention change does not cut, and nev
   await refused(sql`SELECT drop_day((clock_timestamp() AT TIME ZONE 'UTC')::date - 1)`, /are not past/);
   await refused(sql`SELECT drop_tiles(1)`, /no sealed retention change cuts the uses tree/);
   const payload = JSON.stringify({ op: 'retention', day: D10, cut: { upto: '1', at: 0, uses: 1, root: '00'.repeat(32) } });
-  await refused(sql`SELECT log_retention('retention:x', 0, ${payload}, ${randomBytes(16)})`, /is not the first checkpoint past its end/);
+  await refused(sql`SELECT append_retention('retention:x', 0, ${payload}, ${randomBytes(16)})`, /is not the first checkpoint past its end/);
   // The checkpoint past the end, named with another uses head: refused too.
   const cut = (await store.cutAt(MIDNIGHT))!;
   const pair = (await openPair(cut.notes, verifiers))!;
   const wrong = JSON.stringify({ op: 'retention', day: D10, cut: { upto: String(cut.upto), at: pair.at, uses: pair.uses.size, root: '00'.repeat(32) } });
-  await refused(sql`SELECT log_retention('retention:y', 0, ${wrong}, ${randomBytes(16)})`, /is not the first checkpoint past its end/);
+  await refused(sql`SELECT append_retention('retention:y', 0, ${wrong}, ${randomBytes(16)})`, /is not the first checkpoint past its end/);
   // A later checkpoint past the end, named with its own head: not the first, refused too.
   const newest = (await store.newest())!;
   const later = (await openPair(newest.notes, verifiers))!;
   const past = JSON.stringify({ op: 'retention', day: D10, cut: { upto: String(newest.upto), at: later.at, uses: later.uses.size, root: later.uses.root.toString('hex') } });
-  await refused(sql`SELECT log_retention('retention:z', 0, ${past}, ${randomBytes(16)})`, /is not the first checkpoint past its end/);
+  await refused(sql`SELECT append_retention('retention:z', 0, ${past}, ${randomBytes(16)})`, /is not the first checkpoint past its end/);
   // The vault's login writes no log table itself.
   await refused(sql`DELETE FROM log_uses`, /permission denied/);
 });
@@ -637,10 +637,10 @@ test('R48: retention\'s reads cost the same at 10k and at 1M entries: a day\'s c
     const now = Date.now();
     const top = BigInt((await rows<{ n: string }>(db.owner, sql`SELECT max(upto)::text AS n FROM log_checkpoints`))[0]!.n);
     await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
-      SELECT nextval('log_number'), ${Date.parse(`${TODAY}T00:00:00Z`)}::bigint + g % 60000, ${grown}::bigint + g, gen_random_uuid(), gen_random_uuid(), 1, ${randomBytes(16)}, NULL FROM generate_series(1, ${total}) g`);
+      SELECT nextval('log_next'), ${Date.parse(`${TODAY}T00:00:00Z`)}::bigint + g % 60000, ${grown}::bigint + g, gen_random_uuid(), gen_random_uuid(), 1, ${randomBytes(16)}, NULL FROM generate_series(1, ${total}) g`);
     grown += total;
     await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-      SELECT nextval('log_number'), ${now}, 'history-' || g || '-' || ${String(total)}, gen_random_uuid(), 'system:x', '{"op":"x"}', NULL, ${randomBytes(16)} FROM generate_series(1, ${total / 100}) g`);
+      SELECT nextval('log_next'), ${now}, 'history-' || g || '-' || ${String(total)}, gen_random_uuid(), 'system:x', '{"op":"x"}', NULL, ${randomBytes(16)} FROM generate_series(1, ${total / 100}) g`);
     await run(db.owner, sql`INSERT INTO log_checkpoints (upto, at, at_floor, changes_size, changes_root, changes_note, uses_size, uses_root, uses_note)
       SELECT ${top}::bigint + g * 100, ${now}, ${now - 3000}::bigint + g, 0, ${Buffer.alloc(32)}, 'x', 0, ${Buffer.alloc(32)}, 'x' FROM generate_series(1, ${total / 100}) g`);
     await run(db.owner, sql`VACUUM ANALYZE`);

@@ -55,7 +55,7 @@ export async function emptyLog(): Promise<void> {
   await emptyReads(db.owner);
   await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
   // Numbers from the start again: a test may have moved them past 2^53.
-  await run(db.owner, sql`SELECT setval('log_number', 1, false)`);
+  await run(db.owner, sql`SELECT setval('log_next', 1, false)`);
   const today = new Date(Date.now()).toISOString().slice(0, 10);
   await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
 }
@@ -129,7 +129,7 @@ export async function isolate(options: VaultOptions = {}, config: ResolvedVaultC
 // --- the change path, as the owner plays it ---------------------------------------------------------
 
 export async function nextNumber(tx: Queryable): Promise<number> {
-  return Number((await rows<{ n: string }>(tx, sql`SELECT nextval('log_number') AS n`))[0]!.n);
+  return Number((await rows<{ n: string }>(tx, sql`SELECT nextval('log_next') AS n`))[0]!.n);
 }
 
 /**

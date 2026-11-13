@@ -196,7 +196,7 @@ test('StatementSnapshot: a use that waits behind a change reads what the change 
     await run(tx, sql`UPDATE credentials SET revoked_at = now(), seal = ${sealOf(SEAL, { kind: 'credential', id: w.credentialId }, after)} WHERE id = ${w.credentialId}`);
     // A vault's change: its MAC is real, which the use checks (T190).
     const row = { at: Date.now(), requestId: randomUUID(), object: objectKey({ kind: 'credential', id: w.credentialId }), actor: ROOT, payload: JSON.stringify({ op: 'credential.revoke' }), seal: sealOf(SEAL, { kind: 'credential', id: w.credentialId }, after) };
-    await run(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_number'), ${row.at}, ${row.requestId},
+    await run(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_next'), ${row.at}, ${row.requestId},
       ${row.object}, ${row.actor}, ${row.payload}, ${row.seal}, ${entryMac(MAC, { tree: 'changes', row })})`);
   });
   await waitForFence();
@@ -1215,7 +1215,7 @@ test('whole numbers past 2^53 come back exact, entry numbers included', async ()
   const w = await world();
   const id = await w.key();
   const big = 2n ** 53n + 100n;
-  await run(db.owner, sql`SELECT setval('log_number', ${big.toString()}::bigint)`);
+  await run(db.owner, sql`SELECT setval('log_next', ${big.toString()}::bigint)`);
   const { use } = await isolate();
   const outcome = await use(ask(w, id));
   assert.ok(outcome.ok, JSON.stringify(outcome));
