@@ -1,7 +1,9 @@
-import { EVERYWHERE, isCredentialScope, isInstanceRole, isScope, scopeWithReads, type CredentialScope, type Holdings, type Permission, type Policy, type RoleDefinition } from '@coffre/core/access';
+import { allows, EVERYWHERE, isCredentialScope, isInstanceRole, isScope, scopeWithReads, type CredentialScope, type Holdings, type Permission, type Policy, type RoleDefinition } from '@coffre/core/access';
 import { addressWithin, checkConstraints, type BindingPolicy, type Constraints } from '@coffre/core/identity';
-import type { bindings, credentials, environments, grants, identities, policy, principals, roles } from '@coffre/db/schema';
+import { bindings, credentials, environments, grants, identities, policy, principals, roles } from '@coffre/db/schema';
+import { sql, type SQL } from 'drizzle-orm';
 
+import { part, type Seen } from './change.ts';
 import type { Row } from './rows.ts';
 
 /**
@@ -70,8 +72,8 @@ export type Caller = {
   /** `user:<email>` or `token:<name>`. */
   principal: string;
   credential: Row<typeof credentials>;
-  /** What they hold, as `@coffre/core/access` decides on it. */
-  holds: Holdings;
+  /** What they hold, as `@coffre/core/access` decides on it, with the roles and the protected environments of the rows read. */
+  holds: Holdings & { policy: Policy };
   /** For a workload's session; null for any other credential. */
   workload: Workload | null;
 };
@@ -211,5 +213,67 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
       service,
       kind: workload !== null ? 'workload' : service ? 'bearer' : 'person',
     },
+  };
+}
+
+/** A UUID as the vault writes one, for a statement to tell before it casts: a row is read before its MAC is checked. */
+export const ID = sql.raw('[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}');
+
+/** A place that is there: not archived, and not the tombstone a deletion leaves. */
+export const live = (row: { slug: string; archivedAt: Date | null }) => row.archivedAt === null && !row.slug.includes('~');
+
+/**
+ * The caller's rows as a change reads them, by the token's hash: what a
+ * use reads in its one statement (use.ts). Of their grants and roles, only
+ * those that bear on the projects the change is about, given as SQL for a
+ * set of ids: the entry names every row read, and an Owner's hundred
+ * grants elsewhere decide nothing here. With them, the environments that
+ * weigh on what they hold there: those the projects protect, and those a
+ * grant of theirs is on. So no operation has to remember them, and one
+ * protected or unprotected meanwhile starts the change over.
+ */
+export function callerParts(token: Buffer, projects: SQL) {
+  const hash = sql`decode(${token.toString('hex')}, 'hex')`;
+  const own = (column: string) => sql`(SELECT c.${sql.identifier(column)} FROM credentials c WHERE c.token_hash = ${hash})`;
+  const here = sql`(g.project_id IN ${projects} OR g.environment_id IN (SELECT e.id FROM environments e WHERE e.project_id IN ${projects}))`;
+  return {
+    credential: part(credentials, sql`${credentials.tokenHash} = ${hash}`),
+    principal: part(principals, sql`${principals.id} = ${own('principal')}`),
+    identity: part(identities, sql`${identities.id} = ${own('identity_id')}`),
+    grant: part(grants, sql`${grants.id} IN (SELECT g.id FROM grants g WHERE g.principal = ${own('principal')} AND ${here})`),
+    // The roles those grants name, and the member's own in the instance: a role with no row is no role.
+    role: part(roles, sql`(NOT ${roles.instance} AND ${roles.id} IN (SELECT g.role FROM grants g WHERE g.principal = ${own('principal')} AND ${here})) OR (${roles.instance} AND ${roles.id} = (SELECT p.role FROM principals p WHERE p.id = ${own('principal')}))`),
+    // A deleted environment protects nothing: its tombstone is left out.
+    places: part(environments, sql`(${environments.projectId} IN ${projects} AND ${environments.protected} AND strpos(${environments.slug}, '~') = 0) OR ${environments.id} IN (SELECT g.environment_id FROM grants g WHERE g.principal = ${own('principal')} AND ${here})`),
+    // What a trust binding issued names it, and a narrowed session the sessions above it: only what is shaped like ids is cast.
+    binding: part(bindings, sql`${bindings.id} = (SELECT CASE WHEN c.created_by ~ '^binding:${ID}$' THEN substr(c.created_by, 9)::uuid END FROM credentials c WHERE c.token_hash = ${hash})`),
+    ancestor: part(credentials, sql`${credentials.id} = ANY(ARRAY(SELECT above.id::uuid FROM credentials c, jsonb_array_elements_text(CASE WHEN c.kind = 'workload' AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) AS above(id) WHERE c.token_hash = ${hash}))`),
+    policy: part(policy, sql`${own('kind')} = 'workload'`),
+  };
+}
+
+/** Who asks a change: what they hold in the change's projects, whole, and `may` for one environment, by its row. */
+export type Asking = Caller & { may(permission: Permission, environment: Row<typeof environments>): boolean };
+
+/**
+ * The caller a change's read found, as `callerOf` decides, holding what the
+ * rows read say of the change's projects: each one's protected
+ * environments, listed by project too, as a decision about a whole project
+ * weighs them. A handle is the proxy's, for uses: it changes nothing,
+ * whatever its scope says.
+ */
+export function callerFrom(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, workloads: Workloads, at: number): Asking | null {
+  const caller = callerOf({ credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: seen.places, binding: seen.binding, ancestors: seen.ancestor, policy: seen.policy }, shown, workloads, at);
+  if (caller === null || caller.credential.kind === 'handle') return null;
+  const protectedIn: Record<string, { environmentId: string; slug: string | null }[]> = {};
+  // Archived, an environment still protects: it may be brought back. Only a deleted one's tombstone does not.
+  for (const row of seen.places) if (row.protected && !row.slug.includes('~')) (protectedIn[row.projectId] ??= []).push({ environmentId: row.id, slug: row.slug });
+  const holds = { ...caller.holds, policy: { ...caller.holds.policy, protectedIn } };
+  return {
+    ...caller,
+    holds,
+    // By the row itself too: an environment of a project the change did not name is as protected as it says.
+    may: (permission, environment) =>
+      allows(environment.protected ? { ...holds, policy: { ...holds.policy, protected: [...holds.policy.protected, environment.id] } } : holds, permission, { projectId: environment.projectId, environmentId: environment.id, environmentSlug: environment.slug }),
   };
 }

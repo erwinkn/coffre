@@ -1,10 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { ownerKey, seal } from '@coffre/core/envelope';
-import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
-import { sql, type SQL } from 'drizzle-orm';
+import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets } from '@coffre/db/schema';
+import { eq, sql, type SQL } from 'drizzle-orm';
 
-import { change, put, part, type Write } from '../src/change.ts';
+import { change, put, part, type Value, type Write } from '../src/change.ts';
 import type { Fresh } from '../src/rows.ts';
 import type { Ask } from '../src/use.ts';
 import type { TestVault } from './database.ts';
@@ -84,14 +83,17 @@ export const TABLES = { projects, environments, secrets, principals, grants, rol
 /** Rows of one table, as writes of a change. */
 export const rows = <K extends keyof typeof TABLES>(table: K, ...of: Fresh<(typeof TABLES)[K]>[]): Write[] => of.map((row) => put(TABLES[table], row as never));
 
-/** Versions sealed and not yet stored: a version's row points at its secret's, which the next `write` makes. */
-const sealed: (typeof secretVersions.$inferInsert)[] = [];
+/** Values for the next `write` to seal, each with its environment: a version's row is written with its secret's. */
+const values: { value: Value; environment: string }[] = [];
 
-/** One change that writes them all, then the versions sealed for them. */
+/** One change that writes them all, with the values given for them. It reads the values' environments, where it does not make them: a value is sealed under what its environment's row says. */
 export async function write(vault: TestVault, ...writes: Write[]): Promise<void> {
-  const result = await change(vault, { read: { none: part(principals, sql`false`) }, decide: () => ({ writes, entry: { kept: true, action: 'test.write', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null }) });
+  const queued = values.splice(0);
+  const result = await change(vault, {
+    read: { places: part(environments, sql`${environments.id} = ANY(${sql.param(queued.map((item) => item.environment))}::uuid[])`) },
+    decide: () => ({ writes, values: queued.map((item) => item.value), entry: { kept: true, action: 'test.write', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null }),
+  });
   if ('refused' in result) throw new Error(result.refused);
-  if (sealed.length > 0) await vault.owner.insert(secretVersions).values(sealed.splice(0));
 }
 
 /** One change that puts `more` on the rows of a table a condition finds: a revocation, a freeze, an approval. */
@@ -104,17 +106,35 @@ export async function amend<K extends keyof typeof TABLES>(vault: TestVault, tab
 }
 
 /**
- * A secret with its next version, as the vault will write one: the value
- * sealed under its secret, number and sensitivity, and the secret's row
- * moved on to it. The version is stored by the next `write`.
+ * A secret with its next version, as the vault writes one: the value
+ * sealed under its secret, number and nature, and the secret's row moved on
+ * to it. The next `write` seals and stores it.
  */
-export async function value(vault: TestVault, of: Fresh<typeof secrets>, text: string, more: { sensitive?: boolean; plain?: boolean; owner?: string } = {}): Promise<Fresh<typeof secrets>> {
+export function value(_vault: TestVault, of: Fresh<typeof secrets>, text: string, more: { sensitive?: boolean; plain?: boolean } = {}): Fresh<typeof secrets> {
   const version = of.versions + 1;
-  const sensitive = more.sensitive === true;
-  const nature = sensitive ? { sensitive: true as const } : more.plain === true ? { plain: true as const } : {};
-  const envelope = await seal(Buffer.from(text), { projectId: of.projectId, environmentId: of.environmentId, secretId: of.id, version, ...nature, ...(more.owner === undefined ? {} : { owner: ownerKey(more.owner) }) }, vault.keks);
-  sealed.push({ id: randomUUID(), secretId: of.id, version, ...envelope, createdAt: at, createdBy: root, recipe: null, pairId: null, pairHalf: null, plaintext: more.plain === true ? text : null, sensitive });
+  values.push({
+    value: { version: { id: randomUUID(), secretId: of.id, version, createdAt: at, createdBy: root, recipe: null, pairId: null, pairHalf: null, plaintext: more.plain === true ? text : null, sensitive: more.sensitive === true }, text: Buffer.from(text) },
+    environment: of.environmentId,
+  });
   return { ...of, versions: version, currentVersion: version };
+}
+
+/** A secret's next value, in a change of its own, over the row that is there: one change writes one version of a secret. */
+export async function rewrite(vault: TestVault, of: { id: string }, text: string): Promise<Fresh<typeof secrets>> {
+  let written!: Fresh<typeof secrets>;
+  const result = await change(vault, {
+    // Its environment too: the engine seals a value under what that row says.
+    read: { found: part(secrets, eq(secrets.id, of.id)), place: part(environments, sql`${environments.id} = (SELECT s.environment_id FROM secrets s WHERE s.id = ${of.id})`) },
+    decide: ({ found: [was] }) => {
+      const { mac: _, ...kept } = was!;
+      const version = kept.versions + 1;
+      written = { ...kept, versions: version, currentVersion: version };
+      const row = { id: randomUUID(), secretId: kept.id, version, createdAt: at, createdBy: root, recipe: null, pairId: null, pairHalf: null, plaintext: null, sensitive: false };
+      return { writes: [put(secrets, written, was!)], values: [{ version: row, text: Buffer.from(text) }], entry: { kept: true, action: 'test.write', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null };
+    },
+  });
+  if ('refused' in result) throw new Error(result.refused);
+  return written;
 }
 
 export const ask = (label: string, place: string, keys: readonly string[] | null, more: Partial<Ask> = {}): Ask => {

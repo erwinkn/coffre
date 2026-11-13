@@ -1,6 +1,6 @@
 // The vault Worker as a deployment writes it: its entrypoint, its signer,
-// and the binding between them. Its fetch plays the app's side of a reveal,
-// as the app's route does it: the token hashed, never looked up, and the
+// and the binding between them. Its fetch plays the app's side of a reveal
+// (POST) and of a write (PATCH), as the app's routes do them: the token hashed, never looked up, and the
 // vault called over a service binding.
 import type { Vault as Contract } from '@coffre/core/vault';
 
@@ -37,11 +37,13 @@ export default {
     }
     const bearer = /^Bearer (\S+)$/.exec(request.headers.get('authorization') ?? '')?.[1];
     if (bearer === undefined) return Response.json({ refused: 'unauthenticated' }, { status: 401 });
-    const { path, keys } = (await request.json()) as { path: string; keys: string[] | null };
+    const { path, keys, values } = (await request.json()) as { path: string; keys?: string[] | null; values?: Record<string, string> };
     const [project, environment] = path.split('/') as [string, string];
-    const token = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(bearer))).toString('hex');
+    const shown = { token: Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(bearer))).toString('hex'), proof: null, request: crypto.randomUUID(), ip: request.headers.get('cf-connecting-ip') };
     try {
-      const answer = await env.VAULT.use({ token, proof: null, request: crypto.randomUUID(), ip: request.headers.get('cf-connecting-ip'), project, environment, mine: false, keys, purpose: 'reveal', upstream: null });
+      const answer = request.method === 'PATCH'
+        ? await env.VAULT.change({ ...shown, op: 'secret.write', project, environment, values: Object.entries(values!).map(([key, value]) => ({ key, value, nature: 'secret' as const })) })
+        : await env.VAULT.use({ ...shown, project, environment, mine: false, keys: keys ?? null, purpose: 'reveal', upstream: null });
       return Response.json(answer, { status: !('refused' in answer) ? 200 : answer.refused === 'unauthenticated' ? 401 : 403 });
     } catch (error) {
       // Its code too, as the app reads it on the other side of the binding (`isUnavailable`).

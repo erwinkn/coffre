@@ -8,7 +8,7 @@ import { entryOf, type Entry } from '../src/entry.ts';
 import { Busy } from '../src/change.ts';
 import { memoryOf, recall, read, answer, use, type Ask, type Value } from '../src/use.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
-import { amend, ask, binding, credential, dismissed, environment, grant, identity, instance, principal, project, role, rows, secret, session, user, value, write } from './world.ts';
+import { amend, ask, binding, credential, dismissed, environment, grant, identity, instance, principal, project, rewrite, role, rows, secret, session, user, value, write } from './world.ts';
 
 const vault = await openTestVault();
 after(() => vault.close());
@@ -31,14 +31,14 @@ async function world() {
   const billed = environment(billing, 'prod');
 
   const token = await value(vault, secret(billed, 'API_TOKEN'), 'billing-token');
-  const database = await value(vault, await value(vault, secret(prod, 'DATABASE_URL'), 'postgres://old'), 'postgres://prod');
+  const first = await value(vault, secret(prod, 'DATABASE_URL'), 'postgres://old');
   const stripe = await value(vault, secret(prod, 'STRIPE_KEY'), 'sk_live', { sensitive: true });
   const flag = await value(vault, secret(prod, 'FLAG'), 'on', { plain: true });
   const gone = await value(vault, secret(prod, 'OLD', { archivedAt: new Date(0) }), 'gone');
   const link = secret(prod, 'LINK', { sourceId: token.id });
   const hollow = secret(prod, 'HOLLOW');
   const forked = await value(vault, secret(staging, 'DATABASE_URL'), 'postgres://staging');
-  const own = await value(vault, secret(adas, 'DATABASE_URL'), 'postgres://ada', { owner: ada });
+  const own = await value(vault, secret(adas, 'DATABASE_URL'), 'postgres://ada');
   const root = await value(vault, secret(guarded, 'ROOT'), 'root-key');
 
   const scope = (more: object = {}) => JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer', ...more }]);
@@ -46,13 +46,14 @@ async function world() {
     vault,
     ...rows('projects', market, billing),
     ...rows('environments', prod, staging, adas, guarded, billed),
-    ...rows('secrets', token, database, stripe, flag, gone, link, hollow, forked, own, root),
+    ...rows('secrets', token, first, stripe, flag, gone, link, hollow, forked, own, root),
     ...rows('dismissedKeys', dismissed(staging, 'FLAG')),
     ...rows('roles', role(true, 'owner', READS), role(true, 'member', []), role(false, 'viewer', READS, ['secret.use'])),
     ...rows('principals', principal(ada), principal(bo), principal(cy, { role: 'owner' }), principal(dee), principal(ci)),
     ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'viewer', { environment: staging }), grant(ci, 'viewer', { project: market }), grant(ci, 'viewer', { project: billing })),
     ...rows('credentials', credential('ada', ada), credential('bo', bo), credential('cy', cy), credential('dee', dee), credential('ci', ci, { scope: scope() }), credential('ci-sensitive', ci, { scope: scope({ sensitive: true }) })),
   );
+  const database = await rewrite(vault, first, 'postgres://prod');
   return { market, billing, prod, staging, adas, guarded, billed, token, database, stripe, flag, link, forked, own, root };
 }
 
