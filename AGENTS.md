@@ -27,6 +27,20 @@ dev IdP's launcher (`dev/idp`) and the seed. `scripts/` holds what dev, tests an
 `package.json` scripts are the source of truth for commands; this file only adds what
 they leave implicit.
 
+## Writing code here
+
+- A function takes at most 10 arguments, in SQL and in TypeScript. More needs a written reason at the function.
+  Defaults, named notation, a session setting or a wrapper object that hides the count are not fewer arguments.
+  `packages/db/test/collapse.test.ts` lists the SQL functions over the limit; the list only shrinks.
+- No mode flags. A boolean or nullable argument that picks a code path means two functions.
+- A rule lives once, in one language. No SQL copy of a TypeScript check.
+- What a deployment's config fixes is not passed on each call.
+- No code for a state that cannot exist. If the upgrade check, a constraint or a type rules it out, nothing handles it.
+- Every lock, cache and special case names the failing test or the measurement that needs it. One with neither is deleted.
+- Before adding a branch for an edge case, try to make the case impossible.
+- Comments say what the code does now, in plain sentences. No worker, task, decision or review IDs, no history.
+- Prefer the PR that deletes.
+
 ## Packages
 
 A package imports another only by name (`@coffre/core/vault`, never
