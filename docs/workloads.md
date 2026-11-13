@@ -492,7 +492,9 @@ const coffre = await workload({ url: 'https://secrets.acme.example', service: 'w
 coffre trust web --azure --tenant <tid> --object <managed identity's object id> --audience api://coffre-acme
 ```
 
-`audience` is coffre's Entra application ID URI. Entra mints only for a
+`audience` is the resource Entra mints coffre's tokens for. A v1 token's
+audience is that resource's application ID URI, as above, or its client ID;
+with a v2 issuer it is the API's client ID. Entra mints only for a
 registered audience, so the token cannot name the key (see the limits).
 `azure({ audience, clientId })` picks a user-assigned identity.
 
