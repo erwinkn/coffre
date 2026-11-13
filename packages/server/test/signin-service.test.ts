@@ -297,7 +297,7 @@ test('a first sign-in with an invited email binds the account and opens a browse
 
   const rows = await auditRows();
   // The sign-in's entry rides its session's issue, a change, and the link is an event: a request's changes take their
-  // numbers before its events (K1, #581), so the sign-in lists first.
+  // numbers before its events, so the sign-in lists first.
   assert.deepEqual(rows.map((row) => `${row.action} ${row.decision} ${row.actorId}`), [
     `sign_in allow ${DEV}`,
     `account.link allow ${DEV}`,
