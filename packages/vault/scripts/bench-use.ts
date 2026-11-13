@@ -205,10 +205,10 @@ async function run(): Promise<void> {
   const text = legacy
     ? `SELECT * FROM use_credential_0022($1, $2, $3, $4, 4::smallint, $5, $6, $7, NULL, NULL, NULL, $8, $9)`
     : args.json && args.cover
-      ? `SELECT ${args.function}($1, $2, $3, $4, 4::smallint, $5, $6, $7, $12, $13, $14, $8, $9, $10, $11, p_decided => true)::text AS r`
+      ? `SELECT ${args.function}($1, $2, $3, $4, 4::smallint, $5, $6, $7, $12, $13, $14, $8, $9, $10, $11, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL)::text AS r`
       : args.json
-      ? `SELECT ${args.function}($1, $2, $3, $4, 4::smallint, $5, $6, $7, NULL, NULL, NULL, $8, $9, $10, $11)::text AS r`
-      : `SELECT * FROM ${args.function}($1, $2, $3, $4, 4::smallint, $5, $6, $7, NULL, NULL, NULL, $8, $9, $10, $11)`;
+      ? `SELECT ${args.function}($1, $2, $3, $4, 4::smallint, $5, $6, $7, NULL, NULL, NULL, $8, $9, $10, $11, NULL, NULL, NULL, NULL, false, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL)::text AS r`
+      : `SELECT * FROM ${args.function}($1, $2, $3, $4, 4::smallint, $5, $6, $7, NULL, NULL, NULL, $8, $9, $10, $11, NULL, NULL, NULL, NULL, false, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL)`;
   // Each pair's last entry, its cover (`--cover`).
   const covers = new Map<Pair, { number: string; at: number; request: string }>();
   const call = async (pair: Pair, cached: boolean): Promise<{ rows: Record<string, unknown>[] }> => {

@@ -1147,11 +1147,11 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
         asked.push({ label: `${label} ${name}`, call: calls.at(-1)! });
       }
     }
-    // Where the map was warm, the route's named call: `use_credential`, its route its last argument but the
-    // passkey policy (`p_passkeys`, named after it), which read no route for one who stands nowhere; where cold,
-    // `use_route`, its gate asked whole.
+    // Where the map was warm, the route's named call: `use_credential`, its route its last parameter but the
+    // passkey policy (`p_passkeys`; `p_gate` between them is a literal), which read no route for one who stands
+    // nowhere; where cold, `use_route`, its gate asked whole.
     const routeAt = (call: HotCall): number => (call.query.includes('use_route') ? 3 : call.args.length - 2);
-    assert.ok(asked.slice(0, 3).every(({ call }) => call.query.includes('use_credential') && call.query.includes('p_passkeys =>') && typeof call.args[routeAt(call)] === 'string'), 'the warm map asked the route\'s named call');
+    assert.ok(asked.slice(0, 3).every(({ call }) => call.query.includes('use_credential') && typeof call.args[routeAt(call)] === 'string'), 'the warm map asked the route\'s named call');
     // `p_light` is `use_route`'s last argument but `p_passkeys` (0073).
     assert.ok(asked.slice(3).every(({ call }) => call.query.includes('use_route') && call.args.at(-2) === false), 'the cold map asked use_route, its gate whole');
     // Every row the file's cases deleted or wrote over dead to every session first: a transaction that could still see
