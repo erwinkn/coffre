@@ -14,7 +14,7 @@ import { Activity, Clock, ShieldCheck, SlashCircle } from './icons';
  */
 export function ReadsLag({ reads, omitted }: { reads: { through: string | null; behind: boolean; forged?: true } | undefined; omitted?: 'path' | 'scope' | undefined }) {
   // 0.15 lists reads on the whole log, by member and by place to whoever reads the whole log, on the page of each place
-  // they read to a reader of some places, and each person's own (D160, T175); this app has no page of a place, and
+  // they read to a reader of some places, and each person's own; this app has no page of a place, and
   // 0.15.0's servers listed none by place (`path`).
   if (omitted !== undefined) {
     return (

@@ -480,7 +480,7 @@ const TEMPLATES: Record<string, Template> = {
     what: () => [],
   },
   // An environment's proxy definitions written in its Proxy tab (0.16, docs/design/proxy-ui.md): each item saved, where
-  // it sends which keys, the sensitive ones an Owner routes (R66), and those removed.
+  // it sends which keys, the sensitive ones an Owner routes, and those removed.
   'proxy.save': {
     did: 'saved the proxy of',
     tried: 'save the proxy of',

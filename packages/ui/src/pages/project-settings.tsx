@@ -137,7 +137,7 @@ function DangerZone({ project }: { project: ProjectSummary }) {
   const { capabilities } = useShell();
   const { pending, error, run } = useAction();
   const isArchived = project.archivedAt !== null;
-  // What archiving it would stop, asked once the dialog opens (D41); Archive waits for the answer.
+  // What archiving it would stop, asked once the dialog opens; Archive waits for the answer.
   const archiving = confirming && !isArchived;
   const { data: lent } = useQuery({ ...queries.references(coffre, project.slug), enabled: archiving });
   const blockers = archiving && lent?.ok === true ? archiveBlockers(project.slug, lent.references) : [];

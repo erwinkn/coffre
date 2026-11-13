@@ -74,7 +74,7 @@ test("what a failed add means: the same answer again, done, new options, or the 
   assert.equal(addOutcome(error(409, 'tampered')), 'refused');
   assert.equal(addOutcome(error(403, 'fresh_check_required')), 'refused');
   // A body that did not arrive whole, as the client reads it (`http_error`): a 409 may be `passkey_exists`, so the
-  // saved answer is sent again, never a new create() (review r2 of #539).
+  // saved answer is sent again, never a new create().
   assert.equal(addOutcome(error(409, 'http_error')), 'unavailable', 'a 409 unread');
   assert.equal(addOutcome(error(401, 'http_error')), 'unavailable', 'a 401 unread');
   assert.equal(addOutcome(error(403, 'http_error')), 'refused');

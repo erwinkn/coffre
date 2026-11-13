@@ -119,7 +119,7 @@ function listDirectory(client: CoffreClient) {
         ...(signsIn === undefined ? {} : { signsIn }),
       }),
     );
-    // How far reads are listed, under 0.15's log, which the counts of what the removed saw are as of (T166).
+    // How far reads are listed, under 0.15's log, which the counts of what the removed saw are as of.
     return { principals, removed, ...(reads === undefined ? {} : { reads }) };
   });
 }
@@ -438,7 +438,7 @@ async function verifyChain(client: CoffreClient) {
  */
 export function withTrees(chain: Awaited<ReturnType<CoffreClient['audit']['verify']>>, whole: boolean, trees: PromiseSettledResult<TreesResult>) {
   if (trees.status === 'fulfilled') return chainResult(chain, whole, trees.value);
-  // Whatever turned it away, a refusal included (access narrowed between the two, review r11): not checked, never "Verified".
+  // Whatever turned it away, a refusal included (access narrowed between the two): not checked, never "Verified".
   const failed = chainUnknown(trees.reason);
   const problem = failed.integrity === 'unknown' ? failed.problem : 'the request was refused (HTTP 403)';
   return { ...chainResult(chain, whole), ...(chain.ok ? { treesFailed: `coffre could not check the sealed log: ${problem}` } : {}) };
@@ -450,7 +450,7 @@ export type TreesResult = Awaited<ReturnType<CoffreClient['audit']['verifyTrees'
 /**
  * 0.15's log checked whole, as a walk from the first entry has it: its trees
  * from the newest checkpoint, and the reads the pages list held to the uses
- * it sealed (`audit.verifyReads`, T166), whose problems are the log's.
+ * it sealed (`audit.verifyReads`), whose problems are the log's.
  */
 export async function wholeTrees(client: CoffreClient): Promise<TreesResult> {
   const [trees, reads] = await Promise.all([client.audit.verifyTrees(), client.audit.verifyReads()]);
@@ -465,7 +465,7 @@ export async function wholeTrees(client: CoffreClient): Promise<TreesResult> {
  * (`trees`) is part of it: what it finds breaks the log as 0.14's would.
  */
 export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['verify']>>, whole: boolean, trees: TreesResult = { kept: false }) {
-  // More entries above the newest checkpoint than a check reads: a checkpointer behind, not a break (review r4 of W240).
+  // More entries above the newest checkpoint than a check reads: a checkpointer behind, not a break.
   const behind = trees.kept && trees.capped;
   if (result.ok && trees.kept && trees.problems.length > 0) {
     const more = trees.problems.length - 1;
@@ -521,7 +521,7 @@ export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['ve
  *   whole intact, quick intact, 0 remaining, sealed log checked → whole
  *   whole intact, quick anything else                         → quick
  *
- * A newer check that could not check the sealed log (review r10) is
+ * A newer check that could not check the sealed log is
  * "anything else": the walk's seal would stand over a log nobody can now
  * say holds.
  */

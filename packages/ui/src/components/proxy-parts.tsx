@@ -1,4 +1,4 @@
-// What the Proxy tab is made of (0.16, T186): the page's pending edits,
+// What the Proxy tab is made of (0.16): the page's pending edits,
 // saved or discarded all at once; the fields, each folding its controls into
 // one input; and the bar, the review, the copy and the release dialogs.
 // `lib/proxy.ts` holds the rules.
@@ -478,8 +478,8 @@ export function AddItem({ edits, onAdded, onCopy }: { edits: Edits; onAdded: (id
 /**
  * The pending changes, each field by field, before they are saved together:
  * what changed first if another save came since; each copied item's keys
- * and destination here (decision 2); the sensitive keys an Owner routes
- * (R66); and how long a change of destination leaves the old one served
+ * and destination here (decision 2); the sensitive keys an Owner routes;
+ * and how long a change of destination leaves the old one served
  * values decided before it (decision 4).
  */
 export function ReviewDialog({ edits }: { edits: Edits }) {
@@ -587,7 +587,7 @@ function Diff({ rows, adding }: { rows: ReturnType<typeof diffOf>; adding: boole
 
 /**
  * Items from another of the project's environments, added here as pending,
- * every field as it is, a route's egress included (R66): the review names
+ * every field as it is, a route's egress included: the review names
  * the keys each will send here, and where. One this environment cannot take
  * says why.
  */

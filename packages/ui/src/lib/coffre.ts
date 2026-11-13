@@ -31,7 +31,7 @@ export function statusOf(error: unknown): number | undefined {
  * lost. Not a refusal: nothing is to be undone, and what it touched is to be
  * read again. A read so answered is no such thing: it read nothing, and a
  * change that reads before it writes (an invite looks for the person first)
- * stopped there, so it failed, and may be retried (review r6 of #539).
+ * stopped there, so it failed, and may be retried.
  */
 export function landedUnread(error: unknown): boolean {
   return (

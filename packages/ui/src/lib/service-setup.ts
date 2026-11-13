@@ -55,7 +55,7 @@ export function serviceProjects(holder: Holder): ProjectSummary[] {
 /**
  * What a service's new token or binding will not read, as the server said
  * (`withheld`), in a sentence: the sensitive values of these places, which
- * only one an Owner of their project issues reads (R32). Null for none.
+ * only one an Owner of their project issues reads. Null for none.
  *
  *   ['backend/dev']   It will not read the sensitive values of backend/dev: only one an Owner of backend issues does.
  */
@@ -78,7 +78,7 @@ export function tokenLifetimes(maxDays: number): number[] {
 /**
  * The lifetime the token form shows and sends: the one picked (`null` before any is), while the deployment still offers
  * it, else the default. The maximum can drop under a mounted form (a refresh of `/api/me`), and a pick it no longer
- * offers would be sent anyway and refused (review r2 of #516).
+ * offers would be sent anyway and refused.
  */
 export function tokenLifetime(picked: number | null, maxDays: number): number {
   return picked !== null && tokenLifetimes(maxDays).includes(picked) ? picked : serviceTokenDefaultDays(maxDays);

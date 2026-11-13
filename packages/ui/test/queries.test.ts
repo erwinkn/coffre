@@ -269,13 +269,13 @@ test('the audit page loads its entries and its verification together, and a chec
   const failing = await load(intact, Promise.reject(new Error('connection refused')));
   assert.equal(failing.chain?.integrity, 'intact');
   assert.equal((failing.chain as { treesFailed: unknown }).treesFailed, 'coffre could not check the sealed log: the request never got an answer');
-  // Refused, as when access narrows between the two checks (review r11): not checked either, and no earlier walk's seal over it.
+  // Refused, as when access narrows between the two checks: not checked either, and no earlier walk's seal over it.
   const refusedTrees = await load(intact, Promise.reject(new CoffreError(403, 'forbidden', 'forbidden')));
   assert.equal(refusedTrees.chain?.integrity, 'intact');
   assert.equal((refusedTrees.chain as { treesFailed: unknown }).treesFailed, 'coffre could not check the sealed log: the request was refused (HTTP 403)');
   const walked = { ...chainResult(await intact(), true), trees: { checkpoint: null } } as ChainResult;
   assert.equal(shownChain(refusedTrees.chain!, walked), refusedTrees.chain);
-  // More above the newest checkpoint than a check reads (review r4 of W240): a checkpointer behind, never a broken log, nor
+  // More above the newest checkpoint than a check reads: a checkpointer behind, never a broken log, nor
   // "Verified", nor an earlier walk's seal over it.
   const capped = (await load(intact, { ...trees, ok: false, unsealed: 2_000, capped: true })).chain as ChainResult & { treesBehind: boolean; treesFailed: string; trees: { pending: number } };
   assert.equal(capped.integrity, 'intact');
@@ -509,7 +509,7 @@ test('the page shows a break either check found, and the walk from the first ent
   assert.equal(shownChain(broken, walked), broken);
   assert.equal(shownChain(intact(12_000, false), walked)?.integrity === 'intact' && (shownChain(intact(12_000, false), walked) as { remaining: number }).remaining, 12_000);
   assert.equal(shownChain(unknown, walked), unknown);
-  // A newer check whose check of the sealed log could not run says so over the walk's seal (review r10).
+  // A newer check whose check of the sealed log could not run says so over the walk's seal.
   const unchecked = { ...intact(0, false), treesFailed: 'coffre could not check the sealed log: the request failed with HTTP 503' } as ChainResult;
   assert.equal(shownChain(unchecked, walked), unchecked);
 });

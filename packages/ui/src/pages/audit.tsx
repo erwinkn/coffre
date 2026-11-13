@@ -54,9 +54,9 @@ export function AuditPage() {
     setWhole(null);
     let verdict: ChainResult;
     try {
-      // 0.15's log, where the instance keeps it, checked again as on a visit, from its newest checkpoint, beside the walk
-      // (R42). Nothing walks it whole on a request: its cost is the database's to shape.
-      // And the reads the pages list, held to the uses the log sealed (T166): the whole log's check alone reads them.
+      // 0.15's log, where the instance keeps it, checked again as on a visit, from its newest checkpoint, beside the walk.
+      // Nothing walks it whole on a request: its cost is the database's to shape.
+      // And the reads the pages list, held to the uses the log sealed: the whole log's check alone reads them.
       const trees = Promise.allSettled([wholeTrees(client)]);
       const chain = await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through }));
       verdict = withTrees(chain, true, (await trees)[0]);

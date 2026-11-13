@@ -1,4 +1,4 @@
-// The Proxy tab's rules, without React (0.16, T186; docs/design/proxy-ui.md):
+// The Proxy tab's rules, without React (0.16; docs/design/proxy-ui.md):
 // what an environment's credential proxy holds, the deployment's code's items
 // and the environment's own, inherited through its fork's parents; the page's
 // pending edits, one Save for all of them; and the words the page shows.
@@ -48,7 +48,7 @@ export const ENCODINGS: readonly ProxyHmac['encoding'][] = ['hex', 'base64', 'ba
 
 /**
  * One item of the environment's proxy, wherever it is defined: in the
- * deployment's code (shown locked, R66), in this environment, or in a parent
+ * deployment's code (shown locked), in this environment, or in a parent
  * of its fork, which it inherits by name (decision 6).
  */
 export type ProxyItem = {
@@ -196,7 +196,7 @@ export type Editor = {
   keys: readonly SecretKey[];
   /** Whether they may save here now (`ProxyPage.editable`). */
   editable: boolean;
-  /** An Owner of the project, whose save routes its sensitive keys, audited (R66). */
+  /** An Owner of the project, whose save routes its sensitive keys, audited. */
   routesSensitive: boolean;
   /** The names code defines, and those code reserved before (`ProxyPage.reserved`). */
   code: readonly ProxyItem[];
@@ -293,8 +293,8 @@ export function rowsOf(items: readonly ProxyItem[], drafts: Drafts, editor: Edit
 /**
  * How the keys an item sends stand for its editor, as the vault clears them
  * at save (section 8): a key they read is theirs to route; a sensitive one,
- * which no person reads, only an Owner of the project routes, audited (R66),
- * a reference as any key here (R71); any other they cannot read, they may
+ * which no person reads, only an Owner of the project routes, audited,
+ * a reference as any key here; any other they cannot read, they may
  * not. A key the place lacks yet is accepted: the route serves once it is set.
  */
 export function keyStanding(names: readonly string[], editor: Pick<Editor, 'keys' | 'routesSensitive'>): KeyStanding {
@@ -459,7 +459,7 @@ export function fieldOf(problem: string, name: string, kind: ProxyKind): { field
 /**
  * The refusal, in words, of keys the editor may not route: those they cannot
  * read, and sensitive ones, which only an Owner of the project routes, a
- * reference to another project's as any key here (R71).
+ * reference to another project's as any key here.
  *
  *   "BILLING_KEY is sensitive: only an Owner of market routes it."
  */
@@ -483,7 +483,7 @@ export function routedInWords(keys: readonly string[]): string {
  * code, never its reason's text): which key no longer clears, why, and who
  * clears it again. The key is held in the mark's environment, a fork's
  * parent for an inherited one, of the place's project, whose Owners route
- * its sensitive keys (R66, R71).
+ * its sensitive keys.
  *
  *   "gemini does not route now: lead@acme.example, who saved it, does not read OPENAI_API_KEY in market/dev. Someone who does saves it again."
  *   "stripe does not route now: STRIPE_KEY is sensitive, and pat@acme.example, who saved it as an Owner of market, no longer is one. An Owner of market saves it again."

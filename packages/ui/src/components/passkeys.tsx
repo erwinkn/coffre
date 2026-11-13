@@ -256,7 +256,7 @@ function AddPasskeyDialog({ open, onOpenChange, member }: { open: boolean; onOpe
       },
       (failure: unknown) => {
         // Anything but a refusal offers a retry, an unreadable 200 (`unreadable`, which `addOutcome` reads as an add's
-        // `exists`) included (review r3 of #539).
+        // `exists`) included.
         if (current) setStep(addOutcome(failure) === 'refused' ? { refused: failureMessage(failure) } : 'unavailable');
       },
     );
@@ -278,7 +278,7 @@ function AddPasskeyDialog({ open, onOpenChange, member }: { open: boolean; onOpe
 
   async function press(current: AddStep) {
     // This step's own slot: the dialog closed and opened again meanwhile gives the next step another, which this press
-    // must neither fill nor send from (review of #539 by Fable 5.1).
+    // must neither fill nor send from.
     const mine = unsent.current;
     setBusy(true);
     setError(null);
@@ -546,7 +546,7 @@ function RemovePasskeyDialog({
 /**
  * The Projects page's prompt, under `optional`, to a person holding no passkey (section 3.3): Add a passkey, which
  * signs in again to add it, or Not now, which puts it off in this browser for 30 days. An Owner's reset of theirs is
- * said first, and shows it again after a Not now pressed before the reset (review r1 of #539).
+ * said first, and shows it again after a Not now pressed before the reset.
  */
 export function PasskeyPrompt() {
   const { passkeys, principal, auth } = useShell();

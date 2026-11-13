@@ -14,7 +14,7 @@ const Route = pageRoute<typeof passkey>();
 /**
  * What `GET /api/auth/passkey` asks the browser for: a touch (`get()`), or a new passkey (`create()`), in WebAuthn's
  * JSON form, with the sealed `state` the answer goes back with: a step-up's, or the user handle this GET drew for a new
- * passkey (D173).
+ * passkey.
  */
 type Step =
   | { purpose: 'signin' | 'step-up'; email: string; options: RequestJSON; state?: string }

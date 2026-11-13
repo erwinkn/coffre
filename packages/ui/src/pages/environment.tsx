@@ -1265,7 +1265,7 @@ function SecretRow({
   const [breaking, setBreaking] = useState<string | null>(null);
   const [regenerating, setRegenerating] = useState(false);
   const [lentOpen, setLentOpen] = useState(false);
-  // Archiving a key others read through references waits until they are broken (D41).
+  // Archiving a key others read through references waits until they are broken.
   const [archiveBlocked, setArchiveBlocked] = useState(false);
   const blockers = archiveBlockers(`${project}/${environment}/${entry.key}`, lent);
   // Making or breaking a reference, or marking it: its refusal shows under the row, as a reveal's does.

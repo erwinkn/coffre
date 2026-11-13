@@ -102,7 +102,7 @@ export function nameProblem(name: string): string | null {
  * What a failed add means for its dialog (`POST /members/:member/passkeys`):
  * - `unavailable`: no answer to go by (the network, a 5xx, a 408 or 429, a 409 `changed`, a 401 or 409 unread). The server may have added
  *   it, so the next press sends the same answer again, never asks the authenticator for another: a second `create()`
- *   could replace on the device a passkey coffre holds (as `sendPasskey`, review r7 of #500).
+ *   could replace on the device a passkey coffre holds (as `sendPasskey`).
  * - `exists`: that answer was added already, as when the first send's answer was lost (a 409 `passkey_exists`, or the
  *   200 itself, `unreadable`). Done.
  * - `again`: the options lapsed, the session changed, the person's passkeys changed, or the authenticator's answer did
@@ -116,7 +116,7 @@ export function addOutcome(error: unknown): AddOutcome {
   if (error.status >= 500 || error.status === 408 || error.status === 429) return 'unavailable';
   if (error.status === 409 && error.reason === 'changed') return 'unavailable';
   // A 401 or 409 whose body did not arrive whole (the client's `http_error`): those are the statuses of `passkey_exists`
-  // and of a refusal that keeps the answer, so it is not read as a refusal (as `passkeyAnswer`, review r2 of #539).
+  // and of a refusal that keeps the answer, so it is not read as a refusal (as `passkeyAnswer`).
   if ((error.status === 401 || error.status === 409) && error.code === 'http_error') return 'unavailable';
   if (error.reason === 'passkey_exists' || error.code === 'unreadable') return 'exists';
   if (error.reason === 'state_mismatch' || error.code === 'touch_failed') return 'again';
