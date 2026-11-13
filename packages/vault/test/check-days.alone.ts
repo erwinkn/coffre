@@ -1,12 +1,12 @@
-// The audit page's check plans and locks the same however many days of uses the log keeps (T277, D200; audit-check.ts,
+// The audit page's check plans and locks the same however many days of uses the log keeps (audit-check.ts,
 // `checkRead`). Its one statement bounds the uses above the newest checkpoint by that row's floor of `at`, a value of
 // the statement's own, which Postgres cannot prune `log_uses`' day partitions by: without the signer's floor beside it,
 // a constant, every visit planned and locked every day kept (without it, measured here: 380 locks and 290 planning
 // buffers at 104 days, against 83 and 92 at 5; 0054 was the same for `log_reads`). The 0.15 page check (`verifyTrees`) reads through the same
 // statement, its bound the pairs held outside. Both are held here, at a handful of days and at a hundred more, and the
 // beat's statement too, the visit's with the first checkpoint above the cursor (`next`): a seek on `log_checkpoints`'
-// primary key, `upto`, which grows with the checkpoints kept only by the B-tree's depth (review r3 of #587, measured: 2
-// buffers at 200 checkpoints, 4 at 1,000,200). The growth sweep holds it to that once the beat runs (P3's swap).
+// primary key, `upto`, which grows with the checkpoints kept only by the B-tree's depth (measured: 2
+// buffers at 200 checkpoints, 4 at 1,000,200). The growth sweep holds it to that once the beat runs.
 //
 // It runs alone, after the suite (scripts/test-suite.sh), as use-days.alone.ts does and for its reason: a commit of
 // thousands of catalog changes elsewhere in the cluster makes a backend plan everything again.
@@ -79,7 +79,7 @@ async function work({ query, params }: Sent): Promise<{ planning: number; locks:
   }
 }
 
-test('D200: a visit\'s check, the beat\'s and the 0.15 page check plan and lock the same at a handful of days and at a hundred more', { timeout: 300_000 }, async () => {
+test('a visit\'s check, the beat\'s and the 0.15 page check plan and lock the same at a handful of days and at a hundred more', { timeout: 300_000 }, async () => {
   const seed = randomBytes(32);
   const mac = logMacKey(seed);
   const log = logWriter(db.owner, mac);

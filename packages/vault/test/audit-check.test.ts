@@ -1,5 +1,5 @@
-// The audit page's check, flat (T277; audit-check.ts; state-rows.md, section 4, "What a visit's check catches"): one
-// test per row of that table a visit catches, for a database writer with no key, and its cost, one statement at two
+// The audit page's check, flat (audit-check.ts): one
+// test per thing a visit catches, for a database writer with no key, and its cost, one statement at two
 // sizes of the log.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -71,7 +71,7 @@ const asRow = (e: AuditEvent): AuditEventRow => ({ ...e, number: String(e.number
 
 /** The cursor as the projector signs it, listed through `through`, at `at`. */
 function cursor(mac: LogMacKey, through: bigint, at: number): AuditCursorRow {
-  // P1's interim `oldFloor` and `oldTop` are outside the MAC: any value signs the same.
+  // The cursor's interim `oldFloor` and `oldTop` are outside the MAC: any value signs the same.
   const c = { through, pair: through, at, oldFloor: 0n, oldFrom: 0n, oldTop: 0n, oldHash: Buffer.alloc(32) };
   return { through: String(through), pair: String(through), at, oldFrom: '0', oldHash: c.oldHash.toString('hex'), mac: cursorMac(mac, c).toString('base64') };
 }
@@ -253,7 +253,7 @@ test('the cursor put back: shown, listed through less than the checkpoint; the c
   const moved = await v.check({ ...v.input, cursor: { ...cursor(v.mac, old.through, old.at), through: String(v.upto()) } });
   assert.equal(moved.state, 'broken');
   assert.match(moved.reason!, /audit cursor is not the projector's/);
-  // Retention's `reads_from` and P1's interim `old_floor`, `old_top` carry no MAC, and nothing reads them.
+  // Retention's `reads_from` and the cursor's interim `old_floor`, `old_top` carry no MAC, and nothing reads them.
   const extra = { ...cursor(v.mac, old.through, old.at), readsFrom: '999', oldFloor: '5', oldTop: '7' } as AuditCursorRow;
   assert.equal((await v.check({ ...v.input, cursor: extra })).state, 'ok');
 });
@@ -285,7 +285,7 @@ async function insertEntry(tx: Queryable, f: LogFields, prev: Buffer, mac: Buffe
     VALUES (${f.seq}, ${f.author}, ${f.keyId}, ${f.occurredAt}, ${f.actor}, ${f.action}, ${f.decision}, ${f.metadata}, ${prev}, ${mac}, ${hash})`);
 }
 
-/** The upgrade's anchor change, naming `anchor`, as V1's step writes it (upgrade.ts), under `mac`. */
+/** The upgrade's anchor change, naming `anchor`, as the upgrade step writes it (upgrade.ts), under `mac`. */
 async function anchored(mac: LogMacKey, anchor: { seq: bigint; hash: Buffer }): Promise<void> {
   const row = { at: Date.now(), requestId: UPGRADE_REQUESTS.anchor, object: ANCHOR_OBJECT, actor: UPGRADE_ACTOR, payload: anchorPayload(anchor, anchor, 'outside'), seal: null };
   await db.owner.transaction(async (tx) => {
@@ -368,8 +368,8 @@ async function vaulted() {
     sealThrough: sealed, heldOutside: async () => (memory.record === null ? [] : [decodePair(memory.record)!]),
     reached: () => reachedOf(signer.cp, signer.sealing),
   });
-  // Its first call starts its log, with the root's change. Until A1 moves the writers off it, it appends to
-  // `audit_log` too: anchored here, as the upgrade anchors the frozen log of a database that ran 0.15.
+  // Its first call starts its log, with the root's change. It appends to `audit_log`
+  // too: anchored here, as the upgrade anchors the frozen log of a database that ran 0.15.
   assert.equal((await vault.access('user:root@acme.example')).role, 'owner');
   const [last] = await rows<{ seq: string; hash: Buffer }>(db.owner, sql`SELECT seq::text AS seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1`);
   await anchored(logMacKey(seed), { seq: BigInt(last!.seq), hash: last!.hash });
@@ -484,7 +484,7 @@ function counting(): { db: Database; statements: () => number; transactions: () 
   return { db: createDatabase(counted(pool)), statements: () => statements, transactions: () => transactions, close: () => pool.end() };
 }
 
-test('D200: a visit\'s check is one statement, no transaction, at 2,000 and at 20,000 entries', { timeout: 300_000 }, async () => {
+test('a visit\'s check is one statement, no transaction, at 2,000 and at 20,000 entries', { timeout: 300_000 }, async () => {
   const v = await logged();
   const counter = counting();
   const measured: Record<number, { statements: number; transactions: number }> = {};

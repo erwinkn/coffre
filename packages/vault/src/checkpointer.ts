@@ -165,7 +165,7 @@ export function heldIn(record: string | null): PairNotes[] {
 }
 
 /**
- * What the signer answers `check`, in one ask, before the database is read (T277; state-rows.md, section 3): the pair
+ * What the signer answers `check`, in one ask, before the database is read: the pair
  * the database must have reached (`Checkpointer.reached`), the one it is writing, and whether it seals (`sealingOf`).
  * A signer that is not open answers no pair, and why: it cannot tell a write still in flight from a deleted
  * checkpoint, and `check` says `late` with its reason.
@@ -649,7 +649,7 @@ export class Checkpointer {
   }
 
   /**
-   * The pairs the database may be at, for `check` (T277; state-rows.md, section 3): the newest the signer wrote, and the
+   * The pairs the database may be at, for `check`: the newest the signer wrote, and the
    * one it is writing, signed and perhaps remembered, not known to be written. The signer remembers a pair before the
    * database has it, so for the length of one write the database is honestly one pair below its memory; it is never below
    * `pair`.

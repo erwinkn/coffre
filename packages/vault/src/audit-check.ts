@@ -5,21 +5,16 @@ import { VOUCHED_AT_ONCE, type AuditCursorRow, type AuditEventRow, type CheckInp
 import type { Database } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 
-
-import { cursorVouched, eventColumns, eventVouched, type AuditCursor, type AuditEvent, type SignedCursor } from './audit-rows.ts';
-import { keyringOf, type Keyring, type VerifierKeys, entryVouched, openUnder } from './keyring.ts';
-import { changeEvent, readEvent } from './projection.ts';
-import { derive, newestHeld, rangeAt, sealedCut, sealedRange, type ReadsStore } from './reads.ts';
-import { UPGRADE_REQUESTS, type AnchorPayload, parseAnchor } from './upgrade.ts';
+import { cursorVouched, eventColumns, eventVouched, type AuditCursor, type AuditEvent } from './audit-rows.ts';
 import type { Reached } from './checkpointer.ts';
+import { entryVouched, keyringOf, openUnder, type Keyring, type VerifierKeys } from './keyring.ts';
 import type { LogMacKey } from './log-entry.ts';
 import { eventRow, findingEventId } from './note.ts';
-
-import { logEvents, changeHoldsUnder } from './store.ts';
+import { changeEvent, readEvent } from './projection.ts';
+import { derive, newestHeld, rangeAt, sealedCut, sealedRange, type ReadsStore } from './reads.ts';
 import { parseAnchor, UPGRADE_REQUESTS } from './upgrade.ts';
-
-import { checkTrees, floorOf } from './verifier.ts';
 import { changeHoldsUnder, logEvents } from './store.ts';
+import { checkTrees, floorOf } from './verifier.ts';
 
 // The audit's two checks. `checkAudit`, the page's and the beat's: flat, the newest checkpoint and what lies above it,
 // whatever the log holds. `checkListed`, `coffre verify log`'s: the audit projection's listing held to the sealed log,
@@ -34,7 +29,7 @@ import { changeHoldsUnder, logEvents } from './store.ts';
 export const CHECK_TAIL_ENTRIES = USES_IN_FLIGHT;
 
 /**
- * The audit page's check, flat (0.16, T277; D200; state-rows.md, sections 3 and 4): what the vault's `check` answers,
+ * The audit page's check, flat: what the vault's `check` answers,
  * and, for the beat (`projectorStopped`), `listed`, the cursor when its MAC holds, and `unlisted`, the first checkpoint
  * above it when asked (`CheckOptions.beat`): its place, and the time it was signed. The walk opens only the newest
  * checkpoint, so this one is held here to its notes and its place, as the walk holds each row it opens: one that opens
@@ -47,14 +42,14 @@ export const CHECK_TAIL_ENTRIES = USES_IN_FLIGHT;
  * signed (a constant, so that Postgres reads no day below it: `checkRead`), the rotations (only where a key was
  * replaced), the frozen log's anchor and its last entry. Then CPU alone: the pair's signatures against the signer's
  * (`verifyLog`), each entry above it by its MAC and request, the rows the page shows and its cursor by their MACs
- * (audit-rows.ts, P1's), and the frozen log's last entry against the anchor. It writes nothing. Its cost is the rows
+ * (audit-rows.ts), and the frozen log's last entry against the anchor. It writes nothing. Its cost is the rows
  * handed in and what lies above the newest checkpoint, whatever the log holds.
  *
  * Retention's floor is not read: below the newest checkpoint nothing is walked, and the cursor's `reads_from`, which
  * no MAC covers, is never taken (`FloorSealed`, formal/Reads.tla). The full walk (`coffre verify log`) takes it from the
  * sealed retention change.
  *
- * What it catches, for a database writer with no key (section 4): an entry above the checkpoint forged or altered (its
+ * What it catches, for a database writer with no key: an entry above the checkpoint forged or altered (its
  * MAC), a checkpoint deleted or an older one served (`behind`: below the pair the signer wrote), a row shown altered
  * (its MAC: `forged`), the cursor put back (`listedThrough` falls behind `checkpoint`; altered, its MAC; past the
  * newest checkpoint, `behind`), the frozen log cut or extended (its last entry is not the anchor's). A signer that is
@@ -93,7 +88,7 @@ export async function checkAudit(db: Database, keys: VerifierKeys, input: CheckI
     next: options.beat === true && cursor !== null ? cursor.through : null,
   });
   const forged = shown.flatMap((row, i) => (row === null || !eventVouched(ring, row) ? [i] : []));
-  // The cursor's interim columns (P1's `old_floor`, `old_top`) are outside its MAC and not in `AuditCursorRow`: filled
+  // The cursor's interim columns (`old_floor`, `old_top`) are outside its MAC and not in `AuditCursorRow`: filled
   // so that their order holds whatever the five say, they leave the verdict to the MAC alone.
   const listed = cursor !== null && cursorVouched(ring, { ...cursor, oldFloor: 0n, oldTop: cursor.oldFrom }) ? cursor : null;
   // The newest checkpoint, as its signatures open it: the walk's own when it found nothing wrong, else the row's, which
@@ -151,7 +146,7 @@ function uptoOf(notes: PairNotes): bigint {
 }
 
 /**
- * Why the projection counts as stopped, or null (state-rows.md, section 3): its cursor, MAC held, with a checkpoint
+ * Why the projection counts as stopped, or null: its cursor, MAC held, with a checkpoint
  * above it signed more than two beats ago, so what it has not listed has waited that long. Not the cursor's own `at`:
  * that is the time of the pair it stands at, an hour old after a quiet hour, when the first checkpoint after it is a
  * tick old and the projector a moment from listing it. The beat fails its run on it, with no finding.
@@ -163,7 +158,7 @@ export function projectorStopped(listed: Checked['listed'], unlisted: Checked['u
 }
 
 /**
- * The beat's finding (state-rows.md, section 3): an `audit.finding` event of the vault's, through `log_events` as
+ * The beat's finding: an `audit.finding` event of the vault's, through `log_events` as
  * `note` writes one, under `findingEventId` of the checkpoint and the state, so that it is written once however many
  * beats see it. Its detail is `audit_log`'s finding's, the reason the UI shows (`audit-sentences.ts`), with the state
  * and the checkpoint. A beat that finds the event under its id, for this reason or another, writes nothing: the id
@@ -194,12 +189,12 @@ export async function writeFinding(db: Database, macs: readonly LogMacKey[], che
 }
 
 /**
- * Why the frozen log is not what the upgrade anchored, or null when it is (state-rows.md, section 6; upgrade.ts,
+ * Why the frozen log is not what the upgrade anchored, or null when it is (upgrade.ts,
  * `parseAnchor`'s four cases): with an anchor, its MAC and its payload hold, and the log's last entry is the one it
  * names, by seq and by its hash computed again from its columns, so a row altered keeps no stored hash that passes.
  * With none, the frozen log must be empty (a database born on 0.16, where the upgrade writes no anchor): old rows and
- * no anchor are `broken` (state-rows.md, "No anchor and old rows"). The check asks nothing more: no proof that the
- * upgrade ran (V1 has none).
+ * no anchor are `broken`. The check asks nothing more: no proof that the
+ * upgrade ran.
  *
  * Left to the recheck: the anchor and every old row deleted together read as a database born on 0.16. The anchor is
  * a sealed change, and deleting one is the recheck's to catch (the signed tree no longer holds it), as any change
@@ -231,7 +226,7 @@ function base64(text: unknown, length: number): Buffer | null {
   return bytes.length === length && bytes.toString('base64') === text ? bytes : null;
 }
 
-/** A row the page handed in, as P1's `AuditEvent`; null for one no projector writes, which is then `forged`. */
+/** A row the page handed in, as `AuditEvent`; null for one no projector writes, which is then `forged`. */
 function eventOf(raw: unknown): AuditEvent | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const r = raw as Partial<Record<keyof AuditEventRow, unknown>>;
@@ -254,7 +249,7 @@ function eventOf(raw: unknown): AuditEvent | null {
 
 /**
  * The cursor the page handed in, the five columns its MAC covers (`AuditCursorRow`); null for one the projector never
- * writes. P1's interim `old_floor` and `old_top`, and retention's `reads_from`, carry none, and nothing here reads them.
+ * writes. The cursor's interim `old_floor` and `old_top`, and retention's `reads_from`, carry none, and nothing here reads them.
  */
 function cursorOf(raw: unknown): Omit<AuditCursor, 'oldFloor' | 'oldTop'> | null {
   if (typeof raw !== 'object' || raw === null) return null;

@@ -432,7 +432,7 @@ export interface Vault {
    */
   rebuildAudit?(input: RebuildAuditInput): Promise<{ number: string }>;
   /**
-   * The beat's one call (0.16, T277; state-rows.md, section 3, "The watch after"): `check` with no rows, the cursor's
+   * The beat's one call: `check` with no rows, the cursor's
    * row handed in as the page hands it, and, when the state is not `ok`, the finding, an `audit.finding` event the vault
    * writes itself (author `vault`, actor `system:vault`, id `findingEventId`), through `log_events` as `note` writes
    * one, in a statement of its own. Written once however many beats see it: a beat that finds the same checkpoint in the
@@ -442,7 +442,7 @@ export interface Vault {
    * `projector`, null unless the projection has stopped: a checkpoint above the cursor signed more than two beats
    * (`everyMs`, the deployment's beat period) ago, so what it has not listed has waited that long (the cursor's own
    * `at` is the time of the pair it stands at, an hour old after a quiet hour). The app fails its run on it; it writes
-   * no finding, since nothing is wrong with the log. Nothing calls it yet (P3's swap). Only with 0.15's log on.
+   * no finding, since nothing is wrong with the log. Nothing calls it yet. Only with 0.15's log on.
    *
    *   beat({ cursor, everyMs: 300_000 }) on a checkpointer stuck at 4410
    *   → { state: 'late', finding: 'system:vault/finding:4410:late', projector: null, … }

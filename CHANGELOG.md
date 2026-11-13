@@ -94,7 +94,7 @@
   newest `settings.change` and `key.rotate` entries of `audit_log`. They
   stay empty, and nothing reads them, until the vault's upgrade step.
 - **The vault checks an audit page in one statement, whatever the log
-  holds (`check`, T277).** It asks the signer first, for the pair the
+  holds (`check`).** It asks the signer first, for the pair the
   database must have reached and whether it seals, then reads: the
   newest signed checkpoint against that pair, the entries above it by
   their MACs (more than 1,250, or a checkpointer that does not seal, is

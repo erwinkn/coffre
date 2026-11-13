@@ -102,7 +102,7 @@ export async function logEvents(db: Queryable, events: readonly { at: number; re
 /**
  * Whether the change under `requestId` is the vault's, held to its MAC under any of `macs`; null when there is none.
  * `log_events`' retry match compares the payload and not the MAC, so a writer's row under an event's id passes it: the
- * beat asks this after, so that a finding it did not write never counts as written (T277, review r2).
+ * beat asks this after, so that a finding it did not write never counts as written.
  */
 export async function changeHoldsUnder(db: Queryable, macs: readonly LogMacKey[], requestId: string): Promise<boolean | null> {
   type Read = { at: string | number; request_id: string; object: string; actor: string; payload: string; seal: Buffer | Uint8Array | null; mac: Buffer | Uint8Array };

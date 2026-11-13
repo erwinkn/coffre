@@ -260,7 +260,7 @@ export type VaultOptions = {
    */
   sealing?: () => Promise<Sealing> | Sealing;
   /**
-   * Under 0.15's log, what the signer answers `check` and `beat` before they read the database (`Reached`, T277): the
+   * Under 0.15's log, what the signer answers `check` and `beat` before they read the database (`Reached`): the
    * pairs the database may be at and whether it seals, in one ask. The Node runner's `reached`; on Workers,
    * `durableReached`. Without, `check` and `beat` throw.
    */
@@ -4001,7 +4001,7 @@ class VaultService implements Vault {
   }
 
   /**
-   * The audit page's check, flat (`Vault.check`; T277, audit-check.ts): one ask of the signer, then one statement,
+   * The audit page's check, flat (`Vault.check`, audit-check.ts): one ask of the signer, then one statement,
    * whatever the log holds, and nothing written.
    */
   async check(input: CheckInput): Promise<CheckOutcome> {
@@ -4011,7 +4011,7 @@ class VaultService implements Vault {
   }
 
   /**
-   * The beat's call (`Vault.beat`; T277, audit-check.ts): `check` with no rows, the finding written when it is not
+   * The beat's call (`Vault.beat`, audit-check.ts): `check` with no rows, the finding written when it is not
    * `ok`, and whether the projection has stopped.
    */
   async beat(input: BeatInput): Promise<BeatOutcome> {

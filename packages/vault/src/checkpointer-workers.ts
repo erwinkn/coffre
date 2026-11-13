@@ -387,7 +387,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
           });
         }
         if (call.op === 'reached') {
-          // `check`'s ask (T277): the pairs the database may be at and whether it seals, from the object's own view, as
+          // `check`'s ask: the pairs the database may be at and whether it seals, from the object's own view, as
           // `status` gives it. One evicted is not open until its next tick: no pair, and not sealing.
           return Response.json(reachedOf(this.#checkpointer, this.#sealing()));
         }
@@ -482,7 +482,7 @@ export function durableSealing(namespace: ObjectNamespace, name = 'checkpointer'
 }
 
 /**
- * The pairs the database may be at and whether the object seals (`VaultOptions.reached`, T277), asked for at most 2 s:
+ * The pairs the database may be at and whether the object seals (`VaultOptions.reached`), asked for at most 2 s:
  * an object that does not answer has no pair to give, and does not seal.
  */
 export function durableReached(namespace: ObjectNamespace, name = 'checkpointer'): () => Promise<Reached> {

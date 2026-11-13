@@ -214,7 +214,7 @@ export function floorOf(pairs: readonly PairNotes[]): number | null {
  * the entries above the newest pair are: an honest log has one per key the
  * vault has replaced, so only a writer planting rows of the key object grows
  * them, and that writer can deny a check in cheaper ways; a cap would turn its
- * slow check into a refused one, no safer (Muse's review r8).
+ * slow check into a refused one, no safer.
  */
 async function underKeys(
   read: Pick<CheckRead, 'newest' | 'rotations'>,
