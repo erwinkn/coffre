@@ -555,16 +555,18 @@ test("a 0.15.0 database whose vault cut its log over migrates to this version", 
   assert.equal(await applied(url), KNOWN.length);
 });
 
-test("a database that applied 0022's text from before 0.16.0, which gave the hot login generic plans, migrates on; any other text there is refused", needsCluster, async () => {
+test("a database that applied 0000's or 0022's text from before 0.16.0 migrates on; any other text there is refused", needsCluster, async () => {
   const url = await fresh('setup_migrate_rewritten');
   await migrateDatabase(url);
-  const ledger = (hash: string) => asSuperuser('setup_migrate_rewritten', (client) => client.unsafe(
+  const ledger = (tag: string, hash: string) => asSuperuser('setup_migrate_rewritten', (client) => client.unsafe(
     'UPDATE drizzle.__drizzle_migrations SET hash = $1 WHERE created_at = $2',
-    [hash, journal.entries.find((entry) => entry.tag === '0022_log_015')!.when],
+    [hash, journal.entries.find((entry) => entry.tag === tag)!.when],
   ));
-  await ledger('738dd033a0339eac8218494a5cc43568c1b06ad363cd2aa3c0dfc9c82570a2da');
+  // 0.15.0's texts: 0000 altered and granted the group roles even when they were right, 0022 gave the hot login generic plans.
+  await ledger('0000_baseline', '9d41ba8fdca496e46583f631984217b9d571f08700af891e44652e1f818d78fd');
+  await ledger('0022_log_015', '738dd033a0339eac8218494a5cc43568c1b06ad363cd2aa3c0dfc9c82570a2da');
   await migrateDatabase(url);
-  await ledger('ef'.repeat(32));
+  await ledger('0022_log_015', 'ef'.repeat(32));
   await assert.rejects(migrateDatabase(url), /migration history diverged at 0022_log_015; applied migrations must never be edited/);
 });
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Two databases on one server can run their first migrate at once.**
+  The baseline alters and grants the group roles only where they differ
+  from what it sets, so a new database's migrate writes no shared role
+  row and takes no group's lock once the first has made them. A login
+  without `ADMIN` on `coffre_app` and `coffre_vault` now migrates a new
+  database where they and their memberships are already right. A
+  database that applied the baseline before keeps it, and its ledger's
+  hash of it is accepted.
 - **The app's and the vault's logins get a statement timeout, 60 s.**
   `coffre setup` and every `coffre migrate` give `coffre_runtime` and
   `coffre_vault_runtime` `statement_timeout = '60s'` server-wide, where
