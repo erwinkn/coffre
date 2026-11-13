@@ -9,6 +9,7 @@ import * as schema from '@coffre/db/schema';
 import { and, eq, is, not, sql, type SQL } from 'drizzle-orm';
 import { PgTable } from 'drizzle-orm/pg-core';
 
+import { failureOf } from '../src/failure.ts';
 import { Busy, CHANGE_LOCK, change, commit, drop, part, prepare, put, type Operation, type Parts, type Refusal, type Seen, type Write } from '../src/change.ts';
 import { entryOf, type Said } from '../src/entry.ts';
 import { keyOf, nameOf, sealedBy, shapeOf, type Fresh, type Row, type Sealed } from '../src/rows.ts';
@@ -313,12 +314,19 @@ test('a decision that writes around its read is a fault, not a change', async ()
   assert.deepEqual([(await seenOf(principals)).length, (await rowsOf(vault.owner, sql`SELECT 1 FROM log_pending`)).length], [1, entries]);
 });
 
+/** Busy, which the vault answers as an outage, 503, with Postgres's code for the wait that ended. */
+const busy = (code: string) => (error: unknown) => {
+  assert.ok(error instanceof Busy);
+  assert.deepEqual(failureOf(error), { status: 503, body: { error: error.message, code } });
+  return true;
+};
+
 test('a change that cannot have the lock answers busy, and holds nothing', async () => {
   await done(writing(put(principals, member(ada, 'owner'))));
   const waited = await vault.owner.transaction(async (holder) => {
     await holder.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
     const started = Date.now();
-    await assert.rejects(change(vault, writing(put(principals, member(bo)))), Busy);
+    await assert.rejects(change(vault, writing(put(principals, member(bo)))), busy('55P03'));
     return Date.now() - started;
   });
   assert.ok(waited >= 2000 && waited < 4000, `waited ${waited} ms`);
@@ -335,7 +343,7 @@ test('a write that runs past its bound answers busy, and writes nothing', async 
   await vault.owner.execute(sql`CREATE TRIGGER slow_entry BEFORE INSERT ON log_pending FOR EACH ROW EXECUTE FUNCTION slow_entry()`);
   try {
     const started = Date.now();
-    await assert.rejects(change(vault, writing(put(principals, member(bo)))), Busy);
+    await assert.rejects(change(vault, writing(put(principals, member(bo)))), busy('57014'));
     const ran = Date.now() - started;
     assert.ok(ran >= 5000 && ran < 8000, `ran ${ran} ms`);
   } finally {
@@ -366,7 +374,7 @@ test('a change that keeps losing answers busy', async () => {
     await done(bump(1));
     return vault.db.transaction(...args);
   }) as typeof vault.db.transaction;
-  await assert.rejects(change({ ...vault, db }, bump(100)), Busy);
+  await assert.rejects(change({ ...vault, db }, bump(100)), busy('55P03'));
   assert.equal(writes, 5);
   assert.equal((await seenOf(principals, eq(principals.id, bo)))[0]!.generation, 5, 'none of its own writes landed');
 });

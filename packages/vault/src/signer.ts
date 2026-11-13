@@ -63,7 +63,8 @@ export type Finding = { found: 'forged' | 'replayed' | 'stale' | 'missing' | 're
  * window slides with the signer, not the clock: one that was away takes
  * what waited for it. It bounds what the signer remembers signing, and must
  * outlast the longest a commit and its wake-up take: an entry is dated as
- * its write is sent, and the write is bounded (`WRITE_MS` in change.ts).
+ * its write is sent, and the write is bounded (`LOCK_WAIT_MS` and `WRITE_MS`
+ * in change.ts).
  */
 const FRESH_MS = 60_000;
 /** The most entries one run takes: a tile's worth. More wait for the next, at once. */

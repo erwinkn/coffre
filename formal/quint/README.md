@@ -17,7 +17,9 @@ Three [Quint](https://quint.sh) models of the design in
   against a database writer without the key. `logSound` passes, 74,336,046
   states, with one row, MACs 0 to 2, three entries and two moves by the
   writer; `logTwo` passes, LOGTWO states, with two rows, each there or not,
-  where a change to one is decided on the other. Ten modules, each with one
+  where a change to one is decided on the other (a read row put back with an
+older MAC of its own needs three MACs on two rows, too many states: a test
+in `packages/vault/test/signer.test.ts` holds it). Ten modules, each with one
   protection off, must fail.
   `packages/vault/test/replay-log.ts` replays its runs against the signer on
   Postgres (its header says how).

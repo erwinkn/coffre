@@ -81,10 +81,16 @@ async function untouched(): Promise<void> {
 
 test('a use is dated as its entry is written, and its write gives up after two seconds behind a lock', async () => {
   // Every look at the clock is a second later: the read, the decision, values opened through a slow key service, the write.
-  let last = vault.now();
-  const slow = { ...vault, now: () => (last += 1000) };
+  let [last, step] = [vault.now(), 1000];
+  const slow = { ...vault, now: () => (last += step) };
   assert.ok('values' in (await use(slow, ask('ada', 'market/prod', ['DATABASE_URL']))));
   assert.equal((await logged())[0]!.at, last);
+  // What says Ada has seen the key is dated as the entry is.
+  assert.deepEqual(await rowsOf(vault.owner, sql`SELECT (extract(epoch FROM seen_at) * 1000)::float8 AS at FROM exposures`), [{ at: last }]);
+  // The minute it is logged once in starts at the entry's date: more than a minute after it was decided, it is not logged again.
+  [last, step] = [last + 59_999, 0];
+  assert.ok('values' in (await use(slow, ask('ada', 'market/prod', ['DATABASE_URL']))));
+  assert.equal((await logged()).length, 1);
 
   // Past the minute a use is logged once in, behind someone who holds the row that says Ada has seen the key.
   vault.tick(120_000);

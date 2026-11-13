@@ -343,8 +343,9 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
       SELECT ok FROM cap`) as [{ ok: boolean }];
     if (!ok) return { refused: 'bulk_limit' };
     vault.wake(entry.hash);
-    for (const item of fresh) memory.logged.set(mark(item), { at });
-    keep(memory.logged, mark(fresh[0]!), { at }, at - LOGGED_MS);
+    // Remembered by the entry's own date: the minute a use is logged once in starts there.
+    for (const item of fresh) memory.logged.set(mark(item), { at: written });
+    keep(memory.logged, mark(fresh[0]!), { at: written }, at - LOGGED_MS);
   }
 
   // When the credential was last used: its row's own statement, since it shares one with nothing a change may lock.
