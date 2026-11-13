@@ -36,11 +36,12 @@
 (* a decision checks has an advisory lock of its own, keyed as its changes *)
 (* are in the log (`log_object`), named `@` here. Today those are a        *)
 (* credential, a connection, a binding, a member, a key, its environment,  *)
-(* a reference's source, a proxy's definition, the roles and the policy:   *)
-(* the rule is the statement's seal probes, not this list. A use takes the *)
-(* lock of each object it reads, shared; a change's last statement the     *)
-(* lock of each object it writes, exclusive. So a change makes only the    *)
-(* uses of what it writes wait, for that one statement.                    *)
+(* a reference's source, a proxy's definition, the names reserved for      *)
+(* proxies, a role, the roles and the policy: the rule is the statement's  *)
+(* seal probes, not this list. A use takes the lock of each object it      *)
+(* reads, shared; a change's last statement the lock of each object it     *)
+(* writes, exclusive. So a change makes only the uses of what it writes    *)
+(* wait, for that one statement.                                           *)
 (*                                                                         *)
 (* A two-trip change's hold reads again what the vault decided on and goes *)
 (* ahead only if it answers the same (Writing.tla): it takes the lock of   *)
@@ -72,9 +73,9 @@
 (*   barrier  the checkpointer's: the issue lock exclusive, then the fence *)
 (*            exclusive;                                                   *)
 (*   revoke   the credential revoked (`revoke_credential`, 0034): the      *)
-(*            change lock, the row, the issue lock shared (L1: it compares *)
-(*            the policy under it), the fence shared, the credential's     *)
-(*            lock;                                                        *)
+(*            change lock, the row, the issue lock shared (L1: it orders   *)
+(*            the revoke against the barrier, as its fence did while       *)
+(*            exclusive), the fence shared, the credential's lock;         *)
 (*   use      a use: the fence shared, then the credential's lock and the  *)
 (*            key's, shared.                                               *)
 (* Its protections (scripts/formal.sh turns each off):                     *)
@@ -184,26 +185,35 @@
 (*            new with L1, which orders it against the barrier as it does  *)
 (*            every change; the fence shared, b's lock;                    *)
 (*   barrier  as above.                                                    *)
-(* `change_bindings` has no proc of its own. An unbind, a replacement and  *)
-(* a sweep that revokes take the locks of `app` in Flow = "change": the    *)
-(* change lock, then the rows they write (the bindings', then the          *)
-(* credentials', each by id), the issue lock shared, the fence, their      *)
-(* objects sorted. A replacement locks its members' rows before the change *)
-(* lock, as the add does (MembersFirst), and takes with its objects,       *)
-(* shared, the lock of each key it read by name, as a hold does: until L1  *)
-(* the fence held a rename off between its compare of those names and its  *)
-(* commit. A sign-in through a binding locks the binding's row and takes   *)
-(* no change lock: `issue`. A bind that only makes a binding and a sweep   *)
-(* that only closes take no fence today and no object's lock after. Each   *)
-(* numbers under the issue lock, shared, so the barrier waits for it;      *)
-(* nobody names a binding before its commit, and no use reads `closed`.    *)
+(* `change_bindings` has no proc of its own. An unbind and a sweep that    *)
+(* revokes, a replacement's too, take the locks of `app` in Flow =         *)
+(* "change": the change lock, then the rows they write (the bindings',     *)
+(* then the credentials', each by id), the issue lock shared, the fence,   *)
+(* their objects sorted. A replacement locks its members' rows before the  *)
+(* change lock, as the add does (MembersFirst). A bind that makes a        *)
+(* binding where it takes the fence today (it also ends one outright, or   *)
+(* revokes a credential) takes with its objects, shared, the lock of each  *)
+(* key it read by name, as a hold does: there the fence, exclusive, held a *)
+(* rename off between its compare of those names and its commit. Where it  *)
+(* takes no fence today, the compare stays unlocked, as today: a rename    *)
+(* that commits after it is a rename after the bind. A sign-in through a   *)
+(* binding locks the binding's row and takes no change lock: `issue`. A    *)
+(* bind that only makes a binding and a sweep that revokes no credential,  *)
+(* whether it only closes or makes a binding in their place, take no fence *)
+(* today and no object's lock after. Each takes the issue lock, shared, so *)
+(* the barrier waits for it: one that makes a binding numbers its change   *)
+(* under it, and a sweep that only closes writes no change, numbers        *)
+(* nothing, and compares the policy under it. Nobody names a binding       *)
+(* before its commit, and no use reads `closed`.                           *)
 (* A change takes the fence before its objects' locks, as a use does: one  *)
-(* helper for both. No wait cycle needs it, but only while every change    *)
-(* takes the issue lock first, which orders it against the barrier.        *)
-(* `ObjectLocksFenceLast.cfg` is this flow with the two the other way      *)
-(* round (`FenceFirst = FALSE`, the code's shape and no protection): it    *)
-(* must hold too, and stops holding the day a change takes the fence with  *)
-(* no issue lock before it.                                                *)
+(* helper for both. No wait cycle of this flow needs it, but only while    *)
+(* every change takes the issue lock first, which orders it against the    *)
+(* barrier. `ObjectLocksFenceLast.cfg` is this flow with the two the other *)
+(* way round (`FenceFirst = FALSE`, the code's shape and no protection):   *)
+(* it must hold too, and stops holding the day a change takes the fence    *)
+(* with no issue lock before it. `FenceFirst` turns a last statement       *)
+(* (`Last`) and this flow's change and revoke; a hold (`Hold`) takes the   *)
+(* fence first whatever it says, and the other order there is not checked. *)
 (*   UsesInKeyOrder                                                        *)
 (*               a use takes its objects' locks in key order, all before   *)
 (*               its first read: a batch every key's, sorted, not each     *)
@@ -230,7 +240,7 @@ EXTENDS Naturals, Sequences, FiniteSets
 CONSTANTS Flow, TouchFirst, WriteTakesChangeLock, MembersFirst,
           ChangeLockFirst, IssueBeforeFence, BarrierIssueFirst,
           UsesInKeyOrder, ChangesInKeyOrder, PrincipalLast,
-          FenceFirst    \* a change takes the fence before its objects' locks: the code's shape, no protection
+          FenceFirst    \* a change's last statement takes the fence before its objects' locks (`Last`, and the objects flow; not `Hold`): the code's shape, no protection
 
 Procs == CASE Flow = "write" -> {"write", "patch", "issue", "barrier", "revoke", "use"}
            [] Flow = "add" -> {"add", "demote", "issue", "barrier", "revoke", "use"}
@@ -240,9 +250,9 @@ Procs == CASE Flow = "write" -> {"write", "patch", "issue", "barrier", "revoke",
 \* Each one's locks, in the order it takes them: a lock and its mode, S(hared) or X (exclusive). An object's lock is
 \* named `@`; key order is their names'.
 Changing(takes) == IF takes THEN << <<"change", "X">> >> ELSE << >>
-\* A change's last statement, after the issue lock: the fence shared, then the object it writes.
+\* A change's last statement, after the issue lock: the fence shared, then the object it writes (the object first without `FenceFirst`).
 Last(object) == IF FenceFirst THEN << <<"fence", "S">>, <<object, "X">> >> ELSE << <<object, "X">>, <<"fence", "S">> >>
-\* A two-trip change's hold: the fence shared, then the caller's credential, which it read, shared, and the object it writes.
+\* A two-trip change's hold: the fence shared, first in every scenario (`FenceFirst` does not turn it), then the caller's credential, which it read, shared, and the object it writes.
 \* The credential stands for every object the hold read (the member, the roles, the policy, the environment): each shared,
 \* in key order with those it writes.
 Hold(object) == << <<"fence", "S">>, <<"@cred", "S">>, <<object, "X">> >>
