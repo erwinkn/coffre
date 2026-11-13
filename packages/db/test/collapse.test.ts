@@ -11,7 +11,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { assemble, collapseMigrations, LEDGER, numbered, RELEASE, released, several, statements, type Collapsed } from '../scripts/collapse.ts';
 import { migrateDatabase, restrictDatabase } from '../src/migrate.ts';
 import { buildOnline, onlineIndex, onlineIndexes } from '../src/online-indexes.ts';
-import { postgresClient, postgresSession, quoteIdentifier, quoteLiteral } from '../src/postgres.ts';
+import { postgresClient, postgresSession, quoteIdentifier } from '../src/postgres.ts';
 
 const BASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 // Short, not the suite's database name with a suffix: Postgres cuts a name at 63 bytes, which made two of these one.
@@ -168,29 +168,29 @@ const WHEN_MIGRATED: Record<string, string[]> = { checkpoint_fence: ['at_floor']
  * a migration ran, and what a row older than a column added since reads in it.
  */
 async function state(url: string, { history = false, digest = false } = {}): Promise<string[]> {
-  const client = postgresClient(url, { max: 1 });
+  // A row is compared as Postgres writes it, each value by its type's own output function: no JSON (which reads a
+  // float's -0 as 0 and keeps one of a json value's duplicate keys, r5) and no parsing in the driver. The settings
+  // that output reads are the same for every database compared.
+  const client = postgresClient(url, { max: 1, connection: { extra_float_digits: '1', DateStyle: 'ISO, YMD', IntervalStyle: 'postgres', TimeZone: 'UTC', bytea_output: 'hex' } });
   try {
     const lines = (await client.unsafe<{ line: string; def: string | null }[]>(CATALOG, [history])).map(({ line, def }) =>
       `${line}: ${line.startsWith('relation ') ? (def ?? '').replace(/'\d{13}'/g, "'<at>'") : def}`.replace(/_20\d{6}\b/g, '_<day>'));
-    const tables = await client.unsafe<{ name: string; kind: string }[]>(
-      `SELECT c.relname::text AS name, c.relkind::text AS kind FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p', 'm', 'S') AND NOT c.relispartition`,
-    );
-    for (const { name, kind } of tables) {
+    // A table's columns in their order, which the catalog's lines hold alike.
+    const tables = await client.unsafe<{ name: string; kind: string; columns: string[] }[]>(`
+      SELECT c.relname::text AS name, c.relkind::text AS kind, array_agg(a.attname::text ORDER BY a.attnum) AS columns
+        FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+       WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p', 'm', 'S') AND NOT c.relispartition GROUP BY c.oid`);
+    for (const { name, kind, columns } of tables) {
+      const compared = kind === 'S' ? ['last_value', 'is_called'] : columns.filter((column) => history || !(WHEN_MIGRATED[name] ?? []).includes(column));
+      const row = `ROW(${compared.map((column) => `t.${quoteIdentifier(column)}`).join(', ')})::text`;
       if (digest && kind !== 'S') {
-        const row = `to_jsonb(t)${history ? '' : (WHEN_MIGRATED[name] ?? []).map((column) => ` - ${quoteLiteral(column)}`).join('')}`;
         const [{ n, sum }] = await client.unsafe<{ n: string; sum: string }[]>(
-          `SELECT count(*)::text AS n, md5(coalesce(string_agg(h, '' ORDER BY h), '')) AS sum FROM (SELECT md5((${row})::text) AS h FROM ${quoteIdentifier(name)} t) r`,
+          `SELECT count(*)::text AS n, md5(coalesce(string_agg(h, '' ORDER BY h), '')) AS sum FROM (SELECT md5(${row}) AS h FROM ${quoteIdentifier(name)} t) r`,
         );
         lines.push(`rows of ${name}: ${n}, digest ${sum}`);
         continue;
       }
-      const rows = await client.unsafe<{ row: Record<string, unknown> }[]>(
-        kind === 'S' ? `SELECT jsonb_build_object('last_value', last_value, 'is_called', is_called) AS row FROM ${quoteIdentifier(name)}` : `SELECT to_jsonb(t) AS row FROM ${quoteIdentifier(name)} t`,
-      );
-      for (const { row } of rows) {
-        if (!history) for (const column of WHEN_MIGRATED[name] ?? []) delete row[column];
-        lines.push(`row of ${name}: ${JSON.stringify(row)}`);
-      }
+      for (const { line } of await client.unsafe<{ line: string }[]>(`SELECT ${row} AS line FROM ${quoteIdentifier(name)} t`)) lines.push(`row of ${name}: ${line}`);
     }
     return lines.sort();
   } finally {
@@ -327,6 +327,20 @@ test('on a 0.15.0 database with rows, the upgrade writes what the numbered migra
     }
   }
   same(await state(stepped, { history: true }), await state(upgraded, { history: true }));
+});
+
+test('parity tells apart rows that are equal only as JSON (r5)', async () => {
+  for (const [left, right] of [[`'-0'::float8`, `'0'::float8`], [`'{"a": 1}'::json`, `'{"a":1}'::json`]]) {
+    const urls: string[] = [];
+    for (const value of [left!, right!]) {
+      const url = await database(`as_text_${made.length}`);
+      const client = postgresClient(url, { max: 1 });
+      // The catalog's query names the ledger's schema.
+      await client.unsafe('CREATE SCHEMA drizzle').then(() => client.unsafe(`CREATE TABLE probe AS SELECT ${value} AS v`)).finally(() => client.end());
+      urls.push(url);
+    }
+    for (const digest of [false, true]) assert.notDeepEqual(await state(urls[0]!, { digest }), await state(urls[1]!, { digest }));
+  }
 });
 
 /** A database restored from a 0.15.0 deployment's backup on the test cluster (T265's rehearsal), which both paths upgrade. */
