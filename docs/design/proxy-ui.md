@@ -234,7 +234,8 @@ them with no vault call. What holds, and what TLC checks:
 - **`WithinWindow`.** That request leaves within W of the decision, W being R
   (cached values or not; R is 3 s at least, the use's own deadline).
 - **`NoRevival`.** No use is decided on a UI definition once code has shadowed
-  it, then or after code drops the name.
+  it, then or after code drops the name. A rollback to 0.15 is outside it
+  (section 6).
 - **`MismatchInert`.** No vault call reads or changes a route while the
   caller's release and the vault's differ.
 - Two runs `scripts/formal.sh` keeps as expected failures, so the gaps stay
@@ -273,7 +274,8 @@ use (a route use)
                through the one that serves; the newest change's seal of each; the editor's
                principal; every key the item names, resolved by name through the chain and
                held to the map's ids (else `moved`)
-             one entry per key, the route's name included, under its MAC
+             one entry per sealed key, the route's name included, under its MAC
+             (a plain value writes none)
   vault    seals checked, then every key decided twice:
              for the caller (purpose use)
              for the editor: frozen holdings, intersected with current ones (section 8)
@@ -725,7 +727,10 @@ the names code reserved, and they outlive the deployment that reserved them:
   over after 3 s, 503 `starting` after 6 s). A failed gate is 503 `unavailable`
   (`proxy_gate`) and keeps nothing, so the next request asks again. A
   deployment that never served a proxy request reserved nothing, but nothing
-  served or showed its definition either, so there is nothing to revive.
+  served or showed its definition either, so there is nothing to revive. The
+  gate runs at the first request, not at the deploy, because nothing in the
+  deploy pipeline runs the app's config against the vault: `coffre migrate`
+  reads only the schema.
 - **Most gate calls only read** the reserved set, checked against its newest
   change's seal. Only a name missing from it takes the log's head, makes a
   `proxy.code` change (CAS on the set's seal) and, in the same transaction,
@@ -740,7 +745,13 @@ the names code reserved, and they outlive the deployment that reserved them:
   a project Owner cannot. The app refuses a release of a name its own code
   defines (409 `defined_in_code`); nothing can check that no older deployment
   still serving defines it, so the dialog says so. Releasing during a deploy and
-  then saving the name is the one revival left (`RoutingRelease`).
+  then saving the name is one revival left (`RoutingRelease`).
+- **A rollback to 0.15 is the other.** 0.15 serves code routes with no gate,
+  and UI items stay in their rows, unread; the next upgrade's first isolate
+  gates before it serves. A code name added and dropped again while on 0.15
+  was never reserved, so its UI item serves again after that upgrade. An
+  accepted gap: [deploy.md](../deploy.md#from-014-to-016) says not to change
+  code's proxy names while rolled back.
 
 ## 7. Matching, injection and redaction
 
