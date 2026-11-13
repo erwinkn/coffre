@@ -149,6 +149,9 @@ SQL
         || { echo "0019 then a migrate as ${login%%:*} did not leave the group exactly SELECT on projects" >&2; exit 1; }
     [[ "$(as_superuser -d "$database" -At -c "SELECT has_table_privilege('coffre_backup', 'reporting_rows', 'SELECT')")" == f ]] \
         || { echo "a migrate as ${login%%:*} granted the group another role's table" >&2; exit 1; }
+    # Nor any table to come: default privileges would hand it whatever the migrating login makes, coffre's or not (0019).
+    [[ "$(as_superuser -d "$database" -At -c "SELECT count(*) FROM pg_default_acl, aclexplode(defaclacl) AS acl WHERE acl.grantee = 'coffre_backup'::regrole")" == 0 ]] \
+        || { echo "a migrate as ${login%%:*} left the group default privileges" >&2; exit 1; }
 done
 
 as_owner -d postgres -c 'CREATE DATABASE backed_up'
