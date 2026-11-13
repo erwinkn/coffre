@@ -20,6 +20,11 @@ import { fromWire, nameOf, seal, sealedBy, shapeOf, toWire, type Fresh, type Key
  * So what an operation says is what it reads and how it decides. Reading
  * again, comparing, writing, sealing each row and logging what it replaced
  * are here, once.
+ *
+ * Nothing else writes what a MAC covers. A use moves a row's last-seen
+ * columns on, one row a statement, and the signer's upkeep is changes like
+ * any other. So under the lock, the rows a write compared are the rows it
+ * writes over.
  */
 
 /** The vault as it runs: its database, its keys (the first seals, each verifies), its clock, and the signer's wake-up. */
@@ -93,8 +98,23 @@ export const CHANGE_LOCK = 109330110509669;
  */
 const ATTEMPTS = 5;
 
+/**
+ * How long a write waits for a lock, in milliseconds: the change lock, then
+ * any row it writes that another session holds. A write holds the change
+ * lock for one statement, milliseconds, so two seconds behind it is a
+ * holder that is stuck, or hundreds of changes queued. The change answers
+ * busy then: every waiter holds a database connection, which uses need too.
+ */
+const LOCK_WAIT_MS = 2000;
+
 export class Busy extends Error {
   override readonly name = 'Busy';
+}
+
+/** Postgres's `lock_not_available`: a wait `lock_timeout` ended. */
+function waitedOut(error: unknown): boolean {
+  for (let cause = error; cause instanceof Error; cause = cause.cause) if ((cause as { code?: unknown }).code === '55P03') return true;
+  return false;
 }
 
 const id = (name: string) => sql.identifier(name);
@@ -175,14 +195,19 @@ function label(name: string): string {
  * statement sees the database as of the first, the one that waits.
  */
 export async function commit<A>(vault: Running, prepared: Prepared<A>): Promise<boolean> {
-  const ok = await vault.db.transaction(
-    async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
-      const [same] = await rowsOf<{ ok: boolean }>(tx, prepared.statement);
-      return same!.ok;
-    },
-    { isolationLevel: 'read committed' },
-  );
+  const ok = await vault.db
+    .transaction(
+      async (tx) => {
+        // The bound is set for this transaction, ahead of the wait it bounds: a select list is worked out in order.
+        await tx.execute(sql`SELECT set_config('lock_timeout', ${String(LOCK_WAIT_MS)}, true), pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
+        const [same] = await rowsOf<{ ok: boolean }>(tx, prepared.statement);
+        return same!.ok;
+      },
+      { isolationLevel: 'read committed' },
+    )
+    .catch((error: unknown) => {
+      throw waitedOut(error) ? new Busy(`a change waited ${LOCK_WAIT_MS} ms for a lock`) : error;
+    });
   if (ok) vault.wake(prepared.hash);
   return ok;
 }

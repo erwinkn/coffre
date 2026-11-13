@@ -38,11 +38,35 @@ export type Wire = Record<string, unknown>;
  */
 const LAST_SEEN: ReadonlySet<string> = new Set(['last_used_at', 'last_used_ip', 'last_sign_in_at']);
 
+/** A UUID as Postgres writes one. It reads others too, capitals and braces, and gives this back. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The kinds of column a sealed row has, each with the values that Postgres
+ * stores exactly as given. Any other is refused before it is sealed
+ * (`toWire`): Postgres would take a capital UUID, or a number for a text,
+ * and store another value, so the row would read back as one the vault
+ * never sealed, and stay, a row no decision sees and so none removes.
+ */
+const KINDS = {
+  time: (value: unknown) => value instanceof Date && !Number.isNaN(value.getTime()),
+  bytes: (value: unknown) => Buffer.isBuffer(value),
+  uuid: (value: unknown) => typeof value === 'string' && UUID.test(value),
+  integer: (value: unknown) => Number.isSafeInteger(value),
+  boolean: (value: unknown) => typeof value === 'boolean',
+  text: (value: unknown) => typeof value === 'string',
+  texts: (value: unknown) => Array.isArray(value) && value.every((item) => typeof item === 'string'),
+};
+type Kind = keyof typeof KINDS;
+
+/** By the type Postgres gives the column. One the vault has no kind for, a bigint say, which JSON would round, fails here. */
+const KIND_OF: Readonly<Record<string, Kind>> = { 'timestamp (3) with time zone': 'time', bytea: 'bytes', uuid: 'uuid', integer: 'integer', boolean: 'boolean', text: 'text', 'text[]': 'texts' };
+
 type Column = {
   /** Its name in a `Row`, and in the database. */
   key: string;
   name: string;
-  kind: 'time' | 'bytes' | 'uuid' | 'plain';
+  kind: Kind;
   primary: boolean;
   /** Computed by the database: read, never written. */
   generated: boolean;
@@ -61,13 +85,13 @@ export function shapeOf(table: PgTable): Shape {
     const config = getTableConfig(table);
     const primary = new Set((config.primaryKeys[0]?.columns ?? config.columns.filter((column) => column.primary)).map((column) => column.name));
     const columns = Object.entries(getTableColumns(table)).map(([key, column]): Column => {
-      // A whole number past 2^53 does not survive JSON. No table the vault reads this way has one.
-      if (column.columnType === 'PgBigInt64' || column.columnType === 'PgBigInt53') throw new Error(`${getTableName(table)}.${column.name}: a bigint does not cross as JSON`);
+      const kind = KIND_OF[column.getSQLType()];
+      if (kind === undefined) throw new Error(`${getTableName(table)}.${column.name}: the vault has no way to carry a ${column.getSQLType()}`);
       const generated = column.generated !== undefined;
       return {
         key,
         name: column.name,
-        kind: column.columnType === 'PgTimestamp' ? 'time' : column.getSQLType() === 'bytea' ? 'bytes' : column.columnType === 'PgUUID' ? 'uuid' : 'plain',
+        kind,
         primary: primary.has(column.name),
         generated,
         sealed: !generated && column.name !== 'mac' && !LAST_SEEN.has(column.name),
@@ -94,24 +118,16 @@ export function fromWire<T extends PgTable>(table: T, wire: Wire): Row<T> {
   return row as Row<T>;
 }
 
-/** A UUID as Postgres writes one. It reads others too, capitals and braces, and gives this back. */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-/**
- * A row as the JSON a write sends. `only` leaves the other columns out, for
- * a row named by its key. A value Postgres would store as another is
- * refused here: the row would read back as one the vault never sealed, and
- * stay, a row no decision sees and so none removes.
- */
+/** A row as the JSON a write sends, each value one its column stores as given (`KINDS`). `only` leaves the other columns out, for a row named by its key. */
 export function toWire(table: PgTable, row: object, only?: readonly Column[]): Wire {
   const wire: Wire = {};
   for (const column of only ?? shapeOf(table).columns) {
     if (column.generated) continue;
     const value: unknown = (row as Record<string, unknown>)[column.key] ?? null;
     if (value === null) wire[column.name] = null;
+    else if (!KINDS[column.kind](value)) throw new Error(`${shapeOf(table).name}.${column.name}: ${JSON.stringify(value)} is not a ${column.kind} as Postgres stores one`);
     else if (column.kind === 'time') wire[column.name] = (value as Date).toISOString();
     else if (column.kind === 'bytes') wire[column.name] = `\\x${(value as Buffer).toString('hex')}`;
-    else if (column.kind === 'uuid' && !UUID.test(value as string)) throw new Error(`${shapeOf(table).name}.${column.name}: ${JSON.stringify(value)} is not a UUID as Postgres writes one`);
     else wire[column.name] = value;
   }
   return wire;
@@ -143,11 +159,14 @@ export function macOf(key: Key, secret: Buffer, data: string | Uint8Array): Buff
   return Buffer.concat([key.id, createHmac('sha256', secret).update(data).digest()]);
 }
 
-/** The key among `keys` that `mac` is `data`'s MAC under, if any. An empty MAC, as the upgrade leaves, is under none. */
+/**
+ * The key among `keys` that `mac` is `data`'s MAC under, if any. An empty
+ * MAC, as the upgrade leaves, is under none. The four bytes only say which
+ * keys to try: two that share a name are both tried.
+ */
 export function checked(keys: readonly Key[], secret: (key: Key) => Buffer, data: string | Uint8Array, mac: Uint8Array): Key | undefined {
   if (mac.length !== MAC_BYTES) return undefined;
-  const key = keys.find((candidate) => candidate.id.equals(mac.subarray(0, 4)));
-  return key !== undefined && timingSafeEqual(macOf(key, secret(key), data), mac) ? key : undefined;
+  return keys.find((key) => key.id.equals(mac.subarray(0, 4)) && timingSafeEqual(macOf(key, secret(key), data), mac));
 }
 
 /**

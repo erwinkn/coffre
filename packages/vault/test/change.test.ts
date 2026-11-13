@@ -260,13 +260,29 @@ test('a decision that writes around its read is a fault, not a change', async ()
   await assert.rejects(change(vault, writing(put(principals, member(bo)), put(principals, member(bo)))), /twice/);
   const read = { found: part(principals, sql`true`) };
   await assert.rejects(change(vault, { read, decide: ({ found: [it] }: Seen<typeof read>) => ({ writes: [put(principals, member(bo), it!)], entry: said('test'), answer: null }) }), /moves its key/);
-  // Postgres would store it in small letters, a row the vault never sealed.
-  const elsewhere = { id: randomUUID().toUpperCase(), principal: ada, projectId: randomUUID(), environmentId: null, role: 'viewer', expiresAt: null, grantedAt: at, grantedBy: ada };
-  await assert.rejects(change(vault, writing(put(grants, elsewhere))), /not a UUID as Postgres writes one/);
+  // Postgres would store each as another value, a row the vault never sealed: a UUID in small letters, a number as a text.
+  const grant = { id: randomUUID(), principal: ada, projectId: randomUUID(), environmentId: null, role: 'viewer', expiresAt: null, grantedAt: at, grantedBy: ada };
+  await assert.rejects(change(vault, writing(put(grants, { ...grant, id: grant.id.toUpperCase() }))), /grants\.id: .* is not a uuid as Postgres stores one/);
+  await assert.rejects(change(vault, writing(put(grants, { ...grant, role: 5 as never }))), /grants\.role: 5 is not a text as Postgres stores one/);
+  await assert.rejects(change(vault, writing(put(grants, { ...grant, grantedAt: new Date(Number.NaN) }))), /grants\.granted_at: null is not a time as Postgres stores one/);
   // A new row whose key is taken was never read: Postgres refuses it, and nothing of the change is kept.
   const entries = (await rowsOf(vault.owner, sql`SELECT 1 FROM log_pending`)).length;
   await assert.rejects(change(vault, writing(put(principals, member(bo)), put(principals, member(ada)))));
   assert.deepEqual([(await seenOf(principals)).length, (await rowsOf(vault.owner, sql`SELECT 1 FROM log_pending`)).length], [1, entries]);
+});
+
+test('a change that cannot have the lock answers busy, and holds nothing', async () => {
+  await done(writing(put(principals, member(ada, 'owner'))));
+  const waited = await vault.owner.transaction(async (holder) => {
+    await holder.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
+    const started = Date.now();
+    await assert.rejects(change(vault, writing(put(principals, member(bo)))), Busy);
+    return Date.now() - started;
+  });
+  assert.ok(waited >= 2000 && waited < 4000, `waited ${waited} ms`);
+  // The bound was the transaction's: the next change runs.
+  await done(writing(put(principals, member(bo))));
+  assert.equal((await seenOf(principals)).length, 2);
 });
 
 test('a change that keeps losing answers busy', async () => {
