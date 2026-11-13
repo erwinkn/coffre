@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -898,45 +898,42 @@ test("a deployment moved from pnpm 10 or 11 to the template's installs without a
 
 /**
  * A deployment whose lockfile an older pnpm wrote, holding proto@1.0.1, a
- * day old: what pnpm 11 then holds back. `allowed`, the range pg-like asks
- * of proto: one 1.0.0, a month old, fits, or not.
+ * day old: what pnpm 11 then holds back. `range`, the range pg-like asks
+ * of proto: one 1.0.0, a month old, fits, or not. pnpm's metadata cache is
+ * the deployment's own: the user's keys it by host and port, and an earlier
+ * run's registry on the same port served other packuments. The registry
+ * closes when the case ends, however it ends.
  */
-async function lockedYoung(range: string) {
+async function lockedYoung(t: TestContext, range: string) {
   const published = await registry({
     proto: [{ version: '1.0.0', daysAgo: 30 }, { version: '1.0.1', daysAgo: 1 }],
     other: [{ version: '2.0.0', daysAgo: 40 }],
     'pg-like': [{ version: '1.0.0', daysAgo: 30, dependencies: { proto: range, other: '^2.0.0' } }],
   });
   const dir = mkdtempSync(join(tmpdir(), 'coffre-locked-'));
+  t.after(() => (published.close(), rmSync(dir, { recursive: true, force: true })));
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'deployment', private: true, packageManager: `pnpm@${PNPM}`, dependencies: { 'pg-like': '1.0.0' } }));
   writeFileSync(join(dir, '.npmrc'), `registry=${published.origin}/\n`);
-  writeFileSync(join(dir, 'pnpm-workspace.yaml'), 'minimumReleaseAge: 0\n');
+  const settings = (minimumReleaseAge: number) => writeFileSync(join(dir, 'pnpm-workspace.yaml'), `cacheDir: ${join(dir, '.cache')}\nminimumReleaseAge: ${minimumReleaseAge}\n`);
+  settings(0);
   await install(dir);
-  writeFileSync(join(dir, 'pnpm-workspace.yaml'), 'minimumReleaseAge: 10080\n');
-  return { dir, close: () => (published.close(), rmSync(dir, { recursive: true, force: true })) };
+  settings(10080);
+  return dir;
 }
 
-test('held back by an old lockfile, resolving again picks a version old enough, and nothing is let through', needsPnpm(PNPM), async () => {
-  const { dir, close } = await lockedYoung('^1.0.0');
-  try {
-    await assert.rejects(install(dir), (error: unknown) => error instanceof HeldBack && error.held.map(({ spec }) => spec).join() === 'proto@1.0.1');
-    assert.deepEqual(await resolveAgain(dir), [{ name: 'proto', from: ['1.0.1'], to: ['1.0.0'] }]);
-    assert.doesNotMatch(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8'), /Exclude/);
-    await install(dir);
-  } finally {
-    close();
-  }
+test('held back by an old lockfile, resolving again picks a version old enough, and nothing is let through', needsPnpm(PNPM), async (t) => {
+  const dir = await lockedYoung(t, '^1.0.0');
+  await assert.rejects(install(dir), (error: unknown) => error instanceof HeldBack && error.held.map(({ spec }) => spec).join() === 'proto@1.0.1');
+  assert.deepEqual(await resolveAgain(dir), [{ name: 'proto', from: ['1.0.1'], to: ['1.0.0'] }]);
+  assert.doesNotMatch(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8'), /Exclude/);
+  await install(dir);
 });
 
-test('when no version old enough fits, resolving again says which, and puts the lockfile back', needsPnpm(PNPM), async () => {
-  const { dir, close } = await lockedYoung('^1.0.1');
-  try {
-    const lockfile = readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8');
-    await assert.rejects(resolveAgain(dir), (error: unknown) => error instanceof HeldBack && error.held.map(({ spec }) => spec).join() === 'proto@1.0.1');
-    assert.equal(readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8'), lockfile);
-  } finally {
-    close();
-  }
+test('when no version old enough fits, resolving again says which, and puts the lockfile back', needsPnpm(PNPM), async (t) => {
+  const dir = await lockedYoung(t, '^1.0.1');
+  const lockfile = readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8');
+  await assert.rejects(resolveAgain(dir), (error: unknown) => error instanceof HeldBack && error.held.map(({ spec }) => spec).join() === 'proto@1.0.1');
+  assert.equal(readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8'), lockfile);
 });
 
 const pinned = pnpmBinary(PNPM);
