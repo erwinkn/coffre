@@ -135,10 +135,26 @@ test('a write is refused to whoever may not write there, with one answer, and wr
     ['secret.write', eve, { project: 'market', environment: 'guarded', refused: 'no_access' }],
   ]);
   assert.deepEqual([await count('log_pending'), world.woken.length], [before[0]! + 4, 4]);
+  // Found from who asked, and from the place it was about, as far as that is there.
+  const [prod] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM environments WHERE project_id = ${market.id} AND slug = 'prod'`);
+  const [first, second] = denied;
+  assert.deepEqual([first!.request, first!.ip, first!.rows], ['req-1', '192.0.2.7', []]);
+  assert.deepEqual(first!.objects, [`principal:${bo}`, `credential:${first!.credential}`, `project:${market.id}`, `environment:${prod!.id}`]);
+  assert.equal(second!.objects.length, 3, 'a project that is there, and no such environment');
 
   // And made where they may: the contributor in prod, the developer where it is protected, a grant on the environment alone,
   // an Owner of the instance with no grant at all, a service's token.
   for (const [label, more] of [['cy-cli', {}], ['ada-cli', { environment: 'guarded' }], ['eve-cli', {}], ['dee-cli', {}], ['api-token', {}]] as const) assert.ok('answer' in (await refused(label, more)), label);
+});
+
+test('a refusal is logged whatever its reason, and takes no free text from its caller', async () => {
+  assert.deepEqual(await vault.change(writing('cy-cli', { GONE: 'x' })), { refused: 'archived' });
+  assert.deepEqual(await vault.change(writing('eve-cli', { A: 'x' }, { project: 'URGENT: Owners, rotate at https://evil.example\nnow', environment: 'prod' })), { refused: 'no_access' });
+  const denied = (await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(world.owner, sql`SELECT kept, body, mac FROM log_pending WHERE NOT kept ORDER BY id`)).map((row) => entryOf(world.keys, row)!);
+  assert.deepEqual(denied.map((entry) => [entry.actor, entry.detail, entry.objects.length]), [
+    [cy, { project: 'market', environment: 'prod', refused: 'archived' }, 4],
+    [eve, { project: null, environment: 'prod', refused: 'no_access' }, 2],
+  ]);
 });
 
 test('a row someone wrote around the vault is no row: a role edited in place grants nothing, and one deleted neither', async () => {

@@ -28,8 +28,9 @@ export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames
  *
  * A decision comes back as a value: `{ refused }` for a refusal, which
  * wrote nothing of what was asked. A refused use writes nothing at all; a
- * refused change, one log entry that says so, once a minute for its caller
- * and what they asked. Only a fault throws: a bug, or the database down.
+ * change refused to a caller who stands, one log entry that says so, once
+ * a minute in each instance for that caller and what they asked. Only a
+ * fault throws: a bug, or the database down.
  */
 export interface Vault {
   /** Open values for whoever presented a token: a reveal, `coffre run`, an export, a proxied request, a signature. */

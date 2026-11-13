@@ -100,6 +100,13 @@ export type Value = { version: Omit<Row<typeof secretVersions>, keyof Envelope>;
 /** Why a change is not made. Nothing it asked is written. */
 export type Refusal = { refused: string };
 
+/**
+ * A refusal's entry, as an operation says it: its own action, who asked,
+ * and in `detail.refused` why not, which is what tells it from the entry
+ * of a change that was made. Always among the entries that age out.
+ */
+export type Denied = Omit<Said, 'kept' | 'actor'> & { actor: string };
+
 export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; entry: Said; answer: A };
 
 export type Operation<P extends Parts, A> = {
@@ -111,7 +118,7 @@ export type Operation<P extends Parts, A> = {
    * what, and why. Null for a caller who does not stand, who is told one
    * thing and logged nowhere.
    */
-  denied?(seen: Seen<P>, at: number, refusal: Refusal): Said | null;
+  denied?(seen: Seen<P>, at: number, refusal: Refusal): Denied | null;
 };
 
 /** A change read and decided, not yet written. */
@@ -206,7 +213,7 @@ const id = (name: string) => sql.identifier(name);
 const list = (names: readonly { name: string }[], of?: string) => sql.join(names.map(({ name }) => (of === undefined ? id(name) : sql`${id(of)}.${id(name)}`)), sql`, `);
 
 /** A change's read and its decision. */
-export async function prepare<P extends Parts, A>(vault: Running, operation: Operation<P, A>): Promise<Prepared<A> | (Refusal & { said?: Said | null })> {
+export async function prepare<P extends Parts, A>(vault: Running, operation: Operation<P, A>): Promise<Prepared<A> | (Refusal & { said?: Denied | null })> {
   const parts = Object.entries(operation.read);
   if (parts.length === 0) throw new Error('a change reads at least its caller');
   // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts).
@@ -332,23 +339,26 @@ export function keep<V extends { at: number }>(map: Map<string, V>, key: string,
 
 /**
  * A refused change's entry (D236): among those that age out, with its
- * operation's action and why it was refused. One statement, with no lock.
- * It never costs the caller their answer: the refusal stands whether or
- * not it could be logged.
+ * operation's action and why it was refused. One statement, without the
+ * change lock. It never costs the caller their answer: the refusal stands
+ * whether or not it could be logged.
  */
-async function deny(vault: Running, said: Said): Promise<void> {
+async function deny(vault: Running, said: Denied): Promise<void> {
   const at = vault.now();
   const mark = `${said.actor} ${said.action}`;
   if ((vault.refused.get(mark)?.at ?? -Infinity) + REFUSED_MS > at) return;
+  // Remembered before the write, not after: refusals side by side log one entry between them, and hold one connection.
+  keep(vault.refused, mark, { at }, at - REFUSED_MS);
   const entry = pending(vault.keys[0]!, { ...said, kept: false }, at, []);
   try {
     await bounded(vault.db, sql`INSERT INTO log_pending (kept, body, mac) VALUES (${entry.kept}, ${entry.body}, decode(${entry.mac.toString('hex')}, 'hex'))`);
   } catch (error) {
     console.error('coffre: a refused change was not logged', error);
+    // Forgotten, so that the next one is tried: unless a later one took its place meanwhile.
+    if (vault.refused.get(mark)?.at === at) vault.refused.delete(mark);
     return;
   }
   vault.wake(entry.hash);
-  keep(vault.refused, mark, { at }, at - REFUSED_MS);
 }
 
 /** Make a change: its answer, once committed, or why it is refused. */

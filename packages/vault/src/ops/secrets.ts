@@ -45,17 +45,27 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
     environment: part(environments, sql`${environments.projectId} = ${project} AND ${environments.slug} = ${environmentSlug}`),
     secret: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} = (SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${environmentSlug}) AND ${secrets.key} = ANY(${sql.param(items.map((item) => item.key))}::text[])`),
   };
+  /** The place asked about, as far as it is there. */
+  const placed = (seen: Seen<typeof read>) => {
+    const place = seen.project.find((row) => row.slug === projectSlug && live(row));
+    return { place, environment: place && seen.environment.find((row) => row.projectId === place.id && row.slug === environmentSlug && live(row)) };
+  };
   return {
     read,
-    denied: refusedTo('secret.write', shown, vault.workloads, { project: projectSlug, environment: environmentSlug }),
+    denied: refusedTo('secret.write', shown, vault.workloads, {
+      where: { project: projectSlug, environment: environmentSlug },
+      objects: (seen: Seen<typeof read>) => {
+        const { place, environment } = placed(seen);
+        return [...(place === undefined ? [] : [`project:${place.id}`]), ...(environment === undefined ? [] : [`environment:${environment.id}`])];
+      },
+    }),
     decide(seen: Seen<typeof read>, at: number) {
       const caller = callerFrom(seen, shown, vault.workloads, at);
       if (caller === null) return { refused: 'unauthenticated' };
       if (caller.workload?.stop != null) return { refused: caller.workload.stop };
       // A narrowed session uses values, and changes nothing.
       if (caller.workload?.narrowed === true) return { refused: 'narrowed' };
-      const place = seen.project.find((row) => row.slug === projectSlug && live(row));
-      const environment = place && seen.environment.find((row) => row.projectId === place.id && row.slug === environmentSlug && live(row));
+      const { place, environment } = placed(seen);
       // The same answer whether the place is not there, is someone's personal config, or is not theirs to write in: none says which.
       if (place === undefined || environment === undefined || environment.owner !== null || !caller.may('secret.write', environment)) return { refused: 'no_access' };
 
