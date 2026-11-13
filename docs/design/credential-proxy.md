@@ -1452,9 +1452,22 @@ run` calls the same `credential(name).verify` from
 | Yousign | `x-yousign-signature-256: sha256=<hex>` | `{ encoding: 'hex', prefix: 'sha256=' }` |
 | DFNS | `x-dfns-webhook-signature: sha256=<hex>` | `{ encoding: 'hex', prefix: 'sha256=' }` |
 | Lemonway, as Equisafe's code checks it | `x-signature: <hex>` | `{ encoding: 'hex' }` |
+| Monerium (Standard Webhooks), the value the base64 after `whsec_` | `webhook-signature: v1,<base64> …` | `{ encoding: 'base64', prefix: 'v1,', keyEncoding: 'base64' }` |
+| Brale, its `sharedSecret` | `x-request-signature-sha-256: <hex>` | `{ encoding: 'hex', keyEncoding: 'base64url' }` |
 
 - **HMAC-SHA256, and nothing more general.** The key is the value's UTF-8
-  bytes, as `createHmac('sha256', value)` takes a string. The signature
+  bytes, as `createHmac('sha256', value)` takes a string, or with
+  `keyEncoding` (`hex`, `base64` or `base64url`) the bytes the value
+  writes, as `createHmac('sha256', Buffer.from(value, 'hex'))` reads
+  Equisafe's `POLICY_SEAL_KEY` (`{ encoding: 'hex', prefix: 'v1:',
+  keyEncoding: 'hex' }`). The value is read as a signature is, so one its
+  encoding does not write exactly (an odd hex digit, a `whsec_` left on, a
+  space) is a 409 that names the key, never a key half read from it:
+  Node's own `Buffer.from` skips what it does not read. Standard Webhooks
+  sign `<webhook-id>.<webhook-timestamp>.<body>`, which the app joins as
+  the message, and send a list of `v1,<base64>` separated by spaces, which
+  it splits, asking `verify` of each, and checks the timestamp itself, as
+  below. The signature
   is written in `hex` (read in either case), `base64` or `base64url`
   (read with or without padding), after an optional `prefix`, compared
   exactly. coffre decodes it and asks WebCrypto's `verify`, which compares

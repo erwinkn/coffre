@@ -27,6 +27,11 @@ const SECRETS = {
   LEMONWAY_WEBHOOK_SECRET: 'lw_whsec_ab12cd34ef56gh78',
   IFRAME_TOKEN_SECRET: 'iframe_secret_5f4dcc3b5aa765d61d8327deb882cf99',
   SUMSUB_SECRET_KEY: 'sumsub_sk_0f1e2d3c4b5a69788796a5b4c3d2e1f0',
+  // Keys written as text, each read as its own code reads it: Equisafe's policy seal key, 64 hex digits; Monerium's
+  // Standard Webhooks secret, the base64 after `whsec_`; Brale's sharedSecret, base64url.
+  POLICY_SEAL_KEY: '3f9a0c2e7b14d85a6c0e9f3b2a71d4c8e5f60a1b9c2d3e4f5a6b7c8d9e0f1a2b',
+  MONERIUM_WEBHOOK_SECRET: 'MfKQ9r7ZaGw3xYtB2nC5dE8hJk1LmN4p',
+  BRALE_SHARED_SECRET: 'q_-Zx81Lw0Rt5yUi9oPa3sDf7gHj2kL4',
 };
 /** sumsub-key's maxBytes: the ceiling, `MAX_RAW_MESSAGE_BYTES`. */
 const SUMSUB_BYTES = 12 * 1024 * 1024;
@@ -38,11 +43,14 @@ const options: CredentialProxyOptions = {
     dfns: hmac('DFNS_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=', maxBytes: 512 * 1024 }),
     lemonway: hmac('LEMONWAY_WEBHOOK_SECRET', { encoding: 'hex' }),
     absent: hmac('NOT_HELD', { encoding: 'hex' }),
+    monerium: hmac('MONERIUM_WEBHOOK_SECRET', { encoding: 'base64', prefix: 'v1,', keyEncoding: 'base64' }),
+    brale: hmac('BRALE_SHARED_SECRET', { encoding: 'hex', keyEncoding: 'base64url' }),
   },
   signers: {
     'iframe-token': hmac('IFRAME_TOKEN_SECRET', { encoding: 'base64url' }),
     'dfns-key': privateKey('DFNS_PRIVATE_KEY'),
     'sumsub-key': hmac('SUMSUB_SECRET_KEY', { encoding: 'hex', maxBytes: SUMSUB_BYTES }),
+    'policy-seal': hmac('POLICY_SEAL_KEY', { encoding: 'hex', prefix: 'v1:', keyEncoding: 'hex', maxBytes: SUMSUB_BYTES }),
   },
 };
 
@@ -63,11 +71,17 @@ useMcp(async () => {
     LEMONWAY_WEBHOOK_SECRET: SECRETS.LEMONWAY_WEBHOOK_SECRET,
     IFRAME_TOKEN_SECRET: SECRETS.IFRAME_TOKEN_SECRET,
     SUMSUB_SECRET_KEY: SECRETS.SUMSUB_SECRET_KEY,
+    POLICY_SEAL_KEY: SECRETS.POLICY_SEAL_KEY,
+    MONERIUM_WEBHOOK_SECRET: SECRETS.MONERIUM_WEBHOOK_SECRET,
+    BRALE_SHARED_SECRET: SECRETS.BRALE_SHARED_SECRET,
     DFNS_PRIVATE_KEY: generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
   });
   await root.secrets.set('market/bare', { OTHER: 'x' });
   await root.environments.create('market/empty');
   await root.secrets.set('market/empty', { YOUSIGN_WEBHOOK_SECRET: '', IFRAME_TOKEN_SECRET: '' });
+  // Values their keyEncoding does not write exactly, which a lenient decoder would read in part.
+  await root.environments.create('market/garbled');
+  await root.secrets.set('market/garbled', { POLICY_SEAL_KEY: `${SECRETS.POLICY_SEAL_KEY}0`, MONERIUM_WEBHOOK_SECRET: `whsec_${SECRETS.MONERIUM_WEBHOOK_SECRET}`, BRALE_SHARED_SECRET: '====' });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
 });
 
@@ -104,7 +118,7 @@ test("each provider's signature verifies as the provider made it, over the raw b
   const { env, plan } = await run();
   // The app holds the handle where each secret was, never a value; each verifier and HMAC signer is named for credential(name).
   for (const key of Object.keys(SECRETS)) assert.equal(plan.env[key], env.COFFRE_HANDLE, key);
-  assert.deepEqual(Object.keys(plan.credentials).sort(), ['dfns', 'dfns-key', 'iframe-token', 'lemonway', 'sumsub-key', 'yousign']);
+  assert.deepEqual(Object.keys(plan.credentials).sort(), ['brale', 'dfns', 'dfns-key', 'iframe-token', 'lemonway', 'monerium', 'policy-seal', 'sumsub-key', 'yousign']);
   const yousign = used(env, 'yousign');
   const header = `sha256=${hmacOf(SECRETS.YOUSIGN_WEBHOOK_SECRET, YOUSIGN_BODY)}`;
   assert.equal(await yousign.verify(YOUSIGN_BODY, header), true);
@@ -164,6 +178,48 @@ test('an HMAC signer signs as Node does and checks its own signatures; a verifie
   // The URL of a verifier, as a credential's would be, reaches nothing.
   const path = await route('/use/market/dev/yousign/v3/x', { headers: { 'x-coffre-handle': env.COFFRE_HANDLE! } });
   assert.equal(path.status, 404);
+});
+
+test("a key written as text signs and checks as its own code reads it: the policy seal's hex, Standard Webhooks' base64, Brale's base64url", async () => {
+  const { env } = await run();
+  // Equisafe's policy seal: `v1:` and the hex HMAC under Buffer.from(POLICY_SEAL_KEY, 'hex'), JSON and raw alike.
+  const sealed = 'billing_beneficiary:{"id":"b-1","share_bps":2500}';
+  const seal = `v1:${createHmac('sha256', Buffer.from(SECRETS.POLICY_SEAL_KEY, 'hex')).update(sealed).digest('hex')}`;
+  const policy = used(env, 'policy-seal');
+  assert.equal(await policy.sign(sealed), seal);
+  assert.equal(await policy.verify(sealed, seal), true);
+  const raw = await route('/use/market/dev?sign=policy-seal', { method: 'POST', headers: { authorization: `Bearer ${env.COFFRE_HANDLE}`, 'content-type': 'application/octet-stream', 'content-length': String(sealed.length) }, body: sealed });
+  assert.deepEqual(await raw.json(), { signature: seal });
+  // Monerium's Standard Webhooks: `<webhook-id>.<webhook-timestamp>.<body>`, and `webhook-signature` a list the app
+  // splits on spaces, each `v1,<base64>` checked on its own, as Monerium's verifyWebhook does.
+  const body = '{"id":"ev-1","type":"profile.updated","data":{"id":"p-1","state":"approved"}}';
+  const message = `msg_2b1.1761480000.${body}`;
+  const mac = createHmac('sha256', Buffer.from(SECRETS.MONERIUM_WEBHOOK_SECRET, 'base64')).update(message).digest('base64');
+  const header = `v1,${Buffer.alloc(32, 7).toString('base64')} v1,${mac}`;
+  const monerium = used(env, 'monerium');
+  assert.deepEqual(await Promise.all(header.split(' ').map((entry) => monerium.verify(message, entry))), [false, true]);
+  assert.equal(await monerium.verify(`msg_2b1.1761480001.${body}`, `v1,${mac}`), false);
+  // Brale: the hex HMAC of the body, keyed with the base64url-decoded sharedSecret.
+  const brale = createHmac('sha256', Buffer.from(SECRETS.BRALE_SHARED_SECRET, 'base64url')).update(body).digest('hex');
+  assert.equal(await used(env, 'brale').verify(body, brale), true);
+  // The same value as its UTF-8 bytes is another key: no match.
+  assert.equal(await used(env, 'brale').verify(body, hmacOf(SECRETS.BRALE_SHARED_SECRET, body)), false);
+  // A value its keyEncoding does not write exactly is a 409 naming the key, never a signature, JSON or raw.
+  const garbled = await run(['market/garbled']);
+  const asks: [string, RequestInit][] = [
+    ['/use/market/garbled', { method: 'POST', body: JSON.stringify({ sign: { credential: 'policy-seal', message: 'aGk' } }), headers: { 'content-type': 'application/json' } }],
+    ['/use/market/garbled?sign=policy-seal', { method: 'POST', body: 'hi', headers: { 'content-type': 'application/octet-stream', 'content-length': '2' } }],
+    ['/use/market/garbled', { method: 'POST', body: JSON.stringify({ verify: { credential: 'monerium', message: 'aGk', signature: `v1,${mac}` } }), headers: { 'content-type': 'application/json' } }],
+    ['/use/market/garbled', { method: 'POST', body: JSON.stringify({ verify: { credential: 'brale', message: 'aGk', signature: brale } }), headers: { 'content-type': 'application/json' } }],
+  ];
+  const named = ['POLICY_SEAL_KEY is no hex key', 'POLICY_SEAL_KEY is no hex key', 'MONERIUM_WEBHOOK_SECRET is no base64 key', 'BRALE_SHARED_SECRET is no base64url key'];
+  for (const [i, [path, init]] of asks.entries()) {
+    const refused = await route(path, { ...init, headers: { ...init.headers as Record<string, string>, authorization: `Bearer ${garbled.env.COFFRE_HANDLE}` } });
+    const text = await refused.text();
+    assert.equal(refused.status, 409, text);
+    assert.ok(text.includes(`market/garbled's ${named[i]}`), text);
+    assert.ok(!text.includes(SECRETS.MONERIUM_WEBHOOK_SECRET) && !text.includes(SECRETS.POLICY_SEAL_KEY), text);
+  }
 });
 
 test("a webhook body is 64 KiB at most, or its hmac()'s maxBytes; one past it is refused before anything is opened", async () => {
@@ -365,7 +421,7 @@ test('no byte of a secret leaves coffre: not in an answer, an entry of the log, 
       answered.push(`${answer.status} ${JSON.stringify([...answer.headers])} ${await answer.text()}`);
     };
     const message = Buffer.from(YOUSIGN_BODY).toString('base64url');
-    for (const name of ['yousign', 'dfns', 'lemonway', 'absent', 'iframe-token', 'dfns-key', 'sumsub-key', 'nope']) {
+    for (const name of ['yousign', 'dfns', 'lemonway', 'absent', 'monerium', 'brale', 'iframe-token', 'dfns-key', 'sumsub-key', 'policy-seal', 'nope']) {
       for (const [handle, path] of [[env.COFFRE_HANDLE!, '/use/market/dev'], [bare.env.COFFRE_HANDLE!, '/use/market/bare']] as const) {
         for (const signature of ['', 'sha256=', `sha256=${'f'.repeat(64)}`, '%%%', `sha256=${hmacOf(SECRETS.YOUSIGN_WEBHOOK_SECRET, YOUSIGN_BODY)}`]) {
           await ask(handle, path, { verify: { credential: name, message, signature } });
@@ -382,7 +438,8 @@ test('no byte of a secret leaves coffre: not in an answer, an entry of the log, 
   assert.ok(answered.length > 60, `${answered.length} answers`);
   for (const [key, secret] of Object.entries(SECRETS)) {
     if (key === 'IFRAME_TOKEN_SECRET') continue; // A signer's signatures are its answers; its secret is not.
-    for (const form of [secret, Buffer.from(secret).toString('hex'), Buffer.from(secret).toString('base64'), Buffer.from(secret).toString('base64url'), secret.slice(4, 20)]) {
+    const bytes = key === 'POLICY_SEAL_KEY' ? Buffer.from(secret, 'hex') : key === 'MONERIUM_WEBHOOK_SECRET' ? Buffer.from(secret, 'base64') : key === 'BRALE_SHARED_SECRET' ? Buffer.from(secret, 'base64url') : null;
+    for (const form of [secret, ...(bytes === null ? [] : [bytes.toString('hex'), bytes.toString('base64')]), Buffer.from(secret).toString('hex'), Buffer.from(secret).toString('base64'), Buffer.from(secret).toString('base64url'), secret.slice(4, 20)]) {
       assert.ok(!everything.includes(form), `${key} leaked as ${form}`);
     }
   }
@@ -396,6 +453,7 @@ test('the configuration refuses what is no HMAC-SHA256 of these schemes', () => 
   refused({ verifiers: { x: privateKey('KEY') as never } }, /verifier x is hmac\(…\), the only kind there is/);
   refused({ verifiers: { x: hmac('KEY', { encoding: 'hex32' as Encoding }) } }, /hex, base64 or base64url/);
   refused({ verifiers: { x: { ...hmac('KEY', { encoding: 'hex' }), hash: 'SHA-512' } as never } }, /SHA-256 alone; got hash/);
+  refused({ verifiers: { x: hmac('KEY', { encoding: 'hex', keyEncoding: 'utf8' as Encoding }) } }, /reads its key's value as hex, base64 or base64url/);
   refused({ verifiers: { x: hmac('KEY', { encoding: 'hex', prefix: 'sha 256=' }) } }, /prefix is up to 32 printable characters/);
   refused({ verifiers: { x: hmac('not a key', { encoding: 'hex' }) } }, /names the key that holds its secret/);
   refused({ verifiers: { X: hmac('KEY', { encoding: 'hex' }) } }, /a verifier's name is lowercase/);
@@ -425,12 +483,15 @@ function fake(key: string, secret: string): PluginContext {
 const settings = propertySettings(100);
 
 test(`whatever the secret, message and scheme, coffre signs as Node's createHmac does, verifies its own, and no other signature, seed ${settings.seed}`, () => hegel.testAsync(async (tc) => {
-  const secret = tc.draw(gs.text({ minSize: 1, maxSize: 64, excludeCategories: ['Cs'] }));
+  // The key as its UTF-8 bytes, or bytes written as text, which Node reads as Buffer.from(value, keyEncoding) does.
+  const keyEncoding = tc.draw(gs.sampledFrom([undefined, 'hex', 'base64', 'base64url'] as const));
+  const value = keyEncoding === undefined ? tc.draw(gs.text({ minSize: 1, maxSize: 64, excludeCategories: ['Cs'] })) : Buffer.from(tc.draw(gs.binary({ minSize: 1, maxSize: 64 }))).toString(keyEncoding);
+  const secret = keyEncoding === undefined ? value : Buffer.from(value, keyEncoding);
   const message = Buffer.from(tc.draw(gs.binary({ maxSize: 300 })));
   const encoding = tc.draw(gs.sampledFrom(['hex', 'base64', 'base64url'] as const));
   const prefix = tc.draw(gs.sampledFrom(['', 'sha256=', 'v1:', 'v1=']));
-  const proxy = credentialProxy({ credentials: {}, signers: { mac: hmac('SECRET', { encoding, ...(prefix === '' ? {} : { prefix }) }) } });
-  const ask = async (body: unknown) => (await (await proxy.routes!.fetch(new Request('https://coffre.example/use/market/dev', { method: 'POST', headers: { authorization: `Bearer coffre_use_${'h'.repeat(43)}`, 'content-type': 'application/json' }, body: JSON.stringify(body) }), fake('SECRET', secret))).json()) as Record<string, unknown>;
+  const proxy = credentialProxy({ credentials: {}, signers: { mac: hmac('SECRET', { encoding, ...(prefix === '' ? {} : { prefix }), ...(keyEncoding === undefined ? {} : { keyEncoding }) }) } });
+  const ask = async (body: unknown) => (await (await proxy.routes!.fetch(new Request('https://coffre.example/use/market/dev', { method: 'POST', headers: { authorization: `Bearer coffre_use_${'h'.repeat(43)}`, 'content-type': 'application/json' }, body: JSON.stringify(body) }), fake('SECRET', value))).json()) as Record<string, unknown>;
   const signed = await ask({ sign: { credential: 'mac', message: message.toString('base64url') } });
   assert.equal(signed.signature, `${prefix}${createHmac('sha256', secret).update(message).digest(encoding)}`);
   const verified = await ask({ verify: { credential: 'mac', message: message.toString('base64url'), signature: signed.signature } });

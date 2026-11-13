@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **An HMAC key written as text: `keyEncoding`.** An `hmac()` signer's or
+  verifier's key was its value's UTF-8 bytes. With `keyEncoding: 'hex'`,
+  `'base64'` or `'base64url'` it is the bytes the value writes: Equisafe's
+  policy seal key, 64 hex digits (`hmac('POLICY_SEAL_KEY', { encoding:
+  'hex', prefix: 'v1:', keyEncoding: 'hex' })`), Standard Webhooks'
+  secret, the base64 after `whsec_` (Monerium's), and Brale's base64url
+  `sharedSecret`. It holds for a sign as JSON or raw and a verify alike. A
+  value the encoding does not write exactly is a 409 naming the key, and
+  nothing is signed or checked with it. Without `keyEncoding`, nothing
+  changes.
 - **A key in the path: `path()`.** Telegram's Bot API takes its token in
   the URL's path (`/bot<token>/sendMessage`, and files under
   `/file/bot<token>/…`), so a credential may now name a segment's
