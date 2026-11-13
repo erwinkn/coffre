@@ -679,9 +679,11 @@ async function byIds(
     if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busy('late');
     const made = pending.map((index) => ready(path, each[index]!, requestOf(each[index]!, undefined), undefined, decided, seals));
     // Round 2's keys, each decided on round 1's rows, take their principal's lock: exclusive, first. Rows that name two
-    // principals for one credential were written around the log: no lock first, and Postgres ends a wait cycle (40P01).
+    // principals for one credential, each sealed, were written by a holder of the seal key (round 1's seal check refuses
+    // any other): refused, as tampered, sending nothing. Not the control, which the seals are.
     const principals = new Set(decided ? pending.map((index) => (settled[index] as Extract<Used, { again: Ids }>).row.c_principal) : []);
-    const lock = principals.size === 1 ? [...principals][0] ?? null : null;
+    if (principals.size > 1) return { index: pending[0]!, used: { outcome: { ok: false, code: 'tampered', number: null }, row: null, checked: null, request: made[0]!.request } };
+    const lock = [...principals][0] ?? null;
     const answered = await raced(path, input.deadline, (sends) => inStatements(path, made.map((one) => one.call), lock, sends), async (rows, starts) => {
       if (rows.length !== made.length) throw new Error(`use_id_batch answered ${rows.length} rows for ${made.length} keys`);
       const forgedOf = forgedOnce(path, starts);

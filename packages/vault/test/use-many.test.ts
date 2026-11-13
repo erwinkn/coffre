@@ -16,11 +16,11 @@ import { postgresClient } from '@coffre/db/connect';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
-import type { Input } from '../src/inputs.ts';
+import type { Input, Op } from '../src/inputs.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { newRequestId, UseCache, useLimits, useMany, type UsePath } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { HOT_URL, openTestDatabase, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
+import { HOT_URL, openTestDatabase, OWNER_URL, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, emptyLog, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 import { resolveVaultConfig } from '../src/config.ts';
 import { environments } from '@coffre/db/schema';
@@ -468,3 +468,97 @@ test("a batch's keys at a key service take turns as one call's, six at once, wha
   assert.equal(most, 6, "one call's Decrypts, six at a time: Workers' simultaneous open connections of an invocation");
 });
 
+
+test('a use whose session forges `coffre.principal_held` to its own principal, holding no lock exclusive, still stops at the cap: the setting only skips the election', async () => {
+  const w = await world({ count: 2, windowMs: 24 * 3_600_000 });
+  const ids = [await w.key(), await w.key(), await w.key()];
+  const [{ name }] = await rows<{ name: string }>(db.owner, sql`SELECT current_database() AS name`) as [{ name: string }];
+  await run(db.owner, sql.raw(`ALTER DATABASE "${name}" SET coffre.principal_held = '${w.principal}'`));
+  const client = postgresClient(HOT_URL, { max: 1 });
+  try {
+    assert.equal((await client.unsafe(`SELECT current_setting('coffre.principal_held', true) AS v`))[0]!.v, w.principal, 'every session of the vault holds the forgery');
+    const vault = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(client));
+    const code = async (id: string) => { const one = await vault.use!(ask(w, id)); return one.ok ? null : 'code' in one ? one.code : one.busy; };
+    assert.deepEqual([await code(ids[0]!), await code(ids[1]!), await code(ids[2]!)], [null, null, 'bulk_limit']);
+    // Both keys a period back: each moves on under the forged setting, with no election, and the third is still refused.
+    await run(db.owner, sql`UPDATE bulk_cap SET last = last - 120000`);
+    assert.deepEqual([await code(ids[0]!), await code(ids[1]!), await code(ids[2]!)], [null, null, 'bulk_limit']);
+    assert.equal(await count('bulk_cap'), 2);
+  } finally {
+    await client.end();
+    await run(db.owner, sql.raw(`ALTER DATABASE "${name}" RESET coffre.principal_held`));
+  }
+});
+
+test('a second round, under its principal\'s lock exclusive, moves its keys on with no election: 100 keys, no lock of the cap\'s besides the fence and the principal\'s', async () => {
+  const w = await world();
+  const ids: string[] = [];
+  for (let i = 0; i < 100; i += 1) ids.push(await w.key(`m${i}`));
+  const { vault } = await isolate();
+  assert.equal(opened(heard(await vault.useMany!(many(w, ids)))).length, 100);
+  // Every key two periods back, still in the window: the next batch moves each on, in its second round, under the lock.
+  await run(db.owner, sql`UPDATE bulk_cap SET last = last - 120000`);
+  // The last key's row held, so that the second round stops on it, every other key moved, its locks still held.
+  const rowHolder = postgresClient(OWNER_URL, { max: 1 });
+  const holder = createDatabase(rowHolder);
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let locked!: () => void;
+  const holding = new Promise<void>((resolve) => { locked = resolve; });
+  const held = holder.transaction(async (tx) => {
+    await run(tx, sql`SELECT 1 FROM bulk_cap WHERE principal = ${w.principal} AND secret = ${ids[99]!} FOR UPDATE`);
+    locked();
+    await released;
+  });
+  await holding;
+  try {
+    const { vault: next } = await isolate();
+    const second = next.useMany!(many(w, ids));
+    let pid: number | undefined;
+    for (let tries = 0; pid === undefined && tries < 400; tries += 1) {
+      pid = (await rows<{ pid: number }>(db.owner, sql`SELECT l.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+        WHERE NOT l.granted AND a.datname = current_database() AND a.query LIKE '%use_id_batch(%'`))[0]?.pid;
+      if (pid === undefined) await sleep(2);
+    }
+    assert.ok(pid !== undefined, 'the second round waits on the held row');
+    // A one-bigint advisory lock (objsubid 1) is the cap's election's; the fence's and the principal's are two-int (2).
+    const [locks] = await rows<{ elections: number; others: number }>(db.owner, sql`SELECT count(*) FILTER (WHERE objsubid = 1)::int AS elections,
+      count(*) FILTER (WHERE objsubid = 2)::int AS others FROM pg_locks WHERE pid = ${pid} AND locktype = 'advisory' AND granted`);
+    release();
+    await held;
+    assert.deepEqual(locks, { elections: 0, others: 3 }, 'the fence shared, the principal\'s lock exclusive and shared, nothing else');
+    assert.equal(opened(heard(await second)).length, 100);
+  } finally {
+    release();
+    await held.catch(() => {});
+    await rowHolder.end();
+  }
+  assert.equal((await rows(db.owner, sql`SELECT 1 FROM bulk_cap WHERE last < ${onePeriod()}::bigint - 60000`)).length, 0);
+  assert.equal(await replayed(answered), 200);
+});
+
+test('a second round whose rows name two principals for its credential (a credential row rewritten between its first round\'s statements) is refused, as tampered, sending nothing', async () => {
+  const w = await world();
+  const other = await world();
+  const [mine, theirs] = [await w.key('a'), await other.key('b')];
+  // Its credential's row sealed anew for the other principal, as only a writer holding the seal key can, between the
+  // first round's two statements (one key a statement): its first key read by one principal, its second by the other.
+  const moved = { ...w.objects.credential, principal: other.principal } as Input;
+  const isolate = await counted({
+    batch: 1,
+    before: async (n) => {
+      if (n !== 2) return;
+      await change({ kind: 'credential', id: w.credentialId }, { op: 'genesis', value: moved } as Op, moved, (tx, value) =>
+        run(tx, sql`UPDATE credentials SET principal = ${other.principal}, seal = ${value} WHERE id = ${w.credentialId}`));
+    },
+  });
+  try {
+    const outcome = await isolate.useMany(many(w, [mine, theirs]));
+    assert.deepEqual(outcome, { ok: false, index: 0, code: 'tampered', number: null });
+    assert.equal(isolate.statements(), 2, 'the first round\'s two statements, and no second round');
+  } finally {
+    await isolate.close();
+  }
+  assert.equal(await count('bulk_cap'), 0);
+  assert.equal(await count('log_uses'), 0);
+});
