@@ -7,11 +7,9 @@
 -- a key the place holds. The lean statement, the old cached plain form, is a fast path in front of it for the common
 -- use, and answers what the full one would or hands off (`whole`); it exists only because Postgres sets up every node
 -- of a plan on each run, read or not, and the full plan costs a lean use about 130 us more of it. The rule is
--- `use_state`, a SQL function the planner inlines into both. A single use takes the same locks, in the same order, with
--- the same re-checks: the fence shared before the statements, the principal's lock only after the vault decided, the
--- bulk write in a statement of its own. A batch's second round takes fewer: under its principal's lock exclusive, its
--- keys move on in the cap's set with no election (`coffre.principal_held`), and one whose rows name two principals for
--- its credential is refused by the vault, sent nowhere, where it was sent with no lock first. The route's read (its levels, its item's editor, the keys it names), which a route's named call
+-- `use_state`, a SQL function the planner inlines into both. Same locks, in the same order, and the same re-checks:
+-- the fence shared before the statements, the principal's lock only after the vault decided, the bulk write in a
+-- statement of its own. The route's read (its levels, its item's editor, the keys it names), which a route's named call
 -- and `use_route` each held a copy of, is one function both call, `use_route_read`. No login may call either helper.
 -- The warm-up's mark moves on (`coffre.use_planned`), so a session plans both statements before it holds the fence.
 -- A route's read (T205; T200), as both `use_route` and a route's named call in `use_credential` make it, written once:
@@ -853,13 +851,7 @@ BEGIN
     IF r.state IS NULL AND (locked OR moving) THEN
         b_refresh := greatest(1, least(60000, r.cap_window / 10));
         b_period := public.bulk_period(r.c_principal, p_secret, p_at, b_refresh);
-        -- Under the principal's lock exclusive, this use's own or a batch's (`coffre.principal_held`, which the batch sets
-        -- with the lock), no other use moves its keys: the key moves on with no election. The setting is a hint that
-        -- skips the election, never `locked`: any session of a login that may call this can set it, and a false one only
-        -- queues on the row, whose UPDATE is right alone. Read here alone, so that a use that reads its key fresh pays nothing.
-        IF r.in_set AND (locked OR current_setting('coffre.principal_held', true) = r.c_principal) THEN
-            UPDATE public.bulk_cap SET last = b_period WHERE principal = r.c_principal AND secret = p_secret AND last < b_period;
-        ELSIF r.in_set THEN
+        IF r.in_set THEN
             -- One use moves the key to this period: the one that takes a lock of the key and period's own without waiting.
             -- The others take it shared, which waits only for that one's end, never for each other, and read the row again,
             -- locking none: moved, they leave it. An UPDATE that waits on a row another is moving, then finds it moved,
@@ -1116,10 +1108,7 @@ BEGIN
             END LOOP;
             IF v_right THEN
                 -- A second round's keys take the principal's lock, exclusive, before any (StrongestFirst); the fence is held.
-                IF p_lock IS NOT NULL THEN
-                    PERFORM pg_advisory_xact_lock(1668244066, hashtext(p_lock));
-                    PERFORM set_config('coffre.principal_held', p_lock, true);
-                END IF;
+                IF p_lock IS NOT NULL THEN PERFORM pg_advisory_xact_lock(1668244066, hashtext(p_lock)); END IF;
                 FOR k IN 1 .. v_n LOOP
                     -- A key with no request: one a second round does not make again (its use made in the first), only checked.
                     IF p_requests[k] IS NULL THEN
@@ -1375,7 +1364,6 @@ BEGIN
         -- The fence first, as every use takes it, then the principal's lock, exclusive, before any key (StrongestFirst).
         PERFORM pg_advisory_xact_lock_shared(1668244070, 0);
         PERFORM pg_advisory_xact_lock(1668244066, hashtext(p_lock));
-        PERFORM set_config('coffre.principal_held', p_lock, true);
     END IF;
     FOR k IN 1 .. n LOOP
         answers := answers || public.use_credential(

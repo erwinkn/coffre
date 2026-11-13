@@ -2,8 +2,6 @@
 // twice on the same rows: a copy of `use_credential` that answers `whole` wherever the full statement would run, in a
 // subtransaction rolled back, then a copy that never runs the lean one, which makes the use. Wherever the lean copy
 // answered, both answers must be the same but for the entry's number, or the call fails.
-// It holds the answers, not the locks: a single use takes 0.15's locks in 0.15's order, a batch's second round fewer
-// (0086's header).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
