@@ -214,7 +214,7 @@ test("the audit projection starts below retention's cuts, after an upgrade or a 
     assert.fail('the audit projection did not catch up');
   };
   const listed = async () => {
-    const found = await rows<{ number: string; log: number; action: string }>(db.owner, sql`SELECT number::text AS number, log, action FROM audit_events ORDER BY number`);
+    const found = await rows<{ number: string; log: number; action: string }>(db.owner, sql`SELECT number::text AS number, log, action FROM audit_events ORDER BY audit_events.number`);
     return { uses: found.filter((r) => Number(r.log) === 16).map((r) => BigInt(r.number)), rebuilds: found.filter((r) => r.action === 'audit.rebuild').map((r) => BigInt(r.number)) };
   };
   // A change the projection lists, below the cut to come: the record of a rebuild, which also puts the cursor at the start.

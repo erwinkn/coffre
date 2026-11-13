@@ -382,7 +382,7 @@ test('T119, item 3: a reset over a seal in flight: the seal fails rather than si
   for (let i = 0; i < 300; i += 1) await log.use();
   await object.alarm();
   // The partial leaf tile changed by a writer: every write that grows it fails, the alarm's tick's and the seal's.
-  const [edge] = await rows<{ leaf: string; hashes: Buffer }>(db.owner, sql`SELECT leaf::text AS leaf, hashes FROM log_tiles WHERE tree = 'uses' AND level = 0 ORDER BY leaf DESC LIMIT 1`);
+  const [edge] = await rows<{ leaf: string; hashes: Buffer }>(db.owner, sql`SELECT leaf::text AS leaf, hashes FROM log_tiles WHERE tree = 'uses' AND level = 0 ORDER BY log_tiles.leaf DESC LIMIT 1`);
   await run(db.owner, sql`UPDATE log_tiles SET hashes = ${randomBytes(edge!.hashes.length)} WHERE tree = 'uses' AND level = 0 AND leaf = ${BigInt(edge!.leaf)}`);
   await log.use();
   const change = await log.change();
