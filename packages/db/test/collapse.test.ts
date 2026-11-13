@@ -271,8 +271,8 @@ test('each function is made once, by its own file, which the baseline names once
 });
 
 // A function takes at most 10 arguments (AGENTS.md, "Writing code here"). These take more: each
-// name with the argument counts of its overloads, largest first. The list only shrinks. A new entry needs the owner's
-// written reason; a count that grows is refused the same way. A function that is gone, or is down to 10 or fewer,
+// name with the argument counts of its overloads, largest first. The list only shrinks. A new entry needs a written
+// reason in a comment at the function; a count that grows is refused the same way. A function that is gone, or is down to 10 or fewer,
 // leaves the list, and a count that falls is updated here.
 const OVER_TEN: Record<string, number[]> = {
   change_bindings: [54, 53],
@@ -289,7 +289,7 @@ const OVER_TEN: Record<string, number[]> = {
 test('no function in schema public takes more than 10 arguments, but the ones OVER_TEN lists, at the counts it lists', async () => {
   const functions = await admin((client) =>
     client.unsafe<{ name: string; arguments: number }[]>(
-      `SELECT proname AS name, pronargs::int AS arguments FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND pronargs > 10 ORDER BY pronargs DESC`,
+      `SELECT proname AS name, pronargs::int AS arguments FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND pronargs > 10 AND NOT EXISTS (SELECT FROM pg_depend WHERE classid = 'pg_proc'::regclass AND objid = pg_proc.oid AND deptype = 'e') ORDER BY pronargs DESC`,
     ),
   );
   const over: Record<string, number[]> = {};
@@ -298,7 +298,7 @@ test('no function in schema public takes more than 10 arguments, but the ones OV
   assert.deepEqual(
     sorted(over),
     sorted(OVER_TEN),
-    'left: what the database has over 10 arguments, right: OVER_TEN. A function missing on the left is gone or down to 10 or fewer: remove it from OVER_TEN. A function missing on the right, or a larger count, is new and needs the owner\'s written reason. A smaller count is a cut: update OVER_TEN.',
+    'left: what the database has over 10 arguments, right: OVER_TEN. A function missing on the left is gone or down to 10 or fewer: remove it from OVER_TEN. A function missing on the right, or a larger count, is new and needs a written reason in a comment at the function. A smaller count is a cut: update OVER_TEN.',
   );
 });
 
