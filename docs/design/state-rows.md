@@ -5,11 +5,11 @@ Postgres; a clean break (0.16 upgrades offline from exactly 0.15.0, rollback is 
 secondary indexes per table; derive, don't sync; typed columns; no planner steering; the 5 s statement timeout last.
 Decided since the first draft and folded in (section 8): the two JSON values SQL never reads stay JSON (D199); the
 audit page checks the log on every visit, at a flat cost (D200); per-object locks are in 0.16, last before the timeout
-(D201); the offboarding report covers what retention keeps; old heartbeats and checkpoints are not listed. Assumed:
-audit filtered by place stays for the CLI and API; a change still answers only once sealed. Numbers were measured on
-2026-11-12 on main `021a8863`, on a Postgres 16.14 of my own: `pg_stat_statements` under the dev stack, `EXPLAIN
-(ANALYZE, BUFFERS)` in a warm session, `pgbench` with one client, and `change-cost.test.ts`'s harness for round trips.
-Catalog facts come from a migrated database.
+(D201); the offboarding report covers the reads retention keeps and every write; old heartbeats and checkpoints are
+not listed. Assumed: audit filtered by place stays for the CLI and API; a change still answers only once sealed.
+Numbers were measured on 2026-11-12 on main `021a8863`, on a Postgres 16.14 of my own: `pg_stat_statements` under the
+dev stack, `EXPLAIN (ANALYZE, BUFFERS)` in a warm session, `pgbench` with one client, and `change-cost.test.ts`'s
+harness for round trips. Catalog facts come from a migrated database.
 
 ## 1. Today in one page
 
@@ -192,14 +192,15 @@ the chain is. The replay, and the full walk that replays the log, pass over an e
 | `audit_member_keys` | every value a member read or wrote, newest time each | Measured at 440k entries: 18 pages against 18,421 reading the entries, and the scan grows with every read the member makes. A CI token reads on every deploy. |
 | `audit_cursor` and the projector | | They exist today for `log_reads` (533 lines). The new projector covers changes and events too, and replaces the day tables and triggers. |
 
-One job writes all three tables and the cursor in one transaction per batch. It has three sources: the two chains,
-of which it reads only windows the checkpointer has signed, and the frozen `audit_log`, which it reads backward from
-its anchor, leaving out heartbeats and checkpoints (section 6). Rebuilding is the same code: `coffre audit rebuild`
+One job writes all three tables and the cursor in one transaction per batch. It has three sources: the two chains, of
+which it reads only windows the checkpointer has signed, and the frozen `audit_log`, which it reads backward from its
+anchor, leaving out heartbeats and checkpoints (section 6). Rebuilding is the same code: `coffre audit rebuild`
 empties the tables and sets both of the cursor's positions back, so the old log's rows are rebuilt as the new are.
-Retention deletes a dropped day's uses with one range delete on the primary key, which starts with `at`. Residual
-filters (a member at a place, `decision`, a scoped reader's visibility) run over a bounded window of the best index,
-and the page returns what it found with `next`. The API already allows a short page with `more`, so no combination of
-filters needs an index of its own.
+Retention deletes a dropped day's uses with one range delete on the primary key, which starts with `at`, and from the
+summary the reads older than the day's end; it never deletes a `wrote` row (section 3). Residual filters (a member at
+a place, `decision`, a scoped reader's visibility) run over a bounded window of the best index, and the page returns
+what it found with `next`. The API already allows a short page with `more`, so no combination of filters needs an
+index of its own.
 
 **JSON columns, by the typed-columns rule (D199).** Two values stay JSON, because SQL never reads them and a test
 fails any SQL that does: `log_changes.payload`, one signed value only the vault reads whole (no more `strpos`, no
@@ -402,11 +403,14 @@ of the new one, re-derived and held to its signed root and to the projection's r
 timeout, so nothing has to run outside its reach. Its cost follows the log, and nothing runs it unasked.
 
 The walk also holds the report's summary to the list: each listed read inside retention needs an entry of
-`audit_member_keys` for its member, key and version, at its time or later. It takes retention's floor from the sealed
-retention change, never from `audit_cursor.reads_from`. That column has no MAC, and a writer who raises it makes the
-projector skip entries; a verify that trusted it would excuse them all (`formal/Reads.tla`, `FloorSealed`, on P1). A
-read in the frozen log timed before the newest dropped day keeps its row on the page, since retention drops only the
-uses' rows, and is on no report: the report covers retention's window and states the date it starts (D161).
+`audit_member_keys` for its member, key and version, at its time or later, and each listed key write that supplied a
+value needs its `wrote` row, whatever its age. Retention drops uses and never a change, so a `wrote` row lasts as long
+as the table and a rebuild derives it again: a value someone set a year ago and that is still current is one to
+rotate, as today's report says. For reads, the walk takes retention's floor from the sealed retention change, never
+from `audit_cursor.reads_from`. That column has no MAC, and a writer who raises it makes the projector skip entries; a
+verify that trusted it would excuse them all (`formal/Reads.tla`, `FloorSealed`, on P1). A read in the frozen log
+timed before the newest dropped day keeps its row on the page, since retention drops only the uses' rows, and is on no
+report: the report covers retention's window of reads and states the date it starts (D161).
 
 **No `log_verified`, and the beat writes nothing.** With a check on every visit, the row the first draft had the page
 read has no reader, so the table is not built. The 5-minute beat keeps one job: it runs the same `check` when nobody
@@ -631,25 +635,42 @@ fixed:
   update of it, a credential's last use too.
 
 Cost, on the reference rig: 11 shared advisory locks taken in one statement cost 0.0024 ms more than 1 (0.0095 ms
-against 0.0071 ms a round); the 0.013 ms measured first took each in a statement of its own. The bound that matters
-is Postgres's shared lock table, where advisory locks live: `max_locks_per_transaction` (64) times `max_connections`,
-6,400 objects at the defaults. Measured, one session holds 12,832 before `out of shared memory` at 100 connections,
-and 5,248 at 25. What holds locks at once is the pool, 20 connections a Hyperdrive config at 100 and 6 at 25, not the
-1,250 keys an isolate has in flight. Single uses never come near: 20 x 13 = 260. A batch statement of 100 keys holds
-its caller's 4 and 1 to 6 a key: about 110 when its keys share an environment, 604 at the very worst (each key in a
-place of its own and a reference into another). Twenty at once hold 2,200, or 12,080; six hold 660, or 3,624 against
-1,600. Today's batch already takes up to 100 more a statement for the cap's rows (`b_lock`). A full table fails
-whoever asks next, anywhere in the cluster, with an error. L1 must make that impossible, and its PR picks how:
+against 0.0071 ms a round); the 0.013 ms measured first took each in a statement of its own. The bound that matters is
+Postgres's shared lock table, where advisory locks live: `max_locks_per_transaction` (64) times `max_connections`,
+6,400 entries at the defaults. What holds locks at once is a connection, not one of the 1,250 keys an isolate has in
+flight. Keyed by the object, single uses never come near (13 each). A batch statement of 100 keys holds its caller's 4
+and 1 to 6 a key: about 110 when its keys share an environment, 604 at the very worst (each key in a place of its own
+and a reference into another), and twenty of those on the hot path's connections hold 12,080. A full table fails
+whoever asks next, anywhere in the cluster, with an error.
 
-1. **Stripes (recommended).** An object's lock key is its hash modulo 128. A statement then holds 128 object locks at
-   most, whatever it reads: 20 x 128 = 2,560 of 6,400, and 6 x 128 = 768 of 1,600. The price is false sharing: a
-   change makes a single use of other objects wait with probability 7 in 128, and a 100-key batch about half the time,
-   for one statement, where today every change stalls every use. A batch's round 2, which holds its principal's lock
-   exclusive, drops its `b_lock`s, which that lock makes redundant.
-2. **Smaller batch statements**, sized at setup from the lock table as the pools are from `max_connections`: about 25
-   keys a statement at the defaults, so a 100-key request is 4 statements in turn where it is 1.
-3. **A larger table:** `coffre setup` refuses a database whose `max_locks_per_transaction` is below what its pools
-   can ask for. A restart, and not every managed Postgres allows it.
+**Stripes (coordinator, on L1's report).** An object's lock key is a hash of the object modulo a fixed count of
+stripes. A transaction takes its stripes once, sorted and deduplicated, exclusive on a stripe it asks for both ways.
+It then holds at most that count of object locks whatever it reads, with no limit on a batch and no Postgres setting
+for a deployment to raise. Not taken: smaller batch statements (a 100-key request becomes 4 statements in turn), and a
+setup that refuses a small `max_locks_per_transaction` (a restart, which not every managed Postgres allows).
+
+**The count is 32, derived.** Postgres sizes the table at 64 entries for each connection it can admit. Every
+connection coffre holds is one of those, so if no transaction of coffre's holds more than 64 entries, coffre cannot
+fill the table, whatever the pools' sizes and whichever of them is busy. 64 is the budget of one transaction: its
+stripes, its 4 other advisory locks (change, issue, fence, principal), and its relation locks past the 16 a backend
+keeps outside the table (the fast path), tables and indexes both. 32 stripes leave 28 for those. The pools add margin,
+never less than a tenth: `coffre setup` gives the three Hyperdrive configs (the app's, the vault's, the hot path's) a
+third each of `max_connections` less the reserved slots and 3, at most 20, so the table has 106 entries a pooled
+connection at 100, 88 at 25, and 70 at worst, at 66. The 128 this section first proposed counted one config's 20
+connections; over the three it is 60 x 128 = 7,680 of 6,400, and 18 x 128 = 2,304 of 1,600. 64 stripes and the 4
+others are 68, past the budget: at 66 connections they leave 2 of a pooled connection's 70 for relation locks, so they
+hold only by arguing which pools can hold a full set at once. Measured, the table takes at least twice its nominal
+size (one session holds 12,832 locks at 100 connections, 5,248 at 25): slack in shared memory that Postgres does not
+promise, so the count does not lean on it.
+
+The price is false sharing, for one statement: a use of 6 objects waits for an unrelated change of one object with
+probability 1 - (31/32)^6, 17% (9% at 64 stripes, 5% at 128), where today every use waits for every change. A 100-key
+batch covers nearly every stripe and waits for any change's last statement, as it does today. Changes are rare, and
+uses share with each other. L1's PR measures three things against the same run unstriped: a single use's wait while an
+unrelated change is in flight; uses per second with a change every second; and the rows of `pg_locks` outside the fast
+path that a use, a batch and a change each hold, which is what the 28 must cover. If they do not, the count goes down,
+not the budget up. A batch's round 2, which holds its principal's lock exclusive, drops its `b_lock`s (up to 100 a
+statement today, for the cap's rows), which that lock makes redundant.
 
 ## 4. The security argument
 
@@ -978,8 +999,9 @@ No question is open. The five the first draft asked:
   fails any SQL that parses them. The JSON columns SQL does read are typed in a task after 0.16.
 - **The audit page's checks** (Erwin, D200): on every visit, at a cost that does not grow with the log; the full
   recheck only when asked (section 3). The first draft's scheduled row, `log_verified`, is not built.
-- **The offboarding report and retention** (coordinator, on D161): the report covers what retention keeps and states
-  the date it covers from. The summary stays a cache the projector rebuilds.
+- **The offboarding report and retention** (coordinator, on D161): the report covers the reads retention keeps,
+  stating the date they start from, and every write of a value, however old (W385: `drop_audit_day` and `reads_from`
+  leave `wrote` rows alone). The summary stays a cache the projector rebuilds.
 - **Per-object locks** (Erwin, D201): in 0.16, last before the timeout.
 - **Old heartbeats and checkpoints** (coordinator): not listed. They stay in `audit_log`, verified, and a rebuild
   with another filter brings them back.
