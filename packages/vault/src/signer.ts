@@ -1,4 +1,4 @@
-import { Edge, leafHash, tileMap } from '@coffre/core/log';
+import { Edge, leafHash, tileMap, WIDTH } from '@coffre/core/log';
 import type { Database } from '@coffre/db';
 import * as schema from '@coffre/db/schema';
 import { is, sql, type SQL } from 'drizzle-orm';
@@ -7,6 +7,7 @@ import { PgTable } from 'drizzle-orm/pg-core';
 import { bounded } from './change.ts';
 import { entryOf, type Entry } from './entry.ts';
 import { macOf, shapeOf, type Key, type Sealed } from './rows.ts';
+import { pruned, recheck, type Walk } from './upkeep.ts';
 
 /**
  * The signer (docs/design/0.16.md, "The log" and "The signer's mirror";
@@ -41,7 +42,8 @@ export type Store = {
   write(changes: ReadonlyMap<string, unknown>): Promise<void>;
 };
 
-export type Signing = { db: Database; keys: readonly Key[]; now(): number; store: Store };
+/** `keepUsesDays`: how long a use is kept, from its date as signed (`log.keepUsesDays`). Null keeps every one. */
+export type Signing = { db: Database; keys: readonly Key[]; now(): number; store: Store; keepUsesDays: number | null };
 
 /**
  * What a run found, and of what: an entry by its hash (or `pending:<id>` for
@@ -54,7 +56,8 @@ export type Signing = { db: Database; keys: readonly Key[]; now(): number; store
  * - `rewritten`: a change replaced a row, or was decided on one, whose MAC is not the one the mirror holds: false history.
  * - `row`: on a full run, a row that is not what the entries say.
  * - `cut`: on a full run, a tree that does not end with the entry signed last.
- * - `lost`: an entry signed, and not in the log as it was signed once moved.
+ * - `lost`: an entry signed, and not in the log as it was signed once moved, or later by the re-check (upkeep.ts); or a
+ *   block of them, by its leaves (`aging 512-767`), whose tiles do not prove.
  */
 export type Finding = { found: 'forged' | 'replayed' | 'stale' | 'missing' | 'rewritten' | 'row' | 'cut' | 'lost'; of: string };
 
@@ -86,7 +89,7 @@ const MOST_ROWS = 1000;
 const STATEMENT_MS = 30_000;
 
 const TREES = ['kept', 'aging'] as const;
-type Tree = (typeof TREES)[number];
+export type Tree = (typeof TREES)[number];
 const treeOf = (kept: boolean): Tree => (kept ? 'kept' : 'aging');
 
 /** The action of the log's first entry, the adoption's (adopt.ts): the mirror starts from the rows it sealed. */
@@ -133,6 +136,8 @@ type Move = {
   taken: { id: string; kept: boolean; seq: number; leaf: number; hash: string }[];
   refused: string[];
   tiles: { kept: boolean; level: number; number: number; hashes: string }[];
+  /** The first use kept before: the uses from it to the head's `agingFrom` are pruned, with their index rows and tiles. */
+  pruning: number;
   head: { size: number; keptSize: number; keptRoot: string; agingSize: number; agingRoot: string; agingFrom: number; signedAt: number; mac: string };
 };
 
@@ -163,6 +168,10 @@ export class Signer {
   /** Each tree's last leaf, hex: what the log must end with. */
   #last: Record<Tree, string | null> = { kept: null, aging: null };
   #moving: Move | null = null;
+  /** The first use of the aging tree it keeps: those before it are pruned. */
+  #agingFrom = 0;
+  /** Where the re-check of old entries goes on. */
+  #walk: Walk = { tree: 'kept', block: 0, since: 0 };
   /** What it found and nobody has taken yet. */
   #found: Finding[] = [];
   /** The rows and the trees its last check found wrong. One still wrong at the next is no news. */
@@ -207,6 +216,8 @@ export class Signer {
       else if (kind === 'found') signer.#found = value as Finding[];
       else if (kind === 'stands') signer.#stands = value as Finding[];
       else if (kind === 'checked') signer.#checked = value as number;
+      else if (kind === 'agingFrom') signer.#agingFrom = value as number;
+      else if (kind === 'walk') signer.#walk = value as Walk;
       else if (kind === 'state') {
         const { drained, trees } = value as Kept;
         signer.#drained = drained;
@@ -418,19 +429,21 @@ export class Signer {
           changes.set(`signed ${hex}`, undefined);
         }
       }
-      if (taken.length > 0 || refused.length > 0) {
-        const { kept, aging } = this.#trees;
-        // `agingFrom`: the first use pruning has kept, once there is pruning.
-        const head = { size: kept.size + aging.size, keptSize: kept.size, keptRoot: kept.root().toString('hex'), agingSize: aging.size, agingRoot: aging.root().toString('hex'), agingFrom: 0, signedAt: this.#on.now() };
-        const key = this.#on.keys[0]!;
-        this.#moving = { taken, refused, tiles, head: { ...head, mac: macOf(key, key.entries, headText(head)).toString('hex') } };
-        changes.set('moving', this.#moving);
-      }
+      if (taken.length > 0 || refused.length > 0) this.#move(changes, { taken, refused, tiles, pruning: this.#agingFrom });
       // With an entry or a finding, never alone: an idle run writes at most when it checked, and its storage's window is only wider for it.
       if ([...changes.keys()].every((key) => key === 'checked')) return;
       const trees = Object.fromEntries(TREES.map((tree) => [tree, { size: this.#trees[tree].size, last: this.#last[tree], tiles: this.#trees[tree].edgeTiles().map(({ level, index, hashes: tile }) => ({ level, index, hashes: tile.toString('hex') })) }])) as Kept['trees'];
       changes.set('state', { drained: this.#drained, trees } satisfies Kept);
     });
+  }
+
+  /** What is to move, with the head it signs: in its storage before anything moves. */
+  #move(changes: Map<string, unknown>, move: Omit<Move, 'head'>): void {
+    const { kept, aging } = this.#trees;
+    const head = { size: kept.size + aging.size, keptSize: kept.size, keptRoot: kept.root().toString('hex'), agingSize: aging.size, agingRoot: aging.root().toString('hex'), agingFrom: this.#agingFrom, signedAt: this.#on.now() };
+    const key = this.#on.keys[0]!;
+    this.#moving = { ...move, head: { ...head, mac: macOf(key, key.entries, headText(head)).toString('hex') } };
+    changes.set('moving', this.#moving);
   }
 
   /**
@@ -456,6 +469,12 @@ export class Signer {
           INSERT INTO log_index (object, seq) SELECT DISTINCT mentioned.object, moved.seq FROM moved JOIN logged USING (seq), jsonb_array_elements_text(moved.body::jsonb -> 'objects') AS mentioned(object)
           ON CONFLICT DO NOTHING),
         refused AS (DELETE FROM log_pending p USING jsonb_array_elements_text(${JSON.stringify(moving.refused)}::jsonb) AS r(id) WHERE p.id = r.id::bigint),
+        pruned AS (DELETE FROM log l WHERE l.kept = false AND l.leaf >= ${moving.pruning} AND l.leaf < ${head.agingFrom} RETURNING l.seq, l.body),
+        -- By each object they mention, within their numbers: the index's key leads with the object, and a join on the number alone reads all of it.
+        unindexed AS (
+          DELETE FROM log_index i USING (SELECT DISTINCT o.object FROM pruned p, jsonb_array_elements_text(p.body::jsonb -> 'objects') AS o(object)) m
+          WHERE i.object = m.object AND i.seq BETWEEN (SELECT min(seq) FROM pruned) AND (SELECT max(seq) FROM pruned) AND i.seq IN (SELECT seq FROM pruned)),
+        untiled AS (DELETE FROM log_tiles t WHERE t.kept = false AND t.level = 0 AND t.number >= ${moving.pruning / WIDTH} AND t.number < ${head.agingFrom / WIDTH}),
         tiled AS (
           INSERT INTO log_tiles (kept, level, number, hashes) SELECT kept, level, number, decode(hashes, 'hex') FROM jsonb_to_recordset(${JSON.stringify(moving.tiles)}::jsonb) AS t(kept boolean, level smallint, number bigint, hashes text)
           ON CONFLICT (kept, level, number) DO UPDATE SET hashes = excluded.hashes),
@@ -472,6 +491,31 @@ export class Signer {
       for (const { seq, hash } of moving.taken) if (!there.has(seq)) this.#find(changes, 'lost', hash);
       this.#moving = null;
       changes.set('moving', undefined);
+    });
+  }
+
+  /**
+   * After a check (upkeep.ts): the oldest uses pruned, as a move, so that
+   * what is kept from is in its storage before anything goes; then a slice
+   * of the log held to what it signed.
+   */
+  async #upkeep(): Promise<void> {
+    const ask = <Row>(statement: SQL) => this.#ask<Row>(statement);
+    const from = this.#agingFrom;
+    const to = await pruned(ask, this.#on, this.#trees, from);
+    if (to > from) {
+      await this.#step((changes) => {
+        this.#agingFrom = to;
+        changes.set('agingFrom', to);
+        this.#move(changes, { taken: [], refused: [], tiles: [], pruning: from });
+      });
+      await this.move();
+    }
+    const { found, walk } = await recheck(ask, this.#on.now(), this.#trees, to, this.#walk);
+    await this.#step((changes) => {
+      for (const { of } of found) this.#find(changes, 'lost', of);
+      this.#walk = walk;
+      changes.set('walk', walk);
     });
   }
 
@@ -511,6 +555,7 @@ export class Signer {
       // Done, or failed: a check that fails is tried again by the next minute's run, not by every run until then.
       if (failed !== null || (snapshot.drained && snapshot.rows !== null)) this.#owed = false;
       if (failed !== null) throw failed;
+      if (snapshot.drained && snapshot.rows !== null) await this.#upkeep();
       return this.#behind || this.#owed;
     } finally {
       this.#running = false;

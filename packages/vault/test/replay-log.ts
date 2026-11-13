@@ -56,7 +56,7 @@ try {
     await emptyDatabase(vault.owner);
     vault.woken.length = 0;
     const store = memoryStore();
-    const signer = await Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store });
+    const signer = await Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store, keepUsesDays: 90 });
     const made: Made[] = [];
     /** Each row the vault wrote, by the model's name for its MAC: what the writer puts back. */
     const sealed = new Map<string, typeof principals.$inferSelect>();
