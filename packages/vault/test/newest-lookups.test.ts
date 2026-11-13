@@ -375,7 +375,7 @@ async function history({ head = [], run: matching, tail, changes = [] }: Pick<Lo
 }
 
 for (const lookup of LOOKUPS) {
-  test(`${lookup.name}: one step of its index, however long the run of other entries since (T245, R48)`, { timeout: 300_000 }, async () => {
+  test(`${lookup.name}: one step of its index, however long the run of other entries since [full]`, { timeout: 300_000 }, async () => {
     const { first, newest } = await history(lookup);
     const statements = await sent((vault) => lookup.ask(vault, { first, newest }));
     assert.ok(statements.length > 0, 'the read asked the logs');

@@ -116,9 +116,9 @@ const STEPS = {
     run: ({ units }) => [`pnpm -r --no-sort ${units.map((u) => `--filter ./${u}`).join(' ')} run typecheck`],
   },
   action: { job: 'action', install: true, build: true, run: () => ['pnpm check:action'] },
-  tests: { job: 'tests', install: true, postgres: true, run: ({ files }) => [`./scripts/test-suite.sh --files ${quote(files)}`] },
+  tests: { job: 'tests', install: true, postgres: true, run: ({ files, skipFull }) => [`./scripts/test-suite.sh${skipFull ? ' --skip-full' : ''} --files ${quote(files)}`] },
   // On a cluster of their own, no other test's migration resets their backends' caches (scripts/test-suite.sh).
-  alone: { job: 'tests', install: true, postgres: true, run: ({ files }) => [`./scripts/test-suite.sh --serial --files ${quote(files)}`] },
+  alone: { job: 'tests', install: true, postgres: true, run: ({ files, skipFull }) => [`./scripts/test-suite.sh --serial${skipFull ? ' --skip-full' : ''} --files ${quote(files)}`] },
   matrices: {
     job: 'matrices-shard',
     install: true,
@@ -167,7 +167,7 @@ const entries = selected.map((s) => {
   return s.why ? { ...s, run: true } : { ...s, run: false, status: 'skipped', note: s.off ?? 'diff does not touch it' }
 })
 const detail = (s) => {
-  if (s.files) return `\n    ${s.files.join('\n    ')}`
+  if (s.files) return `${s.skipFull ? ' (cases named [full] left out)' : ''}\n    ${s.files.join('\n    ')}`
   if (s.scenarios && s.why !== '--full') return `: ${s.scenarios.join(' ')}`
   if (s.units) return `: ${s.units.join(' ')}`
   return ''

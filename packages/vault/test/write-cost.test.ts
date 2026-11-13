@@ -43,7 +43,7 @@ async function grow(total: number, tag = ''): Promise<void> {
   await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0)`);
 }
 
-test("R48: a key write's vault statement and its app's hold read as many buffers at 10k entries as at 1M", { timeout: 600_000 }, async () => {
+test("a key write's vault statement and its app's hold read as many buffers at 10k entries as at 1M [full]", { timeout: 600_000 }, async () => {
   const w = await world({ role: 'developer' });
   await w.key();
   const [names] = await rows<{ token_hash: Buffer; project: string; key: string }>(db.owner, sql`SELECT c.token_hash, p.slug AS project, s.key
@@ -86,7 +86,7 @@ test("R48: a key write's vault statement and its app's hold read as many buffers
 // A member add's two statements, the same (T179 PR 5): the vault's read (`admit_read`) and its hold (`admit_hold`)
 // read the caller's objects, the member asked for and the scope's projects by id and slug, each object's newest change
 // by one probe, and 0.14's newest access entry about each principal by its index, never history.
-test("R48: a member add's read and its hold read as many buffers before the log grows by a million entries as after", { timeout: 600_000 }, async () => {
+test("a member add's read and its hold read as many buffers before the log grows by a million entries as after [full]", { timeout: 600_000 }, async () => {
   const w = await world({ caller: 'person' });
   const [names] = await rows<{ token_hash: Buffer; project: string }>(db.owner, sql`SELECT c.token_hash, p.slug AS project
     FROM credentials c, environments e JOIN projects p ON p.id = e.project_id WHERE c.id = ${w.credentialId} AND e.slug = 'dev' LIMIT 1`);

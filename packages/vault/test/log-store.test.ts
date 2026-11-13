@@ -307,7 +307,7 @@ test('PR 8 review r3 (W240): a bounded read stops at its limit in the database t
 });
 
 
-test('T245: the window by number reads its first entries in one step of the index, however long the backlog: 400,000 uses behind, a few pages', async () => {
+test('the window by number reads its first entries in one step of the index, however long the backlog: 400,000 uses behind, a few pages [full]', async () => {
   // A backlog as a stall leaves: uses numbered past the newest pair, stamped now, in today's day.
   await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac)
     SELECT nextval('log_number'), (extract(epoch FROM now()) * 1000)::bigint, g, gen_random_uuid(), gen_random_uuid(), 1, '\\x00000000000000000000000000000000'::bytea
@@ -338,7 +338,7 @@ test('T245: the window by number reads its first entries in one step of the inde
   assert.ok(indexed.buffers < 400 && indexed.buffers * 5 < sorted.buffers, said);
 });
 
-test("a pair's entries listed read the pair's own times, not every entry since a stall's floor: 100,000 entries listed, a few pages", async () => {
+test("a pair's entries listed read the pair's own times, not every entry since a stall's floor: 100,000 entries listed, a few pages [full]", async () => {
   const now = Date.now();
   await run(db.owner, sql`INSERT INTO audit_events (at, number, log, author, action, shown, allowed, actor, places, detail, mac)
     SELECT ${now}::bigint - 100000 + g, g, 16, 'vault', 'secret.read', true, true, 'user:ada@acme.example', '{}', '{}', '\\x00000000000000000000000000000000'::bytea

@@ -229,7 +229,7 @@ test("T169, review r8 of #437, Node, Postgres: a reads' projection hung in the d
   }
 });
 
-test('T169, review r1, Node, Postgres: stall after stall, each on a connection of its own, which it cuts: none is left holding one; answered again, it seals', { timeout: 60_000 }, async () => {
+test('Node, Postgres: stall after stall, each on a connection of its own, which it cuts: none is left holding one; answered again, it seals', { timeout: 60_000 }, async () => {
   const w = await world();
   const proxy = await stallProxy(VAULT_URL);
   const kept = await keepCheckpointer({
@@ -251,7 +251,9 @@ test('T169, review r1, Node, Postgres: stall after stall, each on a connection o
     proxy.release();
     await until(() => kept.sealing().ok, 10_000, 'sealing again');
     const number = await commitChange(w);
-    assert.ok((await vault.waitSealed!({ number: String(number) })).ok);
+    // At this test's 200 ms tick bound, a loaded host stalls a tick with nothing held, and the stalled runner answers
+    // unsealed until the keeper opens the next: asked again until one seals it.
+    await until(async () => (await vault.waitSealed!({ number: String(number) })).ok, 10_000, 'the change sealed');
   } finally {
     proxy.release();
     await kept.stop();

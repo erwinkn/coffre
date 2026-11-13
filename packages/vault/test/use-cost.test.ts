@@ -76,7 +76,7 @@ async function grow(total: number): Promise<void> {
   await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0)`);
 }
 
-test('R48: a use is one statement, its buffers the same at 10k and at 1M entries, probing and from the cache', { timeout: 600_000 }, async () => {
+test('a use is one statement, its buffers the same at 10k and at 1M entries, probing and from the cache [full]', { timeout: 600_000 }, async () => {
   const w = await world();
   const id = await w.key();
   const { pool, statements } = counting();
@@ -146,7 +146,7 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
   }
 });
 
-test("D153: a named use reads what it names by index, its buffers the same at 1k places and at 10k, its ids mapped or not", { timeout: 600_000 }, async () => {
+test("a named use reads what it names by index, its buffers the same at 1k places and at 10k, its ids mapped or not [full]", { timeout: 600_000 }, async () => {
   const w = await world();
   const id = await w.key();
   const [names] = await rows<{ token_hash: Buffer; project: string; key: string }>(db.owner, sql`SELECT c.token_hash, p.slug AS project, s.key
@@ -208,7 +208,7 @@ test("D153: a named use reads what it names by index, its buffers the same at 1k
   }
 });
 
-test("T165: a named use at a fork, and at `dev@me`, walks the place's chain and its dismissals by index: its buffers the same at 1k forks and at 10k", { timeout: 600_000 }, async () => {
+test("a named use at a fork, and at `dev@me`, walks the place's chain and its dismissals by index: its buffers the same at 1k forks and at 10k [full]", { timeout: 600_000 }, async () => {
   const w = await namedWorld(db, { caller: 'person' });
   const fork = await w.fork('feature');
   await w.grantAt(fork, 'viewer');
@@ -277,7 +277,7 @@ test("T165: a named use at a fork, and at `dev@me`, walks the place's chain and 
   }
 });
 
-test("T165 (PR 2): a named batch's first statement reads no key without standing, the same buffers whatever the place holds; and, standing, its gate's and each key's lone use's, its own the same at 1k forks and at 10k", { timeout: 600_000 }, async (t) => {
+test("a named batch's first statement reads no key without standing, the same buffers whatever the place holds; and, standing, its gate's and each key's lone use's, its own the same at 1k forks and at 10k [full]", { timeout: 600_000 }, async (t) => {
   const w = await namedWorld(db);
   const fork = await w.fork('feature');
   await w.grantAt(fork, 'viewer');

@@ -85,6 +85,15 @@ test('--full runs every job Validate needs, the image aside, and every command o
   }
 })
 
+test('the suite leaves out the cases named [full] only where the plan says so: pnpm test and Validate run them', () => {
+  const source = readFileSync(script, 'utf8')
+  const commands = [...source.matchAll(/^ {2}(tests|alone): \{.*run: \(\{ files, skipFull \}\) => \[`(.*)`\] \},$/gm)].map((m) => [m[1], m[2]])
+  assert.deepEqual(commands.map(([name]) => name), ['tests', 'alone'])
+  for (const [name, command] of commands) assert.match(command, /^\.\/scripts\/test-suite\.sh(?: --serial)?\$\{skipFull \? ' --skip-full' : ''\} --files /, name)
+  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  for (const [what, text] of [['pnpm test', manifest.scripts.test], ['validate.yml', workflow]]) assert.doesNotMatch(text, /--skip-full|\[full\]/, what)
+})
+
 test('a diff-free change runs the docs check alone', () => {
   const steps = list('--base', 'HEAD')
   assert.equal(steps.docs, 'every change')

@@ -1495,12 +1495,12 @@ async function bindingState(id: string): Promise<{ live: number; closed: boolean
   return { live: rows.filter(({ revokedAt }) => revokedAt === null).length, closed: row!.closedAt !== null, ended: row!.revokedAt !== null };
 }
 
-test(`a binding with more live credentials than one call revokes (${UNBIND_BATCH}) is removed in batches: closed first, every credential revoked, then ended (W331)`, {
+// A few batches, then past what one Node vault message carries (about 15,000), as a binding signing in at 1,000 a second
+// has in 30 s.
+for (const [count, full] of [[3 * UNBIND_BATCH + 7, ''], [Number(process.env.UNBIND_COUNT ?? 31_000), ' [full]']] as const) test(`a binding with more live credentials than one call revokes (${UNBIND_BATCH}) is removed in batches: closed first, every credential revoked, then ended, at ${count}${full}`, {
   timeout: 600_000,
 }, async () => {
   limits = processLimits();
-  // Past what one Node vault message carries (about 15,000), as a binding signing in at 1,000 a second has in 30 s.
-  const count = Number(process.env.UNBIND_COUNT ?? 31_000);
   await signIns(count);
   const calls: { sweep: boolean; credentials: number }[] = [];
   const change = deps.vault.changeBindings!.bind(deps.vault);
@@ -1929,7 +1929,7 @@ test('a removal cuts its batches by bytes too: credentials reaching a hundred pl
   assert.equal(calls.reduce((sum, { credentials }) => sum + credentials, 0), 800);
 });
 
-test("what a removal under way says is left costs the same however long the binding's history (T245)", async () => {
+test("what a removal under way says is left costs the same however long the binding's history [full]", async () => {
   // 3,000 live of the binding, 20,000 live of another binding of the service; then history, as it grows: credentials
   // that ended long ago, a third revoked before they ended.
   const insert = (count: number, by: string, ends: SQL, revoked: SQL = sql`NULL`) => run(sql`INSERT INTO credentials (kind, auth_mac, token_hash, token_hint, generation, principal, created_by, created_at, expires_at, revoked_at)

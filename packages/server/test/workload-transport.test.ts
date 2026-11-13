@@ -120,7 +120,7 @@ for (const [name, transport] of [
       }, 2);
     });
     await assert.rejects(transport.json(new URL(`${origin}/flood`)), /answered 503/);
-    await Promise.race([gone, sleep(2000).then(() => assert.fail('the connection stayed open'))]);
+    await Promise.race([gone, sleep(2000, undefined, { ref: false }).then(() => assert.fail('the connection stayed open'))]);
     assert.ok(written < 1024 * 1024, `the issuer sent ${written} bytes before the connection closed`);
   });
 }

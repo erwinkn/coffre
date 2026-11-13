@@ -5,6 +5,8 @@
 # `--files <file>...` runs only those files, on the same footing: the use
 # matrices (`pnpm test:matrices`), which CI runs in shards (`scripts/matrix-shard.ts`),
 # and the files `pnpm validate` picks; `--serial --files <file>...` runs them one at a time.
+# `--skip-full` leaves out the cases whose name says `[full]`: a growth, heap or large-N check
+# that `pnpm validate` runs only with `--full`, as `pnpm test` and CI always do.
 # Without it, the files that must run alone (`*.alone.ts`) run after the rest.
 set -euo pipefail
 
@@ -26,10 +28,15 @@ trap 'node --conditions=coffre:source scripts/test-databases.mjs cleanup "$COFFR
 node_test=(node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --import ./scripts/test-file-exits.mjs --test --test-timeout=600000)
 files=("scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts")
 concurrency=4
-if [ "${1:-}" = --serial ]; then
-    concurrency=1
+skip=()
+while :; do
+    case "${1:-}" in
+        --serial) concurrency=1 ;;
+        --skip-full) skip=(--test-skip-pattern='\[full\]') ;;
+        *) break ;;
+    esac
     shift
-fi
+done
 if [ "${1:-}" = --files ]; then
     shift
     # The files side by side share Postgres's connections, each a share of them while it runs
@@ -42,7 +49,7 @@ if [ "${1:-}" = --files ]; then
     COFFRE_TEST_FILES_ENDED="$(mktemp -d "${TMPDIR:-/tmp}/coffre-ended.XXXXXX")"
     export COFFRE_TEST_FILES_ENDED
     status=0
-    "${node_test[@]}" --test-concurrency="$concurrency" "$@" || status=$?
+    "${node_test[@]}" --test-concurrency="$concurrency" "${skip[@]}" "$@" || status=$?
     rm -rf "$COFFRE_TEST_FILES_ENDED"
     exit "$status"
 fi
@@ -53,6 +60,6 @@ fi
 # in plans everything again, as a connection's first does (use-days.alone.ts, request-cost.alone.ts). Both runs run;
 # either failing fails the suite.
 status=0
-"${node_test[@]}" --test-concurrency="$concurrency" "$@" "${files[@]}" || status=$?
-"${node_test[@]}" --test-concurrency=1 "$@" "packages/*/test/*.alone.ts" || status=$?
+"${node_test[@]}" --test-concurrency="$concurrency" "${skip[@]}" "$@" "${files[@]}" || status=$?
+"${node_test[@]}" --test-concurrency=1 "${skip[@]}" "$@" "packages/*/test/*.alone.ts" || status=$?
 exit "$status"
