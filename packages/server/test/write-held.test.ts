@@ -770,13 +770,15 @@ test("a refused write leaves every reader of the log as it was (the lead's condi
   // Everything a reader of 0.15's log answers, by the same calls before and after the refusal.
   // A use's answer but its operation's id, each its own.
   const used = ({ operationId: _, ...answer }: { operationId?: string }) => answer;
+  // Ada's report but how far the log is listed, which the projector moves on with every read listed, and when she last
+  // read each key: her reveal in `readers` is logged anew, at its own time, once the key's bulk period has turned.
+  const report = (member: Awaited<ReturnType<typeof w.root.members.get>>) => ({ ...member, reads: undefined, exposed: member.exposed.map(({ at: _, ...read }) => read) });
   const readers = async () => ({
     adaUse: used(await ada.secrets.reveal('market/dev', ['API_KEY'])),
     rootUse: used(await w.root.secrets.reveal('market/dev', ['API_KEY'])),
     list: await ada.secrets.list('market/dev'),
     history: await w.root.secrets.history('market/dev/API_KEY'),
-    // Their report but how far the log is listed, which the projector moves on with every read listed.
-    member: { ...(await w.root.members.get(`user:${ADA}`)), reads: undefined },
+    member: report(await w.root.members.get(`user:${ADA}`)),
     access: await w.root.members.access(`user:${ADA}`),
     everyone: await w.root.members.list(),
     verified: (await w.root.audit.verify()).ok,
@@ -785,7 +787,11 @@ test("a refused write leaves every reader of the log as it was (the lead's condi
     .map((entry) => `${entry.action} ${entry.decision} ${entry.actorId} ${entry.project ?? '-'}/${entry.environment ?? '-'} ${entry.reason ?? '-'}`);
   const before = await readers();
   const pages = { all: await audit(), dev: await audit({ path: 'market/dev' }), prod: await audit({ path: 'market/prod' }), ada: await audit({ actor: ADA }), deny: await audit({ decision: 'deny' }), allow: await audit({ decision: 'allow' }) };
+  const uses = async () => (await run(db.owner, sql`SELECT count(*)::int AS n FROM log_uses`))[0];
+  const usesBefore = await uses();
   const wrote = await w.write({ API_KEY: 'fake-ada' });
+  // A refused write logs no use, for anyone.
+  assert.deepEqual(await uses(), usesBefore);
   assert.equal(wrote.status, 403, JSON.stringify(wrote.body));
   assert.deepEqual(served(w.answers), ['refused']);
   // Listed where 0.14's deny entry would be, and nowhere else: the whole log, market/dev's page, Ada's, the deny ones.
