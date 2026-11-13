@@ -51,7 +51,7 @@ import { isUnavailable } from '@coffre/db/dialect';
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
-import { hmacParts, hmacSign, hmacVerify, type Encoding } from './hmac.ts';
+import { hmacParts, hmacSign, hmacVerify, keyBytes, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
 import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
@@ -266,17 +266,21 @@ export function privateKey(key: string, options: { limit?: Limits } = {}): Signe
 export type { Encoding };
 
 /** An HMAC-SHA256 secret coffre signs or checks signatures with for the app: the key that holds it, how its signatures are written, and how often a workload may use it. */
-export type Hmac = { kind: 'hmac'; key: string; encoding: Encoding; prefix?: string; maxBytes?: number; limit?: Limits };
+export type Hmac = { kind: 'hmac'; key: string; encoding: Encoding; prefix?: string; keyEncoding?: Encoding; maxBytes?: number; limit?: Limits };
 
 /**
  * An HMAC-SHA256 secret the app never holds: an inbound webhook's, among
  * `verifiers`, which the app asks whether a signature is the secret's
  * (`credential(name).verify(body, signature)`), or a key of the app's own
  * among `signers`, which also signs (`credential(name).sign(message)`).
- * The key is the environment's value, as its UTF-8 bytes; the signature
- * is written in `encoding`, `hex`, `base64` or `base64url`, after
+ * The key is the environment's value, as its UTF-8 bytes, or the bytes it
+ * writes in `keyEncoding`, `hex`, `base64` or `base64url`: a value outside
+ * its alphabet or padding is a 409, never signed with. The signature
+ * is written in `encoding`, one of the same, after
  * `prefix`: `hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' })`
- * checks Yousign's `x-yousign-signature-256`. `maxBytes` is the longest
+ * checks Yousign's `x-yousign-signature-256`, and
+ * `hmac('MONERIUM_WEBHOOK_SECRET', { encoding: 'base64', prefix: 'v1,', keyEncoding: 'base64' })`
+ * one of Standard Webhooks' `v1,<base64>` signatures, its value the base64 after `whsec_`. `maxBytes` is the longest
  * message it signs or checks, 64 KiB unless set. A message goes as JSON up
  * to 1 MiB (about 5 ms of CPU, of a Worker's 10 ms on the Free plan); a
  * signer's longer one goes raw, its bytes as the request's body, never
@@ -285,7 +289,7 @@ export type Hmac = { kind: 'hmac'; key: string; encoding: Encoding; prefix?: str
  * A verifier checks JSON alone, 1 MiB at most: a webhook's body is small.
  * `limit`, as a credential's.
  */
-export function hmac(key: string, options: { encoding: Encoding; prefix?: string; maxBytes?: number; limit?: Limits }): Hmac {
+export function hmac(key: string, options: { encoding: Encoding; prefix?: string; keyEncoding?: Encoding; maxBytes?: number; limit?: Limits }): Hmac {
   return { kind: 'hmac', key, ...options };
 }
 
@@ -1246,11 +1250,14 @@ function messageOf(given: unknown): Uint8Array<ArrayBuffer> | null {
 }
 
 /** An HMAC signer's or verifier's secret, opened for the caller as a credential's values are: remembered for `cacheSeconds`, logged as one use when opened; and until when it may serve (`valuesFor`). */
-async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, hmac: Hmac): Promise<{ secret: string; by: number }> {
+async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, hmac: Hmac): Promise<{ secret: Uint8Array<ArrayBuffer>; by: number }> {
   const { values, by } = await valuesFor(coffre, proxy, who, path, { name, keys: [hmac.key] }, { hmac: true });
   // WebCrypto takes no empty HMAC key: said as what is wrong with the value, not the platform's error.
   if (values[hmac.key] === '') throw new CoffreError(409, 'conflict', `${path}'s ${hmac.key} is empty, and ${name} signs and checks nothing with an empty secret`);
-  return { secret: values[hmac.key]!, by };
+  const secret = keyBytes(values[hmac.key]!, hmac.keyEncoding);
+  // What is wrong with the value is said, never the value: no key half read from it signs anything.
+  if (secret === null) throw new CoffreError(409, 'conflict', `${path}'s ${hmac.key} is no ${hmac.keyEncoding} key, which ${name} reads it as: ${hmac.keyEncoding === 'hex' ? 'an even number of hex digits' : `${hmac.keyEncoding}'s alphabet alone, its padding right, no prefix or space`}`);
+  return { secret, by };
 }
 
 /**
@@ -2413,12 +2420,13 @@ function checkSigner(name: string, signer: Signer, credentials: Map<string, Reso
   if (!KEY.test(signer.key)) throw new Error(`credentialProxy: ${what} ${name} names the key that holds its ${signer.kind === 'hmac' ? 'secret, YOUSIGN_WEBHOOK_SECRET' : 'private key, DFNS_PRIVATE_KEY'}`);
   if (signer.kind === 'hmac') {
     // HMAC-SHA256 alone, written as these schemes write it: a key it does not know is refused, never ignored.
-    const unknown = Object.keys(signer).find((option) => !['kind', 'key', 'encoding', 'prefix', 'maxBytes', 'limit'].includes(option));
-    if (unknown !== undefined) throw new Error(`credentialProxy: ${what} ${name}'s hmac() takes encoding, prefix, maxBytes and limit, and signs with SHA-256 alone; got ${unknown}`);
+    const unknown = Object.keys(signer).find((option) => !['kind', 'key', 'encoding', 'prefix', 'keyEncoding', 'maxBytes', 'limit'].includes(option));
+    if (unknown !== undefined) throw new Error(`credentialProxy: ${what} ${name}'s hmac() takes encoding, prefix, keyEncoding, maxBytes and limit, and signs with SHA-256 alone; got ${unknown}`);
     // A signer's message past 1 MiB goes raw; a verifier's is JSON alone.
     const most = what === 'signer' ? MAX_RAW_MESSAGE_BYTES : MAX_MESSAGE_BYTES;
     if (signer.maxBytes !== undefined && !(Number.isInteger(signer.maxBytes) && signer.maxBytes >= 1 && signer.maxBytes <= most)) throw new Error(`credentialProxy: ${what} ${name}'s maxBytes is a whole number of bytes, ${sized(most)} at most`);
     if (signer.encoding !== 'hex' && signer.encoding !== 'base64' && signer.encoding !== 'base64url') throw new Error(`credentialProxy: ${what} ${name}'s hmac() writes its signatures in hex, base64 or base64url`);
+    if (signer.keyEncoding !== undefined && signer.keyEncoding !== 'hex' && signer.keyEncoding !== 'base64' && signer.keyEncoding !== 'base64url') throw new Error(`credentialProxy: ${what} ${name}'s hmac() reads its key's value as hex, base64 or base64url, or as its UTF-8 bytes without keyEncoding`);
     if (signer.prefix !== undefined && (typeof signer.prefix !== 'string' || !/^[\x21-\x7e]{1,32}$/.test(signer.prefix))) throw new Error(`credentialProxy: ${what} ${name}'s prefix is up to 32 printable characters, sha256=`);
   }
   limited(name, signer.limit);
