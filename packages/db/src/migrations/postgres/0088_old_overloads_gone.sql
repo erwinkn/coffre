@@ -1,0 +1,6 @@
+-- 0.16.0: drop the overloads only 0.15.0's vault calls. 0.16 upgrades offline from exactly 0.15.0 (D197): no 0.15
+-- code serves on this schema, and 0.16's vault calls the newer ones (`credentials.postgres.ts`): `change_bindings`'s 54
+-- arguments, `issue_token`'s 29 (with the passkey, 0064), `sign_in`'s 48 (0075).
+DROP FUNCTION public.change_bindings(bigint, text, boolean, text, integer, bigint, integer, bigint, uuid, bytea, bigint, uuid, integer, bigint, uuid[], text[], text, integer, uuid[], uuid[], text[], uuid, bytea, text, text, text, text, text, text, text, text, text, text, bigint, bytea, uuid[], bytea[], bytea[], bytea[], bytea[], uuid[], uuid[], bytea[], bytea[], bytea[], bytea[], bigint, text, text[], uuid[], text[], bytea[], bytea[]);--> statement-breakpoint
+DROP FUNCTION public.issue_token(text, bigint, text, text, bytea, bytea, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, uuid, text, bytea, bytea, text, text, text, text, text, bigint);--> statement-breakpoint
+DROP FUNCTION public.sign_in(text, bigint, text, text, bytea, bytea, uuid, text, integer, text, text, text, text, text, text, bytea, bytea, bigint, boolean, integer, bigint, bigint, uuid, text, bytea, bytea, text, text, text, text, text, bigint, bigint, text, text);

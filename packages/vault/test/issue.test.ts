@@ -23,9 +23,8 @@ const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
 const CI = 'token:ci';
 const APP_KEY = 'app:0123456789abcdef';
-/** `issue_token` as 0.16's vault calls it, with the passkey it carries (0064); the previous release's signature lacks the last `uuid`. */
-const OLD_ISSUE_TOKEN = 'issue_token(text, bigint, text, text, bytea, bytea, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, uuid, text, bytea, bytea, text, text, text, text, text, bigint)';
-const ISSUE_TOKEN = `${OLD_ISSUE_TOKEN.slice(0, -1)}, uuid)`;
+/** `issue_token` as 0.16's vault calls it, with the passkey it carries (0064). */
+const ISSUE_TOKEN = 'issue_token(text, bigint, text, text, bytea, bytea, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, uuid, text, bytea, bytea, text, text, text, text, text, bigint, uuid)';
 /** The person's factor lock, as `issue_token` takes it and a change to their passkeys will (docs/design/passkeys.md, section 6.1). */
 const factorLock = (principal: string) => `SELECT pg_advisory_xact_lock(1717658484, hashtext('${principal}'))`;
 
@@ -552,17 +551,14 @@ test("an issue takes the factor lock first, and holds it while it waits on a mem
   }
 });
 
-test('`issue_token` takes the factor lock before any row, and the previous release\'s signature is the same statement carrying no passkey (0064)', async () => {
+test('`issue_token` takes the factor lock before any row, and is the vault\'s alone to call (0064)', async () => {
   const [{ body }] = await db.owner.execute<{ body: string }>(sql`SELECT pg_get_functiondef(${ISSUE_TOKEN}::regprocedure) AS body`);
   const lock = body.indexOf('pg_advisory_xact_lock(1717658484, hashtext(p_actor))');
   assert.ok(lock > 0 && lock < body.indexOf('FROM public.principals') && lock < body.indexOf('FROM public.credentials'));
   assert.doesNotMatch(body, /jit/i, 'no planner setting (R69)');
-  const [{ old }] = await db.owner.execute<{ old: string }>(sql`SELECT pg_get_functiondef(${OLD_ISSUE_TOKEN}::regprocedure) AS old`);
-  assert.match(old, /SELECT public\.issue_token\([^;]*p_expires, NULL::uuid\)/);
-  assert.doesNotMatch(old, /jit/i);
-  // Both the vault's to call, and no one else's.
-  for (const signature of [ISSUE_TOKEN, OLD_ISSUE_TOKEN]) {
-    const [grant] = await db.owner.execute<{ vault: boolean; app: boolean }>(sql`SELECT has_function_privilege('coffre_vault', ${signature}, 'EXECUTE') AS vault, has_function_privilege('coffre_app', ${signature}, 'EXECUTE') AS app`);
-    assert.deepEqual({ ...grant }, { vault: true, app: false }, signature);
-  }
+  // 0.15.0's overload, which called this one with no passkey, is gone (0088).
+  const [{ overloads }] = await db.owner.execute<{ overloads: number }>(sql`SELECT count(*)::int AS overloads FROM pg_proc WHERE proname = 'issue_token'`);
+  assert.equal(overloads, 1);
+  const [grant] = await db.owner.execute<{ vault: boolean; app: boolean }>(sql`SELECT has_function_privilege('coffre_vault', ${ISSUE_TOKEN}, 'EXECUTE') AS vault, has_function_privilege('coffre_app', ${ISSUE_TOKEN}, 'EXECUTE') AS app`);
+  assert.deepEqual({ ...grant }, { vault: true, app: false }, 'the vault\'s to call, and no one else\'s');
 });

@@ -81,7 +81,6 @@ test("no function works out a key's period but through bulk_period", () => {
 test('no function holds another copy of the minute or the deadline than the ones above', () => {
   // sign_in's own minute (0037): a credential's expiry may run that far past its longest by the app's clock, which is
   // CLOCK_SKEW_MS, the app's clock against the vault's, as the TypeScript checks (credentials.ts).
-  // Once in each overload: 0037's, which the previous release's vault calls, and 0075's.
   const signIn = found(/now_ms \+ p_longest \+ (\d+)\b/g);
   const overloads = functions.filter(({ name }) => name === 'sign_in').length;
   assert.deepEqual(signIn.map(({ name }) => name), Array<string>(overloads).fill('sign_in'), "sign_in's minute is sign_in's alone, and written once in each of its overloads");
