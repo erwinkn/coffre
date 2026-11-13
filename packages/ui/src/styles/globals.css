@@ -721,11 +721,6 @@ a.crumb-link:hover {
   color: var(--violet);
 }
 
-.tile-neutral {
-  background: var(--subtle);
-  color: var(--ink-2);
-}
-
 /* ========================================================================== */
 /* Page head                                                                  */
 /* ========================================================================== */
@@ -823,8 +818,6 @@ a.crumb-link:hover {
 }
 
 .card + .card,
-.card + .card-group,
-.card-group + .card,
 .table-actions + .card {
   margin-top: 1.25rem;
 }
@@ -1551,19 +1544,6 @@ a.crumb-link:hover {
 .segmented label:has(input:disabled) {
   color: var(--ink-3);
   cursor: default;
-}
-
-/* Inside a row being edited: as tall as the notes around it. */
-.segmented-sm {
-  padding: 0.125rem;
-}
-
-.segmented-sm a,
-.segmented-sm button,
-.segmented-sm label {
-  height: 1.375rem;
-  padding: 0 0.5rem;
-  font-size: 0.75rem;
 }
 
 /* The CI run an entry was written for, under its actor. */
@@ -3120,12 +3100,6 @@ tr.row-failure > td:first-child {
   align-self: flex-start;
 }
 
-.fact-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem 1rem;
-}
-
 /* The note behind a fact's value, a tap or hover away. */
 .fact-tip {
   display: inline-flex;
@@ -3681,30 +3655,6 @@ a.env-card-name:hover {
   color: var(--amber);
 }
 
-/* A section title with its status on the same line. */
-.section-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.25rem 0.75rem;
-  margin: 2rem 0 0.75rem;
-}
-
-.section-head .section-title {
-  margin: 0;
-}
-
-.section-head-first {
-  margin-top: 0;
-}
-
-/* What a section is, in a line under its title. */
-.section-desc {
-  margin: -0.375rem 0 0.875rem;
-  color: var(--ink-3);
-  font-size: 0.8125rem;
-}
-
 /* A batch's number is its range, "36–39", on one line. */
 .audit .n {
   width: 1%;
@@ -3789,17 +3739,6 @@ a.env-card-name:hover {
   border-radius: var(--radius-sm);
   font-size: 0.75rem;
   font-weight: 600;
-}
-
-.decision-allow {
-  background: var(--green-wash);
-  color: var(--green);
-}
-
-.decision-deny {
-  background: var(--panel);
-  color: var(--red);
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--red) 35%, transparent);
 }
 
 /* What a line says, wrapping after its separators, with its batch's toggle. */
@@ -4312,25 +4251,6 @@ a.menu-item:hover {
   color: var(--ink-3);
   font-size: 0.75rem;
   font-weight: 550;
-}
-
-.menu-identity {
-  display: flex;
-  flex-direction: column;
-  padding: 0.5rem 0.5rem 0.625rem;
-}
-
-.menu-identity strong {
-  overflow: hidden;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.menu-identity span {
-  color: var(--ink-3);
-  font-size: 0.75rem;
 }
 
 .tooltip-positioner {
@@ -5614,20 +5534,6 @@ a.menu-item:hover {
 }
 
 /* ========================================================================== */
-/* Form options                                                               */
-/* ========================================================================== */
-
-/* A field's options keep their width, taking a line of their own rather
-   than being squeezed, and wrap only when a line cannot hold them. */
-.form-row > .field-options {
-  flex: 0 1 auto;
-}
-
-.field-options .segmented {
-  flex-wrap: wrap;
-}
-
-/* ========================================================================== */
 /* Offboarding report                                                         */
 /* ========================================================================== */
 
@@ -5685,10 +5591,6 @@ a.menu-item:hover {
 .proxy-how {
   color: var(--ink-3);
   white-space: nowrap;
-}
-
-.proxy-error {
-  color: var(--red);
 }
 
 /* An item's kind, the list's first column. */
