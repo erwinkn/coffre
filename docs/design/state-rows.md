@@ -586,29 +586,38 @@ for that statement. L1 moves none of the 14 protections: they are change against
 stays one statement, one round trip, one vault call. The models (T282, a draft stacked on #573) hold it; what they
 fixed:
 
-- **Which objects:** the ones whose newest change a use already seeks. Its credential (or connection, binding or
-  Access account), its member, the roles, the policy, the key and the key's environment: 6. Another place, a personal
-  config's parent, a reference's source and the source's environment make 10 at most by ids. By name, the fork chain
-  adds up to 3 environments; a route, its definition a level and its editor's member.
+- **Which objects:** the ones whose seal the statement checks, so whose newest change a use already seeks. That is the
+  rule; a list is today's instance of it, and a kind left out is the unlocked object the models break on. Its
+  credential (or connection, binding or Access account), its member, the roles, the policy, the key and the key's
+  environment: 6. Another place, a personal config's parent, a reference's source and the source's environment make 10
+  at most by ids. By name, the fork chain adds up to 3 environments; a route, its definition a level and its editor's
+  member.
 - **One order:** the change lock, the issue lock, the fence, the objects' locks sorted by lock key, then a use's
   principal's lock. A transaction takes its objects' locks once, all of them, before its first read or write under
-  them. Four ways to break that each close a wait cycle, a 1 s stall in Postgres: `revoke_credential`, which takes no
-  issue lock, taking its object before the fence; a batch taking each key's lock as its turn comes; a statement of
-  several `app_change` calls (a project's delete) taking each call's as it comes; and `use_batch` (`use_id_batch` from
-  V2a) taking its principal's lock before its keys, as it does today. An event the app commits with its changes
-  (`log_events`, which shares the fence) comes after them in that statement: before them, the transaction would hold
-  the fence when its change asks for the issue lock, while the checkpointer holds the issue lock and waits for the
-  fence.
-- **A use reads ids before it locks.** The call names its credential, key and place; the member is on the
-  credential's row, a reference's source on the reference's. The function reads those ids with no lock, takes the
-  locks, then runs its statement. A key made a reference in between names an object the call did not lock: the
-  statement writes nothing and answers `moved`, and the vault calls again. A use never locks after its first read.
-  The locks are a statement of their own, ahead of the lean and the full read statement alike (taken inside a reading
-  statement, they would come after its snapshot). A handoff from the lean one takes none, so a use still waits once.
+  them. Three ways to break that each close a wait cycle, a 1 s stall in Postgres: a batch taking each key's lock as
+  its turn comes; a statement of several `app_change` calls (a project's delete) taking each call's as it comes; and
+  `use_batch` (`use_id_batch` from V2a) taking its principal's lock before its keys, as it does today.
+  `revoke_credential` takes the issue lock shared, new with L1, as every other change does: its fence was exclusive,
+  which ordered it against the checkpointer's barrier, and shared it no longer does. With that, the fence before the
+  objects is the code's shape and no protection (the models keep the other order as a scenario that holds). An event
+  the app commits with its changes (`log_events`, which shares the fence) comes after them in that statement: before
+  them, the transaction would hold the fence when its change asks for the issue lock, while the checkpointer holds the
+  issue lock and waits for the fence.
+- **A use reads ids before it locks.** The call names its credential, key and place; the member is on the credential's
+  row, a reference's source on the reference's. The function reads those ids with no lock, takes the locks, then runs
+  its statement. A key made a reference in between names an object the call did not lock: the statement writes nothing
+  and answers `moved`, and the vault calls again. A use never locks after its first read. The locks are a statement of
+  their own, ahead of the lean and the full read statement alike (taken inside a reading statement, they would come
+  after its snapshot). A handoff from the lean one takes none, so a use still waits once. By name, the read names the
+  key's ids only to a caller who stands at the place, so one with no standing locks nothing of the key and no wait
+  tells her it exists. A caller revoked between that read and the locks may wait for a write of the key and is
+  refused: the instant that counts is the read's, when the key was hers to know of.
 - **A hold shares what it read.** The fence held exclusive did one more job: it made a two-trip write's hold stand to
   its COMMIT against a change that takes no change lock. So `hold_inputs` and `admit_hold` take the lock of each
   object the vault decided on, shared, with those they write; `write_request` reads as a use does, under the same
-  locks. An entry that changes no object (`note`, a refusal) shares the fence and takes none.
+  locks. A replacement bind does the same for each key it read by name: today the fence holds a rename off between its
+  compare of those names and its commit. An entry that changes no object (`note`, a refusal) shares the fence and
+  takes none.
 - **Advisory locks, not `FOR SHARE`.** A statement takes its snapshot before it waits for a row's lock, so a use that
   waited for a change would decide on the other rows as they were before it. Row share locks also write the row
   (`xmax`, then a multixact for two holders, on the rows every use reads: 0.14.3's cost) and conflict with every
