@@ -2,7 +2,7 @@ import { LOCK_WAIT_MS, versioned } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 
-import { runScheduled } from './app.ts';
+import { runScheduled, walkAnchor } from './app.ts';
 import { cloudflareSourceIp } from './auth.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';
 import { anchorObject, type AnchorNamespace } from './cloudflare-anchor.ts';
@@ -11,7 +11,7 @@ import { forwardSocket, IDLE_DATABASE_MS, socketsObject, workersConnect, type So
 import { CoffreWorkload } from './cloudflare-workload.ts';
 import type { Gates } from './gate.ts';
 import { takesSocket } from './plugins.ts';
-import { createRuntime, watchOf } from './runtime.ts';
+import { createRuntime } from './runtime.ts';
 import { countedEntry, countingCalls, workersRemovalBudget } from './removal.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
 import { admitSocket } from './socket-admission.ts';
@@ -146,8 +146,7 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
         const left: Promise<unknown>[] = [];
         try {
           const runtime = createRuntime(resolved, createDatabase(pool, { lockWaitMs: LOCK_WAIT_MS }), versioned(config.vault), fetchTransport(), (promise) => void left.push(promise));
-          const watch = watchOf(runtime);
-          return watch === null ? false : await watch.hooks.walkOn(watch.context(), store);
+          return await walkAnchor(runtime, store);
         } finally {
           await Promise.allSettled(left);
           await pool.end();

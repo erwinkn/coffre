@@ -19,7 +19,7 @@ import {
   type StoredPasskey,
 } from '@coffre/core/identity';
 import { allows, DEFAULT_POLICY, ownsInstance, DEVICE_TTL_SECONDS, HANDLE_POLICY, holds, MAX_PERSONAL_TOKEN_MINUTES, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
-import type { Access, ObjectChange, Settings, Vault } from '@coffre/core/vault';
+import { isDeploying, type Access, type ObjectChange, type Settings, type Vault } from '@coffre/core/vault';
 import { later, type Database, type Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { KeyRetired } from '@coffre/db/log';
@@ -31,6 +31,7 @@ import { appLogKey } from '../db/audit.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { MAX_BODY_NODES } from '../http.ts';
 import { passkeyName, providerName } from '../passkey-names.ts';
+import { logged } from '../logged.ts';
 import {
   findCredential,
   findDeviceAuthorizations,
@@ -1504,8 +1505,19 @@ export class SigninService {
     return null;
   }
 
+  /**
+   * The vault's answer about a member. A vault that cannot answer (its database down, or given the wrong key, which
+   * cannot tell a row it cannot check from a tampered one) is an outage, as for a request's credential (auth.ts):
+   * 503, logged with what failed, never a 500 or a refusal of the person.
+   */
   async #standing(principal: PrincipalRef): Promise<Access> {
-    return this.#deps.vault.access(formatMember(principal));
+    try {
+      return await this.#deps.vault.access(formatMember(principal));
+    } catch (error) {
+      if (isDeploying(error) || error instanceof ApiError) throw error;
+      console.error('asking the vault about a member failed', logged(error));
+      throw new ApiError('unavailable', 'coffre cannot check who you are right now');
+    }
   }
 
   /**

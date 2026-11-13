@@ -7,7 +7,7 @@ import type { Sealing } from '@coffre/core/vault';
 import { isUnreachable, migrationLedger } from '@coffre/db/dialect';
 import { asc, sql, type SQL } from 'drizzle-orm';
 
-import { coffreRoute, respond, runScheduled } from '../src/app.ts';
+import { coffreRoute, respond, runScheduled, walkAnchor } from '../src/app.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { admitSocket } from '../src/socket-admission.ts';
 import { openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
@@ -90,9 +90,10 @@ async function unmigrated(work: () => Promise<void>): Promise<void> {
 test('below its migrations, the app serves nothing but its health: the API and the pages answer 503 migrating, readiness is red', async () => {
   const runtime = freshRuntime();
   await unmigrated(async () => {
+    const logged = await logsNow();
     const api = await ask(runtime, '/api/me');
     assert.deepEqual([api.status, api.rendered, (JSON.parse(api.body) as { error: string }).error], [503, false, 'migrating']);
-    assert.match(api.body, /an owner runs `coffre migrate`, as every deploy does first/);
+    assert.match(api.body, /an owner runs `coffre migrate`/);
     for (const path of ['/auth/signin/github', '/mcp', '/api/auth/oidc']) assert.equal((await ask(runtime, path)).status, 503, path);
     const page = await ask(runtime, '/projects', 'text/html,application/xhtml+xml');
     assert.deepEqual([page.status, page.rendered, page.type], [503, false, 'text/html; charset=utf-8']);
@@ -101,6 +102,8 @@ test('below its migrations, the app serves nothing but its health: the API and t
     assert.deepEqual([(await ask(runtime, '/livez')).status, (await ask(runtime, '/readyz')).status], [200, 503]);
     assert.equal((JSON.parse((await ask(runtime, '/readyz')).body) as { ok: boolean }).ok, false);
     await assert.rejects(runScheduled(runtime), /lacks this version's migrations/);
+    // Refused, it wrote nothing: no entry, change or use.
+    assert.deepEqual(await logsNow(), logged);
   });
   // A database never migrated has no ledger: below the migrations too, not an outage.
   await neverMigrated(async () => {
@@ -117,6 +120,25 @@ test('below its migrations, the app serves nothing but its health: the API and t
     assert.equal((await ask(runtime, '/projects', 'text/html')).rendered, true);
   });
 });
+
+test('a database that cannot be asked whether it is migrated is an outage at the door: 503 unavailable, nothing served, and the door asks again', async () => {
+  const down = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' });
+  const runtime = { ...freshRuntime(), db: { select: () => ({ from: () => Promise.reject(down) }) } as unknown as CoffreRuntime['db'] };
+  for (const accept of ['application/json', 'text/html']) {
+    const answer = await ask(runtime, '/projects', accept);
+    assert.deepEqual([answer.status, answer.rendered, (JSON.parse(answer.body) as { error: string }).error], [503, false, 'unavailable'], accept);
+  }
+  assert.equal(runtime.schema.migrated, false);
+  // Reachable again, and migrated: it serves, with no restart.
+  runtime.db = deps.db;
+  assert.deepEqual([(await ask(runtime, '/projects', 'text/html')).rendered, runtime.schema.migrated], [true, true]);
+});
+
+/** How many rows the three logs hold, as the owner counts them. */
+async function logsNow(): Promise<Record<string, unknown>> {
+  const [counted] = await rows(sql`SELECT (SELECT count(*) FROM audit_log) AS entries, (SELECT count(*) FROM log_changes) AS changes, (SELECT count(*) FROM log_uses) AS uses`);
+  return counted!;
+}
 
 /** Raw SQL as the owner. */
 async function rows(query: SQL): Promise<Record<string, unknown>[]> {
@@ -137,6 +159,15 @@ test("below its migrations, a plugin's WebSocket is refused at the same door, on
     assert.match(await answer.text(), /lacks this version's migrations/);
   });
   assert.equal(asked, false);
+});
+
+test("below its migrations, the anchor's alarm walks nothing and reads no anchor, and comes again", async () => {
+  let touched = 0;
+  const store = { read: async () => ((touched += 1), null), write: async () => ((touched += 1), false) };
+  await unmigrated(async () => {
+    assert.equal(await walkAnchor(freshRuntime(), store), true);
+  });
+  assert.equal(touched, 0);
 });
 
 test('a plugin that takes 20 s to admit a WebSocket, as under a burst of runs at once, is let in; past 45 s, refused', async () => {
@@ -160,7 +191,7 @@ test('a plugin that takes 20 s to admit a WebSocket, as under a burst of runs at
   }
 });
 
-test('only a database that cannot be reached is an outage the door lets through; any other failure is not', () => {
+test('only a database that cannot be reached is an outage; any other failure is not', () => {
   assert.equal(isUnreachable(Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' })), true);
   assert.equal(isUnreachable(new Error('query failed', { cause: Object.assign(new Error('the database system is shutting down'), { code: '57P03' }) })), true);
   assert.equal(isUnreachable(Object.assign(new Error('connection failure'), { code: '08006' })), true);

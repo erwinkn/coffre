@@ -20,7 +20,7 @@ const API = process.env.COFFRE_DEV_URL;
 const ADMIN = 'admin@acme.example';
 const LEAVER = 'dev@acme.example';
 const CANARY = 'market/prod/DRILL_CANARY';
-const { trySignIn, signIn, send, call } = browser(API, process.env.COFFRE_DEV_IDP_URL, { api: process.env.COFFRE_DEV_PUBLIC_URL }, { passkeys: process.env.COFFRE_DEV_PASSKEY_FILE });
+const { signInAnswer, trySignIn, signIn, send, call } = browser(API, process.env.COFFRE_DEV_IDP_URL, { api: process.env.COFFRE_DEV_PUBLIC_URL }, { passkeys: process.env.COFFRE_DEV_PASSKEY_FILE });
 
 const say = (line) => process.stderr.write(`    ${line}\n`);
 const member = (principal) => `/api/members/${encodeURIComponent(principal)}`;
@@ -122,12 +122,14 @@ async function check(before) {
 }
 
 async function wrongKek(before) {
-    // The vault's keys come from its KEK: under another, its checkpointer refuses the log's checkpoints ("not a pair
-    // signed by this log"), so the app's door, which asks whether 0.15's log is cut over, holds every request at 503,
-    // sign-in's first step included, and the vault decides nothing: an outage, never a verdict.
-    const leave = await fetch(`${API}/auth/signin/github`, { redirect: 'manual' });
-    assert.equal(leave.status, 503, `sign-in under the wrong KEK answered ${leave.status}`);
-    say(`${ADMIN} cannot sign in: coffre answers ${leave.status} from the first step`);
+    // The vault's keys come from its KEK: under another, it opens nothing it holds and decides nothing. Sign-in leaves
+    // for the provider as ever, a step that asks the vault nothing; its passkey's answer, which asks the vault about
+    // the person, is an outage: 503 `unavailable` and no session, never a 500 or a refusal of the person.
+    const signin = await signInAnswer(ADMIN);
+    const said = `${signin.answer.status} ${await signin.answer.text()}`;
+    assert.equal(signin.session, null, 'signed in under the wrong KEK');
+    assert.match(said, /^503 \{"error":"unavailable"/, `sign-in under the wrong KEK answered ${said}`);
+    say(`${ADMIN} cannot sign in: coffre answers ${signin.answer.status} unavailable`);
     const asToken = (method, path, body) => fetch(`${API}${path}`, {
         method,
         headers: { authorization: `Bearer ${before.token}`, 'content-type': 'application/json' },

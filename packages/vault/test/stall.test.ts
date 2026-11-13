@@ -5,7 +5,7 @@
 // once the database answers, it seals again by itself, the change too.
 // (On Workers: log-hosts.test.ts and workers-log.test.ts.)
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, beforeEach, test } from 'node:test';
@@ -316,5 +316,32 @@ test('T169, review r5, Node: an upkeep past its bound retires its runner, as a s
   } finally {
     stall.release();
     await kept.stop();
+  }
+});
+
+test('Node: below its migrations the checkpointer opens over nothing and signs nothing, and says why; migrated, it opens by itself and seals', { timeout: 60_000 }, async () => {
+  const memory = join(dir, 'memory-unmigrated');
+  const ledger = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM drizzle.__drizzle_migrations`);
+  await run(db.owner, sql`DELETE FROM drizzle.__drizzle_migrations`);
+  let kept: KeptCheckpointer | undefined;
+  try {
+    kept = await keepCheckpointer({ database: db.vault, signingKeys: [SIGNING_KEY], memory, intervalMs: 20, retryMs: 50, tickBoundMs: 300 });
+    // Tried again meanwhile, every 50 ms, and refused each time.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const sealing = kept.sealing();
+    assert.equal(sealing.ok, false);
+    assert.match(sealing.ok ? '' : sealing.reason, /below this release's migrations/);
+    assert.equal(existsSync(memory), false, 'the signer remembered a pair');
+  } finally {
+    for (const entry of ledger) {
+      const columns = Object.keys(entry);
+      await run(db.owner, sql`INSERT INTO drizzle.__drizzle_migrations (${sql.join(columns.map((column) => sql.identifier(column)), sql`, `)})
+        VALUES (${sql.join(columns.map((column) => sql`${entry[column]}`), sql`, `)})`);
+    }
+  }
+  try {
+    await until(() => kept!.sealing().ok, 5000, 'sealing once migrated');
+  } finally {
+    await kept?.stop();
   }
 });

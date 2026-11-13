@@ -456,6 +456,19 @@ test('deactivated people are refused, bound or not, and their sessions stop', as
   assert.equal(await countRows(identities, eq(identities.principal, `user:${GONE}`)), 0);
 });
 
+test('a vault that cannot answer about the person is an outage: 503, no session, no refusal', async (t) => {
+  await signedIn(profile('github', '101', [DEV]));
+  const before = await auditRows();
+  // As a vault given the wrong key answers: it cannot tell a row it cannot check from a tampered one.
+  t.mock.method(deps.vault, 'access', async () => {
+    throw new Error("the vault's entries are under vault:0000, a key this vault does not hold");
+  });
+  const report = t.mock.method(console, 'error', () => {});
+  await assert.rejects(signin.completeSignin(profile('github', '101', [DEV]), meta()), { status: 503, code: 'unavailable' });
+  assert.equal(report.mock.callCount(), 1);
+  assert.deepEqual(await auditRows(), before);
+});
+
 test('the Owner the deployment names needs no invitation, and is not removed while named', async () => {
   const first = await signedIn(profile('google', 'g-root', [ROOT]));
   assert.deepEqual(first.principal, { type: 'user', id: ROOT });

@@ -8,22 +8,27 @@
 //               with the log for good.
 //   before <origin> <idp> <out.json> -- <cli…>
 //               on 0.15.0, as its Owner: the log verified by `coffre verify
-//               log`, a beat, then an environment's values (`held`), the
-//               audit API's pages and every removed member's offboarding
-//               report, saved.
+//               log`, a beat, each of the six access acts on a person of
+//               its own, then an environment's values (`held`), the audit
+//               API's pages and every removed member's offboarding report,
+//               saved.
 //   after <origin> <idp> <before.json> -- <cli…>
-//               on this checkout, as its Owner: the same entries in the
-//               same order, the same reports, the same values, a use of
+//               on this checkout, as its Owner: a beat, then the same
+//               entries in the same order, the same reports, the same values, a use of
 //               them through the credential proxy (newer than 0.15.0), a
-//               change, a beat, and `coffre verify log` green.
+//               change, listed on the audit page, a beat, and `coffre
+//               verify log` green.
 //   refusals <owner's URL of the database>
 //               on 0.15.0's database, before this checkout's migrate: no
 //               OAuth client's redirects that 0084 would cut
 //               (`brokenLists`), no loss the log accepted
 //               (`acceptedLosses`), no tamper finding standing
 //               (`standingFindings`), and the policy and the rows
-//               agreeing on what is protected (`disagreeing`), and no
-//               trust binding 0.14 ended alive by the log (`bindingsDiffer`).
+//               agreeing on what is protected (`disagreeing`), no trust
+//               binding 0.14 ended alive by the log (`bindingsDiffer`), and
+//               no member with a 0.14 access entry their newest change does
+//               not account for (`staleAccess`), and no app key rotation
+//               under way (`rotating`).
 //
 // <cli…> is the CLI of the version serving, as a command line; it runs in a
 // home of its own, given as HOME, and is told the instance with --url.
@@ -37,6 +42,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 const OWNER = 'root@conformance.example';
 // conformance's DEV (checks/people.ts), where its people read and write.
 const DEV = 'conformance/dev';
+// The person the six access acts are made on, on 0.15.0, and nobody else's.
+const PERSON = 'user:upgrade-check@conformance.example';
 // What the audit page leaves out of the comparison: the log's own beats, which 0.16 no longer lists (state-rows.md,
 // section 6) and which go on being written between the two snapshots.
 const BEATS = new Set(['audit.heartbeat', 'audit.checkpoint']);
@@ -87,6 +94,7 @@ async function before(origin, idp, out, cli) {
     const owner = await ownerOf(origin, idp);
     await verifyLog(owner, cli);
     await owner.beat();
+    await accessActs(owner);
     const saved = { held: await held(owner), ...(await snapshot(owner)) };
     writeFileSync(out, JSON.stringify(saved));
     say(`saved ${Object.keys(saved.held.values).length} values of ${DEV}, ${saved.entries.length} entries and the reports of ${Object.keys(saved.reports).join(', ') || 'nobody'}`);
@@ -96,6 +104,11 @@ async function after(origin, idp, file, cli) {
     const saved = JSON.parse(readFileSync(file, 'utf8'));
     assert.ok(Object.keys(saved.reports).length > 0, '0.15.0 listed no removed member');
     const owner = await ownerOf(origin, idp);
+    // What 0.15.0 appended to audit_log after its last checkpoint is listed once a checkpoint names it: this
+    // checkout's first beat signs one.
+    await owner.beat();
+    const newest = saved.entries[0];
+    await listed(owner, (entry) => entry.seq === newest.seq, `0.15.0's newest entry, ${newest.seq} (${newest.action}), is not listed 20 s after this checkout's beat`);
     const now = await snapshot(owner);
     const since = sameEntries(saved.entries, now.entries);
     say(`the same ${saved.entries.length} entries, in the same order; since: ${since}`);
@@ -116,7 +129,8 @@ async function after(origin, idp, file, cli) {
     await owner.call('PATCH', `/api/secrets/${DEV}`, { UPGRADE_CHECK: value });
     const { values: read } = await owner.call('POST', '/api/reveals', { path: `${DEV}/UPGRADE_CHECK` });
     assert.equal(read.UPGRADE_CHECK, value, 'the value written after the upgrade does not read back');
-    say(`a value written to ${DEV} reads back`);
+    const waited = await listed(owner, (entry) => entry.action === 'secret.write' && `${entry.project}/${entry.environment}` === DEV && entry.key === 'UPGRADE_CHECK', `the write of ${DEV}'s UPGRADE_CHECK is not listed on the audit page 20 s after it`);
+    say(`a value written to ${DEV} reads back, and the audit page lists its write ${waited} ms after`);
 
     await owner.beat();
     await verifyLog(owner, cli);
@@ -149,6 +163,36 @@ async function ownerOf(origin, idp) {
         },
         origin,
     };
+}
+
+/**
+ * Each of the six acts 0.15.0's vault writes a member's access entry for, on 0.15.0 after its cutover, as its Owner,
+ * on PERSON: an add, a grant, its revoke, a role, a removal and a restore. Each moves the newest 0.14 access entry
+ * about PERSON and PERSON's newest change together, which `staleAccess` then finds in step, on a real 0.15.0 history.
+ */
+async function accessActs(owner) {
+    const at = `/api/members/${encodeURIComponent(PERSON)}`;
+    await owner.call('PUT', at, { role: 'member' });
+    await owner.call('PATCH', `/api/access/${encodeURIComponent(PERSON)}`, { [DEV]: 'viewer' });
+    await owner.call('PATCH', `/api/access/${encodeURIComponent(PERSON)}`, { [DEV]: null });
+    await owner.call('PUT', at, { role: 'auditor' });
+    await owner.call('DELETE', at);
+    await owner.call('PUT', at, { role: 'member' });
+    say(`${PERSON} added, granted ${DEV}, revoked, made an Auditor, removed and restored`);
+}
+
+/**
+ * How long, in ms, an entry the audit page lists only once the projector reaches it took to be listed: within 20 s,
+ * the bound conformance holds the page to, or this fails, naming what is missing.
+ */
+async function listed(owner, holds, missing) {
+    const started = Date.now();
+    for (;;) {
+        const page = await owner.call('GET', '/api/audit?detail=1&limit=50');
+        if (page.entries.some(holds)) return Date.now() - started;
+        assert.ok(Date.now() - started < 20_000, missing);
+        await sleep(250);
+    }
 }
 
 /** What DEV holds, as the Owner reads it, each value as its SHA-256, never printed. */
@@ -209,7 +253,10 @@ async function snapshot(owner) {
 function sameEntries(saved, now) {
     assert.ok(saved.length > 0, '0.15.0 listed no entries');
     const top = now.findIndex((entry) => isDeepStrictEqual(entry, saved[0]));
-    assert.ok(top >= 0, `0.15.0's newest entry is not listed after the upgrade:\n${JSON.stringify(saved[0], null, 2)}`);
+    if (top < 0) {
+        const same = now.find((entry) => entry.seq === saved[0].seq);
+        assert.fail(`0.15.0's newest entry is not listed after the upgrade as it was:\n0.15.0: ${JSON.stringify(saved[0], null, 2)}\nnow: ${same === undefined ? 'no entry of that seq' : JSON.stringify(same, null, 2)}`);
+    }
     const tail = now.slice(top);
     for (let at = 0; at < Math.max(saved.length, tail.length); at += 1) {
         if (isDeepStrictEqual(saved[at], tail[at])) continue;
@@ -343,13 +390,51 @@ export async function bindingsDiffer(sql) {
     return { revived: rows.filter((row) => row.revived).map(({ id }) => id), dropped: rows.filter((row) => row.dropped).map(({ id }) => id) };
 }
 
+/**
+ * The members whose newest 0.14 access entry (the vault's allowed `member.*` or `access.*` about them in `audit_log`)
+ * is newer than what their newest change says it accounts for (its payload's `old`), or whose newest change says
+ * nothing (no change, or no `old`), by principal and the entry's seq. 0.15.0's uses, sign-ins and changes read that
+ * entry on every call and refuse such a member as stale; 0.16 reads no `audit_log` for access, so it refuses the
+ * upgrade instead. None is expected: the cutover set each member's `old` at their newest entry, each 0.15.0 decision
+ * about them moves both together, and 0.15.0's trigger refuses a 0.14 entry after the cutover. One is a 0.14 entry
+ * written around the vault, or forged (this reads no signature); removing the member on 0.15.0 and adding them again
+ * settles either. A principal with no member row is not counted: nothing of 0.16 reads its entries.
+ */
+export async function staleAccess(sql) {
+    const rows = await sql.unsafe(`
+        SELECT m.principal, a.seq::text AS seq FROM vault_members m
+          CROSS JOIN LATERAL (
+              SELECT x.seq FROM audit_log x
+               WHERE x.author = 'vault' AND x.subject_principal = m.principal AND x.decision = 'allow'
+                 AND x.action IN ('member.add', 'member.restore', 'member.owner', 'member.role', 'member.remove', 'access.grant', 'access.revoke')
+               ORDER BY x.seq DESC LIMIT 1) a
+          LEFT JOIN LATERAL (
+              SELECT (c.payload::jsonb ->> 'old')::bigint AS old FROM log_changes c
+               WHERE c.object = log_object('principal', m.principal) ORDER BY c.number DESC LIMIT 1) n ON true
+         WHERE n.old IS NULL OR a.seq > n.old
+         ORDER BY m.principal`);
+    return rows.map(({ principal, seq }) => `${principal} (seq ${seq})`);
+}
+
+/**
+ * The seq of the app's newest `key.reseal` when it is newer than its newest `key.rotate`: an app key rotation under
+ * way on 0.15.0, its last step (`next: null`) included, which the app's next start under its new key ends with
+ * `key.rotate`. 0.16 keeps a rotation's progress where 0.15.0 keeps none, so the upgrade carries no cursor over and
+ * refuses instead. Null otherwise. This reads no signature: a forged entry refuses the upgrade too.
+ */
+export async function rotating(sql) {
+    const [move] = await sql.unsafe(`SELECT seq::text AS seq, action FROM audit_log
+        WHERE author = 'app' AND action IN ('key.reseal', 'key.rotate') ORDER BY seq DESC LIMIT 1`);
+    return move?.action === 'key.reseal' ? move.seq : null;
+}
+
 async function refusals(url) {
     const { postgresSession } = await import('@coffre/db/connect');
     const sql = postgresSession(url);
-    let broken, losses, tampered, protection, bindings;
+    let broken, losses, tampered, protection, bindings, stale, rotation;
     try {
         [broken, losses, tampered] = [await brokenLists(sql), await acceptedLosses(sql), await standingFindings(sql)];
-        [protection, bindings] = [await disagreeing(sql), await bindingsDiffer(sql)];
+        [protection, bindings, stale, rotation] = [await disagreeing(sql), await bindingsDiffer(sql), await staleAccess(sql), await rotating(sql)];
     } finally {
         await sql.end();
     }
@@ -360,8 +445,10 @@ async function refusals(url) {
         protection === null && 'the newest policy.change does not read: 0.16 fills the protected environments from it, and an Owner\'s change of the policy, on 0.15.0, writes one that does',
         protection?.length > 0 && `the newest policy.change and the rows disagree on protecting ${protection.join(', ')}: an Owner turns each off and on again (or on and off), on 0.15.0, to end where it should`,
         bindings.revived.length > 0 && `0.14 ended the trust bindings ${bindings.revived.join(', ')}, which 0.16, reading the log, would bring back: no change on 0.15.0 is known to settle it, so stop and ask coffre's maintainers`,
+        rotation !== null && `an app key rotation is under way (key.reseal, seq ${rotation}): finish it on 0.15.0 first, with one start of the app under its new key, then upgrade`,
+        stale.length > 0 && `0.14's log holds an access entry newer than what the newest change of ${stale.join(', ')} accounts for: written around the vault after the cutover, or forged. On 0.15.0, an Owner removes each and adds them again`,
     ].filter(Boolean);
     assert.deepEqual(refused, [], `the upgrade is refused:\n${refused.join('\n')}`);
     if (bindings.dropped.length > 0) say(`${bindings.dropped.length} trust binding${bindings.dropped.length === 1 ? '' : 's'} sign${bindings.dropped.length === 1 ? 's' : ''} in on 0.15.0 but not on 0.16, whose log ends ${bindings.dropped.length === 1 ? 'it' : 'them'}: ${bindings.dropped.join(', ')}. A write around the vault made ${bindings.dropped.length === 1 ? 'it' : 'them'}; an Owner creates ${bindings.dropped.length === 1 ? 'it' : 'them'} again on 0.16`);
-    say('every OAuth client\'s redirects are a JSON array of strings, as 0084 converts them; the log accepted no loss; no tamper finding stands; the policy and the rows agree on what is protected; no binding 0.14 ended comes back');
+    say('every OAuth client\'s redirects are a JSON array of strings, as 0084 converts them; the log accepted no loss; no tamper finding stands; the policy and the rows agree on what is protected; no binding 0.14 ended comes back; every member\'s newest change accounts for their newest 0.14 access entry; no app key rotation is under way');
 }

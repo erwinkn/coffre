@@ -66,10 +66,11 @@ export function browser(api, idp, tunnel = {}, { passkeys } = {}) {
 
     /**
      * Sign in as a browser would: leave for the stand-in GitHub, answer its
-     * persona page with the email, and come back with a session cookie, or
-     * null when coffre turns them away.
+     * persona page with the email, and come back. Coffre's last answer, the
+     * callback's or the passkey step's, and the session cookie it set, null
+     * when coffre turns them away.
      */
-    async function trySignIn(email) {
+    async function signInAnswer(email) {
         const leave = await fetch(`${api}/auth/signin/github`, { redirect: 'manual' });
         const pending = cookieOf(leave);
         if (pending === null) throw new Error(`leaving for GitHub: expected a redirect with a cookie, got ${leave.status}`);
@@ -80,12 +81,18 @@ export function browser(api, idp, tunnel = {}, { passkeys } = {}) {
         const approve = await fetch(toLoopback(authorize.origin + authorize.pathname), { method: 'POST', body: form, redirect: 'manual' });
         const back = await fetch(toLoopback(approve.headers.get('location') ?? `${site}/`), { headers: { cookie: pending }, redirect: 'manual' });
         if (back.status === 302 && new URL(back.headers.get('location'), site).pathname === '/auth/passkey') return passkeyStep(email, cookiesOf(back).join('; '));
-        return cookieOf(back);
+        return { answer: back, session: cookieOf(back) };
+    }
+
+    /** `signInAnswer`'s session cookie, or null when coffre turns them away. */
+    async function trySignIn(email) {
+        return (await signInAnswer(email)).session;
     }
 
     /**
      * The passkey coffre asks for after the provider (section 3.1): a new one for a person who must add one, kept;
-     * else a touch of the one kept for them. The session cookie, or null when coffre turns them away.
+     * else a touch of the one kept for them. Coffre's answer to the touch, and the session cookie it set, null when it
+     * turns them away.
      */
     async function passkeyStep(email, cookie) {
         const asked = await fetch(`${api}/api/auth/passkey`, { headers: { cookie } });
@@ -109,8 +116,8 @@ export function browser(api, idp, tunnel = {}, { passkeys } = {}) {
             headers: { cookie, origin: site, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
             body: JSON.stringify({ response, ...(state === undefined ? {} : { state }) }),
         });
-        if (!answered.ok) return null;
-        return cookiesOf(answered).find((pair) => /^(__Host-)?coffre_session=/.test(pair)) ?? null;
+        const session = answered.ok ? cookiesOf(answered).find((pair) => /^(__Host-)?coffre_session=/.test(pair)) : undefined;
+        return { answer: answered, session: session ?? null };
     }
 
     async function signIn(email) {
@@ -155,5 +162,5 @@ export function browser(api, idp, tunnel = {}, { passkeys } = {}) {
         return call(session, method, path, { ...body, touch: { state: refusal.touch.state, response } });
     }
 
-    return { trySignIn, signIn, send, call, touched };
+    return { signInAnswer, trySignIn, signIn, send, call, touched };
 }

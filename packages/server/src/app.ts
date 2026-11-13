@@ -20,7 +20,7 @@ import { isUnreachable } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
 import { auditHead, pruneSpentTokens } from './db/queries.ts';
-import { anchorIsOwn } from './anchor.ts';
+import { anchorIsOwn, type AnchorStore } from './anchor.ts';
 import { finishRotation, keyStateNow, rotateStep, type KeyState } from './key-rotation.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
@@ -164,39 +164,27 @@ async function door(runtime: CoffreRuntime): Promise<((request: Request) => Resp
 }
 
 /**
- * Whether the database has every migration this version ships. Each
- * deployment migrates before it deploys (`coffre migrate`), so a new app
- * never serves on a schema it does not have: until then, everything but
- * health answers 503 `migrating`; a database never migrated has no ledger,
- * and is below them too. Asked until it holds, then known. A database that
- * cannot be reached lets the request through, to meet the outage as it would
- * anyway: a page shows its error state, the API answers 503. Hyperdrive's
- * pool full is one too, and may free before the request's own queries:
- * then, below the migrations, they run on the old schema. That is a gap
- * accepted, as it was for a database that came back mid-request: it needs
- * a deploy that skipped `coffre migrate`, and migrations only add. Any
- * other failure of the question fails the request.
+ * Whether the database has every migration this version ships. Until it
+ * has, everything but health answers 503 `migrating`, so this version's
+ * code never runs on a schema it does not have: a database never migrated
+ * has no ledger, and is below them too. Asked until it holds, then known.
+ * A question that fails fails the request, and nothing is let through: a
+ * database that cannot be reached is the outage's 503 `unavailable`, which
+ * says to ask again in a second, never `migrating`.
  */
 export async function schemaReady(runtime: CoffreRuntime): Promise<boolean> {
-  if (!runtime.schema.migrated) {
-    try {
-      runtime.schema.migrated = await migrated(runtime.db);
-    } catch (error) {
-      if (isUnreachable(error)) return true;
-      throw error;
-    }
-  }
+  if (!runtime.schema.migrated) runtime.schema.migrated = await migrated(runtime.db);
   return runtime.schema.migrated;
 }
 
-const MIGRATING = "coffre's database lacks this version's migrations: an owner runs `coffre migrate`, as every deploy does first";
+const MIGRATING = "coffre's database lacks this version's migrations: an owner runs `coffre migrate`";
 
 /** The answer below the migrations: the API's error, or for a browser's page, a page that says it in words. */
 function migrating(request: Request): Response {
   if (!(request.headers.get('accept') ?? '').includes('text/html')) return errorResponse(new ApiError('migrating', MIGRATING), { 'retry-after': '30' });
   const page =
     '<!doctype html><html lang="en"><meta charset="utf-8"><title>coffre is migrating</title>' +
-    "<p>coffre's database lacks this version's migrations. An owner runs <code>coffre migrate</code>, as every deploy does first; this page works once it has.</p></html>";
+    "<p>coffre's database lacks this version's migrations. An owner runs <code>coffre migrate</code>; this page works once it has.</p></html>";
   return new Response(page, { status: 503, headers: { 'content-type': 'text/html; charset=utf-8', 'retry-after': '30' } });
 }
 
@@ -219,8 +207,8 @@ export type KeyHeld =
  * configured, a database that cannot be reached, as nothing may be
  * checked under a key the log has not settled while a rotation may be due.
  * Without them there is none to be due, and a database that cannot be
- * reached lets the request through, as `schemaReady` does, to meet the
- * outage as it would anyway.
+ * reached lets the request through, on a schema `schemaReady` has seen
+ * whole, to meet the outage as it would anyway.
  */
 export async function keyReady(runtime: CoffreRuntime, { wait = false }: { wait?: boolean } = {}): Promise<KeyHeld | null> {
   if (runtime.appKey.settled) return null;
@@ -437,6 +425,19 @@ function unwatched(runtime: CoffreRuntime): void {
 /** Whether the log holds no entry yet; a database that cannot say, no. */
 async function logIsEmpty(runtime: CoffreRuntime): Promise<boolean> {
   return auditHead(runtime.db).then((head) => (head?.nextSeq ?? 0n) === 0n, () => false);
+}
+
+/**
+ * One walk of the audit watch's backlog over `store`: what the anchor's
+ * Durable Object's alarm runs on Workers. Below its migrations nothing is
+ * walked and the backlog stays, so the alarm comes again: this code reads
+ * a log the migrations have not yet made, and would take it for tampered.
+ * Whether more is left.
+ */
+export async function walkAnchor(runtime: CoffreRuntime, store: AnchorStore): Promise<boolean> {
+  if (!(await migrated(runtime.db))) return true;
+  const watch = watchOf(runtime);
+  return watch === null ? false : watch.hooks.walkOn(watch.context(), store);
 }
 
 /**

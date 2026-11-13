@@ -1313,7 +1313,9 @@ the app checks, once per isolate or process until it holds, that the
 database has every migration the release ships (`@coffre/db/schema-version`,
 `migrated`), and below that answers everything but `/livez` and `/readyz`
 with 503 `migrating`, at one door, `respond` in `app.ts`, which every request
-Start answers goes through. `/readyz` is red until then. So code never asks
+Start answers goes through. `/readyz` is red until then. A database that
+cannot be asked is an outage at that door, 503 `unavailable`: nothing is let
+through on a schema the app has not seen. So code never asks
 whether a table or a column is there; a migration only has to keep the
 previous release working:
 

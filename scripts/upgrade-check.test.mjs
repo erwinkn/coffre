@@ -1,12 +1,13 @@
 // upgrade-check.mjs's `refusals`, on a 0.15.0 database: the OAuth clients whose redirects 0084 would cut, by id, and
 // the losses the log accepted, by seq, the members a tamper finding stands for, and the environments the newest
-// policy.change and their rows disagree on protecting, and the trust bindings 0.14's tombstone and 0.16's log disagree on.
+// policy.change and their rows disagree on protecting, the trust bindings 0.14's tombstone and 0.16's log disagree on,
+// the members with a 0.14 access entry their newest change does not account for, and an app key rotation under way.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { postgresSession } from '@coffre/db/connect';
 
-import { acceptedLosses, bindingsDiffer, brokenLists, disagreeing, standingFindings } from './upgrade-check.mjs';
+import { acceptedLosses, bindingsDiffer, brokenLists, disagreeing, standingFindings, staleAccess, rotating } from './upgrade-check.mjs';
 
 const url = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 
@@ -128,6 +129,64 @@ test('a binding 0.14 ended that the log calls live is revived; one live on 0.15.
         assert.deepEqual(await bindingsDiffer(sql), { revived: [id(5)], dropped: [id(6)] });
     } finally {
         await sql.unsafe('DROP SCHEMA IF EXISTS upgrade_bindings CASCADE');
+        await sql.end();
+    }
+});
+
+test('a member whose newest 0.14 access entry is newer than their newest change accounts for, or whose change says nothing, is named with its seq; one in step is not', async () => {
+    const sql = postgresSession(url);
+    try {
+        // 0.15.0's columns the rule reads, in a schema of the test's own.
+        await sql.unsafe('CREATE SCHEMA upgrade_access');
+        await sql.unsafe('SET search_path TO upgrade_access');
+        await sql.unsafe('CREATE TABLE vault_members (principal text PRIMARY KEY)');
+        await sql.unsafe('CREATE TABLE audit_log (seq bigint PRIMARY KEY, author text, subject_principal text, action text, decision text)');
+        await sql.unsafe('CREATE TABLE log_changes (number bigserial, object uuid, payload text)');
+        await sql.unsafe(`CREATE FUNCTION log_object(p_kind text, p_id text) RETURNS uuid LANGUAGE sql AS $$ SELECT encode(substr(sha256(
+            '\\x636f666672652e6f626a6563742e763100'::bytea || convert_to(p_kind, 'UTF8') || '\\x00'::bytea || convert_to(p_id, 'UTF8')), 1, 16), 'hex')::uuid $$`);
+        const member = (principal) => sql.unsafe('INSERT INTO vault_members VALUES ($1)', [principal]);
+        const entry = (seq, principal, action, { author = 'vault', decision = 'allow' } = {}) =>
+            sql.unsafe('INSERT INTO audit_log VALUES ($1, $2, $3, $4, $5)', [seq, author, principal, action, decision]);
+        const change = (principal, payload) => sql.unsafe("INSERT INTO log_changes (object, payload) VALUES (log_object('principal', $1), $2)", [principal, JSON.stringify(payload)]);
+
+        // In step: the cutover's change accounts for 0.14's last entry, and a 0.15 grant moves both.
+        await member('user:ada'); await entry(1, 'user:ada', 'member.add'); await change('user:ada', { op: 'genesis', old: '1' });
+        await entry(5, 'user:ada', 'access.grant'); await change('user:ada', { op: 'access.grant', old: '5' });
+        // No access entry at all: nothing to account for.
+        await member('user:bo'); await change('user:bo', { op: 'genesis', old: null });
+        // A refusal, an app's entry and an entry about nobody with a row move nothing the rule reads.
+        await entry(6, 'user:ada', 'access.grant', { decision: 'deny' }); await entry(7, 'user:ada', 'member.role', { author: 'app' });
+        await entry(8, 'user:gone', 'member.add');
+        assert.deepEqual(await staleAccess(sql), []);
+
+        // A 0.14 entry after the change that accounts for it, its change saying no `old`, and no change at all.
+        await entry(9, 'user:ada', 'member.remove');
+        await member('user:cy'); await entry(2, 'user:cy', 'member.add'); await change('user:cy', { op: 'genesis' });
+        await member('user:di'); await entry(3, 'user:di', 'access.revoke');
+        assert.deepEqual(await staleAccess(sql), ['user:ada (seq 9)', 'user:cy (seq 2)', 'user:di (seq 3)']);
+    } finally {
+        await sql.unsafe('DROP SCHEMA IF EXISTS upgrade_access CASCADE');
+        await sql.end();
+    }
+});
+
+test("an app key rotation under way, the app's newest move a key.reseal, is refused by its seq; one ended by key.rotate, or none, passes", async () => {
+    const sql = postgresSession(url);
+    try {
+        // The columns the rule reads, in a schema of the test's own.
+        await sql.unsafe('CREATE SCHEMA upgrade_rotation');
+        await sql.unsafe('SET search_path TO upgrade_rotation');
+        await sql.unsafe('CREATE TABLE audit_log (seq bigint PRIMARY KEY, author text, action text)');
+        const entry = (seq, action, author = 'app') => sql.unsafe('INSERT INTO audit_log VALUES ($1, $2, $3)', [seq, author, action]);
+        assert.equal(await rotating(sql), null);
+        // A rotation ended: its steps, then key.rotate. A vault entry of the same name is not the app's.
+        await entry(1, 'key.reseal'); await entry(2, 'key.reseal'); await entry(3, 'key.rotate'); await entry(4, 'key.reseal', 'vault');
+        assert.equal(await rotating(sql), null);
+        // Another begun and stopped at its last step, before the start that writes key.rotate.
+        await entry(5, 'key.reseal'); await entry(6, 'secret.write');
+        assert.equal(await rotating(sql), '5');
+    } finally {
+        await sql.unsafe('DROP SCHEMA IF EXISTS upgrade_rotation CASCADE');
         await sql.end();
     }
 });

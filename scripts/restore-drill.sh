@@ -41,12 +41,17 @@ log() { printf '\n==> %s\n' "$1"; }
 
 idp=''
 coffre=''
+coffre_log=''
 stop_coffre() {
     if [ -n "$coffre" ]; then kill "$coffre" 2>/dev/null || true; wait "$coffre" 2>/dev/null || true; fi
     coffre=''
 }
+# A failed step leaves the app's log on stderr, once the app has stopped and written all of it, as the scratch folder
+# goes with it.
 cleanup() {
+    status=$?
     stop_coffre
+    if [ "$status" -ne 0 ] && [ -n "$coffre_log" ]; then tail -n 120 "$coffre_log" >&2; fi
     if [ -n "$idp" ]; then kill "$idp" 2>/dev/null || true; fi
     for db in "$source_db" "$restored_db" "$scratch_db"; do
         psql_as_owner -d postgres -c "DROP DATABASE IF EXISTS $db WITH (FORCE)" || true
@@ -63,6 +68,7 @@ trap cleanup EXIT
 app_config=''
 start_coffre() {
     local state="$scratch/state-$1-$RANDOM"
+    coffre_log="$scratch/coffre-$1.log"
     (
         cd examples/workers
         export PUBLIC_URL="$COFFRE_DEV_PUBLIC_URL" OWNERS="$COFFRE_OWNERS" WRANGLER_SEND_METRICS=false
@@ -75,13 +81,12 @@ start_coffre() {
             --ip 127.0.0.1 --port "$port" --inspector-port "$((port + 2))" --persist-to "$state" \
             --show-interactive-dev-session=false \
             --var "GITHUB_URL:$COFFRE_DEV_IDP_URL/github" --var "GITHUB_API_URL:$COFFRE_DEV_IDP_URL/github/api"
-    ) >"$scratch/coffre-$1.log" 2>&1 &
+    ) >"$coffre_log" 2>&1 &
     coffre=$!
     for _ in $(seq 120); do
         if curl -sf "http://127.0.0.1:$port/livez" >/dev/null; then return; fi # pins: local
         sleep 1
     done
-    cat "$scratch/coffre-$1.log" >&2
     return 1
 }
 

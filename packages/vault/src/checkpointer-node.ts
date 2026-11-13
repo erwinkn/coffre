@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import type { PairNotes } from '@coffre/core/merkle';
 import type { Sealing } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
+import { migrated } from '@coffre/db/schema-version';
 
 import { ALARMS_KEPT_MS, Fence, heldIn, OPEN_BOUND_MS, reachedOf, sealingOf, Stalled, Unsealed, UPKEEP_BOUND_MS, within, type Alarm, type Checkpointer, type Memory, type Reached, type SealThrough, type Witness } from './checkpointer.ts';
 import { daysAround, openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
@@ -102,11 +103,14 @@ export async function runCheckpointer(options: {
   let appending: Promise<void> = Promise.resolve();
   if ((options.connect === undefined) === (options.database === undefined)) throw new Error('the checkpointer runs over its database or a session it connects, one of the two');
   const session = options.connect === undefined ? null : await within(options.connect(), options.tickBoundMs ?? OPEN_BOUND_MS, 'connecting');
-  const store = logStore(session?.db ?? options.database!, { tileRange: options.tileRange });
+  const db = session?.db ?? options.database!;
+  const store = logStore(db, { tileRange: options.tileRange });
   const fence = new Fence();
-  // The next days of uses first: a use needs its day's partition even if the checkpointer then refuses to open. Each
-  // bounded (T169); an open past its bound fenced, so that it does nothing more once another opens.
-  const checkpointer = await within(store.makeDays(daysAround(Date.now())), options.tickBoundMs ?? OPEN_BOUND_MS, 'making the next days of uses').then(() => within(openLogCheckpointer({
+  // Below its migrations it writes nothing, and its keeper tries again: the log it would seal and the days it would
+  // make are not yet this release's. Then the next days of uses: a use needs its day's partition even if the
+  // checkpointer then refuses to open. Each bounded; an open past its bound fenced, so that it does nothing
+  // more once another opens.
+  const checkpointer = await within(isMigrated(db), options.tickBoundMs ?? OPEN_BOUND_MS, 'reading the migrations').then(() => within(store.makeDays(daysAround(Date.now())), options.tickBoundMs ?? OPEN_BOUND_MS, 'making the next days of uses')).then(() => within(openLogCheckpointer({
     store,
     signingKeys: options.signingKeys,
     memory: (options.memoryOf ?? fileMemory)(options.memory),
@@ -250,6 +254,11 @@ export async function runCheckpointer(options: {
       await session?.cut().catch(() => {});
     },
   };
+}
+
+/** Throws below this release's migrations, as before its `coffre migrate`. */
+async function isMigrated(db: Database): Promise<void> {
+  if (!(await migrated(db))) throw new Error("the database is below this release's migrations: run coffre migrate");
 }
 
 /** The alarms in the file, a line each; a line a crash left torn is skipped. */
