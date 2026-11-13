@@ -1,6 +1,6 @@
 # 0.16's models
 
-Two [Quint](https://quint.sh) models of the design in
+Three [Quint](https://quint.sh) models of the design in
 [docs/design/0.16.md](../../docs/design/0.16.md). No script runs them yet:
 `pnpm formal` still checks 0.14's TLA+ models, and takes these over when
 0.16's vault is built. Until then, run them from a folder with
@@ -13,6 +13,11 @@ Two [Quint](https://quint.sh) models of the design in
   against a database writer without the key. `logSound` passes, 52,048,877
   states, with one row, MACs 0 to 2, three entries and two moves by the
   writer. Nine modules, each with one protection off, must fail.
+- `rotate.qnt`: a rotation of the vault's key, with a vault not yet replaced
+  beside a new one, and a writer who holds the old key. `rotateSound` passes,
+  12,294,943 distinct states, in about a minute. Five modules, each with one
+  protection off, must fail: `noFence`, `underConfig`, `noDrain`,
+  `retireAtOnce` (all on `quiet`) and `anyKey` (on `clean`).
 
 ```sh
 # Sampled, in seconds
