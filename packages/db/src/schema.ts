@@ -557,6 +557,7 @@ export const credentials = pgTable(
     jkt: text(),
     notAfter: at('not_after'),
     // A `narrow` child's: its ancestors' IDs, root first, JSON, and its limits (`Constraints`), canonical JSON.
+    // The IDs exactly as `JSON.stringify` writes an array of them, lowercase and with no space: a use reads no other shape.
     ancestors: text(),
     constraints: text(),
     // The enrollment code a session was made from, and, where its binding says `approve`, who approved it.

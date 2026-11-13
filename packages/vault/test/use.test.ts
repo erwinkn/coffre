@@ -7,7 +7,7 @@ import { sql } from 'drizzle-orm';
 import { entryOf, type Entry } from '../src/entry.ts';
 import { memoryOf, recall, read, answer, use, type Ask, type Value } from '../src/use.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
-import { ask, credential, dismissed, environment, grant, identity, principal, project, role, rows, secret, user, value, write } from './world.ts';
+import { amend, ask, binding, credential, dismissed, environment, grant, identity, instance, principal, project, role, rows, secret, session, user, value, write } from './world.ts';
 
 const vault = await openTestVault();
 after(() => vault.close());
@@ -59,7 +59,7 @@ let w: Awaited<ReturnType<typeof world>>;
 beforeEach(async () => {
   await emptyDatabase(vault.owner);
   vault.woken.length = 0;
-  Object.assign(vault, { memory: memoryOf(2), cap: { count: 1000, windowMs: 15 * 60_000 } });
+  Object.assign(vault, { memory: memoryOf(2), cap: { count: 1000, windowMs: 15 * 60_000 }, workloads: { noReads: false, useOnly: false } });
   w = await world();
   await vault.owner.execute(sql`DELETE FROM log_pending`);
   vault.woken.length = 0;
@@ -81,7 +81,7 @@ async function untouched(): Promise<void> {
 test('a reader is handed a key, and the use is logged once: who, with what, where, which version', async () => {
   const result = await use(vault, ask('ada', 'market/prod', ['DATABASE_URL']));
   assert.ok('values' in result);
-  assert.deepEqual(result, { principal: ada, credential: result.credential, values: [{ key: 'DATABASE_URL', secret: w.database.id, version: 2, sensitive: false, value: Buffer.from('postgres://prod') }] });
+  assert.deepEqual(result, { principal: ada, credential: result.credential, workload: null, values: [{ key: 'DATABASE_URL', secret: w.database.id, version: 2, sensitive: false, value: Buffer.from('postgres://prod') }] });
   const [entry, ...more] = await logged();
   assert.deepEqual(more, []);
   assert.deepEqual(
@@ -316,4 +316,161 @@ test('a credential\'s last use moves on every five minutes, under no MAC, and ta
   vault.tick(1);
   assert.deepEqual(await got(ask('ada', 'market/prod', ['FLAG'])), { FLAG: 'on' });
   assert.deepEqual(await used(), [{ at: first + 5 * 60_000 }]);
+});
+
+/** Whatever was remembered is forgotten, and nothing the setup wrote is counted. */
+async function settled(): Promise<void> {
+  vault.memory = memoryOf(2);
+  await vault.owner.execute(sql`DELETE FROM log_pending`);
+  vault.woken.length = 0;
+}
+const scopeOf = (...grants: object[]) => JSON.stringify(grants);
+
+test('what a trust binding issued reaches what its binding does, while the binding stands', async () => {
+  const viewer = scopeOf({ projectId: w.market.id, environmentId: null, role: 'viewer' });
+  const [github, moved, others, sessions] = [binding(ci, { scope: viewer }), binding(ci, { scope: viewer, generation: 1 }), binding('token:other', { scope: viewer }), binding(ci, { scope: viewer, policy: '{}' })];
+  const run = (label: string, by: { id: string }) => credential(label, ci, { createdBy: `binding:${by.id}` });
+  await write(vault, ...rows('principals', principal('token:other')), ...rows('bindings', github, moved, others, sessions), ...rows('credentials', run('run', github), run('moved', moved), run('others', others), run('sessions', sessions)));
+  await settled();
+
+  // Its binding's scope, not its own row's, which holds none: market, and nothing of billing, which ci holds too.
+  assert.deepEqual(await got(ask('run', 'market/prod', ['DATABASE_URL'])), { DATABASE_URL: 'postgres://prod' });
+  assert.equal(await got(ask('run', 'billing/prod', ['API_TOKEN'])), 'no_access');
+  // A binding of another generation, of another service, and one that makes sessions, issue no token.
+  for (const label of ['moved', 'others', 'sessions']) assert.equal(await got(ask(label, 'market/prod', ['DATABASE_URL'])), 'unauthenticated', label);
+  // Unbound: what it issued goes with it, once the vault reads again.
+  await amend(vault, 'bindings', sql`id = ${github.id}`, { revokedAt: new Date(vault.now()), revokedBy: cy });
+  assert.deepEqual(await got(ask('run', 'market/prod', ['DATABASE_URL'])), { DATABASE_URL: 'postgres://prod' });
+  vault.tick(2000);
+  assert.equal(await got(ask('run', 'market/prod', ['DATABASE_URL'])), 'unauthenticated');
+  // An instance whose services are key-bound sessions or nothing takes no service token at all.
+  vault.workloads = { noReads: false, useOnly: true };
+  assert.equal(await got(ask('ci', 'market/prod', ['DATABASE_URL'])), 'unauthenticated');
+  vault.workloads = null;
+  assert.deepEqual(await got(ask('ci', 'market/prod', ['DATABASE_URL'])), { DATABASE_URL: 'postgres://prod' });
+});
+
+/** api, a workload bound with a policy: it uses market, and is handed prod's DATABASE_URL alone. `pod` is a session of it. */
+async function workload(policy: object = {}, more: Parameters<typeof session>[2] = {}) {
+  const api = 'token:api';
+  const bound = binding(api, { profile: 'kubernetes', scope: scopeOf({ projectId: w.market.id, environmentId: null, role: 'viewer' }, { projectId: w.market.id, environmentId: w.prod.id, role: 'viewer' }), policy: JSON.stringify({ reads: { [w.prod.id]: { keys: [w.database.id] } }, ...policy }) });
+  const pod = session('pod', bound, more);
+  await write(vault, ...rows('principals', principal(api)), ...rows('grants', grant(api, 'viewer', { project: w.market })), ...rows('policy', instance()), ...rows('bindings', bound), ...rows('credentials', pod));
+  await settled();
+  return { api, bound, pod };
+}
+const keyed = { proof: 'pod' };
+
+test('a workload\'s session is its key\'s: it uses what its service does, and is handed what its binding lists', async () => {
+  const { api, bound, pod } = await workload();
+  // The token alone, or with another key, is nobody's.
+  for (const proof of [null, 'another']) assert.equal(await got(ask('pod', 'market/prod', ['DATABASE_URL'], { proof })), 'unauthenticated');
+  await untouched();
+  const result = await use(vault, ask('pod', 'market/prod', ['DATABASE_URL', 'STRIPE_KEY', 'FLAG'], keyed));
+  assert.ok('values' in result);
+  // Listed, handed; not listed, used only; plain, no secret.
+  assert.deepEqual(given(result.values), { DATABASE_URL: 'postgres://prod', STRIPE_KEY: 'refused: use_only', FLAG: 'on' });
+  // What only the app can hold the request to comes back with it.
+  assert.deepEqual([result.principal, result.credential, result.workload], [api, pod.id, { binding: bound.id, profile: 'kubernetes', policy: JSON.parse(bound.policy!), constraints: null }]);
+  assert.deepEqual(await got(ask('pod', 'market/prod', ['STRIPE_KEY'], { ...keyed, purpose: 'use', credential: 'stripe' })), { STRIPE_KEY: 'sk_live' });
+  assert.equal((await logged()).at(-1)!.detail.credential, 'stripe');
+  // Listed where the value is held, never where a request names it: staging inherits prod's, and its own is not listed.
+  assert.deepEqual(await got(ask('pod', 'market/staging', ['DATABASE_URL', 'STRIPE_KEY'], keyed)), { DATABASE_URL: 'refused: use_only', STRIPE_KEY: 'refused: use_only' });
+  // A deployment that takes no workloads takes none; and a session's hard end is its own, whatever its expiry says.
+  vault.workloads = null;
+  assert.equal(await got(ask('pod', 'market/prod', ['FLAG'], keyed)), 'unauthenticated');
+  vault.workloads = { noReads: false, useOnly: false };
+  assert.deepEqual(await got(ask('pod', 'market/prod', ['FLAG'], keyed)), { FLAG: 'on' });
+  await amend(vault, 'credentials', sql`id = ${pod.id}`, { notAfter: new Date(vault.now() + 2000) });
+  vault.tick(2000);
+  assert.equal(await got(ask('pod', 'market/prod', ['FLAG'], keyed)), 'unauthenticated');
+});
+
+test('a session that stands and is stopped is told why, writes nothing, and serves again once that is lifted', async () => {
+  const { api, bound, pod } = await workload({ approve: true, sources: ['10.0.0.0/8'] });
+  const inside = { ...keyed, ip: '10.1.2.3' };
+  const asks = (more: Partial<Ask> = inside) => got(ask('pod', 'market/prod', ['FLAG'], more));
+  /** Each freeze is a field of the row it stops: set, the session is frozen; lifted, it serves. */
+  const frozen = async (table: 'policy' | 'principals' | 'bindings' | 'credentials', where: ReturnType<typeof sql>, field: 'frozenAt' | 'workloadsFrozenAt') => {
+    await amend(vault, table, where, { [field]: new Date(vault.now()) } as never);
+    vault.tick(2000);
+    assert.equal(await asks(), 'frozen', table);
+    await amend(vault, table, where, { [field]: null } as never);
+    vault.tick(2000);
+    assert.deepEqual(await asks(), { FLAG: 'on' }, table);
+  };
+
+  assert.equal(await asks(), 'pending');
+  await amend(vault, 'credentials', sql`id = ${pod.id}`, { approvedAt: new Date(vault.now()), approvedBy: cy });
+  vault.tick(2000);
+  // Outside the binding's sources, or from nowhere the app can tell.
+  for (const ip of ['192.0.2.7', null]) assert.equal(await asks({ ...keyed, ip }), 'source');
+  vault.workloads = { noReads: true, useOnly: false };
+  assert.equal(await asks(), 'no_reads');
+  vault.workloads = { noReads: false, useOnly: false };
+  await settled();
+  await untouched();
+  assert.deepEqual(await asks(), { FLAG: 'on' });
+
+  await frozen('policy', sql`true`, 'workloadsFrozenAt');
+  await frozen('principals', sql`id = ${api}`, 'frozenAt');
+  await frozen('bindings', sql`id = ${bound.id}`, 'frozenAt');
+  await frozen('credentials', sql`id = ${pod.id}`, 'frozenAt');
+  // An instance whose policy row is gone cannot say it is not frozen.
+  await vault.owner.execute(sql`DELETE FROM policy`);
+  vault.tick(2000);
+  assert.equal(await asks(), 'frozen');
+});
+
+test('a narrowed session uses values within its limits, is handed none, and stands while every session above it does', async () => {
+  const { bound, pod } = await workload();
+  const narrowed = (label: string, above: string[], constraints: object | null = null) => session(label, bound, { ancestors: JSON.stringify(above), constraints: constraints && JSON.stringify(constraints) });
+  // `narrow` stores a child's limits within its parent's: `tool`, made from `agent`, holds the same.
+  const limits = { places: ['market/prod'], credentials: ['stripe'] };
+  const agent = narrowed('agent', [pod.id], limits);
+  const stray = credential('stray', ci, { kind: 'workload', jkt: 'stray', notAfter: new Date(Date.UTC(2027, 0, 1)) });
+  await write(vault, ...rows('credentials', agent, narrowed('tool', [pod.id, agent.id], limits), narrowed('free', [pod.id]), session('limited', bound, { constraints: JSON.stringify(limits) }), stray, narrowed('adopted', [stray.id]), narrowed('deep', [pod.id, pod.id, pod.id, pod.id, pod.id])));
+  await settled();
+  const uses = (label: string, place: string, credential: string | null, purpose = 'use') => got(ask(label, place, ['STRIPE_KEY'], { proof: label, purpose, credential }));
+
+  assert.deepEqual(await uses('agent', 'market/prod', 'stripe'), { STRIPE_KEY: 'sk_live' });
+  // Handed nothing, a plain value included; and nothing past the places and credentials it was narrowed to.
+  assert.equal(await got(ask('agent', 'market/prod', ['FLAG'], { proof: 'agent', credential: 'stripe' })), 'narrowed');
+  for (const [place, credential] of [['market/staging', 'stripe'], ['market/prod', 'openai'], ['market/prod', null]] as const) assert.equal(await uses('agent', place, credential), 'narrowed', `${place} ${credential}`);
+  // One narrowed with no limit uses what its service does; and limits bind whatever the row says of sessions above it.
+  assert.deepEqual(await uses('free', 'market/staging', null), { STRIPE_KEY: 'sk_live' });
+  assert.equal(await uses('limited', 'market/prod', 'openai'), 'narrowed');
+  // Above it, only its own service's sessions, four at most.
+  for (const label of ['adopted', 'deep']) assert.equal(await uses(label, 'market/prod', null), 'unauthenticated', label);
+  // A session above it frozen stops it; one ended ends it.
+  await amend(vault, 'credentials', sql`id = ${agent.id}`, { frozenAt: new Date(vault.now()) });
+  vault.tick(2000);
+  assert.equal(await uses('tool', 'market/prod', 'stripe'), 'frozen');
+  await amend(vault, 'credentials', sql`id = ${pod.id}`, { revokedAt: new Date(vault.now()), revokedBy: cy });
+  vault.tick(2000);
+  for (const label of ['agent', 'tool']) assert.equal(await uses(label, 'market/prod', 'stripe'), 'unauthenticated', label);
+  // Sessions above it written around the vault are no row's: nobody, and no error.
+  for (const junk of ['not json', '{}', '["not-an-id"]']) {
+    await vault.owner.execute(sql`UPDATE credentials SET ancestors = ${junk} WHERE label = 'free'`);
+    vault.tick(2000);
+    assert.equal(await uses('free', 'market/prod', null), 'unauthenticated', junk);
+  }
+});
+
+test('a handle reaches what its scope does; an upstream credential frozen in an environment is used by nobody there', async () => {
+  await write(vault, ...rows('credentials', credential('handle', ada, { kind: 'handle', scope: scopeOf({ projectId: w.market.id, environmentId: w.prod.id, role: 'viewer' }) })));
+  await settled();
+  // `coffre run` reads its plan through the handle: what its person reads where it was made, and nothing elsewhere.
+  assert.deepEqual(await got(ask('handle', 'market/prod', ['DATABASE_URL'], { purpose: 'expose' })), { DATABASE_URL: 'postgres://prod' });
+  assert.equal(await got(ask('handle', 'market/staging', ['DATABASE_URL'], { purpose: 'expose' })), 'no_access');
+  assert.deepEqual(await got(ask('handle', 'market/prod', ['DATABASE_URL'], { purpose: 'use', credential: 'stripe' })), { DATABASE_URL: 'postgres://prod' });
+
+  await amend(vault, 'environments', sql`id = ${w.prod.id}`, { frozenCredentials: ['stripe'] });
+  await settled();
+  for (const label of ['handle', 'ada', 'cy']) assert.equal(await got(ask(label, 'market/prod', ['DATABASE_URL'], { purpose: 'use', credential: 'stripe' })), 'frozen', label);
+  // Another credential there, and the same one elsewhere, are not.
+  assert.deepEqual(await got(ask('ada', 'market/prod', ['DATABASE_URL'], { purpose: 'use', credential: 'openai' })), { DATABASE_URL: 'postgres://prod' });
+  assert.deepEqual(await got(ask('ada', 'market/staging', ['DATABASE_URL'], { purpose: 'use', credential: 'stripe' })), { DATABASE_URL: 'postgres://staging' });
+  // Nobody is told a credential is frozen in a place they hold nothing in.
+  assert.equal(await got(ask('dee', 'market/prod', ['DATABASE_URL'], { purpose: 'use', credential: 'stripe' })), 'no_access');
 });

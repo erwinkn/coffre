@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import { ownerKey, seal } from '@coffre/core/envelope';
-import { credentials, dismissedKeys, environments, grants, identities, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
-import { sql } from 'drizzle-orm';
+import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
+import { sql, type SQL } from 'drizzle-orm';
 
 import { change, put, part, type Write } from '../src/change.ts';
 import type { Fresh } from '../src/rows.ts';
@@ -53,6 +53,24 @@ export function credential(label: string, of: string, more: Partial<Fresh<typeof
   };
 }
 
+/** A trust binding of a service: one `/api/auth/oidc` takes, unless given a policy, which makes it a workload's. */
+export function binding(of: string, more: Partial<Fresh<typeof bindings>> = {}): Fresh<typeof bindings> {
+  return {
+    id: randomUUID(), principal: of, generation: 0, profile: 'github', issuer: 'https://token.actions.githubusercontent.com', jwksUri: 'https://token.actions.githubusercontent.com/.well-known/jwks', jwks: null,
+    claims: '{}', scope: null, policy: null, label: null, createdAt: at, createdBy: root, lastUsedAt: null, frozenAt: null, revokedAt: null, revokedBy: null, ...more,
+  };
+}
+
+/** A workload's session a binding issued. Its key's thumbprint is its label, so `ask(label, …, { proof: label })` is the session used with its key. */
+export function session(label: string, by: Fresh<typeof bindings>, more: Partial<Fresh<typeof credentials>> = {}): Fresh<typeof credentials> {
+  return credential(label, by.principal, { kind: 'workload', createdBy: `binding:${by.id}`, jkt: label, notAfter: new Date(Date.UTC(2027, 0, 1)), ...more });
+}
+
+/** The instance's one policy row. */
+export function instance(more: Partial<Fresh<typeof policy>> = {}): Fresh<typeof policy> {
+  return { onlyRow: true, serviceAccounts: '{"projects":"all","environments":"all"}', workloadsFrozenAt: null, changedAt: at, changedBy: root, ...more };
+}
+
 export function identity(of: string, more: Partial<Fresh<typeof identities>> = {}): Fresh<typeof identities> {
   return { id: randomUUID(), provider: 'github', subject: randomUUID(), issuerHash: 'x', generation: 0, principal: of, email: null, createdAt: at, createdBy: of, lastSignInAt: null, revokedAt: null, revokedBy: null, ...more };
 }
@@ -61,7 +79,7 @@ export function dismissed(of: { id: string }, key: string): Fresh<typeof dismiss
   return { environmentId: of.id, key, dismissedAt: at, dismissedBy: root, restoredAt: null, restoredBy: null };
 }
 
-export const TABLES = { projects, environments, secrets, principals, grants, roles, credentials, identities, dismissedKeys };
+export const TABLES = { projects, environments, secrets, principals, grants, roles, credentials, identities, dismissedKeys, bindings, policy };
 
 /** Rows of one table, as writes of a change. */
 export const rows = <K extends keyof typeof TABLES>(table: K, ...of: Fresh<(typeof TABLES)[K]>[]): Write[] => of.map((row) => put(TABLES[table], row as never));
@@ -74,6 +92,15 @@ export async function write(vault: TestVault, ...writes: Write[]): Promise<void>
   const result = await change(vault, { read: { none: part(principals, sql`false`) }, decide: () => ({ writes, entry: { kept: true, action: 'test.write', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null }) });
   if ('refused' in result) throw new Error(result.refused);
   if (sealed.length > 0) await vault.owner.insert(secretVersions).values(sealed.splice(0));
+}
+
+/** One change that puts `more` on the rows of a table a condition finds: a revocation, a freeze, an approval. */
+export async function amend<K extends keyof typeof TABLES>(vault: TestVault, table: K, where: SQL, more: Partial<Fresh<(typeof TABLES)[K]>>): Promise<void> {
+  const result = await change(vault, {
+    read: { found: part(TABLES[table], where) },
+    decide: ({ found }) => ({ writes: found.map((row) => put(TABLES[table], { ...row, ...more } as never, row as never)), entry: { kept: true, action: 'test.write', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null }),
+  });
+  if ('refused' in result) throw new Error(result.refused);
 }
 
 /**
@@ -92,5 +119,5 @@ export async function value(vault: TestVault, of: Fresh<typeof secrets>, text: s
 
 export const ask = (label: string, place: string, keys: readonly string[] | null, more: Partial<Ask> = {}): Ask => {
   const [projectSlug, environmentSlug] = place.split('/') as [string, string];
-  return { token: tokenOf(label), project: projectSlug, environment: environmentSlug, mine: false, keys, purpose: 'reveal', request: 'req-1', ip: '192.0.2.7', ...more };
+  return { token: tokenOf(label), project: projectSlug, environment: environmentSlug, mine: false, keys, purpose: 'reveal', credential: null, proof: null, request: 'req-1', ip: '192.0.2.7', ...more };
 };
