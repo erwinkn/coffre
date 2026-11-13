@@ -1889,9 +1889,9 @@ change takes the right from the issuer's role), `LifecycleBind` (Ada binds
 svc's CI through the vault, an issue that commits a binding, while she is
 demoted; a run signs in through it; a bind that replaces another, which
 takes the ended rows exclusive and then, under the issue lock shared, the
-fence, is the lock pattern WriteLocks.tla's `signin` checks free of wait
-cycles), `LifecycleSignIn` (two runs through one binding at once, while
-the account is removed, or a credential revoked),
+fence, is the lock pattern WriteLocks.tla's `app` checks free of wait
+cycles in `ChangeLocks`), `LifecycleSignIn` (two runs through one binding
+at once, while the account is removed, or a credential revoked),
 `LifecycleReplay` (one ID token
 presented twice), `LifecycleUnbind` (two runs through one binding at once
 while a manager unbinds it), `LifecycleRevoke` (a manager's revoke
@@ -3180,8 +3180,6 @@ head is that chain's, and they go or change with the code that ends it.
 Seal.tla's head is a tree's, and no lock. The read in
 Coffre.tla and the unwrap in Credentials.tla (`Uses015` off) are 0.14's too:
 their steps take the lock as they took the head, and leave with that path.
-Migration015.tla, and what HotPathOne.tla says of 0.14's head, go with the
-cutover.
 
 ## TLC
 
