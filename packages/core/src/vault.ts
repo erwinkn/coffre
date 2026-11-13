@@ -1191,7 +1191,7 @@ export type PrepareInput = {
 export type PreparedChange = {
   kind: ObjectChange['kind'];
   id: string;
-  requestId: string | null;
+  requestId: string;
   at: number;
   /** The object's key in the log (`log_object`). */
   object: string;

@@ -14,7 +14,9 @@ import { logObject } from '@coffre/db/log';
 import { asc, eq, inArray, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
-import { auditLog, credentials, logChanges } from '@coffre/db/schema';
+import { auditLog, credentials, logChanges, mcpConnections } from '@coffre/db/schema';
+import { findConnection, liveConnections, priorConnections, serviceSignIns } from '../src/db/queries.ts';
+import { addPasskey, connectedApp } from './passkey-rows.ts';
 import { clientFor, contextFor, credentialsLogged, holdSomething, loggedEntries, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -214,4 +216,18 @@ test("a credential with no seal and no change of the log's is none: its revoke i
   assert.ok(rows.length === 2 && rows.every((row) => row.revokedAt === null));
   const written = (await loggedEntries(db.owner, ['token.revoke', 'sign_out'])).slice(before.length);
   assert.deepEqual(written.map((entry) => [entry.action, entry.decision, entry.code]), [['token.revoke', 'deny', 'unknown_credential']]);
+  // Nor is it listed or counted as live, so no page shows a token that nothing can revoke.
+  assert.ok(!(await serviceSignIns(db.owner, deps.chainKey, new Date(), { tokens: true, bindings: false })).credentials.some((row) => row.id === issued.id));
+});
+
+test("an MCP connection with no seal is none: it is found by no code, refresh or ID, and is no live connection to list or end", async () => {
+  const session = await signin.completeSignin({ provider: 'github', subject: 'dev', emails: [DEV], name: null }, meta());
+  assert.ok(session.ok);
+  const id = await connectedApp(deps, DEV, await addPasskey(db.owner, deps.chainKey, DEV));
+  assert.notEqual(await findConnection(db.owner, deps.chainKey, { id }), null);
+  assert.deepEqual((await liveConnections(db.owner, deps.chainKey, `user:${DEV}`, new Date())).map((row) => row.id), [id]);
+  await db.owner.update(mcpConnections).set({ seal: null }).where(eq(mcpConnections.id, id));
+  assert.equal(await findConnection(db.owner, deps.chainKey, { id }), null);
+  assert.deepEqual(await liveConnections(db.owner, deps.chainKey, `user:${DEV}`, new Date()), []);
+  assert.deepEqual(await priorConnections(db.owner, deps.chainKey, { type: 'user', id: DEV }, 2 ** 31 - 1, new Date()), []);
 });

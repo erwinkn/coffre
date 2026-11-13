@@ -3782,9 +3782,6 @@ class VaultService implements Vault {
       // reads again (`moved`), as it does when `app_change` finds a row moved. An object with no call writes nothing.
       const left = new Map<string, Buffer | null>();
       for (const call of changes) {
-        // A row read unsealed (0.14's), or a key its log never held, logs nothing: `app_change` holds it to there being
-        // no change of its object at all, which no edit of a seal column fakes.
-        if (call.requestId === null) continue;
         const from = call.sealFrom === null ? null : Buffer.from(call.sealFrom, 'base64');
         const same = (seal: Buffer | null) => (seal === null ? from === null : from?.equals(seal) ?? false);
         // A first call from no row (made, or restored), or of an object the log has no change of, is `app_change`'s to

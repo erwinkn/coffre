@@ -217,7 +217,7 @@ test('an archive undone around the app, its row live again with no seal, is refu
   // A writer brings the key back: the row reads live, with no seal, which the log does not bear out.
   await run(db.owner, sql`UPDATE secrets SET archived_at = NULL WHERE id = ${id}`);
   const back = await used(w, id);
-  assert.ok(!back.ok && ['stale', 'tampered'].includes(codeOf(back)!), JSON.stringify(back));
+  assert.equal(!back.ok && codeOf(back), 'tampered', JSON.stringify(back));
   const next = await newVersion(w, id, 'over it');
   const change = await keyChange(id, { ...(await readKey(id)).columns, version: next.columns });
   assert.equal(change.before?.seal, null);

@@ -578,6 +578,11 @@ test('a session whose binding is removed, or whose row is changed around the app
   assert.equal((await me(held)).status, 401);
   await db.owner.update(credentials).set({ notAfter: row.notAfter }).where(eq(credentials.id, row.id));
   assert.equal((await me(held)).status, 200);
+  // Its seal cleared, which the app's MAC does not cover: a row with no seal is none.
+  await db.owner.update(credentials).set({ seal: null }).where(eq(credentials.id, row.id));
+  assert.equal((await me(held)).status, 401);
+  await db.owner.update(credentials).set({ seal: row.seal }).where(eq(credentials.id, row.id));
+  assert.equal((await me(held)).status, 200);
   await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, binding);
   assert.equal((await me(held)).status, 401);
 });
@@ -859,13 +864,14 @@ test("a narrowed session's row stands only while every ancestor does, and reache
   await bindGithub();
   const parent = await githubSession();
   const root = await sessionRow(parent);
-  // A child as a narrow would make it: bound to its own key, its ancestors and limits under its MAC.
+  // A child as a narrow would make it: bound to its own key, its ancestors and limits under its MAC, and sealed (the
+  // root's seal stands in for the vault's: the app holds a session to having one, the vault the use to the root's).
   const key = await generateProofKey();
   const child = { token: `coffre_wl_${Buffer.alloc(32, 7).toString('base64url')}`, key };
   await insertSession(deps.db, deps.chainKey, {
     id: randomUUID(), kind: 'workload', tokenHash: hashToken(child.token), tokenHint: 'coffre_wl_Bwc', generation: root.generation, principal: MEMBER,
     identityId: null, label: 'refund-agent', createdBy: root.createdBy, expiresAt: root.expiresAt, revokedAt: null, scope: root.scope, places: root.places,
-    jkt: await thumbprint(key.jwk), notAfter: root.notAfter!, ancestors: JSON.stringify([root.id]), constraints: JSON.stringify({ credentials: ['stripe'] }), enrollmentId: null, approvedAt: null, approvedBy: null,
+    jkt: await thumbprint(key.jwk), notAfter: root.notAfter!, ancestors: JSON.stringify([root.id]), constraints: JSON.stringify({ credentials: ['stripe'] }), enrollmentId: null, approvedAt: null, approvedBy: null, seal: root.seal,
   });
   const use = async () => {
     const url = `${ORIGIN}/use/-/stripe/v1/refunds`;

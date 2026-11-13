@@ -362,7 +362,8 @@ async function sessionRowsFor(runtime: Pick<CoffreRuntime, 'db' | 'chainKey'>, t
   const own = rows.find((candidate) => candidate.credential.tokenHash.equals(tokenHash));
   if (own === undefined) throw unknown();
   const { credential: row, binding, now } = own;
-  if (!checkAuthRow(runtime.chainKey, 'credentials', row) || !live(row, now)) throw unknown();
+  // A row with no seal is none, as every reader of credentials has it (`unrevokedSealed`): the app's MAC does not cover the seal.
+  if (row.seal === null || !checkAuthRow(runtime.chainKey, 'credentials', row) || !live(row, now)) throw unknown();
   if (own.memberStatus !== 'active' || own.memberGeneration !== row.generation) throw unknown();
   // A binding a removal closed stands for none of its sessions from then on, renewal included: they end as its
   // sign-ins do, at the close, not when the removal reaches their batch, which on Workers may be a scheduled run later.

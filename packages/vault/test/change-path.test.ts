@@ -397,7 +397,8 @@ test('protecting an environment is a change of its object; one whose row has no 
   await genesis(w.keys, { kind: 'environment', id: w.prod }, environment(w.project, w.prod, 'prod'));
   const protect = (ids: string[], on: boolean) => w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.project, environmentIds: ids, protected: on } });
   // Dev has no seal and no change: written around the vault.
-  assert.equal((await protect([w.prod, w.dev], true)).ok, false);
+  const refused = await protect([w.prod, w.dev], true);
+  assert.equal(!refused.ok && refused.refusal.code, 'tampered');
   assert.deepEqual(await opsOf(w.keys, { kind: 'environment', id: w.prod }), ['genesis']);
   assert.ok((await protect([w.prod], true)).ok);
   assert.ok((await protect([w.prod], false)).ok);

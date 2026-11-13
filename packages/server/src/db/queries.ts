@@ -1179,7 +1179,7 @@ export async function members(
       .orderBy(asc(principals.principal)),
     // Live ones only, through `credentials_live_idx`: a CI service leaves an expired one behind each run.
     filter.sessions === false ? [] : db.select().from(credentials).where(and(
-      of(credentials.principal), isNull(credentials.revokedAt), gt(credentials.expiresAt, now), filter.kinds === undefined ? undefined : inArray(credentials.kind, [...filter.kinds]),
+      of(credentials.principal), unrevokedSealed(credentials), gt(credentials.expiresAt, now), filter.kinds === undefined ? undefined : inArray(credentials.kind, [...filter.kinds]),
     )),
     filter.sessions === false ? [] : db.select().from(identities).where(of(identities.principal)),
     filter.standing === false ? [] : readGrants(db, { ...(principal === undefined ? {} : { principal }), liveAt: now.getTime() }),
@@ -1661,7 +1661,7 @@ export async function serviceSignIns(
 ): Promise<{ credentials: CredentialRow[]; bindings: BindingRow[] }> {
   const [held, bound] = await Promise.all([
     read.tokens
-      ? db.select().from(credentials).where(and(like(credentials.principal, 'token:%'), isNull(credentials.revokedAt), gt(credentials.expiresAt, now)))
+      ? db.select().from(credentials).where(and(like(credentials.principal, 'token:%'), unrevokedSealed(credentials), gt(credentials.expiresAt, now)))
       : [],
     read.bindings
       ? db.select().from(serviceBindings)
@@ -2060,10 +2060,10 @@ export async function revokePriorMembership(
   return { credentials: await revokeCredentialsWhere(db, chainKey, priorCredentials(principal, generation, revokedAt), { revokedAt, revokedBy }), connections };
 }
 
-/** A member's live MCP connections of a membership before `generation`, their MACs the app's: what `revokePriorMembership` ends. */
+/** A member's live MCP connections of a membership before `generation`, sealed and their MACs the app's: what `revokePriorMembership` ends. */
 export async function priorConnections(db: Queryable, chainKey: Buffer, principal: { type: string; id: string }, generation: number, at: Date): Promise<ConnectionRow[]> {
   const rows = await db.select().from(mcpConnections).where(and(eq(mcpConnections.principal, principalOf(principal)), lt(mcpConnections.generation, generation),
-    isNull(mcpConnections.revokedAt), gt(mcpConnections.expiresAt, at)));
+    unrevokedSealed(mcpConnections), gt(mcpConnections.expiresAt, at)));
   return rows.filter((row) => checkAuthRow(chainKey, 'mcp_connections', row));
 }
 
@@ -2101,15 +2101,23 @@ export const credentialsBy = {
 };
 
 /**
- * The live credentials `where` names: not revoked, sealed (a row with no
- * seal is none: no change of the vault's made it), and their MAC the app's
+ * Not revoked, and sealed: a credential or connection row with no seal is
+ * none, since no change of the vault's made it. Every reader that lists,
+ * counts or ends such rows asks this, so that what one shows another ends.
+ */
+export function unrevokedSealed(table: { revokedAt: AnyColumn; seal: AnyColumn }): SQL {
+  return and(isNull(table.revokedAt), isNotNull(table.seal))!;
+}
+
+/**
+ * The live credentials `where` names: not revoked, sealed (`unrevokedSealed`), and their MAC the app's
  * (a row that fails it is dead, and never signed again, as `updateAuth`
  * leaves it). What a revoke of them changes: its changes are prepared from
  * this read before the transaction, in which `revokeCredentialsWhere` reads
  * them again (`AppChanges.expect`).
  */
 export async function liveCredentialsWhere(db: Queryable, chainKey: Buffer, where: CredentialsWhere): Promise<(CredentialRow & { seal: Buffer })[]> {
-  const rows = await db.select().from(credentials).where(and(where(credentials as Tables['credentials']), isNull(credentials.revokedAt), isNotNull(credentials.seal)));
+  const rows = await db.select().from(credentials).where(and(where(credentials as Tables['credentials']), unrevokedSealed(credentials)));
   return rows.filter((row): row is CredentialRow & { seal: Buffer } => checkAuthRow(chainKey, 'credentials', row));
 }
 
@@ -2194,21 +2202,22 @@ export async function findConnection(
     .leftJoin(passkeys, eq(passkeys.id, mcpConnections.passkeyId))
     .where(where)
     .limit(1);
-  if (row === undefined) return null;
+  // A row with no seal is none (`unrevokedSealed`): no change of the vault's made it.
+  if (row === undefined || row.connection.seal === null) return null;
   verifyAuthRow(chainKey, 'mcp_connections', row.connection);
   const previous = 'refreshHash' in by && row.connection.refreshHash?.equals(by.refreshHash) !== true;
   return { ...row.connection, previous, now: new Date(row.now), passkeyRead: (await passkeyOf(db, chainKey, row.connection, row))! };
 }
 
 /**
- * A person's connections that have not ended, codes not yet redeemed among
+ * A person's connections that have not ended (`unrevokedSealed`), codes not yet redeemed among
  * them, newest first: rows that fail their MAC are reported and passed over.
  */
 export async function liveConnections(db: Queryable, chainKey: Buffer, principal: string, at: Date): Promise<ConnectionRow[]> {
   const rows = await db
     .select()
     .from(mcpConnections)
-    .where(and(eq(mcpConnections.principal, principal), isNull(mcpConnections.revokedAt), gt(mcpConnections.expiresAt, at)))
+    .where(and(eq(mcpConnections.principal, principal), unrevokedSealed(mcpConnections), gt(mcpConnections.expiresAt, at)))
     .orderBy(desc(mcpConnections.createdAt));
   return rows.filter((row) => checkAuthRow(chainKey, 'mcp_connections', row));
 }
