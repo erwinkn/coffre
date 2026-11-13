@@ -229,7 +229,6 @@ const nearOwner = gs.oneOf<unknown>(near(member.map(ownerKey)), member, gs.sampl
 const validation = propertySettings(128);
 test(`a context is refused unless its ids are lowercase UUIDs, its owner a lowercase SHA-256, sensitive and plain true or absent and never both, and its version a number from 1 or absent, seed ${validation.seed}`, () => hegel.testAsync(async (tc) => {
   const ctx = tc.draw(context) as Record<string, unknown>;
-  delete ctx.plain;
   const field = tc.draw(gs.sampledFrom(['projectId', 'environmentId', 'secretId', 'owner', 'sensitive', 'plain', 'version'] as const));
   const candidate = tc.draw(
     field === 'owner' ? nearOwner
@@ -241,8 +240,8 @@ test(`a context is refused unless its ids are lowercase UUIDs, its owner a lower
   else ctx[field] = candidate;
   tc.note(`${field} = ${JSON.stringify(candidate)}`);
   const valid = field === 'owner' ? candidate === undefined || isOwner(candidate)
-    : field === 'sensitive' ? candidate === undefined || candidate === true
-      // Never both: a plain value is no secret, and a sensitive one never plain.
+    // Never both: a plain value is no secret, and a sensitive one never plain.
+    : field === 'sensitive' ? candidate === undefined || (candidate === true && ctx.plain !== true)
       : field === 'plain' ? candidate === undefined || (candidate === true && ctx.sensitive !== true)
         : field === 'version' ? candidate === undefined || candidate === 1 || candidate === 7
         : isUuid(candidate);
