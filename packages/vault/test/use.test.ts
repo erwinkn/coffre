@@ -596,7 +596,7 @@ test('a use on a server whose bytes are written `escape` is decided as on any: t
   }
 });
 
-test('a session\'s first call does its planning\'s cold work before it takes the fence (T131)', async (t) => {
+test('a session\'s first call does its planning\'s cold work before it takes the fence', async (t) => {
   // A twin (`lean-twin.ts`) plans each statement once per copy of `use_credential`: this file alone holds the count.
   if (onOpen.length > 0) return t.skip('a twin plans its copies\' statements too');
   const w = await world();

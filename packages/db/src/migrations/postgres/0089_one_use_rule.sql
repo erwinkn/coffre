@@ -1,19 +1,16 @@
--- 0.16.0, T274 (V2a; state-rows.md, section 3, "Two use statements, one rule"): `use_credential` held its statement four
--- times, probing or from the isolate's seals, plain or through a place or a reference, its rule in each, and went from
--- one form to another in a loop (`reprobe`, `whole`). Now it holds two statements and the rule once. The full statement
--- is the use's definition: it reads what the four read, by the same keys, and answers every call alone; the seal probes
--- ride a key that is null when the isolate's seals are still the log's (no index scan descends for a null), a
--- reference's rows a condition on the key's own row, and the place read through an id that is null for a use by ids of
--- a key the place holds. The lean statement, the old cached plain form, is a fast path in front of it for the common
--- use, and answers what the full one would or hands off (`whole`); it exists only because Postgres sets up every node
--- of a plan on each run, read or not, and the full plan costs a lean use about 130 us more of it. The rule is
--- `use_refused` then `use_lock`, SQL functions the planner inlines into both. Same locks, in the same order, and the
--- same re-checks: the fence shared before the statements, the principal's lock only after the vault decided, the bulk
--- write in a statement of its own. The route's read (its levels, its item's editor, the keys it names), which a route's
--- named call and `use_route` each held a copy of, is one function both call, `use_route_read`. No login may call any
+-- `use_credential` holds two statements and the use's rule once. The full statement is the use's definition: it reads
+-- every row the decision weighs, each by its key, and answers every call alone; the seal probes ride a key that is null
+-- when the isolate's seals are still the log's (no index scan descends for a null), a reference's rows a condition on
+-- the key's own row, and the place read through an id that is null for a use by ids of a key the place holds. The lean
+-- statement is a fast path in front of it for the common use, and answers what the full one would or hands off
+-- (`whole`); it exists only because Postgres sets up every node of a plan on each run, read or not, and the full plan
+-- costs a lean use about 130 us more of it. The rule is `use_refused` then `use_lock`, SQL functions the planner
+-- inlines into both. The fence is taken shared before the statements, the principal's lock only after the vault
+-- decided, the bulk write in a statement of its own. The route's read (its levels, its item's editor, the keys it
+-- names) is one function, `use_route_read`, that a route's named call and `use_route` both call. No login may call any
 -- of the three helpers.
 -- The warm-up's mark moves on (`coffre.use_planned`), so a session plans both statements before it holds the fence.
--- A route's read (T205; T200), as both `use_route` and a route's named call in `use_credential` make it, written once:
+-- A route's read, as both `use_route` and a route's named call in `use_credential` make it, written once:
 -- each level of the place's chain (`p_layers`, nearest first), its environment's row, seal and newest change, and,
 -- through the first level whose definitions hold the route's item, those definitions and their newest change; that
 -- item's editor's principal, as a use reads its caller's; the keys the item names; and the newest change of these
@@ -37,13 +34,13 @@ BEGIN
     inputs := 0;
     names := '{}';
     -- Each level, nearest first: its definitions through the first whose row holds the route's item (every level's, for
-    -- every item), and every level's environment, which the keys resolve through whatever level serves (review r2).
+    -- every item), and every level's environment, which the keys resolve through whatever level serves.
     FOR l IN 1 .. cardinality(p_layers) LOOP
         v_item := NULL; v_digests := NULL; v_seal := NULL; v_row := NULL; v_number := NULL; v_newest := NULL; v_change := NULL;
         -- The level's environment, its row and seal and its object's newest change: the chain read from `parent_id` is
         -- the vault's to check link by link, as the rows say it, before any level's item serves (a parent re-pointed
         -- around the log would graft another environment's definitions onto this one's keys). Through the level that
-        -- serves, its definitions and their object's newest change too, in the same statement (T200), each read by the
+        -- serves, its definitions and their object's newest change too, in the same statement, each read by the
         -- level's id whether or not its environment's row is there.
         IF serving IS NULL THEN
             SELECT CASE WHEN p_route IS NULL THEN p.items ELSE p.items -> p_route END, p.digests, p.seal, p.environment_id IS NOT NULL,
@@ -114,12 +111,12 @@ $function$;
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION public.use_route_read(uuid[], text) FROM PUBLIC;
 --> statement-breakpoint
--- The use's rule (T158; Probing.tla, AdmissionBeforeKey; review d3 of #416), written once for both of `use_credential`'s
+-- The use's rule (Probing.tla, AdmissionBeforeKey), written once for both of `use_credential`'s
 -- statements, each of which calls it on the rows it read, as `coalesce(use_refused(...), use_lock(...))`: two rules, in
 -- order. Refused: what no key decides comes first, a MAC by a retired key, the floor, the deadline, the clock, the cap's
 -- config; then what the names decide, which the vault answers on the caller's standing first (`p_named`: no credential
--- of that token, no live place of those names), the ids the vault passed not the ones the names name now (`p_right`,
--- D153), and a named call's environment read through archived or its chain cut (`p_archived`). Then the lock: the
+-- of that token, no live place of those names), the ids the vault passed not the ones the names name now (`p_right`),
+-- and a named call's environment read through archived or its chain cut (`p_archived`). Then the lock: the
 -- principal's, to enter its key in the cap's set (`lock`), or to move it on (`share`), unless the use writes no entry
 -- (`p_silent`: a quiet use of no key or of a plain value). Null from both: the use is made. Plain SQL expressions, so
 -- that the planner inlines them into each statement: no call at run time (not SECURITY DEFINER, no SET, no subquery,
@@ -152,7 +149,7 @@ $function$;
 REVOKE ALL ON FUNCTION public.use_lock(text, boolean, boolean, boolean, boolean, boolean) FROM PUBLIC;
 --> statement-breakpoint
 -- No argument has a default, here and in every use function a runtime login calls: 0.15.0's call of 27 resolves to
--- none, and no 0.16 function answers it (#569, section 6). Made again, since a replace cannot drop a default.
+-- none. Made again, since a replace cannot drop a default.
 DROP FUNCTION IF EXISTS public.use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean, text, boolean, text);
 --> statement-breakpoint
 CREATE FUNCTION public.use_credential(p_credential uuid, p_secret uuid, p_request bigint, p_at bigint, p_purpose smallint, p_place uuid, p_mac bytea, p_deadline bigint, p_cover bigint, p_cover_at bigint, p_cover_request bigint, p_known bigint, p_known_mac bytea, p_cap_count integer, p_cap_window bigint, p_token_hash bytea, p_project text, p_environment text, p_key text, p_decided boolean, p_handle boolean, p_unless text[], p_signin boolean, p_issuers text[], p_roles jsonb, p_way smallint, p_principal text, p_forks boolean, p_route text, p_gate boolean, p_passkeys text)
@@ -175,7 +172,7 @@ DECLARE
     -- rows the app checks the lean statement reads none of (a named call always probes besides), or the lean statement
     -- handed it off.
     whole boolean := p_place IS NOT NULL OR p_token_hash IS NOT NULL;
-    -- Whether this session has yet to plan the two statements (T131), and which the warm-up is at.
+    -- Whether this session has yet to plan the two statements, and which the warm-up is at.
     dry boolean := current_setting('coffre.use_planned', true) IS DISTINCT FROM '0086';
     form integer := 0;
     -- The period this call writes, if it writes the cap's row, and the lock that elects the one use that moves it.
@@ -183,7 +180,7 @@ DECLARE
     b_period bigint;
     b_lock bigint;
     b_round integer := 0;
-    -- What the call reads by: the ids passed, or, for a named call, those its names name now (D153), read once under
+    -- What the call reads by: the ids passed, or, for a named call, those its names name now, read once under
     -- the fence; whether they are the ids passed (`v_right`), and what the names name if not a live place (`v_named`).
     v_credential uuid := p_credential;
     v_secret uuid := p_secret;
@@ -191,7 +188,7 @@ DECLARE
     v_right boolean := true;
     v_named text;
     v_accepted boolean;
-    -- What stands behind a person's credential (T216; docs/design/passkeys.md, sections 6.2 and 6.4), read with it under
+    -- What stands behind a person's credential (docs/design/passkeys.md, sections 6.2 and 6.4), read with it under
     -- the fence and answered in the app's rows: its kind, generation and the passkey it names; that passkey's row, and
     -- whether its person holds a live passkey at its generation (2), has rows but none live at it (1), or none ever
     -- (null), as the app's own statement reads them (`heldSql`); and whether that passkey is live and theirs.
@@ -209,25 +206,25 @@ DECLARE
     v_project text;
     v_environment text;
     resolved boolean := p_token_hash IS NULL;
-    -- Whether a named call's caller stands at the place its names name, for its purpose (`use_stands`, W268): only then
+    -- Whether a named call's caller stands at the place its names name, for its purpose (`use_stands`): only then
     -- does it read the key.
     v_stands boolean;
-    -- The caller's principal, which `dev@me` names the personal config of (T165).
+    -- The caller's principal, which `dev@me` names the personal config of.
     v_principal text;
-    -- `dev@me` named, and her personal config of dev found: the place is it, and the gate weighs dev (T165).
+    -- `dev@me` named, and her personal config of dev found: the place is it, and the gate weighs dev.
     v_personal boolean := false;
-    -- The place and the environments it inherits from, nearest first (T165): a fork's, or a personal config's.
+    -- The place and the environments it inherits from, nearest first: a fork's, or a personal config's.
     v_layers uuid[];
-    -- The place's chain cut (a parent archived or deleted, or a chain that loops or runs past 3): it reads nothing (T165).
+    -- The place's chain cut (a parent archived or deleted, or a chain that loops or runs past 3): it reads nothing.
     v_cut boolean := false;
     -- The environment that holds the key named: the place, or one it inherits it from.
     v_holder uuid;
     -- The place's parent: none but a fork's, or a personal config's (dev).
     v_np_parent uuid;
-    -- A named call's, or a route use's (T186, `p_route`; a workload's gate in `use_route` among them): its use of a key
+    -- A named call's, or a route use's (`p_route`; a workload's gate in `use_route` among them): its use of a key
     -- the place does not hold, or of a plain value, writes no entry and takes no lock, the vault deciding it on what was read.
     v_quiet boolean := p_token_hash IS NOT NULL OR p_route IS NOT NULL;
-    -- A route's named call (T205; docs/design/proxy-ui.md, section 4): a handle's, which names the route (`p_route`) and
+    -- A route's named call (docs/design/proxy-ui.md, section 4): a handle's, which names the route (`p_route`) and
     -- no key. After the caller's standing, under the same fence, it reads the route's item through the place's chain, its
     -- editor's principal, and resolves the one key the item names by that name, as a code route's named call resolves the
     -- key the request names; the isolate's map's ids only let it make the use when they are that key's now. One call, the
@@ -247,7 +244,7 @@ DECLARE
     editor json;
     names text[] := '{}';
 BEGIN
-    -- The way in (T147): a credential, 0; an MCP connection, 1; a Cloudflare binding, 2; each by its id; or, behind
+    -- The way in: a credential, 0; an MCP connection, 1; a Cloudflare binding, 2; each by its id; or, behind
     -- Cloudflare Access, the account, 3, a person's or a service token's, whose object's key the entry names. Its kind is in the entry, the purpose's
     -- bits above 512, under its MAC; and only a credential's token is named.
     IF p_way IS NULL OR p_way NOT IN (0, 1, 2, 3) OR p_purpose / 512 <> p_way OR (p_way = 3) <> (p_principal IS NOT NULL)
@@ -256,15 +253,15 @@ BEGIN
         RAISE EXCEPTION 'a use names its way in: a credential, a connection or a binding by id, or an account behind Access by its key' USING ERRCODE = 'invalid_parameter_value';
     END IF;
     -- A route use's is by ids, the route's name a credential's (`CREDENTIAL_NAME`): `use_route` makes it.
-    -- A route use's light gate (`p_gate`, T200) is a handle's named call of no key: `use_route` makes it.
+    -- A route use's light gate (`p_gate`) is a handle's named call of no key: `use_route` makes it.
     IF p_gate IS NULL OR (p_gate AND (p_token_hash IS NULL OR p_key IS NOT NULL OR p_credential IS NOT NULL OR p_secret IS NOT NULL)) THEN
         RAISE EXCEPTION 'a light gate is a handle''s named call of no key' USING ERRCODE = 'invalid_parameter_value';
     END IF;
-    -- A route's named call (T205) is a handle's, of no key it names itself, at a place whose forks it serves.
+    -- A route's named call is a handle's, of no key it names itself, at a place whose forks it serves.
     IF p_route IS NOT NULL AND ((p_token_hash IS NOT NULL AND (p_key IS NOT NULL OR p_gate OR NOT p_forks)) OR p_route !~ '^[a-z][a-z0-9-]{0,31}$') THEN
         RAISE EXCEPTION 'a route use is by ids, or a handle''s named call of its route, and names its route as a credential is named' USING ERRCODE = 'invalid_parameter_value';
     END IF;
-    -- What the app's config says of passkeys (T216): one of its three policies, or none (an app before T216, which runs
+    -- What the app's config says of passkeys: one of its three policies, or none (an app that runs
     -- the check itself before the call).
     IF p_passkeys IS NOT NULL AND p_passkeys NOT IN ('off', 'optional', 'required') THEN
         RAISE EXCEPTION 'a named call''s passkey policy is off, optional or required' USING ERRCODE = 'invalid_parameter_value';
@@ -274,8 +271,8 @@ BEGIN
     IF p_at > (extract(epoch FROM clock_timestamp()) * 1000)::bigint + 60000 THEN r.state := 'ahead'; RETURN CASE WHEN v_routed THEN json_build_object('row', to_json(r), 'route', v_route) ELSE to_json(r) END; END IF;
     IF dry THEN
         -- The statement first runs dry, outside the fence, so that its planning's cold work (the catalog, the statistics,
-        -- the indexes: tens of ms on a new connection) is done before this call holds the fence (T131).
-        -- Planned for no key, the nil id, which none has (T207 r2). Until the plan cache settles, each statement is
+        -- the indexes: tens of ms on a new connection) is done before this call holds the fence.
+        -- Planned for no key, the nil id, which none has. Until the plan cache settles, each statement is
         -- planned for the call's own values, and planning for them reads pages by them: dry runs planned for the key the
         -- isolate passed, before anything decided the caller may know of it, read 16 more blocks of the key's tables
         -- for a key held than for one never made (use.matrix.ts, a named call of one standing nowhere). The call
@@ -289,11 +286,11 @@ BEGIN
             -- What the request names, by its names, under the fence, which no change moves (as `use_resolve` reads it):
             -- the credential of its token's hash; the place of its slugs, or a handle's one place; its key there by name.
             -- Each by an index, whatever plan the cache settles on: a handle's place by its id, a
-            -- named one by its slugs, never one plan for both, which no index serves (review r1 of D153). The dry run
+            -- named one by its slugs, never one plan for both, which no index serves. The dry run
             -- skips this block: these statements, the gate's among them, are planned on a session's first named call,
             -- under the fence, which hangs on nothing a request names.
-            -- The credential first, held to what the app's config accepts (`p_signin`, `p_issuers`; review r6 and r7 of
-            -- D153; Probing.tla, AcceptedFirst): the deployment signs in through coffre's own sign-in, and a browser
+            -- The credential first, held to what the app's config accepts (`p_signin`, `p_issuers`;
+            -- Probing.tla, AcceptedFirst): the deployment signs in through coffre's own sign-in, and a browser
             -- session's identity names a provider it configures, as the app's own check has it (`#liveCredential`). One it
             -- would refuse is answered as a token no credential has, `unknown`, here: no place, no key, no lock read or
             -- taken, whatever the request names.
@@ -302,14 +299,14 @@ BEGIN
               INTO v_credential, v_places, v_principal, v_kind, v_generation, v_passkey_id, v_accepted
               FROM public.credentials c LEFT JOIN public.identities x ON x.id = c.identity_id
              WHERE c.token_hash = p_token_hash;
-            -- Then the passkey behind a person's session or token, with passkeys not `off` (`p_passkeys`; T216;
+            -- Then the passkey behind a person's session or token, with passkeys not `off` (`p_passkeys`;
             -- passkeys.md, section 6.2, `passkeyStands`), as the app's own check has it: one that names a passkey is
             -- taken while that passkey is live, its person's at the credential's generation; one that names none, under
             -- `optional`, while its person holds no live passkey, never under `required`. Refused, it is `unknown` too,
             -- before anything else is read. Two probes of the passkeys' indexes and one by id, which nothing a request
-            -- names moves; never for a handle, a service's token or a workload's, which the check exempts (R44). The
+            -- names moves; never for a handle, a service's token or a workload's, which the check exempts. The
             -- MACs are the app's, which it checks on the rows answered (`app`), so that it reads none itself (a row a
-            -- database writer forged is accepted here and refused there, 401, D154).
+            -- database writer forged is accepted here and refused there, 401).
             IF v_credential IS NOT NULL AND coalesce(v_accepted, false) AND v_kind IN ('browser', 'cli', 'personal') AND p_passkeys IN ('optional', 'required') THEN
                 SELECT to_json(k), coalesce(k.removed_at IS NULL AND k.principal = v_principal AND k.generation = v_generation, false),
                        CASE WHEN EXISTS (SELECT 1 FROM public.passkeys h WHERE h.principal = v_principal AND h.generation = v_generation AND h.removed_at IS NULL) THEN 2
@@ -327,13 +324,13 @@ BEGIN
                                 WHEN coalesce(v_places::json -> 0 ->> 'personal', 'false') <> 'false' THEN NULL
                                 WHEN NOT coalesce(pg_input_is_valid(v_places::json -> 0 ->> 'environmentId', 'uuid'), false) THEN NULL
                                 ELSE (v_places::json -> 0 ->> 'environmentId')::uuid END;
-                -- A fork's place too, with forks served (`p_forks`, T165); never a personal config's (above).
+                -- A fork's place too, with forks served (`p_forks`); never a personal config's (above).
                 SELECT e.id, e.project_id, q.slug, e.slug, e.archived_at IS NULL AND q.archived_at IS NULL AND e.owner IS NULL AND (e.parent_id IS NULL OR p_forks), e.parent_id
                   INTO v_np, v_np_project, v_project, v_environment, v_live, v_np_parent
                   FROM public.environments e JOIN public.projects q ON q.id = e.project_id
                  WHERE e.id = v_bound AND e.slug NOT LIKE '%~%' AND q.slug NOT LIKE '%~%';
             ELSIF p_forks AND right(p_environment, 3) = '@me' THEN
-                -- `dev@me` (T165; `resolveRead`): dev, an environment of its own or a fork, never a personal config; then the
+                -- `dev@me` (`resolveRead`): dev, an environment of its own or a fork, never a personal config; then the
                 -- caller's personal config of it, by its parent and owner (the unique index's own predicate), which is the
                 -- place; or, while they have none, dev itself, read as dev (`fallback`). Archived, either is none.
                 SELECT e.id, e.project_id, q.slug, e.slug, e.archived_at IS NULL AND q.archived_at IS NULL AND e.owner IS NULL, e.parent_id
@@ -378,15 +375,15 @@ BEGIN
                     v_named := 'reread';
                 END IF;
             END IF;
-            -- The caller's standing at the place, for the request's purpose, from rows no key decides (W268; Probing.tla,
+            -- The caller's standing at the place, for the request's purpose, from rows no key decides (Probing.tla,
             -- StandingFirst): its key's name is read only for one who stands there. Without the roles coffre ships, which
             -- every named call of the vault's passes, it stands: never refused here where the vault's rule allows.
-            -- At a personal config, its owner's standing there, as the vault's rule weighs it with dev (`personalRefusal`, R8;
+            -- At a personal config, its owner's standing there, as the vault's rule weighs it with dev (`personalRefusal`;
             -- Probing.tla, GateWeighsParent): theirs while they read or use dev, whatever they ask.
             v_stands := CASE WHEN v_named IS NOT NULL THEN false WHEN p_roles IS NULL THEN true
                              WHEN v_personal THEN public.use_stands_personal(v_credential, v_np, p_at, p_roles)
                              ELSE public.use_stands(v_credential, v_np, p_purpose, p_at, p_roles) END;
-            -- What the place inherits from, for one who stands there (T165; `parentsOf`, `readableValues`): the place, then
+            -- What the place inherits from, for one who stands there (`parentsOf`, `readableValues`): the place, then
             -- each parent, nearest first, by the parent's index, from rows no key decides. A parent archived, deleted (its
             -- slug a tombstone) or not there, or a chain that loops or runs past 3 (`MAX_PARENTS`) cuts it: the place reads
             -- nothing, as the app's read refuses it whole, decided on the place alone (Probing.tla, CutByPlace).
@@ -403,7 +400,7 @@ BEGIN
                 SELECT array_agg(chain.id ORDER BY chain.depth), coalesce(bool_or(chain.cut), false) INTO v_layers, v_cut FROM chain;
                 v_layers := coalesce(v_layers, ARRAY[v_np]);
             END IF;
-            -- The route (T205), for one who stands at the place, its chain whole (Routing.tla, StandingFirst): its levels, its
+            -- The route, for one who stands at the place, its chain whole (Routing.tla, StandingFirst): its levels, its
             -- item's editor and the keys the item names, read as `use_route` reads them (`use_route_read`). The one key the
             -- item names is resolved by that name below, as a code route's named call resolves its own (KeyByItem). An item
             -- of another number of keys, or none, resolves no key: the call reads on as one of no key at the place, its rows
@@ -455,7 +452,7 @@ BEGIN
                 probe := true;
             END IF;
             resolved := true;
-            -- A route use's light gate (T200): a caller who stands at a live place, its chain whole, is answered here, by
+            -- A route use's light gate: a caller who stands at a live place, its chain whole, is answered here, by
             -- its names and the app's rows of the place, nothing more read. The statement goes on to make the route's keys'
             -- uses, whose rows, read under the same fence, are the ones the vault decides the caller on; it asks the
             -- whole gate (this call without `p_gate`) where it makes none. One who stands nowhere, or at a place cut, reads
@@ -480,7 +477,7 @@ BEGIN
                 RETURN CASE WHEN v_routed THEN json_build_object('row', to_json(r), 'route', v_route) ELSE to_json(r) END;
             END IF;
         END IF;
-        -- Two statements, one rule (T274, V2a). The full statement is the use's definition: every row the decision weighs,
+        -- Two statements, one rule. The full statement is the use's definition: every row the decision weighs,
         -- each by its key, then the entry; it answers every call alone. The lean one is a fast path in front of it, for the
         -- common use: no place read through, a key with a version of its own, the isolate's seals still the log's. It reads
         -- a subset of the full one's rows by the same keys and must answer what the full one would, or hand off (`whole`),
@@ -513,9 +510,9 @@ BEGIN
                              (SELECT p.seal FROM public.policy p) AS p_seal
                         FROM public.log_config g
                   ) cfg ON true
-                  -- The way in (T147), one of these by its id; or, behind Access, none: the account alone, whose row is all the
+                  -- The way in, one of these by its id; or, behind Access, none: the account alone, whose row is all the
                   -- use weighs of it. The way rides the join key: the others' is null, which no index scan descends for. A
-                  -- `p_way = 1` beside the key is no one-time filter of an outer join's inner side, and its probe ran (review r2).
+                  -- `p_way = 1` beside the key is no one-time filter of an outer join's inner side, and its probe ran.
                   LEFT JOIN public.credentials c ON c.id = CASE WHEN p_way = 0 THEN v_credential END
                   LEFT JOIN public.mcp_connections k ON k.id = CASE WHEN p_way = 1 THEN v_credential END
                   LEFT JOIN public.service_bindings wb ON wb.id = CASE WHEN p_way = 2 THEN v_credential END
@@ -599,7 +596,7 @@ BEGIN
                    WHERE g.principal = v.p
               ) gr ON v.m_status IS NOT NULL;
         ELSE
-            -- The use's one statement (V2a; state-rows.md, section 3): every row the decision weighs, each by its key, then
+            -- The use's one statement: every row the decision weighs, each by its key, then
             -- the entry. It reads each input's newest change (`seeks`: the probe) unless the isolate's seals are still the
             -- log's: it named the log's newest change it knew (`p_known`), and that is still the newest. A key's reference
             -- and its source, and the place read through, are read only where the key has no version of its own or the place
@@ -642,9 +639,9 @@ BEGIN
                              (SELECT p.seal FROM public.policy p) AS p_seal
                         FROM public.log_config g
                   ) cfg ON true
-                  -- The way in (T147), one of these by its id; or, behind Access, none: the account alone, whose row is all the
+                  -- The way in, one of these by its id; or, behind Access, none: the account alone, whose row is all the
                   -- use weighs of it. The way rides the join key: the others' is null, which no index scan descends for. A
-                  -- `p_way = 1` beside the key is no one-time filter of an outer join's inner side, and its probe ran (review r2).
+                  -- `p_way = 1` beside the key is no one-time filter of an outer join's inner side, and its probe ran.
                   LEFT JOIN public.credentials c ON c.id = CASE WHEN p_way = 0 THEN v_credential END
                   LEFT JOIN public.mcp_connections k ON k.id = CASE WHEN p_way = 1 THEN v_credential END
                   LEFT JOIN public.service_bindings wb ON wb.id = CASE WHEN p_way = 2 THEN v_credential END
@@ -689,7 +686,7 @@ BEGIN
                   -- The value's environment's row: the key's own, unless it is a reference, whose source is elsewhere or gone.
                   LEFT JOIN LATERAL (
                       -- A named call's key the place does not hold: the place's, a personal config's parent, which its standing
-                      -- there weighs (T165, `standingParents`). A use by ids reads as before.
+                      -- there weighs (`standingParents`). A use by ids reads as before.
                       SELECT CASE WHEN s.id IS NULL AND p_token_hash IS NOT NULL THEN e1.owner
                                   WHEN ref.source_secret_id IS NULL OR (src.id IS NOT NULL AND ids.e3 IS NULL) THEN e2.owner ELSE e3.owner END AS owner,
                              CASE WHEN s.id IS NULL AND p_token_hash IS NOT NULL THEN e1.parent_id
@@ -724,7 +721,7 @@ BEGIN
                         AND public.use_covered(p_cover_at, p_cover_request, p_cover, p_credential, p_secret, p_purpose, p_place, p_route), false) AS is_covered
                   FROM i
                   -- Each input's newest change, probed: one probe of log_changes_object_idx a slot, and the change's row, for the
-                  -- columns its MAC covers (T190; the principal's payload names the 0.14 entry it accounts for), which the
+                  -- columns its MAC covers (the principal's payload names the 0.14 entry it accounts for), which the
                   -- vault checks before it holds a row to the seal recorded there. None while the isolate's seals are still the
                   -- log's: the condition is the subquery's, on `i` alone, so it is checked before any probe. A slot with no object
                   -- (no source, no place read through) is no row of the probe's, which it would find nothing for.
@@ -807,7 +804,7 @@ BEGIN
             PERFORM pg_advisory_xact_lock_shared(1668244070, 0);
             CONTINUE;
         END IF;
-        -- A named call answered `moved` or `archived` is decided by the vault before anything else is done (T158, D153):
+        -- A named call answered `moved` or `archived` is decided by the vault before anything else is done:
         -- it is read again probing, so that every row's newest seal is there to check, in this call.
         IF r.state IN ('moved', 'archived') AND p_token_hash IS NOT NULL AND NOT r.probed THEN
             probe := true;
@@ -826,7 +823,7 @@ BEGIN
             RAISE EXCEPTION 'a use wrote no entry and rode no cover' USING ERRCODE = 'XX000';
         END IF;
         -- A use whose key would take its principal's lock (to enter the cap's set, or move on in it), named or by ids,
-        -- takes it only in the vault's call after it decided the use on the rows of this one (`p_decided`; T158, D153;
+        -- takes it only in the vault's call after it decided the use on the rows of this one (`p_decided`;
         -- formal/Probing.tla, DecideBeforeLock, DecideEachLock; HotPathOne, NoLockWithoutStanding). Otherwise the call ends
         -- here, nothing locked or written, and answers the rows it read (`decide`): the vault refuses a use it may not make
         -- on them, the same as for a key never made, and makes one it may, in a second call.
@@ -960,16 +957,16 @@ DECLARE
     v_resolved json[];
     v_right boolean;
     answers json[] := '{}';
-    -- The vault's ask (T200): the gate light, its caller's rows read by the keys' uses this statement makes with its ids.
+    -- The vault's ask: the gate light, its caller's rows read by the keys' uses this statement makes with its ids.
     v_light boolean := coalesce(p_light, false) AND p_token_hash IS NOT NULL AND p_use AND p_secrets IS NOT NULL;
     -- What the statement ends on, short of the route's keys: a personal config, or a chain cut.
     v_personal boolean := false;
     v_chain_cut boolean := false;
     -- A handle's gate that found it standing nowhere there, or at a place cut: the route is not read.
     v_unstood boolean := false;
-    -- Whether this session planned the reading's statements, on its first call, before the fence (T200).
+    -- Whether this session planned the reading's statements, on its first call, before the fence.
     v_planned boolean := current_setting('coffre.route_planned', true) IS NOT DISTINCT FROM '0082';
-    -- The gate's answer, parsed once (T200): each `->>` of a json value parses its text whole again.
+    -- The gate's answer, parsed once: each `->>` of a json value parses its text whole again.
     g jsonb;
 BEGIN
     IF p_limit IS NULL OR p_limit < 1 OR p_offset IS NULL OR p_offset < 0 OR p_read_mac IS NULL OR p_purpose IS NULL OR p_use IS NULL
@@ -988,9 +985,9 @@ BEGIN
     END IF;
     -- The reading: the place reading for an environment the handle was made for, else the stable one (section 6). Picked
     -- before the fence, which the gate takes, so that its plans are made before the call holds it; then picked again under
-    -- it, and the gate asked again by the new one if a rename moved it in between (review r2 of #464): the gate decides by
+    -- it, and the gate asked again by the new one if a rename moved it in between: the gate decides by
     -- the reading the rows it reads under the fence pick. A session whose first call planned them picks once, under the
-    -- fence, taken first (T200): the pick the second round would make, with no first to make it again.
+    -- fence, taken first: the pick the second round would make, with no first to make it again.
     IF v_planned AND v_handle AND p_named IS NOT NULL THEN
         PERFORM pg_advisory_xact_lock_shared(1668244070, 0);
         v_attempt := 1;
@@ -1014,7 +1011,7 @@ BEGIN
         v_route := CASE WHEN v_reading = 1 THEN p_named ELSE p_stable END;
         EXIT WHEN NOT v_handle OR (v_attempt = 2 AND v_reading = v_gated);
         -- The gate: the caller's standing at the place, by the reading's names, from rows no key decides. It takes the fence.
-        -- Light, when the vault asks (T200): one who stands is answered by their names alone, and the keys' uses below
+        -- Light, when the vault asks: one who stands is answered by their names alone, and the keys' uses below
         -- read their rows; the whole gate, below too, where none is made.
         gate := public.use_credential(
             NULL::uuid, NULL::uuid, 0::bigint, p_at, p_purpose, NULL::uuid, p_read_mac, p_deadline,
@@ -1151,7 +1148,7 @@ BEGIN
         );
     END IF;
     -- The handle's places by path, as named now, for the vault's map to pick the next reading by (`made_for`): on an
-    -- answer that makes no use, the only one whose reading the map may have picked wrong (T200: a use made by the map's
+    -- answer that makes no use, the only one whose reading the map may have picked wrong (a use made by the map's
     -- ids was made at the reading it picked, which this statement's rows pick too).
     IF v_handle AND p_named IS NOT NULL AND NOT coalesce(v_right, false) THEN
         made_for := CASE WHEN coalesce(pg_input_is_valid(v_places, 'jsonb'), false) AND jsonb_typeof(v_places::jsonb) = 'array' THEN (
@@ -1159,7 +1156,7 @@ BEGIN
               FROM (
                   -- Each place by its environment's key, its id read as a uuid where it is one: a subquery per place, one
                   -- index probe each, which no plan joins (a join, planned for any values, hashed every environment: 114
-                  -- buffers at 10k; review r1 of #464).
+                  -- buffers at 10k).
                   SELECT (SELECT q.slug || '/' || e.slug || CASE WHEN coalesce(x ->> 'personal', 'false') = 'true' THEN '@me' ELSE '' END
                             FROM public.environments e JOIN public.projects q ON q.id = e.project_id
                            WHERE e.id = CASE WHEN jsonb_typeof(x) = 'object' AND coalesce(pg_input_is_valid(x ->> 'environmentId', 'uuid'), false)
@@ -1233,7 +1230,7 @@ BEGIN
     END IF;
     -- The gate: the caller's standing at the place, by the request's names, from rows no key decides (0051's named call
     -- with no key, read by names alone: it writes and locks nothing). It takes the fence, shared, held to the commit.
-    -- It holds the credential to the passkey check too (`p_passkeys`, T216), once: a change to the person's passkeys
+    -- It holds the credential to the passkey check too (`p_passkeys`), once: a change to the person's passkeys
     -- that leaves no passkey behind the credential revokes it (passkeys.md, section 6.1), a change that waits for this
     -- fence, so what the gate found stands for each key's named call below, which reads the credential again under it.
     gate := public.use_credential(
@@ -1260,7 +1257,7 @@ BEGIN
     )
     SELECT array_agg(chain.id ORDER BY chain.depth), coalesce(bool_or(chain.cut), false) INTO v_layers, v_cut FROM chain;
     -- Cut since the gate read it, around the log (the fence holds every change back): nothing read, and no names listed
-    -- either, so that the vault cannot take it for a place she stands at that holds no key (review r1 of T165 PR 2).
+    -- either, so that the vault cannot take it for a place she stands at that holds no key.
     IF v_cut OR v_layers IS NULL THEN
         RETURN json_build_object('gate', gate, 'keys', NULL, 'rows', '[]'::json, 'by_ids', '[]'::json, 'aheads', '[]'::json);
     END IF;
@@ -1286,7 +1283,7 @@ BEGIN
     -- removed it. A key with a sealed value of its own is then a use by ids: made here when the vault passed its ids and
     -- they are the name's now (the gate's credential; a key it inherits, through the place, 0051), else left to the
     -- vault's batch by ids, which decides it next (its row null here, its ids in its `aheads`): a key's named call costs
-    -- its place, standing and chain read again, five times a use by ids (T165, PR 2's CI: 1,001 keys took 2.3 s, the
+    -- its place, standing and chain read again, five times a use by ids (in CI, 1,001 keys took 2.3 s, the
     -- use's deadline 3). A use by ids logs its request whatever it finds; a plain value, a reference or a key the place
     -- does not hold is no use's, and its named call decides it here, writing nothing (`useMany` never passed one either).
     -- Its rows, for the app, which then reads nothing itself (`NamedKey.app`).
@@ -1349,9 +1346,9 @@ REVOKE ALL ON FUNCTION public.use_named_batch(bytea, text, text, boolean, text[]
 --> statement-breakpoint
 GRANT EXECUTE ON FUNCTION public.use_named_batch(bytea, text, text, boolean, text[], boolean, text[], jsonb, bigint, smallint, bigint, bytea, text[], uuid[], uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], smallint, text, integer, text) TO coffre_vault;
 --> statement-breakpoint
--- 0048's `use_batch`, by its new name: its arguments are 0.15.0's, so its old name would answer 0.15.0's call. Its
--- call of `use_credential` names every argument. 19 arguments, over the 10 a function may take (AGENTS.md), only because
--- they are `use_credential`'s, a list each; V2a renames them and adds none, and the use's redesign (`simple-use.md`) cuts both.
+-- The batch of uses by ids. Its arguments are 0.15.0's `use_batch`'s, so it has a name of its own, which 0.15.0's call
+-- does not find. Its call of `use_credential` names every argument. 19 arguments, over the 10 a function may take
+-- (AGENTS.md), only because they are `use_credential`'s, a list each.
 DROP FUNCTION IF EXISTS public.use_batch(uuid, uuid[], bigint[], bigint, smallint, uuid[], bytea[], bigint, bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], boolean[], smallint, text, text);
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION public.use_id_batch(p_credential uuid, p_secrets uuid[], p_requests bigint[], p_at bigint, p_purpose smallint, p_places uuid[], p_macs bytea[], p_deadline bigint, p_covers bigint[], p_cover_ats bigint[], p_cover_requests bigint[], p_knowns bigint[], p_known_macs bytea[], p_cap_counts integer[], p_cap_windows bigint[], p_decided boolean[], p_way smallint, p_principal text, p_lock text)

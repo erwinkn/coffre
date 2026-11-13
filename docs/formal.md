@@ -725,9 +725,7 @@ name.
 ### Batching.tla
 
 A request's several keys are one vault call, `useMany`, and one statement,
-`use_batch` (migration 0048; T167, B2; `use_id_batch` since 0086, whose
-arguments 0.15.0's call no longer finds), where each key had a call of its
-own. The statement makes each key's use as `use_credential` makes one, by
+`use_id_batch` (migration 0086), rather than a call a key. The statement makes each key's use as `use_credential` makes one, by
 ids, in the request's order, in one transaction: HotPathOne.tla holds each
 of those uses, and this model what a batch adds, as several share one
 transaction, one principal's lock and one cap. A batch is two rounds, as a
