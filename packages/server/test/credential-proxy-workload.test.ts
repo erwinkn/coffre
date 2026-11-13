@@ -9,7 +9,7 @@
 // a tunnel ends within a recheck of a freeze. Both engines.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';
+import { createDecipheriv, createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -28,7 +28,7 @@ import { insertSession } from '../src/db/workloads.ts';
 import { processGates, type Gates } from '../src/gate.ts';
 import { upgrade } from '../src/node-sockets.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
-import { credentialProxy, form, header, hmac, json, path, postgres, privateKey, query, sigv4 } from '../src/plugins/credential-proxy.ts';
+import { aesGcm, credentialProxy, form, header, hmac, json, path, postgres, privateKey, query, sigv4 } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -53,6 +53,7 @@ const DEPLOY = {
 const STRIPE_KEY = 'sk_live_0123456789abcdefghij';
 const AWS = { AWS_ACCESS_KEY_ID: 'AKIAREAL0123456789AB', AWS_SECRET_ACCESS_KEY: 'real/secret/0123456789abcdefghijklmnopqr' };
 const WEBHOOK_SECRET = 'whsec_0123456789abcdefghij';
+const CIPHER_KEY = randomBytes(32);
 const SIGNING_KEY = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
 
 const ui = {} as Pages;
@@ -93,6 +94,7 @@ function proxy(options: { recheckSeconds?: number } = {}) {
     },
     signers: { 'dfns-key': privateKey('SIGNING_KEY'), 'sumsub-key': hmac('WEBHOOK_SECRET', { encoding: 'hex', maxBytes: 11 * 1024 * 1024 }) },
     verifiers: { webhook: hmac('WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) },
+    ciphers: { tokens: aesGcm('CIPHER_KEY', { keyEncoding: 'base64', limit: { perMinute: 4 } }) },
     tunnels: { db: postgres('DATABASE_URL') },
     insecureUpstreams: true,
     ...(options.recheckSeconds === undefined ? {} : { recheckSeconds: options.recheckSeconds }),
@@ -167,7 +169,7 @@ beforeEach(async () => {
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/prod', { name: 'prod' });
-  await root.secrets.set('market/prod', { STRIPE_KEY, ...AWS, SIGNING_KEY, WEBHOOK_SECRET, DATABASE_URL: 'postgres://app:pw@127.0.0.1:5999/app?sslmode=disable', REGION: { value: 'eu-west-3', plain: true } });
+  await root.secrets.set('market/prod', { STRIPE_KEY, ...AWS, SIGNING_KEY, WEBHOOK_SECRET, CIPHER_KEY: CIPHER_KEY.toString('base64'), DATABASE_URL: 'postgres://app:pw@127.0.0.1:5999/app?sslmode=disable', REGION: { value: 'eu-west-3', plain: true } });
   await root.access.set(MEMBER, { 'market/prod': 'viewer' });
 });
 
@@ -655,6 +657,10 @@ test("a narrowed session is held to its constraints on the URL sent, and one lim
   assert.deepEqual([signed.status, signed.body.reason], [403, 'narrowed']);
   const verified = await use(child, 'POST', '/use', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ verify: { credential: 'webhook', message: 'aGk', signature: 'sha256=00' } }) });
   assert.deepEqual([verified.status, verified.body.reason], [403, 'narrowed']);
+  for (const asked of [{ encrypt: { credential: 'tokens', plaintext: 'aGk' } }, { decrypt: { credential: 'tokens', iv: Buffer.alloc(12).toString('base64url'), ciphertext: 'aGk', tag: Buffer.alloc(16).toString('base64url') } }]) {
+    const refused = await use(child, 'POST', '/use', { headers: { 'content-type': 'application/json' }, body: JSON.stringify(asked) });
+    assert.deepEqual([refused.status, refused.body.reason], [403, 'narrowed']);
+  }
   // Raw too.
   const hi = createHash('sha256').update('hi').digest('hex');
   const rawSigned = await use(child, 'POST', '/use?sign=sumsub-key', { headers: { 'content-type': 'application/octet-stream', 'content-length': '2', 'content-digest': contentDigest(hi) }, body: 'hi' });
@@ -679,9 +685,37 @@ test('sign and presign take a workload, its proof signing what is asked; the pla
   assert.equal(plan.status, 200, JSON.stringify(plan.body));
   assert.equal(plan.body.environment, 'market/prod');
   assert.deepEqual(plan.body.values, { REGION: 'eu-west-3' }, 'its plain value, and no secret one: it uses them');
-  assert.deepEqual([...(plan.body.credentials as string[])].sort(), ['dfns-key', 'dpopped', 'metered', 's3', 'stripe', 'sumsub-key', 'webhook', 'yousign']);
+  assert.deepEqual([...(plan.body.credentials as string[])].sort(), ['dfns-key', 'dpopped', 'metered', 's3', 'stripe', 'sumsub-key', 'tokens', 'webhook', 'yousign']);
   assert.deepEqual(plan.body.tunnels, { db: { key: 'DATABASE_URL', url: 'wss://secrets.acme.example/use/market/prod/db' } });
-  assert.deepEqual([...(plan.body.useOnly as string[])].sort(), ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'DATABASE_URL', 'SIGNING_KEY', 'STRIPE_KEY', 'WEBHOOK_SECRET']);
+  assert.deepEqual([...(plan.body.useOnly as string[])].sort(), ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'CIPHER_KEY', 'DATABASE_URL', 'SIGNING_KEY', 'STRIPE_KEY', 'WEBHOOK_SECRET']);
+});
+
+test('a workload encrypts and decrypts through the SDK, the key never answered; past its limit, 429 and nothing opened', async () => {
+  await bind();
+  const coffre = await workload({
+    url: ORIGIN,
+    service: SERVICE,
+    proof: { name: 'github', kind: 'oidc', prove: async (context) => ({ oidc: runToken(keyAudience(context)) }) },
+    fetch: (input, init) => answer(new Request(input, init), runtime, ui, IP),
+    log: () => undefined,
+    sigterm: false,
+  });
+  try {
+    const tokens = coffre.credential('tokens');
+    const sealed = await tokens.encrypt('pennylane-api-token', 'workspace-1');
+    const decipher = createDecipheriv('aes-256-gcm', CIPHER_KEY, sealed.iv, { authTagLength: 16 });
+    decipher.setAAD(Buffer.from('workspace-1'));
+    decipher.setAuthTag(sealed.tag);
+    assert.equal(Buffer.concat([decipher.update(sealed.ciphertext), decipher.final()]).toString(), 'pennylane-api-token');
+    assert.equal(Buffer.from((await tokens.decrypt(sealed, 'workspace-1'))!).toString(), 'pennylane-api-token');
+    assert.equal(await tokens.decrypt(sealed, 'workspace-2'), null);
+    await tokens.encrypt('fourth');
+    await assert.rejects(tokens.encrypt('fifth'), /429|limit/);
+  } finally {
+    await coffre.close();
+  }
+  const uses = (await entries('credential.use')).filter((entry) => entry.credential === 'tokens');
+  assert.deepEqual(uses.map((entry) => entry.cipher), [true]);
 });
 
 test("verify takes a workload, its proof binding the body and signature checked; the secret is opened once a minute and never answered", async () => {

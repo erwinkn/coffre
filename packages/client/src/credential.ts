@@ -12,7 +12,10 @@
  * `COFFRE_HANDLE`, the handle that stands in for the environment's values;
  * the proxy injects the key, and the app never holds it.
  */
-import { JSON_MESSAGE_BYTES } from './dpop.ts';
+import { fromBase64url, JSON_MESSAGE_BYTES } from './dpop.ts';
+
+/** What a cipher's encrypt gives: the IV coffre drew, 12 bytes, the ciphertext, and the 16-byte tag, which the app stores in its own format. */
+export type Sealed = { iv: Uint8Array; ciphertext: Uint8Array; tag: Uint8Array };
 
 export type ProxiedCredential = {
   /** The credential's URL on the proxy: `<url>/<path>` is `<upstream>/<path>`. */
@@ -44,6 +47,13 @@ export type ProxiedCredential = {
    * in coffre, which compares in constant time and says only yes or no.
    */
   verify(message: Uint8Array | string, signature: string): Promise<boolean>;
+  /**
+   * `plaintext` (a string as its UTF-8) encrypted with a cipher's AES-256-GCM key, which stays in coffre, under `aad`
+   * if given: under an IV coffre draws for each, never the app's.
+   */
+  encrypt(plaintext: Uint8Array | string, aad?: Uint8Array | string): Promise<Sealed>;
+  /** The plaintext `sealed` holds under the cipher's key and `aad`, or null when it does not decrypt: whatever part is wrong, coffre says no more. */
+  decrypt(sealed: Sealed, aad?: Uint8Array | string): Promise<Uint8Array | null>;
 };
 
 type Env = Record<string, string | undefined>;
@@ -72,7 +82,7 @@ export function credential(
       headers: { authorization: `Bearer ${handle}`, 'content-type': 'application/json' },
       body: JSON.stringify(asked),
     });
-    return { answer, body: (await answer.json()) as { url?: string; expiresAt?: string; signature?: string; valid?: boolean; message?: string } };
+    return { answer, body: (await answer.json()) as { url?: string; expiresAt?: string; signature?: string; valid?: boolean; iv?: string; ciphertext?: string; tag?: string; plaintext?: string | null; message?: string } };
   };
   /** A message past what JSON takes, signed raw: its bytes as the body, with the SHA-256 that `coffre serve` streams it by, and coffre checks. */
   const raw = async (bytes: Uint8Array) => {
@@ -112,6 +122,20 @@ export function credential(
       const { answer, body } = await compute({ verify: { credential: name, message: bytesOf(message), signature } });
       if (!answer.ok || typeof body.valid !== 'boolean') throw new Error(`coffre verified nothing: ${body.message ?? answer.status}`);
       return body.valid;
+    },
+    encrypt: async (plaintext, aad) => {
+      const { answer, body } = await compute({ encrypt: { credential: name, plaintext: bytesOf(plaintext), ...(aad === undefined ? {} : { aad: bytesOf(aad) }) } });
+      const [iv, ciphertext, tag] = [body.iv, body.ciphertext, body.tag].map((part) => (typeof part === 'string' ? fromBase64url(part) : null));
+      if (!answer.ok || !iv || !ciphertext || !tag) throw new Error(`coffre encrypted nothing: ${body.message ?? answer.status}`);
+      return { iv, ciphertext, tag };
+    },
+    decrypt: async ({ iv, ciphertext, tag }, aad) => {
+      const { answer, body } = await compute({ decrypt: { credential: name, iv: bytesOf(iv), ciphertext: bytesOf(ciphertext), tag: bytesOf(tag), ...(aad === undefined ? {} : { aad: bytesOf(aad) }) } });
+      if (!answer.ok || (body.plaintext !== null && typeof body.plaintext !== 'string')) throw new Error(`coffre decrypted nothing: ${body.message ?? answer.status}`);
+      if (body.plaintext === null) return null;
+      const plaintext = fromBase64url(body.plaintext);
+      if (plaintext === null) throw new Error('coffre decrypted nothing: its answer is no base64url');
+      return plaintext;
     },
   };
 }
