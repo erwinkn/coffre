@@ -30,7 +30,7 @@ let db: TestDatabase;
 before(async () => {
   db = await openTestDatabase();
 });
-after(() => db?.close());
+after(() => db.close());
 beforeEach(async () => {
   await emptyDatabase(db.owner);
 });

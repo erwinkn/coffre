@@ -926,7 +926,7 @@ test('the bulk limit counts a key once across reads of one key and reads of seve
   assert.ok(entries.some((entry) => entry.secretId === null) && entries.some((entry) => entry.secretId !== null), 'both shapes of entry are counted');
 });
 
-test('a forged read that names no key counts against the bulk limit as one key, on either engine', async () => {
+test('a forged read that names no key counts against the bulk limit as one key', async () => {
   const w = await world({ bulkLimit: { count: 5, windowMs: 60_000 } });
   await member(w, ADA, [[w.dev, 'viewer']]);
   const [a, b, c] = await keys(w, 3);

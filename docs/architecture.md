@@ -1142,7 +1142,8 @@ node-postgres (`packages/db/src/connect.ts`); any other scheme is refused. The W
 with `createDatabase`: one connection for each request or vault call, which
 its queries take turns on and a transaction holds until it ends.
 
-Each query is written once, typed against the Postgres schema.
+Each query is written once, typed against the Postgres schema. How the
+queries reach the database:
 
 - **Schema and migrations.** `pgTable` defines the schema, and its
   migration tree is under `packages/db/src/migrations/postgres`, from a

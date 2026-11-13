@@ -59,7 +59,8 @@ async function ask(runtime: CoffreRuntime, path: string, accept = 'application/j
 
 /** No ledger at all while `work` runs, as on a database never migrated: the table moved aside, its grants with it. */
 async function neverMigrated(work: () => Promise<void>): Promise<void> {
-  const [away, back] = [sql`ALTER TABLE drizzle.__drizzle_migrations RENAME TO __drizzle_migrations_away`, sql`ALTER TABLE drizzle.__drizzle_migrations_away RENAME TO __drizzle_migrations`];
+  const away = sql`ALTER TABLE drizzle.__drizzle_migrations RENAME TO __drizzle_migrations_away`;
+  const back = sql`ALTER TABLE drizzle.__drizzle_migrations_away RENAME TO __drizzle_migrations`;
   await run(away);
   try {
     await work();

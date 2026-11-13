@@ -1987,7 +1987,7 @@ export type SecretPlaceRow = {
 
 /**
  * These secrets, where they are now, by id: any number of them, a thousand
- * a query, within every engine's bound on a statement's parameters (an
+ * a query, within Postgres's bound on a statement's parameters (an
  * offboarding report asks for each secret a member's reads listed).
  */
 export async function secretPlaces(db: Queryable, ids: readonly string[]): Promise<Map<string, SecretPlaceRow>> {

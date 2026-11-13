@@ -248,7 +248,7 @@ test('the report lists the current values someone saw, until each is rotated', a
   assert.ok(Date.parse(report.exposed[0].at) <= Date.now());
 });
 
-test('the report reads any number of secrets a member\'s reads listed, past every engine\'s bound on a query\'s parameters', async () => {
+test('the report reads any number of secrets a member\'s reads listed, past Postgres\'s bound on a query\'s parameters', async () => {
   await root.secrets.set('market/prod', { API_KEY: 'api-1' });
   const [secret] = await db.owner.select({ id: secrets.id }).from(secrets).where(eq(secrets.key, 'API_KEY'));
   // One read listing 33,000 secrets, the one still served among them: as the vault writes it, under its key.
