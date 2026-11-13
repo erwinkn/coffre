@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 
+import { deriveLogKey, sealEntry } from '@coffre/core/audit';
+import { encrypt, freshDek } from '@coffre/core/envelope';
+import { LocalKekProvider } from '@coffre/core/kek';
+
 import { createDatabase } from '../../src/database.ts';
 import { canonicalTimestamp } from '../../src/dialect.ts';
 import { migrateDatabase, migrationsFolder } from '../../src/migrate.ts';
@@ -70,8 +74,32 @@ const entry = (seq: number, author: 'app' | 'vault', actor: string, action: stri
 /** The vault's seal of a reference: `holder` in billing/prod reads market/prod's `source`. */
 const seal = (seq: number, reference: number, holder: number, source: number) =>
   entry(seq, 'vault', ADA, 'reference.create', { place: [2, 21], metadata: { reference: id(reference), secretId: id(holder), also: { projectId: id(1), environmentId: id(11), secretId: id(source) } } });
-const version = (n: number, secret: number, number: number, more: { erased?: boolean; plaintext?: string; sensitive?: boolean } = {}) =>
-  `(${u(n)}, ${u(secret)}, ${number}, 1, '\\x${more.erased ? '' : '01'}', '\\x${'00'.repeat(12)}', '\\x${'00'.repeat(16)}', '\\x${more.erased ? '' : '02'}', 'local', 'k', '1', '${ADA}', ${text(more.plaintext)}, ${more.sensitive ?? false})`;
+
+/**
+ * The keys 0.14's vault held, which the vault's adoption of this database is
+ * given too (packages/vault/test/adopt-upgraded.ts): its local KEK, and the
+ * signing key its log entries are under.
+ */
+const KEK = new LocalKekProvider(Buffer.alloc(32, 7), 'k');
+const SIGNING = deriveLogKey('vault', Buffer.alloc(32, 8));
+const bytes = (value: Buffer) => `'\\x${value.toString('hex')}'`;
+/** A version as 0.14 wrote it, envelope format 1: secrets 101 and 102 are in market/prod, the rest in billing/prod. */
+async function version(n: number, secret: number, number: number, more: { erased?: boolean; plaintext?: string; sensitive?: boolean } = {}): Promise<string> {
+  const [project, environment] = secret <= 102 ? [1, 11] : [2, 21];
+  const ids = { projectId: id(project), environmentId: id(environment), secretId: id(secret) };
+  const dek = freshDek();
+  const sealed = encrypt(Buffer.from(more.plaintext ?? `value ${n}`), ids, dek);
+  const wrapped = await KEK.wrap(dek, { ...ids, ...(more.sensitive ? { sensitive: true } : {}) });
+  const [ciphertext, key] = more.erased ? [Buffer.alloc(0), Buffer.alloc(0)] : [sealed.ciphertext, wrapped.bytes];
+  return `(${u(n)}, ${u(secret)}, ${number}, 1, ${bytes(ciphertext)}, ${bytes(sealed.iv)}, ${bytes(sealed.authTag)}, ${bytes(key)}, 'local', 'k', '1', '${ADA}', ${text(more.plaintext)}, ${more.sensitive ?? false})`;
+}
+/** An entry 0.14's vault wrote, under its MAC: what the adoption reads of the archive. */
+function vouched(seq: number, action: string, metadata: object): string {
+  const fields = { seq: BigInt(seq), author: 'vault' as const, keyId: SIGNING.keyId, occurredAt: T0 + seq * 1000, actor: ADA, action, decision: 'allow', code: null, subjectPrincipal: null, projectId: null, environmentId: null, secretId: null, secretVersionId: null, operationId: null, requestId: null, sourceIp: null, relatedSeq: null, metadata: JSON.stringify(metadata) };
+  const prev = Buffer.alloc(32, 1);
+  const { mac, hash } = sealEntry(SIGNING, prev, fields);
+  return `(${seq}, 'vault', '${SIGNING.keyId}', ${fields.occurredAt}, '${ADA}', '${action}', 'allow', NULL, NULL, NULL, NULL, NULL, NULL, '${fields.metadata}', ${bytes(prev)}, ${bytes(mac)}, ${bytes(hash)})`;
+}
 
 const ADA = 'user:ada@acme.example';
 const BO = 'user:bo@acme.example';
@@ -92,16 +120,18 @@ const SEED = `
     (${u(106)}, ${u(2)}, ${u(21)}, 'VALUE_THEN_ENDED_REFERENCE', 2), (${u(107)}, ${u(2)}, ${u(21)}, 'VALUE_THEN_REFERENCE', 1),
     (${u(108)}, ${u(2)}, ${u(21)}, 'ENDED_OVER_UNENDED', 0), (${u(109)}, ${u(2)}, ${u(21)}, 'REFERENCE_THEN_VALUE', 1);
   INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by, plaintext, sensitive) VALUES
-    ${[
-      version(1011, 101, 1, { sensitive: true }),
-      version(1021, 102, 1),
-      version(1022, 102, 2, { plaintext: 'pk_live' }),
-      // An erased version, of a place since deleted: 0.14 empties its ciphertext and its wrapped key.
-      version(1061, 106, 1, { erased: true }),
-      version(1062, 106, 2),
-      version(1071, 107, 1),
-      version(1091, 109, 1),
-    ].join(',\n    ')};
+    ${(
+      await Promise.all([
+        version(1011, 101, 1, { sensitive: true }),
+        version(1021, 102, 1),
+        version(1022, 102, 2, { plaintext: 'pk_live' }),
+        // An erased version, of a place since deleted: 0.14 empties its ciphertext and its wrapped key.
+        version(1061, 106, 1, { erased: true }),
+        version(1062, 106, 2),
+        version(1071, 107, 1),
+        version(1091, 109, 1),
+      ])
+    ).join(',\n    ')};
   UPDATE secrets SET current_version_id = ${u(1011)} WHERE id = ${u(101)};
   UPDATE secrets SET current_version_id = ${u(1022)} WHERE id = ${u(102)};
   UPDATE secrets SET current_version_id = ${u(1091)} WHERE id = ${u(109)};
@@ -150,6 +180,9 @@ const SEED = `
       entry(63, 'vault', ADA, 'secret.read', { decision: 'deny', secret: 103 }),
       entry(64, 'vault', 'token:gone', 'secret.read', { secret: 102 }),
       entry(65, 'vault', API, 'secret.read', { secret: 102, at: T0 + 6 * day }),
+      // The instance's policy and settings, as an Owner last changed them: market/dev protected, Viewer renamed, service accounts set up in dev alone.
+      vouched(66, 'policy.change', { policy: { roles: { viewer: { name: 'Reader', description: 'Read and use secret values.', permissions: ['secret.read', 'secret.use'], protected: ['secret.use'] } }, instanceRoles: {}, protected: [{ projectId: id(1), environmentId: id(12), at: T0 }] } }),
+      vouched(67, 'settings.change', { serviceAccounts: { projects: 'all', environments: { only: ['dev'] } } }),
     ].join(',\n    ')};
   INSERT INTO secret_references (id, project_id, environment_id, secret_id, source_project_id, source_environment_id, source_secret_id, created_seq, created_by) VALUES
     (${u(201)}, ${u(2)}, ${u(21)}, ${u(103)}, ${u(1)}, ${u(11)}, ${u(101)}, 10, '${ADA}'),
