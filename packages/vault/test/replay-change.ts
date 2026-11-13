@@ -11,7 +11,6 @@
 // does, and at `useAnswer` the answer must be the model's. The model's clock
 // is the vault's, a second a tick, and its TTL the memory's two seconds.
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 
 import { rowsOf } from '@coffre/db/dialect';
 import { principals } from '@coffre/db/schema';
@@ -21,6 +20,7 @@ import { change, commit, part, prepare, put, type Operation, type Prepared, type
 import type { Fresh, Row } from '../src/rows.ts';
 import { answer, memoryOf, read, recall, type Read } from '../src/use.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
+import { statesOf } from './itf.ts';
 import { ask, credential, environment, grant, project, role, rows, secret, value, write } from './world.ts';
 
 type Role = 'Out' | 'Member' | 'Owner';
@@ -29,19 +29,6 @@ type State = {
   actionTaken: string; nondetPicks: { p?: string; t?: string; op?: Op }; role: Record<string, Role>; gen: Record<string, number>; chg: Record<string, { decided: boolean }>;
   use: Record<string, { reading: boolean; ok: boolean }>;
 };
-
-/** ITF's big integers, maps, sets, tuples and variants, as plain values, each variable under its own name. */
-function plain(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(plain);
-  if (value === null || typeof value !== 'object') return value;
-  const v = value as Record<string, unknown>;
-  if ('#bigint' in v) return Number(v['#bigint']);
-  if ('#map' in v) return Object.fromEntries((v['#map'] as [string, unknown][]).map(([key, item]) => [key, plain(item)]));
-  if ('#set' in v) return (v['#set'] as unknown[]).map(plain);
-  if ('#tup' in v) return (v['#tup'] as unknown[]).map(plain);
-  if ('tag' in v && 'value' in v) return v.tag === 'Some' ? plain(v.value) : v.tag === 'None' ? undefined : v.tag;
-  return Object.fromEntries(Object.entries(v).map(([key, item]) => [key.split('::').at(-1)!, plain(item)]));
-}
 
 const id = (person: string) => `user:${person}@acme.example`;
 const at = new Date(Date.UTC(2026, 10, 13));
@@ -71,7 +58,7 @@ const vault = await openTestVault();
 let [steps, refusals, lost, uses, remembered] = [0, 0, 0, 0, 0];
 try {
   for (const file of process.argv.slice(2)) {
-    const states = (JSON.parse(readFileSync(file, 'utf8')) as { states: unknown[] }).states.map(plain) as State[];
+    const states = statesOf<State>(file);
     await emptyDatabase(vault.owner);
     const people = Object.keys(states[0]!.role);
     const admitted = people.map((person): Fresh<typeof principals> => ({

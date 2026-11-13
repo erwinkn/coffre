@@ -9,17 +9,18 @@
 // must equal the mirror.
 //
 // A row's MAC is a number, 0 for no row. The writer can put back any MAC the
-// vault once made, delete or put back any waiting entry, and cut the log from
-// its end; it cannot make a MAC. An entry deleted from the middle of the log is
-// not this check's: the signer compares where the log ends, which costs one
-// step whatever its size, and the re-check of old entries finds the rest (D222). `quiet`: without tampering, and with the signer on time, nothing
+// vault once made, delete or put back any waiting entry, and delete any entry
+// of the log; it cannot make a MAC. Of the log, the check holds only that it
+// ends with the entry signed last: one step whatever its size. An entry
+// deleted further back, or the last one once another has been signed after
+// it, is the re-check of old entries' to find (D222), and not modelled. `quiet`: without tampering, and with the signer on time, nothing
 // alerts. `caught`: no full check passes over a row that differs from what
 // the entries say, a change decided on such a row, a missing entry the signer
 // heard of, or a shortened log. The one exception is a row with an entry
 // whose wake-up never arrived.
 module log {
   type Entry = { row: str, was: int, now: int, at: int }
-  type Snap = { on: bool, full: bool, at: int, pending: Set[int], expected: Set[int], rows: str -> int, logSize: int, wrong: bool }
+  type Snap = { on: bool, full: bool, at: int, pending: Set[int], expected: Set[int], rows: str -> int, ends: bool, wrong: bool }
   type Db = { rows: str -> int, pending: Set[int], log: Set[int] }
   type Vault = { made: List[Entry], calls: Set[int], lost: Set[int] }
   type Signer = { expected: Set[int], root: Set[int], mirror: str -> int, moving: Set[int], order: List[int], snap: Snap, drained: int, alert: bool }
@@ -39,7 +40,7 @@ module log {
   const CaptureFirst: bool  // what is expected is noted before the read, not after
   const OneSnapshot: bool   // the rows and the waiting entries come from one read
   const KeepIntent: bool    // what was signed is kept until it is moved
-  const SizeCheck: bool     // the log's size is compared with the signed size
+  const SizeCheck: bool     // the log must end with the entry signed last
   const Chain: bool         // a change must replace the MAC the mirror holds
 
   var db: Db          // what the writer can change
@@ -48,7 +49,7 @@ module log {
   var world: World
 
   val made = vault.made
-  val idle: Snap = { on: false, full: false, at: 0, pending: Set(), expected: Set(), rows: Rows.mapBy(_ => 0), logSize: 0, wrong: false }
+  val idle: Snap = { on: false, full: false, at: 0, pending: Set(), expected: Set(), rows: Rows.mapBy(_ => 0), ends: true, wrong: false }
 
   // The window opens `Fresh` before the signer's last read and slides with the
   // signer, not the clock: a signer that was away takes what waited for it. It
@@ -63,6 +64,8 @@ module log {
   // What a full check must not pass over. An entry is unheard while its wake-up
   // has not reached the signer; unheard and gone, nobody outside the database
   // knows it was written, and its row is no longer vouched for.
+  // The log ends with the entry signed last: the newest one signed is in it.
+  val ends = signer.order.length() == 0 or db.log.contains(signer.order[signer.order.length() - 1])
   def unheard(n: int): bool = vault.lost.union(vault.calls).contains(n)
   def gone(n: int): bool = not(signer.root.contains(n)) and not(db.pending.contains(n))
   val due = range(0, made.length()).foldl(Rows.mapBy(_ => 0), (r, n) =>
@@ -73,7 +76,7 @@ module log {
     world.tainted.exists(n => not(excused(made[n].row))),
     Rows.exists(row => offBook(row)),
     made.indices().exists(n => not(unheard(n)) and gone(n)),
-    db.log != signer.root,
+    not(ends),
   }
   // A wake-up still on its way when its entry leaves the window: only then does an honest run alert.
   def late(read: int): bool = vault.calls.exists(n => made[n].at + Fresh < read)
@@ -115,7 +118,7 @@ module log {
     not(signer.snap.on), signer.moving == Set(),
     signer' = { ...signer, snap: {
       on: true, full: full, at: world.clock, pending: db.pending, expected: signer.expected,
-      rows: if (full) db.rows else idle.rows, logSize: if (full) db.log.size() else 0, wrong: full and wrong,
+      rows: if (full) db.rows else idle.rows, ends: not(full) or ends, wrong: full and wrong,
     } },
     db' = db, vault' = vault, world' = world,
   }
@@ -133,7 +136,7 @@ module log {
       not((if (CaptureFirst) s.expected else signer.expected).subseteq(s.pending)),
       Chain and not(held.ok),
       s.full and held.rows != (if (OneSnapshot) s.rows else db.rows),
-      s.full and SizeCheck and s.logSize != signer.root.size(),
+      s.full and SizeCheck and not(s.ends),
     }
     all {
       s.on,
@@ -167,11 +170,8 @@ module log {
     db' = db, vault' = vault, signer' = signer,
   }
 
-  // The log's end: the entry signed last among those still in it.
-  val newest = signer.order.foldl(-1, (last, n) => if (db.log.contains(n)) n else last)
-
   // The writer: a MAC the vault once gave the row or no row, a waiting entry out
-  // or back in, the log's last entry cut off.
+  // or back in, an entry out of the log.
   action attack: bool = all {
     world.attacks > 0,
     world' = { ...world, attacks: world.attacks - 1 },
@@ -188,7 +188,7 @@ module log {
       any {
         all { db.pending.contains(n), db' = { ...db, pending: db.pending.exclude(Set(n)) } },
         all { not(db.pending.contains(n)), db' = { ...db, pending: db.pending.union(Set(n)) } },
-        all { n == newest, db' = { ...db, log: db.log.exclude(Set(n)) } },
+        all { db.log.contains(n), db' = { ...db, log: db.log.exclude(Set(n)) } },
       },
     },
   }

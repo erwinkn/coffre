@@ -8,6 +8,7 @@ import { getTableName, is, sql } from 'drizzle-orm';
 import { PgTable } from 'drizzle-orm/pg-core';
 
 import { keyOf } from '../src/rows.ts';
+import type { Store } from '../src/signer.ts';
 import { memoryOf, type Serving } from '../src/use.ts';
 
 /**
@@ -48,6 +49,21 @@ export async function openTestVault(): Promise<TestVault> {
     woken,
     close: async () => void (await Promise.all([owner.close(), vault.close()])),
   };
+}
+
+/** The signer's storage, in memory: what a Durable Object's is in a deployment. `down` makes its writes fail. */
+export function memoryStore() {
+  const kept = new Map<string, unknown>();
+  return {
+    kept,
+    down: false,
+    read: async () => structuredClone(kept),
+    async write(changes: ReadonlyMap<string, unknown>) {
+      if (this.down) throw new Error('storage is down');
+      for (const [key, value] of structuredClone(changes)) if (value === undefined) kept.delete(key);
+      else kept.set(key, value);
+    },
+  } satisfies Store & Record<string, unknown>;
 }
 
 const TABLES = Object.values(schema).filter((value: unknown): value is PgTable => is(value, PgTable));

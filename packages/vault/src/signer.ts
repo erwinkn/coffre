@@ -1,8 +1,8 @@
 import { Edge, leafHash, tileMap } from '@coffre/core/log';
 import type { Database } from '@coffre/db';
-import { rowsOf } from '@coffre/db/dialect';
+import { later, laterRows } from '@coffre/db/later';
 import * as schema from '@coffre/db/schema';
-import { is, sql } from 'drizzle-orm';
+import { is, sql, type SQL } from 'drizzle-orm';
 import { PgTable } from 'drizzle-orm/pg-core';
 
 import { entryOf, type Entry } from './entry.ts';
@@ -27,7 +27,7 @@ import { macOf, shapeOf, type Key, type Sealed } from './rows.ts';
  *    next.
  *
  * What it finds it keeps until it is taken (`take`), and goes on (D216): a
- * run that fails after its finding says it again on the next.
+ * run that fails after a finding has not lost it.
  */
 
 /**
@@ -67,6 +67,14 @@ export type Finding = { found: 'forged' | 'replayed' | 'stale' | 'missing' | 're
 const FRESH_MS = 60_000;
 /** The most entries one run takes: a tile's worth. More wait for the next, at once. */
 const MOST = 256;
+/**
+ * How long a statement of the signer's waits for a lock, as a change does,
+ * and how long it runs: half the minute its full run comes round in. Whoever
+ * writes the database can hold a lock for good; the run then fails, and the
+ * next one tries again, where it would have waited for ever.
+ */
+const LOCK_WAIT_MS = 2000;
+const STATEMENT_MS = 30_000;
 
 const TREES = ['kept', 'aging'] as const;
 type Tree = (typeof TREES)[number];
@@ -120,6 +128,11 @@ type Move = {
 export const headText = (head: Omit<Move['head'], 'mac'>) => `head\n${JSON.stringify([head.size, head.keptSize, head.keptRoot, head.agingSize, head.agingRoot, head.agingFrom, head.signedAt])}`;
 
 /** Beside the mirror and the entries: when it last read everything that waited, and each tree's growing edge and end. */
+/** The entries among `taken` that are in the log as they were signed: number, tree, leaf and hash. */
+const asSigned = (taken: Move['taken']) => sql`
+  SELECT l.seq::int FROM log l JOIN jsonb_to_recordset(${JSON.stringify(taken)}::jsonb) AS t(kept boolean, seq bigint, leaf bigint, hash text)
+  ON l.seq = t.seq AND l.kept = t.kept AND l.leaf = t.leaf AND ${leafOf('l.body')} = decode(t.hash, 'hex')`;
+
 type Kept = { drained: number; trees: Record<Tree, End & { tiles: { level: number; index: number; hashes: string }[] }> };
 
 export class Signer {
@@ -142,7 +155,7 @@ export class Signer {
   #owed = false;
   #behind = false;
   #running = false;
-  /** Its memory and its storage may differ: nothing more is asked of it. */
+  /** Its memory and its storage may differ: it does nothing more. */
   #dead = false;
 
   private constructor(on: Signing) {
@@ -172,18 +185,16 @@ export class Signer {
   }
 
   /**
-   * A step that changes the signer's memory, then its storage. Memory
-   * first, so that a wake-up that comes while the storage answers sees what
-   * was decided. If anything fails the two may differ, and the signer is
-   * opened again from its storage.
+   * A step: the signer's memory changes, at once, and then its storage, by
+   * one write. So steps reach the storage in the order they changed the
+   * memory, a wake-up beside a run included. If the write fails the two
+   * differ, and the signer is opened again from its storage.
    */
-  async #step(change: (changes: Map<string, unknown>) => void | Promise<void>): Promise<void> {
+  async #step(change: (changes: Map<string, unknown>) => void): Promise<void> {
     this.#alive();
     const changes = new Map<string, unknown>();
-    const found = this.#found.length;
     try {
-      await change(changes);
-      if (this.#found.length !== found) changes.set('found', this.#found.length > 0 ? this.#found : undefined);
+      change(changes);
       if (changes.size > 0) await this.#on.store.write(changes);
     } catch (error) {
       this.#dead = true;
@@ -193,6 +204,24 @@ export class Signer {
 
   #alive(): void {
     if (this.#dead) throw new Error('this signer failed a step: open another');
+  }
+
+  #find(changes: Map<string, unknown>, found: Finding['found'], of: string): void {
+    this.#found.push({ found, of });
+    changes.set('found', [...this.#found]);
+  }
+
+  /** A statement in a transaction of its own that bounds its waits, in one round trip (`later` in @coffre/db). */
+  async #ask<Row>(statement: SQL): Promise<Row[]> {
+    let rows!: Promise<Row[]>;
+    await this.#on.db.transaction(
+      async (tx) => {
+        later(tx, sql`SELECT set_config('lock_timeout', ${String(LOCK_WAIT_MS)}, true), set_config('statement_timeout', ${String(STATEMENT_MS)}, true)`);
+        rows = laterRows<Row>(tx, statement);
+      },
+      { isolationLevel: 'read committed' },
+    );
+    return rows;
   }
 
   /** The vault's word that an entry was committed (D223). One already signed is not expected again. */
@@ -205,10 +234,18 @@ export class Signer {
     });
   }
 
-  /** What was found since this was last asked. Kept until then, so a run that failed after a finding says it on the next. */
+  /**
+   * What was found since this was last asked: where a finding goes is its
+   * caller's. Kept in the signer's storage until then, so that neither a
+   * run that fails after a finding nor a signer that dies loses it.
+   */
   async take(): Promise<Finding[]> {
-    const found = this.#found;
-    await this.#step(() => void (this.#found = []));
+    let found: Finding[] = [];
+    await this.#step((changes) => {
+      found = this.#found;
+      this.#found = [];
+      if (found.length > 0) changes.set('found', undefined);
+    });
     return found;
   }
 
@@ -217,13 +254,17 @@ export class Signer {
    * one moment. What is expected is noted before it: an entry told of during
    * the read may be in it or not. The database's clock is read with it so
    * that no pooler answers from a cache (`read` in use.ts).
+   *
+   * `read`, `sign` and `move` are a run's steps, apart so that the model's
+   * runs can be replayed one step at a time (test/replay-log.ts). Anything
+   * else calls `run`.
    */
   async read(full: boolean): Promise<Snapshot> {
     this.#alive();
+    if (this.#moving !== null) throw new Error('the last run is not moved yet');
     const expected = new Set(this.#expected);
     const at = this.#on.now();
-    const found = await rowsOf<{ part: 'pending' | 'row' | 'end'; name: string | null; key: unknown; kept: boolean; body: string; mac: Uint8Array }>(
-      this.#on.db,
+    const found = await this.#ask<{ part: 'pending' | 'row' | 'end'; name: string | null; key: unknown; kept: boolean; body: string; mac: Uint8Array }>(
       sql`SELECT parts.*, clock_timestamp() AS read_at FROM (${full ? sql`${WAITING} UNION ALL ${ROWS} UNION ALL ${ENDS}` : WAITING}) parts`,
     );
     const waiting = found.filter((row) => row.part === 'pending').map(({ name, kept, body, mac }) => ({ id: name!, kept, body, mac }));
@@ -254,13 +295,13 @@ export class Signer {
         const found = entry === undefined ? 'forged' : this.#signed.has(hex) ? 'replayed' : entry.at + FRESH_MS < this.#drained ? 'stale' : null;
         if (entry !== undefined) seen.add(hex);
         if (entry === undefined || found !== null) {
-          this.#found.push({ found: found!, of: entry === undefined ? `pending:${row.id}` : hex });
+          this.#find(changes, found!, entry === undefined ? `pending:${row.id}` : hex);
           refused.push(row.id);
           continue;
         }
         // In the order written: each change moves the mirror on from the MAC it replaced.
         for (const { row: name, was, now } of entry.rows) {
-          if ((this.#mirror.get(name) ?? null) !== was) this.#found.push({ found: 'rewritten', of: name });
+          if ((this.#mirror.get(name) ?? null) !== was) this.#find(changes, 'rewritten', name);
           if (now === null) this.#mirror.delete(name);
           else this.#mirror.set(name, now);
           changes.set(`row ${name}`, now ?? undefined);
@@ -273,13 +314,13 @@ export class Signer {
       }
       // Told of before the read, and not in it: gone. Known only when the read took everything that waited.
       const gone = snapshot.drained ? [...snapshot.expected].filter((hex) => !seen.has(hex)) : [];
-      for (const hex of gone) this.#found.push({ found: 'missing', of: hex });
+      for (const hex of gone) this.#find(changes, 'missing', hex);
       for (const hex of [...seen, ...gone]) if (this.#expected.delete(hex)) changes.set(`expected ${hex}`, undefined);
 
       if (snapshot.drained && snapshot.rows !== null && snapshot.ends !== null) {
-        for (const name of new Set([...snapshot.rows.keys(), ...this.#mirror.keys()])) if (snapshot.rows.get(name) !== this.#mirror.get(name)) this.#found.push({ found: 'row', of: name });
+        for (const name of new Set([...snapshot.rows.keys(), ...this.#mirror.keys()])) if (snapshot.rows.get(name) !== this.#mirror.get(name)) this.#find(changes, 'row', name);
         // Before this run's entries: the log read is the one the last run signed, and must end as that one did.
-        for (const tree of TREES) if (snapshot.ends[tree].size !== this.#trees[tree].size || snapshot.ends[tree].last !== this.#last[tree]) this.#found.push({ found: 'cut', of: tree });
+        for (const tree of TREES) if (snapshot.ends[tree].size !== this.#trees[tree].size || snapshot.ends[tree].last !== this.#last[tree]) this.#find(changes, 'cut', tree);
       }
 
       const tiles: Move['tiles'] = [];
@@ -319,19 +360,21 @@ export class Signer {
    * from where it waited or with another row in its place, is `lost`.
    */
   async move(): Promise<void> {
+    this.#alive();
     const moving = this.#moving;
     if (moving === null) return;
     const { head } = moving;
     const bytes = (hex: string) => sql`decode(${hex}, 'hex')`;
     const time = sql`${new Date(head.signedAt).toISOString()}::timestamptz`;
-    const there = await rowsOf<{ seq: number }>(
-      this.#on.db,
-      sql`
+    // Each list is named with its columns: a bare name would be read as a column of a table around it, where one has it.
+    const put = await this.#ask<{ seq: number }>(sql`
       WITH taken AS (SELECT * FROM jsonb_to_recordset(${JSON.stringify(moving.taken)}::jsonb) AS t(id bigint, kept boolean, seq bigint, leaf bigint, hash text)),
         moved AS (DELETE FROM log_pending p USING taken t WHERE p.id = t.id AND p.kept = t.kept AND ${leafOf('p.body')} = decode(t.hash, 'hex') RETURNING t.seq, t.kept, t.leaf, p.body),
         logged AS (INSERT INTO log (seq, kept, leaf, body) SELECT seq, kept, leaf, body FROM moved ON CONFLICT DO NOTHING RETURNING seq),
-        indexed AS (INSERT INTO log_index (object, seq) SELECT DISTINCT object, seq FROM moved, jsonb_array_elements_text(body::jsonb -> 'objects') object ON CONFLICT DO NOTHING),
-        refused AS (DELETE FROM log_pending WHERE id IN (SELECT id::bigint FROM jsonb_array_elements_text(${JSON.stringify(moving.refused)}::jsonb) id)),
+        indexed AS (
+          INSERT INTO log_index (object, seq) SELECT DISTINCT mentioned.object, moved.seq FROM moved JOIN logged USING (seq), jsonb_array_elements_text(moved.body::jsonb -> 'objects') AS mentioned(object)
+          ON CONFLICT DO NOTHING),
+        refused AS (DELETE FROM log_pending p USING jsonb_array_elements_text(${JSON.stringify(moving.refused)}::jsonb) AS refused(id) WHERE p.id = refused.id::bigint),
         tiled AS (
           INSERT INTO log_tiles (kept, level, number, hashes) SELECT kept, level, number, decode(hashes, 'hex') FROM jsonb_to_recordset(${JSON.stringify(moving.tiles)}::jsonb) AS t(kept boolean, level smallint, number bigint, hashes text)
           ON CONFLICT (kept, level, number) DO UPDATE SET hashes = excluded.hashes),
@@ -339,12 +382,13 @@ export class Signer {
           INSERT INTO log_head (only_row, size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at, mac)
           VALUES (true, ${head.size}, ${head.keptSize}, ${bytes(head.keptRoot)}, ${head.agingSize}, ${bytes(head.agingRoot)}, ${head.agingFrom}, ${time}, ${bytes(head.mac)})
           ON CONFLICT (only_row) DO UPDATE SET size = excluded.size, kept_size = excluded.kept_size, kept_root = excluded.kept_root, aging_size = excluded.aging_size, aging_root = excluded.aging_root, aging_from = excluded.aging_from, signed_at = excluded.signed_at, mac = excluded.mac)
-      -- Put there now, or there already, as signed, from a run that died after this statement.
-      SELECT seq::int FROM logged UNION SELECT l.seq::int FROM log l JOIN taken t ON l.seq = t.seq AND l.kept = t.kept AND l.leaf = t.leaf AND ${leafOf('l.body')} = decode(t.hash, 'hex')`,
-    );
+      SELECT seq::int FROM logged`);
+    // Not put there now: there already from a run that died after this statement, whose commit this one may not have seen, or lost. Read apart, and after.
+    const there = new Set(put.map((row) => row.seq));
+    const absent = moving.taken.filter((entry) => !there.has(entry.seq));
+    if (absent.length > 0) for (const { seq } of await this.#ask<{ seq: number }>(asSigned(absent))) there.add(seq);
     await this.#step((changes) => {
-      const seqs = new Set(there.map((row) => row.seq));
-      for (const { seq, hash } of moving.taken) if (!seqs.has(seq)) this.#found.push({ found: 'lost', of: hash });
+      for (const { seq, hash } of moving.taken) if (!there.has(seq)) this.#find(changes, 'lost', hash);
       this.#moving = null;
       changes.set('moving', undefined);
     });
@@ -355,9 +399,10 @@ export class Signer {
    * signing and its move. Only one at a time, and a second is refused, not
    * queued: two that read the same entries would each sign them. A full run
    * reads the rows once nothing waited past the last read; until then it is
-   * owed. `more`: run again at once.
+   * owed. Its answer: whether to run again at once. What it found is
+   * `take`'s, whether it ends or fails.
    */
-  async run(full: boolean): Promise<{ findings: Finding[]; more: boolean }> {
+  async run(full: boolean): Promise<boolean> {
     if (this.#running) throw new Error('the signer runs one at a time');
     this.#running = true;
     try {
@@ -368,7 +413,7 @@ export class Signer {
       await this.move();
       this.#behind = !snapshot.drained;
       if (snapshot.drained && snapshot.rows !== null) this.#owed = false;
-      return { findings: await this.take(), more: this.#behind || this.#owed };
+      return this.#behind || this.#owed;
     } finally {
       this.#running = false;
     }
