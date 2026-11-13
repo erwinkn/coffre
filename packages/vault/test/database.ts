@@ -1,13 +1,14 @@
 import { randomBytes } from 'node:crypto';
 
+import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
 import * as schema from '@coffre/db/schema';
 import { getTableName, is, sql } from 'drizzle-orm';
 import { PgTable } from 'drizzle-orm/pg-core';
 
-import type { Running } from '../src/change.ts';
 import { keyOf } from '../src/rows.ts';
+import { memoryOf, type Serving } from '../src/use.ts';
 
 /**
  * The suite's database, which scripts/test-suite.sh prepares, opened twice:
@@ -17,7 +18,7 @@ import { keyOf } from '../src/rows.ts';
 const name = process.env.COFFRE_TEST_DATABASE ?? 'coffre_test';
 const url = (login: string) => `postgresql://${login}@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${name}`;
 
-export type TestVault = Running & {
+export type TestVault = Serving & {
   owner: Database;
   /** The hashes the signer was woken with, oldest first. */
   woken: Buffer[];
@@ -37,6 +38,9 @@ export async function openTestVault(): Promise<TestVault> {
     db: vault.db,
     owner: owner.db,
     keys: [keyOf(randomBytes(32))],
+    keks: new KekRegistry(LocalKekProvider.generate('test')),
+    cap: { count: 1000, windowMs: 15 * 60_000 },
+    memory: memoryOf(2),
     now: () => now,
     tick: (ms) => void (now += ms),
     wake: (hash) => void woken.push(hash),
@@ -45,7 +49,7 @@ export async function openTestVault(): Promise<TestVault> {
   };
 }
 
-const TABLES = Object.values(schema).filter((value): value is PgTable => is(value, PgTable));
+const TABLES = Object.values(schema).filter((value: unknown): value is PgTable => is(value, PgTable));
 
 /** Every table emptied. */
 export async function emptyDatabase(owner: Database): Promise<void> {
