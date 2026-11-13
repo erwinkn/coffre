@@ -87,9 +87,8 @@ export async function listed(probe: () => Promise<boolean>): Promise<boolean> {
  * call: the projector's cursor has passed their newest number, as it stood.
  * One projector transaction lists an entry on every page and moves the
  * cursor, so a check that reads a page after this reads every entry it made,
- * once, and none it did not. No scheduled run: the checks that call this read
- * only entries of the chains, which the projector's tick lists, never one of
- * `audit_log`, which waits for the beat's checkpoint.
+ * once, and none it did not. An entry of `audit_log` is not waited for: the
+ * projector lists it only once the beat's next checkpoint names it.
  */
 export async function settled(deployment: Deployment): Promise<void> {
   const [target] = await using(deployment.database(), (sql) => query<{ number: string }>(sql, `SELECT
@@ -211,13 +210,21 @@ export async function checkpoints(deployment: Deployment, { admin }: People): Pr
   const [newest, previous] = signed as [(typeof signed)[number], (typeof signed)[number]];
   expect((JSON.parse(newest.metadata) as { seq: number }).seq === after.checkpoint.seq, 'the newest checkpoint entry is not the one verified', { signed, after });
   expect(Number(previous.seq) <= after.checkpoint.seq, 'the newest checkpoint does not cover the one before it', signed);
+  // The walk down from the newest checkpoint, over the one before it, closed: every entry of `audit_log` it names is
+  // listed or left out.
+  const named = after.checkpoint.seq;
+  const walked = async () => {
+    const [cursor] = await using(deployment.database(), (sql) => query<{ old_floor: string }>(sql, 'SELECT old_floor::text FROM audit_cursor'));
+    return cursor !== undefined && BigInt(cursor.old_floor) > BigInt(named);
+  };
+  expect(await listed(walked), `the audit projector did not walk audit_log past ${named} within ${LISTED_WITHIN_MS / 1000} s`);
   await settled(deployment);
   const { entries } = await admin.api.audit.list({ detail: '1', limit: 20 });
   expect(!entries.some((entry) => entry.action === 'audit.checkpoint'), 'the audit page lists a checkpoint', entries.slice(0, 5));
   return `${after.entries} entries verified through ${after.through}, checkpointed at ${after.checkpoint.seq}`;
 }
 
-/** The app's entries for a stored version, which its key's change carries. */
+/** The app's entries that write a stored version, which its key's change carries. */
 const WRITES = ['secret.write', 'secret.restore', 'secret.loosen'];
 
 /**
@@ -253,9 +260,12 @@ export async function writesAgree(deployment: Deployment): Promise<string> {
       places?: { projectId?: unknown; environmentId?: unknown; secretId?: unknown };
     };
     type Logged = { version?: unknown; inputs?: unknown; ref?: { id?: unknown }; request?: { operationId?: unknown; requestId?: unknown }; reported?: Reported | null };
+    // A version's write record: the vault's decision (`inputs`), or the app's write the change carries. Every change to a
+    // live key names the version it holds, and carries its entry, as an unarchive's does: that one writes no version.
     const logged = (await query<{ actor: string; payload: string }>(sql,
       `SELECT actor, payload FROM log_changes WHERE payload LIKE '%"op":"secret.write"%' AND (payload LIKE '%"inputs":"%' OR payload LIKE '%"reported":{%')`))
-      .map(({ actor, payload }) => ({ actor, ...(JSON.parse(payload) as Logged) }));
+      .map(({ actor, payload }) => ({ actor, ...(JSON.parse(payload) as Logged) }))
+      .filter((change) => typeof change.inputs === 'string' || WRITES.includes(String(change.reported?.action)));
     let decided = 0;
     for (const version of versions) {
       const changes = logged.filter((change) => change.version === version.id && change.ref?.id === version.secret_id);
