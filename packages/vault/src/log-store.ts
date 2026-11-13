@@ -613,6 +613,8 @@ export async function checkRead(db: Database, options: { limit: number; anchor: 
   const { limit, anchor, bound, next } = options;
   tailLimit(limit);
   if (bound !== null && !Number.isSafeInteger(bound)) throw new Error(`a check's floor of at is a time in ms, not ${bound}`);
+  // The anchor's first change, by its object's index (`changesOf`).
+  const anchorFirst = changesOf('c', anchor, 'asc');
   const read = await one<{
     newest: (RawPair & { floor: string }) | null; tail: RawEntry[]; rotations: RawEntry[]; anchor: RawEntry | null; last: RawLast | null; indexes: { name: string; def: string }[];
     next: RawPair | null;
@@ -623,7 +625,7 @@ export async function checkRead(db: Database, options: { limit: number; anchor: 
       'newest', (SELECT json_build_object('upto', k.upto::text, 'changes', k.changes_note, 'uses', k.uses_note, 'floor', k.at_floor::text) FROM k),
       'tail', (SELECT coalesce(json_agg(t.v ORDER BY t.n), '[]') FROM t),
       'rotations', ${options.rotations ? sql`(SELECT coalesce(json_agg(${CHANGE} ORDER BY c.number), '[]') FROM log_changes c WHERE c.object = ${KEY_OBJECT}::uuid)` : sql`'[]'::json`},
-      'anchor', (SELECT ${CHANGE} FROM log_changes c WHERE c.object = ${anchor}::uuid ORDER BY c.number LIMIT 1),
+      'anchor', (SELECT ${CHANGE} FROM log_changes c WHERE ${anchorFirst.where} ORDER BY ${anchorFirst.order} LIMIT 1),
       'last', (SELECT json_build_object('seq', a.seq::text, 'author', a.author, 'keyId', a.key_id, 'occurredAt', a.occurred_at::text, 'actor', a.actor,
           'action', a.action, 'decision', a.decision, 'code', a.code, 'subjectPrincipal', a.subject_principal, 'projectId', a.project_id,
           'environmentId', a.environment_id, 'secretId', a.secret_id, 'secretVersionId', a.secret_version_id, 'operationId', a.operation_id,

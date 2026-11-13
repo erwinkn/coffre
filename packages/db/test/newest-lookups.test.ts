@@ -63,6 +63,7 @@ const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   'packages/db/src/log.ts#underHead': { none: 'the newest entry of all: the primary key\'s first step, with nothing to filter' },
   'packages/db/src/log.ts#missingEntry': { none: 'the first entry after a gap, by the primary key, with nothing to filter' },
   'packages/db/src/log.ts#withinBytes': { none: "a batch's bounds by its caller's condition, read forward from a point (`entriesFrom`, `vaultEntriesAfter`, `talliedWithin`)" },
+  'packages/vault/src/log-store.ts#checkRead': { none: 'the newest entry of all: the primary key\'s first step, with nothing to filter' },
   'packages/vault/src/store.ts#entriesFrom': { none: 'a batch of the chain from an entry on, by the primary key, with nothing to filter' },
 };
 
@@ -84,6 +85,8 @@ const CHANGES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> 
   'packages/vault/src/snapshot.postgres.ts#PLACE_CHANGE': { by: VAULT, as: 'changesOf' },
   'packages/vault/src/log-store.ts#postgresStore': { by: VAULT, as: 'changesOf' },
   'packages/vault/src/log-store.ts#objectsOf': { by: VAULT, as: 'changesOf' },
+  // The anchor's first change, beside the check's other reads.
+  'packages/vault/src/log-store.ts#checkRead': { by: VAULT, as: 'changesOf' },
   'packages/server/src/db/queries.ts#newestChangeColumns': { by: VAULT, as: 'changesOf' },
   // A credential's first change, its sign-in or issue, behind other objects' changes before it.
   'packages/server/src/db/queries.ts#originsOf': { by: SERVER, as: 'originsOf' },
