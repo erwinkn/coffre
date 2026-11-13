@@ -21,6 +21,13 @@
   shape, takes `placeholder: prefix('<bot id>:')`. A port of main's #483
   and #523 (docs/design/credential-proxy.md, section 5, "A segment of the
   path").
+- **Fix: a workload's relative redirect through a `query()` rule no longer
+  hands back the key.** An upstream behind `query('api_key', '{KEY}')` that
+  answered `302` with `Location: #top` or an empty `Location` gave a
+  workload the URL the key went out in, `…?api_key=<the key>`, since a
+  relative `Location` resolved against it. It now resolves against the URL
+  the workload sent, so it gets its own query back. A handle's app was not
+  affected: its placeholder replaced the parameter.
 
 ## 0.14.6 (2026-11-13)
 

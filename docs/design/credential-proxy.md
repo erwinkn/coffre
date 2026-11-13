@@ -845,7 +845,13 @@ GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.tele
 - **Before the value.** Routing, `methods`, `paths` and a narrowed
   session's constraints read the path as the app sent it, placeholder and
   all. The value goes in after them, so it never changes which route or
-  environment a request is.
+  environment a request is. `paths` match prefixes, with no wildcard on
+  0.14, so one that reaches past the key's segment names the placeholder
+  too: a narrowed session's `/tg/botcoffre/sendMessage` matches a
+  workload whose SDK holds `coffre`, but a credential's `paths` meets a
+  new handle with every app, so on `path('{ALCHEMY_KEY}')`, whose segment
+  is the first, it lets nothing through. Set `paths` only above the
+  segment (`/file` for Telegram's downloads).
 - **As a segment.** The value goes in percent-encoded, every byte but
   letters, digits, `-._~` and `:` (Telegram's `<bot id>:<35 characters>`
   goes as it is). A value that is empty, or holds `/`, `\`, `?`, `#`, `%`,
