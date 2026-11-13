@@ -28,7 +28,7 @@ import { insertSession } from '../src/db/workloads.ts';
 import { processGates, type Gates } from '../src/gate.ts';
 import { upgrade } from '../src/node-sockets.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
-import { credentialProxy, form, header, hmac, json, postgres, privateKey, sigv4 } from '../src/plugins/credential-proxy.ts';
+import { credentialProxy, form, header, hmac, json, path, postgres, privateKey, query, sigv4 } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -127,7 +127,10 @@ before(async () => {
     });
     request.on('end', () => {
       reached.push({ method: request.method!, url: request.url!, headers: request.headers, sha256: hash.digest('hex'), length });
-      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true }));
+      // A redirect relative to the URL it came to: `#top` and `""` keep its query whole.
+      const at = new URL(request.url!, 'http://upstream').pathname;
+      if (at.endsWith('/fragment') || at.endsWith('/here')) response.writeHead(302, { location: at.endsWith('/here') ? '' : '#top' }).end();
+      else response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true }));
     });
   });
   upstream.listen(0, '127.0.0.1');
@@ -759,6 +762,81 @@ test('a workload tunnel ends within one recheck of a freeze, and stands while no
     // A recheck or a last use still being written would meet the next test's reset: let them land first.
     await sleep(1000);
     await Promise.all(background);
+  }
+});
+
+test("a path rule fills the first segment its template frames, whatever the app put there; the session token anywhere in the URL is refused", async () => {
+  runtime = makeRuntime({
+    plugins: checkPlugins([credentialProxy({
+      credentials: { telegram: { upstream: `${upstreamAt}/tg`, inject: path('bot{STRIPE_KEY}') } },
+      insecureUpstreams: true,
+    })]),
+  });
+  await bind();
+  const held = await session();
+  const sent = await use(held, 'POST', '/use/telegram/botcoffre/sendMessage', { headers: { 'content-type': 'application/json' }, body: '{"chat_id":1}' });
+  assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  assert.equal(reached[0]!.url, `/tg/bot${STRIPE_KEY}/sendMessage`);
+  assert.equal((await use(held, 'GET', '/use/market/prod/telegram/file/bot0:coffre/photos/file_0.jpg')).status, 200);
+  assert.equal(reached[1]!.url, `/tg/file/bot${STRIPE_KEY}/photos/file_0.jpg`);
+  const none = await use(held, 'GET', '/use/telegram/getMe');
+  assert.equal(none.status, 400, JSON.stringify(none.body));
+  const leaked = await use(held, 'GET', `/use/telegram/botcoffre/getMe?note=${held.token}`);
+  assert.equal(leaked.status, 400, JSON.stringify(leaked.body));
+  assert.match(leaked.body.message as string, /session token/);
+  assert.equal(reached.length, 2);
+});
+
+// A narrowed child's paths are weighed on the URL the app sent, its segment as the app wrote it, never the token's: a
+// child no one could write without the token is no child at all.
+test("a narrowed session's paths are weighed on the app's segment, before the token goes in", async () => {
+  runtime = makeRuntime({
+    plugins: checkPlugins([credentialProxy({
+      credentials: { telegram: { upstream: `${upstreamAt}/tg`, inject: path('bot{STRIPE_KEY}') } },
+      insecureUpstreams: true,
+    })]),
+  });
+  await bind();
+  const parent = await session();
+  const root = await sessionRow(parent);
+  const narrowed = async (paths: string[], fill: number) => {
+    const key = await generateProofKey();
+    const child = { token: `coffre_wl_${Buffer.alloc(32, fill).toString('base64url')}`, key };
+    await insertSession(deps.db, deps.chainKey, {
+      id: randomUUID(), kind: 'workload', tokenHash: hashToken(child.token), tokenHint: child.token.slice(0, 13), generation: root.generation, principal: MEMBER,
+      identityId: null, label: 'bot', createdBy: root.createdBy, expiresAt: root.expiresAt, revokedAt: null, scope: root.scope, places: root.places,
+      jkt: await thumbprint(key.jwk), notAfter: root.notAfter!, ancestors: JSON.stringify([root.id]), constraints: JSON.stringify({ credentials: ['telegram'], methods: ['POST'], paths }), enrollmentId: null, approvedAt: null, approvedBy: null,
+    });
+    return child;
+  };
+  const send = (child: Awaited<ReturnType<typeof narrowed>>) => use(child, 'POST', '/use/telegram/botcoffre/sendMessage', { headers: { 'content-type': 'application/json' }, body: '{"chat_id":1}' });
+  const sent = await send(await narrowed(['/tg/botcoffre/sendMessage'], 8));
+  assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  assert.equal(reached.at(-1)!.url, `/tg/bot${STRIPE_KEY}/sendMessage`);
+  const refused = await send(await narrowed([`/tg/bot${STRIPE_KEY}/sendMessage`], 9));
+  assert.deepEqual([refused.status, refused.body.reason], [403, 'narrowed']);
+  assert.ok(!JSON.stringify(refused.body).includes(STRIPE_KEY));
+  assert.equal(reached.length, 1);
+});
+
+// A relative redirect resolves against the URL the app sent, not the one the key went out in: `#top` or `""` from
+// behind a query rule hands the workload back its own query, never the key (before 0.14.7 it handed back the key's).
+test("a query rule's relative redirect to `#top` or `\"\"` gives a workload its own query back, never the key", async () => {
+  runtime = makeRuntime({
+    plugins: checkPlugins([credentialProxy({
+      credentials: { keyed: { upstream: `${upstreamAt}/keyed`, inject: query('api_key', '{STRIPE_KEY}') } },
+      insecureUpstreams: true,
+    })]),
+  });
+  await bind();
+  const held = await session();
+  for (const at of ['fragment', 'here']) {
+    const moved = await use(held, 'GET', `/use/keyed/v1/${at}?page=2`);
+    assert.equal(moved.status, 302, `${at}: ${JSON.stringify(moved.body)}`);
+    assert.equal(reached.at(-1)!.url, `/keyed/v1/${at}?page=2&api_key=${STRIPE_KEY}`);
+    const location = moved.headers.get('location')!;
+    assert.ok(location.endsWith(`/use/keyed/v1/${at}?page=2`), location);
+    assert.ok(!location.includes(STRIPE_KEY) && !decodeURIComponent(location).includes(STRIPE_KEY), location);
   }
 });
 

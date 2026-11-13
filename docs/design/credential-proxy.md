@@ -813,6 +813,87 @@ GET fetched straight from MinIO. A client holding the handle as its keys was
 refused by MinIO directly, and a GET's median was 1.3 ms direct against
 2.6 ms through the proxy, over loopback HTTP to coffre.
 
+**A segment of the path (0.14.7).** Telegram's Bot API takes its token
+in the URL's path, `https://api.telegram.org/bot<token>/sendMessage`, and
+its files under `/file/bot<token>/<file_path>`; Alchemy's RPC URLs end in
+`/v2/<key>`. Every Telegram SDK builds that URL from a base URL and the
+token it holds (`${root}/bot${token}/${method}`). `path()` names the
+segment's template, one key in it once, and is a credential's one rule:
+
+```ts
+telegram: { upstream: 'https://api.telegram.org', inject: path('bot{TELEGRAM_BOT_TOKEN}'), methods: ['GET', 'POST'] },
+alchemy: { upstream: 'https://eth-mainnet.g.alchemy.com/v2', inject: path('{ALCHEMY_KEY}') },
+```
+
+The app points its SDK's base URL at the stable URL and holds the
+placeholder as its token:
+
+```
+POST /use/telegram/botcoffre_use_…/sendMessage            → https://api.telegram.org/bot123456789:AAE…/sendMessage
+GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.telegram.org/file/bot123456789:AAE…/photos/file_0.jpg
+```
+
+- **Which segment.** The first segment under the upstream that the
+  template frames: its text before the key and after it, with at least
+  one character between, read decoded once. A template of the key alone
+  frames the first segment. A path with none is a 400. The handle must be
+  that whole segment, in the template's shape (the placeholder's too, if
+  shaped), as a field's must be the field, `x-coffre-handle`'s included;
+  the handle anywhere else in the URL is refused by the leak check. A
+  workload's session, which carries no handle, has whatever its SDK put
+  there replaced.
+- **Before the value.** Routing, `methods`, `paths` and a narrowed
+  session's constraints read the path as the app sent it, placeholder and
+  all. The value goes in after them, so it never changes which route or
+  environment a request is. `paths` match prefixes, with no wildcard on
+  0.14, so one that reaches past the key's segment names the placeholder
+  too: a narrowed session's `/tg/botcoffre/sendMessage` matches a
+  workload whose SDK holds `coffre`, but a credential's `paths` meets a
+  new handle with every app, so on `path('{ALCHEMY_KEY}')`, whose segment
+  is the first, every entry but `/` names a handle, and none matches a new
+  one. Set `paths` only above the segment (`/file` for Telegram's
+  downloads).
+- **As a segment.** The value goes in percent-encoded, every byte but
+  letters, digits, `-._~` and `:` (Telegram's `<bot id>:<35 characters>`
+  goes as it is). A value that is empty, or holds `/`, `\`, `?`, `#`, `%`,
+  `;`, `..`, a space or a control character, is a 409 naming the key and
+  none of the value, with nothing sent. The segment it makes is no dot
+  segment, nor dots alone (`path('..{T}')` with `.` is `...`), and the
+  URL that goes out is the one the app sent with that one segment
+  changed, or nothing goes.
+- **Shaped placeholders.** aiogram checks its token's shape
+  (`<digits>:<anything>`) and reads the bot's id from it. So
+  `placeholder: prefix('123456789:')`, the bot's own id (no secret), gives
+  it `123456789:coffre_use_…`, and the slot is then
+  `bot123456789:coffre_use_…` exactly. A `path()` credential takes a
+  prefix with no `/`.
+- **Where the value can go, and what stops it.** The audit's
+  `credential.use` names the upstream's host, as for every rule; coffre's
+  refusals quote the path as the app sent it, and no log line has the
+  URL. A platform error that quotes the URL (an egress's, say) is
+  redacted before the 502 names it. An answer's headers and text body are
+  redacted as any answer is (section 4), the segment and the value's
+  encoded form included. A `Location` is read as a URL first, a relative
+  one (`getMe`, `?offset=1`, `#top`, an empty one) against the URL the app
+  sent, never the one the value went out in. Under the upstream, each
+  segment of its path that is the segment as it went out, compared decoded
+  once (`%3a` and `%41` are `:` and `A`), gets the app's segment back, so
+  the app follows it through the proxy with its placeholder
+  (`/bot123456789:AAE…/getMe` → `…/use/market/dev/telegram/botcoffre_use_…/getMe`).
+  Only the path's segments: swapped in the text before it is read,
+  `bot123456789%3AAAE…/getMe` would become the scheme `bot123456789:`. A
+  relative `Location` whose first segment holds a raw colon is a scheme
+  to every client, nowhere under the upstream: a 502. Then the `Location`,
+  read as the app's client reads it (decoded once, tabs and newlines
+  dropped, `\` as `/`), must hold no value nor any echo of one (section
+  4's list), read the same way, or it is a 502 with nothing of the
+  answer: the value's colon encoded twice (`%253A`), or Go's JSON
+  `foo\u003cbar`, `foo/u003cbar` once parsed. A redirect elsewhere is a
+  502, as for every rule. As with `query()`, the URL that goes out holds
+  the value, and so does what a platform records of outgoing requests;
+  the other way, the handle rides in the URL the app sends, so a log of
+  incoming URLs holds the handle, never the value.
+
 **Postgres through a tunnel (PR 3, built on Node).** The deployment
 names the key that holds the database's real URL:
 
