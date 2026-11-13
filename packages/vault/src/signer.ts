@@ -160,6 +160,8 @@ export class Signer {
   #moving: Move | null = null;
   /** What it found and nobody has taken yet. */
   #found: Finding[] = [];
+  /** The rows and the trees its last check found wrong. One still wrong at the next is no news. */
+  #stands: Finding[] = [];
   /** When its last full check completed. */
   #checked: number;
   /** A full run asked for and not yet done, or failed, and whether entries waited past the last read. In memory only: the next minute asks again. */
@@ -197,6 +199,7 @@ export class Signer {
       else if (kind === 'signed') signer.#signed.set(name, value as number);
       else if (kind === 'moving') signer.#moving = value as Move;
       else if (kind === 'found') signer.#found = value as Finding[];
+      else if (kind === 'stands') signer.#stands = value as Finding[];
       else if (kind === 'checked') signer.#checked = value as number;
       else if (kind === 'state') {
         const { drained, trees } = value as Kept;
@@ -228,9 +231,9 @@ export class Signer {
     }
   }
 
-  /** How many findings wait to be taken. */
-  get unsent(): number {
-    return this.#found.length;
+  /** The rows and the trees the last check found wrong. */
+  get standing(): Finding[] {
+    return [...this.#stands];
   }
 
   /** Whether a step failed: its memory and its storage may differ, and whoever runs it opens another. */
@@ -267,17 +270,21 @@ export class Signer {
    * them for the next call, and the same ones are sent again: twice is
    * better than never. Kept in the signer's storage until then, so that
    * neither a run that fails after a finding nor a signer that dies loses
-   * it.
+   * it. `send` answers whether they reached someone: if not, what stands
+   * is news again to the next check.
    */
-  async take(send: (found: Finding[]) => void | Promise<void> = () => {}): Promise<Finding[]> {
+  async take(send: (found: Finding[]) => boolean | Promise<boolean> = () => true): Promise<Finding[]> {
     this.#alive();
     const found = [...this.#found];
-    await send(found);
+    const reached = await send(found);
     await this.#step((changes) => {
       // Those sent, and not what a run found meanwhile.
       const sent = new Set(found);
       this.#found = this.#found.filter((each) => !sent.has(each));
       if (found.length > 0) changes.set('found', this.#found.length > 0 ? [...this.#found] : undefined);
+      if (reached || this.#stands.length === 0) return;
+      this.#stands = [];
+      changes.set('stands', undefined);
     });
     return found;
   }
@@ -354,10 +361,17 @@ export class Signer {
 
       if (snapshot.drained && snapshot.rows !== null && snapshot.ends !== null) {
         const wrong = [...new Set([...snapshot.rows.keys(), ...this.#mirror.keys()])].filter((name) => snapshot.rows!.get(name) !== this.#mirror.get(name));
-        // More than it names at once: the first by name, the same at each check, and the rest by the checks after those are put right.
-        for (const name of wrong.length > MOST_ROWS ? wrong.sort().slice(0, MOST_ROWS) : wrong) this.#find(changes, 'row', name);
-        // Before this run's entries: the log read is the one the last run signed, and must end as that one did.
-        for (const tree of TREES) if (snapshot.ends[tree].size !== this.#trees[tree].size || snapshot.ends[tree].last !== this.#last[tree]) this.#find(changes, 'cut', tree);
+        const stands: Finding[] = [
+          // More than it names at once: the first by name, the same at each check, and the rest by the checks after those are put right.
+          ...(wrong.length > MOST_ROWS ? wrong.sort().slice(0, MOST_ROWS) : wrong).map((of) => ({ found: 'row' as const, of })),
+          // Before this run's entries: the log read is the one the last run signed, and must end as that one did.
+          ...TREES.filter((tree) => snapshot.ends![tree].size !== this.#trees[tree].size || snapshot.ends![tree].last !== this.#last[tree]).map((of) => ({ found: 'cut' as const, of })),
+        ];
+        // Found when it turns wrong, once: what the last check found wrong too is no news.
+        const stood = new Set(this.#stands.map(({ found, of }) => `${found} ${of}`));
+        for (const { found, of } of stands) if (!stood.has(`${found} ${of}`)) this.#find(changes, found, of);
+        if (stands.length > 0 || this.#stands.length > 0) changes.set('stands', stands.length > 0 ? stands : undefined);
+        this.#stands = stands;
         this.#checked = snapshot.at;
         changes.set('checked', snapshot.at);
       }

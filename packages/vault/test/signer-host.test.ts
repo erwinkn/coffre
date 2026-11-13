@@ -159,6 +159,21 @@ test('a signer nobody told of anything checks once it is asked how it stands', a
   assert.deepEqual(alerts.map((alert) => alert.findings), [[{ found: 'row', of: named(ada) }]]);
 });
 
+test('a host whose storage could not give its alarm as it started asks again: the alarm set for sooner stays', async () => {
+  await member(ada, 'owner');
+  await told();
+  const set = storage.alarm;
+  assert.equal(set, vault.now() + TICK_MS);
+  // The object starts again, and its storage fails once.
+  host = start();
+  const { getAlarm } = storage;
+  storage.getAlarm = () => Promise.reject(new Error('the alarm cannot be read'));
+  await assert.rejects(host.status(), /the alarm cannot be read/);
+  storage.getAlarm = getAlarm;
+  await host.status();
+  assert.equal(storage.alarm, set);
+});
+
 test('a row that is wrong is said when a check first finds it, and again only once a check has found it right in between', async () => {
   await member(ada, 'owner');
   await member(bo, 'member');
@@ -171,7 +186,7 @@ test('a row that is wrong is said when a check first finds it, and again only on
   const finding = { found: 'row', of: named(bo) };
   assert.deepEqual(alerts.map((alert) => alert.findings), [[finding]]);
   assert.match(alerts[0]!.text, /^coffre's signer reports \(1\):\n- row \["principals","user:bo@acme\.example"\]: this row is not what the log says/);
-  // Found again each minute, said once, by this host or the next one the object starts, with runs that check nothing in between.
+  // Wrong at each check since, said once, by this host or the next one the object starts, with runs that check nothing in between.
   await minute();
   host = start();
   await wait(reading('a'));
@@ -202,8 +217,8 @@ test('a row found wrong while the alert failed, and right by the next check, is 
   await vault.owner.execute(sql`DELETE FROM principals WHERE id = ${bo}`);
   down.alert = true;
   await minute();
-  // Not sent, and so not marked as said.
-  assert.deepEqual([alerts.length, (await host.status()).standing], [0, []]);
+  // It stands, sent or not.
+  assert.deepEqual([alerts.length, (await host.status()).standing], [0, [finding]]);
   await vault.owner.insert(principals).values(row!);
   down.alert = false;
   await minute();
@@ -211,6 +226,45 @@ test('a row found wrong while the alert failed, and right by the next check, is 
   await vault.owner.execute(sql`DELETE FROM principals WHERE id = ${bo}`);
   await minute();
   assert.deepEqual([alerts.map((alert) => alert.findings), (await host.status()).standing], [[[finding], [finding]], [finding]]);
+});
+
+test('a row said, then found right by a check whose alert failed, is said again when it is wrong again', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  await member(ada, 'owner');
+  await member(bo, 'member');
+  await minute();
+  const [row] = await vault.owner.select().from(principals).where(sql`id = ${bo}`);
+  const finding = { found: 'row', of: named(bo) };
+  await vault.owner.execute(sql`DELETE FROM principals WHERE id = ${bo}`);
+  await minute();
+  assert.deepEqual(alerts.map((alert) => alert.findings), [[finding]]);
+
+  // Put right, in a minute that finds something else, with the alert down.
+  await vault.owner.insert(principals).values(row!);
+  await forge(1);
+  down.alert = true;
+  await minute();
+  assert.deepEqual([alerts.length, (await host.status()).standing], [1, []]);
+  await vault.owner.execute(sql`DELETE FROM principals WHERE id = ${bo}`);
+  down.alert = false;
+  await minute();
+  assert.deepEqual(alerts.at(-1)!.findings.map((each) => each.found), ['forged', 'row']);
+});
+
+test('rows that stay wrong while alerts fail wait once each, however long: they are sent, and not let go to the log', async (t) => {
+  const logged = t.mock.method(console, 'error', () => {});
+  await member(ada, 'owner');
+  await minute();
+  const planted = ['p', 'q', 'r', 's', 't'].map(user);
+  await vault.owner.insert(principals).values(planted.map((id) => ({ ...principal(id, { role: 'member' }), mac: Buffer.alloc(36) })));
+  down.alert = true;
+  // Enough checks for five rows a minute to pass what is kept.
+  for (let checks = 0; checks < KEEP / planted.length + 2; checks += 1) await minute();
+  assert.equal((storage.kv.get('found') as unknown[]).length, planted.length);
+  assert.equal(logged.mock.calls.filter(({ arguments: [text] }) => /They are let go/.test(String(text))).length, 0);
+  down.alert = false;
+  await minute();
+  assert.deepEqual(alerts.map((alert) => alert.findings.map((each) => each.of).sort()), [planted.map(named).sort()]);
 });
 
 test('the alarm for the next run is set before an alert is sent, and an alert that does not return has failed', { timeout: 30_000 }, async (t) => {
@@ -308,9 +362,9 @@ test('findings that pile up behind an alert that cannot be sent go to the log, a
   assert.equal((letGo[0]!.arguments[1] as unknown[]).length, 4 * 256);
   assert.equal(await count('log_pending'), 0);
 
-  // The check found the row, and its alert failed: not let go, and not marked as said.
+  // The check found the row, and its alert failed: not let go.
   const finding = { found: 'row', of: named(ada) };
-  assert.deepEqual((await host.status()).standing, []);
+  assert.deepEqual((await host.status()).standing, [finding]);
   down.alert = false;
   await minute();
   assert.deepEqual(alerts.map((alert) => [alert.findings.length, alert.findings.at(-1)]), [[77, finding]]);
@@ -332,7 +386,6 @@ test('a row that went to the log with the findings piled up before it is not mar
   assert.equal(letGo.length, 1);
   const inLog = letGo[0]!.arguments[1] as unknown[];
   assert.deepEqual([inLog.length, inLog.at(-1)], [KEEP + 1, finding]);
-  assert.deepEqual((await host.status()).standing, []);
 
   down.alert = false;
   await minute();
@@ -380,6 +433,53 @@ test('a signer whose runs fail is said to be stopped, once, and again if it stop
   vault.tick(CHECK_MS - TICK_MS);
   await seconds(2 + (STOPPED_MS - CHECK_MS) / TICK_MS);
   assert.deepEqual(alerts.map((alert) => alert.findings.map((each) => each.found)), [['stopped'], ['stopped']]);
+});
+
+test('that it is stopped, gone to the log with findings piled up behind an alert that cannot be sent, is not marked as said: it is said once alerts go again', async (t) => {
+  const logged = t.mock.method(console, 'error', () => {});
+  await member(ada, 'owner');
+  await minute();
+  // As many findings as are kept wait for the alert.
+  down.alert = true;
+  await forge(KEEP);
+  vault.tick(CHECK_MS);
+  await fire();
+  const checked = vault.now();
+  assert.equal((await host.status()).checked, checked);
+
+  // The writer holds a table the check reads: the check that comes round fails, and none has completed for as long as one may take.
+  let release!: () => void;
+  const locked = vault.owner.transaction(async (tx) => {
+    await tx.execute(sql`LOCK TABLE principals IN ACCESS EXCLUSIVE MODE`);
+    await new Promise<void>((resolve) => (release = resolve));
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    vault.tick(STOPPED_MS);
+    assert.equal(await fire(), 1);
+    // A second on, a run that checks nothing signs: one finding more than is kept, and the signer is stopped.
+    await forge(1);
+    vault.tick(TICK_MS);
+    assert.equal(await fire(), 1);
+    const stopped = { found: 'stopped', of: new Date(checked).toISOString() };
+    const letGo = logged.mock.calls.filter(({ arguments: [text] }) => /They are let go/.test(String(text)));
+    assert.equal(letGo.length, 1);
+    const inLog = letGo[0]!.arguments[1] as unknown[];
+    assert.deepEqual([inLog.length, inLog.at(-1)], [KEEP + 2, stopped]);
+
+    // Alerts go again, and the next run says it, before any check completes; the one after does not.
+    down.alert = false;
+    for (const key of ['a', 'b']) {
+      await wait(reading(key));
+      await told();
+      vault.tick(TICK_MS);
+      assert.equal(await fire(), 1);
+      assert.deepEqual(alerts.map((alert) => alert.findings), [[stopped]]);
+    }
+  } finally {
+    release();
+    await locked;
+  }
 });
 
 test('a check that fails is tried again a minute on, and what waits is signed meanwhile', async (t) => {

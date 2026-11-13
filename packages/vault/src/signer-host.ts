@@ -67,9 +67,6 @@ export const ALERT_MS = 5000;
 /** How many findings wait for an alert that cannot be sent. Past it they go to the process's log, and are let go: the signer's storage holds them in one value. */
 export const KEEP = 1000;
 
-/** What a check finds again each minute for as long as it holds, and is said once. */
-const STANDS = new Set<Alerted['found']>(['row', 'cut']);
-const nameOf = (each: Alerted) => (each.found === 'stopped' ? 'stopped' : `${each.found} ${each.of}`);
 
 const SAYS: Record<Alerted['found'], string> = {
   forged: 'an entry that waited to be signed was not the vault\'s. Removed',
@@ -105,8 +102,8 @@ export const storeOf = (storage: Storage): Store => ({
   },
 });
 
-/** What the host keeps beside the signer's own, under a key the signer does not read: what stands, and was said. */
-const ALERTED = 'alerted';
+/** What the host keeps beside the signer's own, under a key the signer does not read: that it said the signer is stopped. */
+const STOPPED = 'stopped said';
 
 export class SignerHost {
   readonly #on: Hosting;
@@ -127,8 +124,9 @@ export class SignerHost {
     if (this.#signer === null || this.#signer.dead) {
       await this.#on.alone(async () => {
         if (this.#signer !== null && !this.#signer.dead) return;
-        this.#signer = await Signer.open({ db: this.#on.db, keys: this.#on.keys, now: this.#on.now, store: this.#store });
+        const signer = await Signer.open({ db: this.#on.db, keys: this.#on.keys, now: this.#on.now, store: this.#store });
         this.#alarm = await this.#on.storage.getAlarm();
+        this.#signer = signer;
       });
     }
     return this.#signer!;
@@ -153,18 +151,20 @@ export class SignerHost {
   }
 
   /**
-   * When the last check completed, and what stands of what the checks
-   * found. Whoever asks also sets the alarm, if it was not: a signer nobody
-   * told of anything checks all the same.
+   * When the last check completed, and what stands: the rows and the trees
+   * it found wrong, and that none has completed for too long. Whoever asks
+   * also sets the alarm, if it was not: a signer nobody told of anything
+   * checks all the same.
    */
   async status(): Promise<{ checked: number; standing: Alerted[] }> {
     const signer = await this.#open();
-    await this.#by(this.#on.now() + CHECK_MS);
-    return { checked: signer.checked, standing: this.#alerted() };
+    const now = this.#on.now();
+    await this.#by(now + CHECK_MS);
+    return { checked: signer.checked, standing: [...signer.standing, ...this.#stopped(signer, now)] };
   }
 
-  #alerted(): Alerted[] {
-    return (this.#on.storage.kv.get(ALERTED) as Alerted[] | undefined) ?? [];
+  #stopped(signer: Signer, now: number): Alerted[] {
+    return now - signer.checked > STOPPED_MS ? [{ found: 'stopped', of: new Date(signer.checked).toISOString() }] : [];
   }
 
   /**
@@ -180,20 +180,19 @@ export class SignerHost {
     this.#alarm = null;
     const now = this.#on.now();
     let next = now + TICK_MS;
-    let ran: { signer: Signer; unsent: number; checked: number } | null = null;
+    let signer: Signer | null = null;
     try {
-      const signer = await this.#open();
-      ran = { signer, unsent: signer.unsent, checked: signer.checked };
+      signer = await this.#open();
       next = (await this.#run(signer, now)) ? now : this.#due(signer);
     } catch (error) {
       console.error('coffre: a run of the signer failed, and the next tries again', error);
     }
-    // Before anything is sent: an alert that is slow, or the object stopped in the middle of one, costs no run.
+    // Before anything is sent: an object stopped in the middle of an alert has its next run set. One alarm runs at a time, so a slow alert holds that run back, by `ALERT_MS` at most.
     await this.#by(next);
     // One that failed a step says what it found once it is opened again, by the next run.
-    if (ran === null || ran.signer.dead) return;
+    if (signer === null || signer.dead) return;
     try {
-      await this.#tell(ran.signer, now, ran.unsent, ran.signer.checked !== ran.checked);
+      await this.#tell(signer, now);
     } catch (error) {
       console.error('coffre: the signer could not send what it found, and tries again after its next run', error);
     }
@@ -212,57 +211,44 @@ export class SignerHost {
   }
 
   /**
-   * What the signer found is sent, then let go. A row or a tree that is
-   * wrong is found again by every check: it is said when first found, and
-   * again only once a check has found it right in between. `unsent`: how
-   * many findings waited before this run, from runs whose alert failed.
-   * `checked`: this run's check completed.
+   * What the signer found is sent, then let go; and that it is stopped,
+   * once, until a check completes. An alert that fails throws, and the
+   * findings wait for the next run. Unless more than `KEEP` already do:
+   * then they go to the log and are let go, and what stands is news again.
    */
-  async #tell(signer: Signer, now: number, unsent: number, checked: boolean): Promise<void> {
+  async #tell(signer: Signer, now: number): Promise<void> {
+    const stopped = this.#stopped(signer, now);
+    const said = this.#on.storage.kv.get(STOPPED) === true;
+    let reached = true;
     await signer.take(async (found) => {
-      const alerted = this.#alerted();
-      const said = new Set(alerted.map(nameOf));
-      const standing = (all: readonly Alerted[]) => all.filter((each) => STANDS.has(each.found));
-      // What stands. After a check: what that check found, and nothing an earlier one did. Without one: what stood, and what a check found whose alert is not sent yet.
-      const stands = new Map((checked ? standing(found.slice(unsent)) : [...standing(alerted), ...standing(found)]).map((each) => [nameOf(each), each]));
-      const stopped: Alerted | null = now - signer.checked > STOPPED_MS ? { found: 'stopped', of: new Date(signer.checked).toISOString() } : null;
-      if (stopped !== null) stands.set('stopped', stopped);
-
-      // What is said: every finding that is no row's and no tree's; each row or tree found wrong and not said, whether or not a later check found it right; and that it is stopped.
-      const wrong = new Map(standing(found).map((each) => [nameOf(each), each]));
-      const news = [...found.filter((each) => !STANDS.has(each.found)), ...[...wrong].filter(([name]) => !said.has(name)).map(([, each]) => each), ...(stopped !== null && !said.has('stopped') ? [stopped] : [])];
-      // Let go unsent, to the log: what stands is not marked said, and the next check says it.
-      if (news.length > 0 && !(await this.#send(alertOf(news), found.length))) return;
-
-      if (stands.size === said.size && [...stands.keys()].every((name) => said.has(name))) return;
-      this.#on.storage.kv.put(ALERTED, [...stands.values()]);
-      await this.#on.storage.sync();
+      const news: Alerted[] = said ? found : [...found, ...stopped];
+      if (news.length === 0) return true;
+      const alert = alertOf(news);
+      try {
+        await this.#send(alert);
+      } catch (error) {
+        if (found.length <= KEEP) throw error;
+        console.error(`coffre: an alert could not be sent, and ${found.length} findings waited for it. They are let go, and here is what it said:\n${alert.text}`, alert.findings, error);
+        reached = false;
+      }
+      return reached;
     });
+    if (!reached || said === stopped.length > 0) return;
+    if (said) this.#on.storage.kv.delete(STOPPED);
+    else this.#on.storage.kv.put(STOPPED, true);
+    await this.#on.storage.sync();
   }
 
-  /**
-   * To the deployment's `alert`, and whether it went: one that fails, or
-   * has not returned in time, throws, and the findings wait for the next
-   * run. Unless `waiting` of them already do: then they go to the log, and
-   * the answer is false.
-   */
-  async #send(alert: SignerAlert, waiting: number): Promise<boolean> {
+  /** To the deployment's `alert`, or the log without one. One that fails, or has not returned in time, throws. */
+  async #send(alert: SignerAlert): Promise<void> {
     const { alert: send } = this.#on;
-    if (send === undefined) {
-      console.error(`${alert.text}\n(no alert is configured: the vault's \`alert\`)`);
-      return true;
-    }
+    if (send === undefined) return console.error(`${alert.text}\n(no alert is configured: the vault's \`alert\`)`);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         Promise.resolve().then(() => send(alert)),
         new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`the alert did not return within ${ALERT_MS} ms`)), ALERT_MS))),
       ]);
-      return true;
-    } catch (error) {
-      if (waiting <= KEEP) throw error;
-      console.error(`coffre: an alert could not be sent, and ${waiting} findings waited for it. They are let go, and here is what it said:\n${alert.text}`, alert.findings, error);
-      return false;
     } finally {
       clearTimeout(timer);
     }
