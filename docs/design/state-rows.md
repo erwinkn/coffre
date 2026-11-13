@@ -767,7 +767,7 @@ finds a leaf missing. A fact in a sealed row is as safe as a fact in the log, an
 | alter a row the page shows | caught: the row's MAC | |
 | stop the projector, or put an older cursor back | shown: "listed through" falls behind the checkpoint | |
 | cut or extend the frozen log | caught: its last row is not the anchor | |
-| delete the anchor and the whole frozen log with it | not seen until V1 answers "the upgrade ran" from outside the database (open, section 6): it reads as a database born on 0.16 | caught: the anchor is a change inside a signed range |
+| delete the anchor and the whole frozen log with it | not seen by a visit, a known limit (D200: a visit is flat), like deleting a projection row or any change inside a signed range: it reads as a database born on 0.16 | caught: the anchor is a change inside a signed range |
 | alter or delete an entry inside a signed range, or an old entry of the frozen log | not seen: the page shows the projection's own signed rows | caught: the range's root, the chain's hashes |
 | delete a projection row | not seen | caught: the range re-derived and compared |
 | delete a use younger than one tick, before a checkpoint covers it | not seen by any check, today or after. A change answers only once sealed for this reason; a use does not wait. | |
@@ -969,20 +969,13 @@ the ordinary one. They cannot add or alter an entry without a key. After the anc
 projector reaches it stops the walk there, with a finding; one altered after is the recheck's to find, and the rows
 the page shows carry MACs of their own.
 
-**Open, V1's to close: what says the upgrade ran (W395, on #587).** `check` holds the frozen log to its anchor only
-once the upgrade has run, and no row can say so: a writer who deletes the anchor change, the done marker and every row
-of `audit_log` leaves a database that reads as one born on 0.16, an empty log with nothing to anchor, and every visit
-is `ok`. The deleted change is inside a signed range, so the full recheck finds it, and nothing sooner does. `check`
-needs the answer from what a database writer cannot delete (`#upgraded()` in the vault, which #587 leaves answering
-no). Two candidates: the signer's memory, outside the database and already asked once a visit (`reached`), told the
-anchor's number when the step writes it; or the deployment's config, set at the upgrade. The coordinator leans to the
-first: a flag is a new thing an operator can forget or set wrong (D170), and the signer is already the witness outside
-the database. One question it must answer: what `check` says after the signer is reset. Going back (below) resets it
-on the way to 0.15.0, which asks nothing, and the next upgrade's step tells it again. But the same reset follows any
-restore of a 0.16 backup (`docs/restore.md`), and a memory that forgot the upgrade reads the restored database as one
-born on 0.16. So either the reset keeps that one fact, or the first `check` after it takes the anchor from the
-database the operator just vouched for and tells the signer. V1 picks one with its upgrade step. Until then a visit
-does not catch that one act.
+**Nothing outside the database says the upgrade ran (closed with V1).** A writer who deletes the anchor change, the
+change that marks the upgrade done and every row of `audit_log` leaves a database that reads as one born on 0.16. That
+is the same act as deleting any change inside a signed range: a visit does not see it, and the full recheck does. So
+`check`'s third item takes no fact from outside the database, and has four cases. No anchor and an empty log: `ok`. No
+anchor and old rows: `broken`. An anchor and an empty log: `broken`. An anchor and old rows: the last row must match
+the anchor's seq and hash. The upgrade's step never writes a second genesis: with the done change deleted and seals
+present, it refuses or does nothing. V1's tests hold the four cases and the step to this.
 
 **If the step dies halfway, it is rerun.** Each write is one change with a request id made from what it seals
 (`upgrade-0.16:settings`), compared-and-set on a null seal, so the next call skips what is done and goes on. It only
@@ -1034,7 +1027,7 @@ the collapse. Days are working days for one agent under the fast gate. Net lines
 | P3 | Two PRs (section 3, "The watch after"). First the page's check, flat: one `check` call a visit (6 statements, 4 round trips), and `beat`, the same with no rows plus the finding; the full walk in steps behind a Verify button and `coffre verify`, which also holds each listed read inside retention to the report's summary, the floor taken from the sealed retention change (`reads_from` has no MAC); the page's walk of 0.14's chain deleted. Then the swap, after V1 and A1's sites: the scheduled run and `/readyz` on it, the old beat, the heartbeat, `vault.checkpoint()` and loss acceptance deleted | P2; the swap V1, A1's sites | no | no | 3.5 | -1,400 |
 | T1 | Three `text[]` columns, `log_config` dropped | #564 | no | yes | 1 | -50 |
 | A0 | Models: the head becomes the change lock (section 3), the policy revision a digest of newest change numbers | now | it is the model | no | 2 | 0 |
-| V1 | The vault's entries go to the chain only; `settings`, `log_keys`; the vault's upgrade step (one beat's tail, the anchor), and what tells `check` it ran, from outside the database (open, section 6); `note` for events, and a refused read written by the call that refused it | P2 | `SealedObjects` with it | yes | 4 | -300 |
+| V1 | The vault's entries go to the chain only; `settings`, `log_keys`; the vault's upgrade step (one beat's tail, the anchor); `note` for events, and a refused read written by the call that refused it | P2 | `SealedObjects` with it | yes | 4 | -300 |
 | A1 | The app's entries go to the chain; `audit_chain_head`, the reads under it and the policy revision deleted, `lockLogHead` replaced by the change lock, no re-check moved; sign-in in 5 round trips; then `audit_log` frozen, directly on P3's swap | P2, A0; the freeze P3's swap | A0 | yes | 4 | -700 |
 | V2b | `audit_log` reads out of the use and change functions; the cap from its row; old overloads dropped; `use_id_batch`'s round without `p_lock`, which #590 leaves without a caller | V1, V2a | `HotPathOne`, small | yes | 1.5 | -300 |
 | U1 | `scripts/upgrade-check.sh`, its 0.15.0 pages compared without heartbeats and checkpoints | V1, A1 | no | no | 2 | +500 |
