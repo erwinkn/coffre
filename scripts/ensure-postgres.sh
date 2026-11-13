@@ -48,7 +48,7 @@ ready() {
 }
 
 # A reused container keeps the image it was created from: a compose file that
-# moved on (Alpine to Debian, R62) changes nothing for it, and a benchmark on
+# moved on (Alpine to Debian) changes nothing for it, and a benchmark on
 # it would measure the old one. Say so; recreating is its owner's call. The
 # names are compared without their digests: one made before compose pinned
 # its digest, or from a rebuild of the same tag, runs the same Postgres.

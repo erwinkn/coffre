@@ -1,4 +1,4 @@
-// The growth sweep's comparison (R48; docs/growth-sweep.md): two Postgres logs of the sweep's run, at a size and at
+// The growth sweep's comparison (docs/growth-sweep.md): two Postgres logs of the sweep's run, at a size and at
 // ten times it, each holding auto_explain's plan of every statement the runtime logins ran, and the sweep's marks
 // between its request paths. Each statement of each measured path, by the path and the statement's text (each run's
 // database is another, and a query identifier hashes its tables' OIDs), with its literals left out, read so many
@@ -18,7 +18,7 @@ const MARK = /\/\* sweep:(.*?) \*\/ SELECT 1/;
  * Each plan auto_explain logged in `text` (a server log on stderr, `log_format = json`), in order: the backend that
  * ran it, its query's text, and the pages it read. One whose JSON does not parse (a line cut or interleaved) is left
  * out here, and `unparsed` counts it, which fails the sweep: left out silently, a statement of it would be in neither
- * run's map, and read as clean (Fable r1 of #559).
+ * run's map, and read as clean.
  */
 export function plansOf(text) {
   return logged(text).flatMap(({ backend, plan }) => {
@@ -56,7 +56,7 @@ function logged(text) {
 /**
  * A statement's text as the two runs share it: its spaces collapsed, its strings and numbers left out, and each list of
  * parameters (`$1`, or `$3, $4, $5` for an `IN` of three) one `$?`, so that an `IN` as long as a page's rows is one
- * statement however long, and its runs after the first on a backend are warm ones (review r3 of #559). A run of
+ * statement however long, and its runs after the first on a backend are warm ones. A run of
  * `UNION ALL` arms alike once so cut is one arm too: a list of rows built as a `SELECT … UNION ALL SELECT …`, one arm a
  * row (the audit's reads, `log-store.ts`), is as long as its page, which differs between the two sizes.
  */
@@ -70,11 +70,11 @@ export function shapeOf(text) {
  * The statements of each measured path, by the path and the statement's shape (`shapeOf`): the most pages one run of
  * it read there, how many times it ran there, and its text. A statement ran between the mark of its path and the next.
  * By path, not by shape alone: a statement many paths share (a member's access, read by every route) is as many
- * statements, so that one path's walk is not hidden under another's larger, flat run of it (review r2 of #559). Its pages
+ * statements, so that one path's walk is not hidden under another's larger, flat run of it. Its pages
  * are those of its warm runs alone, never of a backend's first run of it, which reads the catalog too, as much at
  * either size or more (`prune_bulk`'s first call on a session, 1,295 pages on an empty database as on a grown one,
  * 18 after): `cold` keeps those apart, and a path whose runs of a statement were all first runs is `warm: false`, which
- * `unwarmed` reports rather than compare (review r3 of #559: by path, a first run on a backend another path warmed).
+ * `unwarmed` reports rather than compare (by path, a first run on a backend another path warmed).
  */
 export function statementsOf(plans) {
   const statements = new Map();
@@ -260,7 +260,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     for (const line of [...known].filter((one) => !still.has(one))) console.log(`FLAT  ${line}: known to grow, but grew no more here; delete its line once a run on main agrees`);
   }
   // A sweep is clean only if both runs went the same way to the end: a statement too slow at the larger size, cut by a
-  // timeout, leaves no plan behind, and would otherwise read as none that grew (review r1 of #559).
+  // timeout, leaves no plan behind, and would otherwise read as none that grew.
   const problems = [];
   for (const [file, text] of [[smallLog, smallText], [largeLog, largeText]]) {
     const cut = unparsed(text);

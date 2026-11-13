@@ -125,8 +125,7 @@ fi
 # them), and in a later migrate, by the owner or by a member of it, of a
 # database the owner made. A member never migrates a new database: the
 # baseline alters the runtime roles, which takes CREATEROLE. Nor does a
-# database from before 0019 migrate: this version upgrades only from 0.15.0
-# (T273).
+# database from before 0019 migrate: this version upgrades only from 0.15.0.
 as_superuser -c 'CREATE ROLE reporting NOLOGIN'
 for logins in migration_owner:local-owner-only,migration_owner:local-owner-only postgres:local-bootstrap-only,postgres:local-bootstrap-only \
     migration_owner:local-owner-only,migration_member:local-member-only; do

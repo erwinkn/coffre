@@ -21,7 +21,7 @@ import { join, resolve } from 'node:path';
  * replaces: nothing of them deploys.
  *
  * Its rate-limiting bindings allow at most `LOCAL_RATE_LIMIT` a window:
- * the examples' `SIGN_IN_PER_SOURCE` takes 10,000 per 10 s (W331, D177),
+ * the examples' `SIGN_IN_PER_SOURCE` takes 10,000 per 10 s,
  * more than a local `wrangler dev` answers in 10 s (20,016 sent, none
  * refused), so conformance's `exchangesLimited` could never see the
  * binding refuse. What it holds is that the binding counts every exchange

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The growth sweep (R48; docs/growth-sweep.md): the sweep's request paths
+# The growth sweep (docs/growth-sweep.md): the sweep's request paths
 # (packages/server/test/growth.sweep.ts) on an instance whose history is
 # `--size` entries long in each of its shapes, then ten times that, each run's
 # statements logged by auto_explain on the runtime logins; then the statements

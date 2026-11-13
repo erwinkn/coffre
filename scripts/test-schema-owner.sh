@@ -97,26 +97,26 @@ SQL
     guarantees "$database"
 done
 
-# A member of the owner may migrate (a managed Postgres's admin login, say). Before T193 what it made stayed its own, as
-# drizzle's migrator leaves it below, and databases it migrated so stay as it left them: a function it made is its own, one it
+# A member of the owner may migrate (a managed Postgres's admin login, say). Under drizzle's migrator, as below, what it
+# made stayed its own, and databases it migrated so stay as it left them: a function it made is its own, one it
 # replaced kept its owner, and each use function runs as its owner, its helpers (which are not SECURITY DEFINER) as
 # their caller. So the owner migrates up to 0056, and 0045's and 0051's helpers are handed to the member, as if it had
 # made them (the owner's grant moves with each). The member then runs the rest, one migration at a time, since each
 # meets the running code: 0057 makes `use_covered` and replaces `use_credential`, which stays the owner's and must be
-# granted the member's helpers (T187); 0058 makes both again, the member's now, and `use_route` (T186 PR C), while
+# granted the member's helpers; 0058 makes both again, the member's now, and `use_route`, while
 # 0048's `use_batch` and 0055's `use_named_batch` stay the owner's and must be granted `use_credential`; 0059 replaces
-# `use_credential` and `use_route` (T190), which keep their owner, and adds an attribute to `use_row`. After each,
+# `use_credential` and `use_route`, which keep their owner, and adds an attribute to `use_row`. After each,
 # every use function's runner must execute every use function it calls, read from their bodies.
 docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres <<'SQL'
 CREATE ROLE migration_member LOGIN INHERIT IN ROLE migration_owner PASSWORD 'local-member-only';
 SQL
 psql_owner -d postgres -c "CREATE DATABASE member"
 # migrate_through <database> <login> <password> <last tag>: drizzle's migrator over the journal up to that tag, as coffre
-# migrated before T193. Never past `$before_t193`, the newest migration then (0074, merged just before it): every later one only coffre's own migrator
+# migrated before it had its own migrator. Never past `$before_t193`, the newest migration then (0074): every later one only coffre's own migrator
 # has applied (`db:migrate`), and only it can, since it builds 0082's indexes CONCURRENTLY after its transaction commits
 # (`online-indexes.ts`), where drizzle's runs every statement inside it.
 before_t193=0074_bulk_phase
-# The fixtures stop at 0073 (T216's `p_passkeys`), whose owners they check; a checkpoint at 0074 would be as valid.
+# The fixtures stop at 0073 (`p_passkeys`), whose owners they check; a checkpoint at 0074 would be as valid.
 fixture_at=0073_passkeys_in_vault
 migrate_through() {
     node -e 'const j = require("./packages/db/src/migrations/postgres/meta/_journal.json"), [last, bound] = process.argv.slice(1), idx = (t) => j.entries.find((e) => e.tag === t)?.idx;
@@ -200,14 +200,14 @@ use_grants member 8
 migrate_through member migration_member local-member-only 0072_passkeys_principal
 [[ "$(owners)" == "$expected" ]] || { echo "after 0059, the use functions' owners: $(owners)" >&2; exit 1; }
 use_grants member 8
-# 0073 makes `use_credential` and `use_named_batch` again, with `p_passkeys` (T216): both the member's now, while
+# 0073 makes `use_credential` and `use_named_batch` again, with `p_passkeys`: both the member's now, while
 # 0048's `use_batch` stays the owner's and must be granted the new `use_credential`, which the drop took from it.
 migrate_through member migration_member local-member-only "$fixture_at"
 expected="${expected/use_named_batch=migration_owner/use_named_batch=migration_member}"
 [[ "$(owners)" == "$expected" ]] || { echo "after 0073, the use functions' owners: $(owners)" >&2; exit 1; }
 use_grants member 8
 # 0064 makes `issue_token`'s overload, the member's, and replaces 0036's signature with a wrapper calling it, which keeps
-# its owner and runs as it (T176 PR 3). The previous release's vault, which calls that signature during a rollout, must
+# its owner and runs as it. The previous release's vault, which calls that signature during a rollout, must
 # still be answered: for a person who is no member, `moved`, never a permission error.
 issuers="$(psql_owner -d member -Atc "SELECT string_agg(pronargs || '=' || pg_get_userbyid(proowner), ' ' ORDER BY pronargs) FROM pg_proc
     WHERE pronamespace = 'public'::regnamespace AND proname = 'issue_token'")"
@@ -219,7 +219,7 @@ answer="$(docker exec -i -e PGPASSWORD=local-vault-only "$container" \
 [[ "$answer" == moved ]] || { echo "the previous release's issue_token answered: $answer" >&2; exit 1; }
 
 # The same split one step later: the owner migrates through 0062, so `write_request` (0061) and `admit_read` (0062)
-# are its, and the member runs the rest, so `passkeys` (0063) is the member's. 0073 has the two read it (T216), as
+# are its, and the member runs the rest, so `passkeys` (0063) is the member's. 0073 has the two read it, as
 # they run, as their owner: each must be granted it, or every key write and member add fails with a permission error.
 psql_owner -d postgres -c "CREATE DATABASE split"
 migrate_through split migration_owner local-owner-only 0062_admit_inputs
@@ -277,7 +277,7 @@ split_holds 0073
 DATABASE_URL="postgresql://migration_member:local-member-only@127.0.0.1:$port/split" pnpm --filter @coffre/db run db:migrate
 split_holds "coffre's migrator"
 
-# The above is how a member migrated before T193, by drizzle's migrator, which leaves what it makes the member's, and
+# The above is how a member migrated by drizzle's migrator, which leaves what it makes the member's, and
 # what the shipped migrations' grants must still answer. coffre's own migrator, as the member, applies the rest of the
 # database the member migrated through 0058 above, whose helpers and `use_credential` are the member's, then, before
 # it commits, hands the owner each of coffre's objects the member's (the ACLs with them, a grant to the owner of what

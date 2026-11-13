@@ -93,7 +93,7 @@ export async function crossSite({ admin }: People, canaries: Canaries): Promise<
 export async function offboarding(deployment: Deployment, { admin, leaver, service }: People, canaries: Canaries) {
   const device = await startDevice(deployment);
   await touching(leaver.browser, (touch) => leaver.api.deviceLogins.decide(device.user_code, true, touch));
-  // What they saw is what to rotate once they are gone: with 0.15's log, once their reads are listed (T166).
+  // What they saw is what to rotate once they are gone: with 0.15's log, once their reads are listed.
   await leaver.cli.secrets.reveal(DEV);
   const expected = Object.keys(valuesIn(canaries, DEV)).map((key) => `${DEV}/${key}`).sort();
   const seen = (report: { exposed: { project: string; environment: string; key: string }[] }) => report.exposed.map((entry) => `${entry.project}/${entry.environment}/${entry.key}`).sort();

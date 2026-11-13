@@ -457,7 +457,7 @@ repeat(20000, () => {
     bulk: credential.row === null ? null : { inSet: chance(0.5), others: Math.floor(random() * 6) },
   };
   const request: UseRequest = {
-    // A key the place does not hold is mostly asked for where it was sought (T145): the caller's standing there decides.
+    // A key the place does not hold is mostly asked for where it was sought: the caller's standing there decides.
     credential: 'c1', secretId: secret.row?.id ?? pick(KEYS),
     place: secret.row === null ? (chance(0.8) ? pick(ENVIRONMENTS) : null) : owner || chance(0.7) ? null : chance(0.3) ? secret.row.environmentId : pick(ENVIRONMENTS), purpose: pick(PURPOSES),
     keepsSensitive: chance(0.5), at: 900 + Math.floor(random() * 300), ...(chance(0.5) ? { plain: true as const } : {}),
@@ -472,7 +472,7 @@ repeat(6000, () => {
   const limit = { count: 1 + Math.floor(random() * 4), windowMs: pick([1_000, 10_000, 60_000, 600_001]) };
   const rows = new Map(some(KEYS, 4).map((key) => [key, at - Math.floor(random() * 2.2 * limit.windowMs)]));
   const key = pick(KEYS);
-  // The model takes the principal's key's phase as given (T204): any the hash gives, here a principal's of a handful,
+  // The model takes the principal's key's phase as given: any the hash gives, here a principal's of a handful,
   // or 0, the previous release's statement's, which a log replays for the uses it decided (`phased`).
   const principal = pick(['token:ci', 'user:ada@acme.example', 'user:bo@acme.example']);
   const phased = random() < 0.75;

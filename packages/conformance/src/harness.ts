@@ -84,8 +84,8 @@ const OWNER = 'root@conformance.example';
 
 /**
  * The vault's Owners, under each name a deployment's vault may read them by:
- * `OWNERS`, and `BOOTSTRAP_OWNERS` and 0.5's `ROOT_ADMINS`, read until 0.7,
- * as an older deployment's vault entry still does. Each Worker gets only the
+ * `OWNERS`, and the older `BOOTSTRAP_OWNERS` and `ROOT_ADMINS`, which an
+ * older deployment's vault entry still reads. Each Worker gets only the
  * vars its wrangler.jsonc declares.
  */
 export const OWNER_VARS = { OWNERS: OWNER, BOOTSTRAP_OWNERS: OWNER, ROOT_ADMINS: OWNER };

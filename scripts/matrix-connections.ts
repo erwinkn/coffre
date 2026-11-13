@@ -1,4 +1,4 @@
-// The use matrices' shares of Postgres's connections (T246). `pnpm test:matrices` runs its files side by side, a process
+// The use matrices' shares of Postgres's connections. `pnpm test:matrices` runs its files side by side, a process
 // each, on one server, which lets a login open `max_connections` less the slots it keeps for superusers and for
 // `pg_use_reserved_connections`: past that, a connection is refused (53300) and the cell that asked for it fails. So each
 // file keeps to a share: what the server lets open, split evenly among the files still running. A file whose cells are

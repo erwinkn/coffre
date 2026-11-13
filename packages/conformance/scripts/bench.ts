@@ -198,7 +198,7 @@ function paths(deployment: Deployment, people: { admin: Who; reader: Who; servic
         if (!signed.ok) throw new Error(`sign-in refused: ${signed.error}`);
       },
     },
-    // Changes (R57): each answers once its entry is sealed in a signed checkpoint (R51).
+    // Changes: each answers once its entry is sealed in a signed checkpoint.
     { name: 'change: a key written', request: () => people.admin.api.secrets.set(GROW, { CHANGED: `fake-${Date.now()}` }) },
     { name: 'cron: heartbeat + checkpoint', workersOnly: true, request: () => deployment.scheduled() },
   ];

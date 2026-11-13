@@ -49,7 +49,7 @@ for version in "$release" ${schema:+"$schema"}; do
         exit 2
     fi
 done
-# Whether a version predates 0.16.0, whose migrations renamed tables (T178).
+# Whether a version predates 0.16.0, whose migrations renamed tables.
 before_renames() {
     local major minor
     IFS=. read -r major minor _ <<<"$1"
@@ -203,8 +203,8 @@ conformance() {
     # The hot path's login, for a release whose harness takes it, as it requires it; one before refuses the flag.
     local hot=()
     if grep -rqs -- 'hot-runtime' "$project/node_modules/@coffre/conformance/dist"; then hot=(--hot-runtime "$hot_runtime"); fi
-    # 0.15.0's conformance holds the hot login to generic plans, which 0.16.0's migrations no longer give it
-    # (T207, docs/design/planner-defaults.md): its URL asks for them, as that release's database did, so the
+    # 0.15.0's conformance holds the hot login to generic plans, which 0.16.0's migrations do not give it
+    # (docs/design/planner-defaults.md): its URL asks for them, as that release's database did, so the
     # release is held to everything else. The driver sends a URL's `options` as the session's settings.
     if [[ ${#hot[@]} -gt 0 ]] && grep -rqs -- 'force_generic_plan' "$project/node_modules/@coffre/conformance/dist"; then
         hot=(--hot-runtime "$hot_runtime?options=-c%20plan_cache_mode%3Dforce_generic_plan")
@@ -225,7 +225,7 @@ for kind in "${kinds[@]}"; do
     # unpinned: init writes no lockfile; this installs what a new deployment's first install does, under its own minimumReleaseAge.
     quietly "installing coffre-$kind" "$work/$kind-install.log" pnpm --dir "$project" install --store-dir "$store"
 
-    # 0.16.0 renamed tables (T178, postgres/0076_table_renames.sql). On
+    # 0.16.0 renamed tables (postgres/0076_table_renames.sql). On
     # Postgres a release before it runs through the views kept under the old
     # names, and its conformance is told the new ones where it names tables
     # (scripts/compat/renamed-tables.mjs). Delete it once 0.16.0 is the

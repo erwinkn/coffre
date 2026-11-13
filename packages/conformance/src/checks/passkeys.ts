@@ -13,7 +13,7 @@ import { BULK, canary, ceremonyOf, deviceLogin, DEV, keepPasskey, passkeyOf, per
 import { pollDevice, startDevice } from './signin.ts';
 import { query } from './storage.ts';
 
-/** How long a touch keeps a session fresh: five minutes (D170), which a session left alone outlives. */
+/** How long a touch keeps a session fresh: five minutes, which a session left alone outlives. */
 const FRESH_MS = 5 * 60 * 1000;
 
 type Body = Record<string, unknown> & { error?: string };
