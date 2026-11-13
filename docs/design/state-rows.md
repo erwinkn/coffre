@@ -405,12 +405,14 @@ timeout, so nothing has to run outside its reach. Its cost follows the log, and 
 The walk also holds the report's summary to the list: each listed read inside retention needs an entry of
 `audit_member_keys` for its member, key and version, at its time or later, and each listed key write that supplied a
 value needs its `wrote` row, whatever its age. Retention drops uses and never a change, so a `wrote` row lasts as long
-as the table and a rebuild derives it again: a value someone set a year ago and that is still current is one to
-rotate, as today's report says. For reads, the walk takes retention's floor from the sealed retention change, never
-from `audit_cursor.reads_from`. That column has no MAC, and a writer who raises it makes the projector skip entries; a
-verify that trusted it would excuse them all (`formal/Reads.tla`, `FloorSealed`, on P1). A read in the frozen log
-timed before the newest dropped day keeps its row on the page, since retention drops only the uses' rows, and is on no
-report: the report covers retention's window of reads and states the date it starts (D161).
+as the table and a rebuild derives it again. It is one row for each write of a value (its writer, key and version; a
+write is one change and makes one version), so the kept rows grow with writes, as the versions do, and never with
+reads: a value someone set a year ago and that is still current is one to rotate, as today's report says. For reads,
+the walk takes retention's floor from the sealed retention change, never from `audit_cursor.reads_from`. That column
+has no MAC, and a writer who raises it makes the projector skip entries; a verify that trusted it would excuse them
+all (`formal/Reads.tla`, `FloorSealed`, on P1). A read in the frozen log timed before the newest dropped day keeps its
+row on the page, since retention drops only the uses' rows, and is on no report: the report covers retention's window
+of reads and states the date it starts (D161).
 
 **No `log_verified`, and the beat writes nothing.** With a check on every visit, the row the first draft had the page
 read has no reader, so the table is not built. The 5-minute beat keeps one job: it runs the same `check` when nobody
@@ -437,14 +439,17 @@ and a finding that cannot be written must fail a run the platform reports.
 - **No "finding cleared" event.** No outcome is stored, so no beat knows that one stood. A `late` is over when
   checkpoints exist above its number, each with its time. A `behind` or a `broken` ends with an operator's act (a
   restore, a forged row removed), and the next `ok` stands.
-- **New: a projector that stopped.** The beat fails its run, with no finding, when the cursor's `through` is below the
-  number the checkpoint signs through and the cursor's `at` is older than two of the beat's periods, the one interval
-  the deployment already configures. A quiet instance never trips it: its cursor is level with the checkpoint, however
-  old. Two periods and not one, because until the swap the projector reads the 5-minute checkpoints: just before a
-  beat it is honestly one period behind, and a run that fires a few seconds late must not fail. After the swap it
-  reads every tick and one period would do; two stays, so the rule does not change at the swap. The page already shows
-  it ("listed through 14:05:03"); this is for when nobody looks. Nothing is wrong with the log, so readiness stays
-  green.
+- **New: a projector that stopped.** The beat's statement also reads the first checkpoint above the cursor, and the
+  beat fails its run, with no finding, when that checkpoint was signed more than two of the beat's periods ago, so
+  what waits to be listed has waited that long, or when it does not open under the vault's keys (`projectorStopped`,
+  #587). The period is the one interval the deployment already configures. Not the cursor's own `at`, which this
+  section compared first and which fails honest runs: it is the time of the pair the cursor stands at, an hour old
+  after a quiet hour, when the first checkpoint after it is a tick old and the projector a moment from listing it. A
+  quiet instance never trips the rule: no checkpoint stands above its cursor, however old the one it stands at. Two
+  periods and not one, because until the swap the projector reads the 5-minute checkpoints: just before a beat it is
+  honestly one period behind, and a run that fires a few seconds late must not fail. After the swap it reads every
+  tick and one period would do; two stays, so the rule does not change at the swap. The page already shows it ("listed
+  through 14:05:03"); this is for when nobody looks. Nothing is wrong with the log, so readiness stays green.
 
 **Readiness is the same check.** `/readyz`, past its doors (migrated, then upgraded, which a probe drives as it drove
 the cutover), reads the cursor's row with the read it already makes and calls `check` with no rows: green on `ok`,
@@ -626,51 +631,75 @@ fixed:
 - **A hold shares what it read.** The fence held exclusive did one more job: it made a two-trip write's hold stand to
   its COMMIT against a change that takes no change lock. So `hold_inputs` and `admit_hold` take the lock of each
   object the vault decided on, shared, with those they write; `write_request` reads as a use does, under the same
-  locks. A replacement bind does the same for each key it read by name: today the fence holds a rename off between its
-  compare of those names and its commit. An entry that changes no object (`note`, a refusal) shares the fence and
-  takes none.
-- **Advisory locks, not `FOR SHARE`.** A statement takes its snapshot before it waits for a row's lock, so a use that
-  waited for a change would decide on the other rows as they were before it. Row share locks also write the row
-  (`xmax`, then a multixact for two holders, on the rows every use reads: 0.14.3's cost) and conflict with every
-  update of it, a credential's last use too.
+  locks. A bind that makes a binding does the same for each key it read by name, where its statement takes the fence
+  today (it also ends a binding outright, or revokes a credential): there the fence holds a rename off between its
+  compare of those names and its commit. Where it takes none today, it takes no lock after, and a rename that commits
+  after its compare is a rename after the bind, as today. An entry that changes no object (`note`, a refusal) shares
+  the fence and takes none. - **Advisory locks, not `FOR SHARE`.** A statement takes its snapshot before it waits for
+  a row's lock, so a use that waited for a change would decide on the other rows as they were before it. Row share
+  locks also write the row (`xmax`, then a multixact for two holders, on the rows every use reads: 0.14.3's cost) and
+  conflict with every update of it, a credential's last use too.
 
 Cost, on the reference rig: 11 shared advisory locks taken in one statement cost 0.0024 ms more than 1 (0.0095 ms
 against 0.0071 ms a round); the 0.013 ms measured first took each in a statement of its own. The bound that matters is
-Postgres's shared lock table, where advisory locks live: `max_locks_per_transaction` (64) times `max_connections`,
-6,400 entries at the defaults. What holds locks at once is a connection, not one of the 1,250 keys an isolate has in
-flight. Keyed by the object, single uses never come near (13 each). A batch statement of 100 keys holds its caller's 4
-and 1 to 6 a key: about 110 when its keys share an environment, 604 at the very worst (each key in a place of its own
-and a reference into another), and twenty of those on the hot path's connections hold 12,080. A full table fails
-whoever asks next, anywhere in the cluster, with an error.
+Postgres's shared lock memory, where advisory locks live. It is two tables (`lock.c`, `InitLocks`, Postgres 16). One
+has an entry for each locked object, whoever holds it: `max_locks_per_transaction` (64) for each process Postgres can
+run, 6,400 at 100 connections as the documentation counts, 7,808 with its own workers at stock settings. The other has
+an entry for each object for each holder, sized at twice the first ("Assume an average of 2 holders per lock"). What
+holds locks at once is a connection, not one of the 1,250 keys an isolate has in flight. Keyed by the object, single
+uses never come near (13 each). A batch statement of 100 keys holds its caller's 4 and 1 to 6 a key: about 110 when
+its keys share an environment, 604 at the very worst (each key in a place of its own and a reference into another),
+and twenty of those on the hot path's connections lock 12,080 objects, since every key is an object of its own. Memory
+that runs out fails whoever asks next, anywhere in the cluster, with an error.
 
 **Stripes (coordinator, on L1's report).** An object's lock key is a hash of the object modulo a fixed count of
-stripes. A transaction takes its stripes once, sorted and deduplicated, exclusive on a stripe it asks for both ways.
-It then holds at most that count of object locks whatever it reads, with no limit on a batch and no Postgres setting
-for a deployment to raise. Not taken: smaller batch statements (a 100-key request becomes 4 statements in turn), and a
-setup that refuses a small `max_locks_per_transaction` (a restart, which not every managed Postgres allows).
+stripes. A transaction takes its stripes once, sorted and deduplicated, exclusive on a stripe it asks for both ways. A
+stripe is one object to Postgres however many connections share it, so every use and change of a database lock the
+count of stripes between them, 32 objects where the worst moment above locked 12,080. And a transaction holds at most
+that count whatever it reads, with no limit on a batch and no Postgres setting for a deployment to raise. Not taken:
+smaller batch statements (a 100-key request becomes 4 statements in turn), and a setup that refuses a small
+`max_locks_per_transaction` (a restart, which not every managed Postgres allows).
 
-**The count is 32, derived.** Postgres sizes the table at 64 entries for each connection it can admit. Every
-connection coffre holds is one of those, so if no transaction of coffre's holds more than 64 entries, coffre cannot
-fill the table, whatever the pools' sizes and whichever of them is busy. 64 is the budget of one transaction: its
-stripes, its 4 other advisory locks (change, issue, fence, principal), and its relation locks past the 16 a backend
-keeps outside the table (the fast path), tables and indexes both. 32 stripes leave 28 for those. The pools add margin,
-never less than a tenth: `coffre setup` gives the three Hyperdrive configs (the app's, the vault's, the hot path's) a
-third each of `max_connections` less the reserved slots and 3, at most 20, so the table has 106 entries a pooled
-connection at 100, 88 at 25, and 70 at worst, at 66. The 128 this section first proposed counted one config's 20
-connections; over the three it is 60 x 128 = 7,680 of 6,400, and 18 x 128 = 2,304 of 1,600. 64 stripes and the 4
-others are 68, past the budget: at 66 connections they leave 2 of a pooled connection's 70 for relation locks, so they
-hold only by arguing which pools can hold a full set at once. Measured, the table takes at least twice its nominal
-size (one session holds 12,832 locks at 100 connections, 5,248 at 25): slack in shared memory that Postgres does not
-promise, so the count does not lean on it.
+**The count is 32, derived.** With stripes the objects are no bound. The stripes and the three locks everyone shares
+(the change lock, the issue lock, the fence) are 35 objects a database. The other advisory locks are one object a
+caller, so at most a few a connection: a batch's or a route's principal's lock, an issuer's factor lock, a place in
+line for the change lock (`reserveProxy`), and the queue lock of each member a decision names. All of it is a few
+hundred of 6,400 with every pool busy. The bound is the holders, and it is a transaction's own: Postgres reserves 128
+holder entries for each process by the source, and by the documentation only the 64, which it calls the average number
+of object locks a transaction uses. So if no transaction of coffre's holds more than its budget, coffre cannot run the
+memory out, whatever the pools' sizes and whichever of them is busy. A transaction holds its stripes, at most 5 other
+advisory locks (the three shared and two members' queues, when one member changes another; a use holds 2, the fence
+and its principal's), and its relation locks past the 16 a backend keeps outside the tables (the fast path), tables
+and indexes both.
+
+- **128 stripes** and the 5 others are 133 holder entries, past 128 before a relation is counted. They hold only while
+  other connections sit idle.
+- **64 stripes** leave room: 64 + 5 + 27 = 96 of 128, with no argument about pools. But they stand on the factor of 2,
+  which is in the source and in no documentation.
+- **32 stripes** fit the documented setting alone: 32 + 5 + 27 = 64.
+
+So 32: going from 17% to 9% of a few milliseconds behind a rare change (below) does not pay for leaning on an
+undocumented factor. The pools add margin on top, since `coffre setup` gives the three Hyperdrive configs (the app's,
+the vault's, the hot path's) a third each of `max_connections` less the reserved slots and 3, at most 20: at most 60
+of 100 processes are coffre's. This section first set 60 connections x 128 stripes = 7,680 against the 6,400; those
+are holders counted against the objects' table, and 128 falls for the reason above, not that one. Neither size is a
+cap: both reserve one pool of shared memory with a tenth over (`LockShmemSize`), and a table past its size takes what
+the other left. That is how one session alone held 12,832 distinct locks at 100 connections (5,248 at 25), an entry in
+each table for each. Postgres promises none of that slack, and the count leans on none.
+
+One transaction is outside the budget, today as after: a key rotation locks every member's queue (`#rotate`), an
+object and a holder a member, once; the declared Owners made at a start are the same on a small scale. Postgres allows
+a transaction over the average while the whole fits, and the objects' table is the room: an instance of thousands of
+members would need its rotation in batches. L1 neither adds that nor fixes it.
 
 The price is false sharing, for one statement: a use of 6 objects waits for an unrelated change of one object with
 probability 1 - (31/32)^6, 17% (9% at 64 stripes, 5% at 128), where today every use waits for every change. A 100-key
 batch covers nearly every stripe and waits for any change's last statement, as it does today. Changes are rare, and
 uses share with each other. L1's PR measures three things against the same run unstriped: a single use's wait while an
 unrelated change is in flight; uses per second with a change every second; and the rows of `pg_locks` outside the fast
-path that a use, a batch and a change each hold, which is what the 28 must cover. If they do not, the count goes down,
-not the budget up. A batch's round 2, which holds its principal's lock exclusive, drops its `b_lock`s (up to 100 a
-statement today, for the cap's rows), which that lock makes redundant.
+path that a use, a batch and a change each hold, which is what the 27 must cover: it is the holders' budget it checks.
+If they do not, the count goes down, not the budget up. A batch's round 2, which holds its principal's lock exclusive,
+drops its `b_lock`s (up to 100 a statement today, for the cap's rows), which that lock makes redundant.
 
 ## 4. The security argument
 
@@ -711,6 +740,7 @@ finds a leaf missing. A fact in a sealed row is as safe as a fact in the log, an
 | alter a row the page shows | caught: the row's MAC | |
 | stop the projector, or put an older cursor back | shown: "listed through" falls behind the checkpoint | |
 | cut or extend the frozen log | caught: its last row is not the anchor | |
+| delete the anchor and the whole frozen log with it | not seen until V1 answers "the upgrade ran" from outside the database (open, section 6): it reads as a database born on 0.16 | caught: the anchor is a change inside a signed range |
 | alter or delete an entry inside a signed range, or an old entry of the frozen log | not seen: the page shows the projection's own signed rows | caught: the range's root, the chain's hashes |
 | delete a projection row | not seen | caught: the range re-derived and compared |
 | delete a use younger than one tick, before a checkpoint covers it | not seen by any check, today or after. A change answers only once sealed for this reason; a use does not wait. | |
@@ -913,6 +943,15 @@ the ordinary one. They cannot add or alter an entry without a key. After the anc
 projector reaches it stops the walk there, with a finding; one altered after is the recheck's to find, and the rows
 the page shows carry MACs of their own.
 
+**Open, V1's to close: what says the upgrade ran (W395, on #587).** `check` holds the frozen log to its anchor only
+once the upgrade has run, and no row can say so: a writer who deletes the anchor change, the done marker and every row
+of `audit_log` leaves a database that reads as one born on 0.16, an empty log with nothing to anchor, and every visit
+is `ok`. The deleted change is inside a signed range, so the full recheck finds it, and nothing sooner does. `check`
+needs the answer from what a database writer cannot delete (`#upgraded()` in the vault, which #587 leaves answering
+no). Two candidates: the signer's memory, outside the database and already asked once a visit (`reached`), told the
+anchor's number when the step writes it; or the deployment's config, set at the upgrade. V1 picks one with its upgrade
+step. Until then a visit does not catch that one act.
+
 **If the step dies halfway, it is rerun.** Each write is one change with a request id made from what it seals
 (`upgrade-0.16:settings`), compared-and-set on a null seal, so the next call skips what is done and goes on. It only
 adds changes and fills null seals. A step that refuses (the old chain's tail does not verify, a row disagrees with its
@@ -963,7 +1002,7 @@ the collapse. Days are working days for one agent under the fast gate. Net lines
 | P3 | Two PRs (section 3, "The watch after"). First the page's check, flat: one `check` call a visit (6 statements, 4 round trips), and `beat`, the same with no rows plus the finding; the full walk in steps behind a Verify button and `coffre verify`, which also holds each listed read inside retention to the report's summary, the floor taken from the sealed retention change (`reads_from` has no MAC); the page's walk of 0.14's chain deleted. Then the swap, after V1 and A1's sites: the scheduled run and `/readyz` on it, the old beat, the heartbeat, `vault.checkpoint()` and loss acceptance deleted | P2; the swap V1, A1's sites | no | no | 3.5 | -1,400 |
 | T1 | Three `text[]` columns, `log_config` dropped | #564 | no | yes | 1 | -50 |
 | A0 | Models: the head becomes the change lock (section 3), the policy revision a digest of newest change numbers | now | it is the model | no | 2 | 0 |
-| V1 | The vault's entries go to the chain only; `settings`, `log_keys`; the vault's upgrade step (one beat's tail, the anchor); `note` for events, and a refused read written by the call that refused it | P2 | `SealedObjects` with it | yes | 4 | -300 |
+| V1 | The vault's entries go to the chain only; `settings`, `log_keys`; the vault's upgrade step (one beat's tail, the anchor), and what tells `check` it ran, from outside the database (open, section 6); `note` for events, and a refused read written by the call that refused it | P2 | `SealedObjects` with it | yes | 4 | -300 |
 | A1 | The app's entries go to the chain; `audit_chain_head`, the reads under it and the policy revision deleted, `lockLogHead` replaced by the change lock, no re-check moved; sign-in in 5 round trips; then `audit_log` frozen, directly on P3's swap | P2, A0; the freeze P3's swap | A0 | yes | 4 | -700 |
 | V2b | `audit_log` reads out of the use and change functions; the cap from its row; old overloads dropped | V1, V2a | `HotPathOne`, small | yes | 1.5 | -300 |
 | L1 | Per-object locks; the fence is the checkpointer's alone (D201). Its model is a draft PR stacked on A0, started in week one | V2b, A1 | yes | yes | 4 | +100 |
