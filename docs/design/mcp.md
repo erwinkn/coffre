@@ -1,625 +1,292 @@
 # An MCP server for coffre
 
-A proposal, written on 2026-10-05, for Erwin's decision D31, and built
-since (#150, #151 and the pull requests after them); where building it
-settled a detail, this says what the code does. It targets MCP revision **2026-07-28**, final since 28 July 2026, and
-serves 2025-era clients too (section 2).
-
-People connect an MCP client, Claude among them, to their coffre instance.
-The client then acts as that person, within the scopes they chose when they
-connected and never beyond their own grants. coffre confirms every change on
-its own page before making it, and keeps secret values away from the model
-unless the person opted into **Reveal values**.
+People connect an MCP client, Claude among them, to their coffre instance. The client then
+acts as that person, within the scopes they chose when they connected and never beyond their
+own grants. coffre confirms every change on its own page before making it, and keeps secret
+values away from the model unless the person granted **Reveal values**. The user guide is
+[mcp.md](../mcp.md); this note is how it works and why.
 
 ## 1. One session, end to end
 
-Ada works on `market`. She runs this once:
-
-```sh
-claude mcp add --transport http coffre https://secrets.acme.example/mcp
-```
-
-1. **Connecting.** Claude Code's first request has no token, and coffre
-   answers `401` with a pointer to its metadata. Claude Code discovers that
-   coffre is its own authorization server. It identifies itself by its
-   Client ID Metadata Document, `https://claude.ai/oauth/claude-code-client-metadata`,
-   and opens `https://secrets.acme.example/oauth/authorize?...` in the browser.
-2. **Consent.** Ada is already signed in to coffre. If she weren't, she would
-   sign in with the usual buttons first. The consent page says:
-
-   > **Claude Code** (`claude.ai`) wants to act as you, ada@acme.example, on
-   > secrets.acme.example.
-   > It receives the answer on this computer (`localhost`). Continue only if
-   > you just started this from an app on this computer.
-   >
-   > ☑ Read: projects, environments, key names, history, access, the audit log
-   > ☐ Write · ☐ Reveal values · ☐ Manage access
-
-   Claude Code asked for Read, so only Read is ticked; she could tick
-   the others here, and leaves them. She approves. Claude Code gets a
-   one-hour access token and a refresh token.
-3. **Browsing.** "What does market/staging have?" Claude calls `list_secrets`
-   with `market/staging` and gets key names, versions and who changed them,
-   never values. The audit log records `mcp.call` from Ada, via Claude Code.
-4. **Asking for more.** "Generate a new SESSION_SECRET for staging."
-   `generate_secret_value` needs the **Write** scope. coffre answers `403
-   insufficient_scope`. Claude Code asks Ada whether to re-authenticate
-   "for the scope read write", and opens the consent page again, with
-   **Write** ticked this time. Ada approves.
-5. **Confirming.** Claude calls `generate_secret_value` again. coffre makes
-   no change. It records a pending approval and answers with a URL-mode
-   elicitation for `https://secrets.acme.example/approvals/7QF2…`. Claude
-   Code asks Ada whether to open that link. The page shows exactly this:
-
-   > Claude Code asks to set **market/staging/SESSION_SECRET** to a new
-   > random value (32 bytes, base64url). It replaces version 3, set by
-   > bob@acme.example on 2 October. Nobody sees the new value; earlier
-   > versions stay restorable.
-   >
-   > [Approve] [Deny]
-
-   Ada approves. coffre generates the value, writes it as version 4, and logs
-   `mcp.approve` and `secret.write`, both naming Claude Code.
-6. **Finishing.** Claude Code retries its call with the state coffre gave it.
-   coffre sees that the approval was used and answers "SESSION_SECRET is at
-   version 4".
-7. **Using it.** "Run the tests with staging's secrets." Claude calls
-   runs `coffre run market/staging -- npm test` in the terminal, as the
-   server's instructions say. The values go to the test process and never
-   into the conversation.
-
-Ada can see Claude Code, its scopes and when it was last used on her
-account page under **Connected apps**, or with `coffre apps`. She can
-disconnect it from either.
+1. Ada runs `claude mcp add --transport http coffre https://secrets.acme.example/mcp`. Claude
+   Code's first request has no token; coffre answers `401` with a pointer to its metadata, and
+   Claude Code opens coffre's consent page in her browser, naming itself by its metadata
+   document, `https://claude.ai/oauth/claude-code-client-metadata`.
+2. The page shows Claude Code, its host `claude.ai`, a warning that the answer goes to
+   `localhost`, her email, and the four scopes with Read ticked. She approves with a passkey
+   touch. Claude Code gets a one-hour access token and a refresh token.
+3. "What does market/staging have?" `list_secrets` answers key names, versions and who changed
+   them, never values.
+4. "Generate a new SESSION_SECRET." `generate_secret_value` needs Write: `403
+   insufficient_scope`. Claude Code re-authenticates, and the consent page opens with Write
+   ticked.
+5. The next call changes nothing: coffre opens an approval and asks Claude Code to open
+   `/approvals/<id>`. The page says it sets `market/staging/SESSION_SECRET` to a new random
+   value, replacing version 3, set by Bob on 2 October. Ada approves with a touch; coffre
+   writes version 4. Claude Code's retry hears "set, version 4".
+6. "Run the tests with staging's secrets." Claude runs `coffre run market/staging -- npm test`
+   in the terminal: the values go to the process, not the chat.
 
 ## 2. The protocol
 
-**Target: 2026-07-28**, the current revision. It is stateless: there is no
-`initialize` and no `Mcp-Session-Id`. Every request carries its protocol
-version and the client's capabilities in `_meta`, and a server asks the
-client for input with Multi Round-Trip Requests (MRTR). The server answers
-`input_required` with what it needs and an opaque `requestState`, and the
-client sends the same call again with its answers. That suits Workers: no
-request waits on another, and nothing needs to be shared between isolates.
+coffre serves MCP **2026-07-28**, and the 2025 revisions beside it, at `POST /mcp`
+(`packages/server/src/mcp/endpoint.ts`). Each request gets one JSON answer, never a stream, and
+there is no session: nothing coffre does needs progress, and on Workers no request should wait
+on another or share state across isolates.
 
-coffre's endpoint is `POST /mcp`. It answers each request with one JSON body
-and never streams, because nothing coffre does takes long enough to need
-progress. It implements:
+**2026-07-28** is stateless: each request carries its version and the client's capabilities in
+`_meta`. A server that needs input answers `input_required` with an opaque `requestState`, and
+the client sends the same call again with its answers (Multi Round-Trip Requests). coffre
+answers `server/discover` (cacheable by anyone for an hour), `tools/list` (`cacheScope:
+"private"`, five minutes, since the list is the person's own) and `tools/call`; anything else is
+`404` `-32601`. Another `_meta` version is `400` `-32022`. The `MCP-Protocol-Version`,
+`Mcp-Method` and, for `tools/call`, `Mcp-Name` headers must match the body, or it is `400`
+`-32020`.
 
-- **Modern methods:** `server/discover`, `tools/list` and `tools/call`.
-  `tools/list` is the person's own (section 5), so it carries
-  `cacheScope: "private"` and a `ttlMs` of five minutes: a role granted or
-  taken shows within them. `server/discover`, the same for every token,
-  stays `public`, for an hour. Any other method answers `404` with
-  `-32601`.
-- **Header checks.** `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` must
-  match the body, or the answer is `400` `HeaderMismatch` (`-32020`).
-  `Mcp-Name` is decoded from its Base64 form first.
-- **Origin.** A request whose `Origin` is not coffre's own is refused with
-  `403`. Claude's servers and native clients send none, so browser pages
-  cannot call `/mcp`. That also means coffre serves no CORS at all.
-- **Everything else on `/mcp`.** `GET` and `DELETE` answer `405`.
+**2025-11-25 and 2025-06-18** open with `initialize`, which coffre answers with the version
+asked for and no session ID. It then serves `ping`, `tools/list` and `tools/call`, with the same
+tools and checks, to requests whose `MCP-Protocol-Version` names one of them; no header at all
+(a client older than 2025-06-18) is refused. A stateless server can't remember what a client
+declared in `initialize`, so it never elicits from a 2025 client: such a client confirms changes
+through the approval link (section 7). No client is read-only because of its revision; only its
+scopes limit it.
 
-**Clients on 2025-11-25 (and 2025-06-18).** These are the "legacy" era: they
-open with `initialize`. The spec lets one endpoint serve both eras, and
-coffre does:
-
-- It answers `initialize` with the version the client asked for, mints no
-  session ID, and serves `tools/list` and `tools/call` with the same tools
-  and the same checks.
-- What it can't do there is elicit. 2025-11-25's equivalent is the
-  `-32042` error, which carries a URL. A stateless server can't know
-  whether the client declared URL elicitation, because that declaration
-  happened in an `initialize` request it no longer remembers.
-- So a legacy client confirms changes, and sees values on coffre's page,
-  through the approval link, as any 2026-07-28 client without URL
-  elicitation does (section 7; Erwin's D62, which replaced answer 3). No
-  client is read-only for its protocol version; only its connection's
-  scopes limit it.
-
-Requests from a client older than 2025-06-18, with no
-`MCP-Protocol-Version` header, are refused.
-
-Section 10 shows where each Claude surface lands.
+**Always:** a request whose `Origin` is not coffre's own is refused `403`. Real clients send
+none, so no web page can call `/mcp`, and coffre serves no CORS. Methods other than `POST` are
+`405`; a notification is answered `202`; a batch is refused. The token is checked before the
+body is read.
 
 ## 3. Where it lives
 
-Everything is in `@coffre/server`, as the API is. A deployment mounts two
-new server routes as file routes and two new pages:
+Everything is in `@coffre/server`. `coffre init` writes the file routes for both kinds:
+`app/src/routes/mcp.ts` (`POST /mcp`), `app/src/routes/[.]well-known.$.ts` (the two metadata
+documents, RFC 9728 and RFC 8414), and the consent and approval pages,
+`app/src/routes/_solo/oauth.authorize.tsx` and `app/src/routes/_solo/approvals.$approval.tsx`.
+The token, registration and revocation endpoints are `POST /api/oauth/token`, `/register` and
+`/revoke`, protocol routes beside the device login's; what the pages and the CLI call
+(`/api/oauth/authorizations`, `/api/approvals/:id`, `/api/apps`) are in the API's route table.
 
-| Path | What | Where |
-|---|---|---|
-| `POST /mcp` | the MCP endpoint | `app/src/routes/mcp.ts`, `{ ...mcp }` from `@coffre/server/routes` |
-| `GET /.well-known/oauth-protected-resource[/mcp]` | protected resource metadata (RFC 9728) | `app/src/routes/[.]well-known.$.ts`, `{ ...wellKnown }` |
-| `GET /.well-known/oauth-authorization-server` | authorization server metadata (RFC 8414) | the same file |
-| `/oauth/authorize` | the consent page | `app/src/routes/_solo/oauth.authorize.tsx` |
-| `/approvals/:id` | the approval page | `app/src/routes/_solo/approvals.$approval.tsx` |
-| `POST /api/oauth/token`, `/api/oauth/register`, `/api/oauth/revoke` | the token, registration and revocation endpoints | coffre's own paths under `/api/$`, beside `/api/auth/device` |
-| `/api/apps`, `/api/approvals/:id`, `/api/oauth/authorizations` | what the pages and the CLI call | ordinary rows in the API's route table |
-
-The OAuth endpoints live under `/api` so they need no new route files: they
-are protocol routes, like the device login's. The MCP URL people type stays
-short: `https://<instance>/mcp`.
-
-**Configuration** is code, like everything else. MCP is on when sign-in says
-so, as trust bindings are:
+MCP is on when the deployment's sign-in says so, with one limit:
 
 ```ts
 auth: signin({
   providers: [github({ … })],
-  workloads: { … },
-  // MCP clients, Claude among them, may act as the people who connect them (docs/mcp.md).
-  mcp: { limits: { perSource: env.SIGN_IN_PER_SOURCE } },
+  mcp: { limits: { perSource: env.SIGN_IN_PER_SOURCE } }, // on Node: processLimits()
 }),
 ```
 
-The limit is the rate-limiting binding CI sign-ins pass, in
-`app/wrangler.jsonc` on Workers, and `processLimits()` on Node (section 4,
-"Admission").
-Without `mcp`, `/mcp` and the OAuth routes answer `404` and say which
-setting turns them on.
-
-**`coffre init`** writes all of this for both kinds, and the examples follow,
-as they must. **`coffre update`** adds the four new route files to an
-existing deployment. It only adds files and never overwrites one. It then
-prints the lines to add to `coffre.ts` and `wrangler.jsonc`, because it
-doesn't edit a deployment's own code. Until those lines are added, MCP stays
-off.
-
-**Cloudflare Access deployments are out of v1.** Behind Access, coffre has
-no sign-in of its own and issues no tokens. Access would also stop Claude's
-servers at the door. Section 10 covers reachability.
+Without `mcp`, all these routes answer `404`, saying which setting turns them on. Behind
+Cloudflare Access there is no `signin()`, so no MCP: coffre issues no tokens there, and Access
+would stop Claude's servers at the door anyway.
 
 ## 4. The authorization server
 
-coffre is its own authorization server: the issuer is the instance's public
-URL, and the protected resource is `<publicUrl>/mcp`.
+coffre is its own OAuth 2.1 authorization server (`packages/server/src/mcp/service.ts`): the
+issuer is the public URL, the protected resource `<publicUrl>/mcp`.
 
-**Discovery.** An unauthenticated request to `/mcp` answers:
+**Discovery.** A request to `/mcp` without a good token answers:
 
 ```http
 HTTP/1.1 401 Unauthorized
 WWW-Authenticate: Bearer resource_metadata="https://secrets.acme.example/.well-known/oauth-protected-resource/mcp", scope="read"
 ```
 
-```json
-{ "resource": "https://secrets.acme.example/mcp",
-  "authorization_servers": ["https://secrets.acme.example"],
-  "scopes_supported": ["read"],
-  "bearer_methods_supported": ["header"],
-  "resource_name": "coffre at secrets.acme.example" }
-```
-
-```json
-{ "issuer": "https://secrets.acme.example",
-  "authorization_endpoint": "https://secrets.acme.example/oauth/authorize",
-  "token_endpoint": "https://secrets.acme.example/api/oauth/token",
-  "registration_endpoint": "https://secrets.acme.example/api/oauth/register",
-  "revocation_endpoint": "https://secrets.acme.example/api/oauth/revoke",
-  "scopes_supported": ["read", "write", "reveal", "manage-access", "offline_access"],
-  "response_types_supported": ["code"],
-  "grant_types_supported": ["authorization_code", "refresh_token"],
-  "code_challenge_methods_supported": ["S256"],
-  "token_endpoint_auth_methods_supported": ["none"],
-  "revocation_endpoint_auth_methods_supported": ["none"],
-  "client_id_metadata_document_supported": true,
-  "authorization_response_iss_parameter_supported": true }
-```
-
-The resource metadata lists only `read`, the minimum, and the `401`
-names it too: it is what clients ask for, and what the consent page starts
-with ticked. The person ticks the others there, at connection, whatever was
-asked; a client that steps up asks for one later (section 5). Claude picks
-CIMD only when both
-`client_id_metadata_document_supported` and `"none"` are present, and adds
-`offline_access` when it is listed (section 10).
+The resource metadata names coffre as its one authorization server and `scopes_supported:
+["read"]`. The server metadata lists the endpoints; all four scopes and `offline_access`
+(accepted and ignored: every connection gets a refresh token); the code and refresh grants;
+S256 PKCE; `none` as the only client authentication; `client_id_metadata_document_supported`;
+and the `iss` response parameter. Claude uses a metadata document only when both that flag and
+`none` are listed. Clients are told only `read` because they ask for what they are told, and the
+consent page starts with that ticked; naming all four would have them ask for Reveal values and
+Manage access by default.
 
 ### Clients
 
-Every client is public: it holds no secret, and PKCE protects its codes.
+Every client is public: it holds no secret, and PKCE protects its codes. The rules are in
+`packages/core/src/mcp.ts`.
 
-- **Client ID Metadata Documents (preferred).** The `client_id` is an HTTPS
-  URL with a path, such as `https://claude.ai/oauth/claude-code-client-metadata`.
-  - The consent page fetches it through the transport trust bindings
-    already use. That transport follows no redirect, stops after 5 seconds
-    and 64 KiB, and on Node connects only to public addresses.
-  - The document must parse, its `client_id` must equal the URL, it must
-    name `redirect_uris`, and `token_endpoint_auth_method` must be `none`.
-  - Each isolate or process keeps documents for ten minutes. It keeps the
-    parsed document only, never a pending fetch.
-  - Nothing is stored until someone consents. The connection then keeps the
-    client's name and host for display.
-- **Dynamic Client Registration (fallback, deprecated by the spec).**
-  - `POST /api/oauth/register` takes `client_name` and `redirect_uris` only:
-    at most 5 URIs, and `token_endpoint_auth_method: none`.
-  - A redirect URI that breaks the rules below is left out of the
-    registration rather than failing it, as RFC 7591 allows, as long as one
-    usable URI remains. Cursor registers `cursor://…` beside its localhost
-    callback. Refusing the whole registration would lock Cursor out, as it
-    does at providers that refuse it.
-  - It answers a random `client_id` and stores a row in `oauth_clients`.
-  - The consent page shows such a client as **unverified**, because its name
-    is only its own claim.
-  - Registration passes the admission limits below. MCP Inspector, some
-    other clients, and a Claude connector set to "Register automatically"
-    use it.
+- **Client ID Metadata Documents (preferred).** The `client_id` is an HTTPS URL with a path, and
+  no query, fragment, user or dot segment, at most 2,048 characters. The consent page fetches it
+  through the transport trust bindings use: no redirect, 5 seconds, 64 KiB, and on Node public
+  addresses only. The document must name its own URL as `client_id`, list 1 to 10
+  `redirect_uris`, and use no client authentication. Each isolate keeps up to 200 parsed
+  documents for ten minutes, never a pending fetch.
+- **Dynamic Client Registration (fallback).** `POST /api/oauth/register` takes `client_name` and
+  1 to 10 `redirect_uris`. A redirect that breaks the rules below is left out rather than
+  failing the registration, as long as one remains (RFC 7591 lets the server change what was
+  asked): Cursor registers `cursor://…` beside its loopback callback, and refusing it whole would
+  lock Cursor out. It answers a random `client_id`. Such a client shows as **Unverified**, since
+  its name is only its own claim.
 
-**Redirect URIs** must be one of:
-
-- **HTTPS**, matched exactly. For a CIMD client, it must also be on the
-  `client_id`'s host. Claude's hosted callback,
-  `https://claude.ai/api/mcp/auth_callback`, is on `claude.ai`, the same
-  host as its document. This rule means the consent page names one host,
-  and a document on `evil.example` can't send codes to `claude.ai`, or the
-  other way round.
-- **Loopback HTTP**: `http://127.0.0.1`, `http://[::1]` or
-  `http://localhost`, with any port and the exact path. RFC 8252 allows the
-  port to vary, and Claude Code needs it, since it binds a new port each
-  time.
-- Nothing else: no custom schemes such as `cursor://…`, and no plain HTTP
-  elsewhere. See the open questions.
+Names are shown without control or bidirectional characters, cut to 100 characters. **Redirect
+URIs** must be HTTPS, matched exactly, and for a document on the document's own host, so the
+consent page names one host and a document on `evil.example` can't send codes to `claude.ai`;
+or loopback HTTP (`127.0.0.1`, `[::1]`, `localhost`) on any port with the exact path, since RFC
+8252 lets a native client bind whatever port it gets, and Claude Code does. Nothing else: no
+custom scheme, fragment, user or password.
 
 ### Consent
 
-`/oauth/authorize` is a coffre page in the sign-in frame, built like the
-device login page:
+`/oauth/authorize` is a coffre page in the sign-in frame. A visitor not signed in signs in and
+comes back. Its loader calls `GET /api/oauth/authorizations`, which resolves the client and
+checks every parameter. A bad `client_id` or `redirect_uri` is shown on the page and never
+redirected to, which would be an open redirect; anything else wrong (no `response_type=code`, no
+S256 challenge, a `state` over 1,024 characters, another `resource`, an unknown scope) goes back
+to the client as an OAuth error.
 
-1. A visitor who isn't signed in goes to `/login?next=…` and comes back.
-2. The page's loader calls `GET /api/oauth/authorizations?…` with the
-   request's parameters. The server checks them, fetches the CIMD and
-   returns what the page shows. A bad `client_id` or `redirect_uri` is
-   shown on the page and never redirected to: an unchecked redirect would
-   be an open redirect.
-3. The page shows:
-   - the client's name;
-   - its host, which matters more than the name;
-   - where the answer goes, with a warning when that is only `localhost`;
-   - the person's own email;
-   - every scope, those the client asked for ticked and the others not.
-     Read can't be unticked; the person's ticks decide, whatever was
-     asked. **Reveal values** carries its warning (section 7).
-4. **Approve** and **Deny** call `POST /api/oauth/authorizations` with a
-   cookie. The API's same-origin rule applies, so another site can't post
-   it.
-   - The server checks every parameter again. It keeps nothing between the
-     two requests.
-   - On Approve, it creates the connection and its code, and logs
-     `mcp.connect` with the scopes asked for and those granted. The token
-     answer's `scope` says what was granted (RFC 6749, section 3.3), which
-     may be more than was asked.
-   - It answers the URL to go to:
-     `redirect_uri?code=…&state=…&iss=https://secrets.acme.example`, or
-     `error=access_denied` on Deny.
-   - The page goes there with `location.assign`. A form post would not
-     work: the page's `form-action 'self'` would block the cross-origin
-     redirect.
-5. Every authorization shows this page, even for a client connected before.
-   There is no silent re-consent.
+The page shows the client's name and, larger, its host; where the answer goes, with a warning
+when every redirect is loopback, since any program on the machine can listen there; the person's
+email; every scope, those asked for ticked and Read fixed; the person's connections of the same
+client this one would replace (section 9); and how many days it lasts.
+
+**Approve** posts the request and the ticked scopes to `POST /api/oauth/authorizations`. The
+server checks everything again, since it keeps nothing between the two calls. It requires a
+person signed in as themselves, not through a personal token, and a passkey touch bound to the
+request and scopes from anyone a passkey stands behind
+([passkeys.md](passkeys.md#42-holder-and-ceremony)). Past 20 live connections it refuses. It then
+creates the connection and its code, logs `mcp.connect` with the scopes asked for and granted,
+and answers `redirect_uri?code=…&state=…&iss=…` (or `error=access_denied`), which the page opens
+with `location.assign`: a form post would hit the page's `form-action 'self'`. Every
+authorization shows this page, even for a client connected before.
 
 ### Codes and tokens
 
-A **connection** is one approved authorization: one person, one client, its
-scopes. It is what **Connected apps** lists, and revoking it ends
-everything issued under it. A person may hold at most 20 live connections.
-Past that, consent is refused, with a link to Connected apps. If someone
-connects the same client on two laptops, that is two connections, so
+A **connection** is one approved authorization: one person, one client, its scopes. Connected
+apps lists them, and ending one ends everything issued under it. A person holds at most 20,
+counting those whose code still waits. The same client on two laptops is two connections, so
 neither sign-in signs the other out.
 
-- **Code.**
-  - 256 random bits. The connection row stores its hash, its S256
-    challenge, its `redirect_uri` and an expiry 60 seconds out.
-  - The token endpoint checks:
-    - `client_id`, `redirect_uri` and `code_verifier`;
-    - `resource`, which must be `<publicUrl>/mcp` if given (Claude always
-      sends it).
-  - Redeeming clears the code with a conditional update, so of two racing
-    requests one wins.
-  - A code presented again revokes its connection (OAuth 2.1, section 4.1.3).
-- **Access token**: `coffre_mcp_` + base64url(connection ID, issue time,
-  expiry, MAC).
-  - It lasts **one hour**.
-  - It is MACed under a key derived from `auditChainKey`
-    (`coffre/mcp-tokens/v1`), so a database writer can't mint one.
-  - It has no row of its own. Each request checks the MAC, then reads the
-    connection in one query. The connection must be live, unexpired, at
-    the member's current generation, and its own MAC must hold. Then comes
-    the request's one `vault.access`.
-  - So revoking a connection, or removing its member, ends its tokens at
-    the next request, not at their expiry.
-- **Refresh token**: `coffre_mcr_` + 256 random bits, stored as a hash on
-  the connection.
-  - **Rotated on every use.** The connection keeps the previous hash too,
-    and a rotated-out token presented again revokes the connection (OAuth
-    2.1 reuse detection).
-  - A dead refresh token answers `invalid_grant`, as Claude expects.
-  - A connection lasts as long as a CLI login, `cliSessionDays` (30 days by
-    default), and then the person connects again.
-  - `scope` on a refresh may narrow the scopes, never widen them.
-- **Revocation.** `POST /api/oauth/revoke` (RFC 7009) with either token ends
-  the connection.
+- **Code**: 256 random bits, kept as a hash with its S256 challenge, its `redirect_uri` and an
+  expiry 60 seconds out. The token endpoint (form-encoded, each field once) checks `client_id`,
+  `redirect_uri`, `code_verifier`, and `resource` when given. Redeeming clears the code with a
+  conditional update, so of two racing requests one wins; a code presented again ends its
+  connection (OAuth 2.1, 4.1.3).
+- **Access token**: `coffre_mcp_` + base64url of the connection ID, its scopes, its issue and
+  expiry times, and an HMAC-SHA-256 under a key derived from `auditChainKey`
+  (`coffre/mcp-tokens/v1`), so a database writer can't mint one. It lasts an hour, never past its
+  connection, and has no row. Each request checks the MAC and the time, reads the connection once
+  (its own MAC holds; redeemed, unrevoked, unexpired; the passkey it names still live), then asks
+  the vault once whether the person is still a member at the connection's generation
+  (`vault.access`). So revoking a connection, or removing its person, ends its tokens at the next
+  request.
+- **Refresh token**: `coffre_mcr_` + 256 random bits, kept as a hash and rotated on every use.
+  The previous hash is kept: a replaced token presented again ends the connection (reuse
+  detection). A dead one answers `invalid_grant`. A `scope` on refresh may narrow, never widen.
+  A connection lasts as long as a CLI login (`people.cliSessionDays`, 30 days unless set).
+- **Revocation**: `POST /api/oauth/revoke` (RFC 7009) with either token ends the connection, and
+  answers `200` whatever the token, so it tells nobody which exist.
 
-**Audience.** An MCP token is good only at `/mcp`, by construction:
+**Audience.** An MCP token is good only at `/mcp`: `/api` reads credentials, and `coffre_mcp_`
+is none of their shapes; `/mcp` accepts nothing else, neither a CLI session nor a browser cookie.
+So the scopes can't be dodged by calling the API directly.
 
-- `/api` never accepts one. Its credential lookup reads `credentials`, and
-  the `coffre_mcp_` shape isn't a credential.
-- `/mcp` accepts nothing else, neither a CLI session nor a browser cookie.
-
-The token is bound to the MCP resource (RFC 8707), and the scopes can't be
-dodged by calling the API directly.
-
-**Admission.** The unauthenticated endpoints (`token`, `register`,
-`revoke`, the consent page's CIMD fetch) pass a limiter per source
-address, each endpoint counted apart, before any database or network
-work, as the OIDC exchange does: 10,000 per 10 seconds by default, the
-same limiter (W331, D177; there is no limit in total, and none per
-connection: a connection acts as the person who approved it, whose other
-ways in have no rate). On Workers this is a Cloudflare rate-limiting
-binding; on Node, `processLimits()`. Bodies are read to the bound of
-every body sent before sign-in, 128 KiB (`SIGN_IN_BODY_BYTES`), and
-refused 413 past it. A token endpoint that waits on nothing slow
-answers well inside Claude's 10 seconds.
+**Admission.** The endpoints anyone may call (token, registration, revocation, and the consent
+page's read when it would fetch a document) pass a limit per source address, each endpoint
+counted apart, before any database or network work: the limiter CI sign-ins use, 10,000 per 10
+seconds in the examples. Past it, `429`; a limiter that fails refuses with `503`. Their bodies
+are read to 128 KiB (`SIGN_IN_BODY_BYTES`). Tool calls pass no limit: a connection acts as its
+person, whose other ways in have none.
 
 ## 5. Scopes and permissions
 
-| Scope | Lets the client | Default |
+| Scope | Label | Lets the client |
 |---|---|---|
-| `read` | see projects, environments, key names, versions, access, the audit log; show a value **to the person** on coffre's page | always |
-| `write` | set, generate, rename, archive, unarchive and restore secrets; create projects and environments | opt-in |
-| `reveal` | receive secret values in tool results | opt-in, with a warning |
-| `manage-access` | grants, admitting and offboarding members, service tokens, trust bindings | opt-in |
-
-Their labels are Read, Write, Reveal values and Manage access. Before
-0.4.2 the first was `browse` (Browse) and the third `read-values` (Read
-values); a connection made then holds an unknown scope for each, which
-counts as nothing, so it keeps Read alone until its person connects it
-again.
+| `read` | Read, always | see projects, environments, key names, versions, access, the audit log; show a value **to the person** on coffre's page |
+| `write` | Write | set, generate, rename, archive, unarchive and restore secrets; create projects and environments |
+| `reveal` | Reveal values | receive secret values in tool results |
+| `manage-access` | Manage access | grants, admitting and offboarding members, service tokens, trust bindings |
 
 **Never beyond the person's own grants.** Three layers hold that:
 
-1. **Every tool is API calls as the person.** The MCP endpoint
-   authenticates the token. It then calls the API in process, with that
-   caller, through the same table, permission checks and vault. This is
-   the path a page's render takes (`pageClient`). A tool can do no more
-   than the person could with `curl` and their session. Ada, a viewer on
-   `market/prod`, gets the API's `403` from `archive_secret` there, with or
-   without `write`.
-2. **Scopes gate tools.** A tool outside the token's scopes answers HTTP
-   `403` with `WWW-Authenticate: Bearer error="insufficient_scope",
-   scope="read write"`. The `scope` names everything the connection
-   already holds plus what's missing, because Claude's docs ask for the
-   union. A client that steps up (MCP's incremental consent) asks for it,
-   and the consent page opens with it ticked. Not every client does: the
-   `403`'s body is the tool's result, an error that names the scope and
-   tells the person how to grant it, by connecting the client again and
-   ticking it, with the steps in Claude's apps and Claude Code.
-3. **The API checks the scope too.** A request that comes in through MCP
-   carries its connection. `serveApi` refuses any route that the
-   connection's scopes don't allow, by a table of `route → scope`. So a
-   tool with a bug can't reach `POST /reveals` without `reveal`.
+1. **Every tool is API calls as the person**, in process, through the same route table,
+   permission checks and vault as a page's render. A tool can do no more than the person could
+   with the CLI: Ada, a viewer on `market/prod`, gets the API's `403` from `archive_secret`
+   there, with or without Write.
+2. **Scopes gate tools.** A tool outside the connection's scopes answers HTTP `403` with
+   `WWW-Authenticate: Bearer error="insufficient_scope", scope="read write"`, naming what the
+   connection holds plus what's missing, because a client asks for exactly that. Not every
+   client steps up (Claude Desktop doesn't), so the body is also a tool result telling the model
+   how the person grants it: connect again and tick the scope.
+3. **The API checks the scope too.** The router refuses any route a request's connection lacks
+   the scope for, by `ROUTE_SCOPES` in `packages/server/src/mcp/scopes.ts`. Routes MCP never
+   reaches map to `null`: the person's own sign-in, passkeys, connected apps and approvals,
+   permanent deletion, freezes, roles, settings. The table is typed over the route table, so a
+   new route fails the typecheck until it says. A tool with a bug still can't reach `POST
+   /reveals` without `reveal`.
 
-**The tool list is the person's** (D76). `tools/list`, in either era,
-leaves out a tool no role the person holds now reaches anywhere, and keeps
-a tool their roles reach but their connection's scopes withhold: clients
-see what they could do, and step up when they need to. Each tool declares
-what it needs: any member (`whoami`, `list_projects`); someone who runs the
-instance, or a person who holds anything anywhere, who may set up service
-accounts
-([instance-roles.md](instance-roles.md), "Setting up service accounts")
-(`list_access`, `describe_member`, `admit_member`, `offboard_member`, the
-service-token and trust tools, each checked against the account before it
-is offered for approval); one whose scope takes in new projects
-(`create_project`); or a permission held
-somewhere, by a grant's role or the person's instance role, as the API lets
-them. The list is computed on
-each request from the `vault.access` answer the token check already read,
-so it costs no read of its own. It only hides: `tools/call` is unchanged,
-and a hidden tool called by name is refused by the same checks as before.
+**The tool list is the person's.** `tools/list` leaves out a tool no role the person holds
+reaches anywhere, and keeps one their roles reach but their scopes withhold, so clients can step
+up when needed. Each tool declares what it needs (`usable` in `packages/server/src/mcp/tools.ts`):
+any member, one who may make projects, one who may set up service accounts
+([instance-roles.md](instance-roles.md#setting-up-service-accounts)), or a permission held
+somewhere. The list is computed from the `vault.access` answer the token check already read. It
+only hides: a hidden tool called by name meets the same checks.
 
-**Picking scopes at connection.** Clients ask for what the `401` and the
-resource metadata name, `read`. Claude Desktop never asked for more:
-connected to Erwin's instance, it got Read, and every write tool,
-approval link and `request_secret_value` was refused, with no step-up. So
-the consent page offers all four scopes on every connection, ticking only
-what was asked, and grants what the person ticks. The metadata still names
-only `read`: naming all four would have clients ask for, and the page
-tick, Reveal values and Manage access by default.
+**Picking scopes at connection.** Clients ask for `read`, and some never ask for more: Claude
+Desktop, given Read, never stepped up and could make no change. So the consent page offers all
+four scopes every time, ticks what was asked, and grants what the person ticks. The token
+answer's `scope` says what was granted, which may be more than was asked (RFC 6749, 3.3).
 
 ## 6. The tools
 
-Paths are coffre's: `market/prod` is an environment, and
-`market/prod/STRIPE_KEY` is a secret. Every tool has `openWorldHint: false`,
-because it touches only this instance. "Approval" means the change waits for
-coffre's page (section 7).
+Paths are coffre's: `market/prod` is an environment, `market/prod/STRIPE_KEY` a secret. Every
+tool has `openWorldHint: false`. "Approval" means the call only opens one (section 7).
 
-| Tool | Scope | Hints (read-only, destructive, idempotent) | Approval | API calls |
-|---|---|---|---|---|
-| `whoami` | read | ✓ · ✓ | | `GET /me`; the connection's scopes and client |
-| `list_projects` | read | ✓ · ✓ | | `GET /projects` |
-| `list_secrets {environment}` | read | ✓ · ✓ | | `GET /secrets/:p/:e` |
-| `secret_history {secret}` | read | ✓ · ✓ | | `GET /secrets/:p/:e/:key/versions` |
-| `list_access {place?}` | read | ✓ · ✓ | | `GET /members?path=` |
-| `describe_member {member}` | read | ✓ · ✓ | | `GET /members/:m`; for a service, its tokens and bindings |
-| `read_audit_log {path?, actor?, decision?, before?, limit?}` | read | ✓ · ✓ | | `GET /audit` |
-| `show_secret_value {secret}` | read | ✓ · ✓ | the page shows it | `POST /reveals`, from the page |
-| `request_secret_value {secret, note?}` | write | ✗ ✓ ✗ | the person types it | `PATCH /secrets/:p/:e` |
-| `generate_secret_value {secret, length?, alphabet?}` | write | ✗ ✓ ✗ | ✓ | `PATCH /secrets/:p/:e`, value made on the server |
-| `rename_secret {secret, newKey}` | write | ✗ ✓ ✓ | ✓ | `PATCH /secrets/:p/:e/:key {key}` |
-| `archive_secret {secret}` | write | ✗ ✓ ✓ | ✓ | `PATCH …/:key {archived: true}` |
-| `unarchive_secret {secret}` | write | ✗ ✗ ✓ | ✓ | `PATCH …/:key {archived: false}` |
-| `restore_secret_version {secret, version}` | write | ✗ ✓ ✗ | ✓ | `POST …/:key/restore` |
-| `create_project {project}` | write | ✗ ✗ ✓ | ✓ | `PUT /projects/:p` |
-| `create_environment {environment}` | write | ✗ ✗ ✓ | ✓ | `PUT /projects/:p/:e` |
-| `reveal_secret_values {path}` | reveal | ✓ · ✓ | | `POST /reveals`; an environment or one secret |
-| `set_access {member, changes}` | manage-access | ✗ ✓ ✓ | ✓ | `PATCH /access/:m`, the API's merge patch |
-| `admit_member {member, role?, scope?, access?}` | manage-access | ✗ ✗ ✓ | ✓ | `PUT /members/:m`; `access`, a service account's first grants, in the same call |
-| `offboard_member {member}` | manage-access | ✗ ✓ ✓ | ✓ | `DELETE /members/:m`; the page shows its report |
-| `issue_service_token {service, label?, expiresInDays, scope?}` | manage-access | ✗ ✗ ✗ | ✓, the token is shown on the page only | `POST /members/:m/tokens`, previewed with `?dryRun=1` |
-| `revoke_service_token {service, id}` | manage-access | ✗ ✓ ✓ | ✓ | `DELETE /members/:m/tokens/:id` |
-| `trust_workload {service, profile, issuer?, claims, scope?, label?}` | manage-access | ✗ ✗ ✗ | ✓ | `POST /members/:m/bindings`, previewed with `?dryRun=1` |
-| `untrust_workload {service, id}` | manage-access | ✗ ✓ ✓ | ✓ | `DELETE /members/:m/bindings/:id` |
+| Tool | Scope | Read-only, destructive, idempotent | Approval |
+|---|---|---|---|
+| `whoami`, `list_projects`, `list_secrets {environment}`, `secret_history {secret}`, `list_access {place?}`, `describe_member {member}` | read | ✓ ✗ ✓ | |
+| `read_audit_log {path?, actor?, decision?, before?, limit?}`: 50 entries unless asked, 200 at most | read | ✓ ✗ ✓ | |
+| `show_secret_value {secret}` | read | ✓ ✗ ✓ | the page shows the value |
+| `reveal_secret_values {path}`: a secret or an environment | reveal | ✓ ✗ ✓ | |
+| `request_secret_value {secret, note?}` | write | ✗ ✓ ✗ | the person types the value |
+| `generate_secret_value {secret, length?, alphabet?}`, `restore_secret_version {secret, version}` | write | ✗ ✓ ✗ | ✓ |
+| `rename_secret {secret, newKey}`, `archive_secret {secret}` | write | ✗ ✓ ✓ | ✓ |
+| `unarchive_secret {secret}`, `create_project {project}`, `create_environment {environment, inherits?}` | write | ✗ ✗ ✓ | ✓ |
+| `set_access {member, changes}`, `offboard_member {member}`, `revoke_service_token {service, id}`, `untrust_workload {service, id}` | manage-access | ✗ ✓ ✓ | ✓ |
+| `admit_member {member, role?, scope?, access?}` | manage-access | ✗ ✗ ✓ | ✓ |
+| `issue_service_token {service, label?, expiresInDays, scope?}`, `trust_workload {service, profile, issuer?, claims, scope?, label?}` | manage-access | ✗ ✗ ✗ | ✓; a token is shown on the page only |
 
-The hints are for the client. Overwriting a live value counts as
-destructive, even though coffre keeps every version, because a running
-deploy reads the new one. coffre does not rely on the hints: the approval
-is what it enforces.
+The hints are for the client; coffre enforces the approval, not them. Overwriting a value counts
+as destructive though every version is kept, because a running deploy reads the new one. No tool
+takes a secret value as input, so an agent can't supply one. Removing projects or environments,
+permanent deletion and the instance's settings stay with people.
 
-No tool takes a secret value as input, so an agent can't supply one.
-Removing projects or environments, permanent deletion, and the instance's
-settings stay with people, in the UI and the CLI.
-
-Results are JSON in `structuredContent`, repeated as a text block, and each
-tool declares its `outputSchema`. Lists are paged: the audit log gives 50
-entries per call by default. That keeps a result under Claude Code's 25,000
-tokens and claude.ai's 150,000 characters.
+Results are JSON in `structuredContent`, repeated as text, under each tool's `outputSchema`, and
+lists are paged, to stay under Claude Code's 25,000 tokens and claude.ai's 150,000 characters a
+result. The read tools are in `tools.ts`; each change in `changes.ts` is four functions over the
+API: a summary, a check before asking, a preview, and the change itself.
 
 ## 7. Confirming changes and handling values
 
 ### Approvals
 
-An **approval** is a row in `mcp_approvals`. It holds:
+An **approval** is a row in `mcp_approvals` (`packages/server/src/mcp/approvals.ts`): its
+connection; the tool and its arguments, never an API request; their digest, SHA-256 of the
+canonical JSON of both; a status (`pending`, `approved`, `denied`, `cancelled` or `failed`; a
+pending one past its expiry reads as expired); its outcome, without values; and when it was
+asked, decided, and reported to the client. The person has 5 minutes to decide; the client may
+read the outcome for 10 minutes after asking.
 
-- its connection;
-- the tool;
-- a digest of the call: SHA-256 of the canonical JSON of the tool name and
-  its arguments;
-- the change in API terms;
-- a status (`pending`, `approved`, `denied`, `cancelled`, `failed` or
-  `expired`);
-- a result without values;
-- an expiry 5 minutes out, answer 1's bound, for every client; the client
-  may read the outcome for 10 minutes after it asked;
-- when the client heard the outcome. Until then, the same call (same
-  connection, same digest) rejoins the approval, and reads its outcome; after,
-  it asks afresh.
+**Asking.** A change's call first runs the tool's check, so a call the person could not make is
+refused before any approval opens. Then, under the audit log's head, it rejoins the approval the
+same call (same connection, same digest) opened in the last 10 minutes, if its client hasn't
+heard the outcome, or inserts a new one, at most five pending per connection. Identical calls at
+once open one approval, and a burst stays within five.
 
-The row stores the tool and its arguments, never the API request: the page's
-preview and the change itself are both made from them, by the tool's own
-code (`packages/server/src/mcp/changes.ts`). The page sends back the digest
-it showed, and the server recomputes it from the stored arguments, so what
-runs is what the person read.
+**With URL elicitation** (a 2026-07-28 client that declared `elicitation.url`, as Claude Code
+does), the call answers `input_required` with an `elicitation/create` request in URL mode, the
+approval's URL and "Approve on coffre: …", and a `requestState` sealing the approval, the
+connection, the call's digest and an expiry under a key of its own
+(`coffre/mcp-request-state/v1`). The client retries with the same state; another call's
+arguments under it are refused `-32602`. The retry waits on the approval, reading it every
+second in plain queries and holding no transaction, for up to 25 seconds, well inside claude.ai's
+240 seconds a call; still pending, it answers `input_required` with the state alone, which the
+client retries without asking the person again. A `decline` cancels the approval. A `cancel`
+means the prompt was dismissed, or that a client with nobody to ask answered it (Claude Code with
+`-p` does): the approval stays pending, and the result carries its link.
 
-**On the wire (2026-07-28).** The first call:
-
-```json
-{ "resultType": "input_required",
-  "inputRequests": { "approve": { "method": "elicitation/create", "params": {
-      "mode": "url",
-      "url": "https://secrets.acme.example/approvals/0b9e5c1a-…",
-      "message": "Approve on coffre: set market/staging/SESSION_SECRET to a new random value" } } },
-  "requestState": "<MACed: approval id, connection id, call digest, expiry>" }
-```
-
-The client asks the person, opens the URL, then retries with
-`inputResponses: { "approve": { "action": "accept" } }` and the same
-`requestState`. On that retry, coffre:
-
-1. checks the `requestState` MAC, its expiry, that it belongs to this
-   token's connection, and that the call's digest matches. Different
-   arguments under the same state are refused.
-2. reads the approval:
-   - **Approved:** answers the result.
-   - **Denied, expired or failed:** answers a tool error that says which.
-   - **Pending:** waits. It reads the row again every second, for up to 25
-     seconds. If still pending, it answers `input_required` with the state
-     only and no new prompt, and the client retries without asking the
-     person again.
-
-   The official client SDK, which Claude Code's v2 runtime is built on,
-   retries ten rounds by default: about four minutes. claude.ai allows 240
-   seconds per tool call.
-3. treats `decline` from the client as cancelling the approval, logged as
-   `mcp.cancel`. A `cancel`
-   means the prompt was dismissed, or that a client with no one to ask
-   answered it (Claude Code run with `-p` does, as the live check found):
-   the approval stays pending, and the result carries its link, as for a
-   client without URL elicitation.
-
-A call identical to a pending one (same connection, same digest) rejoins
-that approval rather than opening another. A connection may hold at most
-five pending approvals. The call reads its connection's open approvals and
-inserts its own under the audit log's head, with its `mcp.call` entry, so
-identical calls at once open one approval and a burst stays within five.
-It reads only those asked in the last 10 minutes: older ones can no longer
-be rejoined, nor still wait. A call the person could not make is refused
-before any approval opens, as the API would refuse it on Approve.
-
-**The page.** `/approvals/:id` requires the person's coffre session in
-their browser, and only the approval's own person, at the same generation,
-may decide it. Anyone else, Bob for instance, sees "this approval is for
-someone else", and nothing more. Its API, `GET` and `POST
-/api/approvals/:id`, takes a browser session only, never a CLI session or
-a service token: deciding on coffre's page is literally what the person
-does. Behind Cloudflare Access, it takes Access's cookie, which a client
-that is no browser can set too. Its `GET`, asked with a cookie, needs
-`Sec-Fetch-Site: same-origin`, as the consent page's does: another site
-cannot make coffre run the preview as the person.
-
-The page shows:
-
-- the client;
-- the change in coffre's words, with what it replaces. The preview comes
-  from the API's own previews: `?dryRun=1` for secrets, tokens and
-  bindings, the member report for access and offboarding. What a token or
-  a binding reaches is part of the basis Approve compares, and Approve
-  makes it with that scope, not one the server works out again;
-- what the client wrote, labelled as the app's ("The app says", "The app
-  calls it"), never as coffre's;
-- for `trust_workload`, what each numeric ID names, read back from
-  github.com's or gitlab.com's API through the transport bindings use (a
-  repository, a project, an owner by its path), or "private or unknown:
-  check this ID yourself". The model picks the IDs; the person reads the
-  names. Only those two hosts are asked: the app may name its own issuer,
-  whose API could name its IDs anything. For any other issuer the IDs read
-  "coffre can't check this host", and the issuer is flagged: whoever runs
-  it can sign in as the account;
-- when the connection holds Reveal values, that the app can read values
-  the person can read, the one they are setting included, instead of
-  "the app never sees it";
-- when it was asked for, and when it expires.
-
-**Approve** calls `POST /api/approvals/:id` with the cookie, so the
-same-origin rule applies. It sends back the digest the page showed, and the
-basis: what the change replaces, read once for the page, so the basis is
-what it showed (a secret's current version for the tools that write one,
-the member's roles at each place and when they end for `set_access`). The
-server:
-
-1. checks the person, the connection (live, at its generation), the scope
-   and the expiry;
-2. reads the basis again, as the person: a version set or a role changed
-   since refuses Approve with "this changed since you opened it". Unread on
-   either side, nothing is approved: a page that couldn't read it says so
-   and offers no Approve, and a read that fails now refuses, to retry. The API
-   takes no expected version, so a write in the moment between this read
-   and the change still lands first;
-3. moves the approval from `pending` to `approved` with a conditional
-   update, under the log's head, after reading the approval and its
-   connection again there: a double click acts once, a disconnect since
-   the first checks refuses it, and so does an expiry, which the update
-   itself checks against the database's clock;
-4. **makes the change there and then.** It calls the stored API request in
-   process, as the person, with the connection attached. Every check runs
-   again, and the change's own entries name the client.
-5. stores the outcome (or `failed`, with the API's error) for the client's
-   retry.
-
-If the request dies between 3 and 5, or the outcome can't be stored, the
-approval stays `approved` with no outcome; the page still hears the change
-was made, and sees what only it may. While coffre makes the change, the
-page and the client say so. A minute on, it reads as `failed`, its outcome unknown: the client
-is told coffre doesn't know whether the change was made, never that nothing
-changed, on every call that rejoins it. Its client is never told it ended,
-so when the same call opens a new approval later, that page warns the
-person they approved it before, with no known outcome.
-
-The change happens when the person approves, on coffre's page. That's what
-they saw and clicked, whether or not the client ever comes back. The
-client's retry only reads the outcome. It also covers changes that only the
-page can carry: a value typed by the person, or a token shown once.
-
-**Without URL elicitation** (answer 1). A 2026-07-28 client that didn't
-declare `elicitation.url`, claude.ai's among them, gets the approval link in
-the tool's result, as text for the model to show the person:
+**Without** (claude.ai and Desktop today, and every 2025 client), the result carries the link for
+the model to show, with `structuredContent: { status: "pending", approval: { id, url, expiresAt } }`:
 
 ```text
 Nothing has changed yet: coffre asks the person to approve this on its own page.
@@ -630,553 +297,218 @@ Show them this link, to open signed in to coffre (it expires at 14:08:00Z):
 Once they have approved or denied it, call archive_secret again with the same arguments: it answers what became of it.
 ```
 
-with `structuredContent: { status: "pending", approval: { id, url,
-expiresAt } }`. The same call again rejoins the approval: it waits up to 25
-seconds for the person, then answers the outcome, or the link again. The
-person still confirms the exact change on coffre's page, signed in as
-themselves, so what coffre enforces is unchanged. Legacy clients get the
-same link (section 2, D62).
+Calling again rejoins it, waits up to 25 seconds, and answers the outcome or the link again. The
+person still confirms the exact change on coffre's page, so what coffre enforces is the same.
+What is lost is the client vouching that the link is coffre's: a steered model could show a
+lookalike, but it could print one at any time anyway.
 
-### Setting a value
+**The page.** Only the approval's own person decides it, through a live connection at the
+generation they connected it in; anyone else is told "this approval is for someone else" and
+nothing more. Its API takes a browser session only, never a CLI session or a token, so an app
+holding the person's CLI session can't decide its own approvals. Asked with a cookie, its `GET`
+needs `Sec-Fetch-Site: same-origin` like its `POST`, since the preview reads as the person. The
+page shows:
 
-The agent never supplies a value. There are two tools:
+- the client, the change in coffre's words, and what it replaces, read as the person when the
+  page opens, from the API's own previews (`dryRun` for tokens and bindings, the member's report
+  for access and offboarding);
+- what the client wrote, labelled as the app's ("The app says"), never as coffre's;
+- for `trust_workload`, what each numeric ID names, read back from github.com's or gitlab.com's
+  API, or "private or unknown: check this ID yourself"; any other issuer is flagged, since
+  whoever runs it can sign in as the account. The model picks IDs; the person reads names;
+- when the connection holds Reveal values, that the app can read the values the person can,
+  including one they are setting;
+- a warning when the same change was approved before with no known outcome.
 
-- **`request_secret_value`**: the approval page has a value field (with
-  Import .env's paste handling). The person types or pastes; coffre writes
-  it. The client gets back "set, version 4".
-- **`generate_secret_value`**: coffre generates the value on the server.
-  The defaults are 32 random bytes in base64url; `hex` and `alphanumeric`
-  are the other alphabets, from 16 to 128 characters. It writes the value
-  when the person approves. Nobody ever sees it, unless someone with read
-  access reveals it later.
+**Approve** sends back the digest the page showed and its **basis**, a digest of what the change
+replaces as shown (a secret's current version; the member's roles at each place). The server:
 
-### Reading a value
+1. recomputes the digest from the stored arguments and refuses one that differs, so what runs is
+   what the person read; checks the status, and that the connection still holds the scope;
+2. reads the basis again, as the person, and refuses "this changed since you opened it" if it
+   moved; when either side couldn't read it, nothing is approved. The API takes no expected
+   version, so a write in the moment between this read and the change still lands first;
+3. asks a passkey touch bound to the digest, basis and any typed value from anyone a passkey
+   stands behind ([passkeys.md](passkeys.md#44-who-is-never-asked-and-who-cannot-be)): one touch,
+   one change. Without a passkey under the `optional` policy, a change whose route always needs a
+   fresh check (granting, admitting, removing, issuing a token, trusting a workload) is refused
+   until the person adds one, and stays pending;
+4. under the log's head, reads the approval and connection again and moves `pending` to
+   `approved` with a conditional update checked against the database's clock: a double click
+   acts once, and a disconnect or an expiry since refuses it;
+5. **makes the change there and then**, outside any transaction, through the API in process as
+   the person with the connection attached, every check running again;
+6. stores the outcome, or `failed` with the API's error, for the client's retry.
 
-- **To the person (Read):** `show_secret_value` opens the approval page.
-  The value shows only when the person clicks **Reveal**, a `POST` logged
-  as a reveal, requested by the client. The model gets "shown to
-  ada@acme.example at 14:03" and no value. It is an approval like a
-  change's: its Reveal reads the value as the person, with the connection
-  attached, and is the one call through MCP that may reach `POST /reveals`
-  without Reveal values, since the value goes to the page alone.
-- **To the model (Reveal values):** `reveal_secret_values` returns values in its
-  result, with no page. It is a read, so it needs no approval. The vault
-  logs it as a `reveal` under the access token's credential ID, and the
-  app's `mcp.call` names the client. The vault's bulk limit applies as
-  always. The result begins with a plain warning: "These values are now
-  part of this conversation and its history."
+The change happens when the person approves, whether or not the client returns, which also
+carries what only the page can: a typed value, a token shown once. If the request dies between 4
+and 6, the approval stays `approved` with no outcome; a minute on it reads as `failed`, and the
+client is told coffre doesn't know whether the change was made, never that nothing changed.
 
-The consent page warns when Reveal values is asked for:
+### Values
 
-> Values will be sent to Claude. They become part of the conversation:
-> whoever can read that conversation, and wherever Claude stores it, has
-> them.
+The agent never supplies a value. **`request_secret_value`** puts a value field on the approval
+page; what the person types goes to coffre only. **`generate_secret_value`** has coffre make the
+value when the person approves: 32 random bytes in base64url by default, or `hex` or
+`alphanumeric`, 16 to 128 characters, seen by nobody unless someone reveals it later.
 
-### Using secrets: `coffre run`
+To read one:
 
-When the agent has a shell, the values should go to the process that needs
-them, not to the transcript. No tool does this: a tool could only print the
-command, which the model can write itself. The server's `instructions` tell
-the model to run `coffre run <project>/<env> [<project>/<env> …] --
-<command>` in the person's terminal. (`coffre login <url>` once per
-machine; `coffre run` itself is refused for anyone who cannot read the
-environment.)
+- **To the person (Read):** `show_secret_value` opens an approval whose page shows the value when
+  the person presses Reveal. The model hears that it was shown, and no value. It is the one MCP
+  call that may reach `POST /reveals` without Reveal values, since the value goes to the page
+  alone.
+- **To the model (Reveal values):** `reveal_secret_values` returns values in its result, with no
+  page: it is a read. The vault logs the reveal and its bulk limit applies. A whole environment's
+  reveal leaves out values marked sensitive, naming them. The text begins "These values are now
+  part of this conversation and its history", and the consent page warns when the scope is
+  ticked.
 
-The CLI signs in with its own device login, as the person, and the MCP
-connection grants it nothing.
-
-The server's `instructions`, which clients pass to the model, say the same
-in one paragraph:
-
-- never ask the person to paste a secret into the chat;
-- to set one, use `request_secret_value` or `generate_secret_value`;
-- to use secrets in a command, run it with `coffre run`, and avoid commands
-  that print them;
-- `reveal_secret_values` puts values into the conversation, so use it only
-  when the person wants the model to see them.
-
-**Without a shell** (a claude.ai chat), the model has nowhere to run it; the
-person can. The tool descriptions of
-`reveal_secret_values` and `show_secret_value` say plainly which one puts the
-value in front of the model.
+With a shell, values should go to the process that needs them, not the transcript. The server's
+`instructions` tell the model to run `coffre run <project>/<env> [<project>/<env> …] --
+<command>` in the person's terminal, to avoid commands that print values, never to ask for a
+secret in the chat, and to reveal values only when the person wants the model to see them. The
+CLI signs in with its own login; the MCP connection grants it nothing.
 
 ## 8. The audit log
 
-Every entry a request through MCP writes names its connection. The app's
-entries carry `via`: the client ID, its name, and the connection. The
-vault's entries carry the access token's ID in the `credentialId`
-correlation, as an exchanged CI credential's do, and that leads to the
-connection. The audit page shows the actor as "ada@acme.example via Claude
-Code".
+Every entry a request through MCP writes carries `via` (the connection, the client's ID and name,
+and the approval when there is one) and `credentialId`, the connection's ID, as an exchanged CI
+credential's entries carry theirs. The audit page shows "ada@acme.example via Claude Code".
 
 | Action | When |
 |---|---|
-| `mcp.connect` | consent approved (scopes asked and granted, client, redirect host) or denied |
-| `mcp.disconnect` | a connection revoked: by the person, an owner, the revocation endpoint, a reused code or refresh token |
-| `mcp.call` | each `tools/call`, with the tool and its arguments' paths; never a value. Refusals too: scope, capability, the API's own. A retry that only waits on its approval is not logged again |
-| `mcp.approve`, `mcp.deny` | the person's decision on coffre's page |
-| the change's own entries | `secret.write`, `access.grant`, … as today, with `via` and the approval ID |
+| `mcp.connect` | consent approved, with scopes asked and granted, or denied |
+| `mcp.token` | a code redeemed, a refresh (detail) |
+| `mcp.disconnect` | a connection ended, with its reason: `person`, `owner`, `revocation_endpoint`, `code_reused`, `refresh_reused`, `superseded` |
+| `mcp.read` | a read-only tool's call that went through (detail) |
+| `mcp.call` | a change's call that opens an approval, and every refusal: scope, too many approvals, a bad `requestState`, the API's own |
+| `mcp.approve`, `mcp.deny`, `mcp.cancel` | the person's decision, or the client's decline |
+| the change's own entries | `secret.write`, `access.grant`, …, with `via` |
 
-Calls made with read-only tools are detail, like sign-ins: they are in the
-log and its chain, but left out of `GET /api/audit` unless `detail=1`.
-Changes, reveals, approvals and refusals show by default. Token refreshes
-are detail.
+Detail actions are in the log and its chain, but `GET /api/audit` leaves them out unless
+`detail=1`, as it does sign-ins. A retry that only waits on its approval is not logged again.
+Entries name the tool and the paths in its arguments, never a value.
 
 ## 9. Connected apps
 
-- **UI.** The account page gets a **Connected apps** tab, a table with
-  these columns:
-  - the app: its name, its host, and an **Unverified** tag for registered
-    clients;
-  - its scopes;
-  - when it connected;
-  - its last use;
-  - its expiry;
-  - **Disconnect**, in its row.
+The account page's **Connected apps** tab lists each connection: name, host, **Unverified** for a
+registered client, scopes, last use, expiry, and **Disconnect**. An owner sees and disconnects
+anyone's on that person's page, as with sessions; the offboarding report lists them, and removal
+ends them through the generation. The CLI has `coffre apps [--json]` and `coffre apps revoke <id>
+[--apply]`; the API, `GET /api/apps` and `DELETE /api/apps/:id`.
 
-  A person's page shows an owner that person's connected apps, with
-  Disconnect, as owners may already revoke others' sessions. The offboarding
-  report lists them too, and removal ends them through the generation.
-- **CLI.** `coffre apps [--json]` and `coffre apps revoke <id> [--apply]`,
-  shaped like `coffre sessions`.
-- **API.** `GET /api/apps` lists your own; a member's report lists theirs;
-  `DELETE /api/apps/:id` disconnects. These routes join the UI parity map.
+**A step-up replaces.** A new connection that grants everything an earlier connection of the same
+client holds, and more, supersedes it, whether the client asked for the more or the person ticked
+it: the earlier one ends when the new one's code is redeemed (`mcp.disconnect`, `superseded`).
+One with the same scopes, on a second laptop say, stays.
 
 ## 10. Claude as the client
 
-Claude must work as a custom connector in claude.ai and Claude Desktop,
-including one an organization Owner adds for everyone, and in Claude Code.
-Anthropic's docs, read on 2026-10-05:
-[authentication](https://claude.com/docs/connectors/building/authentication),
-[building a server](https://claude.com/docs/connectors/building/index),
-[lazy authentication](https://claude.com/docs/connectors/building/lazy-authentication),
-[adding a connector](https://claude.com/docs/connectors/custom/add-unlisted),
-[Claude Code and MCP](https://code.claude.com/docs/en/mcp).
+coffre must work with Claude as a custom connector in claude.ai and Desktop (personal or added
+by an Owner for a whole organization) and in Claude Code. Most choices above follow
+[Claude's connector docs](https://claude.com/docs/connectors/building/authentication): one
+authorization server, since Claude reads only the first; the `scope` rules of the `401` and the
+step-up; a token endpoint that answers within 10 seconds and rotates refresh tokens.
 
-**What Claude requires, and what coffre does:**
+Claude Code speaks 2026-07-28 with URL elicitation, so it opens approvals itself. claude.ai,
+Desktop, mobile and Cowork speak 2026-07-28 for their tool calls (their setup probe sends a
+2025-11-25 `initialize`) and declare no elicitation, so they make changes through the link.
+coffre reads the capability on every request, so a client that gains it uses it with no change
+here. An org-wide connector shares Anthropic's one client ID, but each member connects as
+themselves.
 
-| Claude requires | coffre |
-|---|---|
-| `401` with `resource_metadata` to start sign-in; a `WWW-Authenticate` on a `200` is ignored | `401` before any MCP parsing |
-| `resource` equal to the URL the person enters | `https://<instance>/mcp`, and docs/mcp.md says to enter exactly that |
-| Claude uses only the first entry in `authorization_servers` | coffre lists exactly one |
-| CIMD only with `client_id_metadata_document_supported` and `none` in `token_endpoint_auth_methods_supported`; otherwise DCR | both are listed, and DCR is there too |
-| Hosted apps redirect to `https://claude.ai/api/mcp/auth_callback` | HTTPS on the document's own host, allowed |
-| Claude Code: CIMD `https://claude.ai/oauth/claude-code-client-metadata`, redirects to `http://localhost/callback` and `http://127.0.0.1/callback` on any port | loopback matched with the port ignored, `localhost` included |
-| S256 PKCE; `code_challenge_methods_supported` | yes |
-| Scopes come from the `401`'s `scope`, else `scopes_supported`; `offline_access` is added when listed | `scope="read"`; `offline_access` listed |
-| Step-up on `403 insufficient_scope`, whose `scope` should name everything still needed | the union of held and needed scopes; the body is a tool result saying how to grant it, for a client that doesn't step up (Claude Desktop didn't) |
-| Token endpoint takes form-urlencoded and answers in 10 s (refresh in 30 s); rotate refresh tokens; `invalid_grant` for a dead one | yes |
-| Tool results ~150,000 characters (hosted), 25,000 tokens (Claude Code); tool calls 240 s (hosted) | paged lists; approvals wait 25 s per round |
+**Reachability.** The hosted apps call `/mcp`, `/.well-known/…`, `/api/oauth/token` and
+`/api/oauth/register` from Anthropic's servers, `160.79.104.0/21`, so an IP allowlist must let
+that range in on those paths. The person's browser reaches the pages from wherever they are.
+Claude Code calls from the person's own machine.
 
-**Org-wide connectors.** An Owner adds the URL under Organization settings,
-Connectors. Each member then clicks Connect and goes through coffre's sign-in
-and consent as themselves. Every member's connection is their own, with
-their own scopes and their own grants behind them. The hosted apps share
-one client ID, Anthropic's CIMD, so coffre's Connected apps shows "Claude
-(claude.ai)" for each person who connected.
+## 11. Library
 
-**Where each surface lands:**
-
-| Surface | Protocol | URL elicitation | What coffre allows |
-|---|---|---|---|
-| Claude Code, v2 runtime (on by default from v2.1.232 where it fetches flags, v2.1.274 elsewhere) | 2026-07-28, which it asks for | yes: it declares `elicitation: {form: {}, url: {}}` and opens the browser | everything, with approvals |
-| Claude Code, v1 runtime | 2025-era | documented only on 2026-07-28 connections | everything, changes through the approval link |
-| claude.ai, Desktop, mobile, Cowork (custom connector, personal or org-wide) | 2026-07-28 for its tool calls; its connector-setup probe sends a 2025-11-25 `initialize` | declares none | everything, changes through the approval link |
-
-Without URL elicitation, a claude.ai connector makes changes through an
-approval link in the tool result, which the person opens on coffre (section
-16, answer 1). When claude.ai supports URL elicitation, it uses that
-instead, with no change to coffre: coffre reads the capability from each
-request.
-
-What claude.ai speaks was checked on 2026-10-05 from servers that logged it
-on 2026-09-26 and 2026-10-04: its user-facing client sends `server/discover`,
-`tools/list` and `tools/call` on 2026-07-28 with no session and no
-elicitation capability, and only its connector-setup probe opens with a
-2025-11-25 `initialize`, which coffre answers. A live check from claude.ai
-needs an instance it can reach.
-
-What Claude Code sends was checked on 2026-10-06, with Claude Code 2.1.291
-against a local stack:
-
-- **Authorize:** `scope=read offline_access` and `prompt=consent`, its
-  CIMD and a loopback redirect. Its **Re-authenticate** in `/mcp` asks again
-  for the scopes it last held.
-- **Requests:** 2026-07-28, with `elicitation: {form: {}, url: {}}` in
-  every request's capabilities.
-- **A `403 insufficient_scope`:** it asks the person whether to
-  re-authenticate "for the scope read write", opens the consent page,
-  with Write ticked, and retries the call once. If the person says not now,
-  the model reads Claude Code's own message, "needs additional permissions
-  (scope: "read write") — run /mcp to re-authenticate", not the body.
-- **A change:** a URL elicitation, "Approve on coffre: …", with Open in
-  browser, I'm done and Decline. The call it retries right after a step-up
-  doesn't show it: that call gets the approval link instead, and works the
-  same. Both made their change once the person approved on coffre's page.
-
-Claude Desktop, connected to Erwin's instance on 2026-10-06, was granted
-Read and never stepped up, so it could make no change until the consent
-page offered Write at connection (section 5). That is his report: a local
-stack can't be reached from claude.ai, so it was not checked here.
-
-**Reachability.** The hosted apps call coffre from Anthropic's servers,
-`160.79.104.0/21`. They reach `/mcp`, `/.well-known/…`, `/api/oauth/token`
-and `/api/oauth/register` from there. The person's browser reaches the
-consent and approval pages from wherever they are.
-
-- An instance on the open internet works as is.
-- An IP allowlist in front of it must let in `160.79.104.0/21`, on those
-  four paths at least.
-- Cloudflare Access in front blocks Claude's servers, because they hold no
-  Access identity. Bypassing Access for those paths, limited to Anthropic's
-  range, would work at the network level. But coffre's Access mode has no
-  tokens of its own, so v1 doesn't support it.
-- An instance inside a private network can use Anthropic's
-  [MCP tunnels](https://claude.com/docs/connectors/mcp-tunnels/overview).
-  This is untested.
-- Claude Code needs none of this: it calls from the person's own machine.
-
-## 11. Library: hand-written, with the official client in the tests
-
-coffre implements the protocol itself and doesn't take the official
-TypeScript SDK at run time. The SDK is
-[`@modelcontextprotocol/server`](https://www.npmjs.com/package/@modelcontextprotocol/server)
-2.x, which serves both eras and does run on Workers.
-
-| | Hand-written | SDK 2.x |
-|---|---|---|
-| Runtime dependencies | none new (zod is already there) | `@modelcontextprotocol/server` and `/core`, about 7.7 MB unpacked |
-| Surface used | one POST endpoint; 3 modern and 4 legacy methods; JSON answers only | all of MCP: tasks, subscriptions, SSE, sessions, stdio |
-| Release pace and the 7-day gate | none to follow | 2.0.0 on 27 July, 2.3.0 on 2 October: we would always be a release behind |
-| What we write anyway | the `401`/`403` gate, tokens, scopes, approvals, `requestState`, Origin | the same: the SDK "performs no token verification" and its entry is "deliberately validation-free" |
-| Wire correctness | ours to get right: header checks, Base64 names, error codes, eras | the SDK's |
-
-The part the SDK would own is the smallest: about 300 lines of JSON-RPC
-over one endpoint. The parts that make this safe are coffre's either way.
-So the wire is hand-written, and its correctness is held by the **official
-client**:
-
-- [`@modelcontextprotocol/client`](https://www.npmjs.com/package/@modelcontextprotocol/client),
-  exactly pinned and age-gated, as a dev dependency of the server's tests.
-- It connects to coffre in both eras, runs the OAuth flow, and runs MRTR
-  rounds against coffre's approvals.
-
-An independent implementation, written by the spec's authors, then fails
-the build whenever coffre's wire drifts. If the protocol later grows
-something we need (streaming, tasks), the SDK becomes the better trade, and
-the tools move over unchanged, since they are plain functions over the API.
+The wire is hand-written rather than built on the official server SDK: coffre needs one endpoint,
+a handful of methods and JSON answers, and what makes it safe (tokens, scopes, approvals) is
+coffre's either way. The official client, `@modelcontextprotocol/client`, is a dev dependency of
+the server's tests (`packages/server/test/mcp-fixture.ts`). It connects in both eras and runs the
+OAuth flow and MRTR rounds, so an independent implementation fails the build when coffre's wire
+drifts.
 
 ## 12. Storage
 
-One migration, adding three tables on both engines. It expands only:
+Three tables on both engines (`packages/db/src/schema.ts`):
 
-- **`oauth_clients`**: registered clients. Columns: ID, name, redirect URIs,
-  created at and from where, last use, revoked at. MACed over its ID, its
-  redirect URIs and its revocation.
-- **`mcp_connections`**: one row per approved authorization.
-  - Columns:
-    - principal, generation;
-    - client ID, its name and host as shown at consent, how it registered;
-    - scopes, redirect URI;
-    - the code's hash, challenge and expiry;
-    - the refresh token's hash and the previous one's;
-    - expiry, created, last used (time and address), revoked (when and by
-      whom).
-  - Its MAC covers every field that grants something. It is a fifth table
-    in [Sign-in rows](../architecture.md#sign-in-rows), and every change
-    checks the old MAC, as there.
-  - The principal and generation reference `principals`, as
-    credentials' do.
-- **`mcp_approvals`**: as in section 7. Not MACed: approving runs nothing
-  by itself. A changed row can only make the client report a false
-  outcome, or show the person a different change, which they then read
-  before approving: the page's Approve carries the digest of what it
-  showed, recomputed from the stored arguments on the server.
+- **`oauth_clients`**: registered clients: ID, name, redirect URIs, created at and from where,
+  revoked at. MACed over its ID, name, redirect URIs and revocation, so a database writer can't
+  add a redirect of their own to a client people approved. Each registration revokes up to ten
+  registrations over a week old that no connection names; nothing is deleted.
+- **`mcp_connections`**: the person (`user:<email>`) and generation; the client's ID, name and
+  host as shown, and how it registered; scopes and redirect URI; the code's hash, challenge and
+  expiry; the refresh token's hash and the previous one's; expiry, creation, last use (time and
+  address, written at most every five minutes), revocation (when, by whom); the passkey that
+  confirmed it. Its MAC covers every field that grants something, as for the other
+  [sign-in rows](../architecture.md#sign-in-rows). Where the vault keeps its log of changes
+  ([log-015.md](log-015.md)), making or ending a connection is also a change there, sealed by the
+  vault before the app commits it (`seal`), as for credentials.
+- **`mcp_approvals`**: as in section 7. Not MACed: approving runs nothing by itself. A changed row
+  can only make the client report a false outcome, or show the person a different change, which
+  they read before approving and whose digest the server recomputes from the stored arguments.
 
-A registration no connection names is revoked a week after it was made,
-ten at a time, by later registrations, and connects no more. Nothing is
-deleted, as nowhere in coffre (schema guarantee 3): the rows stay, at the
-pace the registration limits allow.
-
-Access tokens and `requestState` have no rows: both are MACed and checked
-against a connection. Last use is written once per five minutes at most,
-as for credentials.
-
-The previous release ignores all three tables, and old code can't verify an
-MCP token, since its credential check refuses the prefix. Until the
-migration runs, `/mcp` and the OAuth routes answer `503`, as trust bindings
-did before theirs.
+Access tokens and `requestState` have no rows: both are MACed and checked against a connection.
 
 ## 13. Security review points
 
-- **Consent phishing.** An attacker sends Ada a link to
-  `/oauth/authorize?client_id=https://evil.example/c.json&redirect_uri=https://evil.example/cb`.
-  The page shows `evil.example` as the app's host and as where the answer
-  goes, in larger type than the name the document claims. Redirects must be
-  HTTPS on the document's host, or loopback. Registered clients say
-  **Unverified**. Nothing is ever approved silently.
-  - What coffre doesn't stop: Ada approving `evil.example` anyway. She
-    then sees it in Connected apps, and every call it makes is in the log.
-  - Loopback-only clients get a warning, because any program on Ada's
-    machine can listen on a port.
-- **Token audience.**
-  - An MCP token is refused at `/api`, and an API credential at `/mcp`.
-  - `resource` must be coffre's MCP URL.
-  - Tokens carry their connection under a MAC, and the connection carries
-    its scopes under another.
-- **CSRF.**
-  - The consent and approval decisions are `POST`s to `/api`, with a
-    cookie, so they need `Sec-Fetch-Site: same-origin`.
-  - Both pages are unframeable (`frame-ancestors 'none'`).
-  - The consent request is checked again in full when it is posted.
-  - Codes need the PKCE verifier, and the `iss` parameter defeats mix-ups.
-- **A signed-in CLI on the agent's machine.** `coffre run` needs the CLI
-  signed in as the person, often on the machine the agent runs on. Whoever
-  can run commands there holds that session: `coffre export`, `coffre set`
-  and the rest act as the person, with none of MCP's scopes or approvals.
-  coffre keeps that session off the approval page's API, so an app can't
-  decide its own approvals with it, but it bounds nothing else: an agent
-  that has a shell beside a signed-in CLI has the person's access. Sign
-  the CLI in elsewhere, or not at all, to keep the agent to its scopes.
-- **Replaying an approval.**
-  - An approval is one stored change, for one person, under one
-    connection, and it acts once.
-  - A `requestState` is MACed and bound to that approval, that connection,
-    the call's digest and an expiry. It can't confirm a different call or
-    be used by another connection.
-  - The approval URL is not a credential: whoever opens it must be
-    signed in as its person.
-  - It expires in 10 minutes.
-- **Prompt injection.**
-  - **What we do:**
-    - Secret keys match `[A-Za-z_][A-Za-z0-9_]*`, and slugs are slugs, so
-      the names the model sees most can't carry sentences.
-    - Free text (display names, token labels, client names, audit
-      metadata) is returned as JSON data, never as instructions.
-    - No change happens without the person reading coffre's page. That
-      page, not the model's summary, is what they approve.
-    - Values never reach the model without Reveal values.
-  - **What we don't defend:**
-    - A model steered into proposing a harmful but well-formed change. The
-      page shows it, but the person must read it.
-    - With Reveal values, a value that itself carries instructions.
-    - With Reveal values, a model that reads a value and then passes it to
-      another tool or connector of the client's. This is why Reveal values is
-      opt-in, with its warning.
-    - A person who approves without reading.
-- **Approval fatigue.** At most five pending approvals per connection. An
-  identical call rejoins its approval. Each approval is shown alone, never
-  in bulk.
-- **Step-up.** A consent that grants all an earlier connection of the same
-  client holds and more supersedes it, whether the client asked for the
-  more or the person ticked it: the earlier one ends when the new
-  one's code is redeemed, logged as `mcp.disconnect`, `superseded`, and the
-  consent page says so. One with the same scopes, a second laptop, stays.
-- **Workers.** No isolate keeps a pending promise: a CIMD document or a
-  limiter answer is kept only once it has settled. No app transaction
-  stays open across a vault call. A held retry polls with plain queries
-  and holds no transaction.
+- **Consent phishing.** A link to
+  `/oauth/authorize?client_id=https://evil.example/c.json&redirect_uri=https://evil.example/cb`
+  shows `evil.example` as the app's host and where the answer goes, larger than the name it
+  claims. Redirects must be on the document's host, or loopback, which is flagged; registered
+  clients say Unverified; nothing is approved silently. Ada can still approve it; she then sees
+  it in Connected apps, and every call it makes is in the log.
+- **Already covered above:** token audience (section 4), CSRF (the decisions and the two reads
+  that work as the person need `Sec-Fetch-Site: same-origin`; both pages are unframeable), and
+  replay (an approval acts once; a `requestState` is bound to its approval, connection and call;
+  the approval URL is no credential).
+- **An agent driving the person's browser** (Claude in Chrome, a browser tool) could open the
+  link and press Approve: coffre sees a valid same-origin session. A passkey touch for that one
+  act is the control it can't pass, so connecting and Approve ask one of anyone with a passkey. A
+  person without one, under `optional`, stays exposed for the changes that need no fresh check
+  (secret writes), which the same agent could make through coffre's UI anyway.
+- **A signed-in CLI on the agent's machine.** `coffre run` needs the CLI signed in as the person,
+  often where the agent runs. Whoever runs commands there holds that session, and `coffre export`
+  or `coffre set` act as the person with none of MCP's scopes or approvals. The approval API
+  refuses that session, so an app can't decide its own approvals with it, but it bounds nothing
+  else. To keep an agent to its scopes, sign the CLI in elsewhere, or give the agent a scoped
+  personal token ([personal-tokens.md](personal-tokens.md)).
+- **Prompt injection.** Secret keys match `[A-Za-z_][A-Za-z0-9_]{0,127}` and slugs are slugs, so the
+  names the model sees most can't carry sentences; free text (names, labels, audit metadata) is
+  returned as JSON data. No change happens without the person reading coffre's page, and no value
+  reaches the model without Reveal values. Not defended: a well-formed harmful change the person
+  approves without reading; with Reveal values, a value carrying instructions, or a model passing
+  a value on to another tool.
+- **Approval fatigue.** Five pending at most per connection; an identical call rejoins its
+  approval; each is shown alone.
+- **Workers.** No isolate keeps a pending promise, no app transaction stays open across a vault
+  call, and a waiting retry polls with plain queries.
 
 ## 14. Conformance and tests
 
-`coffre-conformance` gains MCP checks, for both kinds:
+`coffre-conformance` checks, for both kinds (`packages/conformance/src/checks/mcp.ts`):
 
-1. **Connect.** The `401` and both metadata documents are as above. Then:
-   - a client registers;
-   - a seeded person signs in through the dev IdP and consents to Read;
-   - the code is exchanged;
-   - `server/discover` and `tools/list` succeed, on 2026-07-28 and through
-     a 2025-11-25 `initialize`;
-   - a CIMD client, served by the harness on loopback under a development
-     flag like trust bindings' loopback issuers, does the same.
-2. **Read can't write.** `archive_secret` and `reveal_secret_values` answer
-   `403 insufficient_scope`, with the right `scope`, and a tool result
-   saying how to grant it. The secret is still live, and the API refused
-   nothing on the token's behalf. A connection that asked for Read, with
-   Write ticked, gets a token whose `scope` is `read write`.
-3. **No change without approval.** With Write:
-   - without URL elicitation: `-32021`, and nothing changed;
-   - with it: `input_required`, and nothing changed;
-   - another person opening the approval is refused;
-   - a `requestState` replayed with other arguments is refused;
-   - the person approves, the change is made once, and the retry reports
-     it.
-4. **No value without Reveal values.** Every Read and Write tool's result is
-   searched for the seeded values, which must not appear. With Reveal values,
-   `reveal_secret_values` returns them.
-5. **Every call audited with the client.** Each call above has its entry
-   naming the client ID, and the change's own entries carry `via`.
-6. **Audience and lifecycle.**
-   - An MCP token at `/api`: `401`. A CLI session at `/mcp`: `401`.
-   - A reused refresh token or code revokes the connection.
-   - Disconnecting ends the token at the next call.
-   - A foreign `Origin`: `403`.
+1. **Connect.** Discovery, registration (a custom-scheme redirect left out), consent (another
+   site's answer refused), redemption and rotation; the tools on 2026-07-28 and after a
+   2025-11-25 `initialize`, with no session.
+2. **Read can't write.** `403 insufficient_scope`, `scope="read write"`, a result saying how to
+   grant Write, and nothing changed; Write ticked on a Read request gives `scope` `read write`.
+3. **No change without approval**, with or without URL elicitation. Another person, a forged
+   digest, another site and the person's CLI session can neither open nor decide it; Approve acts
+   once; the retry reports it; a replayed `requestState` is refused; a typed value is written, a
+   generated one reaches nobody.
+4. **No value without Reveal values**: every Read and Write result is searched for the seeded
+   values.
+5. **Every call audited with the client**, the changes' entries with `via`.
+6. **Audience and lifecycle.** Tokens refused where they don't belong (`401`), a foreign `Origin`
+   (`403`), reused codes and refresh tokens ending the connection, disconnection taking effect at
+   the next call, each end logged with its reason.
 
-The server's own suites (both engines) test each piece, run the official
-client against it, and test the transaction rule for every tool. CI runs
-all of it: lint, typecheck, `pnpm test`, `test:sqlite`, `test:schema`, both
-conformance runs, `test:compat` and `test:consumer`.
-
-## 15. Pull requests
-
-Each one is green, reviewable alone, and rebased on #137 (grants on all
-projects), #134 (permanent deletion), the environment features and UI
-parity as they merge.
-
-1. **The authorization server.**
-   - Migration, `oauth_clients`, `mcp_connections`.
-   - Metadata, DCR, CIMD.
-   - The consent page, codes, tokens, refresh, revocation, limits.
-   - `signin({ mcp })`, `init`, `update`, both examples.
-   - `/mcp` answers only `401`, or `server/discover` once authenticated.
-2. **The MCP endpoint with Read.** Both eras, the tools,
-   the scope gate in `serveApi`, the audit's `via`, and the conformance
-   checks 1, 2, 5 and 6.
-3. **Changes with approvals.** `mcp_approvals`, the approval page, MRTR, the
-   Write and Manage access tools, and check 3.
-4. **Values.** `request_secret_value`, `generate_secret_value`,
-   `show_secret_value`, `reveal_secret_values`, the consent warning, and
-   check 4.
-5. **Connected apps.** The account tab, the person's page, the offboarding
-   report, `coffre apps`, and docs/mcp.md.
-
-## 16. Open questions for Erwin
-
-All four are settled. Erwin answered 1, 3 and 4 as recommended (D44): Claude,
-in claude.ai's connectors and in Claude Code, is to support every feature,
-and he tests its flows by hand.
-
-- **1: the approval link**, with the cheap bounds; a passkey step-up on
-  Approve is the follow-up.
-- **3: replaced by D62.** Older protocol versions are not read-only: a
-  2025-era client makes changes through answer 1's link, as any client
-  without URL elicitation does. Only a connection's scopes make it
-  read-only.
-- **4: read-only calls are detail**, under Show details (`mcp.read`; a
-  refusal is `mcp.call`, shown).
-
-PR 3 checked what claude.ai speaks (section 10): 2026-07-28, without
-elicitation. So it makes changes through answer 1's link. Since the link
-works in any revision, Erwin then extended it to 2025-era clients (D62).
-
-1. **Clients that can't elicit, claude.ai today.**
-   - **Default (D31):** refuse changes and showing values, so a claude.ai
-     connector can read and, with Reveal values, receive values.
-   - **Alternative:** for such clients, the tool result carries the
-     approval link as text for the model to show the person ("Open
-     https://secrets.acme.example/approvals/7QF2… to approve"). The client
-     retries or calls again for the outcome. The person still confirms the
-     exact change on coffre's page, signed in as themselves, so what coffre
-     enforces is unchanged.
-   - **What we'd lose:** the client no longer vouches that the link came
-     from coffre. A manipulated model could show a lookalike link, though
-     it could print one at any time anyway.
-   - **Threat model.** The model now holds the URL, which brings three
-     threats:
-     1. **An agentic browser that holds the person's cookies**, such as
-        Claude in Chrome or the agent's own browser tool, opens the link and
-        clicks Approve. coffre sees a valid same-origin session and can't
-        tell it from the person, so the confirmation fails. The same agent
-        could already make the change through coffre's UI with that
-        session; the link only hands it the exact target.
-     2. **A lookalike link**, injected into the model's output, phishes the
-        sign-in.
-     3. **A forwarded link** is opened by someone else, who is refused.
-   - **What resists the agentic browser**, from weakest to strongest:
-     - **Cheap bounds**, which ship either way, though none stops an agent:
-       single use, bound to the person, connection and digest, a 5-minute
-       expiry, a POST-only Approve, `frame-ancestors 'none'`, same-origin.
-     - **A recent sign-in.** An IdP session lets an agent sign in again
-       silently, and `prompt=login` is per provider; GitHub has none.
-     - **A passkey with user verification** (WebAuthn,
-       `userVerification: required`) on Approve. This is the one control
-       an agent can't pass. It needs per-person passkeys, a new feature,
-       and it would protect elicitation clients that drive a browser too.
-     - **Approval on another device.** Stronger, and much heavier.
-   - **Recommendation:** the alternative, with the cheap bounds. Say plainly
-     that an agent driving the person's signed-in browser can approve, just
-     as it can use coffre's UI. Passkeys on approvals are the follow-up.
-     Without the alternative, the org-wide claude.ai connector can't change
-     anything at all.
-2. **Custom-scheme redirects** (`cursor://…`, `vscode://…`). *Settled: v1
-   refuses them, and DCR leaves them out of a registration.* D31 says to
-   refuse non-HTTPS. coffre allows loopback HTTP because the spec and Claude
-   Code need it. By their own docs, no mainstream client needs a custom
-   scheme:
-   - **Cursor** documents `http://localhost:8787/callback` and
-     `https://www.cursor.com/agents/mcp/oauth/callback`, through DCR. Its
-     `cursor://anysphere.cursor-mcp/oauth/callback` is an undocumented
-     fallback for when that port is taken. DCR leaves it out (section 4).
-   - **VS Code** has a CIMD at `https://vscode.dev/oauth/client-metadata.json`,
-     redirecting to `https://vscode.dev/redirect` and
-     `http://127.0.0.1:33418/`.
-   - **Windsurf** documents no MCP redirect.
-   - **Claude**: section 10.
-
-   v1 refuses custom schemes. If one is ever needed, the future path, and
-   the narrowest allowance, is a reverse-domain scheme (RFC 8252 §7.1, such as
-   `com.example.app:/cb`), declared in a CIMD document and matched exactly,
-   with a warning on the consent page. Never through DCR, and never a
-   one-word scheme.
-3. **2025-era clients: reads only.** *Superseded by D62: they get the
-   approval link.* The full `-32042` path would let them
-   make changes. It needs a session ID that carries the client's declared
-   capabilities under a MAC. Claude Code's 2025 runtime doesn't declare URL
-   elicitation, and the hosted apps don't document it, so it would buy
-   little. **Recommendation:** reads only.
-4. **Read-only calls in the audit page.** **Recommendation:** detail, like
-   sign-ins: in the log, shown with "Show details". Changes and reveals show
-   by default.
-
-## Appendix: docs/mcp.md, the user guide (draft)
-
-This becomes `docs/mcp.md` with the fifth pull request.
-
-> ### Connect Claude, or another MCP client, to coffre
->
-> coffre serves MCP at `https://<your instance>/mcp`. Clients sign in as
-> you, with your coffre sign-in, and can never do more than you can. They
-> can do less: you choose what they may do when you connect them.
->
-> **Scopes.** You grant these on coffre's consent page:
-> - **Read**, always: projects, environments, key names, history, access,
->   the audit log.
-> - **Write**: set, generate, rename, archive and restore secrets; create
->   projects and environments.
-> - **Reveal values**: secret values sent to the client. They become part of
->   the conversation.
-> - **Manage access**: grants, members, service tokens, trusted workloads.
->
-> Tick what a client may do when you connect it: clients ask for Read
-> alone. One that needs more later may ask, and you see the consent page
-> again.
->
-> **Every change is confirmed on coffre.** When a client wants to change
-> something, coffre opens its own page with the exact change, and nothing
-> happens until you approve it there. A client never types a secret value:
-> you type it on coffre's page, or coffre generates it.
->
-> **Claude Code.**
-> `claude mcp add --transport http coffre https://secrets.acme.example/mcp`,
-> then `/mcp` to sign in. To run code with secrets, Claude uses
-> `coffre run <project>/<environment> -- <command>`, so the values go to the
-> command, not the conversation.
->
-> **claude.ai and Claude Desktop.** Under Customize, Connectors, choose
-> **Add custom connector** and enter `https://secrets.acme.example/mcp`
-> exactly. Leave the OAuth client on "Use Claude's published identity". On
-> Team and Enterprise plans, an Owner adds it once under Organization
-> settings, Connectors, and each person then clicks **Connect** and signs in
-> as themselves. Claude's apps can't open coffre's approval page
-> themselves, so Claude shows you its link, and you open it.
->
-> **Reaching your instance.** claude.ai and Desktop connect from
-> Anthropic's servers (`160.79.104.0/21`). An instance behind an IP
-> allowlist must let that range in. One behind Cloudflare Access can't be
-> connected yet. Claude Code connects from your machine.
->
-> **Connected apps.** Your account page lists every client you connected,
-> its scopes and its last use, and disconnects any of them. So does
-> `coffre apps`. Every call a client makes is in the audit log as "you via
-> <client>".
+The server's own suites (`packages/server/test/mcp-endpoint.test.ts`, `mcp-oauth.test.ts`,
+`mcp-approvals.test.ts`, `mcp-values.test.ts` and others, on both engines) test each piece and
+run the official client against coffre, under the integration fixture that rejects a vault call
+made inside a transaction.
