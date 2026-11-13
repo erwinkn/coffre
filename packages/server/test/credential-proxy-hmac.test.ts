@@ -305,7 +305,7 @@ test('a raw sign is refused before its body is read: the handle, the signer, its
   assert.deepEqual(await asked('sumsub-key', {}, 'market/dev', `coffre_use_${'x'.repeat(43)}`).then(([status]) => status), 401);
   assert.deepEqual(await asked('sumsub-key', { authorization: null }).then(([status]) => status), 401);
   assert.match((await asked('nope', {}))[1], /\?sign= names the hmac\(\) signer of a raw message/);
-  assert.deepEqual(await asked('yousign', {}), [404, '?sign= names the hmac() signer of a raw message: yousign is a verifier, which checks signatures and makes none']);
+  assert.deepEqual(await asked('yousign', {}), [404, "?sign= names the hmac() signer of a raw message: its deployment's credentialProxy names them, signers: { … }; yousign is a verifier, which checks signatures and makes none"]);
   assert.deepEqual((await asked('dfns-key', {}))[0], 415);
   assert.deepEqual((await asked('sumsub-key', { 'content-length': String(SUMSUB_BYTES + 1) }))[0], 413);
   assert.deepEqual((await asked('iframe-token', { 'content-length': String(64 * 1024 + 1) }))[0], 413);

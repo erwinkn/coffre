@@ -1545,11 +1545,10 @@ run` calls the same `credential(name).verify` from
   one costs what a proxied request does: one vault call and its
   entries (`request-cost.test.ts`). A private key's signatures stay logged
   one by one, each naming its message: what DFNS's key signs moves money.
-- **Not yet.** `POLICY_SEAL_KEY` seals with HMAC-SHA256 too (`v1:` and
-  hex), but keyed with the 32 bytes its hex value decodes to, not its
-  text: that needs an option saying how the value is written (`key:
-  'hex'`), which nobody uses yet. The AES-GCM key Equisafe derives from it
-  with HKDF is encryption, which neither `sign` nor `verify` covers.
+- **A key written as text.** `POLICY_SEAL_KEY` seals with HMAC-SHA256 too
+  (`v1:` and hex), keyed with the 32 bytes its hex value decodes to:
+  `keyEncoding: 'hex'`. The AES-GCM keys Equisafe derives are a cipher's
+  (below).
 
 Lemonway documents no signature on its notifications: its webhook pages
 describe a URL, a method and a content type, form-encoded or JSON, with
@@ -1558,6 +1557,60 @@ secret or algorithm. Equisafe's check (`x-signature`, hex HMAC-SHA256)
 matches no scheme Lemonway publishes; Lemon Squeezy, another company,
 signs exactly so. Whether Lemonway sends it at all is for Lemonway's
 support to say, before the app relies on it.
+
+**Encrypting: AES-256-GCM (0.14.7, built).** Equisafe keeps a few
+values encrypted in its database, a Pimlico session, billing providers'
+API tokens, owners' signatures, each under an AES-256-GCM key it derives
+from a root key. A cipher holds such a key in coffre, and the app asks
+it to encrypt or decrypt:
+
+    ciphers: { 'billing-tokens': aesGcm('BILLING_TOKEN_KEY', { keyEncoding: 'hex' }) }
+
+    const { iv, ciphertext, tag } = await credential('billing-tokens').encrypt(token);
+    const plaintext = await credential('billing-tokens').decrypt({ iv, ciphertext, tag });
+
+On the wire, `POST /use/<project>/<env>` with `{ encrypt: { credential,
+plaintext, aad? } }` answers `{ iv, ciphertext, tag }`, and `{ decrypt:
+{ credential, iv, ciphertext, tag, aad? } }` answers `{ plaintext }`,
+each byte string base64url. The app builds its own stored format from
+the three parts, `ps1:` and base64url of IV, ciphertext and tag for
+Equisafe's payer session, `btv1:iv:tag:ciphertext` in base64 for its
+billing tokens.
+
+- **The key, exactly.** The value holds the key's 32 bytes, in hex,
+  base64 or base64url as `keyEncoding` says (`keyBytes`, as an `hmac()`'s).
+  coffre derives nothing: no HKDF, no hash of a passphrase, no UTF-8 key.
+  A key derived from a root key is derived once, outside, and stored as
+  its bytes. A value that decodes to any other length, or not at all, is
+  a 409 naming the key, never its value.
+- **AES-256-GCM alone,** a 12-byte IV and the full 16-byte tag, in
+  WebCrypto, the same on Workers and Node; no option for another mode, key
+  size or tag length.
+- **The IV is coffre's.** Each encrypt draws 12 fresh bytes from
+  `crypto.getRandomValues`; an `iv` sent with it is a 400. Random IVs keep
+  the chance that two encryptions share one below 2^-32 for about 2^32
+  encryptions per key (NIST SP 800-38D): past that, rotate the key.
+- **One answer to a failed decrypt.** A wrong key, IV, tag, AAD or
+  ciphertext answers `{ plaintext: null }`, as a verify answers `{ valid:
+  false }`, the same bytes whichever it was. Malformed input is a 400: not
+  base64url, an IV that is not 12 bytes, a tag that is not 16. A
+  plaintext (or ciphertext) with its AAD past `maxBytes`, 64 KiB unless
+  set and 1 MiB at most, is a 413; there is no raw form.
+- **Opened, logged and limited as an HMAC secret.** Once per handle or
+  session, environment and name for `cacheSeconds`, one `credential.use`
+  entry (`cipher: true`) naming the cipher, never the plaintext, the AAD
+  or the IV. A narrowed session encrypts or decrypts only with a cipher it
+  names. A cipher's name is no credential's, tunnel's, signer's or
+  verifier's, and asking one kind for another's operation is a 404 naming
+  the map the name is in.
+- **What it protects, and what not.** The key stays out of the app: a
+  leaked environment, log or memory dump of the app holds no key, and
+  every use is in coffre's log and under its limits. But whoever may use
+  the cipher can decrypt anything encrypted under it, and encrypt
+  anything: an app compromised while it runs decrypts what it can reach,
+  for as long as its handle or session stands. A revocation ends that
+  within `cacheSeconds`; a stolen database without the app's access to
+  coffre decrypts nothing.
 
 **Later: SDK credential files.** A JWT signed with a service account's
 key, and an SDK that reads a credentials file (Google's service-account

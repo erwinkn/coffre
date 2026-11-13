@@ -12,6 +12,17 @@
   value outside the encoding's alphabet or padding is a 409 naming the key, and
   nothing is signed or checked with it. Without `keyEncoding`, nothing
   changes.
+- **AES-256-GCM: `ciphers` and `aesGcm()`.** A third map beside `signers`
+  and `verifiers`: `ciphers: { 'billing-tokens': aesGcm('BILLING_TOKEN_KEY',
+  { keyEncoding: 'hex' }) }`. The app sends plaintext and gets `{ iv,
+  ciphertext, tag }` back, or the reverse, with `credential(name).encrypt(plaintext,
+  aad?)` and `.decrypt({ iv, ciphertext, tag }, aad?)`, the workload SDK's
+  too; the key never leaves coffre. The key is exactly 32 bytes after
+  decoding (a 409 naming the key otherwise), coffre derives nothing, and
+  each encrypt draws its own 12-byte IV. A failed decrypt answers `{
+  plaintext: null }` whatever was wrong. Opened, logged (`cipher: true`) and
+  limited as an HMAC secret; `maxBytes` 64 KiB unless set, 1 MiB at most.
+  `coffre serve` forwards it as it is: no new sidecar.
 - **A key in the path: `path()`.** Telegram's Bot API takes its token in
   the URL's path (`/bot<token>/sendMessage`, and files under
   `/file/bot<token>/…`), so a credential may now name a segment's

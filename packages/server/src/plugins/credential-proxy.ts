@@ -293,6 +293,20 @@ export function hmac(key: string, options: { encoding: Encoding; prefix?: string
   return { kind: 'hmac', key, ...options };
 }
 
+/** An AES-256-GCM key coffre encrypts and decrypts with for the app: the key that holds it, how its value writes the 32 bytes, and how much it takes. */
+export type Cipher = { kind: 'aes-gcm'; key: string; keyEncoding: Encoding; maxBytes?: number; limit?: Limits };
+
+/**
+ * An AES-256-GCM key the app never holds, among `ciphers`: `credential(name).encrypt(plaintext, aad?)` and
+ * `.decrypt({ iv, ciphertext, tag }, aad?)`. The key is exactly 32 bytes, written in `keyEncoding`, `hex`, `base64` or
+ * `base64url`: `aesGcm('BILLING_TOKEN_KEY', { keyEncoding: 'hex' })`. coffre derives nothing: a key made from a
+ * passphrase is derived once, outside, and stored as its bytes. `maxBytes` is the longest plaintext with its AAD, 64 KiB
+ * unless set, 1 MiB at most; `limit`, as a credential's.
+ */
+export function aesGcm(key: string, options: { keyEncoding: Encoding; maxBytes?: number; limit?: Limits }): Cipher {
+  return { kind: 'aes-gcm', key, ...options };
+}
+
 export type CredentialProxyOptions = {
   /** By name, as the proxy's URLs say it: lowercase letters, digits and dashes. */
   credentials: Record<string, Credential>;
@@ -302,6 +316,8 @@ export type CredentialProxyOptions = {
   signers?: Record<string, Signer>;
   /** HMAC secrets, by name as credentials are, that coffre checks signatures with for the app, and never signs with: an inbound webhook's, `{ yousign: hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) }`. */
   verifiers?: Record<string, Hmac>;
+  /** AES-256-GCM keys, by name as credentials are, that coffre encrypts and decrypts with for the app: `{ 'billing-tokens': aesGcm('BILLING_TOKEN_KEY', { keyEncoding: 'hex' }) }`. */
+  ciphers?: Record<string, Cipher>;
   /**
    * How often an open tunnel checks its handle still stands, ending when it
    * does not: 60 seconds unless set. A workload's tunnel stops within 15
@@ -461,8 +477,9 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const tunnels = new Map(Object.entries(options.tunnels ?? {}).map(([name, tunnel]) => [name, checkTunnel(name, tunnel, credentials, options.insecureUpstreams === true)]));
   const signers = new Map(Object.entries(options.signers ?? {}).map(([name, signer]) => [name, checkSigner(name, signer, credentials, tunnels, new Map(), 'signer')]));
   const verifiers = new Map(Object.entries(options.verifiers ?? {}).map(([name, verifier]) => [name, checkSigner(name, verifier, credentials, tunnels, signers, 'verifier') as Hmac]));
+  const ciphers = new Map(Object.entries(options.ciphers ?? {}).map(([name, cipher]) => [name, checkSigner(name, cipher, credentials, tunnels, signers, 'cipher', verifiers) as Cipher]));
   // What a message as JSON takes, read whole: 1 MiB at most, whatever a signer's longer `maxBytes`, which it signs raw.
-  const messageBytes = Math.min(Math.max(...[...signers.values(), ...verifiers.values()].map(longest), MESSAGE_BYTES), MAX_MESSAGE_BYTES);
+  const messageBytes = Math.min(Math.max(...[...signers.values(), ...verifiers.values(), ...ciphers.values()].map(longest), MESSAGE_BYTES), MAX_MESSAGE_BYTES);
   const recheckMs = (options.recheckSeconds ?? 60) * 1000;
   if (!(recheckMs > 0 && recheckMs <= 3_600_000)) throw new Error('credentialProxy: recheckSeconds is above 0, an hour at most');
   const cacheMs = (options.cacheSeconds ?? 60) * 1000;
@@ -477,7 +494,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       prefix: '/use',
       fetch: async (request, coffre) => {
         try {
-          return await serve(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
+          return await serve(request, coffre, { credentials, groups, tunnels, signers, verifiers, ciphers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -485,7 +502,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       },
       socket: async (request, coffre) => {
         try {
-          return await open(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
+          return await open(request, coffre, { credentials, groups, tunnels, signers, verifiers, ciphers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -517,7 +534,8 @@ type Proxy = {
   signers: Map<string, Signer>;
   /** HMAC secrets that check signatures and make none. */
   verifiers: Map<string, Hmac>;
-  /** The longest message any signer or verifier takes. */
+  ciphers: Map<string, Cipher>;
+  /** The longest message any signer, verifier or cipher takes. */
   messageBytes: number;
   insecure: boolean;
   recheckMs: number;
@@ -625,6 +643,7 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   const credential = proxy.credentials.get(place[2]!);
   if (credential === undefined && proxy.signers.has(place[2]!)) return failure(404, `${place[2]} is a signer, which reaches no upstream: credential(${JSON.stringify(place[2])}).sign(message)`);
   if (credential === undefined && proxy.verifiers.has(place[2]!)) return failure(404, `${place[2]} is a verifier, which reaches no upstream: credential(${JSON.stringify(place[2])}).verify(message, signature)`);
+  if (credential === undefined && proxy.ciphers.has(place[2]!)) return failure(404, `${place[2]} is a cipher, which reaches no upstream: credential(${JSON.stringify(place[2])}).encrypt(plaintext)`);
   if (credential === undefined) return failure(404, `this instance has no credential ${JSON.stringify(place[2])}: its deployment's credentialProxy names them`);
   return forward(request, coffre, proxy, `${place[0]}/${place[1]}`, credential, raw.slice(3), url.search, peeked.get(credential));
 }
@@ -648,9 +667,16 @@ async function madeFor(coffre: PluginContext, proxy: Proxy, handle: string): Pro
   return paths;
 }
 
-/** The signers and verifiers, by name: each a key the app holds the handle for, which coffre computes with. */
-function keyed(proxy: Proxy): [string, Signer][] {
-  return [...proxy.signers, ...proxy.verifiers];
+/** The signers, verifiers and ciphers, by name: each a key the app holds the handle for, which coffre computes with. */
+function keyed(proxy: Proxy): [string, Signer | Cipher][] {
+  return [...proxy.signers, ...proxy.verifiers, ...proxy.ciphers];
+}
+
+/** Which of the deployment's maps holds `name`, said to a request that asks it for what another kind does. */
+function heldAs(proxy: Proxy, name: string): string {
+  if (proxy.verifiers.has(name)) return `; ${name} is a verifier, which checks signatures and makes none`;
+  if (proxy.ciphers.has(name)) return `; ${name} is a cipher, which encrypts and decrypts: credential(${JSON.stringify(name)}).encrypt(plaintext)`;
+  return proxy.signers.has(name) ? `; ${name} is a signer: credential(${JSON.stringify(name)}).sign(message)` : '';
 }
 
 /**
@@ -1027,7 +1053,7 @@ async function compute(request: Request, coffre: PluginContext, proxy: Proxy, pa
   // Read up to what the longest message takes, as base64url in JSON beside the rest.
   const raw = await boundedBody(request, Math.ceil(proxy.messageBytes / 3) * 4 + 4096);
   if (raw === null) return failure(413, `a message to sign or verify is at most ${sized(proxy.messageBytes)} here as JSON; a longer one to an hmac() signer whose maxBytes takes it goes raw, its bytes as the body: POST ?sign=<signer>, Content-Type: application/octet-stream, as @coffre/client sends it`);
-  type Asked = { presign?: Record<string, unknown>; sign?: Record<string, unknown>; verify?: Record<string, unknown> };
+  type Asked = { presign?: Record<string, unknown>; sign?: Record<string, unknown>; verify?: Record<string, unknown>; encrypt?: Record<string, unknown>; decrypt?: Record<string, unknown> };
   let asked: Asked | null = null;
   try {
     const parsed: unknown = JSON.parse(new TextDecoder().decode(raw ?? new Uint8Array(0)));
@@ -1036,23 +1062,29 @@ async function compute(request: Request, coffre: PluginContext, proxy: Proxy, pa
     asked = null;
   }
   // What it asks for, and the credential or signer it uses, which a workload's `credential:` freeze and limits name.
-  const operation = asked?.presign !== undefined ? 'presign' : asked?.sign !== undefined ? 'sign' : asked?.verify !== undefined ? 'verify' : null;
+  const operation = (['presign', 'sign', 'verify', 'encrypt', 'decrypt'] as const).find((one) => asked?.[one] !== undefined) ?? null;
   if (asked === null || operation === null) {
-    return failure(400, `send { presign: { credential, path, method, expiresIn } }, { sign: { credential, message } } or { verify: { credential, message, signature } } as JSON`);
+    return failure(400, `send { presign: { credential, path, method, expiresIn } }, { sign: { credential, message } }, { verify: { credential, message, signature } }, { encrypt: { credential, plaintext, aad? } } or { decrypt: { credential, iv, ciphertext, tag, aad? } } as JSON`);
   }
   const given = asked[operation] ?? {};
   const name = typeof given.credential === 'string' ? given.credential : '';
   // A verifier verifies, and an HMAC signer too, which could check a signature by making it: a private key's is no HMAC.
   const signer = operation === 'sign' ? proxy.signers.get(name) : operation === 'verify' ? (proxy.verifiers.get(name) ?? proxy.signers.get(name)) : undefined;
   const credential = operation === 'presign' ? proxy.credentials.get(name) : undefined;
+  const cipher = operation === 'encrypt' || operation === 'decrypt' ? proxy.ciphers.get(name) : undefined;
   if (operation === 'sign' && signer === undefined) {
-    return failure(404, `sign names a signer of this instance's: its deployment's credentialProxy names them, signers: { … }${proxy.verifiers.has(name) ? `; ${name} is a verifier, which checks signatures and makes none` : ''}`);
+    return failure(404, `sign names a signer of this instance's: its deployment's credentialProxy names them, signers: { … }${heldAs(proxy, name)}`);
   }
-  if (operation === 'verify' && signer?.kind !== 'hmac') return failure(404, 'verify names a verifier of this instance\'s, or a signer of its that is hmac(…): its deployment\'s credentialProxy names them, verifiers: { … }');
+  if (operation === 'verify' && signer?.kind !== 'hmac') return failure(404, `verify names a verifier of this instance's, or a signer of its that is hmac(…): its deployment's credentialProxy names them, verifiers: { … }${proxy.ciphers.has(name) ? heldAs(proxy, name) : ''}`);
+  if ((operation === 'encrypt' || operation === 'decrypt') && cipher === undefined) return failure(404, `${operation} names a cipher of this instance's: its deployment's credentialProxy names them, ciphers: { … }${heldAs(proxy, name)}`);
   if (operation === 'presign' && credential?.inject.kind !== 'sigv4') return failure(404, 'presign names a credential of this instance\'s that signs with sigv4()');
-  const caller = await workloadOf(request, coffre, { place: path, credential: name, body: await bodyDigest(raw ?? new Uint8Array(0)), ...countsOf(name, (signer ?? credential!).limit) });
+  const caller = await workloadOf(request, coffre, { place: path, credential: name, body: await bodyDigest(raw ?? new Uint8Array(0)), ...countsOf(name, (signer ?? cipher ?? credential!).limit) });
   if (caller instanceof Response) return caller;
-  const run = (who: User, at: string) => (operation === 'presign' ? presign(coffre, proxy, at, who, credential!, given) : operation === 'sign' ? sign(coffre, proxy, at, who, name, signer!, given) : verify(coffre, proxy, at, who, name, signer as Hmac, given));
+  const run = (who: User, at: string) =>
+    operation === 'presign' ? presign(coffre, proxy, at, who, credential!, given)
+      : operation === 'sign' ? sign(coffre, proxy, at, who, name, signer!, given)
+        : operation === 'verify' ? verify(coffre, proxy, at, who, name, signer as Hmac, given)
+          : crypt(coffre, proxy, at, who, name, cipher!, operation, given);
   if (caller !== null) return answering(caller, async () => (caller.path === null ? failure(409, 'name the environment, POST /use/<project>/<environment>: this session reaches none, or several, or one gone') : run(caller, caller.path)));
   if (path === null) return failure(405, 'GET only: a handle names its environment, POST /use/<project>/<environment>');
   const handle = bearer(request);
@@ -1114,6 +1146,48 @@ async function verify(coffre: PluginContext, proxy: Proxy, path: string, who: Us
   return answer({ valid: await hmacVerify(secret, message, asked.signature, { encoding: verifier.encoding, prefix: verifier.prefix ?? '' }) });
 }
 
+/** AES-GCM's IV and tag, the only lengths a cipher takes: a random 96-bit IV, the full 128-bit tag. */
+const IV_BYTES = 12;
+const TAG_BYTES = 16;
+
+/**
+ * AES-256-GCM with a cipher's key, for the app that holds the handle, or the workload, every byte string base64url:
+ * `{ encrypt: { credential, plaintext, aad? } }` answers `{ iv, ciphertext, tag }`, under an IV of 12 bytes coffre draws
+ * for each, which no caller gives; `{ decrypt: { credential, iv, ciphertext, tag, aad? } }` answers `{ plaintext }`, or
+ * `{ plaintext: null }` whatever is wrong, the key, IV, tag, AAD or ciphertext, as verify answers `{ valid: false }`. The
+ * key is opened as an hmac()'s secret is, logged once a minute, and never leaves coffre; nor is what goes through logged.
+ */
+async function crypt(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, cipher: Cipher, operation: 'encrypt' | 'decrypt', asked: Record<string, unknown>): Promise<Response> {
+  const sealing = operation === 'encrypt';
+  if (sealing && asked.iv !== undefined) return failure(400, 'encrypt draws its own IV for each plaintext: send none');
+  const text = messageOf(sealing ? asked.plaintext : asked.ciphertext);
+  const aad = asked.aad === undefined ? new Uint8Array(0) : messageOf(asked.aad);
+  const iv = sealing ? crypto.getRandomValues(new Uint8Array(IV_BYTES)) : messageOf(asked.iv);
+  const tag = sealing ? new Uint8Array(TAG_BYTES) : messageOf(asked.tag);
+  if (text === null || aad === null || iv?.byteLength !== IV_BYTES || tag?.byteLength !== TAG_BYTES) {
+    return failure(400, sealing ? 'encrypt a plaintext, and an aad if any, given as base64url' : 'decrypt an iv of 12 bytes, a ciphertext and a tag of 16, and an aad if any, each base64url');
+  }
+  if (text.byteLength + aad.byteLength > longest(cipher)) return failure(413, `${name} ${operation}s ${sized(longest(cipher))} at most, with its AAD: its aesGcm()'s maxBytes takes more`);
+  if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: name })) return failure(403, `this narrowed session may not ${operation} with ${name}`, 'narrowed');
+  const { values } = await valuesFor(coffre, proxy, who, path, { name, keys: [cipher.key] }, { cipher: true });
+  const bytes = keyBytes(values[cipher.key]!, cipher.keyEncoding);
+  // What is wrong with the value is said, never the value: no other length is AES-256's, and none is made one.
+  if (bytes?.byteLength !== 32) throw new CoffreError(409, 'conflict', `${path}'s ${cipher.key} is no AES-256 key, which ${name} reads as exactly 32 bytes written in ${cipher.keyEncoding}`);
+  const key = await crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, [operation]);
+  const params = { name: 'AES-GCM', iv, additionalData: aad, tagLength: TAG_BYTES * 8 };
+  // WebCrypto's ciphertext ends with its tag.
+  if (sealing) {
+    const sealed = Buffer.from(await crypto.subtle.encrypt(params, key, text));
+    return answer({ iv: Buffer.from(iv).toString('base64url'), ciphertext: sealed.subarray(0, -TAG_BYTES).toString('base64url'), tag: sealed.subarray(-TAG_BYTES).toString('base64url') });
+  }
+  try {
+    return answer({ plaintext: Buffer.from(await crypto.subtle.decrypt(params, key, Buffer.concat([text, tag]))).toString('base64url') });
+  } catch {
+    // One answer for every failure, and nothing of WebCrypto's error: which part was wrong is no one's to learn.
+    return answer({ plaintext: null });
+  }
+}
+
 /**
  * A signature of the request's body, raw (`Content-Type: application/octet-stream`), by the `hmac()` signer `?sign=`
  * names: `POST /use/<project>/<env>?sign=sumsub-key`, or `POST /use?sign=…` for a workload that reaches one
@@ -1131,8 +1205,7 @@ async function signRaw(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const signer = proxy.signers.get(name);
   if (signer?.kind === 'private-key') return failure(415, `${name} signs with a private key, whose message goes as JSON, ${sized(MESSAGE_BYTES)} at most: { sign: { credential, message } }`);
   if (signer === undefined) {
-    const why = proxy.verifiers.has(name) ? `${name} is a verifier, which checks signatures and makes none` : 'its deployment\'s credentialProxy names them, signers: { … }';
-    return failure(404, `?sign= names the hmac() signer of a raw message: ${why}`);
+    return failure(404, `?sign= names the hmac() signer of a raw message: its deployment's credentialProxy names them, signers: { … }${heldAs(proxy, name)}`);
   }
   const said = request.headers.get('content-length');
   if (said === null || !/^\d+$/.test(said)) return failure(411, 'a raw message says its length before a byte of it is read: send its Content-Length');
@@ -1237,8 +1310,8 @@ function partsOf(body: ReadableStream<Uint8Array>): { read(): Promise<ReadableSt
 }
 
 /** The longest message a signer or verifier takes. */
-function longest(signer: Signer): number {
-  return signer.kind === 'hmac' ? (signer.maxBytes ?? MESSAGE_BYTES) : MESSAGE_BYTES;
+function longest(signer: Signer | Cipher): number {
+  return signer.kind === 'private-key' ? MESSAGE_BYTES : (signer.maxBytes ?? MESSAGE_BYTES);
 }
 
 const sized = (bytes: number) => (bytes % 1024 ** 2 === 0 ? `${bytes / 1024 ** 2} MiB` : bytes % 1024 === 0 ? `${bytes / 1024} KiB` : `${bytes} bytes`);
@@ -1922,8 +1995,8 @@ async function valuesFor(
   user: User,
   path: string,
   credential: { name: string; keys: readonly string[]; egress?: Egress },
-  /** What the use is, for its entry in the log: the upstream's host, `{ tunnel: true }` or `{ hmac: true }`. */
-  through: { host: string } | { tunnel: true } | { hmac: true },
+  /** What the use is, for its entry in the log: the upstream's host, `{ tunnel: true }`, `{ hmac: true }` or `{ cipher: true }`. */
+  through: { host: string } | { tunnel: true } | { hmac: true } | { cipher: true },
   /** Told when the vault decided now, not the cache. */
   decided?: () => void,
 ): Promise<Opened & { by: number }> {
@@ -2410,14 +2483,20 @@ function through(network: Network): Connect {
   };
 }
 
-function checkSigner(name: string, signer: Signer, credentials: Map<string, Resolved>, tunnels: Map<string, Tunnel>, signers: Map<string, Signer>, what: 'signer' | 'verifier'): Signer {
+function checkSigner<T extends Signer | Cipher>(name: string, signer: T, credentials: Map<string, Resolved>, tunnels: Map<string, Tunnel>, signers: Map<string, Signer>, what: 'signer' | 'verifier' | 'cipher', verifiers: Map<string, Hmac> = new Map()): T {
   if (!NAME.test(name)) throw new Error(`credentialProxy: a ${what}'s name is lowercase letters, digits and dashes; got ${JSON.stringify(name)}`);
-  const taken = credentials.has(name) ? 'credential' : tunnels.has(name) ? 'tunnel' : signers.has(name) ? 'signer' : null;
+  const taken = credentials.has(name) ? 'credential' : tunnels.has(name) ? 'tunnel' : signers.has(name) ? 'signer' : verifiers.has(name) ? 'verifier' : null;
   if (taken !== null) throw new Error(`credentialProxy: ${name} names a ${taken} and a ${what}`);
-  if (what === 'verifier' ? signer.kind !== 'hmac' : signer.kind !== 'private-key' && signer.kind !== 'hmac') {
-    throw new Error(`credentialProxy: ${what} ${name} is ${what === 'verifier' ? 'hmac(…), the only kind there is' : 'privateKey(…) or hmac(…)'}`);
+  const kinds = { signer: ['private-key', 'hmac'], verifier: ['hmac'], cipher: ['aes-gcm'] }[what];
+  if (!kinds.includes(signer.kind)) throw new Error(`credentialProxy: ${what} ${name} is ${{ signer: 'privateKey(…) or hmac(…)', verifier: 'hmac(…), the only kind there is', cipher: 'aesGcm(…), the only kind there is' }[what]}`);
+  if (!KEY.test(signer.key)) throw new Error(`credentialProxy: ${what} ${name} names the key that holds its ${{ hmac: 'secret, YOUSIGN_WEBHOOK_SECRET', 'private-key': 'private key, DFNS_PRIVATE_KEY', 'aes-gcm': 'key, BILLING_TOKEN_KEY' }[signer.kind]}`);
+  if (signer.kind === 'aes-gcm') {
+    // AES-256-GCM alone, a 12-byte IV and a 16-byte tag: an option it does not know is refused, never ignored.
+    const unknown = Object.keys(signer).find((option) => !['kind', 'key', 'keyEncoding', 'maxBytes', 'limit'].includes(option));
+    if (unknown !== undefined) throw new Error(`credentialProxy: cipher ${name}'s aesGcm() takes keyEncoding, maxBytes and limit, and is AES-256-GCM alone; got ${unknown}`);
+    if (signer.keyEncoding !== 'hex' && signer.keyEncoding !== 'base64' && signer.keyEncoding !== 'base64url') throw new Error(`credentialProxy: cipher ${name}'s aesGcm() reads its key's 32 bytes as hex, base64 or base64url: keyEncoding`);
+    if (signer.maxBytes !== undefined && !(Number.isInteger(signer.maxBytes) && signer.maxBytes >= 1 && signer.maxBytes <= MAX_MESSAGE_BYTES)) throw new Error(`credentialProxy: cipher ${name}'s maxBytes is a whole number of bytes, ${sized(MAX_MESSAGE_BYTES)} at most`);
   }
-  if (!KEY.test(signer.key)) throw new Error(`credentialProxy: ${what} ${name} names the key that holds its ${signer.kind === 'hmac' ? 'secret, YOUSIGN_WEBHOOK_SECRET' : 'private key, DFNS_PRIVATE_KEY'}`);
   if (signer.kind === 'hmac') {
     // HMAC-SHA256 alone, written as these schemes write it: a key it does not know is refused, never ignored.
     const unknown = Object.keys(signer).find((option) => !['kind', 'key', 'encoding', 'prefix', 'keyEncoding', 'maxBytes', 'limit'].includes(option));
