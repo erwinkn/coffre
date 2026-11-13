@@ -58,6 +58,10 @@ async function proven(): Promise<Head> {
     assert.deepEqual(entries.map((entry) => entry.leaf), Array.from({ length: size - from }, (_, n) => from + n));
     for (const { leaf, body } of entries) assert.ok(verifyInclusion(leafHash(Buffer.from(body)), leaf, size, inclusionProof(nodes, leaf, size), Buffer.from(root, 'hex')), `leaf ${leaf}`);
   }
+  // The index names each entry in the log by each object it mentions, and nothing else.
+  const index = sql`SELECT object, seq FROM log_index`;
+  const mentioned = sql`SELECT o.object, l.seq FROM log l, jsonb_array_elements_text(l.body::jsonb -> 'objects') AS o(object)`;
+  assert.deepEqual(await rowsOf(vault.owner, sql`(${index} EXCEPT ${mentioned}) UNION ALL (${mentioned} EXCEPT ${index})`), [], 'the index is the log\'s');
   const { keptSize, keptRoot, agingSize, agingRoot, agingFrom } = head;
   return { keptSize, keptRoot, agingSize, agingRoot, agingFrom };
 }
@@ -161,6 +165,26 @@ test('the re-check walks the log round and round, three blocks a minute, and fin
   for (let n = 0; n < 5; n += 1) found.push(await minute());
   const hash = (body: string) => leafHash(Buffer.from(body)).toString('hex');
   assert.deepEqual(found, [[{ found: 'lost', of: hash(edited) }], [{ found: 'lost', of: 'aging 0-255' }], [{ found: 'lost', of: hash(deleted) }], [], []]);
+});
+
+test('a walk ends where the log was when it began: a log growing faster than the re-check reads still comes round to the changes, across a restart', async () => {
+  signer = await open(null);
+  await write(2 * 256, true);
+  // 1,024 uses a minute, where a minute re-checks 768 entries.
+  const found: Finding[][] = [];
+  const grow = async () => {
+    await write(4 * 256);
+    found.push(await minute());
+  };
+  // The first walk reads the changes' two blocks, then four of uses, as far as the log was at its start.
+  await grow();
+  const [{ deleted }] = (await rowsOf<{ deleted: string }>(vault.owner, sql`DELETE FROM log WHERE kept AND leaf = 7 RETURNING body AS deleted`)) as [{ deleted: string }];
+  vault.tick(DAY);
+  await grow();
+  // The signer dies; the next comes up where the walk was, and so does its end.
+  signer = await open(null);
+  for (let n = 0; n < 3; n += 1) await grow();
+  assert.deepEqual(found, [[], [], [{ found: 'lost', of: leafHash(Buffer.from(deleted)).toString('hex') }], [], []]);
 });
 
 test('the re-check finds nothing on a pruned log, walk after walk; it skips what was pruned, by what the signer kept', async () => {

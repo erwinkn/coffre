@@ -101,6 +101,7 @@ export type VaultConfig = {
    * session.
    */
   workloads?: { noReads?: boolean; useOnly?: boolean };
+  /**
    * How long the log keeps a use, in days: 90 unless set, and `null` keeps
    * every one (docs/design/0.16.md, "How long the log is kept"). Changes are
    * kept for good.

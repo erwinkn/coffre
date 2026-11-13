@@ -171,7 +171,7 @@ export class Signer {
   /** The first use of the aging tree it keeps: those before it are pruned. */
   #agingFrom = 0;
   /** Where the re-check of old entries goes on. */
-  #walk: Walk = { tree: 'kept', block: 0, since: 0 };
+  #walk: Walk = { tree: 'kept', block: 0, since: 0, ends: { kept: 0, aging: 0 } };
   /** What it found and nobody has taken yet. */
   #found: Finding[] = [];
   /** The rows and the trees its last check found wrong. One still wrong at the next is no news. */
@@ -470,10 +470,10 @@ export class Signer {
           ON CONFLICT DO NOTHING),
         refused AS (DELETE FROM log_pending p USING jsonb_array_elements_text(${JSON.stringify(moving.refused)}::jsonb) AS r(id) WHERE p.id = r.id::bigint),
         pruned AS (DELETE FROM log l WHERE l.kept = false AND l.leaf >= ${moving.pruning} AND l.leaf < ${head.agingFrom} RETURNING l.seq, l.body),
-        -- By each object they mention, within their numbers: the index's key leads with the object, and a join on the number alone reads all of it.
-        unindexed AS (
-          DELETE FROM log_index i USING (SELECT DISTINCT o.object FROM pruned p, jsonb_array_elements_text(p.body::jsonb -> 'objects') AS o(object)) m
-          WHERE i.object = m.object AND i.seq BETWEEN (SELECT min(seq) FROM pruned) AND (SELECT max(seq) FROM pruned) AND i.seq IN (SELECT seq FROM pruned)),
+        -- By each entry's own keys, one probe each, however many rows of an object lie between them. Unnested from arrays, a
+        -- list the planner takes for short: from the entries' lists, it counts a hundred each and reads all of the index.
+        mentions AS (SELECT array_agg(o.object) AS objects, array_agg(p.seq) AS seqs FROM pruned p, jsonb_array_elements_text(p.body::jsonb -> 'objects') AS o(object)),
+        unindexed AS (DELETE FROM log_index i USING mentions m, unnest(m.objects, m.seqs) AS k(object, seq) WHERE i.object = k.object AND i.seq = k.seq),
         untiled AS (DELETE FROM log_tiles t WHERE t.kept = false AND t.level = 0 AND t.number >= ${moving.pruning / WIDTH} AND t.number < ${head.agingFrom / WIDTH}),
         tiled AS (
           INSERT INTO log_tiles (kept, level, number, hashes) SELECT kept, level, number, decode(hashes, 'hex') FROM jsonb_to_recordset(${JSON.stringify(moving.tiles)}::jsonb) AS t(kept boolean, level smallint, number bigint, hashes text)

@@ -32,8 +32,12 @@ type Ask = <Row>(statement: SQL) => Promise<Row[]>;
 
 /** Where in the log, by tree and block. */
 type Block = { tree: Tree; block: number };
-/** Where the re-check goes on, and when the walk it is in began. */
-export type Walk = Block & { since: number };
+/**
+ * Where the re-check goes on, when the walk it is in began, and where that
+ * walk ends: each tree's size then, so that a log growing faster than it
+ * reads does not keep it from coming round to the changes again.
+ */
+export type Walk = Block & { since: number; ends: Record<Tree, number> };
 
 /**
  * A block as read: the bodies of its entries, and what of it is not there as
@@ -109,24 +113,24 @@ export async function pruned(ask: Ask, { keepUsesDays, now }: Signing, trees: Re
 
 /**
  * The next slice of the walk, from `walk`: the kept tree, then the aging
- * one from its first use kept, and round again, a walk a day at most. What
- * it finds is `lost`, each entry by the hash it was signed under, or a
- * block by its leaves when its tiles do not prove: said once a walk, while
- * it stays so.
+ * one from its first use kept, each as far as it was when the walk began,
+ * and round again, a walk a day at most. What it finds is `lost`, each
+ * entry by the hash it was signed under, or a block by its leaves when its
+ * tiles do not prove: said once a walk, while it stays so.
  */
 export async function recheck(ask: Ask, now: number, trees: Record<Tree, Edge>, agingFrom: number, walk: Walk): Promise<{ found: Finding[]; walk: Walk }> {
   const blocks: Block[] = [];
-  let { tree, block, since } = walk;
+  let { tree, block, since, ends } = walk;
   while (blocks.length < RECHECK) {
     if (tree === 'kept' && block === 0) {
       // A walk starts: not before a day after the last, so that a small log is not read, nor its findings said, every minute.
       if (now < since + DAY_MS) break;
-      since = now;
+      [since, ends] = [now, { kept: trees.kept.size, aging: trees.aging.size }];
     }
     block = Math.max(block, tree === 'aging' ? agingFrom / WIDTH : 0);
-    if (block * WIDTH < trees[tree].size) blocks.push({ tree, block: block++ });
+    if (block * WIDTH < ends[tree]) blocks.push({ tree, block: block++ });
     else [tree, block] = [tree === 'kept' ? 'aging' : 'kept', 0];
   }
   const held = blocks.length === 0 ? [] : await read(ask, trees, blocks);
-  return { found: held.flatMap(({ lost }) => lost.map((of) => ({ found: 'lost' as const, of }))), walk: { tree, block, since } };
+  return { found: held.flatMap(({ lost }) => lost.map((of) => ({ found: 'lost' as const, of }))), walk: { tree, block, since, ends } };
 }
