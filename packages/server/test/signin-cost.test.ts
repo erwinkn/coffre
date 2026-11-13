@@ -1,10 +1,7 @@
-// What a CI run's sign-in costs with 0.15's log, where the vault makes it: on the app's
-// connection, one read, its service's bindings on the token's issuer with whether the token was spent (which the
-// app's check of the token needs), and the account's and each binding's newest change, whose MACs the vault checks;
-// then the vault's one call, `sign_in` (migrations 0034, 0075), one statement, which weighs
-// the binding, the account, the rate and the token on their rows and writes the credential and its change. No 0.14
-// head, no entry of 0.14's. Each statement reads as many rows, and as many pages, however many credentials the binding
-// issued before, however many tokens were spent, and however long both logs grow.
+// What a sign-in costs, and that it does not grow: a CI run's sign-in within its budget (budgets.ts), a service
+// token's issue reading what it withholds only for a non-Owner, and each statement reading as many rows, and as many
+// pages, however many credentials the binding issued before, however many tokens were spent, and however long both
+// logs grow.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomBytes, randomUUID, sign as signWith } from 'node:crypto';
@@ -24,6 +21,7 @@ import { clientFor, entryOf, contextFor, openTestDatabase, resetDatabase, sealed
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { answer, type Pages } from './start-fixture.ts';
+import { assertWithin, BUDGET } from './budgets.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -170,14 +168,9 @@ function freshSignIn(values: unknown[]): unknown[] {
   return next;
 }
 
-test("a CI run's sign-in is one app statement and one vault call, one statement there: no 0.14 head, no 0.14 entry (T149, T190, T192)", async () => {
+test("a CI run's sign-in runs within its budget", async () => {
   const ran = await statements();
-  assert.deepEqual(shown(ran.app), ['select "service_bindings"."i'], "its service's bindings on the issuer, with whether the token was spent and the newest changes");
-  // `sign_in` holds the member's and the binding's rows to their newest changes' seals, which SQL cannot authenticate:
-  // the app's read answers those changes beside the bindings, the vault checks their MACs, and `sign_in`
-  // holds each object's newest change to the one checked, in its one statement.
-  assert.deepEqual(shown(ran.vault), ['/* writes */ SELECT sign_in('], 'the sign-in, in one statement');
-  assert.equal(ran.vaultCalls, 1);
+  assertWithin("a CI run's sign-in", { statements: ran.app.length + ran.vault.length, vaultCalls: ran.vaultCalls }, BUDGET.signIn, `\n${shown([...ran.app, ...ran.vault]).join('\n')}`);
 });
 
 test("a sign-in's statements read as many rows and pages however many credentials its binding issued, tokens were spent, and the logs grow (R48)", async () => {
@@ -256,27 +249,15 @@ function freshIssue(values: unknown[]): unknown[] {
 /** A statement of `holdingSensitive`: which of the scope's environments hold a sensitive value, for what an issue withholds. */
 const holding = ({ text }: Statement) => /^\s*select distinct "environment_id" from "secrets"/i.test(text);
 
-test("a service token's issue: the app's reads and the vault's two answers, as before; then one vault call, its write one statement, no 0.14 head (T149, PR 2)", async () => {
-  const ran = await issueStatements();
-  // The issuer's newest policy and access entries, and the places: the scope as the app works it out, by path. An Owner
-  // of every project in it withholds nothing (a reference's sensitive value is its holder's project's to give),
-  // so the app reads nothing of what those places hold; a Developer's issue does, below.
-  assert.equal(ran.app.length, 3);
-  assert.equal(ran.app.filter(holding).length, 0);
-  assert.ok(ran.app.every(({ text }) => /^\s*select/i.test(text)), 'the app writes nothing');
-  // `access` for the issuer and for the account (the app's checks), a snapshot each; then the issue: one snapshot (the
-  // members, their grants, the policy, the setting, and the places their grants are on, each with what 0.15's log holds
-  // it to), and its one write.
-  assert.equal(ran.vaultCalls, 3);
-  assert.deepEqual(shown(ran.vault), ['WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', '/* writes */ SELECT issue_to']);
-});
-
-test("a service token's issue by someone who owns no project of its scope: the app reads too what sensitive values its places hold, its own and its references', for what it withholds (R71)", async () => {
-  const ran = await issueStatements(ISSUING_DEVELOPER);
-  // As an Owner's, and the settings and places a non-Owner's issue checks; then the two statements of `holdingSensitive`.
-  assert.equal(ran.app.length, 6);
-  assert.equal(ran.app.filter(holding).length, 2);
-  assert.ok(ran.app.every(({ text }) => /^\s*select/i.test(text)), 'the app writes nothing');
+// A service token's issue is a change, whose round trips change-cost.test.ts holds; here, what its app reads. An
+// Owner of every project in its scope withholds nothing (a reference's sensitive value is its holder's project's to
+// give), so the app reads nothing of what those places hold; a Developer's issue reads it, for what it withholds.
+test("a service token's issue reads what sensitive values its places hold only when its issuer owns no project of its scope, and the app writes nothing", async () => {
+  const byOwner = await issueStatements();
+  const byDeveloper = await issueStatements(ISSUING_DEVELOPER);
+  assert.equal(byOwner.app.filter(holding).length, 0, 'an Owner reads nothing of what the places hold');
+  assert.ok(byDeveloper.app.some(holding), 'a Developer reads what the places hold');
+  for (const ran of [byOwner, byDeveloper]) assert.ok(ran.app.every(({ text }) => /^\s*select/i.test(text)), 'the app writes nothing');
 });
 
 test("an issue's write reads as many rows and pages however long the logs and the account's history grow (R48)", async () => {

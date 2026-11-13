@@ -28,6 +28,7 @@ import { processLimits } from '../src/workloads/limits.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
+import { assertOver, OVER } from './budgets.ts';
 import { checkpointFence } from '@coffre/db/schema';
 import { inBulkPeriod } from './window-fixture.ts';
 
@@ -169,13 +170,14 @@ const STILL = 'select "principals"."status",';
 
 test('through an MCP connection, a Cloudflare binding, or behind Access, a value is the hot path\'s one call: no check of the way in after it, no vault call but the use, nothing of 0.14\'s head (T147)', async () => {
   const cases = [
-    ['an MCP client\'s reveal', reveal(own, await asDev(own, { via: { connectionId, clientId: 'https://client.example/meta', clientName: 'Client', scopes: ['read', 'reveal'] }, provenance: connectionId }))],
-    ['a Worker\'s /use through its binding', async () => (await bindingRoute(new Request(`${ORIGIN}/use/market/dev/api/v1/charges`), own, EDGE))!],
-    ['a reveal behind Access', reveal(access, await asDev(access, { via: null, provenance: null, access: true }))],
+    ['an MCP client\'s reveal', OVER.wayInReveal, reveal(own, await asDev(own, { via: { connectionId, clientId: 'https://client.example/meta', clientName: 'Client', scopes: ['read', 'reveal'] }, provenance: connectionId }))],
+    ['a Worker\'s /use through its binding', OVER.bindingUse, async () => (await bindingRoute(new Request(`${ORIGIN}/use/market/dev/api/v1/charges`), own, EDGE))!],
+    ['a reveal behind Access', OVER.wayInReveal, reveal(access, await asDev(access, { via: null, provenance: null, access: true }))],
   ] as const;
-  for (const [name, request] of cases) {
+  for (const [name, route, request] of cases) {
     const ran = await statements(request);
-    assert.deepEqual(ran.hot, [USE], `${name}: one use`);
+    assertOver(`${name}, ran ${JSON.stringify(ran)}`, { statements: ran.app.length + ran.vault.length + ran.hot.length }, route);
+    assert.deepEqual(ran.hot, [USE], `${name}: the value is the hot path's one use`);
     assert.deepEqual(ran.vault, [], `${name}: no vault call but the use`);
     assert.ok(!ran.app.some((text) => text.startsWith(STILL)), `${name}: no read of the way in after the use: ${JSON.stringify(ran.app)}`);
     assert.ok(!ran.app.some((text) => /audit_chain_head/.test(text)), `${name}: nothing of 0.14's head`);
