@@ -124,7 +124,7 @@ test('a binding 0.14 ended that the log calls live is revived; one live on 0.15.
         await binding(4, seal(4), false); await change(4, 'binding.make', seal(4)); // born on 0.15
         assert.deepEqual(await bindingsDiffer(sql), { revived: [], dropped: [] });
         await binding(5, seal(5), false); await unbind(5); await change(5, 'genesis', seal(5)); // tombstoned, yet sealed as live
-        await binding(6, seal(6), false); await change(6, 'genesis', seal(7)); // its seal not its newest change's: a rotation's?
+        await binding(6, seal(6), false); await change(6, 'genesis', seal(7)); // its seal not its newest change's: only a write around the vault
         assert.deepEqual(await bindingsDiffer(sql), { revived: [id(5)], dropped: [id(6)] });
     } finally {
         await sql.unsafe('DROP SCHEMA IF EXISTS upgrade_bindings CASCADE');

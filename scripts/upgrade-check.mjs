@@ -322,7 +322,9 @@ export async function disagreeing(sql) {
  * The trust bindings whose life 0.16's rule (the log's: sealed by its newest change, no `binding.revoke` among them)
  * and 0.14's tombstone (an allowed app `token.unbind`) disagree on, in plain SQL on 0.15.0's tables, apart from either
  * release's code. `revived`, live by the log though tombstoned, would come back: they stop the upgrade, by id. `dropped`,
- * live by 0.15.0 (not revoked, no tombstone, sealed) but dead by the log, is stricter, so safe, and only reported.
+ * live by 0.15.0 (not revoked, no tombstone, sealed) but dead by the log, ends no more than it should, and is reported:
+ * only a write around the vault makes one, since every 0.15.0 change moves a binding's seal and logs its change in one
+ * statement (`change_input`, `change_bindings`) and the app key's rotation re-signs `auth_mac` alone.
  */
 export async function bindingsDiffer(sql) {
     const rows = await sql.unsafe(`
@@ -355,6 +357,6 @@ async function refusals(url) {
         bindings.revived.length > 0 && `0.14 ended the trust bindings ${bindings.revived.join(', ')}, which 0.16, reading the log, would bring back: no change on 0.15.0 is known to settle it, so stop and ask coffre's maintainers`,
     ].filter(Boolean);
     assert.deepEqual(refused, [], `the upgrade is refused:\n${refused.join('\n')}`);
-    if (bindings.dropped.length > 0) say(`${bindings.dropped.length} trust binding${bindings.dropped.length === 1 ? '' : 's'} live on 0.15.0 the log ends, for 0.16: ${bindings.dropped.join(', ')}`);
+    if (bindings.dropped.length > 0) say(`${bindings.dropped.length} trust binding${bindings.dropped.length === 1 ? '' : 's'} sign${bindings.dropped.length === 1 ? 's' : ''} in on 0.15.0 but not on 0.16, whose log ends ${bindings.dropped.length === 1 ? 'it' : 'them'}: ${bindings.dropped.join(', ')}. A write around the vault made ${bindings.dropped.length === 1 ? 'it' : 'them'}; an Owner creates ${bindings.dropped.length === 1 ? 'it' : 'them'} again on 0.16`);
     say('every OAuth client\'s redirects are a JSON array of strings, as 0084 converts them; the log accepted no loss; no tamper finding stands; the policy and the rows agree on what is protected; no binding 0.14 ended comes back');
 }
