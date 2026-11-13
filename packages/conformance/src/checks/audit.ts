@@ -83,28 +83,26 @@ export async function listed(probe: () => Promise<boolean>): Promise<boolean> {
 }
 
 /**
- * Waits until the audit page lists every entry written before the call:
- * the projector's cursor has passed the newest seq of `audit_log` and the
- * newest number of the chains, as they stood. One projector transaction
- * lists an entry on every page and moves the cursor, so a check that reads a
- * page after this reads every entry it made, once, and none it did not.
+ * Waits until the audit page lists every entry the chains held before the
+ * call: the projector's cursor has passed their newest number, as it stood.
+ * One projector transaction lists an entry on every page and moves the
+ * cursor, so a check that reads a page after this reads every entry it made,
+ * once, and none it did not. No scheduled run: the checks that call this read
+ * only entries of the chains, which the projector's tick lists, never one of
+ * `audit_log`, which waits for the beat's checkpoint.
  */
 export async function settled(deployment: Deployment): Promise<void> {
-  const [target] = await using(deployment.database(), (sql) => query<{ seq: string; number: string }>(sql, `SELECT
-    (SELECT coalesce(max(seq), -1) FROM audit_log)::text AS seq,
+  const [target] = await using(deployment.database(), (sql) => query<{ number: string }>(sql, `SELECT
     greatest((SELECT coalesce(max(number), 0) FROM log_changes), (SELECT coalesce(max(number), 0) FROM log_uses))::text AS number`));
-  const { seq, number } = target!;
-  let cursor: { old_floor: string; through: string } | undefined;
-  const oldPassed = () => cursor !== undefined && BigInt(cursor.old_floor) > BigInt(seq);
-  const chainsPassed = () => cursor !== undefined && BigInt(cursor.through) >= BigInt(number);
+  const { number } = target!;
+  let through: string | undefined;
   const passed = async () => {
-    [cursor] = await using(deployment.database(), (sql) => query<{ old_floor: string; through: string }>(sql, 'SELECT old_floor::text, through::text FROM audit_cursor'));
-    return oldPassed() && chainsPassed();
+    const [cursor] = await using(deployment.database(), (sql) => query<{ through: string }>(sql, 'SELECT through::text FROM audit_cursor'));
+    through = cursor?.through;
+    return through !== undefined && BigInt(through) >= BigInt(number);
   };
   await until('the audit projector', passed, LISTED_WITHIN_MS / 1000).catch(() => {
-    const missed = [oldPassed() ? null : `audit_log seq ${seq}`, chainsPassed() ? null : `chain number ${number}`].filter(Boolean);
-    const at = cursor === undefined ? 'no audit cursor read' : `old_floor ${cursor.old_floor}, through ${cursor.through}`;
-    throw new Failure(`the audit projector did not pass ${missed.join(' or ')} within ${LISTED_WITHIN_MS / 1000} s (${at})`);
+    throw new Failure(`the audit projector did not pass chain number ${number} within ${LISTED_WITHIN_MS / 1000} s (${through === undefined ? 'no audit cursor read' : `through ${through}`})`);
   });
 }
 
