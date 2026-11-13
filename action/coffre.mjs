@@ -1886,7 +1886,7 @@ async function planImport(coffre, path, entries) {
 	};
 }
 //#endregion
-//#region ../core/dist/access-B_lIg-X_.js
+//#region ../core/dist/access-DOv_DmL8.js
 /**
 * Who may do what: nine permissions, the seven project roles a grant names,
 * and the five instance roles a person holds across every project.
@@ -7060,7 +7060,7 @@ function describePlan(member, plan, applied) {
 /**
 * What a service's new token or binding will not read, as the server said
 * (`withheld`): the sensitive values of these places, references' included,
-* which only one an Owner of their project issues reads (R32, R71), each
+* which only one an Owner of their project issues reads, each
 * project named. Null when there are none.
 *
 *   ['landing/prod']   reads no sensitive value of landing/prod: only one an Owner of landing issues does
@@ -7464,7 +7464,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload-jgHP66Oa.js
+//#region ../client/dist/workload-CQib9NFS.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;
@@ -8373,7 +8373,7 @@ const TUNNEL_FLOW = "coffre-tunnel-flow";
 * How often a client's end of an open tunnel says it is there, idle or not: a count, which keeps an idle connection
 * and its Durable Object alive, and, from `coffre run`, a ping whose pong must come before the next, which finds a
 * peer gone without a word. Cloudflare closes an idle WebSocket after "a period of time" its WebSockets page
-* (updated 2026-08-14) gives no number for; the 100 s this was set under is unverified (the limits audit, #501, C3).
+* (updated 2026-08-14) gives no number for; the 100 s this was set under is unverified.
 */
 const TUNNEL_KEEPALIVE_MS = 3e4;
 /**
@@ -13494,7 +13494,7 @@ const UNANSWERED = /* @__PURE__ */ new Set([
 * A local listener that forwards each request under `/use/` to coffre,
 * signed by the session, as the app sent it: its method, path, query, headers
 * and body. The app's config names it (`OPENAI_BASE_URL=http://127.0.0.1:7300/use/openai`),
-* and coffre writes no URL into the app's environment (R14). On a Unix
+* and coffre writes no URL into the app's environment. On a Unix
 * socket, only the socket's owner may connect.
 */
 async function forwarder(coffre, origin, address) {
@@ -16068,7 +16068,7 @@ async function whoIsToken(origin, api, canary) {
 /**
 * How long before a reveal 0.15's log may have logged the read it rides on:
 * a repeat of a use within a minute rides on the first one's entry (a
-* cover, R53), and the server's clock may stand a little off this one's.
+* cover), and the server's clock may stand a little off this one's.
 */
 const COVERED_MS = 9e4;
 /** How long a read may wait to be listed in 0.15's log: sealed at the checkpointer's tick, then listed by the projector. */
@@ -16076,8 +16076,8 @@ const LISTED_WITHIN_MS = 2e4;
 /**
 * Reveal the canary once, and find its `secret.read` in the audit log: by
 * the reveal's operation, in 0.14's log; in 0.15's, where a read is its use
-* and names no operation (T166), the token's own read of the canary, on
-* its own page (0.15.0 lists reads by member, never by place: D160), by its
+* and names no operation, the token's own read of the canary, on
+* its own page (0.15.0 lists reads by member, never by place), by its
 * credential, for a reveal, of the version the token lists: the use
 * the reveal made, or the one within the minute before it that it rode on
 * (a cover is of the same credential, purpose and key), once listed, which
