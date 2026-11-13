@@ -18,3 +18,6 @@ export function presented({ token, proof, request, ip }: Presented): { token: Bu
   }
   return { token: Buffer.from(token, 'hex'), proof, request, ip };
 }
+
+/** A key's name, as the table's own check has it (`secrets_key_check`): told before anything is read or sealed. */
+export const KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;

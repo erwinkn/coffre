@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets } from '@coffre/db/schema';
-import { sql, type SQL } from 'drizzle-orm';
+import { eq, sql, type SQL } from 'drizzle-orm';
 
 import { change, put, part, type Value, type Write } from '../src/change.ts';
 import type { Fresh } from '../src/rows.ts';
@@ -109,12 +109,28 @@ export async function amend<K extends keyof typeof TABLES>(vault: TestVault, tab
 export function value(_vault: TestVault, of: Fresh<typeof secrets>, text: string, more: { sensitive?: boolean; plain?: boolean; owner?: string } = {}): Fresh<typeof secrets> {
   const version = of.versions + 1;
   values.push({
-    secret: of,
     owner: more.owner ?? null,
     version: { id: randomUUID(), secretId: of.id, version, createdAt: at, createdBy: root, recipe: null, pairId: null, pairHalf: null, plaintext: more.plain === true ? text : null, sensitive: more.sensitive === true },
     text: Buffer.from(text),
   });
   return { ...of, versions: version, currentVersion: version };
+}
+
+/** A secret's next value, in a change of its own, over the row that is there: one change writes one version of a secret. */
+export async function rewrite(vault: TestVault, of: { id: string }, text: string): Promise<Fresh<typeof secrets>> {
+  let written!: Fresh<typeof secrets>;
+  const result = await change(vault, {
+    read: { found: part(secrets, eq(secrets.id, of.id)) },
+    decide: ({ found: [was] }) => {
+      const { mac: _, ...kept } = was!;
+      const version = kept.versions + 1;
+      written = { ...kept, versions: version, currentVersion: version };
+      const row = { id: randomUUID(), secretId: kept.id, version, createdAt: at, createdBy: root, recipe: null, pairId: null, pairHalf: null, plaintext: null, sensitive: false };
+      return { writes: [put(secrets, written, was!)], values: [{ owner: null, version: row, text: Buffer.from(text) }], entry: { kept: true, action: 'test.write', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null };
+    },
+  });
+  if ('refused' in result) throw new Error(result.refused);
+  return written;
 }
 
 export const ask = (label: string, place: string, keys: readonly string[] | null, more: Partial<Ask> = {}): Ask => {

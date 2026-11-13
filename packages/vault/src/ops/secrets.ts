@@ -1,22 +1,23 @@
 import { randomUUID } from 'node:crypto';
 
-import { allows } from '@coffre/core/access';
 import type { Answers, Presented, SecretWrite } from '@coffre/core/vault';
 import { environments, projects, secrets } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
-import { callerFrom, callerParts } from '../caller.ts';
+import { callerFrom, callerParts, live } from '../caller.ts';
 import { part, put, type Operation, type Parts, type Seen, type Value, type Write } from '../change.ts';
 import type { Fresh } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
-import { presented, text } from './input.ts';
+import { KEY, presented, text } from './input.ts';
 
-/** A value's size at most, in bytes of UTF-8: a certificate chain or a service account's key file fits many times over. */
-const VALUE_BYTES = 64 * 1024;
+/** The app's own bounds (its routes'): a value's length in characters, the keys of one write, and a request's body, which every value of a write came in. */
+const VALUE_LENGTH = 64 * 1024;
+const MOST_KEYS = 2000;
+const WRITE_BYTES = 1024 * 1024;
 const NATURES = ['secret', 'sensitive', 'plain'];
 
-/** A place that is there: not archived, and not the tombstone a deletion leaves. */
-const live = (row: { slug: string; archivedAt: Date | null }) => row.archivedAt === null && !row.slug.includes('~');
+/** A value as text Postgres stores and a reader gets back as written: no NUL, no half of a surrogate pair. */
+const written = (value: unknown): value is string => typeof value === 'string' && value.length <= VALUE_LENGTH && !value.includes('\0') && Buffer.from(value).toString() === value;
 
 /**
  * Values written in one environment (docs/design/0.16.md, "A change"):
@@ -29,9 +30,9 @@ export function secretWrite(input: Presented & SecretWrite, vault: Deciding): Op
   const shown = presented(input);
   const { project: projectSlug, environment: environmentSlug, values } = input;
   const items = Array.isArray(values) ? [...values] : [];
-  const valid = items.every((item) => typeof item === 'object' && item !== null && text(item.key) && typeof item.value === 'string' && Buffer.byteLength(item.value) <= VALUE_BYTES && NATURES.includes(item.nature));
-  if (!text(projectSlug) || !text(environmentSlug) || items.length === 0 || items.length > 1000 || !valid || new Set(items.map((item) => item.key)).size !== items.length) {
-    throw new TypeError('a write names a place by its slugs and 1 to 1,000 keys, each once, with a value of 64 KiB at most and its nature');
+  const valid = items.every((item) => typeof item === 'object' && item !== null && typeof item.key === 'string' && KEY.test(item.key) && written(item.value) && NATURES.includes(item.nature));
+  if (!text(projectSlug) || !text(environmentSlug) || items.length === 0 || items.length > MOST_KEYS || !valid || new Set(items.map((item) => item.key)).size !== items.length || items.reduce((sum, item) => sum + Buffer.byteLength(item.value), 0) > WRITE_BYTES) {
+    throw new TypeError('a write names a place by its slugs and 1 to 2,000 keys, each once, with its nature and a value of well-formed text, 64 Ki characters at most, and 1 MiB in all');
   }
   // A key the environment does not have yet is made under an id drawn here: a decision draws nothing.
   const fresh = new Map(items.map((item) => [item.key, { secret: randomUUID(), version: randomUUID() }]));
@@ -51,18 +52,17 @@ export function secretWrite(input: Presented & SecretWrite, vault: Deciding): Op
       if (caller.workload?.stop != null) return { refused: caller.workload.stop };
       // A narrowed session uses values, and changes nothing.
       if (caller.workload?.narrowed === true) return { refused: 'narrowed' };
-      const [place] = seen.project;
-      const [environment] = seen.environment;
-      // The same answer whether the place is not there or not theirs to write in: none says which.
-      if (place === undefined || environment === undefined || !live(place) || !live(environment) || environment.owner !== null) return { refused: 'no_access' };
-      if (!allows(caller.holds, 'secret.write', { projectId: place.id, environmentId: environment.id, environmentSlug: environment.slug })) return { refused: 'no_access' };
+      const place = seen.project.find((row) => row.slug === projectSlug && live(row));
+      const environment = place && seen.environment.find((row) => row.projectId === place.id && row.slug === environmentSlug && live(row));
+      // The same answer whether the place is not there, is someone's personal config, or is not theirs to write in: none says which.
+      if (place === undefined || environment === undefined || environment.owner !== null || !caller.may('secret.write', environment)) return { refused: 'no_access' };
 
       const now = new Date(at);
       const held = new Map(seen.secret.map((row) => [row.key, row]));
       // An archived key keeps its name: it is brought back, not written over.
       if (items.some((item) => held.get(item.key)?.archivedAt != null)) return { refused: 'archived' };
       const writes: Write[] = [];
-      const written: Value[] = [];
+      const sealed: Value[] = [];
       const keys = items.map(({ key, value, nature }) => {
         const was = held.get(key) ?? null;
         const ids = fresh.get(key)!;
@@ -70,17 +70,17 @@ export function secretWrite(input: Presented & SecretWrite, vault: Deciding): Op
         const version = kept.versions + 1;
         const secret: Fresh<typeof secrets> = { ...kept, versions: version, currentVersion: version, updatedAt: now, sourceId: null };
         writes.push(put(secrets, secret, was));
-        written.push({
-          secret,
+        sealed.push({
           owner: null,
           version: { id: ids.version, secretId: secret.id, version, createdAt: now, createdBy: caller.principal, recipe: null, pairId: null, pairHalf: null, plaintext: nature === 'plain' ? value : null, sensitive: nature === 'sensitive' },
           text: Buffer.from(value),
         });
-        return { key, secret: secret.id, version, nature, ...(was === null ? { made: true } : {}), ...(was?.sourceId == null ? {} : { was: was.sourceId }) };
+        // `source`: the secret it referred to until now.
+        return { key, secret: secret.id, version, nature, ...(was === null ? { made: true } : {}), ...(was?.sourceId == null ? {} : { source: was.sourceId }) };
       });
       return {
         writes,
-        values: written,
+        values: sealed,
         entry: {
           kept: true,
           action: 'secret.write',

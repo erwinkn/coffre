@@ -6,7 +6,7 @@ import type { BindingPolicy, Constraints } from '@coffre/core/identity';
 import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { callerOf, ID, type Caller, type Workloads } from './caller.ts';
+import { callerOf, ID, live, type Caller, type Workloads } from './caller.ts';
 import { bounded, type Refusal, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, sealedBy, type Row, type Sealed, type Wire } from './rows.ts';
@@ -167,9 +167,6 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
 /** A key the caller is given: the secret that holds its value, the one asked for when that is a reference to it, and the version. */
 type Given = { key: string; held: Row<typeof secrets>; asked: Row<typeof secrets>; version: Row<typeof secretVersions>; owner: string | null };
 type Decided = { caller: Caller; project: Row<typeof projects>; environment: Row<typeof environments>; items: (Given | { key: string; refused: string })[] };
-
-/** A place that is there: not archived, and not the tombstone a deletion leaves. */
-const live = (row: { slug: string; archivedAt: Date | null }) => row.archivedAt === null && !row.slug.includes('~');
 
 /**
  * The same answer whether the place does not exist, is archived, or is one

@@ -381,10 +381,19 @@ test('a change that keeps losing answers busy', async () => {
   assert.equal((await seenOf(principals, eq(principals.id, bo)))[0]!.generation, 5, 'none of its own writes landed');
 });
 
-test('a value is sealed for the secret its version names, or the change is a fault', async () => {
-  const [one, other] = [randomUUID(), randomUUID()];
-  const held = { id: one, projectId: randomUUID(), environmentId: randomUUID() };
-  const version = { id: randomUUID(), secretId: other, version: 1, createdAt: at, createdBy: ada, recipe: null, pairId: null, pairHalf: null, plaintext: null, sensitive: false };
-  await assert.rejects(change(vault, { read: nothing, decide: () => ({ writes: [], values: [{ secret: held, owner: null, version, text: Buffer.from('x') }], entry: said('test.write'), answer: null }) }), /another secret/);
+test('a value is the current version of a secret the same change writes, or the change is a fault', async () => {
+  const [environment, id] = [randomUUID(), randomUUID()];
+  const secret = (versions: number, currentVersion: number | null): Fresh<typeof secrets> => ({ id, projectId: randomUUID(), environmentId: environment, key: 'A', createdAt: at, updatedAt: at, versions, currentVersion, archivedAt: null, folder: null, sourceId: null });
+  const version = (of: string, number: number) => ({ owner: null, version: { id: randomUUID(), secretId: of, version: number, createdAt: at, createdBy: ada, recipe: null, pairId: null, pairHalf: null, plaintext: null, sensitive: false }, text: Buffer.from('x') });
+  const tries: [string, Write[], ReturnType<typeof version>][] = [
+    ['no secret written', [], version(id, 1)],
+    ['another secret written', [put(secrets, secret(1, 1))], version(randomUUID(), 1)],
+    ['not the number its secret is at', [put(secrets, secret(2, 2))], version(id, 1)],
+    ['a secret left with no value', [put(secrets, secret(1, null))], version(id, 1)],
+  ];
+  for (const [what, writes, value] of tries) {
+    await assert.rejects(change(vault, { read: nothing, decide: () => ({ writes, values: [value], entry: said('test.write'), answer: null }) }), /current version of a secret it writes/, what);
+  }
   assert.equal(vault.woken.length, 0);
+  assert.deepEqual(await rowsOf(vault.owner, sql`SELECT 1 FROM secrets UNION ALL SELECT 1 FROM secret_versions`), []);
 });

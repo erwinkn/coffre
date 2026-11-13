@@ -1,15 +1,15 @@
-import { open, seal as sealValue, type Envelope } from '@coffre/core/envelope';
+import { seal as sealValue, type Envelope } from '@coffre/core/envelope';
 import type { KekRegistry } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
 import { gaveUpCode, rowsOf } from '@coffre/db/dialect';
 import { later, laterRows } from '@coffre/db/later';
-import { secretVersions } from '@coffre/db/schema';
+import { secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
 import { pending, type Entry, type Said } from './entry.ts';
 import { fromWire, nameOf, seal, sealedBy, shapeOf, toWire, type Fresh, type Key, type Row, type Sealed, type Wire } from './rows.ts';
-import { contextOf, type Held } from './value.ts';
+import { contextOf } from './value.ts';
 
 /**
  * A change: anything that writes (docs/design/0.16.md, "Operations"). Every
@@ -88,16 +88,14 @@ export function drop<T extends Sealed>(table: T, was: Row<T>): Write {
 }
 
 /**
- * A version a change writes: its row but for the encryption, the secret
- * that holds it, as the change leaves it, and a personal config's owner.
- * Its value is the text given, or a stored version's, opened as its own
- * rows say it is: a restore, or a fork's copy.
+ * A value a change writes: its version's row but for the encryption, its
+ * text, and a personal config's owner. It is the current version of a
+ * secret the same change writes, whose row says where it is held.
  */
 export type Value = {
-  secret: Held;
   owner: string | null;
   version: Omit<Row<typeof secretVersions>, keyof Envelope>;
-  text: Buffer | { secret: Held; owner: string | null; version: Row<typeof secretVersions> };
+  text: Buffer;
 };
 
 /** Why a change is not made. It writes nothing, the log included. */
@@ -250,10 +248,11 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
     if (!rows.some((other) => other.row === name)) rows.push({ row: name, was: mac, now: mac });
   }
   const versions: Wire[] = [];
-  for (const { secret, owner, version, text } of plan.values ?? []) {
-    if (version.secretId !== secret.id) throw new Error('a change writes a version of another secret than the one it names');
-    const plain = Buffer.isBuffer(text) ? text : await open(text.version, contextOf(text.secret, text.version, text.owner), vault.keks);
-    versions.push(toWire(secretVersions, { ...version, ...(await sealValue(plain, contextOf(secret, version, owner), vault.keks)) }));
+  for (const { owner, version, text } of plan.values ?? []) {
+    // Sealed under what its secret's row says, as this change leaves it: a use opens it by the same row.
+    const held = plan.writes.find((write) => write.table === secrets && (write.row as { id?: string } | null)?.id === version.secretId)?.row as Fresh<typeof secrets> | undefined;
+    if (held === undefined || held.currentVersion !== version.version || held.versions !== version.version) throw new Error('a change writes a value as the current version of a secret it writes');
+    versions.push(toWire(secretVersions, { ...version, ...(await sealValue(text, contextOf(held, version, owner), vault.keks)) }));
   }
   // Dated now, as the write is sent: sealing a value, through a key service, takes as long as it takes.
   const entry = pending(key, plan.entry, vault.now(), rows);
@@ -275,7 +274,7 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
   }
   // In the statement that writes its secret's row: the two are there together, or neither.
   if (versions.length > 0) {
-    const stored = shapeOf(secretVersions).columns;
+    const stored = shapeOf(secretVersions).columns.filter((column) => !column.generated);
     statements.push(sql`versions AS (INSERT INTO ${secretVersions} (${list(stored)}) SELECT ${list(stored, 'j')} FROM ${fromRows(secretVersions, versions)})`);
   }
   statements.push(sql`entry AS (INSERT INTO log_pending (kept, body, mac) SELECT ${entry.kept}, ${entry.body}, decode(${entry.mac.toString('hex')}, 'hex') FROM same WHERE same.ok)`);

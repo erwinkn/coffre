@@ -1,8 +1,8 @@
-import { PURPOSES, type UseInput, type Vault } from '@coffre/core/vault';
+import { PURPOSES, type Answers, type Change, type Presented, type UseInput, type Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
 import type { ResolvedVaultConfig } from './config.ts';
-import { change } from './change.ts';
+import { change, type Operation, type Parts } from './change.ts';
 import { OPERATIONS } from './ops/index.ts';
 import { presented, text } from './ops/input.ts';
 import { keyOf } from './rows.ts';
@@ -65,10 +65,11 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
       if ('refused' in answer) return answer;
       return { ...answer, values: answer.values.map((value) => ('refused' in value ? value : { ...value, value: value.value.toString('utf8') })) };
     },
-    async change(input) {
-      const operation = Object.hasOwn(OPERATIONS, input.op) ? OPERATIONS[input.op] : undefined;
-      if (operation === undefined) throw new TypeError('a change names an operation the contract has');
-      return change(serving, operation(input, serving)) as Promise<never>;
+    async change<O extends Change['op']>(input: Presented & Extract<Change, { op: O }>) {
+      if (!Object.hasOwn(OPERATIONS, input.op)) throw new TypeError('a change names an operation the contract has');
+      // The registry holds each operation under its own name: what it answers is that name's.
+      const operation = OPERATIONS[input.op] as unknown as (input: Presented & Extract<Change, { op: O }>, vault: Deciding) => Operation<Parts, Answers[O]>;
+      return change(serving, operation(input, { workloads: serving.workloads }));
     },
   };
 }
