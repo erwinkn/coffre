@@ -127,12 +127,12 @@ type Move = {
 /** What the head's MAC covers: both trees at once, so the two never disagree about when. No entry's body begins as it does. */
 export const headText = (head: Omit<Move['head'], 'mac'>) => `head\n${JSON.stringify([head.size, head.keptSize, head.keptRoot, head.agingSize, head.agingRoot, head.agingFrom, head.signedAt])}`;
 
-/** Beside the mirror and the entries: when it last read everything that waited, and each tree's growing edge and end. */
 /** The entries among `taken` that are in the log as they were signed: number, tree, leaf and hash. */
 const asSigned = (taken: Move['taken']) => sql`
   SELECT l.seq::int FROM log l JOIN jsonb_to_recordset(${JSON.stringify(taken)}::jsonb) AS t(kept boolean, seq bigint, leaf bigint, hash text)
   ON l.seq = t.seq AND l.kept = t.kept AND l.leaf = t.leaf AND ${leafOf('l.body')} = decode(t.hash, 'hex')`;
 
+/** Beside the mirror and the entries: when it last read everything that waited, and each tree's growing edge and end. */
 type Kept = { drained: number; trees: Record<Tree, End & { tiles: { level: number; index: number; hashes: string }[] }> };
 
 export class Signer {
@@ -151,6 +151,8 @@ export class Signer {
   #moving: Move | null = null;
   /** What it found and nobody has taken yet. */
   #found: Finding[] = [];
+  /** When its last full check completed. */
+  #checked: number;
   /** A full run asked for and not yet done, and whether entries waited past the last read. In memory only: the next minute asks again. */
   #owed = false;
   #behind = false;
@@ -160,6 +162,17 @@ export class Signer {
 
   private constructor(on: Signing) {
     this.#on = on;
+    this.#checked = on.now();
+  }
+
+  /**
+   * When the signer last compared the rows and the log's end with what it
+   * signed. It cannot say of itself that it is stopped: whoever runs it
+   * says so once this is minutes old, whether its runs fail, on a lock the
+   * database's writer holds or a table they flooded, or nothing runs it.
+   */
+  get checked(): number {
+    return this.#checked;
   }
 
   static async open(on: Signing): Promise<Signer> {
@@ -172,6 +185,7 @@ export class Signer {
       else if (kind === 'signed') signer.#signed.set(name, value as number);
       else if (kind === 'moving') signer.#moving = value as Move;
       else if (kind === 'found') signer.#found = value as Finding[];
+      else if (kind === 'checked') signer.#checked = value as number;
       else if (kind === 'state') {
         const { drained, trees } = value as Kept;
         signer.#drained = drained;
@@ -246,6 +260,8 @@ export class Signer {
       this.#found = [];
       if (found.length > 0) changes.set('found', undefined);
     });
+    // A step before this one may have failed since: its findings were never kept, and the next signer finds them again.
+    this.#alive();
     return found;
   }
 
@@ -321,6 +337,8 @@ export class Signer {
         for (const name of new Set([...snapshot.rows.keys(), ...this.#mirror.keys()])) if (snapshot.rows.get(name) !== this.#mirror.get(name)) this.#find(changes, 'row', name);
         // Before this run's entries: the log read is the one the last run signed, and must end as that one did.
         for (const tree of TREES) if (snapshot.ends[tree].size !== this.#trees[tree].size || snapshot.ends[tree].last !== this.#last[tree]) this.#find(changes, 'cut', tree);
+        this.#checked = snapshot.at;
+        changes.set('checked', snapshot.at);
       }
 
       const tiles: Move['tiles'] = [];
@@ -345,8 +363,8 @@ export class Signer {
         this.#moving = { taken, refused, tiles, head: { ...head, mac: macOf(key, key.entries, headText(head)).toString('hex') } };
         changes.set('moving', this.#moving);
       }
-      // With whatever else is kept, never alone: an idle run writes nothing, and its storage's window is only wider for it.
-      if (changes.size === 0) return;
+      // With an entry or a finding, never alone: an idle run writes at most when it checked, and its storage's window is only wider for it.
+      if ([...changes.keys()].every((key) => key === 'checked')) return;
       const trees = Object.fromEntries(TREES.map((tree) => [tree, { size: this.#trees[tree].size, last: this.#last[tree], tiles: this.#trees[tree].edgeTiles().map(({ level, index, hashes: tile }) => ({ level, index, hashes: tile.toString('hex') })) }])) as Kept['trees'];
       changes.set('state', { drained: this.#drained, trees } satisfies Kept);
     });
@@ -374,7 +392,7 @@ export class Signer {
         indexed AS (
           INSERT INTO log_index (object, seq) SELECT DISTINCT mentioned.object, moved.seq FROM moved JOIN logged USING (seq), jsonb_array_elements_text(moved.body::jsonb -> 'objects') AS mentioned(object)
           ON CONFLICT DO NOTHING),
-        refused AS (DELETE FROM log_pending p USING jsonb_array_elements_text(${JSON.stringify(moving.refused)}::jsonb) AS refused(id) WHERE p.id = refused.id::bigint),
+        refused AS (DELETE FROM log_pending p USING jsonb_array_elements_text(${JSON.stringify(moving.refused)}::jsonb) AS r(id) WHERE p.id = r.id::bigint),
         tiled AS (
           INSERT INTO log_tiles (kept, level, number, hashes) SELECT kept, level, number, decode(hashes, 'hex') FROM jsonb_to_recordset(${JSON.stringify(moving.tiles)}::jsonb) AS t(kept boolean, level smallint, number bigint, hashes text)
           ON CONFLICT (kept, level, number) DO UPDATE SET hashes = excluded.hashes),
@@ -399,8 +417,10 @@ export class Signer {
    * signing and its move. Only one at a time, and a second is refused, not
    * queued: two that read the same entries would each sign them. A full run
    * reads the rows once nothing waited past the last read; until then it is
-   * owed. Its answer: whether to run again at once. What it found is
-   * `take`'s, whether it ends or fails.
+   * owed. A full read that fails, on a lock held or a table flooded, does
+   * not stop the signing: the run reads what waits alone, and fails once it
+   * has moved it. Its answer: whether to run again at once. What it found
+   * is `take`'s, whether it ends or fails.
    */
   async run(full: boolean): Promise<boolean> {
     if (this.#running) throw new Error('the signer runs one at a time');
@@ -408,10 +428,18 @@ export class Signer {
     try {
       this.#owed ||= full;
       await this.move();
-      const snapshot = await this.read(this.#owed && !this.#behind);
+      const checking = this.#owed && !this.#behind;
+      const [snapshot, failed] = await this.read(checking).then(
+        (read) => [read, null] as const,
+        async (error: unknown) => {
+          if (!checking) throw error;
+          return [await this.read(false), error] as const;
+        },
+      );
       await this.sign(snapshot);
       await this.move();
       this.#behind = !snapshot.drained;
+      if (failed !== null) throw failed;
       if (snapshot.drained && snapshot.rows !== null) this.#owed = false;
       return this.#behind || this.#owed;
     } finally {

@@ -269,6 +269,13 @@ test('a run that died before its move, or before it could say it had moved, is f
   assert.deepEqual(await run(), []);
   assert.deepEqual((await logged()).map((entry) => entry.seq), [0, 1, 2, 3, 4]);
   await proven();
+
+  // Nothing is taken from a signer whose step before failed meanwhile: what that step found was never kept, and the next signer finds it again.
+  store.down = true;
+  const waking = signer.wake(Buffer.alloc(32, 1));
+  store.down = false;
+  await assert.rejects(signer.take(), /open another/);
+  await assert.rejects(waking, /storage is down/);
 });
 
 test('an entry that is nobody\'s is refused and removed, alone; one changed between its signing and its move is lost, and said so', async () => {
@@ -360,6 +367,32 @@ test('a run is two round trips, its read and its move, each bounded; only one ru
     }
     assert.deepEqual(await run(false), []);
     assert.deepEqual([(await logged()).length, await waiting()], [2, 0]);
+
+    // The writer holds a table the full run reads. The run fails, having signed and moved what waited; and the signer
+    // says when it last checked, for whoever watches it to say it is stopped.
+    assert.deepEqual(await run(), []);
+    const checked = signer.checked;
+    assert.equal(checked, vault.now());
+    vault.tick(60_000);
+    await member(cy, 'member');
+    await told();
+    const locked = vault.owner.transaction(async (tx) => {
+      await tx.execute(sql`LOCK TABLE principals IN ACCESS EXCLUSIVE MODE`);
+      await new Promise<void>((resolve) => (release = resolve));
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await assert.rejects(signer.run(true));
+      assert.deepEqual([(await rowsOf(vault.owner, sql`SELECT 1 FROM log`)).length, await signer.take(), signer.checked], [3, [], checked]);
+    } finally {
+      release();
+      await locked;
+    }
+    // The check stayed owed: the next run does it, whatever it is asked, and the next signer knows when.
+    assert.deepEqual(await run(false), []);
+    assert.equal(signer.checked, vault.now());
+    vault.tick(5000);
+    assert.equal((await Signer.open({ db: through.db, keys: vault.keys, now: vault.now, store })).checked, vault.now() - 5000);
   } finally {
     await through.close();
     await proxy.close();

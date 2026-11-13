@@ -2,19 +2,24 @@
 // Quint's simulator writes them, against src/signer.ts on Postgres, with the
 // vault's change and a database writer beside it.
 //
-//   quint run log.qnt --main logSound --mbt --n-traces 500 --max-samples 500 --max-steps 30 --out-itf 'l{seq}.itf.json'
+//   quint run log.qnt --main logSound --mbt --n-traces 1000 --max-samples 1000 --max-steps 30 --out-itf 'l{seq}.itf.json'
 //   node --conditions=coffre:source test/replay-log.ts l*.itf.json
 //
 // The model's row is a member's: MAC 0 is no row, 1 a Member, 2 an Owner. Its
-// clock ticks the signer's window, a minute. After each step the log, the
-// signer's mirror and what waits must be the model's, and:
+// clock ticks the signer's window, a minute. After each step the log and the
+// signer's mirror must be the model's; what waits must be what waits in the
+// model, less what the signer refused, which it removes and the model
+// leaves; and:
 //
-// - where the model alerts, the signer has found something;
+// - once the model alerts, the signer has found something;
 // - the signer finds nothing unless the writer acted, or a wake-up came late.
 //
-// The signer may find something a step before the model does: it says an
-// entry is lost when it moves, and the model at the next full check. And
-// what it refuses it removes, where in the model it waits on.
+// So each run holds the signer to finding the first tampering in it, and to
+// silence before it. It does not compare what is found after: the model's
+// alert stays on, and it says again each run what the signer says once. The
+// signer may also find something a step before the model does: it says an
+// entry is lost when it moves, and the model, if that was the last one
+// signed, at the next full check.
 import assert from 'node:assert/strict';
 
 import { rowsOf } from '@coffre/db/dialect';
@@ -55,10 +60,12 @@ try {
     /** Each row the vault wrote, by the model's name for its MAC: what the writer puts back. */
     const sealed = new Map<string, typeof principals.$inferSelect>();
     const findings: Finding[] = [];
+    /** The entries the signer refused, and so removes: put back, each is one more to refuse. */
+    const refused = new Set<number>();
     let snapshot: Snapshot | undefined;
 
     for (const [i, state] of states.entries()) {
-      const { row, v, sent, n, full } = state.nondetPicks;
+      const { row, v, n, full } = state.nondetPicks;
       const before = states[i - 1];
       const where = `${file} step ${i}: ${state.actionTaken || 'the writer'}`;
       if (state.actionTaken === 'commit') {
@@ -84,9 +91,8 @@ try {
           if (written !== undefined) sealed.set(`${row} ${v}`, written);
         }
         const [waits] = await rowsOf<Omit<Made, 'hash'>>(vault.owner, sql`SELECT id::text, kept, body, encode(mac, 'hex') AS mac FROM log_pending ORDER BY id DESC LIMIT 1`);
+        // Its wake-up is on its way until `deliver`, or never left: the vault died first.
         made.push({ ...waits!, hash });
-        // `sent` false: the vault died before its wake-up. Otherwise it is on its way, until `deliver`.
-        void sent;
       } else if (state.actionTaken === 'deliver') await signer.wake(made[n!]!.hash);
       else if (state.actionTaken === 'runRead') snapshot = await signer.read(full!);
       else if (state.actionTaken === 'runSign') {
@@ -107,23 +113,28 @@ try {
           const [waited, waits] = [before!.db.pending.includes(index), state.db.pending.includes(index)];
           if (waited && !waits) await vault.owner.execute(sql`DELETE FROM log_pending WHERE id = ${entry.id}::bigint`);
           // Back under the id it had, so that it waits in the order it was written, as the model has it.
+          if (!waited && waits) refused.delete(index);
           if (!waited && waits) await vault.owner.execute(sql`INSERT INTO log_pending (id, kept, body, mac) OVERRIDING SYSTEM VALUE VALUES (${entry.id}::bigint, ${entry.kept}, ${entry.body}, decode(${entry.mac}, 'hex'))`);
           if (before!.db.log.includes(index) && !state.db.log.includes(index)) await vault.owner.execute(sql`DELETE FROM log WHERE body = ${entry.body}`);
         }
       }
 
-      findings.push(...(await signer.take()));
+      const numbered = new Map(made.map((entry, index) => [entry.hash.toString('hex'), index]));
+      for (const finding of await signer.take()) {
+        findings.push(finding);
+        if (finding.found === 'replayed' || finding.found === 'stale') refused.add(numbered.get(finding.of)!);
+      }
       const said = `${where}: ${JSON.stringify(findings)}`;
       if (state.signer.alert) assert.ok(findings.length > 0, `the model alerts and the signer found nothing, ${said}`);
       if (findings.length > 0) assert.ok(state.world.attacks < states[0]!.world.attacks || state.world.slow, `the signer found something with nobody writing, ${said}`);
       early += findings.length > 0 && !state.signer.alert ? 1 : 0;
 
-      const numbered = new Map(made.map((entry, index) => [entry.body, index]));
-      const bodies = async (table: 'log' | 'log_pending') => (await rowsOf<{ body: string }>(vault.owner, sql`SELECT body FROM ${sql.identifier(table)}`)).map((entry) => numbered.get(entry.body)!);
+      const written = new Map(made.map((entry, index) => [entry.body, index]));
+      const bodies = async (table: 'log' | 'log_pending') => (await rowsOf<{ body: string }>(vault.owner, sql`SELECT body FROM ${sql.identifier(table)}`)).map((entry) => written.get(entry.body)!);
       assert.deepEqual(sorted(await bodies('log')), sorted(state.db.log), `the log, ${said}`);
-      // What the signer refused it removed, and in the model it waits on.
+      // What the signer refused it removes, at its move, and nothing else: in the model it waits on.
       const waiting = await bodies('log_pending');
-      assert.ok(waiting.every((index) => state.db.pending.includes(index)), `what waits, ${said}`);
+      assert.ok(waiting.every((index) => state.db.pending.includes(index)) && state.db.pending.every((index) => refused.has(index) || waiting.includes(index)), `what waits is ${JSON.stringify(waiting)}, ${said}`);
       for (const [name, mac] of Object.entries(state.signer.mirror)) assert.equal(store.kept.get(`row ${named(name)}`), mac === 0 ? undefined : sealed.get(`${name} ${mac}`)!.mac.toString('hex'), `the mirror, ${said}`);
       steps += 1;
     }
