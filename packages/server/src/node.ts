@@ -154,7 +154,7 @@ export type NodeConfig = CoffreConfig & {
 function checkNodeConfig(options: NodeConfig) {
   const config = resolveConfig(options);
   if (typeof options.database !== 'string' || options.database.length === 0) {
-    throw new Error('database must be a URL: postgres://… or file:…');
+    throw new Error('database must be a URL: postgres://…');
   }
   return config;
 }

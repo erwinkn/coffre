@@ -44,7 +44,14 @@ async function serve(readyFile: string, environmentFile: string): Promise<void> 
     process.once('SIGTERM', resolve);
     process.once('SIGINT', resolve);
   });
-  const deployment = await boot('node', fileURLToPath(new URL('../../../examples/node', import.meta.url)), { port: 3982 });
+  // On the local Postgres, as `pnpm conformance:node` runs it: the workflow made its logins (scripts/ensure-database.mjs).
+  const local = (login: string) => `postgresql://${login}@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/postgres`;
+  const deployment = await boot('node', fileURLToPath(new URL('../../../examples/node', import.meta.url)), {
+    port: 3982,
+    postgres: local('coffre_owner:local-dev-only'),
+    runtime: local('coffre_runtime:local-runtime-only'),
+    vaultRuntime: local('coffre_vault_runtime:local-vault-only'),
+  });
   try {
     const { value: admin } = await signInAdmin(deployment);
     await admin.api.projects.create('action-test', { name: 'Action test' });
