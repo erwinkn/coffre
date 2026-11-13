@@ -118,9 +118,8 @@ Each file names its model and its sources in its header.
 
 ## Database-backed properties
 
-`pnpm test:properties:server` runs these on one random scratch database,
-Postgres unless `COFFRE_TEST_ENGINE=sqlite`; `pnpm test` runs each on its
-private clone too.
+`pnpm test:properties:server` runs these on one random scratch Postgres
+database; `pnpm test` runs each on its private clone too.
 
 - **Operation sequences** (`operations-properties.test.ts`): below.
 - **Forks** (`forks-properties.test.ts`): random worlds written as rows,
@@ -179,11 +178,9 @@ without running that script or compiling Koffi.
 random scratch Postgres database: the operation sequences below, then the
 other database-backed files above. `pnpm test:properties:server --long --seed=42`
 runs 40 generated sequences instead of the normal four, and ten times as many
-cases of the others. A normal run takes about a minute on Postgres and half
-that on SQLite; a long one, about five minutes and two. Set the existing
-`COFFRE_TEST_ENGINE=sqlite` to run that command on SQLite. Normal `pnpm test`
-and `pnpm test:sqlite` include the file with their usual private database
-clone or copy. The standalone command removes its scratch data on exit.
+cases of the others. A normal run takes about a minute; a long one, about
+five minutes. Normal `pnpm test` includes the file with its usual private
+database clone. The standalone command removes its scratch data on exit.
 
 The operation list is drawn before execution, so Hegel can shrink its length
 and parameters: four to fourteen operations. It includes invitations, member
@@ -243,7 +240,7 @@ rotation tests remain in the full suite.
 ## Every night
 
 `.github/workflows/properties.yml` runs `pnpm test:properties --long` and
-`pnpm test:properties:server --long`, on Postgres and on SQLite, each night
+`pnpm test:properties:server --long` each night
 on a fresh seed, and on demand with a seed to replay (Actions, Nightly
 properties, Run workflow). The seed is printed first as a notice, and a
 failure ends with an error naming it and the command that replays it

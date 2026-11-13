@@ -6,11 +6,11 @@ import { GENESIS_HASH, sealEntry, verifyEntries, type LogFields } from '@coffre/
 import type { Database, Transaction } from '@coffre/db';
 import { canonicalTimestamp } from '@coffre/db/dialect';
 import { LogHeadMismatch, LogRewound } from '@coffre/db/log';
-import { eq, gte, sql, type SQL } from 'drizzle-orm';
+import { eq, gte, sql } from 'drizzle-orm';
 
 import { actorOf, actorParts, appendAudit, appLogKey } from '../../src/db/audit.ts';
 import { auditHead, auditRange } from '../../src/db/queries.ts';
-import { emptyLog, openTestDatabase, postgresOnly, TEST_ENGINE, withLogUnlocked } from './engine.ts';
+import { emptyLog, openTestDatabase, withLogUnlocked } from './engine.ts';
 import { auditChainHead, auditLog } from './tables.ts';
 
 const CHAIN_KEY = randomBytes(32);
@@ -237,7 +237,6 @@ test('timestamps read as text render as UTC with microseconds, whatever shape th
 
 test(
   'a session in another time zone reads back the same chain',
-  postgresOnly('the session time zone is a Postgres setting'),
   async () => {
     await inTransaction((tx) =>
       appendAudit(tx, CHAIN_KEY, [
@@ -255,7 +254,7 @@ test(
 
 test('concurrent appends queue on the chain head and form one linear chain', async () => {
   // Each append is its own transaction, as each request's is. They all want
-  // the head at once; the lock (a queue of one on SQLite) lets them through
+  // the head at once; the lock lets them through
   // in turn, so every entry links to the one before it.
   await Promise.all(
     Array.from({ length: 24 }, (_, index) =>
@@ -307,16 +306,4 @@ test('64-bit sequences, related entries and the head round-trip above 2^53', asy
       await owned.delete(auditLog).where(eq(auditLog.seq, seq));
     });
   }
-});
-
-test('SQLite refuses replacing an audit entry through INSERT OR REPLACE', { skip: TEST_ENGINE !== 'sqlite' }, async () => {
-  await inTransaction((tx) => appendAudit(tx, CHAIN_KEY, [
-    { actorType: 'system', actorId: 'test', action: 'test', decision: 'allow' },
-  ]));
-  const sqlite = db as unknown as { run(query: SQL): Promise<unknown> };
-  await assert.rejects(sqlite.run(sql`INSERT OR REPLACE INTO audit_log
-    (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-    SELECT seq, author, key_id, occurred_at, actor, 'rewritten', decision, prev_hash, mac, hash FROM audit_log`),
-  (error: unknown) => /append-only/.test(`${error} ${(error as { cause?: unknown }).cause}`));
-  assert.equal((await auditRange(db))[0].action, 'test');
 });

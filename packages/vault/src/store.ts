@@ -2,7 +2,7 @@ import { EVERYWHERE, ownsInstance, type InstanceRole, type Scope } from '@coffre
 import type { Author, StoredEntry } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
+import { clockMillis, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
 import { entryColumns, withinBytes } from '@coffre/db/log';
 
@@ -54,7 +54,7 @@ export { accessEntriesAbout, insertGrant, liveProjects } from '@coffre/db/grants
 export { newestVaultEntries } from '@coffre/db/log';
 
 /**
- * On Postgres, fail a lock wait in this transaction after `ms`, rather than
+ * Fail a lock wait in this transaction after `ms`, rather than
  * wait for ever behind a transaction that never ends; with `statements`,
  * any statement that takes longer, too. A queue for a row each holder
  * updates, as the log's head, is no one wait: a waiter follows each update
@@ -62,7 +62,6 @@ export { newestVaultEntries } from '@coffre/db/log';
  * so only the statement's own bound ends it.
  */
 export async function boundLockWaits(tx: Transaction, ms: number, statements = false): Promise<void> {
-  if (engineOf(tx) !== 'postgres') return;
   const bound = String(Math.trunc(ms));
   await tx.execute(statements
     ? sql`SELECT set_config('lock_timeout', ${bound}, true), set_config('statement_timeout', ${bound}, true)`
@@ -81,19 +80,13 @@ export const RELEASES_KEPT_MS = MAX_BULK_WINDOW_MINUTES * 60_000 + 3_600_000;
 /**
  * Delete up to `atMost` rows of `vault_releases` released over
  * `RELEASES_KEPT_MS` before the database's clock: what no bulk count can
- * read again. On Postgres the vault's login deletes no row itself, and asks
+ * read again. The vault's login deletes no row itself, and asks
  * `prune_vault_releases`, which deletes only those (migration 0021). How
  * many went.
  */
 export async function pruneReleases(db: Queryable, atMost: number): Promise<number> {
-  if (engineOf(db) === 'postgres') {
-    const [row] = await rowsOf<{ pruned: number }>(db, sql`SELECT prune_vault_releases(${atMost}::int) AS pruned`);
-    return row!.pruned;
-  }
-  const { vaultReleases } = tablesOf(db);
-  const old = db.select({ principal: vaultReleases.principal, key: vaultReleases.key }).from(vaultReleases)
-    .where(lt(vaultReleases.releasedAt, sql`${clockMillis(db)} - ${RELEASES_KEPT_MS}`)).limit(atMost);
-  return changedRows(await db.delete(vaultReleases).where(sql`(${vaultReleases.principal}, ${vaultReleases.key}) IN ${old}`));
+  const [row] = await rowsOf<{ pruned: number }>(db, sql`SELECT prune_vault_releases(${atMost}::int) AS pruned`);
+  return row!.pruned;
 }
 
 /** The database's clock, now. */
@@ -186,13 +179,11 @@ export async function instanceOwners(db: Queryable): Promise<Member[]> {
  */
 export async function lockMembers(tx: Transaction, principals: readonly string[], shared = false): Promise<Map<string, Member>> {
   const { vaultMembers } = tablesOf(tx);
-  const queued: Record<string, SQL> = engineOf(tx) === 'postgres'
-    ? { queued: sql`${sql.raw(shared ? 'pg_advisory_xact_lock_shared' : 'pg_advisory_xact_lock')}(${MEMBER_QUEUE}, hashtext(${vaultMembers.principal}))` }
-    : {};
+  const queued = sql`${sql.raw(shared ? 'pg_advisory_xact_lock_shared' : 'pg_advisory_xact_lock')}(${MEMBER_QUEUE}, hashtext(${vaultMembers.principal}))`;
   const rows = await forUpdate(
     tx,
     tx
-      .select({ ...memberColumns(tx), ...queued })
+      .select({ ...memberColumns(tx), queued })
       .from(vaultMembers)
       .where(inArray(vaultMembers.principal, [...new Set(principals)]))
       .orderBy(asc(vaultMembers.principal)),
@@ -788,7 +779,6 @@ export async function versions(db: Queryable, ids: readonly string[]): Promise<S
       bytes: row.wrappedDek.toString('base64'),
     },
     current: row.currentVersionId === row.id && Number(row.newest) === row.version,
-    // SQLite answers a subquery's boolean as a number.
     newestSensitive: Boolean(row.newestSensitive),
     heldSensitive: Boolean(row.heldSensitive),
   }));

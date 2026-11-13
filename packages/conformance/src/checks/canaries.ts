@@ -1,7 +1,6 @@
 // A value leaves coffre through a reveal and nowhere else: not in any
 // answer to a GET, whoever asks, not in a page, and not in what it stores or
 // prints. Every value set is a random canary, so finding one is a leak.
-import { existsSync, readFileSync } from 'node:fs';
 
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
@@ -97,9 +96,9 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
     const names = await tables(sql);
     // Prove the reader sees bytes before trusting an absence of plaintext.
     const control = canary();
-    await sql.exec(`CREATE TABLE conformance_canary_probe (value ${sql.engine === 'postgres' ? 'bytea' : 'BLOB'})`);
+    await sql.exec('CREATE TABLE conformance_canary_probe (value bytea)');
     try {
-      await sql.query(`INSERT INTO conformance_canary_probe VALUES (${sql.engine === 'postgres' ? '$1' : '?'})`, [Buffer.from(control)]);
+      await sql.query('INSERT INTO conformance_canary_probe VALUES ($1)', [Buffer.from(control)]);
       let found = false;
       await scanTables(sql, ['conformance_canary_probe'], (_, bytes) => { found ||= Buffer.from(bytes).includes(control); });
       expect(found, 'the database scanner missed its planted binary canary');
@@ -109,21 +108,9 @@ export async function canaryScan(deployment: Deployment, people: People, canarie
     await scanTables(sql, names, look);
     stored.push(`${names.length} tables, with a binary positive control`);
   });
-  if (deployment.databaseFile !== null) {
-    look("the database's file", files(deployment.databaseFile));
-    stored.push('the database file and WAL');
-  }
   look("the processes' output", deployment.output());
   stored.push("the processes' output");
 
   expect(leaks.length === 0, 'a value was found outside a reveal', leaks);
   return `${answers} answers from ${Object.keys(routes).length} GET routes and ${paths.length} pages as ${callers.length} callers, and ${stored.join(', ')}: no value`;
-}
-
-/** A SQLite file and its write-ahead log, as bytes: what anyone with the disk would read. */
-function files(path: string): Buffer {
-  expect(existsSync(path), `the store file could not be found: ${path}`);
-  return Buffer.concat([path, `${path}-wal`]
-    .filter((file) => existsSync(file))
-    .map((file) => readFileSync(file)));
 }

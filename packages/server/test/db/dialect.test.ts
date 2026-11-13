@@ -11,7 +11,7 @@ import { insert, insertIfAbsent, update, upsert } from '../../src/db/queries.ts'
 import { openTestDatabase } from './engine.ts';
 import { projects } from './tables.ts';
 
-// The named operations of dialect.ts, on whichever engine the suite runs.
+// The named operations of dialect.ts.
 // Writes name their table the way the server does, by the Postgres import.
 
 let db: Database;

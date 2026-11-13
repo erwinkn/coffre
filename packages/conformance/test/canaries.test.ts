@@ -1,18 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { TABLES } from '../src/checks/storage.ts';
 import { Browser } from '../src/browser.ts';
 import { canaryScan } from '../src/checks/canaries.ts';
 import { canary, type People } from '../src/checks/people.ts';
-import { postgres, sqlite, using } from '../src/database.ts';
+import { postgres, using } from '../src/database.ts';
 import type { Deployment } from '../src/harness.ts';
+import { scratch } from './scratch.ts';
 
-test('the canary scan detects plaintext in a Postgres bytea column', {
-  skip: (process.env.COFFRE_TEST_ENGINE ?? 'postgres') !== 'postgres' && 'Postgres bytea reader',
-}, async (t) => {
+test('the canary scan detects plaintext in a Postgres bytea column', async (t) => {
   const url = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
   // Only storage is under test; every HTTP surface answers without a value.
   const clean = async () => new Response('{}');
@@ -24,7 +20,7 @@ test('the canary scan detects plaintext in a Postgres bytea column', {
     leaver: { ...person, cli: person.api, cliToken: 'removed' }, service: { member: 'token:removed', token: 'removed', api: person.api },
   };
   const deployment = {
-    origin: 'http://conformance.test', database: () => postgres(url), databaseFile: null,
+    origin: 'http://conformance.test', database: () => postgres(url),
     output: () => '',
   } as Deployment;
   const value = canary();
@@ -43,13 +39,13 @@ test('the canary scan detects plaintext in a Postgres bytea column', {
 });
 
 test('a missing shared table fails the canary scan instead of passing an incomplete inspection', async (t) => {
-  const { deployment, people, sql } = await sqliteFixture(t);
+  const { deployment, people, sql } = await fixture(t);
   await sql.exec('DROP TABLE vault_members');
   await assert.rejects(canaryScan(deployment, people, { KEY: canary() }), /shared tables could not be inspected/);
 });
 
 test('the binary positive control fails a scanner whose driver hides bytes', async (t) => {
-  const { deployment, people, sql } = await sqliteFixture(t);
+  const { deployment, people, sql } = await fixture(t);
   const original = sql.query.bind(sql);
   t.mock.method(sql, 'query', async (statement: string, params?: unknown[]) => {
     const rows = await original(statement, params);
@@ -59,11 +55,9 @@ test('the binary positive control fails a scanner whose driver hides bytes', asy
   await assert.rejects(canaryScan(deployment, people, { KEY: canary() }), /scanner missed its planted binary canary/);
 });
 
-async function sqliteFixture(t: test.TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'coffre-canary-test-'));
-  const file = join(directory, 'coffre.db');
-  const sql = sqlite(file);
-  t.after(async () => { await sql.close(); rmSync(directory, { recursive: true, force: true }); });
+async function fixture(t: test.TestContext) {
+  const sql = await (await scratch(t))();
+  t.after(() => sql.close());
   for (const table of TABLES) await sql.exec(`CREATE TABLE ${table} (id TEXT)`);
   t.mock.method(globalThis, 'fetch', async () => new Response('{}'));
   const browser = new Browser('http://conformance.test');
@@ -74,7 +68,7 @@ async function sqliteFixture(t: test.TestContext) {
   };
   // The connection stays open so a test can change how the driver emits bytes.
   const deployment = {
-    origin: 'http://conformance.test', database: async () => ({ ...sql, close: async () => {} }), databaseFile: file,
+    origin: 'http://conformance.test', database: async () => ({ ...sql, close: async () => {} }),
     output: () => '',
   } as Deployment;
   return { deployment, people, sql };
@@ -82,7 +76,7 @@ async function sqliteFixture(t: test.TestContext) {
 
 
 test('the HTTP scan waits for every reply and finds a leak in its final answer', async (t) => {
-  const { deployment, people } = await sqliteFixture(t);
+  const { deployment, people } = await fixture(t);
   const value = canary();
   let calls = 0;
   let active = 0;

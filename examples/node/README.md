@@ -72,12 +72,6 @@ With AWS KMS instead of a key of your own, the vault also needs a
 To do the same by hand, see
 [deploy.md](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#appendix-the-database-by-hand).
 
-For tests and local development only, both URLs may instead name the same
-absolute SQLite file, e.g. `file:/tmp/coffre-local.db`; migrate that URL once
-with `pnpm exec coffre-server migrate file:/tmp/coffre-local.db`, and make the
-keys with `pnpm exec coffre keys`. SQLite
-has no database logins or separation of privileges.
-
 ## 3. Run
 
 ```sh
@@ -115,8 +109,16 @@ administrator's URL (at its prompt, or, in a script, piped in, with
 
 ## Conformance
 
-`pnpm conformance` builds the app, runs the vault and the server on SQLite in a temporary
-directory, signs people in through a stand-in GitHub, and checks what coffre
+```sh
+pnpm conformance \
+  --postgres "postgres://owner:…@127.0.0.1:5432" \
+  --runtime "postgres://coffre_runtime:…@127.0.0.1:5432" \
+  --vault-runtime "postgres://coffre_vault_runtime:…@127.0.0.1:5432"
+```
+
+builds the app, runs the vault and the server on a database of their own that
+it creates on that Postgres and drops after, signs people in through a
+stand-in GitHub, and checks what coffre
 must never do: show a value to someone without access, act for another site
 with someone's cookie, keep a removed member in, give a value it did not
 log. Run it after changing this project, and before deploying the change.

@@ -17,7 +17,6 @@ import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { lockLogHead } from '@coffre/db/log';
-import { postgresOnly } from './db/engine.ts';
 import { auditLog } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
@@ -617,7 +616,7 @@ test('a role edit weighed from a policy another change overtook is refused, poli
   assert.equal((await root.roles.list()).roles.find((role) => role.id === 'viewer')!.edited, true);
 });
 
-test('rule 2: a plain value is fenced by a read of the newest policy change, which waits on no write', postgresOnly('one writer at a time is SQLite\'s'), async () => {
+test('rule 2: a plain value is fenced by a read of the newest policy change, which waits on no write', async () => {
   await root.secrets.set('market/prod', { REGION: { value: 'eu-west-3', plain: true } });
   // Another transaction holds the log's head, as any write does while it commits: the read is not queued behind it.
   let release!: () => void;

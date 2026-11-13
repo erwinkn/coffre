@@ -1,7 +1,4 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import test from 'node:test';
 
 import { createClient } from '@coffre/client';
@@ -9,8 +6,9 @@ import { createClient } from '@coffre/client';
 import { bulkLimit } from '../src/checks/access.ts';
 import { noAuditNoValue } from '../src/checks/audit.ts';
 import { DEV, type People } from '../src/checks/people.ts';
-import { sqlite, using } from '../src/database.ts';
+import { using } from '../src/database.ts';
 import type { Deployment } from '../src/harness.ts';
+import { scratch } from './scratch.ts';
 
 for (const [error, reason, passes] of [
   ['forbidden', 'no_grant', false],
@@ -32,16 +30,14 @@ for (const [error, reason, passes] of [
 }
 
 async function auditFixture(t: test.TestContext, status: number, error: string, down = false) {
-  const dir = mkdtempSync(join(tmpdir(), 'coffre-refusal-test-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const file = join(dir, 'app.db');
-  await using(sqlite(file), (sql) => sql.exec('CREATE TABLE audit_log (action TEXT)'));
+  const database = await scratch(t);
+  await using(database(), (sql) => sql.exec('CREATE TABLE audit_log (action TEXT)'));
   let output = '';
-  const deployment = { database: async () => sqlite(file), output: () => output } as Deployment;
+  const deployment = { database, output: () => output } as Deployment;
   const admin = {
     browser: { send: async () => {
       if (!down) {
-        await using(sqlite(file), async (sql) => {
+        await using(database(), async (sql) => {
           try {
             await sql.exec("INSERT INTO audit_log VALUES ('secret.read')");
           } catch (cause) {

@@ -1,18 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import test from 'node:test';
 
 import { writesAgree } from '../src/checks/audit.ts';
-import { sqlite } from '../src/database.ts';
 import type { Deployment } from '../src/harness.ts';
+import { scratch } from './scratch.ts';
 
 test('a stored version without a write entry fails conformance', async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'coffre-write-test-'));
-  const file = join(dir, 'coffre.db');
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const sql = sqlite(file);
+  const database = await scratch(t);
+  const sql = await database();
   await sql.exec(`
     CREATE TABLE projects (id TEXT, slug TEXT);
     CREATE TABLE environments (id TEXT, project_id TEXT, slug TEXT);
@@ -25,6 +20,6 @@ test('a stored version without a write entry fails conformance', async (t) => {
     INSERT INTO secret_versions VALUES ('version', 'secret', 1);
   `);
   await sql.close();
-  const deployment = { database: async () => sqlite(file) } as Deployment;
+  const deployment = { database } as Deployment;
   await assert.rejects(writesAgree(deployment), /a stored version has no unique app write entry/);
 });

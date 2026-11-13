@@ -139,7 +139,7 @@ export function createCoffre(config: NodeConfig): CoffreNode {
 
 /** coffre's configuration on Node. */
 export type NodeConfig = CoffreConfig & {
-  /** `postgres://…`, or `file:coffre.db` for local SQLite. */
+  /** `postgres://…`. */
   database: string;
   /**
    * The client's address, for a deployment behind a load balancer, whose
@@ -154,7 +154,7 @@ export type NodeConfig = CoffreConfig & {
 function checkNodeConfig(options: NodeConfig) {
   const config = resolveConfig(options);
   if (typeof options.database !== 'string' || options.database.length === 0) {
-    throw new Error('database must be a URL: postgres://… or file:…');
+    throw new Error('database must be a URL: postgres://…');
   }
   return config;
 }

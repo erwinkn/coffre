@@ -313,8 +313,7 @@ reference to that secret in `References`, and none yet elsewhere.
 - **Liveness.** It checks that nothing bad happens, not that every request
   finishes. A deadlock does show, since every run is finite.
 - **Postgres itself.** It assumes Postgres's row locks and READ COMMITTED
-  behave as documented. It does not cover SQLite, where every transaction
-  holds the whole file and so nothing interleaves.
+  behave as documented.
 - **Security outside concurrency:** MACs, the chain, the database's owner.
 
 ## Credentials, issuing and the bulk limit

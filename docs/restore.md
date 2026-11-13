@@ -106,9 +106,7 @@ A dump is a logical copy of one database: its tables, rows, privileges and
 row-level policies, but not the cluster's roles or their passwords, and
 not the privileges on the database itself. Provision the roles before
 restoring; `coffre migrate` reasserts the database privileges afterwards.
-This is what the drill runs. Postgres only: a SQLite database, which only
-tests and local development use, is one file, copied whole with
-`sqlite3 coffre.db ".backup coffre-copy.db"`.
+This is what the drill runs.
 
 `coffre backup`, `coffre restore` and `coffre verify backup` run
 PostgreSQL's own `pg_dump` and `pg_restore`, which must be on `PATH`:

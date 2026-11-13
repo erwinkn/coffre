@@ -298,11 +298,8 @@ jobs:
   compat:
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
-    name: Previous release on this schema (${{ matrix.kind }})
-    strategy:
-      fail-fast: false
-      matrix:
-        kind: [workers, node]
+    # Workers only: the newest release's Node deployment runs on SQLite, which this checkout no longer migrates.
+    name: Previous release on this schema (workers)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -313,7 +310,7 @@ jobs:
           # The schema comes from this checkout's sources; the release from npm.
           build: 'false'
       - name: The newest release of this line, migrated with this revision's migrations
-        run: pnpm test:compat --kind ${{ matrix.kind }}
+        run: pnpm test:compat
 
   validate:
     name: Validate

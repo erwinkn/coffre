@@ -39,7 +39,7 @@ import { clientFor, contextFor, openTestDatabase, resetDatabase, testAnchor, wai
 import { answer, type Pages } from './start-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { postgresOnly, withLogUnlocked } from './db/engine.ts';
+import { withLogUnlocked } from './db/engine.ts';
 import { auditLog, credentials as credentialRows } from './db/tables.ts';
 import { testPostgresPool } from './db/postgres-pool.ts';
 
@@ -51,7 +51,6 @@ const ISSUER = 'https://token.actions.githubusercontent.com';
 const KEYS = `${ISSUER}/.well-known/jwks`;
 /** What a CI job reveals: seven keys of the environment it reads. */
 const SEVEN = ['CLOUDFLARE_API_TOKEN', 'SCALEWAY_SECRET_KEY', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'SOURCE_REGISTRY_KEY', 'GITHUB_RELEASE_APP_CLIENT_ID', 'GITHUB_RELEASE_APP_PRIVATE_KEY'];
-const POSTGRES = postgresOnly("counts what the app's and the vault's Postgres connections run");
 const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }).resolve(ORIGIN);
 
 type Count = { statements: number; rows: number };
@@ -172,7 +171,6 @@ function bearer(runtime: CoffreRuntime, token: string): CoffreClient {
 }
 
 before(async () => {
-  if (POSTGRES.skip) return;
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   app = new CountingPool(testPostgresPool(TEST_RUNTIME_DATABASE_URL));
@@ -342,7 +340,6 @@ before(async () => {
 });
 
 after(async () => {
-  if (POSTGRES.skip) return;
   await resetDatabase(db.owner);
   await Promise.all([app.end(), vaultPool.end(), db.close()]);
 });
@@ -403,7 +400,7 @@ const requests: Record<string, { request: () => Promise<unknown>; budget: { app:
   "a Cloudflare call at the proxy": { request: () => bound(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
 };
 
-test('each hot request runs exactly its budget of statements, on as many connections', POSTGRES, async () => {
+test('each hot request runs exactly its budget of statements, on as many connections', async () => {
   await warm();
   for (const [name, { request, budget }] of Object.entries(requests)) {
     const spent = await cost(request);
@@ -421,7 +418,7 @@ test('each hot request runs exactly its budget of statements, on as many connect
  * did, for its own entry, for six statements more, which every append in
  * the instance waited for.
  */
-test("a workload's request at a proxy whose cache lapsed runs its budget, and the app takes no lock", POSTGRES, async () => {
+test("a workload's request at a proxy whose cache lapsed runs its budget, and the app takes no lock", async () => {
   await coldWorkload();
   const held = { ...app.held };
   const spent = await cost(coldWorkload);
@@ -430,7 +427,7 @@ test("a workload's request at a proxy whose cache lapsed runs its budget, and th
 });
 
 /** A workload's verify at a proxy whose cache has lapsed: what a proxied request costs then, the secret opened and its use logged. */
-test("a workload's verify at a proxy whose cache lapsed runs a proxied request's budget", POSTGRES, async () => {
+test("a workload's verify at a proxy whose cache lapsed runs a proxied request's budget", async () => {
   await coldVerify();
   const spent = await cost(coldVerify);
   assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
@@ -441,7 +438,7 @@ test("a workload's verify at a proxy whose cache lapsed runs a proxied request's
  * proxy's last read: the read on the kept answer, refused by the vault,
  * goes again, asking, through the session it already checked.
  */
-test("a proxied call whose cache lapsed, after its service's access changed, asks the vault again, once", POSTGRES, async () => {
+test("a proxied call whose cache lapsed, after its service's access changed, asks the vault again, once", async () => {
   await coldWorkload();
   await root.access.set(SERVICE, { 'market/dev': 'developer' });
   const [{ seq: since }] = await db.owner.select({ seq: auditLog.seq }).from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
@@ -455,7 +452,7 @@ test("a proxied call whose cache lapsed, after its service's access changed, ask
   assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
 });
 
-test('a request runs the same statements, and reads the same rows, however large the log, the members and the policy grow', POSTGRES, async () => {
+test('a request runs the same statements, and reads the same rows, however large the log, the members and the policy grow', async () => {
   await warm();
   const small: Record<string, Cost> = {};
   for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
@@ -487,7 +484,7 @@ test('a request runs the same statements, and reads the same rows, however large
  * day, some within the bulk limit's window. No statement scans the log, nor
  * one principal's reads in it (the bulk count reads `vault_releases`).
  */
-test("each hot request's statements read as many pages however long the log grows", POSTGRES, async () => {
+test("each hot request's statements read as many pages however long the log grows", async () => {
   /** `count` entries more, older than any, copies of the reads and uses the log holds: what the hot paths would scan. */
   const grow = async (count: number) => {
     // In parts, each within a statement's time on the fixture's connections.
@@ -572,7 +569,7 @@ test("each hot request's statements read as many pages however long the log grow
  * logging nothing, and the request goes again, asking. Three calls, once:
  * the next is one again.
  */
-test("a reveal after the reader's access changed asks the vault again, once", POSTGRES, async () => {
+test("a reveal after the reader's access changed asks the vault again, once", async () => {
   await reader.secrets.reveal('market/dev/API_KEY');
   await root.access.set(`user:${READER}`, { 'market/dev': 'developer' });
   const changed = await cost(() => reader.secrets.reveal('market/dev/API_KEY'));
@@ -582,7 +579,7 @@ test("a reveal after the reader's access changed asks the vault again, once", PO
   assert.deepEqual({ app: after.app.statements, vault: after.vault.statements, vaultCalls: after.vaultCalls }, { app: 4, vault: 7, vaultCalls: 1 });
 });
 
-test("a caller's check reads nothing of a project they reach nothing in", POSTGRES, async () => {
+test("a caller's check reads nothing of a project they reach nothing in", async () => {
   await reader.me();
   const before = await cost(() => reader.me());
   await root.projects.create('elsewhere', { name: 'Elsewhere' });
@@ -607,7 +604,7 @@ const growth = gs.record({
 });
 const growthSettings = propertySettings(4, 10);
 
-test(`a request costs the same after any growth of the instance, seed ${growthSettings.seed}`, POSTGRES, async () => {
+test(`a request costs the same after any growth of the instance, seed ${growthSettings.seed}`, async () => {
   await warm();
   const small: Record<string, Cost> = {};
   for (const [name, { request }] of Object.entries(requests)) small[name] = await cost(request);
@@ -689,7 +686,7 @@ test(`a request costs the same after any growth of the instance, seed ${growthSe
   }, growthSettings);
 });
 
-test('readiness costs the same however long the log, and however far it ran past the anchor', POSTGRES, async () => {
+test('readiness costs the same however long the log, and however far it ran past the anchor', async () => {
   await beat();
   assert.equal((await ready()).ok, true);
   const small = await cost(ready);
@@ -720,7 +717,7 @@ test('readiness costs the same however long the log, and however far it ran past
  * the past rehashed and the head, is the same after a long stretch of the
  * log as after a short one.
  */
-test("a checkpoint's transactions read the same however far its walk goes", POSTGRES, async () => {
+test("a checkpoint's transactions read the same however far its walk goes", async () => {
   const held = async (count: number) => {
     assert.ok((await signLog()).ok);
     await append(count);
@@ -745,7 +742,7 @@ test("a checkpoint's transactions read the same however far its walk goes", POST
  * the app's side, its row under the head, is the same after a long
  * backlog as after a short one.
  */
-test("a beat's transactions read the same however far its walk goes", POSTGRES, async () => {
+test("a beat's transactions read the same however far its walk goes", async () => {
   const held = async (count: number) => {
     assert.equal(await beat(), true);
     await append(count);
@@ -763,7 +760,7 @@ test("a beat's transactions read the same however far its walk goes", POSTGRES, 
   assert.deepEqual({ statements: long.statements, rows: long.rows }, { statements: short.statements, rows: short.rows });
 });
 
-test('a standing finding costs each beat the same on the app\'s side, however long it stands and the log grows', POSTGRES, async () => {
+test('a standing finding costs each beat the same on the app\'s side, however long it stands and the log grows', async () => {
   assert.equal(await beat(), true);
   await append(1);
   const [x] = await db.owner.select().from(auditLog).orderBy(desc(auditLog.seq)).limit(1);

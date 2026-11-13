@@ -24,7 +24,6 @@ import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, environments, secrets, serviceBindings } from './db/tables.ts';
-import { postgresOnly } from './db/engine.ts';
 import { answer, type Pages } from './start-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -531,7 +530,7 @@ test('a frozen session still renews: lifting the freeze restores it, with nothin
   assert.equal((await me(held)).status, 200);
 });
 
-test("the per-request statement reads its rows through their indexes, however many credentials there are", postgresOnly('reads the plan Postgres makes'), async () => {
+test("the per-request statement reads its rows through their indexes, however many credentials there are", async () => {
   const { sql: text, params } = sessionStatement(db.owner).toSQL();
   const values: Record<string, unknown> = { tokenHash: Buffer.alloc(32, 1), place: null, credential: 'stripe' };
   const literal = (value: unknown): string => {
@@ -934,7 +933,7 @@ test('a Cloudflare binding unbound after its call was checked releases nothing: 
  * The models (formal/Credentials.tla) take a statement as one step, and
  * cannot see that; this does.
  */
-test('a Cloudflare binding unbound while its use waits for the head releases nothing', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('a Cloudflare binding unbound while its use waits for the head releases nothing', async () => {
   const seen: { caller?: WorkloadUse; context?: PluginContext } = {};
   runtime = makeRuntime({ plugins: checkPlugins([probe(seen)]) });
   await marketProd();

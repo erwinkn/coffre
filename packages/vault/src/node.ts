@@ -33,8 +33,8 @@ export type { LocalVault, VaultOptions };
 export type NodeVaultConfig = VaultConfig & {
   /**
    * The database the server uses, as the vault's own login:
-   * `postgres://coffre_vault_runtime:…@…/coffre`, or a `file:` URL for local
-   * development. Or one already open, which the vault leaves open.
+   * `postgres://coffre_vault_runtime:…@…/coffre`. Or one already open, which
+   * the vault leaves open.
    */
   database: string | Database;
 };

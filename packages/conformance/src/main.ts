@@ -10,19 +10,18 @@ import { Failure } from './report.ts';
 import { conform } from './suite.ts';
 
 const USAGE = `usage:
-  coffre-conformance workers [<dir>] --postgres <owner URL> --runtime <coffre_runtime URL>
+  coffre-conformance workers|node [<dir>] --postgres <owner URL> --runtime <coffre_runtime URL>
                     --vault-runtime <coffre_vault_runtime URL> [options]
-  coffre-conformance node [<dir>] [options]
 
   <dir>             the deployment, as \`coffre init\` wrote it (default: here)
   --port <n>        coffre's port; the IdP gets the next, wrangler's inspector the one after (3082)
   --bulk-limit <n>  the vault's bulkLimit count, when not the default (1000)
   --browser <path>  Chrome or Chromium, to load the pages in (default: one found here;
                     without one, that check is skipped)
-  --postgres <url>  workers: a Postgres login that may create databases; one is made for the run
-  --runtime <url>   workers: the same server as coffre_runtime, the login the app runs as
+  --postgres <url>  a Postgres login that may create databases; one is made for the run
+  --runtime <url>   the same server as coffre_runtime, the login the app runs as
   --vault-runtime <url>
-                    workers: the same server as coffre_vault_runtime, the login the vault runs as
+                    the same server as coffre_vault_runtime, the login the vault runs as
 
 To check an instance that is running already, from outside, use the CLI:
 \`coffre verify instance\`.`;

@@ -2,7 +2,7 @@
 // log says the app's key stands, and its signed rows, a stretch at a time.
 import type { StoredEntry } from '@coffre/core/audit';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { changedRows, engineOf, forUpdate, rowsOf } from '@coffre/db/dialect';
+import { forUpdate, rowsOf } from '@coffre/db/dialect';
 import { entryColumns, MOVES_FROM } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 
@@ -77,19 +77,11 @@ export type Resealed = { id: string; was: Buffer; mac: Buffer; ends: Date | null
  * Each row given its new MAC, if it still carries the one it was read with:
  * a row changed since keeps its change, and the MAC it was changed under. A
  * session that ends is revoked as coffre revokes one, a device's login is
- * consumed. The ids of those it changed. One statement on Postgres for each
- * kind, one a row on SQLite.
+ * consumed. The ids of those it changed. One statement for each kind.
  */
 export async function reseal(tx: Transaction, table: AuthTable, rows: readonly Resealed[]): Promise<string[]> {
   const target = signedTable(tx, table);
   const changed: string[] = [];
-  if (engineOf(tx) === 'sqlite') {
-    for (const row of rows) {
-      const set = row.ends === null ? { authMac: row.mac } : { authMac: row.mac, ...ending(table, row.ends) };
-      if (changedRows(await tx.update(target).set(set as never).where(and(eq(target.id, row.id), eq(target.authMac, row.was)))) > 0) changed.push(row.id);
-    }
-    return changed;
-  }
   for (const ends of [false, true]) {
     const some = rows.filter((row) => (row.ends !== null) === ends);
     if (some.length === 0) continue;
@@ -103,7 +95,3 @@ export async function reseal(tx: Transaction, table: AuthTable, rows: readonly R
   return changed;
 }
 
-/** The columns that end a row as a rotation ends it: a device's login consumed, a session revoked. */
-function ending(table: AuthTable, at: Date): Record<string, unknown> {
-  return table === 'device_authorizations' ? { consumedAt: at } : { revokedAt: at, revokedBy: 'coffre' };
-}

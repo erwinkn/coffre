@@ -17,11 +17,9 @@ import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
 import { clientFor } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 import { deps, DEV, entries, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 import { tunnelListener } from './tunnel-listener.ts';
 
-const skip = TEST_ENGINE !== 'postgres' ? 'the tunnel reaches a Postgres database, over Hyperdrive' : false;
 const NAME = 'coffre-tunnel-coffre-workers-test';
 
 let dir: string;
@@ -29,7 +27,6 @@ let worker: Unstable_DevWorker;
 let handle: string;
 
 useMcp(async () => {
-  if (skip) return;
   const root = clientFor(deps, ROOT);
   await root.members.add(`user:${DEV}`);
   await root.projects.create('market');
@@ -73,7 +70,7 @@ after(async () => {
   if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
 });
 
-test("a run's session in coffre's object: admitted and logged as on Node, rechecked a second, and ended once its handle is revoked", { skip, timeout: 180_000 }, async () => {
+test("a run's session in coffre's object: admitted and logged as on Node, rechecked a second, and ended once its handle is revoked", { timeout: 180_000 }, async () => {
   await boot();
   const listener = await tunnelListener(`ws://${worker.address}:${worker.port}/use/market/dev/db`, handle);
   try {
