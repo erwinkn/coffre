@@ -8,7 +8,8 @@
 //   pnpm validate                  what this diff can change
 //   pnpm validate --full           everything, as the release's Validate (the image aside; the
 //                                  packed client on this Node, or those COFFRE_CLIENT_NODES lists),
-//                                  and the growth sweep, which Validate has no job for
+//                                  and the growth sweep, which Validate has no job for; the
+//                                  upgrade check runs here alone
 //   pnpm validate --base <rev>     the revision the change is on (default origin/main)
 //   pnpm validate --skip a,b       leave steps out; one the diff needs is OMITTED and the
 //                                  summary reads PARTIAL (exit 1), never pass
@@ -144,6 +145,9 @@ const STEPS = {
   },
   // No job of validate.yml: the growth sweep (docs/growth-sweep.md) runs before a tag, on the step's own Postgres, as it requires.
   sweep: { install: true, postgres: true, run: () => [`pnpm sweep:growth --out ${quote([join(logs, 'sweep')])}`] },
+  // A database of 0.14.5's through 0.15.0 to this revision, on a Postgres and ports the script picks itself
+  // (scripts/upgrade-check.sh): about 4.5 min, so --full alone runs it.
+  upgrade: { job: 'upgrade', install: true, build: true, run: () => ['pnpm upgrade:check'] },
 }
 
 const names = new Set(Object.keys(STEPS))
@@ -496,7 +500,7 @@ const runStep = async (s) => {
 const toRun = entries.filter((s) => s.run)
 console.log(`validate: ${toRun.map((s) => s.name).join(', ') || 'nothing'} on ${head.slice(0, 10)}, logs in ${logs}`)
 // The longest first, so that the --jobs slots go to what holds the run up.
-const ORDER = ['tests', 'matrices', 'formal', 'consumer', 'alone', 'workers', 'schema', 'sweep', 'node', 'terraform', 'typecheck', 'proofs', 'action', 'lint']
+const ORDER = ['tests', 'matrices', 'formal', 'consumer', 'upgrade', 'alone', 'workers', 'schema', 'sweep', 'node', 'terraform', 'typecheck', 'proofs', 'action', 'lint']
 if (toRun.some((s) => STEPS[s.name].postgres)) await sweep()
 await Promise.all(toRun.sort((a, b) => ORDER.indexOf(a.name) - ORDER.indexOf(b.name)).map((s) => runStep(s).catch((error) => record(s.name, { status: 'FAIL', why: error.message }))))
 if (networkMade && !opt['keep-db'] && !(await twice(`docker network rm ${network}`, { log: sweepLog }))) {

@@ -8,8 +8,9 @@
 #   1. 0.14.5, as `coffre init --workers` writes it, from npm, filled by its
 #      own conformance on a database kept for the run; the suite stops before
 #      the checks that break the log for good (upgrade-check.mjs, `fill`).
-#   2. 0.15.0, as `init` writes it: its `coffre migrate`, then its first
-#      request cuts the log over.
+#   2. 0.15.0, as `init` writes it: its `coffre migrate`, this checkout's
+#      refused (the log is not 0.15's yet), then 0.15.0's first request cuts
+#      the log over.
 #   3. On 0.15.0, as the Owner: `coffre verify log` green, a beat, then a
 #      read of an environment's values (as hashes), the audit API's pages
 #      (heartbeats and checkpoints left out) and every removed member's
@@ -230,6 +231,14 @@ log "coffre $through, as init writes it: migrated, then cut over by its first re
 step release "$through" workers "$work/coffre-$through"
 step quietly "coffre $through's migrate" "$work/coffre-$through-migrate.log" \
     migrate "$work/coffre-$through" ./node_modules/.bin/coffre
+# Before 0.15.0's first start its vault has not moved the log to 0.15's: this checkout's migrate refuses it.
+cli=(node --conditions=coffre:source "$root/packages/cli/src/main.ts")
+if step migrate "$root/examples/workers" "${cli[@]}" >"$work/early-migrate.log" 2>&1 ||
+    ! grep -q "not moved to 0.15's yet" "$work/early-migrate.log"; then
+    echo "upgrade-check: this checkout's migrate did not refuse a 0.15.0 never started; see $work/early-migrate.log" >&2
+    exit 1
+fi
+echo "    this checkout's migrate refuses it until 0.15.0 has started once"
 # This checkout's dev IdP signs the Owner in from here on: a GitHub account is the same for any IdP, by its email.
 env -u COFFRE_DEV_PUBLIC_URL -u COFFRE_DEV_IDP_PUBLIC_URL COFFRE_DEV_IDP_PORT=$((port + 1)) \
     setsid node --conditions=coffre:source "$root/dev/idp/server.ts" >"$work/idp.log" 2>&1 &
@@ -251,7 +260,6 @@ coffre=''
 
 log "this checkout: what its migrations would lose refused, its migrate, and its Workers example on the same database"
 step node --conditions=coffre:source "$root/scripts/upgrade-check.mjs" refusals "$owner/$database"
-cli=(node --conditions=coffre:source "$root/packages/cli/src/main.ts")
 step quietly "this checkout's migrate" "$work/migrate.log" migrate "$root/examples/workers" "${cli[@]}"
 serve "$root/examples/workers"
 step node --conditions=coffre:source "$root/scripts/upgrade-check.mjs" after "$origin" "$idp_origin" "$work/before.json" -- "${cli[@]}"

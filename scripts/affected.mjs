@@ -22,10 +22,11 @@
 //   only the Node deployment runs, while `nodeConformance` is on; Terraform on its
 //   provider and the routes it calls; the packed consumer on manifests, build configs
 //   and the examples `init` writes.
-// - A changed file no rule claims selects every step but TLC and the growth sweep: a
-//   miss fails safe, never as a skip.
+// - A changed file no rule claims selects every step but TLC, the growth sweep and the
+//   upgrade check: a miss fails safe, never as a skip.
 // - `--full` runs everything, as the release's Validate does, and the growth sweep,
-//   which Validate has no job for: a tag's local `--full` is its only gate.
+//   which Validate has no job for: a tag's local `--full` is its only gate. The upgrade
+//   check (0.14.5 through 0.15.0 to this revision, minutes, from npm) runs there alone.
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -208,6 +209,7 @@ export function plan({ root, files, changed, read = (f) => readFileSync(join(roo
     { name: 'terraform', ...rule('terraform')() },
     { name: 'consumer', ...rule('consumer', { db: true })() },
     { name: 'sweep', why: full ? '--full' : null },
+    { name: 'upgrade', why: full ? '--full' : null },
   ]
   return { steps, everything, unclaimed }
 }

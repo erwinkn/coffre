@@ -20,7 +20,7 @@ const workflow = readFileSync(new URL('../.github/workflows/validate.yml', impor
 test('--full selects every step, and each but the sweep is a job of validate.yml', () => {
   const steps = list('--full', '--base', 'HEAD')
   const jobs = new Set([...workflow.matchAll(/^ {2}([a-z0-9-]+):$/gm)].map((m) => m[1]))
-  assert.equal(Object.keys(steps).length, 17)
+  assert.equal(Object.keys(steps).length, 18)
   for (const [name, why] of Object.entries(steps)) assert.match(why, name === 'docs' ? /every change/ : name === 'node' && !nodeConformance ? /^not run: off until 0\.16\.1 \(T270\)$/ : /^--full/, name)
   // The image is the release's, not a step here.
   assert.equal('image' in steps, false)
