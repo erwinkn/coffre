@@ -95,10 +95,10 @@ test('D200: a visit\'s check, the beat\'s and the 0.15 page check plan and lock 
   const statements = async () => {
     const capture = capturing();
     try {
-      const checked = await checkAudit(capture.db, keys, input, { reached: reachedOf(cp, { ok: true }), upgraded: false });
+      const checked = await checkAudit(capture.db, keys, input, { reached: reachedOf(cp, { ok: true }) });
       assert.equal(checked.state, 'ok', checked.reason ?? '');
       const [visit] = capture.sent.splice(0);
-      const beat = await checkAudit(capture.db, keys, input, { reached: reachedOf(cp, { ok: true }), upgraded: false, beat: true });
+      const beat = await checkAudit(capture.db, keys, input, { reached: reachedOf(cp, { ok: true }), beat: true });
       assert.ok(beat.state === 'ok' && beat.unlisted !== null, beat.reason ?? 'no checkpoint above the cursor');
       const [beaten] = capture.sent.splice(0);
       const walked = await verifyTrees(capture.db, keys, { anchors: [cp.pair.notes] });

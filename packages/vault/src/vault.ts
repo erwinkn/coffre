@@ -4028,17 +4028,7 @@ class VaultService implements Vault {
     const reached = this.#prepared.log015.reached;
     if (reached === undefined) throw new Error("the audit check asks the signer first: give the vault the checkpointer's reached");
     const said = await reached();
-    return checkAudit(this.#db, await this.#verifierKeys(), input, { reached: said, upgraded: this.#upgraded(), beat });
-  }
-
-  /**
-   * Whether the upgrade step has anchored the frozen log (upgrade.ts): V1 writes the step and answers here. Until it
-   * does, no database has an anchor, `audit_log` still grows, and `check` holds no last entry to one. V1 answers from
-   * what no database writer can delete (`frozenLog`): never a row, such as the upgrade's done marker, a writer could
-   * delete with the anchor.
-   */
-  #upgraded(): boolean {
-    return false;
+    return checkAudit(this.#db, await this.#verifierKeys(), input, { reached: said, beat });
   }
 
   /** `coffre audit rebuild` (projection.ts): the record and the reset, one statement, then the seal wait. */

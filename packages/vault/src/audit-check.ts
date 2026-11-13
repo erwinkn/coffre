@@ -75,11 +75,6 @@ export type Checked = {
 export type CheckOptions = {
   /** The signer's answer, asked before the read (`VaultOptions.reached`). */
   reached: Reached;
-  /**
-   * Whether the vault's upgrade step has written the anchor (V1, T279; upgrade.ts): from then on a frozen log with rows
-   * and no anchor is `broken`. Before, `audit_log` still grows, and has no anchor to answer to.
-   */
-  upgraded: boolean;
   /** The beat's: the statement also reads the first checkpoint above the cursor (`unlisted`). */
   beat?: boolean;
 };
@@ -110,7 +105,7 @@ export async function checkAudit(db: Database, keys: VerifierKeys, input: CheckI
   const broken: string[] = walked.problems.filter((p) => !walked.behind || !p.startsWith(ENDS_BELOW));
   if (forged.length > 0) broken.push(`${forged.length} of the rows shown: not the projector's (their MAC does not hold)`);
   if (listed === null) broken.push("the audit cursor is not the projector's (its MAC does not hold)");
-  const frozen = frozenLog(read.anchor, read.last, ring, options.upgraded);
+  const frozen = frozenLog(read.anchor, read.last, ring);
   if (frozen !== null) broken.push(frozen);
   const behind = walked.behind ? ['the database ends below the checkpoint its signer wrote: checkpoints were deleted, or an older one is served'] : [];
   // The projector lists only what a checkpoint signed: a cursor past the newest one is a database rolled back below it.
@@ -202,17 +197,14 @@ export async function writeFinding(db: Database, macs: readonly LogMacKey[], che
  * Why the frozen log is not what the upgrade anchored, or null when it is (state-rows.md, section 6; upgrade.ts,
  * `parseAnchor`'s four cases): with an anchor, its MAC and its payload hold, and the log's last entry is the one it
  * names, by seq and by its hash computed again from its columns, so a row altered keeps no stored hash that passes.
- * With none, an empty log is nothing to hold, and one with rows is `broken` once the upgrade has run (before it the log
- * still grows, and has no anchor yet).
+ * With none, there is nothing to hold, and the check asks nothing more: no proof that the upgrade ran (V1 has none).
  *
- * Left to the recheck: the anchor deleted and every row of the frozen log with it reads as a database born on 0.16, an
- * empty log with nothing to anchor. Deleting a sealed change is the recheck's to catch (the signed tree no longer holds
- * it), as any change inside a signed range. So `upgraded` must come from what no database writer can delete (V1): a row
- * of the database, the upgrade's done marker say, deleted with the anchor, would free the frozen log to be cut or
- * extended with every visit `ok`.
+ * Left to the recheck: the anchor deleted reads as a database the upgrade has not anchored. The anchor is a sealed
+ * change, and deleting one is the recheck's to catch (the signed tree no longer holds it), as any change inside a
+ * signed range.
  */
-export function frozenLog(anchor: LogEntry | null, last: StoredEntry | null, ring: Keyring, upgraded: boolean): string | null {
-  if (anchor === null) return last !== null && upgraded ? 'the frozen log has no anchor: the upgrade wrote one' : null;
+export function frozenLog(anchor: LogEntry | null, last: StoredEntry | null, ring: Keyring): string | null {
+  if (anchor === null) return null;
   if (entryVouched(ring, anchor) !== 'held') return "the frozen log's anchor is not the vault's (its MAC does not hold)";
   // [at, request, object, actor, payload, seal, mac]
   const [request, payload] = [anchor.columns[1], anchor.columns[4]];

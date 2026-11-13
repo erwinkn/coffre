@@ -51,8 +51,8 @@ async function logged(store: LogStore = logStore(db.vault)) {
   const keys = await verifierKeys([seed]);
   const tick = async () => assert.ok((await cp.tick()).signed);
   const upto = () => cp.pair.pair.upto;
-  const check = (input: CheckInput, { upgraded = false, on = db.vault, reached = reachedOf(cp, { ok: true }) }: { upgraded?: boolean; on?: Database; reached?: Reached } = {}) =>
-    checkAudit(on, keys, input, { reached, upgraded });
+  const check = (input: CheckInput, { on = db.vault, reached = reachedOf(cp, { ok: true }) }: { on?: Database; reached?: Reached } = {}) =>
+    checkAudit(on, keys, input, { reached });
   return { mac, log: logWriter(db.owner, mac), cp, memory, tick, upto, check };
 }
 
@@ -298,18 +298,18 @@ test('the frozen log cut, extended or its last entry altered: broken, its last e
   const last = await frozenLog(4);
   await anchored(v.mac, last);
   await v.tick();
-  assert.equal((await v.check(v.input, { upgraded: true })).state, 'ok');
+  assert.equal((await v.check(v.input)).state, 'ok');
 
   await withTriggersLifted(db.owner, 'audit_log', (tx) => run(tx, sql`UPDATE audit_log SET action = 'secret.write' WHERE seq = ${last.seq}`));
-  const altered = await v.check(v.input, { upgraded: true });
+  const altered = await v.check(v.input);
   assert.equal(altered.state, 'broken');
   assert.match(altered.reason!, /it was altered/);
   await withTriggersLifted(db.owner, 'audit_log', (tx) => run(tx, sql`UPDATE audit_log SET action = 'secret.read' WHERE seq = ${last.seq}`));
-  assert.equal((await v.check(v.input, { upgraded: true })).state, 'ok');
+  assert.equal((await v.check(v.input)).state, 'ok');
 
   const [kept] = await rows<{ seq: string; author: 'app'; key_id: string; occurred_at: string; prev_hash: Buffer; mac: Buffer; hash: Buffer }>(db.owner, sql`SELECT * FROM audit_log WHERE seq = ${last.seq}`);
   await withTriggersLifted(db.owner, 'audit_log', (tx) => run(tx, sql`DELETE FROM audit_log WHERE seq = ${last.seq}`));
-  const cut = await v.check(v.input, { upgraded: true });
+  const cut = await v.check(v.input);
   assert.equal(cut.state, 'broken');
   assert.match(cut.reason!, /it was cut/);
 
@@ -319,30 +319,25 @@ test('the frozen log cut, extended or its last entry altered: broken, its last e
     await run(tx, sql`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
       VALUES (${last.seq + 1n}, 'app', ${kept!.key_id}, ${Date.now()}, 'user:ada@acme.example', 'secret.read', 'allow', '{}', ${last.hash}, ${randomBytes(32)}, ${randomBytes(32)})`);
   });
-  const extended = await v.check(v.input, { upgraded: true });
+  const extended = await v.check(v.input);
   assert.equal(extended.state, 'broken');
   assert.match(extended.reason!, /it was extended/);
 });
 
-test('the anchor deleted after the upgrade, or one not the vault\'s: broken; before the upgrade there is none to hold', async () => {
+test('an anchor not the vault\'s: broken; with none, nothing to hold, whatever the frozen log holds', async () => {
   const v = await visited();
   const last = await frozenLog(2);
-  assert.equal((await v.check(v.input)).state, 'ok', 'before the upgrade: no anchor, nothing to hold');
-  const gone = await v.check(v.input, { upgraded: true });
-  assert.equal(gone.state, 'broken');
-  assert.match(gone.reason!, /no anchor/);
+  assert.equal((await v.check(v.input)).state, 'ok', 'no anchor: nothing to hold');
   // An anchor under a key the vault does not hold: a writer's.
   await anchored(logMacKey(randomBytes(32)), last);
-  const planted = await v.check(v.input, { upgraded: true });
+  const planted = await v.check(v.input);
   assert.equal(planted.state, 'broken');
   assert.match(planted.reason!, /anchor is not the vault's/);
-  // No anchor and no old row (a database born on 0.16): nothing to hold, upgraded or not.
+  // No anchor and no old row (a database born on 0.16): nothing to hold either.
   await run(db.owner, sql`DELETE FROM log_changes WHERE object = ${ANCHOR_OBJECT}::uuid`);
   await withTriggersLifted(db.owner, 'audit_log', (tx) => run(tx, sql`DELETE FROM audit_log`));
-  assert.equal((await v.check(v.input, { upgraded: true })).state, 'ok');
+  assert.equal((await v.check(v.input)).state, 'ok');
 });
-
-test.todo('V1: the vault says it is upgraded once its step wrote the anchor (`#upgraded`), and a visit then holds the frozen log to it');
 
 test('more entries above the newest checkpoint than `CHECK_TAIL_ENTRIES`: late, not verified past it, no problem', async () => {
   const v = await visited();
