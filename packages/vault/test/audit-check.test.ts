@@ -33,6 +33,8 @@ before(async () => {
 after(() => db.close());
 beforeEach(async () => {
   for (const table of ['log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles', 'log_changes']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  // A database born on 0.16 by default: no frozen log, so no anchor to hold it to.
+  await withTriggersLifted(db.owner, 'audit_log', (tx) => run(tx, sql`DELETE FROM audit_log`));
   await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}, retired = '{}'`);
   const today = new Date().toISOString().slice(0, 10);
   await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
@@ -324,10 +326,12 @@ test('the frozen log cut, extended or its last entry altered: broken, its last e
   assert.match(extended.reason!, /it was extended/);
 });
 
-test('an anchor not the vault\'s: broken; with none, nothing to hold, whatever the frozen log holds', async () => {
+test('an anchor not the vault\'s: broken; with none, old rows are broken and an empty frozen log is ok', async () => {
   const v = await visited();
   const last = await frozenLog(2);
-  assert.equal((await v.check(v.input)).state, 'ok', 'no anchor: nothing to hold');
+  const unanchored = await v.check(v.input);
+  assert.equal(unanchored.state, 'broken', 'no anchor and old rows');
+  assert.match(unanchored.reason!, /old rows \(the last, seq 2\) and no anchor/);
   // An anchor under a key the vault does not hold: a writer's.
   await anchored(logMacKey(randomBytes(32)), last);
   const planted = await v.check(v.input);
@@ -364,8 +368,11 @@ async function vaulted() {
     sealThrough: sealed, heldOutside: async () => (memory.record === null ? [] : [decodePair(memory.record)!]),
     reached: () => reachedOf(signer.cp, signer.sealing),
   });
-  // Its first call starts its log, with the root's change.
+  // Its first call starts its log, with the root's change. Until A1 moves the writers off it, it appends to
+  // `audit_log` too: anchored here, as the upgrade anchors the frozen log of a database that ran 0.15.
   assert.equal((await vault.access('user:root@acme.example')).role, 'owner');
+  const [last] = await rows<{ seq: string; hash: Buffer }>(db.owner, sql`SELECT seq::text AS seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1`);
+  await anchored(logMacKey(seed), { seq: BigInt(last!.seq), hash: last!.hash });
   const cp = (signer.cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [seed], memory }));
   assert.ok((await cp.tick()).signed);
   return { vault, cp, signer, mac: logMacKey(seed) };

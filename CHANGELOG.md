@@ -99,7 +99,8 @@
   newest signed checkpoint against that pair, the entries above it by
   their MACs (more than 1,250, or a checkpointer that does not seal, is
   `late`), the rows the page shows and its cursor by theirs, and
-  the frozen `audit_log`'s last entry against its anchor, when there is one.
+  the frozen `audit_log`'s last entry against its anchor (old rows with no
+  anchor are `broken`; no rows and no anchor, a database born on 0.16, pass).
   `beat` is the same check with no rows, and writes a finding, an event
   of the vault's, once per checkpoint and state. Nothing calls either
   yet. The check of 0.15's log the page asks today reads in the same one

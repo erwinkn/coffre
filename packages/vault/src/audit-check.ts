@@ -197,14 +197,16 @@ export async function writeFinding(db: Database, macs: readonly LogMacKey[], che
  * Why the frozen log is not what the upgrade anchored, or null when it is (state-rows.md, section 6; upgrade.ts,
  * `parseAnchor`'s four cases): with an anchor, its MAC and its payload hold, and the log's last entry is the one it
  * names, by seq and by its hash computed again from its columns, so a row altered keeps no stored hash that passes.
- * With none, there is nothing to hold, and the check asks nothing more: no proof that the upgrade ran (V1 has none).
+ * With none, the frozen log must be empty (a database born on 0.16, where the upgrade writes no anchor): old rows and
+ * no anchor are `broken` (state-rows.md, "No anchor and old rows"). The check asks nothing more: no proof that the
+ * upgrade ran (V1 has none).
  *
- * Left to the recheck: the anchor deleted reads as a database the upgrade has not anchored. The anchor is a sealed
- * change, and deleting one is the recheck's to catch (the signed tree no longer holds it), as any change inside a
- * signed range.
+ * Left to the recheck: the anchor and every old row deleted together read as a database born on 0.16. The anchor is
+ * a sealed change, and deleting one is the recheck's to catch (the signed tree no longer holds it), as any change
+ * inside a signed range.
  */
 export function frozenLog(anchor: LogEntry | null, last: StoredEntry | null, ring: Keyring): string | null {
-  if (anchor === null) return null;
+  if (anchor === null) return last === null ? null : `the frozen log holds old rows (the last, seq ${last.seq}) and no anchor`;
   if (entryVouched(ring, anchor) !== 'held') return "the frozen log's anchor is not the vault's (its MAC does not hold)";
   // [at, request, object, actor, payload, seal, mac]
   const [request, payload] = [anchor.columns[1], anchor.columns[4]];
