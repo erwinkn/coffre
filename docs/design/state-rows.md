@@ -975,7 +975,9 @@ is the same act as deleting any change inside a signed range: a visit does not s
 `check`'s third item takes no fact from outside the database, and has four cases. No anchor and an empty log: `ok`. No
 anchor and old rows: `broken`. An anchor and an empty log: `broken`. An anchor and old rows: the last row must match
 the anchor's seq and hash. The upgrade's step never writes a second genesis: with the done change deleted and seals
-present, it refuses or does nothing. V1's tests hold the four cases and the step to this.
+present, it refuses or does nothing. V1's tests hold the four cases, the step that will not write a second genesis,
+and the known limit: with the anchor, the done change and the frozen log all deleted, a visit says `ok` and only the
+full recheck reports it.
 
 **If the step dies halfway, it is rerun.** Each write is one change with a request id made from what it seals
 (`upgrade-0.16:settings`), compared-and-set on a null seal, so the next call skips what is done and goes on. It only
