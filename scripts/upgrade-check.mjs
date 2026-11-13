@@ -397,8 +397,8 @@ export async function bindingsDiffer(sql) {
  * entry on every call and refuse such a member as stale; 0.16 reads no `audit_log` for access, so it refuses the
  * upgrade instead. None is expected: the cutover set each member's `old` at their newest entry, each 0.15.0 decision
  * about them moves both together, and 0.15.0's trigger refuses a 0.14 entry after the cutover. One is a 0.14 entry
- * written around the vault, or forged (this reads no signature); removing the member on 0.15.0 and adding them again
- * settles either. A principal with no member row is not counted: nothing of 0.16 reads its entries.
+ * written around the vault, or forged (this reads no signature); an Owner's change to the member, on 0.15.0, settles
+ * either. A principal with no member row is not counted: nothing of 0.16 reads its entries.
  */
 export async function staleAccess(sql) {
     const rows = await sql.unsafe(`

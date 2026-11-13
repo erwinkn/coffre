@@ -203,6 +203,21 @@ export async function run(db: Queryable, query: SQL): Promise<void> {
   await db.execute(query);
 }
 
+/** The migration ledger's rows forgotten while `work` runs, as on a database an earlier release migrated. */
+export async function unmigrated<T>(owner: Database, work: () => Promise<T>): Promise<T> {
+  const ledger = await rows<Record<string, unknown>>(owner, sql`SELECT * FROM drizzle.__drizzle_migrations`);
+  await run(owner, sql`DELETE FROM drizzle.__drizzle_migrations`);
+  try {
+    return await work();
+  } finally {
+    for (const entry of ledger) {
+      const columns = Object.keys(entry);
+      await run(owner, sql`INSERT INTO drizzle.__drizzle_migrations (${sql.join(columns.map((column) => sql.identifier(column)), sql`, `)})
+        VALUES (${sql.join(columns.map((column) => sql`${entry[column]}`), sql`, `)})`);
+    }
+  }
+}
+
 /**
  * How many of `pg_locks`'s rows match `where` (its `locktype`, `classid`,
  * `objid`, `mode`, `granted`), of this test's database's sessions alone.

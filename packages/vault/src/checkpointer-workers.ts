@@ -301,7 +301,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
           const pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
           const db = createDatabase(pool);
           // Below its migrations it projects nothing, and the next tick asks again over a connection of its own.
-          await within(this.#requireMigrated(db), s.tickBoundMs ?? OPEN_BOUND_MS, 'reading the migrations', () => pool.destroy()).catch((error: unknown) => {
+          await within(this.#requireMigrated(db), s.tickBoundMs ?? OPEN_BOUND_MS, 'reading the migrations').catch((error: unknown) => {
             pool.destroy();
             throw error;
           });

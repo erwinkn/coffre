@@ -18,7 +18,7 @@ import { openDatabase } from '@coffre/db/connect';
 
 import { SEAL_WAIT_MS } from '../src/checkpointer.ts';
 import { fileMemory, keepCheckpointer, type KeptCheckpointer } from '../src/checkpointer-node.ts';
-import { openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, run, unmigrated, VAULT_URL, type TestDatabase } from './database.ts';
 import { stallProxy } from './stall-proxy.ts';
 import { ask, change, emptyLog, isolate, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
@@ -321,10 +321,8 @@ test('T169, review r5, Node: an upkeep past its bound retires its runner, as a s
 
 test('Node: below its migrations the checkpointer opens over nothing and signs nothing, and says why; migrated, it opens by itself and seals', { timeout: 60_000 }, async () => {
   const memory = join(dir, 'memory-unmigrated');
-  const ledger = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM drizzle.__drizzle_migrations`);
-  await run(db.owner, sql`DELETE FROM drizzle.__drizzle_migrations`);
   let kept: KeptCheckpointer | undefined;
-  try {
+  await unmigrated(db.owner, async () => {
     kept = await keepCheckpointer({ database: db.vault, signingKeys: [SIGNING_KEY], memory, intervalMs: 20, retryMs: 50, tickBoundMs: 300 });
     // Tried again meanwhile, every 50 ms, and refused each time.
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -332,13 +330,7 @@ test('Node: below its migrations the checkpointer opens over nothing and signs n
     assert.equal(sealing.ok, false);
     assert.match(sealing.ok ? '' : sealing.reason, /below this release's migrations/);
     assert.equal(existsSync(memory), false, 'the signer remembered a pair');
-  } finally {
-    for (const entry of ledger) {
-      const columns = Object.keys(entry);
-      await run(db.owner, sql`INSERT INTO drizzle.__drizzle_migrations (${sql.join(columns.map((column) => sql.identifier(column)), sql`, `)})
-        VALUES (${sql.join(columns.map((column) => sql`${entry[column]}`), sql`, `)})`);
-    }
-  }
+  });
   try {
     await until(() => kept!.sealing().ok, 5000, 'sealing once migrated');
   } finally {

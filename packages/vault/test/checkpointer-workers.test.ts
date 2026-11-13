@@ -17,7 +17,7 @@ import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
 import { logOrigin } from '../src/checkpointer.ts';
 import { KEY_OBJECT, logMacKey } from '../src/log-entry.ts';
-import { openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
+import { openTestDatabase, rows, unmigrated, VAULT_URL, type TestDatabase } from './database.ts';
 import { logWriter } from './log-entries.ts';
 
 let db: TestDatabase;
@@ -72,8 +72,8 @@ after(async () => {
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
 
-const ask = async <T>(op: string, number?: bigint): Promise<T> => {
-  const response = await worker.fetch('/', { method: 'POST', body: JSON.stringify({ op, number: number === undefined ? undefined : String(number) }), signal: AbortSignal.timeout(20_000) });
+const ask = async <T>(op: string, number?: bigint, name?: string): Promise<T> => {
+  const response = await worker.fetch('/', { method: 'POST', body: JSON.stringify({ op, number: number === undefined ? undefined : String(number), name }), signal: AbortSignal.timeout(20_000) });
   const body = (await response.json()) as T & { error?: string };
   assert.ok(response.ok, body.error ?? String(response.status));
   return body;
@@ -128,42 +128,36 @@ test('deployed again under a new signing key, the object carries its memory acro
     ["the audit log moves on from <log> to this signer's key, <log>, at <n>: entries under <log> count only below it"]);
 });
 
-test('below its migrations, the object opens over nothing and signs nothing, from its start or its alarm, and says why; migrated, its alarm opens it and it seals', { timeout: 120_000 }, async () => {
+test('below its migrations, the object opens over nothing, makes no days, projects nothing and signs nothing, and says why; migrated, its alarm opens it and it seals', { timeout: 120_000 }, async () => {
   const sealedUpto = async () => ((await rows<{ upto: string }>(db.owner, sql`SELECT max(upto)::text AS upto FROM log_checkpoints`))[0]!.upto);
-  await worker.stop();
-  const ledger = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM drizzle.__drizzle_migrations`);
-  await run(db.owner, sql`DELETE FROM drizzle.__drizzle_migrations`);
-  try {
-    const sealedBefore = await sealedUpto();
-    await start(next, [seed]);
-    // Its alarm, kept from the deploy before, ticks every 500 ms, and refuses to open first. (A start sent within the
-    // first open's few milliseconds, as its connection closes, waits for good in local workerd: its next connection never
-    // answers. The start below comes after it.)
-    const refused = async () => (await ask<{ failed: string | null }>('status')).failed ?? '';
+  const until = async (what: string, done: () => Promise<boolean>) => {
     const end = Date.now() + 10_000;
-    while (!/below this release's migrations/.test(await refused())) {
-      assert.ok(Date.now() < end, 'refused by its alarm');
+    while (!(await done())) {
+      assert.ok(Date.now() < end, what);
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    const started = await worker.fetch('/', { method: 'POST', body: JSON.stringify({ op: 'start' }), signal: AbortSignal.timeout(20_000) });
-    assert.match(((await started.json()) as { error?: string }).error ?? '', /below this release's migrations/);
+  };
+  const said = async (pattern: RegExp, name?: string) => (await ask<{ message: string }[]>('alarms', undefined, name)).some((a) => pattern.test(a.message));
+  await worker.stop();
+  await unmigrated(db.owner, async () => {
+    // A use the object would sign, were it to open.
+    await logWriter(db.owner, logMacKey(next)).use();
+    const sealedBefore = await sealedUpto();
+    await start(next, [seed]);
+    // Its alarm, kept from the deploy before, ticks every 500 ms: it refuses to open, then to make the next days. No
+    // start is sent: it reaches the same open, and in workerd before 1.20261014.1 a request that holds the object's
+    // input gate while the timers a refused open left are due waits until the object is reset, 30 s later.
+    await until('refused by its alarm', async () => /below this release's migrations/.test((await ask<{ failed: string | null }>('status')).failed ?? ''));
+    await until('no days made', () => said(/^the next days of uses were not made: .*below this release's migrations/));
+    await ask('project');
+    await until('no projection', () => said(/^the audit projection cannot open: .*below this release's migrations/, 'reads'));
     await new Promise((resolve) => setTimeout(resolve, 2000));
     const status = await ask<{ open: boolean; failed: string | null }>('status');
     assert.equal(status.open, false);
     assert.match(status.failed ?? '', /below this release's migrations/);
     assert.equal(await sealedUpto(), sealedBefore, 'it signed a checkpoint');
-  } finally {
-    for (const entry of ledger) {
-      const columns = Object.keys(entry);
-      await run(db.owner, sql`INSERT INTO drizzle.__drizzle_migrations (${sql.join(columns.map((column) => sql.identifier(column)), sql`, `)})
-        VALUES (${sql.join(columns.map((column) => sql`${entry[column]}`), sql`, `)})`);
-    }
-  }
-  const migratedBy = Date.now() + 10_000;
-  while (!(await ask<{ open: boolean }>('status')).open) {
-    assert.ok(Date.now() < migratedBy, 'opened by its alarm once migrated');
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+  });
+  await until('opened by its alarm once migrated', async () => (await ask<{ open: boolean }>('status')).open);
   const change = await logWriter(db.owner, logMacKey(next)).change();
   assert.equal((await ask<{ number: string }>('seal', change)).number, String(change));
 });
