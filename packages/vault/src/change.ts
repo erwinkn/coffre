@@ -81,9 +81,10 @@ export type Prepared<A> = { answer: A; statement: SQL; hash: Buffer };
 /**
  * Only changes take it, each for its one write. Under it a write reads
  * what its decision read as of now: every change before it has committed,
- * and none runs beside it. `coffre`, in ASCII.
+ * and none runs beside it. `coffre` in ASCII, 0x636f66667265, in decimal:
+ * Postgres reads a hex number from 16 on only.
  */
-const CHANGE_LOCK = sql.raw('0x636f66667265::bigint');
+export const CHANGE_LOCK = 109330110509669;
 
 /**
  * How often a change starts again before it answers busy. Each new start
@@ -103,6 +104,7 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
 export async function prepare<P extends Parts, A>(vault: Running, operation: Operation<P, A>): Promise<Prepared<A> | Refusal> {
   const at = vault.now();
   const parts = Object.entries(operation.read);
+  if (parts.length === 0) throw new Error('a change reads at least its caller');
   const found = await rowsOf<{ part: string; row: Wire }>(
     vault.db,
     sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`), sql` UNION ALL `),
@@ -168,14 +170,19 @@ function label(name: string): string {
  * nothing was written. The lock is taken by a statement of its own, ahead
  * of the write: a statement sees the database as of when it starts, so a
  * write that took the lock itself would compare against rows from before
- * it waited.
+ * it waited. For the same reason the transaction is read committed, said
+ * here and not left to the database's default: under repeatable read every
+ * statement sees the database as of the first, the one that waits.
  */
 export async function commit<A>(vault: Running, prepared: Prepared<A>): Promise<boolean> {
-  const ok = await vault.db.transaction(async (tx) => {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(${CHANGE_LOCK})`);
-    const [same] = await rowsOf<{ ok: boolean }>(tx, prepared.statement);
-    return same!.ok;
-  });
+  const ok = await vault.db.transaction(
+    async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
+      const [same] = await rowsOf<{ ok: boolean }>(tx, prepared.statement);
+      return same!.ok;
+    },
+    { isolationLevel: 'read committed' },
+  );
   if (ok) vault.wake(prepared.hash);
   return ok;
 }

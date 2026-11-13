@@ -3,14 +3,15 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { after, beforeEach, test } from 'node:test';
 
 import { leafHash } from '@coffre/core/log';
+import { rowsOf } from '@coffre/db/dialect';
 import * as schema from '@coffre/db/schema';
 import { and, eq, is, not, sql, type SQL } from 'drizzle-orm';
 import { PgTable } from 'drizzle-orm/pg-core';
 
-import { Busy, change, commit, drop, part, prepare, put, type Operation, type Parts, type Refusal, type Seen, type Write } from '../src/change.ts';
+import { Busy, CHANGE_LOCK, change, commit, drop, part, prepare, put, type Operation, type Parts, type Refusal, type Seen, type Write } from '../src/change.ts';
 import { entryOf, type Said } from '../src/entry.ts';
 import { keyOf, nameOf, sealedBy, shapeOf, type Fresh, type Row, type Sealed } from '../src/rows.ts';
-import { emptyDatabase, openTestVault, rows } from './database.ts';
+import { emptyDatabase, openTestVault } from './database.ts';
 
 const { bindings, credentials, deviceLogins, enrollmentCodes, environments, grants, identities, oauthClients, policy, principals, roles, secrets } = schema;
 
@@ -129,16 +130,35 @@ test('every sealed table has a row that reads back as the vault sealed it', asyn
 
 test('three Owners each demote themselves at once: one stays', async () => {
   await done(writing(put(principals, member(ada, 'owner')), put(principals, member(bo, 'owner')), put(principals, member(cy, 'owner'))));
+  const results = await Promise.all([ada, bo, cy].map((who) => change(vault, setRole(who, who, 'member'))));
+  assert.deepEqual(results.map((result) => ('refused' in result ? result.refused : 'done')).sort(), ['done', 'done', 'last_owner']);
+  assert.equal((await seenOf(principals, owning)).length, 1);
+});
 
+test('a write compares against the rows as they are once it holds the lock, whatever the database defaults to', async () => {
+  await done(writing(put(principals, member(ada, 'owner')), put(principals, member(bo, 'owner')), put(principals, member(cy, 'owner'))));
   // Each decides alone, having read three Owners.
   const prepared = await Promise.all([ada, bo, cy].map((who) => prepare(vault, setRole(who, who, 'member'))));
-  const landed = await Promise.all(prepared.map((one) => commit(vault, one as never)));
-  assert.equal(landed.filter(Boolean).length, 1, 'the first write changes an Owner row the other two counted');
 
-  // Started again, as `change` does, the second lands and the third is the last Owner.
-  const results = await Promise.all([ada, bo, cy].map((who) => change(vault, setRole(who, who, 'member'))));
-  assert.deepEqual(results.map((result) => ('refused' in result ? result.refused : 'done')).sort(), ['done', 'last_owner', 'not_owner']);
-  assert.equal((await seenOf(principals, owning)).length, 1);
+  // A database whose transactions see it as of their first statement, unless they say otherwise.
+  await vault.owner.execute(sql`ALTER DATABASE ${sql.identifier(process.env.COFFRE_TEST_DATABASE ?? 'coffre_test')} SET default_transaction_isolation = 'repeatable read'`);
+  const fresh = await openTestVault();
+  try {
+    // All three writes wait for the lock at once, each having started before any other landed.
+    const landed = await vault.owner.transaction(async (holder) => {
+      await holder.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
+      const writes = prepared.map((one) => commit({ ...vault, db: fresh.db }, one as never));
+      for (;;) {
+        const [{ waiting }] = await rowsOf<{ waiting: number }>(holder, sql`SELECT count(*)::int AS waiting FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`);
+        if (waiting === 3) return writes;
+      }
+    });
+    assert.deepEqual((await Promise.all(landed)).filter(Boolean).length, 1, 'the first write changes an Owner row the other two counted');
+    assert.equal((await seenOf(principals, owning)).length, 2);
+  } finally {
+    await vault.owner.execute(sql`ALTER DATABASE ${sql.identifier(process.env.COFFRE_TEST_DATABASE ?? 'coffre_test')} RESET default_transaction_isolation`);
+    await fresh.close();
+  }
 });
 
 test('a row that came since the read stops the write', async () => {
@@ -175,7 +195,7 @@ test('a row written behind the vault is no row', async () => {
 
 test('a refusal writes nothing, and a change logs what it replaced', async () => {
   await done(writing(put(principals, member(ada, 'owner')), put(principals, member(bo))));
-  const pendingRows = () => rows<{ kept: boolean; body: string; mac: Buffer }>(vault.owner, sql`SELECT kept, body, mac FROM log_pending ORDER BY id`);
+  const pendingRows = () => rowsOf<{ kept: boolean; body: string; mac: Buffer }>(vault.owner, sql`SELECT kept, body, mac FROM log_pending ORDER BY id`);
   const before = (await pendingRows()).length;
   vault.woken.length = 0;
 
@@ -240,10 +260,13 @@ test('a decision that writes around its read is a fault, not a change', async ()
   await assert.rejects(change(vault, writing(put(principals, member(bo)), put(principals, member(bo)))), /twice/);
   const read = { found: part(principals, sql`true`) };
   await assert.rejects(change(vault, { read, decide: ({ found: [it] }: Seen<typeof read>) => ({ writes: [put(principals, member(bo), it!)], entry: said('test'), answer: null }) }), /moves its key/);
+  // Postgres would store it in small letters, a row the vault never sealed.
+  const elsewhere = { id: randomUUID().toUpperCase(), principal: ada, projectId: randomUUID(), environmentId: null, role: 'viewer', expiresAt: null, grantedAt: at, grantedBy: ada };
+  await assert.rejects(change(vault, writing(put(grants, elsewhere))), /not a UUID as Postgres writes one/);
   // A new row whose key is taken was never read: Postgres refuses it, and nothing of the change is kept.
-  const entries = (await rows(vault.owner, sql`SELECT 1 FROM log_pending`)).length;
+  const entries = (await rowsOf(vault.owner, sql`SELECT 1 FROM log_pending`)).length;
   await assert.rejects(change(vault, writing(put(principals, member(bo)), put(principals, member(ada)))));
-  assert.deepEqual([(await seenOf(principals)).length, (await rows(vault.owner, sql`SELECT 1 FROM log_pending`)).length], [1, entries]);
+  assert.deepEqual([(await seenOf(principals)).length, (await rowsOf(vault.owner, sql`SELECT 1 FROM log_pending`)).length], [1, entries]);
 });
 
 test('a change that keeps losing answers busy', async () => {

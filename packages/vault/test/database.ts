@@ -2,9 +2,8 @@ import { randomBytes } from 'node:crypto';
 
 import type { Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
-import { rowsOf } from '@coffre/db/dialect';
 import * as schema from '@coffre/db/schema';
-import { getTableName, is, sql, type SQL } from 'drizzle-orm';
+import { getTableName, is, sql } from 'drizzle-orm';
 import { PgTable } from 'drizzle-orm/pg-core';
 
 import type { Running } from '../src/change.ts';
@@ -48,9 +47,4 @@ const TABLES = Object.values(schema).filter((value): value is PgTable => is(valu
 /** Every table emptied. */
 export async function emptyDatabase(owner: Database): Promise<void> {
   await owner.execute(sql`TRUNCATE ${sql.join(TABLES.map((table) => sql.identifier(getTableName(table))), sql`, `)} RESTART IDENTITY CASCADE`);
-}
-
-/** Rows of a hand-written query. */
-export function rows<Row>(db: Database, query: SQL): Promise<Row[]> {
-  return rowsOf<Row>(db, query);
 }

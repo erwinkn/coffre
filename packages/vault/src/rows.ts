@@ -42,7 +42,7 @@ type Column = {
   /** Its name in a `Row`, and in the database. */
   key: string;
   name: string;
-  kind: 'time' | 'bytes' | 'plain';
+  kind: 'time' | 'bytes' | 'uuid' | 'plain';
   primary: boolean;
   /** Computed by the database: read, never written. */
   generated: boolean;
@@ -67,7 +67,7 @@ export function shapeOf(table: PgTable): Shape {
       return {
         key,
         name: column.name,
-        kind: column.columnType === 'PgTimestamp' ? 'time' : column.columnType === 'PgCustomColumn' ? 'bytes' : 'plain',
+        kind: column.columnType === 'PgTimestamp' ? 'time' : column.getSQLType() === 'bytea' ? 'bytes' : column.columnType === 'PgUUID' ? 'uuid' : 'plain',
         primary: primary.has(column.name),
         generated,
         sealed: !generated && column.name !== 'mac' && !LAST_SEEN.has(column.name),
@@ -94,7 +94,15 @@ export function fromWire<T extends PgTable>(table: T, wire: Wire): Row<T> {
   return row as Row<T>;
 }
 
-/** A row as the JSON a write sends. `only` leaves the other columns out, for a row named by its key. */
+/** A UUID as Postgres writes one. It reads others too, capitals and braces, and gives this back. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * A row as the JSON a write sends. `only` leaves the other columns out, for
+ * a row named by its key. A value Postgres would store as another is
+ * refused here: the row would read back as one the vault never sealed, and
+ * stay, a row no decision sees and so none removes.
+ */
 export function toWire(table: PgTable, row: object, only?: readonly Column[]): Wire {
   const wire: Wire = {};
   for (const column of only ?? shapeOf(table).columns) {
@@ -103,6 +111,7 @@ export function toWire(table: PgTable, row: object, only?: readonly Column[]): W
     if (value === null) wire[column.name] = null;
     else if (column.kind === 'time') wire[column.name] = (value as Date).toISOString();
     else if (column.kind === 'bytes') wire[column.name] = `\\x${(value as Buffer).toString('hex')}`;
+    else if (column.kind === 'uuid' && !UUID.test(value as string)) throw new Error(`${shapeOf(table).name}.${column.name}: ${JSON.stringify(value)} is not a UUID as Postgres writes one`);
     else wire[column.name] = value;
   }
   return wire;
@@ -127,7 +136,7 @@ export function keyOf(seed: Uint8Array): Key {
 }
 
 /** Four bytes that name the key, then 32 of HMAC-SHA256. */
-export const MAC_BYTES = 36;
+const MAC_BYTES = 36;
 
 /** `data`'s MAC under `secret`, headed by the key's name. */
 export function macOf(key: Key, secret: Buffer, data: string | Uint8Array): Buffer {
