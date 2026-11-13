@@ -22,13 +22,16 @@
 //   module, or a module it extends or instantiates changed; Node conformance on what
 //   only the Node deployment runs, while `nodeConformance` is on; Terraform on its
 //   provider and the routes it calls; the packed consumer on manifests, build configs
-//   and the examples `init` writes.
+//   and the examples `init` writes; the growth sweep on the migrations and the source
+//   it runs, so that a statement that starts reading history fails before it merges.
 // - A changed file no rule claims selects every step but TLC, the growth sweep and the
 //   upgrade check: a miss fails safe, never as a skip.
 // - `--full` runs everything, as the release's Validate does, and the growth sweep,
 //   which Validate has no job for: a tag's local `--full` is its only gate. The upgrade
 //   check (0.14.5 through 0.15.0 to this revision, minutes, from npm) runs there, and on a
-//   change to its own scripts, not on what it reads: nearly every change reaches it.
+//   change to its own scripts or to its direct input, the migrations and the migrator
+//   with its precheck; not on the pages and reports it reads, which nearly every change
+//   reaches.
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -62,8 +65,11 @@ const dependencies = any('pnpm-lock.yaml', /(?:^|\/)pnpm-workspace\.yaml$/, /(?:
 const compose = any('docker-compose.yml', 'docker-compose.subnet.yml', 'docker-compose.network.yml')
 // What scripts/check-pins.mjs reads, beside its own sources.
 const pinned = any(/(?:^|\/)package\.json$/, /\.ya?ml$/, /(?:^|\/)Dockerfile[^/]*$/, /\.sh$/, '.github/', 'action/', 'pnpm-workspace.yaml', /(?:^|\/)\.node-version$/)
-// The upgrade check's own scripts, the files that select it short of --full.
-const UPGRADE_CHECK = ['scripts/upgrade-check.sh', 'scripts/upgrade-check.mjs', 'scripts/compat/release.sh']
+// The upgrade check's own scripts, the migrator and its precheck (`migrate.ts`), and the
+// migrations: the files that select it short of --full.
+const UPGRADE_CHECK = ['scripts/upgrade-check.sh', 'scripts/upgrade-check.mjs', 'scripts/compat/release.sh',
+  'packages/db/src/migrate.ts', 'packages/db/src/migrate-main.ts', 'packages/db/src/online-indexes.ts']
+const upgrades = (f) => UPGRADE_CHECK.includes(f) || f.startsWith('packages/db/src/migrations/')
 const lintable = (f) => /^packages\/[^/]+\/(?:src|test|scripts)\/.+\.tsx?$/.test(f)
 
 /**
@@ -136,6 +142,8 @@ export function plan({ root, files, changed, read = (f) => readFileSync(join(roo
       ...files.filter((f) => /^packages\/[^/]+\/(?:package\.json|tsdown\.config\.ts|vite\.config\.ts)$/.test(f)),
       ...under('examples/'),
     ]),
+    // The migrations and the source the sweep runs: its tests and scripts are its own harness.
+    sweep: new Set([...inputs('package.json#sweep:growth')].filter((f) => tracked.has(f) && (f.endsWith('.sql') || f.includes('/src/')))),
     // The matrices, the worlds and scripts they run, and the vault's use path: what use.ts runs in the vault, not in core.
     matrices: new Set([
       ...[...inputs(matrices)].filter((f) => !f.includes('/src/')),
@@ -213,8 +221,8 @@ export function plan({ root, files, changed, read = (f) => readFileSync(join(roo
     { name: 'node', ...(nodeConformance ? rule('node')() : { why: null, off: 'off until 0.16.1 (T270)' }) },
     { name: 'terraform', ...rule('terraform')() },
     { name: 'consumer', ...rule('consumer', { db: true })() },
-    { name: 'sweep', why: full ? '--full' : null },
-    { name: 'upgrade', why: full ? '--full' : why(changed.find((f) => UPGRADE_CHECK.includes(f))) },
+    { name: 'sweep', why: full ? '--full' : why(ownHit('sweep')) },
+    { name: 'upgrade', why: full ? '--full' : why(changed.find(upgrades)) },
   ]
   return { steps, everything, unclaimed }
 }

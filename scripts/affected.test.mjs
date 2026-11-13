@@ -15,6 +15,7 @@ const TREE = {
       'conformance:node': 'pnpm --filter coffre-node conformance',
       'test:terraform': './scripts/terraform-provider.sh',
       'check:pins': 'node scripts/check-pins.mjs',
+      'sweep:growth': './scripts/growth-sweep.sh',
     },
   }),
   'pnpm-lock.yaml': '',
@@ -28,6 +29,7 @@ const TREE = {
   'scripts/test-databases.mjs': '',
   'scripts/test-schema.sh': './scripts/setup-test-database.sh\npsql < packages/db/test/schema.sql',
   'scripts/check-pins.mjs': '',
+  'scripts/growth-sweep.sh': './scripts/setup-test-database.sh\nnode --test packages/server/test/growth.sweep.ts',
   'scripts/terraform-provider.sh': 'node packages/conformance/scripts/terraform-fixture.ts',
   'scripts/x.mjs': '',
   'scripts/x.test.mjs': "import { x } from './x.mjs'",
@@ -56,6 +58,8 @@ const TREE = {
   'packages/server/package.json': json({ name: '@coffre/server', exports: { '.': source('./src/index.ts'), './node': source('./src/node.ts') } }),
   'packages/server/src/index.ts': "export * from './app.ts'",
   'packages/server/src/app.ts': "import { decide } from '@coffre/core/access'",
+  'packages/server/test/growth.sweep.ts': "import '../src/api/routes.ts'\nimport './helpers.ts'",
+  'packages/server/test/helpers.ts': '',
   'packages/server/src/node.ts': "import './app.ts'",
   'packages/server/src/api/secrets.ts': "import '../app.ts'",
   'packages/server/src/api/routes.ts': "import './secrets.ts'\nimport './missing.ts'",
@@ -236,6 +240,15 @@ test('the slow tier runs on its own inputs: the matrices and Terraform', () => {
   assert.ok(!run(['packages/server/src/app.ts']).names.includes('terraform'))
 })
 
+test('the growth sweep runs on the migrations and on the source it runs', () => {
+  // missing.ts imports no query builder: a file that passes a table and a filter to a helper changes a plan too.
+  for (const file of ['packages/db/src/migrations/postgres/0001.sql', 'packages/server/src/api/missing.ts']) assert.equal(run([file]).steps.sweep?.why, `${file} changed`, file)
+  // Its own test and helpers, source it does not run, SQL it does not run, docs and the dependencies.
+  for (const file of ['packages/server/test/growth.sweep.ts', 'packages/server/test/helpers.ts', 'packages/vault/src/other.ts', 'packages/server/test/fixtures/seed.sql', 'docs/guide.md', 'pnpm-lock.yaml']) {
+    assert.ok(!run([file]).names.includes('sweep'), file)
+  }
+})
+
 test('a diff leaves out the cases named [full], which --full runs', () => {
   for (const changed of [['packages/server/src/app.ts'], ['scripts/test-databases.mjs'], ['pnpm-lock.yaml']]) {
     const { steps } = run(changed)
@@ -255,9 +268,11 @@ test('--full runs every step that is on, every file and every scenario', () => {
   assert.equal(steps.upgrade.why, '--full')
 })
 
-test('the upgrade check runs on a change to its own scripts, not to what it reads', () => {
-  assert.equal(run(['scripts/upgrade-check.sh']).steps.upgrade.why, 'scripts/upgrade-check.sh changed')
-  assert.ok(!run(['packages/db/src/migrations/postgres/0001.sql']).names.includes('upgrade'))
+test('the upgrade check runs on a change to its own scripts, the migrations or the migrator, not to the pages it reads', () => {
+  for (const f of ['scripts/upgrade-check.sh', 'packages/db/src/migrations/postgres/0001.sql', 'packages/db/src/migrate.ts']) {
+    assert.equal(run([f]).steps.upgrade?.why, `${f} changed`)
+  }
+  assert.ok(!run(['packages/core/src/access.ts']).names.includes('upgrade'))
 })
 
 test('comments go, strings and regular expressions stay', () => {
