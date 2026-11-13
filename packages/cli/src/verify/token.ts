@@ -76,6 +76,9 @@ const COVERED_MS = 90_000;
 /** How long a read may wait to be listed in 0.15's log: sealed at the checkpointer's tick, then listed by the projector. */
 const LISTED_WITHIN_MS = 20_000;
 
+/** The most pages of the token's own entries a look for its read walks back, empty ones included. */
+const RECENT_PAGES = 20;
+
 /**
  * Reveal the canary once, and find its `secret.read` in the audit log: by
  * the reveal's operation, in 0.14's log; in 0.15's, where a read is its use
@@ -94,7 +97,7 @@ export async function tokenReveal(api: CoffreClient, canary: Canary, token: Toke
   const version = (await api.secrets.list(path)).keys.find((key) => key.key === canary.key)?.version;
   const list = async (query: { path?: string; before?: string }) => {
     try {
-      return await api.audit.list({ ...query, actor: token.member, limit: 50, sealed: '1' });
+      return await api.audit.list({ ...query, actor: token.member, limit: 50 });
     } catch (error) {
       if (error instanceof CoffreError && error.status === 403) {
         throw new Skip(`the token holds no audit.read on ${canary.project}, so the reveal's entry cannot be looked for`);
@@ -105,26 +108,30 @@ export async function tokenReveal(api: CoffreClient, canary: Canary, token: Toke
   const first = await list({ path });
   let { entries, reads } = first;
   const read = entries.filter((entry) => entry.operationId === operationId);
-  // A server that keeps 0.15's log lists its reads on the whole log and by member, and since 0.15.x by place; 0.15.0
-  // never by place, and says so: the token's own page lists its own, whatever it audits.
-  if (read.length === 0 && (reads !== undefined || first.readsOmitted !== undefined)) {
+  // Not 0.14's entry of the reveal: in 0.15's log a read is its use alone, which names no operation, so look for the token's
+  // own use (0.15.0 listed none by place: its own page lists them, whatever it audits).
+  if (read.length === 0) {
     expect(token.credentialId !== null, "the server names no credential of the token's, so its read in 0.15's log cannot be told from another's");
     // Of the version revealed: an earlier version's read of the minute before stops no wait for this one.
     const ownOf = (listed: typeof entries) => listed.filter((entry) => entry.log === '0.15' && entry.action === 'secret.read' && entry.key === canary.key
       && entry.project === canary.project && entry.environment === canary.environment
       && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === 'reveal' && entry.version === version
       && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
-    // Page back as far as the cover's minute: newer entries of the token's may fill the first page.
+    // Page back as far as the cover's minute: newer entries of the token's may fill the first page. A page
+    // may hold none and still go on (its stretch all detail, or at places the token does not audit), so it pages on by
+    // `next` past an empty one, `RECENT_PAGES` at most.
     const recent = async () => {
       const all: typeof entries = [];
-      for (let before: string | undefined; ;) {
+      let before: string | undefined;
+      for (let pages = 0; pages < RECENT_PAGES; pages++) {
         const page = await list(before === undefined ? {} : { before });
         all.push(...page.entries);
         reads = page.reads;
         const oldest = page.entries.at(-1);
-        if (page.next === null || oldest === undefined || Date.parse(oldest.occurredAt) < asked - COVERED_MS) return all;
+        if (page.next === null || (oldest !== undefined && Date.parse(oldest.occurredAt) < asked - COVERED_MS)) break;
         before = page.next;
       }
+      return all;
     };
     entries = await recent();
     for (const deadline = Date.now() + LISTED_WITHIN_MS; ownOf(entries).length === 0 && Date.now() < deadline;) {

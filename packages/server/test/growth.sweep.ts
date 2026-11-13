@@ -139,7 +139,9 @@ before(async () => {
   // vault's own would open ten that close when idle; and counted, so that a reveal that never reached it fails (review
   // r4 of #559: a reveal of a caller with no way in takes 0.14's unwrap, and the hot path's reads went unmeasured).
   hot = testPostgresPool(TEST_HOT_DATABASE_URL);
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], { hotDatabase: createDatabase(watched(hot, () => (hotRan += 1))) }) });
+  // Its pages and reports read the projection as the sweep last listed it (`settleAudit`): the projector's own
+  // statements are a path of their own, not every page's.
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], { hotDatabase: createDatabase(watched(hot, () => (hotRan += 1))) }), settleAudit: false });
   signinService = new SigninService({ ...deps, signin: defineSignin({ publicUrl: ORIGIN, providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }) });
   deps.signin = signinService;
   const root = clientFor(deps, ROOT);
@@ -166,12 +168,13 @@ before(async () => {
   // Real uses and reads, a few, then sealed and projected, so that the pages and the checkpointer have their own.
   for (const member of [READER, ...LEAVERS]) for (let i = 0; i < 3; i += 1) await throughAccess(member).secrets.reveal('market/dev');
   assert.ok(hotRan > 0, "the seed's reveals ran no statement on the hot path: they planted no 0.15 use");
-  await deps.vault.listReads();
+  await deps.vault.listAudit();
 
   // What the instance's own requests wrote to 0.14's log, beside 0.15's: the shapes `grow` adds to are those.
   console.log(`sweep instance ${JSON.stringify(await rowsOf(db.owner, sql`SELECT author, action, count(*)::int AS n FROM audit_log GROUP BY 1, 2 ORDER BY 1, 2`))}`);
   await grow();
   await caughtUp();
+  await deps.vault.listAudit();
   await settled();
 });
 
@@ -217,7 +220,7 @@ async function caughtUp(): Promise<void> {
   // every 500 ms: a measured tick reads what came since, and the trees' check what is above the newest pair, not the
   // whole history as a backlog.
   for (let round = 0, sealed = ''; round < 1_000; round += 1) {
-    await deps.vault.listReads();
+    await deps.vault.listAudit();
     const [newest] = await rowsOf<{ upto: string }>(db.owner, sql`SELECT coalesce(max(k.upto), 0)::text AS upto FROM log_checkpoints k`);
     if (newest!.upto === sealed) break;
     sealed = newest!.upto;
@@ -287,7 +290,8 @@ async function grow(): Promise<void> {
   await rowsOf(db.owner, sql`SELECT make_day(${day}::date)`);
   // One member's reads of market/dev's three keys, each at its version, and through market/prod's reference to its
   // API_KEY, whose version a read through it names: the same four again and again, a thousand a day, over a day for
-  // every thousand (`readsBy` walks each key and version of each of their days; review r1 of #559).
+  // every thousand, as the projector lists them (`readEvent`): its event, its places and the member's keys
+  //.
   const keys = await rowsOf<{ secret: string; environment: string; project: string; version: string; credential: string }>(db.owner, sql`
     SELECT s.id::text AS secret, s.environment_id::text AS environment, s.project_id::text AS project, s.current_version_id::text AS version,
            (SELECT c.id::text FROM credentials c LIMIT 1) AS credential
@@ -301,19 +305,34 @@ async function grow(): Promise<void> {
      WHERE p.slug = 'market' AND e.slug = 'prod' AND s.key = 'API_KEY'`);
   const days = Math.max(1, Math.floor(SIZE / 1_000));
   const today = Math.floor(now / 86_400_000);
-  const pick = (column: 'secret' | 'environment' | 'project' | 'version') => sql.raw(`CASE g % 4 ${keys.map((key, i) => `WHEN ${i} THEN '${key[column]}'`).join(' ')} ELSE '${column === 'version' ? place!.version : through![column]}' END`);
+  // The read's key, as its event names it: dev's for a read through the reference (g % 4 = 3), which is the source's.
+  const pick = (column: 'secret' | 'environment' | 'project' | 'version') => sql.raw(`CASE g % 4 ${keys.map((key, i) => `WHEN ${i} THEN '${key[column]}'`).join(' ')} ELSE '${place![column]}' END`);
+  const ref = sql`g % 4 = 3`;
+  // Today's end at `now`, never after, and stay in today's partition (in the first second after midnight, at its
+  // start): the entries seeded after them are newer at either size, whatever the time the seeding takes (a read dated
+  // past `now` came out newest at 2,000 and not at 20,000, and the pages read differently).
   for (let back = days - 1; back >= 0; back -= 1) {
     const start = (today - back) * 86_400_000;
-    await rowsOf(db.owner, sql`SELECT make_reads_day(${new Date(start).toISOString().slice(0, 10)}::date)`);
     for (const leaver of LEAVERS) await rowsOf(db.owner, sql`
-      INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, source, source_environment, source_project, version, mac)
-      SELECT nextval('log_number'), ${back === 0 ? now : start}::bigint + g, ${place!.credential}::uuid, 1, ${`user:${leaver}`},
-             CAST(${pick('secret')} AS uuid), CAST(${pick('environment')} AS uuid), CAST(${pick('project')} AS uuid),
-             CASE WHEN g % 4 = 3 THEN ${place!.secret}::uuid END, CASE WHEN g % 4 = 3 THEN ${place!.environment}::uuid END, CASE WHEN g % 4 = 3 THEN ${place!.project}::uuid END,
-             CAST(${pick('version')} AS uuid), ${ZERO16}::bytea
+      INSERT INTO audit_events (at, number, log, author, action, shown, allowed, code, actor, subject, credential, project, environment, secret, version, places,
+                                request_id, operation_id, related, source_ip, detail, mac)
+      SELECT ${back === 0 ? sql`greatest(${start}::bigint, ${now - Math.min(SIZE, 1_000)}::bigint + g)` : sql`${start}::bigint + g`}, nextval('log_number'), 16, 'vault', 'secret.read', true, true, NULL, ${`user:${leaver}`}, NULL,
+             ${place!.credential}::uuid, CAST(${pick('project')} AS uuid), CAST(${pick('environment')} AS uuid), CAST(${pick('secret')} AS uuid),
+             CAST(${pick('version')} AS uuid),
+             CASE WHEN ${ref} THEN ARRAY[${place!.project}::uuid, ${place!.environment}::uuid, ${place!.secret}::uuid, ${through!.project}::uuid, ${through!.environment}::uuid, ${through!.secret}::uuid]
+                  ELSE ARRAY[CAST(${pick('project')} AS uuid), CAST(${pick('environment')} AS uuid), CAST(${pick('secret')} AS uuid)] END,
+             NULL, NULL, NULL, NULL,
+             (jsonb_build_object('purpose', 'reveal', 'secretId', ${pick('secret')}, 'credentialId', ${place!.credential}::text)
+               || CASE WHEN ${ref} THEN jsonb_build_object('also', jsonb_build_object('projectId', ${through!.project}::text, 'environmentId', ${through!.environment}::text, 'secretId', ${through!.secret}::text))
+                       ELSE '{}'::jsonb END)::text, ${ZERO16}::bytea
         FROM generate_series(1, ${Math.min(SIZE, 1_000)}) g`);
-    for (const leaver of LEAVERS) await rowsOf(db.owner, sql`INSERT INTO log_read_days (principal, day) VALUES (${`user:${leaver}`}, ${today - back}) ON CONFLICT DO NOTHING`);
   }
+  await rowsOf(db.owner, sql`INSERT INTO audit_event_places (place, at, number, log)
+    SELECT unnest(places), at, number, log FROM audit_events WHERE action = 'secret.read' AND mac = ${ZERO16}::bytea ON CONFLICT DO NOTHING`);
+  await rowsOf(db.owner, sql`INSERT INTO audit_member_keys (principal, secret, version, wrote, at, number)
+    SELECT actor, secret, version, false, max(at), max(number) FROM audit_events WHERE action = 'secret.read' AND mac = ${ZERO16}::bytea
+     GROUP BY actor, secret, version
+    ON CONFLICT (principal, secret, version, wrote) DO UPDATE SET at = greatest(audit_member_keys.at, excluded.at), number = greatest(audit_member_keys.number, excluded.number)`);
   // The uses, spread evenly above the floor the checkpointer reads its window from, so that it seals them
   // (`caughtUp`), and below the floor its next barrier sets, so that, sealed, no window above the newest pair reads
   // them again. How many share a millisecond depends on how long the seeding above took, so on the machine. Uses
@@ -321,7 +340,7 @@ async function grow(): Promise<void> {
   const [span] = await rowsOf<{ floor: string | null; ceiling: string }>(db.owner, sql`
     SELECT (SELECT k.at_floor FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1)::text AS floor,
            ((extract(epoch FROM clock_timestamp()) * 1000)::bigint - deadline_max())::text AS ceiling`);
-  assert.ok(span!.floor !== null, 'no checkpoint to read the floor from: the reveals and listReads() above make one');
+  assert.ok(span!.floor !== null, 'no checkpoint to read the floor from: the reveals and listAudit() above make one');
   const [floor, ceiling] = [Number(span!.floor), Number(span!.ceiling)];
   assert.ok(ceiling - floor > 1, `no time between the checkpointer's floor (${floor}) and the next barrier's (${ceiling}) to stamp uses in`);
   const uses = Array.from({ length: SIZE }, (_, i) => {
@@ -393,8 +412,8 @@ async function get(as: string, path: string): Promise<number> {
 type Path = { name: string; run: (round: number) => Promise<unknown>; before?: () => Promise<unknown>; last?: boolean };
 
 /** The audit pages each of the owner, the viewer and the auditor of market asks. */
-const PAGES = ['', '?detail=1', '?sealed=1', '?sealed=1&hidden=1', '?limit=5', `?actor=${encodeURIComponent(`user:${READER}`)}`, `?actor=${encodeURIComponent(`user:${TAMPERED}`)}`,
-  '?path=market', '?path=market%2Fdev', '?path=market%2Fdev%2FAPI_KEY', '?decision=deny', '?sealed=1&path=market%2Fdev', `?sealed=1&actor=${encodeURIComponent(`user:${LEAVER}`)}`,
+const PAGES = ['', '?detail=1', '?hidden=1', '?sealed=1&hidden=1', '?limit=5', `?actor=${encodeURIComponent(`user:${READER}`)}`, `?actor=${encodeURIComponent(`user:${TAMPERED}`)}`,
+  '?path=market', '?path=market%2Fdev', '?path=market%2Fdev%2FAPI_KEY', '?decision=deny', `?actor=${encodeURIComponent(`user:${LEAVER}`)}`,
   // Each behind entries of its own it leaves out: the scheduler's (a system actor by its name alone, as its links name
   // it) behind its heartbeats, the signer's behind their sign-ins, shop's behind its MCP reads.
   `?actor=${SCHEDULER.slice('system:'.length)}`, `?actor=${encodeURIComponent(SIGNER)}`, '?path=shop',
@@ -425,7 +444,7 @@ function paths(): Path[] {
     { name: 'a heartbeat', run: () => writeAuditHeartbeat(deps.db, deps.chainKey, deps.vault, deps.anchor, { warn: () => undefined }) },
     { name: 'readiness', run: () => auditReadiness(deps.db, deps.vault, deps.chainKey, deps.anchor) },
     { name: "the vault's checkpoint", run: () => deps.vault.checkpoint() },
-    { name: "the checkpointer's tick and the reads' projection", run: () => deps.vault.listReads() },
+    { name: "the checkpointer's tick and the audit projection", run: () => deps.vault.listAudit() },
     { name: "the checkpointer's tick and projection with a replaced key (the keyring)", run: () => replacedKeyTick() },
     // An offboarding of the member with every read, and their report after.
     { name: 'an offboarding (owner)', run: (round) => root.members.remove(`user:${LEAVERS[round]}`), last: true },
@@ -449,13 +468,13 @@ async function onHotPath(reveal: () => Promise<unknown>): Promise<void> {
   if (hotRan === before) throw new Error('no statement on the hot path');
 }
 
-/** A tick of a checkpointer that holds a key it replaced, so that it reads the keyring, and the projector after it. */
+/** A tick of a checkpointer that holds a key it replaced, so that it reads the keyring, and the audit projector after it. */
 async function replacedKeyTick(): Promise<void> {
   const memory = mkdtempSync(join(tmpdir(), 'coffre-sweep-'));
   const signer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [deps.vault.signingKey, randomBytes(32)], memory: join(memory, 'memory'), intervalMs: 3_600_000 });
   try {
     await signer.checkpointer.tick();
-    await signer.projected();
+    await signer.auditProjected();
   } finally {
     await signer.stop();
     rmSync(memory, { recursive: true, force: true });

@@ -267,6 +267,8 @@ test('the vault\'s entries are chained, and one rewritten fails', async () => {
   await developer.secrets.reveal('market/dev/API_KEY');
   assert.equal((await root.audit.verify()).ok, true);
   await assert.rejects(developer.audit.verify(), { status: 403 });
+  // Its entry as stored, the page aside: listing the log would checkpoint it, and the check starts at the newest checkpoint.
+  const [read] = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'secret.read')));
 
   // Someone who owns the database, and lifts the log's triggers.
   await withLogUnlocked(db.owner, (owner) =>
@@ -275,11 +277,10 @@ test('the vault\'s entries are chained, and one rewritten fails', async () => {
       .set({ actor: 'user:nobody@acme.example' })
       .where(and(eq(auditLog.author, 'vault'), eq(auditLog.action, 'secret.read'))),
   );
-  const read = (await vaultEntries()).find((entry) => entry.action === 'secret.read')!;
   assert.deepEqual(await root.audit.verify(), {
     ok: false,
-    through: read.seq - 1,
-    failedAtSeq: read.seq,
+    through: Number(read!.seq) - 1,
+    failedAtSeq: Number(read!.seq),
     author: 'app',
     reason: 'hash does not match the entry',
   });
@@ -334,7 +335,9 @@ test('a read put on someone else and chained again fails: the vault wrote it, an
   });
   // And the vault will not sign past it.
   assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, { warn: () => {} }), false);
-  const [refused] = await vaultEntries();
+  // As stored: no page lists a log that no longer holds (the projection stops at it).
+  const [refused] = (await db.owner.select().from(auditLog).where(eq(auditLog.author, 'vault')).orderBy(desc(auditLog.seq)).limit(1))
+    .map((row) => ({ ...row, reason: row.code }));
   assert.deepEqual([refused.action, refused.decision, refused.reason], ['audit.checkpoint', 'deny', 'log_broken']);
 });
 

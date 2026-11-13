@@ -121,8 +121,8 @@ async function usesAudited(
     for (const entry of read) {
       const rows = await query<{ secret: string }>(sql, 'SELECT secret FROM log_uses WHERE number = $1', [entry.seq]);
       expect(rows.length === 1 && String(rows[0]!.secret) === entry.metadata.secretId, 'the read is not the use the vault wrote', { entry, rows });
-      const projected = await query<{ secret: string; principal: string }>(sql, 'SELECT secret, principal FROM log_reads WHERE number = $1', [entry.seq]);
-      expect(projected.length === 1 && String(projected[0]!.secret) === entry.metadata.secretId && projected[0]!.principal === `user:${reader.email}`, "the read is not the use as the vault's projector listed it", { entry, projected });
+      const projected = await query<{ secret: string; actor: string }>(sql, 'SELECT secret, actor FROM audit_events WHERE log = 16 AND number = $1', [entry.seq]);
+      expect(projected.length === 1 && String(projected[0]!.secret) === entry.metadata.secretId && projected[0]!.actor === `user:${reader.email}`, "the read is not the use as the vault's projector listed it", { entry, projected });
     }
   });
   return `${read.length} values read by the vault for ${purpose}, each its use in 0.15's log`;
@@ -407,7 +407,7 @@ export async function deletedTail(deployment: Deployment, { admin }: People): Pr
 export async function everyAuditEntry(api: CoffreClient, query: { actor?: string; path?: string } = {}): Promise<AuditEntryView[]> {
   const all: AuditEntryView[] = [];
   for (let before: string | undefined; ; ) {
-    const { entries, next } = await api.audit.list({ before, limit: 500, detail: '1', sealed: '1', ...query });
+    const { entries, next } = await api.audit.list({ before, limit: 500, detail: '1', ...query });
     all.push(...entries);
     if (next === null) return all;
     before = next;

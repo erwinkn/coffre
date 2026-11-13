@@ -4,7 +4,7 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { migrateDatabase, migrationsFolder, ONLINE_LOCK_KEY } from '../src/migrate.ts';
@@ -17,6 +17,9 @@ const url = Object.assign(new URL(BASE), { pathname: `/${NAME}` }).toString();
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const ALL = onlineIndexes([readFileSync(join(migrationsFolder(), '0082_flat_history.sql'), 'utf8')]);
+/** What a migration run builds: every migration's, less those a later one drops (`log_reads`' went with it). */
+const BUILT = onlineIndexes(readdirSync(migrationsFolder()).filter((file) => file.endsWith('.sql')).sort()
+  .map((file) => readFileSync(join(migrationsFolder(), file), 'utf8')));
 
 before(async () => {
   const admin = postgresClient(BASE, { max: 1 });
@@ -35,6 +38,23 @@ after(async () => {
   } finally {
     await admin.end();
   }
+});
+
+test('an index a later migration drops, by name or with its table, is built online no more', () => {
+  const later = ['DROP TABLE "log_reads" CASCADE;--> statement-breakpoint\nDROP INDEX IF EXISTS "audit_log_vault_idx";'];
+  const names = onlineIndexes([readFileSync(join(migrationsFolder(), '0082_flat_history.sql'), 'utf8'), ...later]).map(({ name }) => name);
+  assert.ok(ALL.some(({ name }) => name === 'log_reads_by_number_idx') && ALL.some(({ name }) => name === 'audit_log_vault_idx'));
+  assert.deepEqual(names, ALL.map(({ name }) => name).filter((name) => name !== 'log_reads_by_number_idx' && name !== 'audit_log_vault_idx'));
+  // Dropped, then built again by a later one: built.
+  const again = 'CREATE INDEX CONCURRENTLY IF NOT EXISTS "audit_log_vault_idx" ON "audit_log" USING btree ("seq");';
+  const rebuilt = onlineIndexes([readFileSync(join(migrationsFolder(), '0082_flat_history.sql'), 'utf8'), ...later, again]);
+  assert.deepEqual(rebuilt.filter(({ name }) => name === 'audit_log_vault_idx').map(({ body }) => body), ['USING btree ("seq")']);
+  assert.equal(rebuilt.length, names.length + 1);
+  // Renamed, the index or its table: the list would build it under its old name, so it refuses.
+  for (const rename of ['ALTER INDEX "audit_log_vault_idx" RENAME TO "audit_log_vault2_idx";', 'ALTER TABLE "audit_log" RENAME TO "audit_log2";']) {
+    assert.throws(() => onlineIndexes([readFileSync(join(migrationsFolder(), '0082_flat_history.sql'), 'utf8'), rename]), /renames of online-built indexes are unsupported/);
+  }
+  assert.doesNotThrow(() => onlineIndexes([readFileSync(join(migrationsFolder(), '0082_flat_history.sql'), 'utf8'), 'ALTER TABLE "secrets" RENAME TO "secrets2";']));
 });
 
 test('a migration CONCURRENTLY index is read whole, comments before it or not; any other statement is not one', () => {
@@ -81,10 +101,14 @@ test('a migration run builds every online index, each partitioned table on each 
   const session = postgresSession(url);
   try {
     const found = await state(session);
-    assert.deepEqual(found.map(({ index, valid }) => [index, valid]), ALL.map(({ name }) => [name, true]).sort());
+    assert.deepEqual(found.map(({ index, valid }) => [index, valid]), BUILT.map(({ name }) => [name, true]).sort());
     for (const { index, days, indexed } of found) {
       if (index.startsWith('log_')) assert.ok(days > 0 && indexed === days, `${index}: ${indexed} of ${days} days`);
     }
+    // 0088 dropped log_reads, with its online index: a run after builds it no more, nor fails on its missing table.
+    assert.ok(!BUILT.some(({ name }) => name === 'log_reads_by_number_idx'));
+    assert.deepEqual((await migrateDatabase(url)).unbuilt, []);
+    assert.deepEqual((await state(session)).map(({ index, valid }) => [index, valid]), BUILT.map(({ name }) => [name, true]).sort());
   } finally {
     await session.end();
   }
@@ -147,9 +171,9 @@ test("a run that finds every index built takes no lock a use's insert waits for:
   const session = postgresSession(url);
   const writer = postgresSession(url);
   try {
-    // A use's and a read's insert, open: CREATE INDEX IF NOT EXISTS ... ON ONLY would wait for them (SHARE), and they for it.
+    // A use's insert, open: CREATE INDEX IF NOT EXISTS ... ON ONLY would wait for it (SHARE), and it for it.
     await writer.unsafe('BEGIN');
-    await writer.unsafe('LOCK TABLE log_uses, log_reads IN ROW EXCLUSIVE MODE');
+    await writer.unsafe('LOCK TABLE log_uses IN ROW EXCLUSIVE MODE');
     const started = Date.now();
     assert.deepEqual((await migrateDatabase(url)).unbuilt, []);
     // In this database: pg_locks lists the cluster's, and another test file's waiter is not the run's.
@@ -182,20 +206,19 @@ test("a partitioned table's index left part-built is finished a day at a time, a
   const session = postgresSession(url);
   try {
     // A run cut short after the empty index and one day's: the other days unindexed, the index invalid.
-    await session.unsafe('DROP INDEX log_reads_by_number_idx');
-    await session.unsafe('CREATE INDEX log_reads_by_number_idx ON ONLY log_reads USING btree (number)');
+    await session.unsafe('DROP INDEX log_uses_by_number_idx');
+    await session.unsafe('CREATE INDEX log_uses_by_number_idx ON ONLY log_uses USING btree (number)');
     const [first] = await session.unsafe<{ day: string }[]>(
-      "SELECT c.relname::text AS day FROM pg_inherits h JOIN pg_class c ON c.oid = h.inhrelid WHERE h.inhparent = 'log_reads'::regclass ORDER BY 1 LIMIT 1");
+      "SELECT c.relname::text AS day FROM pg_inherits h JOIN pg_class c ON c.oid = h.inhrelid WHERE h.inhparent = 'log_uses'::regclass ORDER BY 1 LIMIT 1");
     await session.unsafe(`CREATE INDEX ${quoteIdentifier(`${first!.day}_by_number_idx`)} ON ${quoteIdentifier(first!.day)} USING btree (number)`);
-    await session.unsafe(`ALTER INDEX log_reads_by_number_idx ATTACH PARTITION ${quoteIdentifier(`${first!.day}_by_number_idx`)}`);
-    assert.equal((await state(session)).find(({ index }) => index === 'log_reads_by_number_idx')?.valid, false);
+    await session.unsafe(`ALTER INDEX log_uses_by_number_idx ATTACH PARTITION ${quoteIdentifier(`${first!.day}_by_number_idx`)}`);
+    assert.equal((await state(session)).find(({ index }) => index === 'log_uses_by_number_idx')?.valid, false);
     assert.deepEqual((await migrateDatabase(url)).unbuilt, []);
-    const reads = (await state(session)).find(({ index }) => index === 'log_reads_by_number_idx')!;
-    assert.ok(reads.valid && reads.indexed === reads.days, `${reads.indexed} of ${reads.days} days`);
+    const uses = (await state(session)).find(({ index }) => index === 'log_uses_by_number_idx')!;
+    assert.ok(uses.valid && uses.indexed === uses.days, `${uses.indexed} of ${uses.days} days`);
     // A day made later, as the vault makes them ahead: attached, it takes the index, empty.
-    await session.unsafe("SELECT make_reads_day(current_date + 30)");
     await session.unsafe("SELECT make_day(current_date + 30)");
-    for (const index of ['log_reads_by_number_idx', 'log_uses_by_number_idx']) {
+    for (const index of ['log_uses_by_number_idx']) {
       const day = (await state(session)).find((found) => found.index === index)!;
       assert.ok(day.valid && day.indexed === day.days, `${index}: ${day.indexed} of ${day.days} days`);
     }

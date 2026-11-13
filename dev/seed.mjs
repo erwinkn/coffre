@@ -66,10 +66,12 @@ await pool.unsafe('DELETE FROM secret_references');
 await pool.unsafe('ALTER TABLE audit_log DISABLE TRIGGER USER');
 await pool.unsafe('DELETE FROM audit_log');
 await pool.unsafe('ALTER TABLE audit_log ENABLE TRIGGER USER');
-for (const table of ['log_uses', 'bulk_cap', 'log_changes', 'log_config', 'policy', 'roles', 'proxy_definitions', 'proxy_reserved', 'log_checkpoints', 'log_tiles', 'log_reads', 'log_read_days', 'log_read_place_days']) {
+for (const table of ['log_uses', 'bulk_cap', 'log_changes', 'log_config', 'policy', 'roles', 'proxy_definitions', 'proxy_reserved', 'log_checkpoints', 'log_tiles']) {
     await pool.unsafe(`DELETE FROM ${table}`);
 }
-await pool.unsafe('UPDATE log_reads_cursor SET through = 0, pair = 0, at = 0, mac = NULL');
+// The audit projection at its start, nothing listed: the projector lists the seed's log again from it.
+await pool.unsafe('TRUNCATE audit_events, audit_event_places, audit_member_keys');
+await pool.unsafe("UPDATE audit_cursor SET through = 0, pair = 0, at = 0, old_floor = 0, old_from = 0, old_top = 0, old_hash = decode(repeat('00', 32), 'hex'), mac = NULL, reads_from = 0");
 await pool.unsafe('DELETE FROM vault_releases');
 await pool.unsafe('DELETE FROM mcp_approvals');
 await pool.unsafe('DELETE FROM mcp_connections');

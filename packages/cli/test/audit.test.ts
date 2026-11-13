@@ -21,7 +21,7 @@ function entry(seq: number, fields: Record<string, unknown>) {
 }
 
 /** `coffre audit <args>` against a coffre answering every listing with `entries`, and `more` beside them; the queries it was sent. */
-async function audit(t: test.TestContext, entries: unknown[], args: string[], more: Record<string, unknown> = {}) {
+async function audit(t: test.TestContext, entries: unknown[] | ((query: URLSearchParams) => Record<string, unknown>), args: string[], more: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), 'coffre-audit-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const queries: URLSearchParams[] = [];
@@ -29,7 +29,7 @@ async function audit(t: test.TestContext, entries: unknown[], args: string[], mo
     const url = new URL(req.url ?? '/', 'http://coffre');
     assert.equal(url.pathname, '/api/audit');
     queries.push(url.searchParams);
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ entries, ...more }));
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(typeof entries === 'function' ? entries(url.searchParams) : { entries, ...more }));
   });
   t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
   server.listen(0, '127.0.0.1');
@@ -83,20 +83,19 @@ test("audit names the CI run beside a service's entries, its sign-in in 0.15's l
   assert.match(lines[1]!, /service:ci-deploy \(acme\/api run 7002 at 3f2a9c1\)\s+token\.exchange\s+-$/);
 });
 
-test("audit asks for 0.15's sealed log too, and never for the counts of what a page hides, so each page shows what it holds (T164)", async (t) => {
+test("audit never asks for the counts of what a page hides, nor for 0.15's sealed log, which 0.16's page lists anyway, so each page shows what it holds", async (t) => {
   for (const args of [[], ['--detail'], ['--actor', 'service:ci']]) {
     const listed = await audit(t, [entry(1, {})], args);
     assert.equal(listed.code, 0, listed.stderr);
-    assert.deepEqual([listed.queries[0]!.get('sealed'), listed.queries[0]!.has('hidden')], ['1', false], args.join(' '));
+    assert.deepEqual([listed.queries[0]!.has('sealed'), listed.queries[0]!.has('hidden')], [false, false], args.join(' '));
   }
 });
 
-test("audit says on stderr when 0.15's reads lag, are not vouched for, or are listed elsewhere, as text or --json, which prints the entries alone (T166, review r9)", async (t) => {
+test("audit says on stderr when 0.15's reads lag, are not vouched for, or older entries are still being listed, as text or --json, which prints the entries alone", async (t) => {
   for (const [more, said] of [
     [{ reads: { through: '2026-10-17T10:00:00.000Z', behind: true } }, /Reads are sealed through 2026-10-17T10:00:00\.000Z; newer reads are not listed yet\./],
     [{ reads: { through: null, behind: true, forged: true } }, /Reads: FORGED: the vault does not vouch for how far they are listed/],
-    [{ readsOmitted: 'path' }, /Reads are not listed by place/],
-    [{ readsOmitted: 'scope' }, /Reads are listed to whoever reads the whole log/],
+    [{ listingOlder: true }, /Older entries are still being listed: the history stops early until they are\./],
   ] as const) {
     for (const json of [false, true]) {
       const listed = await audit(t, [entry(1, {})], json ? ['--json'] : [], more);
@@ -110,11 +109,26 @@ test("audit says on stderr when 0.15's reads lag, are not vouched for, or are li
   assert.equal(current.stderr, '');
 });
 
-test("audit pages back from where a page stopped (--before), and says so on stderr: a place's page may show nothing and still go on (T175, review r1)", async (t) => {
-  // A page of a place that passed over reads its reader may not see: no entry, and a next.
+test('audit asks on past a page that held fewer entries than --limit, none even, until it is filled, and prints where the last stopped', async (t) => {
+  // The server's pages read a bounded stretch: the newest holds no denial, the next two one each.
+  const pages: Record<string, Record<string, unknown>> = {
+    '': { entries: [], next: '-:3.3' },
+    '-:3.3': { entries: [entry(2, { decision: 'deny' })], next: '-:2.2' },
+    '-:2.2': { entries: [entry(1, { decision: 'deny' })], next: '-:1.1' },
+  };
+  const listed = await audit(t, (query) => pages[query.get('before') ?? '']!, ['--denied', '--limit', '2', '--json']);
+  assert.equal(listed.code, 0, listed.stderr);
+  assert.deepEqual((JSON.parse(listed.stdout) as { seq: number }[]).map((e) => e.seq), [2, 1]);
+  assert.deepEqual(listed.queries.map((query) => [query.get('before'), query.get('limit'), query.get('decision')]), [[null, '2', 'deny'], ['-:3.3', '2', 'deny'], ['-:2.2', '1', 'deny']]);
+  assert.match(listed.stderr, /Older entries: the same command with --before=-:1\.1/);
+});
+
+test("audit pages back from where a page stopped (--before), and says so on stderr", async (t) => {
+  // Every page empty, and each with a next: it gives up after its pages, and says where to go on from.
   const empty = await audit(t, [], ['market/dev', '--actor', 'ada@acme.example', '--json'], { more: true, next: '-:1793553278193.5120' });
   assert.equal(empty.code, 0, empty.stderr);
   assert.deepEqual(JSON.parse(empty.stdout), []);
+  assert.equal(empty.queries.length, 20);
   assert.match(empty.stderr, /Older entries: the same command with --before=-:1793553278193\.5120/);
   const older = await audit(t, [entry(1, {})], ['market/dev', '--before=-:1793553278193.5120'], { more: false, next: null });
   assert.equal(older.code, 0, older.stderr);

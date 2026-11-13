@@ -29,7 +29,6 @@ import { listAudit } from '../src/api/audit.ts';
 import { callerFrom } from '../src/api/caller.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { parsePath } from '../src/api/paths.ts';
-import { READS_PER_STATEMENT, sealedPage, STATEMENTS_AT_ONCE, versionsOf } from '../src/db/queries.ts';
 import { acceptance } from '../src/named-use.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { REFUSAL_UNSEALED_MESSAGE } from '../src/api/errors.ts';
@@ -694,183 +693,6 @@ test("a try the vault served, abandoned at its hold, then not served (the key ma
   assert.equal(verified, true);
 });
 
-test("the versions a report names by id are read a thousand a statement: an offboarding report of a member who wrote more than a statement takes parameters (review r2 of #490)", async () => {
-  const ids = Array.from({ length: 70_000 }, () => randomUUID());
-  assert.equal((await versionsOf(db.runtime, ids)).size, 0);
-});
-
-test("a page of many environments' key writes reads them a few hundred a statement, and lists the newest of them all: a project of more environments than Postgres takes a statement's parameters (review r3 of #490)", async () => {
-  await resetDatabase(db.owner);
-  const environments = Array.from({ length: 2 * READS_PER_STATEMENT + 100 }, () => randomUUID());
-  const [first, last] = [environments[10]!, environments.at(-10)!];
-  // Three key writes down the two-trip path, in two statements' reads: the first environment's, then the last's.
-  const plant = (number: bigint, at: number, environment: string) => run(db.owner, sql`
-    INSERT INTO log_changes (number, at, request_id, object, actor, payload, mac)
-    VALUES (${number}, ${at}, ${`planted-${number}`}, ${randomUUID()}, ${`user:${ADA}`},
-      ${`{"digest":null,"environmentId":"${environment}","inputs":"00","key":null,"nature":"secret","op":"secret.write","projectId":"p","ref":{"id":"${randomUUID()}","kind":"secret"},"reference":null,"request":{"credential":"c","identity":null,"number":"1","operationId":null,"requestId":null},"source":null,"version":"v"}`},
-      ${Buffer.alloc(16)})`);
-  const base = 1n << 40n;
-  await plant(base + 1n, 2_000, last);
-  await plant(base + 2n, 1_000, first);
-  await plant(base + 3n, 1_000, last);
-  const page = async (limit: number, before?: { at: number; number: bigint }) => {
-    const { rows, more } = await sealedPage(db.runtime, { detail: false, limit, instance: false, written: { environmentIds: environments }, ...(before === undefined ? {} : { before }) });
-    return { rows: rows.map((row) => row.number - base), more };
-  };
-  // Newest first by when the vault asked, then by number, across both statements' rows.
-  assert.deepEqual(await page(10), { rows: [1n, 3n, 2n], more: false });
-  assert.deepEqual(await page(2), { rows: [1n, 3n], more: true });
-  assert.deepEqual(await page(2, { at: 1_000, number: base + 3n }), { rows: [2n], more: false });
-  // Past Postgres's 65,535 parameters in one statement: none of these environments holds a write.
-  const many = Array.from({ length: 17_000 }, () => randomUUID());
-  assert.deepEqual(await sealedPage(db.runtime, { detail: false, limit: 50, before: { at: 3_000, number: base }, instance: false, written: { environmentIds: many } }), { rows: [], more: false });
-  // Ada's page of a project of 65,000 environments: of her two forms, 130,000 reads, more than a call takes
-  // arguments, which a spread into `push` threw on before any statement ran (review r4 of #490). Her write at
-  // the last environment, in the last statement's reads, is listed.
-  const project = [...Array.from({ length: 65_000 - 1 }, () => randomUUID()), last];
-  assert.deepEqual(
-    (await sealedPage(db.runtime, { actors: [`user:${ADA}`, `token:${ADA}`], detail: false, limit: 50, instance: false, written: { environmentIds: project } })).rows.map((row) => row.number - base),
-    [1n, 3n],
-  );
-  // And made as they are asked, a few statements at a time: 130,000 reads made at once, and their 520 statements
-  // asked together, held 617 MiB, past Workers' 128 MB (review r5 of #490). Each statement starts with no more
-  // of the project's environments read than its own and those before it, and no more than a few are asked at once.
-  let read = 0;
-  const counted = new Proxy(project, { get: (target, key, receiver) => {
-    if (typeof key === 'string' && /^\d+$/.test(key)) read = Math.max(read, Number(key) + 1);
-    return Reflect.get(target, key, receiver);
-  } });
-  const method = 'execute';
-  const starts: { read: number; asking: number }[] = [];
-  let asking = 0;
-  const watched = new Proxy(db.runtime, { get: (target, key, receiver) => {
-    const value = Reflect.get(target, key, receiver) as unknown;
-    if (key !== method || typeof value !== 'function') return value;
-    return async (...args: unknown[]) => {
-      asking += 1;
-      starts.push({ read, asking });
-      try {
-        return await (value as (...args: unknown[]) => Promise<unknown>).apply(target, args);
-      } finally {
-        asking -= 1;
-      }
-    };
-  } });
-  assert.deepEqual(
-    (await sealedPage(watched, { actors: [`user:${ADA}`, `token:${ADA}`], detail: false, limit: 50, instance: false, written: { environmentIds: counted } })).rows.map((row) => row.number - base),
-    [1n, 3n],
-  );
-  assert.equal(starts.length, Math.ceil(2 * project.length / READS_PER_STATEMENT));
-  starts.forEach((start, i) => {
-    // The first two statements' reads are made before either is asked; each later one's, as it is. Ada's account's
-    // reads read the environments once, her tokens' again, so only the first pass tells how far they were read.
-    const made = Math.max(i + 1, 2) * READS_PER_STATEMENT;
-    if (made < project.length) assert.ok(start.read <= made, `statement ${i + 1} started with ${start.read} environments read`);
-    assert.ok(start.asking <= STATEMENTS_AT_ONCE, `statement ${i + 1} asked with ${start.asking} at once`);
-  });
-  // A statement that fails fails the page, and no statement is asked after it: the others already asked are
-  // waited for, none left running, and the page rejects with its error (review r6 of #490: the other workers
-  // went on to ask all 520).
-  const cancelled = new Error('canceling statement due to statement timeout');
-  let asked = 0;
-  let running = 0;
-  const failing = new Proxy(db.runtime, { get: (target, key, receiver) => {
-    const value = Reflect.get(target, key, receiver) as unknown;
-    if (key !== method || typeof value !== 'function') return value;
-    return async (...args: unknown[]) => {
-      asked += 1;
-      running += 1;
-      try {
-        if (asked === 3) throw cancelled;
-        return await (value as (...args: unknown[]) => Promise<unknown>).apply(target, args);
-      } finally {
-        running -= 1;
-      }
-    };
-  } });
-  await assert.rejects(sealedPage(failing, { actors: [`user:${ADA}`, `token:${ADA}`], detail: false, limit: 50, instance: false, written: { environmentIds: project } }), (error) => error === cancelled);
-  assert.equal(running, 0, 'a statement was left running after the page failed');
-  // The four first asked together, the third of which failed: none after.
-  assert.equal(asked, STATEMENTS_AT_ONCE, `${asked} statements asked`);
-  await run(db.owner, sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
-});
-
-test("a project's audit page whose 0.14 read fails asks no more of its key writes' statements, and fails once those asked have answered: a read beside them that fails stops them too (review r7 of #490)", async () => {
-  const w = await world();
-  const [{ id: market }] = await run(db.owner, sql`SELECT id FROM projects WHERE slug = 'market'`) as [{ id: string }];
-  // A project of 5,000 environments: its page's key writes, 20 statements of 250 reads.
-  await run(db.owner, sql`INSERT INTO environments (id, project_id, slug, name)
-    SELECT gen_random_uuid(), ${market}, 'env-' || g, 'Env ' || g FROM generate_series(1, 5000) g`);
-  const caller = callerFrom({ type: 'user', id: ROOT }, await w.deps.vault.access(`user:${ROOT}`), null);
-  // Each of the key writes' statements slowed, so that 0.14's read, refused at once, fails while they are asked.
-  let asked = 0;
-  let running = 0;
-  const slowed = new Proxy(db.runtime, { get: (target, key, receiver) => {
-    const value = Reflect.get(target, key, receiver) as unknown;
-    if (key !== 'execute' || typeof value !== 'function') return value;
-    return async (...args: unknown[]) => {
-      asked += 1;
-      running += 1;
-      try {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        return await (value as (...args: unknown[]) => Promise<unknown>).apply(target, args);
-      } finally {
-        running -= 1;
-      }
-    };
-  } });
-  const ctx = {
-    db: slowed, chainKey: w.deps.chainKey, previousChainKeys: [], vault: w.deps.vault, waitUntil: () => {}, signin: null, workloads: null, mcp: null,
-    caller, requestId: randomUUID(), sourceIp: null, credentialId: null, provenance: null, via: null, personalToken: null, credentialExpiresAt: null, rotateAfterDays: null,
-  } as unknown as ApiContext;
-  const query = { path: parsePath('market'), sealed: true, detail: false, hidden: false, limit: 50 };
-  // Its whole page first, every statement asked.
-  await listAudit(ctx, query);
-  // Of its 5,001 environments (dev's too), 21 statements; and the page's reads, which no failure stops, once asked.
-  const all = asked;
-  const writes = Math.ceil(5001 / READS_PER_STATEMENT);
-  assert.ok(all >= writes, `${all} statements on the whole page`);
-  await run(db.owner, sql`REVOKE SELECT ON audit_log FROM coffre_app`);
-  try {
-    asked = 0;
-    await assert.rejects(listAudit(ctx, query), (error: { code?: string; cause?: { code?: string } }) => (error.code ?? error.cause?.code) === '42501');
-    assert.equal(running, 0, 'a statement was left running after the page failed');
-    const atFailure = asked;
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.equal(asked, atFailure, `${asked - atFailure} statements asked after the page failed`);
-    assert.ok(asked <= STATEMENTS_AT_ONCE + all - writes, `${asked} of the page's ${all} statements asked`);
-  } finally {
-    await run(db.owner, sql`GRANT SELECT ON audit_log TO coffre_app`);
-  }
-  // And the page fails with its first error, not one met while it waits: a key-write statement fails at once, the
-  // page's other reads after it, each with another, while the key writes' statements asked with it, slower, are
-  // waited for (review r8 of #490: `newest` kept its error while it waited for them, and a read beside it that failed
-  // meanwhile stood for it).
-  const first = new Error("the key writes' third statement, refused at once");
-  const later = new Error('a statement refused after it');
-  let writesAsked = 0;
-  running = 0;
-  const failing = new Proxy(db.runtime, { get: (target, key, receiver) => {
-    const value = Reflect.get(target, key, receiver) as unknown;
-    if (key !== 'execute' || typeof value !== 'function') return value;
-    return async (statement: SQL) => {
-      const text = (target as unknown as { dialect: { sqlToQuery(statement: SQL): { sql: string } } }).dialect.sqlToQuery(statement).sql;
-      running += 1;
-      try {
-        const writes = text.includes(' UNION ALL ');
-        if (writes && ++writesAsked === 3) throw first;
-        await new Promise((resolve) => setTimeout(resolve, writes ? 200 : 50));
-        throw later;
-      } finally {
-        running -= 1;
-      }
-    };
-  } });
-  await assert.rejects(listAudit({ ...ctx, db: failing } as ApiContext, query), (error) => error === first);
-  assert.equal(writesAsked, STATEMENTS_AT_ONCE, `${writesAsked} key-write statements asked`);
-  assert.equal(running, 0, 'a statement was left running after the page failed');
-});
-
 test("a key write down the two-trip path, recorded in 0.15's log alone, is listed where 0.14's `secret.write` stood: the whole log, its project's, environment's and key's pages, Ada's, a reader of its environment's; none of another place's, another member's or the refusals' (T179, 0.16.0)", async () => {
   const w = await world();
   await w.root.environments.create('market/prod');
@@ -878,7 +700,7 @@ test("a key write down the two-trip path, recorded in 0.15's log alone, is liste
   assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
   assert.deepEqual(served(w.answers), ['served']);
   type Client = ReturnType<typeof clientFor>;
-  const written = async (client: Client, query: Record<string, string | undefined>) => (await client.audit.list({ sealed: '1', limit: 50, ...query })).entries.filter((entry) => entry.action === 'secret.write');
+  const written = async (client: Client, query: Record<string, string | undefined>) => (await client.audit.list({ limit: 50, ...query })).entries.filter((entry) => entry.action === 'secret.write');
   for (const query of [{}, { path: 'market' }, { path: 'market/dev' }, { path: 'market/dev/API_KEY' }, { actor: `user:${ADA}` }, { actor: ADA }, { path: 'market/dev', actor: ADA }]) {
     const shown = await written(w.root, query);
     const fast = shown.filter((entry) => entry.log === '0.15');
@@ -899,8 +721,6 @@ test("a key write down the two-trip path, recorded in 0.15's log alone, is liste
   for (const query of [{ path: 'market/prod' }, { actor: ROOT }, { decision: 'deny' }]) {
     assert.deepEqual((await written(w.root, query)).filter((entry) => entry.log === '0.15'), [], JSON.stringify(query));
   }
-  // Without `sealed`, 0.14's log alone, as a client before 0.15 pages it.
-  assert.deepEqual((await w.root.audit.list({ limit: 50 })).entries.filter((entry) => entry.log === '0.15' && entry.action === 'secret.write'), []);
   // A reader of market/dev alone (an auditor there) reads it, on the whole log and the project's page; of prod alone, not.
   const bob = 'bob@acme.example';
   await w.root.members.add(`user:${bob}`);
@@ -917,9 +737,8 @@ test("a key write down the two-trip path, recorded in 0.15's log alone, is liste
   assert.equal((await clientFor(w.deps, ADA).secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'fake-new');
   const [seen] = (await w.root.members.get(`user:${ADA}`)).exposed;
   assert.deepEqual([seen?.how, Date.parse(seen!.at) > Number(wroteAt)], ['wrote', true], JSON.stringify({ seen, wroteAt }));
-  // A change edited around coffre is listed marked: the vault does not vouch for it.
-  const row = (await keyRow('API_KEY'))!;
-  await run(db.owner, sql`UPDATE log_changes SET actor = ${`user:${ROOT}`} WHERE object = ${logObject('secret', row.id)} AND payload LIKE ${'{"digest":%"inputs":"%'}`);
+  // Its row of the projection edited around coffre is listed marked: the vault does not vouch for it.
+  await run(db.owner, sql`UPDATE audit_events SET actor = ${`user:${ROOT}`} WHERE log = 15 AND action = 'secret.write'`);
   const [edited] = (await written(w.root, { path: 'market/dev/API_KEY' })).filter((entry) => entry.log === '0.15');
   assert.deepEqual([edited?.actorId, edited?.forged], [ROOT, true]);
 });
@@ -956,12 +775,13 @@ test("a refused write leaves every reader of the log as it was (the lead's condi
     rootUse: used(await w.root.secrets.reveal('market/dev', ['API_KEY'])),
     list: await ada.secrets.list('market/dev'),
     history: await w.root.secrets.history('market/dev/API_KEY'),
-    member: await w.root.members.get(`user:${ADA}`),
+    // Their report but how far the log is listed, which the projector moves on with every read listed.
+    member: { ...(await w.root.members.get(`user:${ADA}`)), reads: undefined },
     access: await w.root.members.access(`user:${ADA}`),
     everyone: await w.root.members.list(),
     verified: (await w.root.audit.verify()).ok,
   });
-  const audit = async (query: Parameters<typeof w.root.audit.list>[0] = {}) => (await w.root.audit.list({ sealed: 'true', ...query })).entries
+  const audit = async (query: Parameters<typeof w.root.audit.list>[0] = {}) => (await w.root.audit.list({ ...query })).entries
     .map((entry) => `${entry.action} ${entry.decision} ${entry.actorId} ${entry.project ?? '-'}/${entry.environment ?? '-'} ${entry.reason ?? '-'}`);
   const before = await readers();
   const pages = { all: await audit(), dev: await audit({ path: 'market/dev' }), prod: await audit({ path: 'market/prod' }), ada: await audit({ actor: ADA }), deny: await audit({ decision: 'deny' }), allow: await audit({ decision: 'allow' }) };
@@ -983,7 +803,7 @@ test("a refused write leaves every reader of the log as it was (the lead's condi
   await w.root.members.add(`user:${bob}`);
   await w.root.access.set(`user:${bob}`, { 'market/dev': 'auditor' });
   const reader = clientFor(w.deps, bob);
-  const refusals = async (query: Parameters<typeof reader.audit.list>[0]) => (await reader.audit.list({ sealed: 'true', decision: 'deny', ...query })).entries.filter((entry) => entry.log === '0.15');
+  const refusals = async (query: Parameters<typeof reader.audit.list>[0]) => (await reader.audit.list({ decision: 'deny', ...query })).entries.filter((entry) => entry.log === '0.15');
   for (const query of [{}, { path: 'market' }, { path: 'market/dev' }]) assert.equal((await refusals(query)).length, 1, JSON.stringify(query));
   await w.root.access.set(`user:${bob}`, { 'market/dev': null, 'market/prod': 'auditor' });
   for (const query of [{}, { path: 'market' }]) assert.deepEqual(await refusals(query), [], JSON.stringify(query));
@@ -996,7 +816,7 @@ test("a refused write leaves every reader of the log as it was (the lead's condi
   assert.equal(only!.payload.credential, w.ada.id);
   assert.deepEqual(only!.payload.keys, ['API_KEY']);
   // Its credential's id, as a two-trip change's, not shown for a session (Fable's review of #490).
-  const [shown] = (await w.root.audit.list({ sealed: 'true', decision: 'deny' })).entries;
+  const [shown] = (await w.root.audit.list({ decision: 'deny' })).entries;
   assert.equal(shown!.metadata.credentialId, undefined);
   // (Sealed into the trees by a checkpointer and replayed: the test of that, below.)
 });
@@ -1078,7 +898,7 @@ test("two retries of one refusal's ticket at once, both finding no record: the s
   assert.deepEqual((await refusalRecords()).map((each) => each.number), [record!.number]);
 });
 
-test("a refusal's record copied to another object, by a database writer, Ada's row put back to match: its MAC is over its own object, so the vault refuses the member it now stands for, and nothing is written; copied whole under another request id, it is forged in the audit list (PR 6, WritingRefuse)", async () => {
+test("a refusal's record copied to another object, by a database writer, Ada's row put back to match: its MAC is over its own object, so the vault refuses the member it now stands for, and nothing is written; copied whole under another request id, no audit page lists it (WritingRefuse)", async () => {
   const w = await world();
   // Ada refused once (no grant at market/dev): the record to copy.
   const [member] = await db.owner.select().from(principals).where(eq(principals.principal, `user:${ADA}`));
@@ -1086,6 +906,8 @@ test("a refusal's record copied to another object, by a database writer, Ada's r
   await w.root.access.set(`user:${ADA}`, { 'market/dev': null });
   assert.equal((await w.write({ API_KEY: 'fake-ada' })).status, 403);
   const [record] = await refusalRecords();
+  const denied = async () => (await w.root.audit.list({ decision: 'deny' })).entries.filter((entry) => entry.log === '0.15').map((entry) => entry.forged === true);
+  assert.deepEqual(await denied(), [false]);
   // The writer puts her grant back, her row as it was, and copies the record as her member's newest change, its seal
   // column her row's: row and log agree, and only the record's MAC, over the request's object, says otherwise.
   await db.owner.delete(grants).where(eq(grants.principal, `user:${ADA}`));
@@ -1102,8 +924,8 @@ test("a refusal's record copied to another object, by a database writer, Ada's r
   // Copied whole under a request id of its own (its own object then names another request): its MAC covers both.
   await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
     SELECT nextval('log_number'), c.at, ${randomUUID()}, c.object, c.actor, c.payload, c.seal, c.mac FROM log_changes c WHERE c.number = ${record!.number}::bigint`);
-  const listed = (await w.root.audit.list({ sealed: 'true', decision: 'deny' })).entries.filter((entry) => entry.log === '0.15');
-  assert.deepEqual(listed.map((entry) => entry.forged === true), [true, true, false]);
+  // Neither copy is listed: the projector lists what the vault signed, and it signs no change its MAC refuses.
+  assert.deepEqual(await denied(), [false]);
 });
 
 test("a refusal's record sealed by the checkpointer before it answers, as a change is (D165): the trees verify with it among them, and the log replays with no fault, every use decided as before (PR 6)", async () => {

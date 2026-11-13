@@ -7,7 +7,7 @@ import { defineSignin, generateToken, github, hashToken } from '@coffre/core/ide
 import { appendEntries } from '@coffre/db/log';
 import { eq, isNull } from 'drizzle-orm';
 
-import { auditLog, credentials, identities, secrets } from '@coffre/db/schema';
+import { auditLog, credentials, identities, secrets, secretVersions } from '@coffre/db/schema';
 import { CredentialUncheckable, SigninService } from '../src/api/signin.ts';
 import { authenticateRequest } from '../src/auth.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
@@ -257,6 +257,67 @@ test('the report reads any number of secrets a member\'s reads listed, past Post
     actor: `user:${DEV}`, action: 'secret.read', decision: 'allow', metadata: JSON.stringify({ purpose: 'run', secrets: listed }),
   }]));
   assert.deepEqual((await root.members.get(`user:${DEV}`)).exposed.map(({ key, version, how }) => `${key} v${version} ${how}`), ['API_KEY v1 read']);
+});
+
+// The report's rule: a version holds the value they saw exactly when its
+// ciphertext, `(iv, auth_tag)`, is the one they saw; no walk of restores.
+const ciphertexts = async (key: string) => new Map((await db.owner.select({ version: secretVersions.version, iv: secretVersions.iv, tag: secretVersions.authTag })
+  .from(secretVersions).innerJoin(secrets, eq(secrets.id, secretVersions.secretId)).where(eq(secrets.key, key)))
+  .map(({ version, iv, tag }) => [version, `${Buffer.from(iv).toString('hex')}:${Buffer.from(tag).toString('hex')}`]));
+
+test('a value set again as it was is a new value: a fresh IV and tag, and the report counts the key rotated', async () => {
+  await root.secrets.set('market/prod', { API_KEY: 'api-1' });
+  await dev.secrets.reveal('market/prod/API_KEY');
+  await root.secrets.set('market/prod', { API_KEY: 'api-1' });
+  const seen = await ciphertexts('API_KEY');
+  assert.deepEqual([...seen.keys()].sort(), [1, 2]);
+  assert.notEqual(seen.get(2), seen.get(1));
+  const report = await root.members.get(`user:${DEV}`);
+  assert.deepEqual([report.exposed, report.rotated], [[], 1]);
+});
+
+test('every new value draws a ciphertext of its own, the same text however it is written: one key, several at once (an import), plain, generated, sensitive, a fork\'s copy', async () => {
+  // What the report's rule stands on: two versions share an IV and tag only when one is the other's copy (a restore, a mark).
+  await root.secrets.set('market/prod', { API_KEY: 'api-1' });
+  await dev.secrets.reveal('market/prod/API_KEY');
+  await root.secrets.set('market/prod', { API_KEY: 'api-1', OTHER: 'api-1' });
+  await root.secrets.set('market/prod', { API_KEY: { value: 'api-1', sensitivity: 'plain' } });
+  await root.secrets.set('market/prod', { API_KEY: { value: 'api-1', generated: { recipe: 'bytes:32' } } });
+  await root.secrets.set('market/prod', { API_KEY: { value: 'api-1', sensitivity: 'sensitive' } });
+  await root.environments.create('market/copy', { from: 'prod' });
+  const all = await db.owner.select({ secret: secretVersions.secretId, version: secretVersions.version, iv: secretVersions.iv, tag: secretVersions.authTag }).from(secretVersions);
+  const keyed = await db.owner.select({ id: secrets.id, key: secrets.key, environment: secrets.environmentId }).from(secrets);
+  assert.equal(keyed.length, 4, 'API_KEY and OTHER, in prod and in the copy');
+  assert.equal(all.length, 5 + 1 + 2);
+  const identities = all.map(({ iv, tag }) => `${Buffer.from(iv).toString('hex')}:${Buffer.from(tag).toString('hex')}`);
+  assert.equal(new Set(identities).size, all.length, 'no two versions share an IV and tag');
+  const report = await root.members.get(`user:${DEV}`);
+  assert.deepEqual([report.exposed, report.rotated], [[], 1]);
+});
+
+test('a value put back again and again, each restore of the last restore, is the one they saw however long the chain', async () => {
+  await root.secrets.set('market/prod', { API_KEY: 'api-1' });
+  await dev.secrets.reveal('market/prod/API_KEY');
+  // v2 a new value, v3 v1's put back; v4 new, v5 v3's put back; v6 new, v7 v5's.
+  for (const [value, back] of [['api-2', 1], ['api-3', 3], ['api-4', 5]] as const) {
+    await root.secrets.set('market/prod', { API_KEY: value });
+    await root.secrets.restore('market/prod/API_KEY', back);
+  }
+  const seen = await ciphertexts('API_KEY');
+  assert.deepEqual([3, 5, 7].map((version) => seen.get(version)), [1, 1, 1].map((version) => seen.get(version)), 'a restore copies the ciphertext');
+  assert.deepEqual((await root.members.get(`user:${DEV}`)).exposed.map(({ key, version, how }) => `${key} v${version} ${how}`), ['API_KEY v7 read']);
+});
+
+test('a key marked stricter after they read it holds the value they read: not rotated', async () => {
+  // Read v3, then sensitive: v4, v3's ciphertext rewrapped. 0.15's report followed restores alone: v4 came from none,
+  // and it called the key rotated.
+  for (const value of ['api-1', 'api-2', 'api-3']) await root.secrets.set('market/prod', { API_KEY: value });
+  await dev.secrets.reveal('market/prod/API_KEY');
+  await root.secrets.set('market/prod', { API_KEY: { sensitivity: 'sensitive' } });
+  const seen = await ciphertexts('API_KEY');
+  assert.equal(seen.get(4), seen.get(3), 'marking copies the ciphertext');
+  const report = await root.members.get(`user:${DEV}`);
+  assert.deepEqual([report.exposed.map(({ key, version, how }) => `${key} v${version} ${how}`), report.rotated], [['API_KEY v4 read'], 0]);
 });
 
 test('removed people stay listed, with as many values to rotate as their report', async () => {

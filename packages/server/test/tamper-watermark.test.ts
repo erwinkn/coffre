@@ -22,7 +22,9 @@ let root: ReturnType<typeof clientFor>;
 
 before(async () => {
   db = await openTestDatabase();
-  deps = testDeps(db.runtime, [ROOT]);
+  // Its tests take 0.14's entries out, which the projection's walk of that log would stop on: what they read is no
+  // page of it.
+  deps = testDeps(db.runtime, [ROOT], { settleAudit: false });
   root = clientFor(deps, ROOT);
 });
 

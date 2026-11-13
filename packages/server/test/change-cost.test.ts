@@ -300,7 +300,7 @@ const CASES: Case[] = [
     run: (i) => owner.access.set(`user:granted-${i}@acme.example`, { 'market/dev': 'developer' }),
   },
   {
-    name: 'member removed', over: 19,
+    name: 'member removed', over: 17,
     setup: async (i) => void (await owner.members.add(`user:leaving-${i}@acme.example`)),
     run: (i) => owner.members.remove(`user:leaving-${i}@acme.example`),
   },

@@ -21,6 +21,48 @@
   pools reconnect with it; a query sent on one at that moment fails once.
   A `statement_timeout` in a login's URL, or set for the role in one
   database, outranks it and stays.
+- **The audit pages, the offboarding report and MCP read the audit
+  projection (0088).** Every page lists every log as one list, newest
+  first: 0.14's entries, 0.15's changes and its reads, once the vault's
+  projector has listed them (a few seconds; the page says how far it
+  lists). A page reads one index of the projection, and its other
+  filters (a member at a place, `decision`, a reader's places) look at no
+  more than a window of 1,000 entries past the page: a filtered page may
+  hold fewer entries than asked, or none, and go on from its `next`.
+  `next` is opaque, and a page's cost no longer grows with the log.
+  `?sealed=1` is accepted and ignored; a numeric `before` (a client
+  older than 0.15) still works. `hidden` counts what a page passed over
+  in the stretch it read, when asked (`?hidden=1`).
+- **A reader of some places sees one rule on every page.** Whoever holds
+  `audit.read` on some projects or environments, not the whole log, sees
+  an entry when one of the places it is at is a place they read and none
+  is an environment their role leaves out there, on the page of no
+  place, by member and by place alike. They now see others' reads at
+  their places on the page of no place, and no longer see their own
+  reads at places whose log they cannot read, `--actor <you>` and their
+  own Activity tab included: that tab lists what they did where they
+  audit, not everything they did. The page of a place they cannot read
+  lists nothing, a reference's entries from a place they read included:
+  those stay on that place's page and the page of no place.
+  `readsOmitted` is gone from the answer.
+- **The offboarding report weighs reads from the projection's summary,
+  and says from when.** Its new `readsFrom` is the day retention's newest
+  change keeps reads from (null while it dropped none): a read older than
+  that, an old log's included, stays on the audit page and is on no
+  report. Writes are weighed however old. A value counts as still
+  current when its version is the current one or a restore of it (the
+  same ciphertext). The report and the members list ask the vault once,
+  to vouch for how far the projection has gone: the summary's rows carry
+  no MAC of their own.
+- **0.15's reads' projection is gone (0088):** `log_reads`, its two day
+  tables and its cursor, its six functions and two triggers, and the
+  indexes only the old pages read: 17 partial indexes of `log_changes`
+  (one stays, `admitted_idx`, for members the log names with no row) and
+  two of `audit_log` (by actor, and a reference's other environment).
+  `coffre verify log` holds the projection's rows of 0.15's log to the
+  sealed log instead. Not yet those of 0.14's chain, which the app still
+  appends to: a row of one of its entries deleted from the projection
+  leaves the pages, and no check notices.
 - **0.16 upgrades offline, from exactly 0.15.0.** Stop the deployment,
   run `coffre migrate`, then deploy 0.16: 0.15.0's code cannot run on
   the new schema. To go back, restore the backup taken before the

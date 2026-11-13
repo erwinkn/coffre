@@ -31,9 +31,36 @@ export function onlineIndex(statement: string): OnlineIndex | null {
   return { unique: match[1] !== undefined, name: match[2]!, table: match[3]!, body: match[4]! };
 }
 
-/** Every index the migrations build online, in their order. */
+const DROP_INDEX = /^DROP INDEX (?:CONCURRENTLY )?(?:IF EXISTS )?"([^"]+)"/;
+const DROP_TABLE = /^DROP TABLE (?:IF EXISTS )?((?:"[^"]+"(?:\s*,\s*)?)+)/;
+const RENAME = /^ALTER (?:INDEX|TABLE) (?:IF EXISTS )?(?:ONLY )?"([^"]+)" RENAME TO /;
+
+/**
+ * Every index the migrations build online, in their order, but those a
+ * later migration drops, by name or with their table (`log_reads`).
+ * A rename of one, or of its table, is not followed: it throws.
+ */
 export function onlineIndexes(sqlTexts: readonly string[]): OnlineIndex[] {
-  return sqlTexts.flatMap((text) => text.split('--> statement-breakpoint').map(onlineIndex).filter((index) => index !== null));
+  const built = new Map<string, OnlineIndex>();
+  for (const statement of sqlTexts.flatMap((text) => text.split('--> statement-breakpoint').map(bare))) {
+    const index = onlineIndex(statement);
+    if (index !== null) {
+      built.set(index.name, index);
+      continue;
+    }
+    const dropped = DROP_INDEX.exec(statement)?.[1];
+    if (dropped !== undefined) built.delete(dropped);
+    const tables = DROP_TABLE.exec(statement)?.[1];
+    if (tables !== undefined) {
+      const gone = new Set([...tables.matchAll(/"([^"]+)"/g)].map((match) => match[1]!));
+      for (const [name, each] of built) if (gone.has(each.table)) built.delete(name);
+    }
+    const renamed = RENAME.exec(statement)?.[1];
+    if (renamed !== undefined && [...built.values()].some(({ name, table }) => name === renamed || table === renamed)) {
+      throw new Error(`a migration renames "${renamed}", an index built online or its table: renames of online-built indexes are unsupported; drop the index and build it again under its new name`);
+    }
+  }
+  return [...built.values()];
 }
 
 /** The longest name Postgres keeps whole (NAMEDATALEN − 1). */
@@ -55,11 +82,11 @@ export type OnlineSession = {
 
 /**
  * Build `index` if it is not built: valid, on its table and, for a table
- * partitioned by day (`log_uses`, `log_reads`), on every day. A
+ * partitioned by day (`log_uses`), on every day. A
  * partitioned table takes no CREATE INDEX CONCURRENTLY, so its index is made
  * empty on the table alone (`ON ONLY`, invalid until every day has one),
  * each day's is built concurrently and attached, and a day made since takes
- * one as it is attached (`make_day`, `make_reads_day`), empty. An invalid
+ * one as it is attached (`make_day`), empty. An invalid
  * index a cut-short build left is dropped and built again.
  */
 export async function buildOnline(session: OnlineSession, index: OnlineIndex): Promise<void> {

@@ -354,23 +354,29 @@ export const queries = {
   roles: (client: CoffreClient) =>
     queryOptions({ queryKey: keys.roles, queryFn: () => uiResult(() => client.roles.list()) }),
 
-  /** A page of the log, as filtered: always read fresh. */
+  /**
+   * The log, as filtered, newest first, older pages on request: always read
+   * fresh. A filter passes over a bounded stretch of the log a page, so a
+   * page may hold fewer entries than asked, none even, with more below it:
+   * its `next` is where the next one starts.
+   */
   auditEntries: (client: CoffreClient, search: AuditSearch) =>
-    queryOptions({
+    infiniteQueryOptions({
       queryKey: [...keys.audit, 'entries', search],
       staleTime: 0,
-      // Detail is left out by the server unless asked for, and counted.
-      queryFn: () =>
+      initialPageParam: undefined as string | undefined,
+      // Detail is left out by the server unless asked for.
+      queryFn: ({ pageParam }) =>
         uiResult(() =>
           client.audit.list({
             limit: AUDIT_PAGE_SIZE,
             decision: search.decision,
             actor: search.actorId,
             detail: search.detail,
-            // What 0.15's sealed log alone records too: sign-ins through trust bindings, tokens' issues, revokes and sign-outs.
-            sealed: '1',
+            before: pageParam,
           }),
         ),
+      getNextPageParam: (page) => (page.ok ? page.next ?? undefined : undefined),
     }),
 
   /**
@@ -388,7 +394,7 @@ export const queries = {
       refetchOnWindowFocus: false,
       initialPageParam: undefined as string | undefined,
       queryFn: ({ pageParam }) =>
-        uiResult(() => client.audit.list({ actor: member, limit: ACTIONS_PAGE_SIZE, sealed: '1', before: pageParam })),
+        uiResult(() => client.audit.list({ actor: member, limit: ACTIONS_PAGE_SIZE, before: pageParam })),
       // A page lists fewer entries where they name many secrets, and says where it stopped in each log: its `next`.
       getNextPageParam: (page) => (page.ok ? page.next ?? undefined : undefined),
     }),
@@ -692,10 +698,10 @@ export async function loadProxy(queryClient: QueryClient, client: CoffreClient, 
  */
 export async function loadAudit(queryClient: QueryClient, client: CoffreClient, search: AuditSearch) {
   const [entries] = await Promise.all([
-    queryClient.fetchQuery(queries.auditEntries(client, search)),
+    queryClient.fetchInfiniteQuery(queries.auditEntries(client, search)),
     queryClient.fetchQuery(queries.auditChain(client)),
   ]);
-  return entries;
+  return entries.pages[0]!;
 }
 
 /** The directory pages' read: the directory, for owners. */

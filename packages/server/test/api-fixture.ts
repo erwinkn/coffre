@@ -9,7 +9,7 @@ import { issuedGrant } from '@coffre/core/access';
 import { sealEntry, type LogFields } from '@coffre/core/audit';
 import { UNSEALED, type Through, type UseInput, type UseOutcome, type Vault, type VaultEntry } from '@coffre/core/vault';
 import { type Database } from '@coffre/db';
-import { auditLog, credentials, environments, grants, logConfig, principals, projects, proxyDefinitions, proxyReserved, secretReferences, secrets, secretVersions, serviceBindings, logUses, logChanges, auditChainHead, deviceLogins, enrollmentCodes, identities, spentIdTokens, cappedAlerts, dismissedKeys, mcpApprovals, mcpConnections, oauthClients, policy, roles, passkeys, bulkCap, logReads, logReadDays, logReadsCursor, auditCursor } from '@coffre/db/schema';
+import { auditLog, credentials, environments, grants, logConfig, principals, projects, proxyDefinitions, proxyReserved, secretReferences, secrets, secretVersions, serviceBindings, logUses, logChanges, auditChainHead, deviceLogins, enrollmentCodes, identities, spentIdTokens, cappedAlerts, dismissedKeys, mcpApprovals, mcpConnections, oauthClients, policy, roles, passkeys, bulkCap, auditCursor, logCheckpoints, logTiles } from '@coffre/db/schema';
 import { rowsOf } from '@coffre/db/dialect';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { derivedSigningKey } from '@coffre/vault';
@@ -41,6 +41,12 @@ export type FixtureDeps = {
   proxy?: ApiContext['proxy'];
   signin?: SigninService;
   workloads?: WorkloadService;
+  /**
+   * Whether a read of the audit page or a member's report first lists every log so far (`TestVault.listAudit`), as a
+   * deployment's projector has a few seconds after: on unless a test runs a checkpointer of its own, which would then
+   * not hold the pairs another one signed.
+   */
+  settleAudit?: boolean;
 };
 
 /**
@@ -57,14 +63,11 @@ export type TestVault = SpeakingVault<Vault> & VaultEntry & {
   advance(ms: number): void;
   reset(): Promise<void>;
   /**
-   * 0.15's reads as the audit pages list them, once the log is sealed and the
-   * vault's projector has gone that far (T166): a checkpointer of its own,
-   * under the vault's signing key, ticks once, then the projector runs to its
-   * newest pair.
+   * Every log as the audit projection lists it, as `listAudit` settles it, with a checkpointer of its own;
+   * `settling`, as a read of the page does first (`settleAudit`): a log a test broke is left as far as it was listed,
+   * as a deployment's projector leaves it, for the test to find what its pages say of it.
    */
-  listReads(): Promise<void>;
-  /** Every log as the audit projection lists it, as `listAudit` settles it, with a checkpointer of its own. */
-  listAudit(): Promise<void>;
+  listAudit(settling?: boolean): Promise<void>;
 };
 
 /**
@@ -76,6 +79,11 @@ export type TestVault = SpeakingVault<Vault> & VaultEntry & {
 export async function listAudit(vault: Pick<Vault, 'checkpoint'>, signer: Pick<RunningCheckpointer, 'checkpointer' | 'auditProjected'>): Promise<void> {
   const checkpoint = await vault.checkpoint();
   assert.ok(checkpoint.ok, JSON.stringify(checkpoint));
+  await projected(signer);
+}
+
+/** The chains signed to their newest pair, and the projector run until nothing is left. */
+async function projected(signer: Pick<RunningCheckpointer, 'checkpointer' | 'auditProjected'>): Promise<void> {
   await signer.checkpointer.tick();
   await signer.auditProjected();
 }
@@ -418,22 +426,14 @@ export function testVault(
       current = null;
       offset = 0;
     },
-    async listAudit() {
+    async listAudit(settling = false) {
+      const checkpoint = await this.checkpoint();
+      if (settling && !checkpoint.ok && checkpoint.refusal.code === 'log_broken') return;
+      assert.ok(checkpoint.ok, JSON.stringify(checkpoint));
       const memory = mkdtempSync(join(tmpdir(), 'coffre-audit-'));
       const signer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [config.signingKey === undefined ? signingKey : Buffer.from(config.signingKey, 'base64')], memory: join(memory, 'memory'), intervalMs: 3_600_000 });
       try {
-        await listAudit(this as TestVault, signer);
-      } finally {
-        await signer.stop();
-        rmSync(memory, { recursive: true, force: true });
-      }
-    },
-    async listReads() {
-      const memory = mkdtempSync(join(tmpdir(), 'coffre-reads-'));
-      const signer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [config.signingKey === undefined ? signingKey : Buffer.from(config.signingKey, 'base64')], memory: join(memory, 'memory'), intervalMs: 3_600_000 });
-      try {
-        await signer.checkpointer.tick();
-        await signer.projected();
+        await projected(signer);
       } finally {
         await signer.stop();
         rmSync(memory, { recursive: true, force: true });
@@ -513,8 +513,21 @@ export function clientFor(
 ): CoffreClient {
   return createClient({
     url: 'https://coffre.test',
-    transport: async (request) => serveApi(request, await contextFor(deps, id, type)),
+    transport: async (request) => {
+      if (deps.settleAudit !== false && listsAudit(request)) await deps.vault.listAudit(true);
+      return serveApi(request, await contextFor(deps, id, type));
+    },
   });
+}
+
+/**
+ * A read of what the audit projection lists: the audit page, the members' list (the removed ones' counts) and a
+ * member's report, the one a removal answers with included.
+ */
+function listsAudit(request: Request): boolean {
+  const { pathname } = new URL(request.url);
+  if (request.method === 'DELETE') return /\/members\/[^/]+$/.test(pathname);
+  return request.method === 'GET' && /\/audit$|\/members$|\/members\/[^/]+$/.test(pathname);
 }
 
 export { openTestDatabase } from './db/engine.ts';
@@ -579,12 +592,10 @@ export async function resetDatabase(owner: Database): Promise<void> {
   // Its uses and their cap's rows: a test's reads count from none.
   await owner.delete(logUses);
   await owner.delete(bulkCap);
-  // And their projection (T166), from the start again.
-  await owner.delete(logReads);
-  await owner.delete(logReadDays);
-  // Its one row put back if a test deleted it (review r6).
-  const start = { through: 0n, pair: 0n, at: 0, mac: null };
-  await owner.insert(logReadsCursor).values({ onlyRow: true, ...start }).onConflictDoUpdate({ target: logReadsCursor.onlyRow, set: start });
+  // Their signed pairs and tiles too: the projector, which every read of the page or a report runs first, walks the
+  // pairs from the start, and a pair of the last test's entries would stop it.
+  await owner.delete(logCheckpoints);
+  await owner.delete(logTiles);
   // The audit projection at its start: nothing listed of any log.
   await owner.execute(sql`TRUNCATE audit_events, audit_event_places, audit_member_keys`);
   const listed = { through: 0n, pair: 0n, at: 0, oldFloor: 0n, oldFrom: 0n, oldTop: 0n, oldHash: Buffer.alloc(32), mac: null, readsFrom: 0 };

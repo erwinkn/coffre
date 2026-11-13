@@ -207,11 +207,11 @@ test("T169, review r8 of #437, Node, Postgres: a reads' projection hung in the d
     return releases.length - 1;
   };
   // A projection waiting on its cursor, in this database: pg_locks lists the whole cluster's.
-  const projecting = async () => (await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM pg_locks WHERE relation = 'log_reads_cursor'::regclass AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND NOT granted`))[0]!.n > 0;
+  const projecting = async () => (await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM pg_locks WHERE relation = 'audit_cursor'::regclass AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND NOT granted`))[0]!.n > 0;
   try {
     await until(() => kept.sealing().ok, 5000, 'sealing at first');
     // The projection's cursor locked: the projector's next run waits on it in the database, holding its connection.
-    await hold(sql`LOCK TABLE log_reads_cursor IN ACCESS EXCLUSIVE MODE`);
+    await hold(sql`LOCK TABLE audit_cursor IN ACCESS EXCLUSIVE MODE`);
     await until(projecting, 5000, 'a projection waiting on its cursor');
     // Then the barrier's lock: the tick stalls past its bound, and the runner is retired.
     const barrier = await hold(sql`SELECT pg_advisory_xact_lock(1668244070, 1)`);

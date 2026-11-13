@@ -14,15 +14,15 @@ import { leafHash, openPair, verifyInclusion, verifyLog, type PairNotes, type Pa
 import { postgresClient, postgresSession } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
-import { CURSOR_START, cursorMac as auditCursorMac, type AuditCursor } from '../src/audit-rows.ts';
 import { Checkpointer, FenceClosed } from '../src/checkpointer.ts';
 import { logObject } from '../src/inputs.ts';
 import { verifierKeys, type VerifierKeys } from '../src/keyring.ts';
 import { DAYS_AHEAD, logKey, openLogCheckpointer, upkeep } from '../src/log-checkpointer.ts';
 import { authentic, RETENTION_OBJECT, retentionCut, type LogMacKey } from '../src/log-entry.ts';
 import { callRebuild, logStore, type LogStore } from '../src/log-store.ts';
+import { checkListed } from '../src/audit-check.ts';
+import { CURSOR_START, cursorMac } from '../src/audit-rows.ts';
 import { projectAudit, rebuildRow } from '../src/projection.ts';
-import { checkReads, cursorMac, projectReads } from '../src/reads.ts';
 import { DAY_MS, dayOf, retain } from '../src/retention.ts';
 import { variableMemory } from './audit-tree.ts';
 import { logWriter } from './log-entries.ts';
@@ -90,28 +90,19 @@ beforeEach(async () => {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** The audit projector's cursor at `through`, MAC'd under `key` as the projector writes it (audit-rows.ts). */
-const auditCursorAt = (through: bigint, key: LogMacKey): AuditCursor => {
-  const cursor = { ...CURSOR_START, through };
-  return { ...cursor, mac: auditCursorMac(key, cursor) };
-};
+/** The audit cursor at `through`, MAC'd under `key`. */
+const cursorAt = (through: bigint, key = macKey) => ({ ...CURSOR_START, through, mac: cursorMac(key, { ...CURSOR_START, through }) });
 
 /**
- * A store whose audit projection is past every cut, as these tests run no audit projector: retention waits on it
- * otherwise, as a test below holds it to.
+ * A store whose audit projection is past every cut, as these tests have no projector: retention waits on it otherwise
+ *. The test below opens the store as it is (`projected` false).
  */
-const auditPast = (store: LogStore): LogStore => ({ ...store, auditCursor: async () => auditCursorAt(2n ** 62n, macKey) });
-
-/**
- * A store whose reads' projection is past every cut too, as these tests have no projector: retention waits on it
- * otherwise. A test that opens with `projected` false reads the store's reads' cursor as it is.
- */
-const projected = (store: LogStore): LogStore => auditPast({ ...store, readsCursor: async () => ({ through: 2n ** 62n, pair: 0n, at: 0, mac: cursorMac(macKey, { through: 2n ** 62n, pair: 0n, at: 0 }) }) });
+const projected = (store: LogStore): LogStore => ({ ...store, auditCursor: async () => cursorAt(2n ** 62n) });
 
 async function open(options: { projected?: boolean } = {}) {
   const alerts: string[] = [];
   const raw = logStore(db.vault, { tileRange: RANGE });
-  const store = options.projected === false ? auditPast(raw) : projected(raw);
+  const store = options.projected === false ? raw : projected(raw);
   const cp = await Checkpointer.open(store, signers, { memory: variableMemory(), authentic: authentic(macKey), alert: (m) => alerts.push(m), freshMs: FRESH, now });
   return { cp, store, alerts };
 }
@@ -152,13 +143,9 @@ test('T168, review r3 of #444: a day whose cut is under the key the log moved on
   // The old key's log: D10 and D9's midnight sealed under it, the cut among its pairs.
   const memory = variableMemory();
   const raw = logStore(db.vault, { tileRange: RANGE });
-  let cursor: { through: bigint; mac: Buffer } = { through: 0n, mac: Buffer.alloc(0) };
-  // The reads' cursor, where the test puts it, MAC'd under the key it says; the audit projector's beside it, under the old key.
-  const store: LogStore = {
-    ...raw,
-    readsCursor: async () => ({ through: cursor.through, pair: 0n, at: 0, mac: cursor.mac }),
-    auditCursor: async () => auditCursorAt(cursor.through, macKey),
-  };
+  let cursor = cursorAt(0n);
+  // The audit cursor, where the test puts it, MAC'd under the key it says.
+  const store: LogStore = { ...raw, auditCursor: async () => cursor };
   const old = await Checkpointer.open(raw, signers, { memory, authentic: authentic(macKey), alert: () => {}, freshMs: FRESH, now });
   await midnight(old);
   const cut = (await store.cutAt(MIDNIGHT))!.upto;
@@ -177,7 +164,7 @@ test('T168, review r3 of #444: a day whose cut is under the key the log moved on
     assert.ok((await cp.tick()).signed);
   };
   const both = await verifierKeys([fresh, seed]);
-  const underOld = (through: bigint) => ({ through, mac: cursorMac(macKey, { through, pair: 0n, at: 0 }) });
+  const underOld = (through: bigint) => cursorAt(through);
   // With the new key alone, as retention had it before, the old key's cut is no pair of this log: the day never goes.
   cursor = underOld(until - 1n);
   await assert.rejects(retain(cp, store, { keepDays: 9, keys: { current: both.current, previous: [] }, now }), /no pair of this log, at or below the signer's/);
@@ -187,7 +174,7 @@ test('T168, review r3 of #444: a day whose cut is under the key the log moved on
   await laterUnderNew();
   // The cursor under the old key at the rotation: not the vault's, as every reader takes it. Retention waits.
   cursor = underOld(until);
-  assert.match((await retain(cp, store, { keepDays: 9, keys: both, now })).waiting?.reason ?? '', /the reads' cursor, at \d+, is not the vault's/);
+  assert.match((await retain(cp, store, { keepDays: 9, keys: both, now })).waiting?.reason ?? '', /the audit cursor, at \d+, is not the vault's/);
   // Below it, the projector's last move before the rotation: D10 goes.
   cursor = underOld(until - 1n);
   const r = await retain(cp, store, { keepDays: 9, keys: both, now });
@@ -200,12 +187,12 @@ test('a day goes only once the audit projection is past its cut too, by the curs
   const { cp, store } = await open();
   await midnight(cp);
   await later(cp);
-  // The reads' projection past the cut, the audit projection at its start: D10 waits.
+  // The audit projection at its start: D10 waits.
   const behind = await retain(cp, { ...store, auditCursor: async () => ({ ...CURSOR_START, mac: null }) }, { keepDays: 9, keys, now });
   assert.deepEqual(behind.dropped, []);
   assert.match(behind.waiting?.reason ?? '', /the audit projection \(through 0\) has not reached the cut/);
   // A database writer moving the cursor past the cut, its MAC left behind: still waits.
-  const moved = { ...auditCursorAt(0n, macKey), through: 2n ** 62n };
+  const moved = { ...cursorAt(0n), through: 2n ** 62n };
   const forged = await retain(cp, { ...store, auditCursor: async () => moved }, { keepDays: 9, keys, now });
   assert.deepEqual(forged.dropped, []);
   assert.match(forged.waiting?.reason ?? '', /the audit cursor, at \d+, is not the vault's/);
@@ -324,14 +311,12 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   assert.deepEqual(alerts, []);
 });
 
-test("the reads' projection goes on across retention's cuts, and the whole log's check of it starts at the cut: nothing found, and no use dropped looked for (T166, review r3)", async () => {
+test("the audit projection goes on across retention's cuts, and the whole log's check of it starts at the cut: nothing found, and no use dropped looked for", async () => {
   const { cp, store } = await open({ projected: false });
-  // The reads' days beside the uses', as the store's upkeep makes them.
-  await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
   await midnight(cp);
   const projectedAll = async () => {
     for (let run = 0; run < 100; run += 1) {
-      const { through, sealed } = await projectReads(store, keys, { steps: 100 });
+      const { through, sealed } = await projectAudit(store, keys, [], { steps: 100 });
       if (through >= sealed) return;
     }
     assert.fail("the projection did not catch up");
@@ -339,7 +324,7 @@ test("the reads' projection goes on across retention's cuts, and the whole log's
   const checked = async () => {
     const problems: string[] = [];
     for (let from: bigint | null = 0n; from !== null;) {
-      const stretch = await checkReads(store, keys, from);
+      const stretch = await checkListed(store, keys, from);
       problems.push(...stretch.problems);
       from = stretch.next;
     }
@@ -350,13 +335,13 @@ test("the reads' projection goes on across retention's cuts, and the whole log's
   await later(cp);
   const waiting = await retain(cp, store, { keepDays: 9, keys, now });
   assert.deepEqual(waiting.dropped, []);
-  assert.match(waiting.waiting?.reason ?? '', /the reads' projection \(through 0\) has not reached the cut/);
+  assert.match(waiting.waiting?.reason ?? '', /the audit projection \(through 0\) has not reached the cut/);
   // Nor once a database writer moves the cursor past the cut around the projector: by its MAC, not its number (review r7).
-  await run(db.owner, sql`UPDATE log_reads_cursor SET through = 1000000000`);
+  await run(db.owner, sql`UPDATE audit_cursor SET through = 1000000000`);
   const moved = await retain(cp, store, { keepDays: 9, keys, now });
   assert.deepEqual(moved.dropped, []);
-  assert.match(moved.waiting?.reason ?? '', /the reads' cursor, at 1000000000, is not the vault's/);
-  await run(db.owner, sql`UPDATE log_reads_cursor SET through = 0`);
+  assert.match(moved.waiting?.reason ?? '', /the audit cursor, at 1000000000, is not the vault's/);
+  await run(db.owner, sql`UPDATE audit_cursor SET through = 0`);
   await projectedAll();
   assert.deepEqual(await checked(), []);
   // D10 cut, and dropped with its reads; then D9, its stragglers with it; then the log goes on past both.
@@ -481,38 +466,6 @@ test('a reader holding the uses past drop_day\'s lock timeout makes the run wait
   assert.deepEqual(r.detached, [D10]);
   assert.equal(r.waiting, null);
   assert.deepEqual((await retain(cp, store, { keepDays: 1, keys, now })).detached, [D9]);
-});
-
-test("a reader holding a day's reads past drop_reads_day's lock timeout makes the run wait; the next drops them before the uses' partition, so the day is never forgotten with its reads listed (T166, review r10)", async () => {
-  const { cp, store } = await open({ projected: false });
-  await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
-  await midnight(cp);
-  await later(cp);
-  for (let through = 0n, sealed = 1n; through < sealed;) ({ through, sealed } = await projectReads(store, keys, { steps: 100 }));
-  const d10 = (await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_reads WHERE at >= ${Date.parse(`${D10}T00:00:00Z`)} AND at < ${MIDNIGHT}`))[0]!.n;
-  assert.equal(d10, 600);
-  // A reader of D10's reads, a backup say, past the reads' drop's lock timeout: the uses' day detached, its reads kept.
-  const reader = postgresSession(VAULT_URL);
-  await reader.unsafe('BEGIN');
-  await reader.unsafe(`SELECT count(*) FROM log_reads WHERE at < ${MIDNIGHT}`);
-  try {
-    const held = await retain(cp, store, { keepDays: 9, keys, now });
-    assert.deepEqual([held.waiting?.day, held.waiting?.lock], [D10, true]);
-    assert.equal(await exists(`log_reads_${D10.replaceAll('-', '')}`), true);
-  } finally {
-    await reader.unsafe('ROLLBACK');
-    await reader.end();
-  }
-  // Found again by its uses' partition, still there detached: its reads go, then the uses'.
-  assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), true);
-  await retain(cp, store, { keepDays: 9, keys, now });
-  await retain(cp, store, { keepDays: 9, keys, now });
-  assert.deepEqual([await exists(`log_reads_${D10.replaceAll('-', '')}`), await exists(`log_uses_${D10.replaceAll('-', '')}`)], [false, false]);
-  // Its members' days of reads go with it, and its places' (T175), which the projector's writes placed.
-  const day = Date.parse(`${D10}T00:00:00Z`) / DAY_MS;
-  assert.equal((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_days WHERE day = ${day}`))[0]!.n, 0);
-  assert.equal((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_place_days WHERE day = ${day}`))[0]!.n, 0);
-  assert.ok((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_place_days WHERE day > ${day}`))[0]!.n > 0, "the later days' places stay");
 });
 
 /**

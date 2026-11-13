@@ -13,10 +13,10 @@ import { logObject } from '@coffre/db/log';
 import { and, asc, eq, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
-import { HIDDEN_COUNTED } from '../src/db/queries.ts';
+import { WINDOW } from '../src/db/events.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { auditLog, credentials, logChanges } from '@coffre/db/schema';
+import { auditEvents, auditLog, credentials, logChanges } from '@coffre/db/schema';
 import { aroundNextUseByIds, clientFor, contextFor, issuesLogged, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -240,8 +240,11 @@ test('a personal token makes nothing that outlives it: no token, session, app, g
   // The log of the places it reaches, not the instance's: an Owner's token for market's log reads market's alone.
   assert.equal(await status(token.audit.list({})), 403, 'a maintainer reads no log');
   const auditor = await root.tokens.issue(`user:${ROOT}`, { label: 'log', expiresInMinutes: 60, scope: { market: 'auditor' } });
+  // Its requests go around the fixture's client, which lists the log before a page: listed here.
+  await deps.vault.listAudit();
   const { entries } = await bearer(auditor.token).audit.list({ detail: '1' });
-  assert.ok(entries.length > 0 && entries.every((entry) => entry.project === 'market'), 'no sign-in, member or settings entry');
+  assert.ok(entries.length > 0, 'no entry');
+  assert.deepEqual(entries.filter((entry) => entry.project !== 'market').map((entry) => `${entry.log} ${entry.action} ${entry.project}`), [], 'no sign-in, member or settings entry');
 });
 
 test('every entry made with a personal token names its person and the token, the vault\'s too, and the log shows its label', async () => {
@@ -267,7 +270,7 @@ test('every entry made with a personal token names its person and the token, the
   // The vault issues it, and its change records it: the page lists the change, and the token's label
   // beside what it made.
   assert.deepEqual((await issuesLogged(db.owner)).map(({ kind, label, targetCredentialId }) => [kind, label, targetCredentialId]), [['personal', 'cursor-agent', issued.id]]);
-  const { entries } = await root.audit.list({ actor: ADA, detail: '1', sealed: '1' });
+  const { entries } = await root.audit.list({ actor: ADA, detail: '1' });
   const create = entries.find((entry) => entry.action === 'token.create')!;
   assert.deepEqual([create.log, create.metadata.kind, create.metadata.label, create.metadata.targetCredentialId, create.token], ['0.15', 'personal', 'cursor-agent', issued.id, null]);
   const write = entries.find((entry) => entry.action === 'secret.write')!;
@@ -396,7 +399,7 @@ test("a personal token's label is shown wherever it goes, so it holds no control
   await signin.signOut(issued.token, { requestId: 'logout', sourceIp: null });
   // The vault ends it, and its change, which the page lists, names the token it ends.
   assert.deepEqual(await revokesLogged(db.owner), [{ actor: ADA, reason: 'sign_out', targetCredentialId: issued.id }]);
-  const { entries } = await root.audit.list({ actor: ADA, detail: '1', sealed: '1' });
+  const { entries } = await root.audit.list({ actor: ADA, detail: '1' });
   const out = entries.find((entry) => entry.action === 'sign_out')!;
   assert.deepEqual([out.log, out.metadata.targetCredentialId, out.metadata.kind, out.token], ['0.15', issued.id, 'personal', { id: issued.id, label: 'agent' }]);
 });
@@ -432,7 +435,7 @@ test("a person's token issues, revokes and sign-outs are counted on the page of 
   const walk = async (query: { actor?: string; detail?: '1'; hidden?: '1' }, limit: number) => {
     const pages: Page[] = [];
     for (let before: string | undefined; ;) {
-      const page = await root.audit.list({ ...query, sealed: '1', limit, ...(before === undefined ? {} : { before }) });
+      const page = await root.audit.list({ ...query, limit, ...(before === undefined ? {} : { before }) });
       assert.ok(page.entries.length <= limit);
       assert.equal(page.more, page.next !== null);
       pages.push(page);
@@ -449,7 +452,7 @@ test("a person's token issues, revokes and sign-outs are counted on the page of 
   assert.deepEqual(activity.map(tokens), [{}, { 'token.create': 1, 'token.revoke': 1, sign_out: 1 }, { 'token.create': 1 }, {}]);
 
   // Asked for, each is listed.
-  const listed = (await root.audit.list({ actor: ADA, detail: '1', sealed: '1', limit: 500 })).entries.filter((entry) => TOKENS.has(entry.action));
+  const listed = (await root.audit.list({ actor: ADA, detail: '1', limit: 500 })).entries.filter((entry) => TOKENS.has(entry.action));
   assert.deepEqual(listed.map((entry) => [entry.log, entry.action, entry.actorId, entry.metadata.targetCredentialId, entry.detail]), [
     ['0.15', 'sign_out', 'ada@acme.example', first.id, true],
     ['0.15', 'token.revoke', 'ada@acme.example', second.id, true],
@@ -472,51 +475,42 @@ test("a person's token issues, revokes and sign-outs are counted on the page of 
 });
 
 /**
- * Token records past what the pages show, more of them than a page counts (`HIDDEN_COUNTED`). A page that counts
- * them (`hidden`, asked for) counts no more than that, and shows nothing older than the last it counts, though an
- * entry it would show lies just below; the pages after count the rest, and show it, every one once. A page that does
- * not ask, as every page of coffre's own, counts nothing and shows the entry at once. Planted as the vault writes them,
- * as only the pages are under test: a person with nothing but their handles, and a
- * service whose runs' sign-outs came after an old sign-in.
+ * Token records past what the pages show, more of them than a page reads past its own (`WINDOW`). A page reads no
+ * further: asked to count (`hidden`), it counts what it read and shows nothing older, though an entry it would show
+ * lies just below; the pages after count the rest, and show it, every one once. A page that does not ask counts
+ * nothing, and goes on from `next` all the same. Planted in the projection as the projector writes them, as only the
+ * pages are under test: a person with nothing but their handles, and a service whose runs' sign-outs came after an
+ * old sign-in.
  */
-test("token records are counted a page's worth at a time, and an entry below them waits for the page that reaches it", async () => {
+test("a page reads a window past what it shows, and counts what it hid there: an entry below waits for the page that reaches it", async () => {
   const at = Date.now() - 3_600_000;
-  const row = (i: number, actor: string, record: Record<string, unknown>) => {
-    const id = crypto.randomUUID();
-    return { number: 10_000_000n + BigInt(i), at: at + i, requestId: crypto.randomUUID(), object: logObject('credential', id), actor, payload: JSON.stringify({ ...record, ref: { id, kind: 'credential' } }), mac: Buffer.alloc(16) };
-  };
+  const row = (i: number, actor: string, action: string) => ({
+    at: at + i, number: 10_000_000n + BigInt(i), log: 15, author: 'vault', action, shown: action === 'token.exchange', allowed: true, code: null, actor,
+    subject: null, credential: null, project: null, environment: null, secret: null, version: null, places: [], requestId: null, operationId: null,
+    related: null, sourceIp: null, detail: '{}', mac: Buffer.alloc(16),
+  });
   const CI = 'token:ci';
   const rows = [
-    // Keys in the vault's order: an issue's, a sign-in's, a revoke's.
-    ...Array.from({ length: 2 * HIDDEN_COUNTED + 500 }, (_, i) => row(i, ADA, {
-      caller: 'person', expiresAt: at + 60_000, generation: 0, issue: { by: ADA, kind: 'handle', label: `run ${i}`, via: null }, op: 'credential.issue', principal: ADA,
-    })),
-    row(5_000, CI, { caller: 'bearer', expiresAt: at + 60_000, generation: 0, op: 'credential.issue', principal: CI, signIn: { binding: 'b', issuer: 'https://issuer.example', proof: 'oidc', run: { run_id: '7' } } }),
-    ...Array.from({ length: 2 * HIDDEN_COUNTED + 500 }, (_, i) => row(5_001 + i, CI, { op: 'credential.revoke', revoke: { kind: 'service', principal: CI, reason: 'sign_out', via: null } })),
-  ].map((planted) => ({ ...planted, payload: canonicalJson(JSON.parse(planted.payload)) }));
-  for (let i = 0; i < rows.length; i += 500) await db.owner.insert(logChanges).values(rows.slice(i, i + 500));
-  const walk = async (actor: string, action: string) => {
+    ...Array.from({ length: 2 * WINDOW + 500 }, (_, i) => row(i, ADA, 'token.create')),
+    row(5_000, CI, 'token.exchange'),
+    ...Array.from({ length: 2 * WINDOW + 500 }, (_, i) => row(5_001 + i, CI, 'sign_out')),
+  ];
+  for (let i = 0; i < rows.length; i += 500) await db.owner.insert(auditEvents).values(rows.slice(i, i + 500));
+  const walk = async (actor: string, action: string, hidden: boolean) => {
     const pages: { shown: string[]; counted: number }[] = [];
     for (let before: string | undefined; ;) {
-      const page = await root.audit.list({ actor, sealed: '1', hidden: '1', limit: 50, ...(before === undefined ? {} : { before }) });
-      pages.push({ shown: page.entries.map((entry) => entry.action), counted: page.hidden?.find((hidden) => hidden.action === action)?.count ?? 0 });
+      const page = await root.audit.list({ actor, limit: 50, ...(hidden ? { hidden: '1' as const } : {}), ...(before === undefined ? {} : { before }) });
+      pages.push({ shown: page.entries.map((entry) => entry.action), counted: page.hidden?.find((counted) => counted.action === action)?.count ?? 0 });
       if (page.next === null) return pages;
       before = page.next;
     }
   };
-  assert.deepEqual(await walk(ADA, 'token.create'), [{ shown: [], counted: HIDDEN_COUNTED }, { shown: [], counted: HIDDEN_COUNTED }, { shown: [], counted: 500 }]);
-  assert.deepEqual(await walk(CI, 'sign_out'), [{ shown: [], counted: HIDDEN_COUNTED }, { shown: [], counted: HIDDEN_COUNTED }, { shown: ['token.exchange'], counted: 500 }]);
-  // Not asked: nothing counted, and the sign-in on the first page; Ada's first page is her last, and empty.
-  const service = await root.audit.list({ actor: CI, sealed: '1', limit: 50 });
-  assert.deepEqual([service.entries.map((entry) => entry.action), service.next, service.hidden], [['token.exchange'], null, undefined]);
-  const person = await root.audit.list({ actor: ADA, sealed: '1', limit: 50 });
-  assert.deepEqual([person.entries, person.next, person.hidden], [[], null, undefined]);
+  const read = 50 + WINDOW;
+  assert.deepEqual(await walk(ADA, 'token.create', true), [{ shown: [], counted: read }, { shown: [], counted: read }, { shown: [], counted: 2 * WINDOW + 500 - 2 * read }]);
+  assert.deepEqual(await walk(CI, 'sign_out', true), [{ shown: [], counted: read }, { shown: [], counted: read }, { shown: ['token.exchange'], counted: 2 * WINDOW + 500 - 2 * read }]);
+  // Not asked: nothing counted, and the same pages.
+  assert.deepEqual(await walk(CI, 'sign_out', false), [{ shown: [], counted: 0 }, { shown: [], counted: 0 }, { shown: ['token.exchange'], counted: 0 }]);
 });
-
-/** JSON with its objects' keys in order, as the vault writes a change's payload. */
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(value, (_, v: unknown) => (v !== null && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1))) : v));
-}
 
 test("a token of a personal config's owner keeps to its scope's role there too: a viewer's reads their dev@me, and writes nothing", async () => {
   await ada.secrets.set('market/dev@me', { API_KEY: 'ada-own' });

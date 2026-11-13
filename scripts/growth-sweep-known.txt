@@ -2,58 +2,30 @@
 # its id, then its path, under its text and where the code asks it. A pull request that fixes one deletes its lines;
 # one that makes another grow fails the sweep.
 
-# select "audit_log"."actor", "audit_log"."action", "audit_log"."secret_id", "audit_log"."metadata", "audit_log"."occurred_at", "secrets"."key", "secret
-#   from packages/server/src/db/queries.ts:1284 (memberActivity)
-04aaab50685d GET /members (owner)
-04aaab50685d GET /members/token%3Aci-web (owner)
-04aaab50685d GET /members/user%3Aadmin%40acme.example (owner)
-04aaab50685d GET /members/user%3Aleaver%40acme.example (owner)
-04aaab50685d GET /members/user%3Areader%40acme.example (owner)
-04aaab50685d GET /members/user%3Atampered%40acme.example (owner)
-04aaab50685d GET /members/user:ghost@acme.example (owner, no row)
-04aaab50685d GET the removed member's report (owner)
-04aaab50685d an offboarding (owner)
-
-# SELECT st.*, g.* FROM (SELECT c.through AS s_through, c.pair AS s_pair, c.at AS s_at, c.mac AS s_mac, k.upto AS s_sealed, k.at AS s_sealed_at, c.only_
-#   from packages/server/src/db/reads.ts:248 (readsByStanding)
-097fe4b7b4cd GET /members/token%3Aci-web (owner)
-097fe4b7b4cd GET /members/user%3Aleaver%40acme.example (owner)
-097fe4b7b4cd GET /members/user%3Areader%40acme.example (owner)
-097fe4b7b4cd GET the removed member's report (owner)
-097fe4b7b4cd an offboarding (owner)
-
-# select "seq", length("metadata") from "audit_log" where (("audit_log"."project_id" in ($1) or ((("audit_log"."metadata")::jsonb -> 'also') IS NOT NULL
-#   from packages/db/src/log.ts:512 (withinBytes) < packages/server/src/db/queries.ts:3582 (auditPage)
-0c2ea28e3eb7 GET /audit?path=shop (owner)
-
-# select "action", count(*) from "audit_log" where ("audit_log"."author" in ($1, $2) and "audit_log"."action" in ($3, $4, $5, $6, $7, $8, $9, $10, $11, 
-#   from packages/server/src/db/queries.ts:3691 (auditActionCounts) < packages/server/src/api/audit.ts:431
-#   grows in some runs alone: its plan flips at 20,000 (271 -> 2,602 pages in one run, 271 -> 116 in another)
-10ca383ca09a GET /audit?actor=user%3Aadmin%40acme.example (owner)
+# SELECT * FROM (SELECT 'changes' AS tree, c.number AS n, c.at::text AS at, c.request_id, c.object::text AS object, c.actor, c.payload, c.seal, c.mac, N
+#   from packages/vault/src/log-store.ts:261 (postgresWindow) < packages/vault/src/log-store.ts:284
+19f0debdde07 the checkpointer's tick and projection with a replaced key (the keyring)
+19f0debdde07 the checkpointer's tick and the audit projection
+# SELECT * FROM (SELECT 'changes' AS tree, c.number AS n, c.at::text AS at, c.request_id, c.object::text AS object, c.actor, c.payload, c.seal, c.mac, N
+#   from packages/vault/src/log-store.ts:261 (postgresWindow) < packages/vault/src/log-store.ts:284
+33ec1dc43056 GET /audit/trees (owner)
 
 # select count(*) from "audit_log" where ("audit_log"."seq" >= $1 and "audit_log"."seq" <= $2)
 #   from packages/db/src/log.ts:576 (missingEntry) < packages/server/src/api/audit.ts:1227, packages/vault/src/vault.ts:3693, packages/vault/src/vault.ts:5331
 3a5748244d97 GET /audit/verification (owner)
 3a5748244d97 a heartbeat
+3a5748244d97 the checkpointer's tick and the audit projection
 3a5748244d97 the vault's checkpoint
 
-# SELECT s.seq, s.bytes FROM (SELECT * FROM (SELECT "audit_log"."seq" AS seq, length("audit_log"."metadata") AS bytes FROM "audit_log" WHERE ("audit_log
-#   from packages/db/src/log.ts:541 (streamsOf) < packages/server/src/db/queries.ts:3582 (auditPage, by actor)
-41944f046d18 GET /audit?actor=coffre-scheduler (auditor of market)
+# SELECT st.*, g.* FROM (SELECT c.through AS s_through, c.pair AS s_pair, c.at AS s_at, c.old_floor AS s_old_floor, c.old_from AS s_old_from, c.old_top 
+#   grows in some runs alone: the same 37 pages of entries at both sizes, but at 20,000 its name joins rescan their one-page
+#   tables for each of the page's rows rather than once (35 -> 71 pages, or flat)
+dddbca3d0573 GET /audit?actor=user%3Areader%40acme.example (owner)
 
-# select "action", count(*) from "audit_log" where ("audit_log"."author" in ($1, $2) and "audit_log"."action" in ($3, $4, $5, $6, $7, $8, $9, $10, $11, 
-#   from packages/server/src/db/queries.ts:3691 (auditActionCounts) < packages/server/src/api/audit.ts:431
-42218c53b4d3 GET /audit?actor=user%3Asigner%40acme.example (owner)
-
-# select "action", count(*) from "audit_log" where ("audit_log"."author" in ($1, $2) and "audit_log"."action" in ($3, $4, $5, $6, $7, $8, $9, $10, $11, 
-#   from packages/server/src/db/queries.ts:3691 (auditActionCounts) < packages/server/src/api/audit.ts:431
-43aa39e1d69d GET /audit?path=shop (owner)
-
-# select "action", count(*) from "audit_log" where ("audit_log"."author" in ($1, $2) and "audit_log"."action" in ($3, $4, $5, $6, $7, $8, $9, $10, $11, 
-#   from packages/server/src/db/queries.ts:3691 (auditActionCounts) < packages/server/src/api/audit.ts:431
-4d24e4e551aa GET /audit?actor=coffre-scheduler (auditor of market)
-4d24e4e551aa GET /audit?actor=user%3Aadmin%40acme.example (auditor of market)
-4d24e4e551aa GET /audit?actor=user%3Asigner%40acme.example (auditor of market)
+# SELECT st.*, g.* FROM (SELECT c.through AS s_through, c.pair AS s_pair, c.at AS s_at, c.old_floor AS s_old_floor, c.old_from AS s_old_from, c.old_top 
+#   grows in some runs alone: the same 37 pages of entries at both sizes, but at 20,000 its name joins rescan their one-page
+#   tables for each of the page's rows rather than once (35 -> 71 pages, or flat)
+7a4338d08b03 GET /audit?actor=user%3Areader%40acme.example (auditor of market)
 
 # select "secret_references"."id", "secret_references"."project_id", "secret_references"."environment_id", "secret_references"."secret_id", "secret_referenc
 #   from packages/server/src/db/queries.ts:3115 (referenceRows)
@@ -66,17 +38,10 @@
 62a71c0d12ef GET the removed member's report (owner)
 62a71c0d12ef an offboarding (owner)
 
-# select "seq", length("metadata") from "audit_log" order by "audit_log"."seq" desc limit $1
-#   from packages/db/src/log.ts:512 (withinBytes) < packages/server/src/db/queries.ts:3582 (auditPage)
-63ec93ccd0a0 GET /audit?detail=1 (owner)
-
-# SELECT s.seq, s.bytes FROM (SELECT * FROM (SELECT "audit_log"."seq" AS seq, length("audit_log"."metadata") AS bytes FROM "audit_log" WHERE ("audit_log
-#   from packages/db/src/log.ts:541 (streamsOf) < packages/server/src/db/queries.ts:3582 (auditPage, by actor)
-73ea61f119b9 GET /audit?actor=user%3Asigner%40acme.example (owner)
-
-# select "action", count(*) from "audit_log" where ("audit_log"."author" in ($1, $2) and "audit_log"."action" in ($3, $4, $5, $6, $7, $8, $9, $10, $11, 
-#   from packages/server/src/db/queries.ts:3691 (auditActionCounts) < packages/server/src/api/audit.ts:431
-80b29b9c5185 GET /audit?decision=deny (owner)
+# SELECT min(u.at)::text AS v FROM log_uses u WHERE u.at >= $1::bigint AND u.number > $2 AND u.number <= $3
+#   from packages/vault/src/log-store.ts:291 (lowestAbove)
+882ef0d4c748 the checkpointer's tick and projection with a replaced key (the keyring)
+882ef0d4c748 the checkpointer's tick and the audit projection
 
 # select "subject_principal", (CASE WHEN jsonb_typeof("audit_log"."metadata"::jsonb -> 'change') = 'string' THEN "audit_log"."metadata"::jsonb ->> 'chan
 #   from packages/db/src/grants.ts:265 (tamperedMembers)
@@ -91,43 +56,3 @@
 98a6c87a6fea GET /references?path=market%2Fdev (owner)
 98a6c87a6fea GET the removed member's report (owner)
 98a6c87a6fea an offboarding (owner)
-
-# select "seq", length("metadata") from "audit_log" where (("audit_log"."project_id" in ($1) or ((("audit_log"."metadata")::jsonb -> 'also') IS NOT NULL
-#   from packages/db/src/log.ts:512 (withinBytes) < packages/server/src/db/queries.ts:3582 (auditPage)
-9c2ae76e691a GET /audit?detail=1 (auditor of market)
-
-# SELECT s.seq, s.bytes FROM (SELECT * FROM (SELECT "audit_log"."seq" AS seq, length("audit_log"."metadata") AS bytes FROM "audit_log" WHERE ("audit_log
-#   from packages/db/src/log.ts:541 (streamsOf) < packages/server/src/db/queries.ts:3582 (auditPage, by actor)
-b1210a70a93c GET /audit?actor=coffre-scheduler (owner)
-
-# SELECT r.number, r.at, CAST(r.credential AS text) AS credential, r.purpose, r.principal, CAST(r.secret AS text) AS secret, CAST(r.environment AS text)
-#   from packages/vault/src/log-store.ts:516 (the reads' listing, GET /audit/reads)
-c1b132858972 GET /audit/reads?from=start (owner)
-
-# select "seq", length("metadata") from "audit_log" where "audit_log"."action" not in ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-#   from packages/db/src/log.ts:512 (withinBytes) < packages/server/src/db/queries.ts:3582 (auditPage)
-e1c8ff0f5349 GET /audit (owner)
-e1c8ff0f5349 GET /audit?sealed=1 (owner)
-e1c8ff0f5349 GET /audit?sealed=1&hidden=1 (owner)
-
-# select "seq", length("metadata") from "audit_log" where ((("audit_log"."project_id" in ($1) or ((("audit_log"."metadata")::jsonb -> 'also') IS NOT NUL
-#   from packages/db/src/log.ts:512 (withinBytes) < packages/server/src/db/queries.ts:3582 (auditPage)
-e56afb00a9d8 GET /audit?limit=5 (auditor of market)
-
-# SELECT s.seq, s.bytes FROM (SELECT * FROM (SELECT "audit_log"."seq" AS seq, length("audit_log"."metadata") AS bytes FROM "audit_log" WHERE ("audit_log
-#   from packages/db/src/log.ts:541 (streamsOf) < packages/server/src/db/queries.ts:3582 (auditPage, by actor)
-e5c56533bff8 GET /audit?actor=user%3Aadmin%40acme.example (auditor of market)
-e5c56533bff8 GET /audit?actor=user%3Asigner%40acme.example (auditor of market)
-
-# select "seq", length("metadata") from "audit_log" where ("audit_log"."decision" = $1 and "audit_log"."action" not in ($2, $3, $4, $5, $6, $7, $8, $9, 
-#   from packages/db/src/log.ts:512 (withinBytes) < packages/server/src/db/queries.ts:3582 (auditPage)
-e707af531aa1 GET /audit?decision=deny (owner)
-
-# select "action", count(*) from "audit_log" where ("audit_log"."author" in ($1, $2) and "audit_log"."action" in ($3, $4, $5, $6, $7, $8, $9, $10, $11, 
-#   from packages/server/src/db/queries.ts:3691 (auditActionCounts) < packages/server/src/api/audit.ts:431
-f1eaa4ebe132 GET /audit (owner)
-
-# SELECT r.principal AS actor, CAST(coalesce(r.source, r.secret) AS text) AS secret, v.version, max(r.at) AS read_at FROM log_read_days d CROSS JOIN LAT
-#   from packages/server/src/db/reads.ts:236 (readsBy)
-f391d1c149b9 GET /members (owner)
-

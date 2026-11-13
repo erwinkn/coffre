@@ -556,7 +556,7 @@ test('sign-ins stay in the log, and the audit list shows them only when asked', 
   // Asked as every client of this release asks it (`sealed`): the sign-out is the vault's change, which the
   // page lists in the place of an app entry, and counts where it hides it.
   const audit = clientFor(deps, ROOT).audit;
-  const all = (await audit.list({ detail: '1', sealed: '1' })).entries;
+  const all = (await audit.list({ detail: '1' })).entries;
   assert.deepEqual(all.slice(0, 4).map((entry) => `${entry.log} ${entry.action} ${entry.decision} ${entry.detail}`), [
     '0.15 sign_out allow true',
     '0.14 sign_in deny true',
@@ -564,13 +564,13 @@ test('sign-ins stay in the log, and the audit list shows them only when asked', 
     '0.14 account.link allow true',
   ]);
   // Left out by default: what is shown is the rest, the members admitted above.
-  const shown = (await audit.list({ sealed: '1' })).entries;
+  const shown = (await audit.list({})).entries;
   assert.ok(shown.length > 0);
   assert.deepEqual(shown.map((entry) => entry.seq), all.filter((entry) => !entry.detail).map((entry) => entry.seq));
   // Filtered by the query, so a page of one is not an empty page. Counted when asked (`hidden`), as no page of
   // coffre's own asks, and not otherwise.
-  assert.equal((await audit.list({ limit: 1, sealed: '1' })).hidden, undefined);
-  const first = await audit.list({ limit: 1, sealed: '1', hidden: '1' });
+  assert.equal((await audit.list({ limit: 1 })).hidden, undefined);
+  const first = await audit.list({ limit: 1, hidden: '1' });
   assert.deepEqual(first.entries.map((entry) => entry.seq), [shown[0].seq]);
   // Each page says what it left out of its stretch of the log, and the
   // stretches tile it: the sign-ins and the sign-out, newer than every entry
@@ -578,8 +578,8 @@ test('sign-ins stay in the log, and the audit list shows them only when asked', 
   const hidden = [{ action: 'sign_in', count: 2 }, { action: 'account.link', count: 1 }, { action: 'sign_out', count: 1 }];
   assert.deepEqual(first.hidden, hidden);
   assert.deepEqual((await audit.list({ limit: 1, before: first.next!, hidden: '1' })).hidden, []);
-  assert.deepEqual((await audit.list({ sealed: '1', hidden: '1' })).hidden, hidden);
-  assert.equal((await audit.list({ detail: '1', sealed: '1', hidden: '1' })).hidden, undefined);
+  assert.deepEqual((await audit.list({ hidden: '1' })).hidden, hidden);
+  assert.equal((await audit.list({ detail: '1', hidden: '1' })).hidden, undefined);
   // And the chain still covers what the list left out.
   assert.equal((await audit.verify()).ok, true);
 });
@@ -631,7 +631,7 @@ test('people revoke their own credentials; only owners revoke anyone else\'s', a
     { actor: `user:${ROOT}`, reason: 'revoke', targetCredentialId: token.id },
   ]);
   // The audit page shows each as an app entry would, the change in its place.
-  const shown = (await clientFor(deps, ROOT).audit.list({ detail: '1', sealed: '1', decision: 'allow' })).entries.filter((entry) => entry.action === 'token.revoke');
+  const shown = (await clientFor(deps, ROOT).audit.list({ detail: '1', decision: 'allow' })).entries.filter((entry) => entry.action === 'token.revoke');
   assert.deepEqual(shown.reverse().map(({ log, actorId, metadata }) => [log, actorId, metadata.targetCredentialId, metadata.kind, metadata.principalType, metadata.principalId]), [
     ['0.15', DEV, devOther.credential.id, 'browser', 'user', DEV],
     ['0.15', LEAD, devSession.credential.id, 'browser', 'user', DEV],
@@ -840,7 +840,7 @@ test('owners issue service tokens that verify as the service', async () => {
     [`user:${ROOT}`, 'service', byRoot.id],
   ]);
   // The audit page shows it as an app entry would, the change in its place.
-  const shown = (await clientFor(deps, ROOT).audit.list({ detail: '1', sealed: '1' })).entries.filter((entry) => entry.action === 'token.create');
+  const shown = (await clientFor(deps, ROOT).audit.list({ detail: '1' })).entries.filter((entry) => entry.action === 'token.create');
   assert.deepEqual(shown.map((entry) => [entry.log, entry.actorId, entry.detail]), [['0.15', ROOT, true], ['0.15', LEAD, true]]);
   assert.deepEqual(Object.fromEntries(Object.keys(created).map((name) => [name, shown[1]!.metadata[name]])), created);
 

@@ -23,6 +23,7 @@ import { keyringOf } from '../src/keyring.ts';
 import { openLogCheckpointer, logKey, logKeys } from '../src/log-checkpointer.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { authentic, entryMac, KEY_OBJECT, logMacKey, rotationPayload } from '../src/log-entry.ts';
+import { eventMac } from '../src/audit-rows.ts';
 import { logStore } from '../src/log-store.ts';
 import { credentialObject, environmentObject, secretObject } from '../src/objects.ts';
 import * as store from '../src/store.ts';
@@ -561,12 +562,14 @@ test('two rotations, A to B to C, and someone who holds A and B: a rotation from
   assert.deepEqual(await bounds(), [second!.number, -1n]);
   const problems = (await verify(underC.vault)).problems;
   for (const n of [one.use, two.use]) assert.ok(problems.includes(`${n}: under a key the log moved on from, past its rotation`), JSON.stringify(problems));
-  // vouch, the same keyring: a use under A between B's rotation and the planted one is forged.
-  const vouched = (number: bigint) => {
-    const row = { at: Date.now(), requestId: 7n, credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
-    return { tree: 'uses', number: String(number), at: row.at, requestId: String(row.requestId), credential: row.credential, secret: row.secret, purpose: 1, place: null, mac: entryMac(ka!.mac, { tree: 'uses', row }).toString('hex') } as const;
-  };
-  assert.deepEqual((await underC.vault.vouch!({ entries: [vouched(two.use)] })).forged, [String(two.use)]);
+  // vouch, the same keyring: a read listed under A at that use's number, past B's rotation, is forged.
+  const read = {
+    at: Date.now(), number: two.use, log: 16, author: 'vault', action: 'secret.read', shown: true, allowed: true, code: null, actor: 'user:x', subject: null,
+    credential: null, project: null, environment: null, secret: null, version: null, places: [], requestId: null, operationId: null, related: null, sourceIp: null,
+    detail: '{}',
+  } as const;
+  const vouched = { ...read, tree: 'event' as const, name: String(two.use), number: String(two.use), places: [] as string[], mac: eventMac(ka!.mac, { ...read, places: [] }).toString('hex') };
+  assert.deepEqual((await underC.vault.vouch!({ entries: [vouched] })).forged, [String(two.use)]);
 });
 
 test('a rotation over a database whose fence row is gone fails whole: no rotation, no key left unretired past it (Fable\'s review r6)', async () => {

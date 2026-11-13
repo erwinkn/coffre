@@ -463,7 +463,7 @@ tens of millions each spends minutes building their indexes on its first
 0.16 migrate: run that one from a shell before the deploy, where a
 pipeline's time limit (Workers Builds') cannot cut it. A run cut short
 keeps the days it built, and the next goes on from there. On a table partitioned by day
-(`log_uses`, `log_reads`), each day is built apart and attached, and the
+(`log_uses`), each day is built apart and attached, and the
 days coffre makes ahead take theirs as they are made. A day retention
 detaches while its index is built can leave the table's index marked
 invalid with every day still there indexed: Postgres 14.23, 15.18, 16.14

@@ -243,7 +243,7 @@ test('every act a fresh check let through names, in its own entry, the passkey a
   assert.equal(erased.status, 200, JSON.stringify(erased.body));
 
   // Every entry, the vault's sealed changes among them, as the audit page lists them with their details.
-  const entries = (await root.audit.list({ actor: BOB, detail: '1', sealed: '1', limit: 200 })).entries
+  const entries = (await root.audit.list({ actor: BOB, detail: '1', limit: 200 })).entries
     .filter((entry) => entry.actorId === BOB && entry.decision === 'allow');
   const confirmation = (action: string) => {
     const found = entries.filter((entry) => entry.action === action);

@@ -30,7 +30,7 @@ import { credentials, identities, mcpConnections } from '@coffre/db/schema';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { actorParts } from '../db/audit.ts';
-import { readsByStanding, readsStanding } from '../db/reads.ts';
+import { memberKeys, type MemberKey } from '../db/events.ts';
 import { readsReported, type ReadsListed } from './audit.ts';
 import {
   priorConnections,
@@ -38,7 +38,6 @@ import {
   revokeCredentialsWhere,
   liveConnections,
   memberAccess as readMemberAccess,
-  memberActivity,
   liveCredentialsWhere,
   members as loadMembers,
   priorCredentials,
@@ -156,9 +155,10 @@ export type IssuedToken = {
 /**
  * What one person or service can still reach, and what they have seen.
  *
- * Built from the audit log, which records the version of every value read or
- * written. A value they saw that is still current is one they could still use
- * somewhere, so it is listed to rotate; writing a new version takes it off.
+ * Built from the audit projection's summary (`audit_member_keys`), the newest
+ * time they read or wrote each version of each key. A value they saw that is
+ * still current is one they could still use somewhere, so it is listed to
+ * rotate; writing a new version takes it off.
  */
 export type OffboardingReport = {
   principalType: 'user' | 'service';
@@ -177,11 +177,20 @@ export type OffboardingReport = {
   /** Secrets they saw that have had a new version since. */
   rotated: number;
   /**
-   * With 0.15's log, how far their reads are listed (T166): `exposed` names
-   * what they read through then, and says, `behind`, when reads sealed
-   * since wait to be listed, which it may yet name (review r4).
+   * How far the log is listed: `exposed` names what they read
+   * and wrote through then, and says, `behind`, while entries it weighs wait
+   * to be listed, which it may yet name: for a member removed, until the
+   * listing has passed their removal; for one not, until it has passed the
+   * newest checkpoint.
    */
   reads?: ReadsListed;
+  /**
+   * The oldest reads it weighs are of this day: retention dropped every read
+   * before it, as its newest change in the log says. Null while it
+   * has dropped none. Writes are weighed however old; an old read still on
+   * the audit page is on no report.
+   */
+  readsFrom: string | null;
   /** Service tokens they issued that still work. */
   issuedTokens: IssuedToken[];
   /** A person's connected MCP apps, which removing them disconnects. */
@@ -445,8 +454,8 @@ export async function listMembers(
   // not the work of rotating what they saw.
   const removed = all.filter((listed) => listed.status === 'removed').map((listed) => listed.member);
   // And how far their reads are listed under 0.15's log, which their counts are as of (T166).
-  const [activity, standing] = removed.length === 0 ? [[], null] : await ctx.db.transaction((tx) => Promise.all([memberActivity(tx, removed.map((m) => m.id)), readsStanding(tx)]), SNAPSHOT);
-  const exposed = exposure(removed, activity);
+  const { keys, standing } = removed.length === 0 ? { keys: [], standing: null } : await memberKeys(ctx.db, removed.map(formatMember));
+  const exposed = exposure(removed, keys);
   const reads = standing === null ? null : await readsReported(ctx, standing);
   return {
     members,
@@ -484,80 +493,21 @@ function signsInBy({ credentials, bindings }: Awaited<ReturnType<typeof serviceS
   };
 }
 
-type Activity = Awaited<ReturnType<typeof memberActivity>>[number];
-type Seen = { version: number; wrote: boolean; at: string };
-
 /**
- * What each of these members read or wrote that is still a live secret's
- * current version: a value they saw that is still current is one to rotate.
+ * What each of these members saw that is still a live key's current value, to rotate, by project, environment and key;
+ * and how many live keys they saw a value of that is no longer current.
  */
-function exposure(
-  members: MemberRef[],
-  activity: Activity[],
-): Map<string, { exposed: ExposedSecret[]; rotated: number }> {
+function exposure(members: MemberRef[], keys: readonly MemberKey[]): Map<string, { exposed: ExposedSecret[]; rotated: number }> {
   const result = new Map(members.map((member) => [formatMember(member), { exposed: [] as ExposedSecret[], rotated: 0 }]));
-
-  // Per member, per secret, per version: whether they wrote it, and when they last saw it.
-  const seen = new Map<string, Map<string, Map<number, Seen>>>();
-  // A restore is a new version holding an older one's value, so whoever saw
-  // that value has seen the restored version too.
-  const restoredFrom = new Map<string, number>();
-  const current = new Map<string, Activity>();
-  for (const row of activity) {
-    if (row.secretId === null) continue;
-    const metadata = JSON.parse(row.metadata) as { version?: unknown; from?: unknown };
-    if (row.action === 'secret.restore') {
-      if (typeof metadata.version === 'number' && typeof metadata.from === 'number') {
-        restoredFrom.set(`${row.secretId}:${metadata.version}`, metadata.from);
-      }
+  const sorted = [...keys].sort((a, b) => compare(a.project, b.project) || compare(a.environment, b.environment) || compare(a.key, b.key));
+  for (const key of sorted) {
+    const report = result.get(key.principal);
+    if (report === undefined) continue;
+    if (!key.exposed) {
+      report.rotated += 1;
       continue;
     }
-    const { actorType, actorId } = actorParts(row.actor);
-    const key = formatMember({ type: actorType as 'user' | 'service', id: actorId });
-    if (!result.has(key)) continue;
-    const version = metadata.version;
-    if (typeof version !== 'number') continue;
-    if (row.key !== null && !row.archived && row.currentVersion! > 0) current.set(row.secretId, row);
-    const bySecret = seen.get(key) ?? new Map<string, Map<number, Seen>>();
-    seen.set(key, bySecret);
-    const byVersion = bySecret.get(row.secretId) ?? new Map<number, Seen>();
-    bySecret.set(row.secretId, byVersion);
-    const previous = byVersion.get(version);
-    byVersion.set(version, {
-      version,
-      wrote: (previous?.wrote ?? false) || row.action !== 'secret.read',
-      // The latest: 0.15's log's key writes come after 0.14's entries and reads, not in time with them (T179, review r2 of #490).
-      at: previous !== undefined && Date.parse(previous.at) > Date.parse(row.occurredAt) ? previous.at : row.occurredAt,
-    });
-  }
-
-  const secrets = [...current.values()].sort(
-    (a, b) => compare(a.project!, b.project!) || compare(a.environment!, b.environment!) || compare(a.key!, b.key!),
-  );
-  for (const [key, bySecret] of seen) {
-    const report = result.get(key)!;
-    for (const secret of secrets) {
-      const byVersion = bySecret.get(secret.secretId!);
-      if (byVersion === undefined) continue;
-      // Restores only point back, so this walk ends.
-      let version: number | undefined = secret.currentVersion!;
-      let hit: Seen | undefined;
-      while (version !== undefined && (hit = byVersion.get(version)) === undefined) {
-        version = restoredFrom.get(`${secret.secretId}:${version}`);
-      }
-      if (hit === undefined) {
-        report.rotated += 1;
-        continue;
-      }
-      report.exposed.push({
-        project: secret.project!,
-        environment: secret.environment!,
-        key: secret.key!,
-        version: secret.currentVersion!,
-        how: hit.wrote ? 'wrote' : 'read',
-        at: hit.at,
-      });
-    }
+    report.exposed.push({ project: key.project, environment: key.environment, key: key.key, version: key.version, how: key.wrote ? 'wrote' : 'read', at: new Date(key.at!).toISOString() });
   }
   return result;
 }
@@ -573,20 +523,23 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   if (!runsInstance(ctx.caller)) throw forbidden('only admins and owners of the whole instance may see what someone has access to');
   // Everyone, not just them: the service tokens they issued belong to others. Beside it, every place (which whoever
   // runs the instance reaches, as a render read them) and the references they made, which need nothing of it.
-  // And their reads under 0.15's log, as the vault's projection lists them (T166), which the report weighs below, and how
-  // far it lists them, in one statement, so as of one moment (review r5).
+  // And what they read and wrote, from the projection's summary, with how far it is listed and their removal's change,
+  // in one statement, so as of one moment.
   // And the proxy items they saved, from the vault's objects (decision 5): each stops once they no longer read its keys.
-  const [everyone, known, owners, references, { reads: used, standing }, saved] = await Promise.all([
-    directory(ctx, new Date()), reachedPlaces(ctx), declaredOwners(ctx), referencesBy(ctx.db, formatMember(member)), readsByStanding(ctx.db, [formatMember(member)]),
-    keeps015(ctx.vault).then((log) => (log ? ctx.vault.proxySavedBy({ member: formatMember(member) }) : { items: [] })),
+  const principal = formatMember(member);
+  const [everyone, known, owners, references, seen, saved] = await Promise.all([
+    directory(ctx, new Date()), reachedPlaces(ctx), declaredOwners(ctx), referencesBy(ctx.db, principal), memberKeys(ctx.db, [principal]),
+    keeps015(ctx.vault).then((log) => (log ? ctx.vault.proxySavedBy({ member: principal }) : { items: [] })),
   ]);
-  const reads = await readsReported(ctx, standing);
   // Not in the list, which finds those with no row by 0.14's access entries alone: one whose change 0.15's log holds,
   // with no row, is missing all the same (`missingMembers` of one; T179 PR 4a), as an add of 0.16 writes no such entry.
-  const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member))
+  const listed = everyone.find((entry) => formatMember(entry.member) === principal)
     ?? ((await missingMembers(ctx.db, member)).length > 0 ? { member, row: null, status: 'tampered' as const, grants: [] } : undefined);
   if (listed === undefined) throw notFound('no such member');
   const { row, status } = listed;
+  // Removed, every read of theirs is numbered below their removal, which answered only once sealed: the summary is whole
+  // once listed past it (state-rows.md, section 4).
+  const reads = await readsReported(ctx, seen.standing, status === 'removed' ? seen.newest.get(principal) : undefined);
 
   const held = row?.credentials ?? [];
   const issued = everyone
@@ -595,8 +548,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
     .filter((credential) => credential.kind === 'service' && credential.createdBy === member.id)
     .sort((a, b) => compare(a.service, b.service) || a.createdAt.getTime() - b.createdAt.getTime());
 
-  const activity = await ctx.db.transaction((tx) => memberActivity(tx, [member.id], used), SNAPSHOT);
-  const { exposed, rotated } = exposure([member], activity).get(formatMember(member))!;
+  const { exposed, rotated } = exposure([member], seen.keys).get(principal)!;
   const made = references.map((reference) => reference.view);
   made.sort((a, b) => Number(b.state === 'live') - Number(a.state === 'live') || a.createdAt.localeCompare(b.createdAt));
   // Only people connect apps. Removal disconnects them, but 0.4.0's left
@@ -622,6 +574,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
     exposed,
     rotated,
     ...(reads === null ? {} : { reads }),
+    readsFrom: seen.readsFrom === null ? null : new Date(seen.readsFrom).toISOString(),
     issuedTokens: issued.map((token) => ({
       id: token.id,
       service: token.service,

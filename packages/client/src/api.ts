@@ -557,6 +557,7 @@ export type Api = {
         behind: boolean;
         forged?: true;
       };
+      readsFrom: string | null;
       issuedTokens: {
         id: string;
         service: string;
@@ -714,6 +715,7 @@ export type Api = {
           behind: boolean;
           forged?: true;
         };
+        readsFrom: string | null;
         issuedTokens: {
           id: string;
           service: string;
@@ -1186,7 +1188,6 @@ export type Api = {
       actor?: string;
       decision?: "allow" | "deny";
       detail?: "1" | "true";
-      sealed?: "1" | "true";
       hidden?: "1" | "true";
       before?: unknown;
       limit?: unknown;
@@ -1242,7 +1243,7 @@ export type Api = {
         behind: boolean;
         forged?: true;
       };
-      readsOmitted?: "path" | "scope";
+      listingOlder?: true;
     };
   };
   "GET /audit/verification": {
@@ -2953,6 +2954,7 @@ export type OffboardingReport = {
     behind: boolean;
     forged?: true;
   };
+  readsFrom: string | null;
   issuedTokens: {
     id: string;
     service: string;

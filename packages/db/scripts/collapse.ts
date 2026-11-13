@@ -7,8 +7,9 @@
 // which functions it made, replaced, altered, granted or dropped (`pg_proc`). Every statement about functions alone
 // is then left out, and each function that lives to the end is written where the path first made or changed it,
 // as the catalog holds it at the end (`pg_get_functiondef`, with its grants); one that does not is dropped where
-// the path last touched it, and, if the path made it too and an object held it meanwhile (0047's trigger, which 0085
-// drops with its function), is made where the path made it, in the form it last had. Every other statement stays, in its order. So does every row a migration writes, and so
+// the path last touched it, and, if the path made it too, is made where the path made it, in the form it last had:
+// meanwhile, an object may hold it (0047's trigger, which 0085 drops with its function) or a statement call it (0049's
+// days, made by `make_reads_day`, which 0088 drops). Every other statement stays, in its order. So does every row a migration writes, and so
 // does a function of the session's own (`pg_temp`, 0084's), which lives only for the statements of its migration that
 // call it, and which the migration's one session runs as the collapsed one does.
 //
@@ -138,9 +139,6 @@ const run = (client: PostgresClient, statement: string) => {
 const INDEXES = `SELECT oid::text FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind IN ('i', 'I')`;
 const indexes = async (client: PostgresClient) => new Set((await client.unsafe<{ oid: string }[]>(INDEXES)).map(({ oid }) => oid));
 
-/** The functions an object depends on, as Postgres records it: a trigger's, a default's, a view's (not a body's calls). */
-const HELD = `SELECT DISTINCT refobjid::regprocedure::text AS id FROM pg_depend WHERE refclassid = 'pg_proc'::regclass AND refobjid >= 16384`;
-
 /** Besides the functions: the indexes (object IDs) each statement made and removed, and those left at the end. */
 type Replayed = {
   start: Snapshot;
@@ -150,7 +148,7 @@ type Replayed = {
   made: string[][];
   gone: string[][];
   kept: Set<string>;
-  /** The last definition of each function the path made and dropped again, while an object held it (a trigger). */
+  /** The last definition of each function the path made and dropped again. */
   dead: Map<string, string>;
 };
 
@@ -173,7 +171,6 @@ async function replay(client: PostgresClient, where: readonly string[], list: re
   const made: string[][] = [];
   const gone: string[][] = [];
   const defs = new Map<string, string>();
-  const held = new Set<string>();
   for (const [index, statement] of list.entries()) {
     await run(client, statement);
     const after = await snapshot(client);
@@ -191,12 +188,11 @@ async function replay(client: PostgresClient, where: readonly string[], list: re
       const [{ def }] = await client.unsafe<[{ def: string }]>('SELECT pg_get_functiondef($1::regprocedure) AS def', [id]);
       defs.set(id, def.trimEnd());
     }
-    for (const { id } of await client.unsafe<{ id: string }[]>(HELD)) held.add(id);
     touched.push(ids);
     steps.push(after.fns);
     before = after;
   }
-  const dead = new Map([...defs].filter(([id]) => held.has(id) && !before.fns.has(id)));
+  const dead = new Map([...defs].filter(([id]) => !before.fns.has(id)));
   return { start: first.fns, steps, touched, end: before.fns, made, gone, kept: had, dead };
 }
 
@@ -208,8 +204,8 @@ const qualified = (id: string) => (id.startsWith('public.') ? id : `public.${id}
  * `end` lacks. A name goes where the path first changed it, but one with an overload CREATE OR REPLACE cannot turn
  * into its final form (its head changed, or a default went) is dropped and made where the path itself dropped that
  * overload, not before, when what the path dropped with it may still hold it. A function `end` lacks is dropped where
- * the path last touched it; one the path made and dropped again while an object held it (a trigger) is made where the
- * path first made it, in the form it last had, and dropped where the path last touched it.
+ * the path last touched it; one the path made and dropped again is made where the path first made it, in the form
+ * it last had, and dropped where the path last touched it.
  */
 function placement({ start, steps, touched, end }: Replayed) {
   const placeAt = new Map<string, number>();

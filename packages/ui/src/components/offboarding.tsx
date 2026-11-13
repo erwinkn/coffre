@@ -135,6 +135,14 @@ function ConsiderRotating({ report, person }: { report: PrincipalReport; person:
     >
       {/* Reads sealed since may yet be listed, and named here. */}
       <ReadsLag reads={report.reads} />
+      {/* Retention's cut: reads before it are no longer kept, so none of them is weighed. */}
+      {report.readsFrom != null && (
+        <div style={{ marginBottom: '1.25rem' }}>
+          <Notice>
+            Reads are weighed from <Timestamp iso={report.readsFrom} />, as far back as retention keeps them; writes however old.
+          </Notice>
+        </div>
+      )}
       {report.exposed.length === 0 ? (
         <EmptyState title="Nothing left to rotate">
           {report.rotated > 0

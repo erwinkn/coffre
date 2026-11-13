@@ -206,7 +206,8 @@ import { frozenHoldings, notCleared, proxyView, reservedProblem, routeRefusal, t
 import { TICK_MS } from './log-checkpointer.ts';
 import { changeEntry, changeHolds, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
 import { callRebuild, logStore } from './log-store.ts';
-import { checkReads, cursorVouched, readVouched, type ReadRow } from './reads.ts';
+import { checkListed } from './audit-check.ts';
+import { cursorVouched, eventVouched, oldWalkOpen, type AuditCursor, type AuditEvent } from './audit-rows.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { replayFault, type Replayed } from './replay.ts';
 import { principalObject } from './objects.ts';
@@ -4823,34 +4824,32 @@ class VaultService implements Vault {
    * statement, only when an entry fails the current key and the vault holds
    * a replaced one, and kept by no isolate (a restore moves them).
    * Otherwise pure CPU: about 3 µs an entry, `VOUCHED_AT_ONCE` at most.
+   * And, of the cursor asked about, whether `audit_log` is still being
+   * listed (`oldWalkOpen`), so that the app reads none of its fields.
    */
-  async vouch(input: VouchInput): Promise<{ forged: string[] }> {
+  async vouch(input: VouchInput): Promise<{ forged: string[]; listingOlder: boolean }> {
     const entries: unknown = (input as { entries?: unknown } | undefined)?.entries;
     if (!Array.isArray(entries) || entries.length > VOUCHED_AT_ONCE) throw new Error(`vouch takes up to ${VOUCHED_AT_ONCE} entries`);
     const keys = await this.#verifierKeys();
+    let listingOlder = false;
     const asked = entries.map((entry: VouchedEntry): { named: string; holds: (ring: Keyring) => boolean } => {
-      const named = typeof entry?.number === 'string' ? entry.number : '?';
+      const named = typeof entry?.name === 'string' ? entry.name : '?';
       if (entry?.tree === 'cursor') {
-        const at = typeof entry.through === 'string' && /^[0-9]{1,19}$/.test(entry.through) && typeof entry.pair === 'string' && /^[0-9]{1,19}$/.test(entry.pair) && Number.isSafeInteger(entry.at);
-        const mac = entry.mac === null ? null : typeof entry.mac === 'string' && /^[0-9a-f]{32}$/.test(entry.mac) ? Buffer.from(entry.mac, 'hex') : undefined;
-        const cursor = at && mac !== undefined ? { through: BigInt(entry.through), pair: BigInt(entry.pair), at: entry.at, mac } : null;
+        const cursor = vouchedCursor(entry);
+        if (cursor !== null && oldWalkOpen(cursor)) listingOlder = true;
         return { named, holds: (ring) => cursor !== null && cursorVouched(ring, cursor) };
       }
-      if (entry?.tree === 'reads') {
-        const read = vouchedRead(entry);
-        return { named, holds: (ring) => read !== null && readVouched(ring, read) };
-      }
-      const logged = vouchedEntry(entry as Exclude<VouchedEntry, { tree: 'reads' | 'cursor' }>);
-      return { named, holds: (ring) => logged !== null && entryVouched(ring, logged) === 'held' };
+      const event = vouchedEvent(entry);
+      return { named, holds: (ring) => event !== null && eventVouched(ring, event) };
     });
     const failing = asked.filter((a) => !a.holds(alone(keys)));
-    if (failing.length === 0 || keys.previous.length === 0) return { forged: failing.map((a) => a.named) };
+    if (failing.length === 0 || keys.previous.length === 0) return { forged: failing.map((a) => a.named), listingOlder };
     const ring = await keyringOf(keys, logStore(this.#db));
-    return { forged: failing.filter((a) => !a.holds(ring)).map((a) => a.named) };
+    return { forged: failing.filter((a) => !a.holds(ring)).map((a) => a.named), listingOlder };
   }
 
   /**
-   * A stretch of the reads' check (reads.ts, `checkReads`): from `start`, or
+   * A stretch of the listing's check (audit-check.ts, `checkListed`): from `start`, or
    * a stretch's `next` (a pair's number), in a snapshot of its own. Flat:
    * a checkpoint's range, whatever the log's length.
    */
@@ -4860,7 +4859,7 @@ class VaultService implements Vault {
     const at = typeof from === 'string' ? /^(?:start|([0-9]{1,19}))$/.exec(from) : null;
     if (at === null) throw new Error('verifyReads starts at start, or at a stretch\'s next');
     const keys = await this.#verifierKeys();
-    const checked = await this.#db.transaction((tx) => checkReads(logStore(tx as unknown as Database), keys, at[1] === undefined ? 0n : BigInt(at[1])), SNAPSHOT);
+    const checked = await this.#db.transaction((tx) => checkListed(logStore(tx as unknown as Database), keys, at[1] === undefined ? 0n : BigInt(at[1])), SNAPSHOT);
     return {
       kept: true,
       ok: checked.problems.length === 0,
@@ -5619,31 +5618,37 @@ function base64(bytes: Uint8Array): string {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
 }
 
-/** An entry as `vouch` was given it, as the trees take it; null for one of no shape a row has. */
-function vouchedEntry(entry: Exclude<VouchedEntry, { tree: 'reads' | 'cursor' }>): LogEntry | null {
-  const hex = (value: unknown) => (typeof value === 'string' && /^(?:[0-9a-f]{2})*$/.test(value) ? Buffer.from(value, 'hex') : null);
-  const text = (value: unknown) => typeof value === 'string';
-  if (typeof entry !== 'object' || entry === null || !text(entry.number) || !/^[0-9]{1,19}$/.test(entry.number) || !Number.isSafeInteger(entry.at) || !text(entry.requestId)) return null;
-  const mac = hex(entry.mac);
-  if (mac === null) return null;
-  const number = BigInt(entry.number);
-  if (entry.tree === 'changes') {
-    const seal = entry.seal === null ? null : hex(entry.seal);
-    if (!text(entry.object) || !text(entry.actor) || !text(entry.payload) || (entry.seal !== null && seal === null)) return null;
-    return changeEntry({ number, at: entry.at, requestId: entry.requestId, object: entry.object, actor: entry.actor, payload: entry.payload, seal, mac });
-  }
-  if (entry.tree !== 'uses' || !/^[0-9]{1,19}$/.test(entry.requestId) || !text(entry.credential) || !text(entry.secret) || !Number.isSafeInteger(entry.purpose)
-    || (entry.place !== null && !text(entry.place)) || (entry.route != null && !text(entry.route))) return null;
-  return usedEntry({ number, at: entry.at, requestId: BigInt(entry.requestId), credential: entry.credential, secret: entry.secret, purpose: entry.purpose, place: entry.place, route: entry.route ?? null, mac });
+const DECIMAL = /^[0-9]{1,19}$/;
+const hexOf = (value: unknown, bytes: number) => (typeof value === 'string' && value.length === bytes * 2 && /^[0-9a-f]*$/.test(value) ? Buffer.from(value, 'hex') : null);
+
+/** A projected entry as `vouch` was given it (`audit_events`); null for one of no shape the projector writes. */
+function vouchedEvent(entry: unknown): AuditEvent | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+  const e = entry as Record<string, unknown>;
+  const text = (value: unknown): value is string => typeof value === 'string';
+  const maybe = (value: unknown): value is string | null => value === null || text(value);
+  const mac = hexOf(e.mac, 16);
+  if (mac === null || !Number.isSafeInteger(e.at) || !text(e.number) || !DECIMAL.test(e.number) || (e.log !== 14 && e.log !== 15 && e.log !== 16)
+    || (e.author !== 'app' && e.author !== 'vault') || !text(e.action) || typeof e.shown !== 'boolean' || typeof e.allowed !== 'boolean' || !maybe(e.code)
+    || !text(e.actor) || !maybe(e.subject) || !maybe(e.credential) || !maybe(e.project) || !maybe(e.environment) || !maybe(e.secret) || !maybe(e.version)
+    || !Array.isArray(e.places) || !e.places.every(text) || !maybe(e.requestId) || !maybe(e.operationId) || !(e.related === null || (text(e.related) && DECIMAL.test(e.related)))
+    || !maybe(e.sourceIp) || !text(e.detail)) return null;
+  return {
+    at: e.at as number, number: BigInt(e.number), log: e.log, author: e.author, action: e.action, shown: e.shown, allowed: e.allowed, code: e.code,
+    actor: e.actor, subject: e.subject, credential: e.credential, project: e.project, environment: e.environment, secret: e.secret, version: e.version,
+    places: e.places as string[], requestId: e.requestId, operationId: e.operationId, related: e.related === null ? null : BigInt(e.related as string),
+    sourceIp: e.sourceIp, detail: e.detail, mac,
+  };
 }
 
-/** A read as `vouch` was given it (`log_reads`, T166); null for one of no shape the projector writes. */
-function vouchedRead(entry: Extract<VouchedEntry, { tree: 'reads' }>): ReadRow | null {
-  const id = (value: unknown) => typeof value === 'string' && value.length > 0;
-  const maybe = (value: unknown): value is string | null => value === null || id(value);
-  const mac = typeof entry.mac === 'string' && /^[0-9a-f]{32}$/.test(entry.mac) ? Buffer.from(entry.mac, 'hex') : null;
-  if (mac === null || typeof entry.number !== 'string' || !/^[0-9]{1,19}$/.test(entry.number) || !Number.isSafeInteger(entry.at) || !Number.isSafeInteger(entry.purpose)
-    || !id(entry.credential) || !id(entry.principal) || !id(entry.secret) || !id(entry.environment) || !id(entry.project)
-    || !maybe(entry.place) || !maybe(entry.source) || !maybe(entry.sourceEnvironment) || !maybe(entry.sourceProject) || !maybe(entry.version)) return null;
-  return { ...entry, number: BigInt(entry.number), mac };
+/** The projection's cursor as `vouch` was given it (`audit_cursor`); null for one of no shape it has. */
+function vouchedCursor(entry: Extract<VouchedEntry, { tree: 'cursor' }>): AuditCursor | null {
+  const numbers = [entry.through, entry.pair, entry.oldFloor, entry.oldFrom, entry.oldTop];
+  const oldHash = hexOf(entry.oldHash, 32);
+  const mac = entry.mac === null ? null : hexOf(entry.mac, 16);
+  if (!numbers.every((value) => typeof value === 'string' && DECIMAL.test(value)) || !Number.isSafeInteger(entry.at) || oldHash === null || (entry.mac !== null && mac === null)) return null;
+  return {
+    through: BigInt(entry.through), pair: BigInt(entry.pair), at: entry.at, oldFloor: BigInt(entry.oldFloor), oldFrom: BigInt(entry.oldFrom), oldTop: BigInt(entry.oldTop),
+    oldHash, mac,
+  };
 }

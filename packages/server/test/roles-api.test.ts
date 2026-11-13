@@ -71,11 +71,10 @@ test('an auditor reads audit data without being able to read secrets', async () 
 test('a page says what it hides, as far as its reader may see', async () => {
   await root.access.set(AUDITOR, { market: 'auditor' });
   assert.equal(await writeAuditHeartbeat(db.runtime, deps.chainKey, deps.vault, deps.anchor, { warn: () => assert.fail('the heartbeat warned') }), true);
-  // The write's key.wrap is in market; the heartbeat and its checkpoint are in no place, so owners' alone.
-  assert.deepEqual((await auditor.audit.list()).hidden, [{ action: 'key.wrap', count: 1 }]);
-  assert.deepEqual((await root.audit.list()).hidden, [
-    { action: 'audit.checkpoint', count: 1 },
-    { action: 'audit.heartbeat', count: 1 },
+  // The write's key.wrap is in market; the KEK's check value is in no place, so owners' alone. The heartbeat
+  // and its checkpoint are the chain's own beats, which the projection leaves out.
+  assert.deepEqual((await auditor.audit.list({ hidden: '1' })).hidden, [{ action: 'key.wrap', count: 1 }]);
+  assert.deepEqual((await root.audit.list({ hidden: '1' })).hidden, [
     // The KEK's check value, recorded before the first key was wrapped.
     { action: 'key.check', count: 1 },
     { action: 'key.wrap', count: 1 },
@@ -136,7 +135,7 @@ test('the log lists only the denied entries when asked, to an owner and to an au
   await assert.rejects(developer.secrets.reveal('market/prod/API_KEY'), { status: 404, code: 'not_available' });
   await assert.rejects(developer.secrets.reveal('market/prod'), { status: 403 });
   for (const reader of [root, auditor]) {
-    const { entries, hidden } = await reader.audit.list({ limit: 200, decision: 'deny' });
+    const { entries, hidden } = await reader.audit.list({ limit: 200, decision: 'deny', hidden: '1' });
     assert.ok(entries.length > 0, 'no denied entry listed');
     assert.ok(entries.every((entry) => entry.decision === 'deny'), 'an allowed entry listed');
     assert.deepEqual(entries.map((entry) => [entry.action, entry.key]), [['secret.read', null], ['secret.read', 'API_KEY']]);
