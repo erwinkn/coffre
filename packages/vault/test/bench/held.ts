@@ -1,4 +1,5 @@
-// What a key in flight holds in the vault's isolate over a use's whole life (docs/design/config.md, Q1;
+// What a key in flight holds in the vault's isolate over a use's whole life
+// (docs/design/limits.md, "Admission: places in flight, from memory and CPU";
 // `USE_IN_FLIGHT_BYTES`, @coffre/core/memory): uses admitted, their statements answered, each waiting on its key
 // service, which answers none until every key of the run waits there. The heap is collected and read before the run
 // and while they all wait; the difference, a key apiece, is what each holds: its call, its statement's row and view,

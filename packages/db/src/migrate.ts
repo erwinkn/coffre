@@ -78,7 +78,7 @@ export const MIGRATION_LOCK_PAUSE_MS = 1_000;
  * the migration lock, or another database's of the same server, for the
  * roles' rows that reasserting the privileges changes, which the roles of
  * every database share. Neither wait holds a table, so no use queues behind
- * it, and it may be long: 5 minutes (docs/design/limits.md).
+ * it, and it may be long: 5 minutes (docs/design/limits.md, "Lock waits and deadlines").
  */
 const OTHER_RUN_LOCK_TIMEOUT = '5min';
 
@@ -241,7 +241,7 @@ export async function holdRuntimeTimeouts(
       FOR idle IN SELECT pid FROM pg_stat_activity
                    WHERE usename = ANY(ARRAY[${given.map(quoteLiteral).join(', ')}]::text[]) AND datname = current_database() AND state = 'idle' LOOP
         -- Refused (42501) to a login without the privileges of the role or pg_signal_backend, which CREATEROLE and ADMIN
-        -- do not give (docs/design/config.md): that session keeps its old settings until its pool replaces it.
+        -- do not give: that session keeps its old settings until its pool replaces it.
         BEGIN
           PERFORM pg_terminate_backend(idle);
         EXCEPTION WHEN insufficient_privilege THEN NULL;

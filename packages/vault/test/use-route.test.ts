@@ -129,7 +129,7 @@ test('a route of two keys, and of plain keys only: every key decided on one vers
   assert.equal(await count('log_uses'), before, 'a plain value: no entry');
 });
 
-test('a route use takes a place in admission for each of its keys while they open, once it has read them (config.md, Q1)', async () => {
+test('a route use takes a place in admission for each of its keys while they open, once it has read them', async () => {
   const w = await routeWorld(db);
   const a = await w.key('access-key');
   const b = await w.key('secret-key');
@@ -147,7 +147,7 @@ test('a route use takes a place in admission for each of its keys while they ope
   assert.equal(cache.inFlight, 0);
 });
 
-test("a route use whose keys' second statement Postgres gave up on, before its deadline, counts as late to the throttle: answered as the route's own busy, never inside a route's answer (config.md, Q1, step 2; Sol's review r2 of #554)", async () => {
+test("a route use whose keys' second statement Postgres gave up on, before its deadline, counts as late to the throttle: answered as the route's own busy, never inside a route's answer", async () => {
   const w = await routeWorld(db);
   const [nameA, nameB] = [await w.nameOf(await w.key('access-key')), await w.nameOf(await w.key('secret-key'))];
   const ada = await w.member([{ environmentId: null, role: 'owner' }]);

@@ -8,7 +8,7 @@ test("the shares split an isolate's 128 MB, and leave the runtime more than an i
   // 8,602,928 bytes: the app's Worker idle, once collected.
   assert.ok(RUNTIME_BYTES > 3 * 8_602_928, `${RUNTIME_BYTES}`);
   assert.equal(Math.floor(USES_BYTES / USE_IN_FLIGHT_BYTES), 2083);
-  // The CPU bound, 3 s ÷ 2.4 ms, is the smaller, while a key in flight holds at most 51,200 bytes (config.md, Q1).
+  // The CPU bound, 3 s ÷ 2.4 ms, is the smaller, while a key in flight holds at most 51,200 bytes.
   assert.equal(USES_IN_FLIGHT, 1250);
   assert.ok(USE_IN_FLIGHT_BYTES <= USES_BYTES / USES_IN_FLIGHT);
   assert.equal(BODIES_BYTES / (2 * BODY_READ_WHOLE_BYTES), 8);

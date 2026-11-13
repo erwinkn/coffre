@@ -1,9 +1,9 @@
 // The credential proxy's windows, all from one number, the deployment's `proxy.revokedWithinSeconds`, R
-// (docs/design/config.md, section 1): how long opened values serve, how long a request may send after its use was
-// decided, and how a tunnel's checks fit inside R. Every path that forwards, signs, verifies or presigns with values
-// decided now answers 503 `late` once R has passed since they were decided, as the UI's paths do. And the options 0.15
-// took for them, still read in 0.16 as the object's fields, with a warning. Through the plugin's own routes, with a fake
-// coffre whose use takes as long as a test says: no database.
+// (docs/design/config.md, "`proxy.revokedWithinSeconds`"): how long opened values serve, how long a request may send
+// after its use was decided, and how a tunnel's checks fit inside R. Every path that forwards, signs, verifies or
+// presigns with values decided now answers 503 `late` once R has passed since they were decided, as the UI's paths
+// do. And the options 0.15 took for them, still read in 0.16 as the object's fields, with a warning. Through the
+// plugin's own routes, with a fake coffre whose use takes as long as a test says: no database.
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import test, { type TestContext } from 'node:test';
