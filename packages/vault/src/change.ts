@@ -1,5 +1,5 @@
 import type { Database } from '@coffre/db';
-import { rowsOf } from '@coffre/db/dialect';
+import { gaveUp, rowsOf } from '@coffre/db/dialect';
 import { later, laterRows } from '@coffre/db/later';
 import { sql, type SQL } from 'drizzle-orm';
 
@@ -118,48 +118,39 @@ const LOCK_WAIT_MS = 2000;
  * How long a write's statement runs, in milliseconds, once it has the
  * change lock, its waits for rows included. It is milliseconds of work, so
  * five seconds is a database that cannot keep up, and the write answers
- * busy. An entry is dated as its write is sent, so it commits within the
- * two waits of its date, seven seconds, well inside the minute the signer
- * takes it in (`FRESH_MS` in signer.ts): no entry is refused as too old for
- * a database that was slow.
+ * busy. An entry is dated as its write is sent, so once its transaction has
+ * a connection it commits within the two waits of its date, seven seconds,
+ * well inside the minute the signer takes it in (`FRESH_MS` in signer.ts).
+ * The wait for that connection comes before, and is the pool's to bound:
+ * Hyperdrive's does, at 15 seconds; postgres.js's own, on Node, does not
+ * (docs/design/0.16.md).
  */
 const WRITE_MS = 5000;
 
-/** Postgres's `lock_not_available`: a wait `lock_timeout` ended. */
-const LOCK_NOT_AVAILABLE = '55P03';
-
 /**
- * The database had no turn for it in time. It carries Postgres's code for
- * the wait that ended, as its cause does, so the vault answers it as the
- * outage it is, 503, and not as a bug (`failureOf`). A change that started
- * over too often never had its turn: `lock_not_available`.
+ * The database had no turn for it in time: a wait that gave up, its cause,
+ * whose code Postgres gave, or a change that started over too often, which
+ * never had its turn and says so in Postgres's code for that,
+ * `lock_not_available`. By that code the vault answers it as the outage it
+ * is, 503, and not as a bug (`failureOf`).
  */
 export class Busy extends Error {
   override readonly name = 'Busy';
-  readonly code: string;
-  constructor(message: string, code = LOCK_NOT_AVAILABLE, cause?: unknown) {
+  readonly code: string | undefined;
+  constructor(message: string, cause?: unknown) {
     super(message, { cause });
-    this.code = code;
+    this.code = cause === undefined ? '55P03' : undefined;
   }
-}
-
-/** Postgres's code for a wait that gave up, if one did: `lock_not_available`, ended by `lock_timeout`, or `query_canceled`, by `statement_timeout`. */
-function gaveUp(error: unknown): string | undefined {
-  for (let cause = error; cause instanceof Error; cause = cause.cause) {
-    const { code } = cause as { code?: unknown };
-    if (code === LOCK_NOT_AVAILABLE || code === '57014') return code;
-  }
-  return undefined;
 }
 
 /**
  * One statement in a transaction of its own that bounds its lock waits and
  * its run, and its rows. `first` is selected ahead of it, in a statement of
  * its own, which only its lock wait bounds: Postgres times a statement from
- * its start, by the bound in force then. One round trip: nothing is waited for inside the transaction, so
- * the driver sends BEGIN, the statements and COMMIT together (`later` in
- * @coffre/db). Postgres still runs them one after the other, and skips the
- * rest once one fails. Read committed, said here and not left to the
+ * its start, by the bound in force then. One round trip: nothing is waited
+ * for inside the transaction, so the driver sends BEGIN, the statements and
+ * COMMIT together (`later` in @coffre/db). Postgres still runs them one
+ * after the other, and skips the rest once one fails. Read committed, said here and not left to the
  * database's default: the statement sees the database as of when it starts,
  * after whatever `first` waited for.
  */
@@ -175,8 +166,7 @@ export async function bounded<Row>(db: Database, statement: SQL, { first, runMs 
       { isolationLevel: 'read committed' },
     )
     .catch((error: unknown) => {
-      const code = gaveUp(error);
-      throw code === undefined ? error : new Busy(`a statement waited ${LOCK_WAIT_MS} ms for a lock, or ran ${runMs} ms`, code, error);
+      throw gaveUp(error) ? new Busy(`a statement waited ${LOCK_WAIT_MS} ms for a lock, or ran ${runMs} ms`, error) : error;
     });
   // Read once the transaction has resolved: it committed.
   return rows;
