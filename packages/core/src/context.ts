@@ -18,6 +18,10 @@ import { createHash } from 'node:crypto';
  * docs/design/credential-proxy.md, section 2): a forged owner or sensitivity
  * column fails to open, rather than granting. The value's own ciphertext
  * binds the ids alone, so a version made sensitive keeps its ciphertext.
+ *
+ * From envelope version 2 the wrap names the version's number too,
+ * `version`: a version's row copied over another of the same secret, an old
+ * value put back as the current one, does not open either.
  */
 export type SecretContext = {
   projectId: string;
@@ -27,6 +31,8 @@ export type SecretContext = {
   owner?: string;
   /** A sensitive value's: never handed back to a person (`sensitive` in @coffre/core/vault). Absent otherwise, never false. */
   sensitive?: true;
+  /** The version's number among its secret's, from 1. Absent in the wrap of a value written before envelope version 2. */
+  version?: number;
 };
 
 /**
@@ -44,7 +50,7 @@ function assertUuid(value: string, field: string): void {
   }
 }
 
-/** Throw unless every field is a lowercase UUID, an owner a lowercase SHA-256, and `sensitive` true if there. */
+/** Throw unless every field is a lowercase UUID, an owner a lowercase SHA-256, `sensitive` true if there, and a version a number from 1. */
 export function checkContext(ctx: SecretContext): void {
   assertUuid(ctx.projectId, 'projectId');
   assertUuid(ctx.environmentId, 'environmentId');
@@ -53,6 +59,7 @@ export function checkContext(ctx: SecretContext): void {
     throw new Error(`context.owner must be a lowercase SHA-256, got: ${String(ctx.owner)}`);
   }
   if (ctx.sensitive !== undefined && ctx.sensitive !== true) throw new Error(`context.sensitive is true or absent, got: ${String(ctx.sensitive)}`);
+  if (ctx.version !== undefined && !(Number.isSafeInteger(ctx.version) && ctx.version > 0)) throw new Error(`context.version is a version's number, from 1, got: ${String(ctx.version)}`);
 }
 
 const OWNER_RE = /^[0-9a-f]{64}$/;
@@ -76,7 +83,7 @@ export function ownerKey(member: string): string {
 export function encodeAad(ctx: SecretContext): Buffer {
   checkContext(ctx);
   return Buffer.from(
-    `${AAD_VERSION}|${ctx.projectId}|${ctx.environmentId}|${ctx.secretId}${ctx.owner === undefined ? '' : `|owner:${ctx.owner}`}${ctx.sensitive === true ? '|sensitive' : ''}`,
+    `${AAD_VERSION}|${ctx.projectId}|${ctx.environmentId}|${ctx.secretId}${ctx.owner === undefined ? '' : `|owner:${ctx.owner}`}${ctx.sensitive === true ? '|sensitive' : ''}${ctx.version === undefined ? '' : `|version:${ctx.version}`}`,
     'utf8',
   );
 }

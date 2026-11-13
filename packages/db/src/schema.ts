@@ -69,7 +69,11 @@ const folderCheck = (name: string, column: AnyPgColumn) =>
 
 // ---------------------------------------------------------------- Secrets
 
-/** No MAC: a project's row decides nothing. A grant names its id, and an environment's row, under its MAC, says whose it is. */
+/**
+ * Under a MAC for its slug: a request names a project by it, and a grant by
+ * its id. With none, a database writer could swap two projects' slugs, and
+ * whoever holds both would be handed one's values under the other's name.
+ */
 export const projects = pgTable(
   'projects',
   {
@@ -79,11 +83,13 @@ export const projects = pgTable(
     createdAt: at('created_at').notNull(),
     archivedAt: at('archived_at'),
     folder: text(),
+    mac: mac(),
   },
   (table) => [
     unique('projects_slug_key').on(table.slug),
     check('projects_slug_check', sql`${table.slug} ~ ${PLACE_SLUG}`),
     folderCheck('projects_folder_check', table.folder),
+    macCheck('projects_mac_check', table.mac),
   ],
 );
 

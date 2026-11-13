@@ -2410,6 +2410,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "mac": {
+          "name": "mac",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'\\x'::bytea"
         }
       },
       "indexes": {},
@@ -2433,6 +2440,10 @@
         "projects_folder_check": {
           "name": "projects_folder_check",
           "value": "\"projects\".\"folder\" IS NULL OR (char_length(\"projects\".\"folder\") BETWEEN 1 AND 64 AND \"projects\".\"folder\" !~ '[/[:cntrl:]]' AND \"projects\".\"folder\" = btrim(\"projects\".\"folder\"))"
+        },
+        "projects_mac_check": {
+          "name": "projects_mac_check",
+          "value": "octet_length(\"projects\".\"mac\") IN (0, 36)"
         }
       },
       "isRLSEnabled": false

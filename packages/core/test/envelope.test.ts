@@ -29,10 +29,33 @@ test('seal then open round-trips the plaintext', async () => {
   const plaintext = Buffer.from('postgres://user:pw@host/db', 'utf8');
 
   const envelope = await seal(plaintext, dev, keks);
-  assert.equal(envelope.envelopeVersion, ENVELOPE_VERSION);
+  assert.equal(envelope.envelopeVersion, 1);
 
   const opened = await open(envelope, dev, keks);
   assert.deepEqual(opened, plaintext);
+});
+
+test('a version opens under its own number only, and as its own format only', async () => {
+  const { dev, keks } = fixture();
+  const old = await seal(Buffer.from('rotated away', 'utf8'), { ...dev, version: 1 }, keks);
+  const current = await seal(Buffer.from('current', 'utf8'), { ...dev, version: 2 }, keks);
+  assert.equal(current.envelopeVersion, ENVELOPE_VERSION);
+  assert.deepEqual(await open(current, { ...dev, version: 2 }, keks), Buffer.from('current', 'utf8'));
+
+  // A database writer copies version 1's row over version 2's: the old value, as the current one.
+  await assert.rejects(open(old, { ...dev, version: 2 }, keks), KekBadClaimError);
+  // Relabelled as the format that names no number, or read with none.
+  await assert.rejects(open({ ...current, envelopeVersion: 1 }, { ...dev, version: 2 }, keks), KekBadClaimError);
+  await assert.rejects(open(current, dev, keks), /version's number/);
+  // And its sensitivity is in the wrap as before.
+  await assert.rejects(open(current, { ...dev, version: 2, sensitive: true }, keks), KekBadClaimError);
+});
+
+test('a value written by 0.14 opens under its rows as 0.16 reads them, number included, and not relabelled', async () => {
+  const { dev, keks } = fixture();
+  const legacy = await seal(Buffer.from('from 0.14', 'utf8'), dev, keks);
+  assert.deepEqual(await open(legacy, { ...dev, version: 3 }, keks), Buffer.from('from 0.14', 'utf8'));
+  await assert.rejects(open({ ...legacy, envelopeVersion: ENVELOPE_VERSION }, { ...dev, version: 3 }, keks), KekBadClaimError);
 });
 
 test('ciphertext is not the plaintext and a fresh DEK is used per seal', async () => {

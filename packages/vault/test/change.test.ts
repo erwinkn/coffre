@@ -13,7 +13,7 @@ import { entryOf, type Said } from '../src/entry.ts';
 import { keyOf, nameOf, sealedBy, shapeOf, type Fresh, type Row, type Sealed } from '../src/rows.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
 
-const { bindings, credentials, deviceLogins, enrollmentCodes, environments, grants, identities, oauthClients, policy, principals, roles, secrets } = schema;
+const { bindings, credentials, deviceLogins, enrollmentCodes, environments, grants, identities, oauthClients, policy, principals, projects, roles, secrets } = schema;
 
 const vault = await openTestVault();
 after(() => vault.close());
@@ -74,10 +74,11 @@ function setRole(caller: string, target: string, to: 'owner' | 'member' | 'remov
 
 test('every sealed table has a row that reads back as the vault sealed it', async () => {
   const [project, environment, parent, secret, source, identity, binding, code] = Array.from({ length: 8 }, () => randomUUID());
-  await vault.owner.insert(schema.projects).values({ id: project, slug: 'market', name: 'Market', createdAt: at, archivedAt: null, folder: null });
   const service = 'token:deploy';
   // One row with every column filled, where the table's checks let it, and one of nulls, per table.
   const written: [Sealed, object][] = [
+    [projects, { id: project, slug: 'market', name: 'Market', createdAt: at, archivedAt: at, folder: 'Payments' }],
+    [projects, { id: randomUUID(), slug: 'billing', name: 'Billing', createdAt: at, archivedAt: null, folder: null }],
     [environments, { id: parent, projectId: project, slug: 'prod', name: 'Production', createdAt: at, archivedAt: at, parentId: null, owner: null, protected: true, frozenCredentials: ['stripe', 'aws'] }],
     [environments, { id: environment, projectId: project, slug: 'ada', name: 'Ada’s', createdAt: at, archivedAt: null, parentId: parent, owner: ada, protected: false, frozenCredentials: [] }],
     [secrets, { id: source, projectId: project, environmentId: parent, key: 'STRIPE_KEY', createdAt: at, updatedAt: at, versions: 3, currentVersion: 3, archivedAt: at, folder: 'Payments', sourceId: null }],
