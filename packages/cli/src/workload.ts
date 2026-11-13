@@ -153,7 +153,7 @@ const UNANSWERED = new Set(['connection', 'content-encoding', 'content-length', 
  * A local listener that forwards each request under `/use/` to coffre,
  * signed by the session, as the app sent it: its method, path, query, headers
  * and body. The app's config names it (`OPENAI_BASE_URL=http://127.0.0.1:7300/use/openai`),
- * and coffre writes no URL into the app's environment (R14). On a Unix
+ * and coffre writes no URL into the app's environment. On a Unix
  * socket, only the socket's owner may connect.
  */
 export async function forwarder(coffre: Workload, origin: string, address: Address): Promise<{ url: string; close: () => void }> {

@@ -1,7 +1,6 @@
 // `coffre enroll` and `coffre approve` (docs/design/workload-access.md,
 // section 4.4): a deploy's enrollment code, minted, listed or promoted, and
-// a session approved. Declared in `coffre help` by that design's PR 0; PR 3
-// builds them, here.
+// a session approved.
 import { parse } from './manage.ts';
 
 /** `coffre enroll <service> [--binding <id>] [--promote <code-id> [--now] | --list [--json]]`. */

@@ -162,7 +162,7 @@ test('a plan and a list show every claim in full', () => {
       '',
     ].join('\n'),
   );
-  // A Developer's binding, where market/prod holds sensitive values: told before it is saved (R32).
+  // A Developer's binding, where market/prod holds sensitive values: told before it is saved.
   assert.match(
     describePlan('token:api-deploy', { ...plan, withheld: ['market/prod'] }, null),
     /\n  reads no sensitive value of market\/prod: only one an Owner of market issues does\n$/,
@@ -175,7 +175,7 @@ test('a plan and a list show every claim in full', () => {
       removing: { since: '2026-11-06T09:30:12.000Z', by: 'lead@acme.example' },
     },
   ]);
-  // A removal longer than one request, its binding closed (W331): said under its head.
+  // A removal longer than one request, its binding closed: said under its head.
   assert.match(listed, /\nb0  \(added by lead@acme.example 2026-09-03, never used\)\nbeing removed since 2026-11-06 09:30: refused already, its credentials still being revoked\n  profile/);
   assert.match(listed, /^b1  prod  \(added by lead@acme.example 2026-10-03, never used\)\n  profile  github\n/);
   assert.match(listed, /\n  reaches  all its account holds\n$/, 'one of 0.4 the app has not sealed yet');

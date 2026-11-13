@@ -286,7 +286,7 @@ test("what comes next, after a run that made only the hot path's login, as one a
 test("each Hyperdrive config's connection limit is an even share of the database's connections, so that a burst of requests waits in Hyperdrive rather than being refused", () => {
   // PlanetScale's smallest cluster: max_connections 25, 3 kept for superusers.
   // Left at Cloudflare's default, 60 each, the configs opened more than its
-  // 22, and a page's parallel reads failed with 53300 (T78). Three configs
+  // 22, and a page's parallel reads failed with 53300. Three configs
   // now, the app's, the vault's and the hot path's, share it.
   const small = { max: 25, reserved: 3 };
   assert.equal(hyperdriveLimit(small), 6);

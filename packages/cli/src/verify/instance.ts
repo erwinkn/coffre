@@ -303,7 +303,7 @@ async function verification(api: CoffreClient): Promise<string> {
   const trees = await api.audit.verifyTrees();
   expect(!trees.kept || trees.problems.length === 0, "0.15's log does not verify from its newest checkpoint", trees);
   // Not checked to its head, as 0.14's checkpoints catching up above: a checkpointer behind, no break of the log, and
-  // no pass either (review r4 of W240).
+  // no pass either.
   expect(!trees.kept || !trees.capped, "0.15's log is not checked to its head: more entries wait above its newest checkpoint than a check reads, the checkpointer behind", trees);
   const sealed = !trees.kept ? '' : trees.checkpoint === null ? "; 0.15's log too, nothing sealed yet" : `; 0.15's log too, from its newest checkpoint, up to entry ${trees.checkpoint.upto}`;
   return `the whole chain verifies, as you: ${verified.entries} entries, through entry ${verified.through}${sealed}`;

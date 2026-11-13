@@ -815,7 +815,7 @@ export function describePlan(member: string, plan: BindingPlan & { policy?: Poli
 /**
  * What a service's new token or binding will not read, as the server said
  * (`withheld`): the sensitive values of these places, references' included,
- * which only one an Owner of their project issues reads (R32, R71), each
+ * which only one an Owner of their project issues reads, each
  * project named. Null when there are none.
  *
  *   ['landing/prod']   reads no sensitive value of landing/prod: only one an Owner of landing issues does
@@ -918,7 +918,7 @@ export function describeBindings(member: string, bindings: BindingView[]): strin
   const blocks = bindings.map((binding) => {
     const used = binding.lastUsedAt === null ? 'never used' : `last used ${binding.lastUsedAt.slice(0, 16).replace('T', ' ')}`;
     const head = `${binding.id}${binding.label === null ? '' : `  ${binding.label}`}  (added by ${binding.createdBy} ${binding.createdAt.slice(0, 10)}, ${used})`;
-    // Closed, its credentials still being revoked (W331): `coffre untrust --apply` again, or the scheduled run, finishes it.
+    // Closed, its credentials still being revoked: `coffre untrust --apply` again, or the scheduled run, finishes it.
     const removing = binding.removing === null
       ? []
       : [`being removed since ${binding.removing.since.slice(0, 16).replace('T', ' ')}: refused already, its credentials still being revoked`];

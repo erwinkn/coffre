@@ -67,7 +67,7 @@ test('how the CLI was installed: by what npm and pnpm say their globals are, not
   // pnpm 10, on Linux: its global, in its own virtual store.
   const ten = '/home/ada/.local/share/pnpm/global/5/.pnpm/@coffre+cli@0.1.11/node_modules/@coffre/cli';
   assert.deepEqual(installOf(`${ten}/dist/main.js`, { ...none, pnpm: ten }), { kind: 'pnpm' });
-  // pnpm 11, on Erwin's Mac: its global, in the store's links/, which read as a project's dependency.
+  // pnpm 11 on macOS: its global, in the store's links/, which read as a project's dependency.
   const eleven = '/Users/erwin/Library/pnpm/store/v11/links/@coffre/cli/0.1.16/7ee22ffdfe0eadd9777d18ac111f4d8648f16c979bfc6c2d111f2f16d124454d/node_modules/@coffre/cli';
   const there = `${eleven}/dist/main.js`;
   assert.deepEqual(installOf(there, { ...none, pnpm: eleven }), { kind: 'pnpm' });

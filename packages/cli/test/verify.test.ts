@@ -229,7 +229,7 @@ for (const role of ['user', 'owner'] as const) {
   });
 }
 
-// --- which instance verify instance writes to (T181) ---------------------------------
+// --- which instance verify instance writes to ---------------------------------
 
 /** A home with a session on each of `origins`, the first the default. */
 function homeWithSessions(t: test.TestContext, origins: string[]): { home: string; store: () => string } {
