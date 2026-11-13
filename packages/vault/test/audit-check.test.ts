@@ -14,7 +14,7 @@ import { createDatabase, type Database, type Queryable } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
-import { CHECK_TAIL_ENTRIES, checkAudit, projectorStopped } from '../src/audit-check.ts';
+import { CHECK_TAIL_ENTRIES, checkAudit } from '../src/audit-check.ts';
 import { reachedOf, type Checkpointer, type Reached } from '../src/checkpointer.ts';
 import { cursorMac, eventMac, type AuditEvent } from '../src/audit-rows.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
@@ -439,8 +439,19 @@ test('`beat`: a projector that stopped, a checkpoint above its cursor signed two
   // At the checkpoint, however old: nothing above it to list.
   const level = await vault.beat!({ cursor: cursor(mac, above, 0), everyMs });
   assert.ok(level.ok && level.projector === null, JSON.stringify(level));
-  // A checkpoint above it that does not open under the vault's keys: said, not taken as a time.
-  assert.match(projectorStopped({ through: below, at: 0 }, { upto: above, at: null }, everyMs)!, /does not open under the vault's keys/);
+  // The checkpoint above the cursor, now below the newest, which the walk does not open: held to its notes and its place.
+  // An older pair's notes copied up (a genuine pair, signed for another place), then notes altered: each `broken`, a
+  // finding, and no projector read from a time it does not sign.
+  await logWriter(db.owner, mac).uses(3);
+  assert.ok((await cp.tick()).signed);
+  await run(db.owner, sql`UPDATE log_checkpoints SET changes_note = k.changes_note, uses_note = k.uses_note FROM log_checkpoints k WHERE log_checkpoints.upto = ${above} AND k.upto = ${below}`);
+  const moved = await vault.beat!({ cursor: cursor(mac, below, Date.now()), everyMs });
+  assert.ok(moved.ok && moved.state === 'broken' && moved.finding !== null && moved.projector === null, JSON.stringify(moved));
+  assert.match(moved.reason!, new RegExp(`checkpoint up to ${above}, above the projection's cursor: its notes are the pair up to ${below}'s`));
+  await run(db.owner, sql`UPDATE log_checkpoints SET changes_note = changes_note || 'x' WHERE upto = ${above}`);
+  const altered = await vault.beat!({ cursor: cursor(mac, below, Date.now()), everyMs });
+  assert.ok(altered.ok && altered.state === 'broken' && altered.projector === null, JSON.stringify(altered));
+  assert.match(altered.reason!, new RegExp(`checkpoint up to ${above}, above the projection's cursor: not a pair signed by the log`));
   await assert.rejects(vault.beat!({ cursor: cursor(mac, below, Date.now()), everyMs: 0 }), /positive integer/);
 });
 

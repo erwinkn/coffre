@@ -36,8 +36,9 @@ export const CHECK_TAIL_ENTRIES = USES_IN_FLIGHT;
 /**
  * The audit page's check, flat (0.16, T277; D200; state-rows.md, sections 3 and 4): what the vault's `check` answers,
  * and, for the beat (`projectorStopped`), `listed`, the cursor when its MAC holds, and `unlisted`, the first checkpoint
- * above it when asked (`CheckOptions.beat`): its place, and the time it was signed, null when it does not open under the
- * vault's keys.
+ * above it when asked (`CheckOptions.beat`): its place, and the time it was signed. The walk opens only the newest
+ * checkpoint, so this one is held here to its notes and its place, as the walk holds each row it opens: one that opens
+ * under no key of the vault's, or as the pair of another place (an older pair's notes copied up), is `broken`.
  *
  * The signer first, the database after: `reached`, the signer's one answer, gives the pair the database must have
  * reached, the one it is writing, and whether it seals. Asked after the read, a visit during the signer's write would
@@ -68,7 +69,7 @@ export type Checked = {
   listedThrough: { number: string; at: number };
   forged: number[];
   listed: { through: bigint; at: number } | null;
-  unlisted: { upto: bigint; at: number | null } | null;
+  unlisted: { upto: bigint; at: number } | null;
 };
 
 export type CheckOptions = {
@@ -113,6 +114,14 @@ export async function checkAudit(db: Database, keys: VerifierKeys, input: CheckI
   if (frozen !== null) broken.push(frozen);
   const behind = walked.behind ? ['the database ends below the checkpoint its signer wrote: checkpoints were deleted, or an older one is served'] : [];
   // The projector lists only what a checkpoint signed: a cursor past the newest one is a database rolled back below it.
+  let unlisted: Checked['unlisted'] = null;
+  if (listed !== null && read.next !== null) {
+    const pair = (await openUnder(ring, read.next.notes))?.pair ?? null;
+    const place = `the checkpoint up to ${read.next.upto}, above the projection's cursor`;
+    if (pair === null) broken.push(`${place}: not a pair signed by the log`);
+    else if (BigInt(pair.upto) !== read.next.upto) broken.push(`${place}: its notes are the pair up to ${pair.upto}'s`);
+    else unlisted = { upto: read.next.upto, at: pair.at };
+  }
   if (listed !== null && listed.through > upto) behind.push(`the projection lists through ${listed.through}, past the newest checkpoint (${upto})`);
   const late = walked.capped ? [`more than ${CHECK_TAIL_ENTRIES} entries above the newest checkpoint: the checkpointer is late`] : [];
   if (reached.pair === null) late.push(`the signer holds no pair to check the database against: ${reached.reason}`);
@@ -125,7 +134,7 @@ export async function checkAudit(db: Database, keys: VerifierKeys, input: CheckI
     listedThrough: listed === null ? { number: '0', at: 0 } : { number: String(listed.through), at: listed.at },
     forged,
     listed: listed === null ? null : { through: listed.through, at: listed.at },
-    unlisted: read.next === null ? null : { upto: read.next.upto, at: (await openUnder(ring, read.next.notes))?.pair.at ?? null },
+    unlisted,
   };
 }
 
@@ -154,7 +163,6 @@ function uptoOf(notes: PairNotes): bigint {
  */
 export function projectorStopped(listed: Checked['listed'], unlisted: Checked['unlisted'], everyMs: number, now = Date.now()): string | null {
   if (listed === null || unlisted === null) return null;
-  if (unlisted.at === null) return `the checkpoint above the projection's cursor (up to ${unlisted.upto}) does not open under the vault's keys`;
   if (now - unlisted.at <= 2 * everyMs) return null;
   return `the projection lists through ${listed.through}, and the checkpoint above it (up to ${unlisted.upto}) was signed ${now - unlisted.at} ms ago, more than two beats (${2 * everyMs} ms)`;
 }

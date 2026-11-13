@@ -3,7 +3,10 @@
 // the statement's own, which Postgres cannot prune `log_uses`' day partitions by: without the signer's floor beside it,
 // a constant, every visit planned and locked every day kept (without it, measured here: 380 locks and 290 planning
 // buffers at 104 days, against 83 and 92 at 5; 0054 was the same for `log_reads`). The 0.15 page check (`verifyTrees`) reads through the same
-// statement, its bound the pairs held outside. Both are held here, at a handful of days and at a hundred more.
+// statement, its bound the pairs held outside. Both are held here, at a handful of days and at a hundred more, and the
+// beat's statement too, the visit's with the first checkpoint above the cursor (`next`): a seek on `log_checkpoints`'
+// primary key, `upto`, which grows with the checkpoints kept only by the B-tree's depth (review r3 of #587, measured: 2
+// buffers at 200 checkpoints, 4 at 1,000,200). The growth sweep holds it to that once the beat runs (P3's swap).
 //
 // It runs alone, after the suite (scripts/test-suite.sh), as use-days.alone.ts does and for its reason: a commit of
 // thousands of catalog changes elsewhere in the cluster makes a backend plan everything again.
@@ -76,7 +79,7 @@ async function work({ query, params }: Sent): Promise<{ planning: number; locks:
   }
 }
 
-test('D200: a visit\'s check, and the 0.15 page check, plan and lock the same at a handful of days and at a hundred more', { timeout: 300_000 }, async () => {
+test('D200: a visit\'s check, the beat\'s and the 0.15 page check plan and lock the same at a handful of days and at a hundred more', { timeout: 300_000 }, async () => {
   const seed = randomBytes(32);
   const mac = logMacKey(seed);
   const log = logWriter(db.owner, mac);
@@ -95,11 +98,14 @@ test('D200: a visit\'s check, and the 0.15 page check, plan and lock the same at
       const checked = await checkAudit(capture.db, keys, input, { reached: reachedOf(cp, { ok: true }), upgraded: false });
       assert.equal(checked.state, 'ok', checked.reason ?? '');
       const [visit] = capture.sent.splice(0);
+      const beat = await checkAudit(capture.db, keys, input, { reached: reachedOf(cp, { ok: true }), upgraded: false, beat: true });
+      assert.ok(beat.state === 'ok' && beat.unlisted !== null, beat.reason ?? 'no checkpoint above the cursor');
+      const [beaten] = capture.sent.splice(0);
       const walked = await verifyTrees(capture.db, keys, { anchors: [cp.pair.notes] });
       assert.ok(walked.ok, walked.problems.join('; '));
       const [page] = capture.sent;
-      assert.ok(visit !== undefined && page !== undefined && capture.sent.length === 1, 'each one statement');
-      return { visit: await work(visit), page: await work(page) };
+      assert.ok(visit !== undefined && beaten !== undefined && page !== undefined && capture.sent.length === 1, 'each one statement');
+      return { visit: await work(visit), beat: await work(beaten), page: await work(page) };
     } finally {
       await capture.close();
     }
@@ -112,7 +118,7 @@ test('D200: a visit\'s check, and the 0.15 page check, plan and lock the same at
   const many = { days: await days(), ...await statements() };
   console.log(JSON.stringify({ few, many }));
   assert.ok(many.days - few.days >= 95, `${few.days} days, then ${many.days}`);
-  for (const which of ['visit', 'page'] as const) {
+  for (const which of ['visit', 'beat', 'page'] as const) {
     const [a, b] = [few[which], many[which]];
     // A lock on each day's partition and its indexes, unpruned: hundreds more at a hundred days.
     assert.equal(b.locks, a.locks, `${which}: ${a.locks} locks at ${few.days} days, ${b.locks} at ${many.days}`);
