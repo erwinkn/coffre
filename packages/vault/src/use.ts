@@ -2,10 +2,11 @@ import { allows, readsSensitive, useOnly, withinCredential, type Place } from '@
 import { open, ownerKey } from '@coffre/core/envelope';
 import { KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
 import { rowsOf } from '@coffre/db/dialect';
-import { credentials, dismissedKeys, environments, grants, identities, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
+import type { BindingPolicy, Constraints } from '@coffre/core/identity';
+import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { callerOf, type Caller } from './caller.ts';
+import { callerOf, type Caller, type Workloads } from './caller.ts';
 import type { Refusal, Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, sealedBy, type Row, type Sealed, type Wire } from './rows.ts';
@@ -42,7 +43,11 @@ export type Ask = {
   keys: readonly string[] | null;
   /** `use`: the value is used for the caller, by the credential proxy, and never handed back. Any other, `reveal` or `run`, hands it back. */
   purpose: string;
-  /** The app's request, for the log. */
+  /** The upstream credential the values are used for, by its name in the deployment's configuration: a freeze names it, and a narrowed session's limits. Null for none. */
+  credential: string | null;
+  /** The thumbprint of the key that signed the request's proof, which the app held to the request: a workload's session is its key's alone. Null with no proof. */
+  proof: string | null;
+  /** The app's request, for the log, and the address it came from, which a workload's binding may name. */
   request: string | null;
   ip: string | null;
 };
@@ -50,18 +55,25 @@ export type Ask = {
 /** One key's value, or why this caller is not given it. `secret` is where the value is held: a reference's source. */
 export type Value = { key: string; secret: string; version: number; sensitive: boolean; value: Buffer } | { key: string; refused: string };
 
-export type Answer = { principal: string; credential: string; values: Value[] };
+export type Answer = {
+  principal: string;
+  credential: string;
+  values: Value[];
+  /** For a workload's session, what only the app can hold its request to: an unsigned upload its binding must allow, a narrowed session's methods and paths. */
+  workload: { binding: string; profile: string; policy: BindingPolicy; constraints: Constraints | null } | null;
+};
 
 /** What a use needs of the vault as it runs, past a change's. */
 export type Serving = Running & {
   keks: KekRegistry;
   /** The bulk cap: how many distinct keys one principal is given within the window. */
   cap: { count: number; windowMs: number };
+  workloads: Workloads;
   memory: Memory;
 };
 
 /** What a read finds, by table. */
-const READ = { credential: credentials, principal: principals, identity: identities, grant: grants, role: roles, project: projects, environment: environments, secret: secrets, dismissed: dismissedKeys, version: secretVersions };
+const READ = { credential: credentials, principal: principals, identity: identities, grant: grants, role: roles, binding: bindings, ancestor: credentials, policy, project: projects, environment: environments, secret: secrets, dismissed: dismissedKeys, version: secretVersions };
 type Seen = { [K in keyof typeof READ]: Row<(typeof READ)[K]>[] };
 
 /** Rows as one read found them, when, and the values opened from them since. */
@@ -130,6 +142,10 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
     UNION ALL SELECT 'identity', to_jsonb(t) FROM identities t, c WHERE t.id = c.identity_id
     UNION ALL SELECT 'grant', to_jsonb(t) FROM grants t, c WHERE t.principal = c.principal
     UNION ALL SELECT 'role', to_jsonb(t) FROM roles t
+    -- What a trust binding issued names it, and a narrowed session the sessions above it: each by its id, and only for a row that has them.
+    UNION ALL SELECT 'binding', to_jsonb(t) FROM bindings t, c WHERE t.id = CASE WHEN c.created_by ~ '^binding:[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' THEN substr(c.created_by, 9)::uuid END
+    UNION ALL SELECT 'ancestor', to_jsonb(t) FROM credentials t WHERE t.id IN (SELECT above::uuid FROM c, jsonb_array_elements_text(CASE WHEN c.kind = 'workload' THEN c.ancestors::jsonb END) above)
+    UNION ALL SELECT 'policy', to_jsonb(t) FROM policy t, c WHERE c.kind = 'workload'
     UNION ALL SELECT 'project', to_jsonb(t) FROM projects t WHERE t.id IN (SELECT project_id FROM held UNION ALL SELECT id FROM p)
     UNION ALL SELECT 'environment', to_jsonb(t) FROM environments t WHERE t.id IN (SELECT environment_id FROM held UNION ALL SELECT id FROM chain)
     UNION ALL SELECT 'secret', to_jsonb(t) FROM held t
@@ -163,10 +179,18 @@ const NO_ACCESS: Refusal = { refused: 'no_access' };
  * Refused as a whole for who asks or where; key by key past that, so that
  * a `coffre run` is told which keys it is not given, and why.
  */
-export function decide(seen: Seen, ask: Ask, at: number): Decided | Refusal {
-  const caller = callerOf({ credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: seen.environment }, at);
+export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): Decided | Refusal {
+  const caller = callerOf({ credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: seen.environment, binding: seen.binding, ancestors: seen.ancestor, policy: seen.policy }, ask, workloads, at);
   if (caller === null) return { refused: 'unauthenticated' };
   const handed = ask.purpose !== 'use';
+  const { workload } = caller;
+  // A session that stands and is stopped is told why, before anything about the place: lifting it restores service.
+  if (workload !== null && workload.stops.length > 0) return { refused: workload.stops[0]! };
+  // A narrowed session uses values, within the places and credentials it was narrowed to, and is handed none.
+  const within = (list: readonly string[] | undefined, name: string | null) => list === undefined || (name !== null && list.includes(name));
+  if (workload?.narrowed === true && (handed || !within(workload.constraints?.places, `${ask.project}/${ask.environment}${ask.mine ? '@me' : ''}`) || !within(workload.constraints?.credentials, ask.credential))) return { refused: 'narrowed' };
+  // A handle stands in for values in its person's app: they are used for it, and never handed to it.
+  if (caller.credential.kind === 'handle' && handed) return NO_ACCESS;
   const permission = handed ? 'secret.read' : 'secret.use';
   const environment = new Map(seen.environment.map((row) => [row.id, row]));
   const place = (row: Row<typeof environments>): Place => ({ projectId: row.projectId, environmentId: row.id, environmentSlug: row.slug });
@@ -190,6 +214,8 @@ export function decide(seen: Seen, ask: Ask, at: number): Decided | Refusal {
   // `@me` with no config of one's own is the environment itself.
   const first = (ask.mine ? seen.environment.find((row) => row.parentId === base.id && row.owner === caller.principal && live(row)) : undefined) ?? base;
   if (!may(first)) return NO_ACCESS;
+  // An upstream credential frozen in this environment is used by nobody, until an Owner of the project lifts it.
+  if (ask.credential !== null && base.frozenCredentials.includes(ask.credential)) return { refused: 'frozen' };
 
   // The environment, then what it inherits from, nearest first: a key is the nearest one's.
   const layers = [first];
@@ -251,7 +277,7 @@ export function decide(seen: Seen, ask: Ask, at: number): Decided | Refusal {
 export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Answer | Refusal> {
   const at = vault.now();
   const { memory } = vault;
-  const decided = decide(found.seen, ask, at);
+  const decided = decide(found.seen, ask, vault.workloads, at);
   if ('refused' in decided) {
     // Not remembered: the next use reads again, and is given what has changed since.
     memory.reads.delete(shapeOfAsk(ask));
@@ -297,7 +323,7 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
       request: ask.request,
       ip: ask.ip,
       objects: [...new Set([`project:${project.id}`, `environment:${environment.id}`, `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...fresh.flatMap((item) => [`secret:${item.held.id}`, `secret:${item.asked.id}`])])],
-      detail: { purpose: ask.purpose, keys: fresh.map(({ key, held, asked, version }) => ({ key, secret: held.id, version: version.version, ...(asked === held ? {} : { through: asked.id }) })) },
+      detail: { purpose: ask.purpose, ...(ask.credential === null ? {} : { credential: ask.credential }), keys: fresh.map(({ key, held, asked, version }) => ({ key, secret: held.id, version: version.version, ...(asked === held ? {} : { through: asked.id }) })) },
     }, at, []);
     const time = sql`${new Date(at).toISOString()}::timestamptz`;
     const since = sql`${new Date(at - vault.cap.windowMs).toISOString()}::timestamptz`;
@@ -327,7 +353,8 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
   }
   // Unless a newer read of the same is there already: a slow use does not put its older rows back over it.
   if (memory.seconds > 0 && !((memory.reads.get(shapeOfAsk(ask))?.at ?? -Infinity) > found.at)) keep(memory.reads, shapeOfAsk(ask), found, at - memory.seconds * 1000);
-  return { principal: caller.principal, credential: id, values };
+  const { workload } = caller;
+  return { principal: caller.principal, credential: id, values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };
 }
 
 /** A use: from memory while it is fresh, else one read. */

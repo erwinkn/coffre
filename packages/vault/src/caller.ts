@@ -1,12 +1,14 @@
-import { EVERYWHERE, isCredentialScope, isInstanceRole, isScope, type CredentialScope, type Holdings, type Permission, type Policy, type RoleDefinition } from '@coffre/core/access';
-import type { credentials, environments, grants, identities, principals, roles } from '@coffre/db/schema';
+import { EVERYWHERE, isCredentialScope, isInstanceRole, isScope, scopeWithReads, type CredentialScope, type Holdings, type Permission, type Policy, type RoleDefinition } from '@coffre/core/access';
+import { addressWithin, checkConstraints, type BindingPolicy, type Constraints } from '@coffre/core/identity';
+import type { bindings, credentials, environments, grants, identities, policy, principals, roles } from '@coffre/db/schema';
 
 import type { Row } from './rows.ts';
 
 /**
  * Who is asking (docs/design/0.16.md, "A use"): from a credential's rows,
  * each under the vault's MAC, to what its holder may do now. One function
- * of the rows and the time, for a use and for a change alike.
+ * of the rows, what the request showed and the time, for a use and for a
+ * change alike.
  */
 
 /** A caller's rows, as one read found them. A row whose MAC is not the vault's is not among them. */
@@ -18,6 +20,54 @@ export type CallerRows = {
   roles: readonly Row<typeof roles>[];
   /** The environments the request is about: a grant on one names it alone, and a protected one says so in its row. */
   environments: readonly Row<typeof environments>[];
+  /** The trust binding that issued the credential, for one a binding issued. */
+  binding: readonly Row<typeof bindings>[];
+  /** A workload's session's: the sessions it was narrowed from, and the instance's policy, which says whether every workload is frozen. */
+  ancestors: readonly Row<typeof credentials>[];
+  policy: readonly Row<typeof policy>[];
+};
+
+/** What a request shows beyond its token, which only the app sees. */
+export type Shown = {
+  /**
+   * The thumbprint of the key that signed this request's proof (RFC 9449),
+   * once the app has held the proof to the request: its signature, method,
+   * URL, token and content. Null for a request with none.
+   */
+  proof: string | null;
+  /** The address it came from. */
+  ip: string | null;
+};
+
+/** What the deployment says of workloads (docs/design/workload-access.md, section 6.3): null, it takes none. */
+export type Workloads = {
+  /** No binding may list values its sessions are handed back. */
+  noReads: boolean;
+  /** A service account is a key-bound session or nothing: no service token, kept or exchanged. */
+  useOnly: boolean;
+} | null;
+
+/**
+ * Why a workload's session that stands does nothing now, as its SDK reads
+ * it. None of them ends the session: an approval, a move back inside the
+ * binding's sources or a lifted freeze restores service with no new proof,
+ * which matters where the proof is an enrollment code, spent.
+ */
+export type Stop = 'pending' | 'no_reads' | 'source' | 'frozen';
+
+/** A workload's session, past its token and key. */
+export type Workload = {
+  binding: Row<typeof bindings>;
+  policy: BindingPolicy;
+  /** A session `narrow` made from another, which uses values within its limits and is handed none. */
+  narrowed: boolean;
+  constraints: Constraints | null;
+  /**
+   * What stops it, in the order 0.14 answered them. An operation takes the
+   * first, but for logout, which none stops, and renewal, which a freeze
+   * does not: a renewal refused would end the session the lift restores.
+   */
+  stops: readonly Stop[];
 };
 
 export type Caller = {
@@ -26,10 +76,14 @@ export type Caller = {
   credential: Row<typeof credentials>;
   /** What they hold, as `@coffre/core/access` decides on it. */
   holds: Holdings;
+  /** For a workload's session; null for any other credential. */
+  workload: Workload | null;
 };
 
-/** The credential kinds decided here. A workload's session and an MCP connection come with their own rows, bindings and ancestors, not built yet. */
-const KINDS: ReadonlySet<string> = new Set(['browser', 'cli', 'service', 'personal', 'handle']);
+/** What a trust binding issued says so in `created_by`: `binding:<id>`, under the row's MAC. */
+const ISSUED = 'binding:';
+/** `narrow` goes four deep (docs/design/workload-access.md, section 8.4). */
+const MAX_ANCESTORS = 4;
 
 function parsed(json: string | null): unknown {
   if (json === null) return null;
@@ -40,18 +94,60 @@ function parsed(json: string | null): unknown {
   }
 }
 
+/** A token's cap: one that does not read as a scope reaches nothing. */
+function capOf(stored: string | null): CredentialScope {
+  const cap = parsed(stored);
+  return isCredentialScope(cap) ? cap : [];
+}
+
 /**
- * The caller, or null: no such credential, one expired, revoked or frozen,
- * one of a member removed since it was issued, or of an account since
- * unlinked. One answer for all of these, so that none says which.
+ * A workload's session past its own row and its member's: the key, the
+ * binding's policy, the sessions it was narrowed from, and what stops it.
+ * Null for one that does not stand.
  */
-export function callerOf(rows: CallerRows, at: number): Caller | null {
+function sessionOf(rows: CallerRows, session: Row<typeof credentials>, binding: Row<typeof bindings>, shown: Shown, workloads: NonNullable<Workloads>, at: number): Workload | null {
+  const live = (row: Row<typeof credentials>) => row.kind === 'workload' && row.revokedAt === null && row.expiresAt.getTime() > at && row.notAfter !== null && row.notAfter.getTime() > at;
+  // The key before anything that tells one live session from another: a token without its key learns nothing more.
+  if (!live(session) || session.jkt === null || shown.proof !== session.jkt) return null;
+  const policy = parsed(binding.policy);
+  if (typeof policy !== 'object' || policy === null || Array.isArray(policy)) return null;
+  const says = policy as BindingPolicy;
+
+  // A `narrow` child stands while every session above it does.
+  const ids = session.ancestors === null ? [] : parsed(session.ancestors);
+  if (!Array.isArray(ids) || ids.length > MAX_ANCESTORS) return null;
+  const lineage = ids.map((id: unknown) => rows.ancestors.find((row) => row.id === id && row.principal === session.principal && live(row)));
+  if (lineage.includes(undefined)) return null;
+  let constraints: Constraints | null = null;
+  try {
+    if (session.constraints !== null) constraints = checkConstraints(JSON.parse(session.constraints));
+  } catch {
+    return null;
+  }
+
+  const [instance] = rows.policy;
+  const stops: Stop[] = [];
+  if (says.approve === true && session.approvedAt === null) stops.push('pending');
+  if (workloads.noReads && says.reads !== undefined) stops.push('no_reads');
+  if (says.sources !== undefined && (shown.ip === null || !addressWithin(shown.ip, says.sources))) stops.push('source');
+  // Each freeze is a field of the row it stops. An instance whose policy row is gone cannot say it is not frozen.
+  if (instance?.workloadsFrozenAt !== null || rows.principal.some((row) => row.frozenAt !== null) || binding.frozenAt !== null || session.frozenAt !== null || lineage.some((row) => row!.frozenAt !== null)) stops.push('frozen');
+  return { binding, policy: says, narrowed: ids.length > 0, constraints, stops };
+}
+
+/**
+ * The caller, or null: no such credential, one expired or revoked, one of
+ * a member removed since it was issued, of an account since unlinked, or
+ * of a binding since removed; a workload's session without its key. One
+ * answer for all of these, so that none says which.
+ */
+export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, at: number): Caller | null {
   const [credential] = rows.credential;
   const [principal] = rows.principal;
-  if (credential === undefined || principal === undefined || !KINDS.has(credential.kind)) return null;
-  // What a trust binding issued stands while its binding does: with the workloads.
-  if (credential.createdBy.startsWith('binding:')) return null;
-  if (credential.revokedAt !== null || credential.frozenAt !== null || credential.expiresAt.getTime() <= at) return null;
+  if (credential === undefined || principal === undefined) return null;
+  if (credential.revokedAt !== null || credential.expiresAt.getTime() <= at) return null;
+  // Only a workload's session is frozen and thawed, which stops it and keeps it (`Stop`). On any other credential a freeze has no lift, so it ends it.
+  if (credential.frozenAt !== null && credential.kind !== 'workload') return null;
   // A removal moves the generation on: everything issued before it is dead, whatever its own row says.
   if (principal.id !== credential.principal || principal.status !== 'active' || principal.generation !== credential.generation) return null;
   // A browser's session is an account's, always; any credential that names an account goes with it.
@@ -60,10 +156,44 @@ export function callerOf(rows: CallerRows, at: number): Caller | null {
   const service = principal.id.startsWith('token:');
   const scope = principal.scope === null ? EVERYWHERE : parsed(principal.scope);
   if (!isScope(scope)) return null;
-  // A session carries no scope. A token's is its cap, and one that does not read as a scope reaches nothing.
-  const session = credential.kind === 'browser' || credential.kind === 'cli';
-  const cap = parsed(credential.scope);
-  const credentialScope: CredentialScope | null = session ? null : isCredentialScope(cap) ? cap : [];
+
+  // What a trust binding issued, a CI run's token or a workload's session, stands while the binding does, in the generation it was bound in.
+  const issued = credential.createdBy.startsWith(ISSUED);
+  const binding = issued ? rows.binding.find((row) => row.id === credential.createdBy.slice(ISSUED.length) && row.revokedAt === null && row.principal === principal.id && row.generation === credential.generation) : undefined;
+  // What the credential reaches at most: nothing past it. A session's carries no cap, and holds all its member does.
+  let credentialScope: CredentialScope | null;
+  let workload: Workload | null = null;
+  switch (credential.kind) {
+    case 'browser':
+    case 'cli':
+      if (issued) return null;
+      credentialScope = null;
+      break;
+    case 'personal':
+    case 'handle':
+      if (issued) return null;
+      credentialScope = capOf(credential.scope);
+      break;
+    case 'service':
+      // A token a CI run exchanged its ID token for reaches what its binding does, a binding with no policy: one with a policy makes sessions.
+      if (workloads?.useOnly === true || (issued && (binding === undefined || binding.policy !== null))) return null;
+      credentialScope = capOf(binding === undefined ? credential.scope : binding.scope);
+      break;
+    case 'workload': {
+      if (workloads === null || binding === undefined) return null;
+      workload = sessionOf(rows, credential, binding, shown, workloads, at);
+      if (workload === null) return null;
+      // Its own scope, an enrollment code's, or else its binding's, with the binding's `reads` on the environments they list.
+      // A binding is made with a grant of its own at each environment it lists, so its scope says each one's project.
+      const cap = capOf(credential.scope ?? binding.scope);
+      const projectOf = new Map(cap.flatMap((grant): [string, string][] => (grant.environmentId != null && grant.projectId !== null ? [[grant.environmentId, grant.projectId]] : [])));
+      credentialScope = scopeWithReads(cap, workload.policy.reads, projectOf);
+      break;
+    }
+    // An MCP connection's requests come with an access token, which has no row: not built yet.
+    default:
+      return null;
+  }
 
   const projectOf = new Map(rows.environments.map((environment) => [environment.id, environment.projectId]));
   const definitions = (instance: boolean) =>
@@ -71,6 +201,7 @@ export function callerOf(rows: CallerRows, at: number): Caller | null {
   return {
     principal: principal.id,
     credential,
+    workload,
     holds: {
       role: !service && isInstanceRole(principal.role) ? principal.role : 'member',
       scope,
@@ -82,7 +213,7 @@ export function callerOf(rows: CallerRows, at: number): Caller | null {
       // A role with no row is no role: the roles are the rows read, never the ones that ship.
       policy: { roles: definitions(false), instanceRoles: definitions(true) as Policy['instanceRoles'], protected: rows.environments.filter((environment) => environment.protected).map((environment) => environment.id), protectedIn: {} },
       service,
-      kind: service ? 'bearer' : 'person',
+      kind: workload !== null ? 'workload' : service ? 'bearer' : 'person',
     },
   };
 }

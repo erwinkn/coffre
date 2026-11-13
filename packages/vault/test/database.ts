@@ -40,6 +40,7 @@ export async function openTestVault(): Promise<TestVault> {
     keys: [keyOf(randomBytes(32))],
     keks: new KekRegistry(LocalKekProvider.generate('test')),
     cap: { count: 1000, windowMs: 15 * 60_000 },
+    workloads: { noReads: false, useOnly: false },
     memory: memoryOf(2),
     now: () => now,
     tick: (ms) => void (now += ms),
