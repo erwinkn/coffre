@@ -95,6 +95,7 @@ step() {
 work=''
 keep=false
 postgres=false
+owned=false
 finish() {
     local result=$? newest pids
     # A second Ctrl-C would end the cleanup half done.
@@ -108,9 +109,9 @@ finish() {
             echo "upgrade-check: could not remove Postgres $COMPOSE_PROJECT_NAME; COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME docker compose down --volumes" >&2
     fi
     if ((result != 0)); then
-        # The step that failed wrote last.
-        newest="$(ls -t "$work"/*.log 2>/dev/null | head -n 1)"
-        [[ -z "$newest" ]] || printf -- '--- %s, last lines\n%s\n' "$newest" "$(tail -n 40 "$newest")" >&2
+        # The step that failed wrote last, in a directory this run took (a refused one's logs are someone else's).
+        [[ "$owned" == false ]] || newest="$(ls -t "$work"/*.log 2>/dev/null | head -n 1)"
+        [[ -z "${newest:-}" ]] || printf -- '--- %s, last lines\n%s\n' "$newest" "$(tail -n 40 "$newest")" >&2
         echo "upgrade check failed after $((SECONDS - started)) s" >&2
     fi
     [[ "$keep" == true || -z "$work" ]] || rm -rf -- "$work"
@@ -136,6 +137,7 @@ if [[ "$work" == "$root" || "$work" == "$root"/* || "$work" == / || "$work" == "
     exit 2
 fi
 touch "$work/.upgrade-check"
+owned=true
 # A kept directory's last run: its Durable Objects' storage and CLI home would meet a new database.
 rm -rf -- "$work/state" "$work/home" "$work/tmp"
 mkdir "$work/tmp"
@@ -201,7 +203,7 @@ serve() {
     ) >"$work/$(basename "$project").log" 2>&1 &
     coffre=$!
     for _ in $(seq 120); do
-        if curl -sf "http://localhost:$port/livez" >/dev/null; then return; fi # pins: local
+        if curl -sf --max-time 2 "http://localhost:$port/livez" >/dev/null; then return; fi # pins: local
         kill -0 "$coffre" 2>/dev/null || break
         sleep 1
     done
@@ -233,7 +235,7 @@ env -u COFFRE_DEV_PUBLIC_URL -u COFFRE_DEV_IDP_PUBLIC_URL COFFRE_DEV_IDP_PORT=$(
     setsid node --conditions=coffre:source "$root/dev/idp/server.ts" >"$work/idp.log" 2>&1 &
 idp=$!
 for tries in $(seq 30); do
-    if curl -s -o /dev/null "http://127.0.0.1:$((port + 1))/"; then break; fi # pins: local
+    if curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$((port + 1))/"; then break; fi # pins: local
     if ! kill -0 "$idp" 2>/dev/null || ((tries == 30)); then
         echo "upgrade-check: the dev IdP did not start; see $work/idp.log" >&2
         exit 1

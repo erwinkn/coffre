@@ -170,7 +170,8 @@ async function use(owner) {
     const body = await response.text();
     assert.equal(response.status, 200, `a use of ${DEV} through the proxy answered ${response.status}: ${body}`);
     const plan = JSON.parse(body);
-    const given = Object.keys(plan.env);
+    // A key behind a tunnel leaves `env` for the tunnel's entry: given too.
+    const given = [...Object.keys(plan.env), ...Object.values(plan.tunnels ?? {}).map(({ key }) => key)];
     const missing = keys.filter(({ archived }) => !archived).map(({ key }) => key).filter((key) => !given.includes(key) && !plan.left.includes(key));
     assert.ok(given.length > 0, `the plan for ${DEV} gives no key; it leaves out ${plan.left.join(', ') || 'none'}`);
     assert.deepEqual(missing, [], `the plan for ${DEV} neither gives nor leaves out ${missing.join(', ')}`);
@@ -284,7 +285,9 @@ export async function brokenLists(sql) {
 /**
  * A loss the log accepted (`audit.loss_accepted`, which 0.15's watch writes when an Owner accepts a gap) is a break
  * in its hashes, where 0.16's projector, walking the log back, stops: below it is not designed, and will be only for a
- * real database that has one (state-rows.md, section 6). Such a log stops the upgrade here, with the entries' seqs.
+ * real database that has one (state-rows.md, section 6). The entry is the barrier, not the break: one a later
+ * `audit.loss_unapplied` says did not take stops the upgrade too, since whether its range still breaks the hashes is
+ * the walk's to judge, not this check's. Such a log stops the upgrade here, with the entries' seqs.
  */
 export async function acceptedLosses(sql) {
     const rows = await sql.unsafe(`SELECT seq::text AS seq FROM audit_log WHERE action = 'audit.loss_accepted' ORDER BY audit_log.seq`);
@@ -350,7 +353,7 @@ async function refusals(url) {
     }
     const refused = [
         broken.length > 0 && `0084 would cut the redirects of the OAuth clients ${broken.join(', ')}: they are not a JSON array of strings`,
-        losses.length > 0 && `the log accepted ${losses.length} loss${losses.length === 1 ? '' : 'es'}, at seq ${losses.join(', ')}: 0.16's projector stops at one`,
+        losses.length > 0 && `the log accepted ${losses.length} loss${losses.length === 1 ? '' : 'es'}, at seq ${losses.join(', ')}: 0.16's projector stops at one, so stop and ask coffre's maintainers`,
         tampered.length > 0 && `a tamper finding stands for ${tampered.join(', ')}: 0.16 carries none over, and an Owner's change to each, on 0.15.0, settles it`,
         protection === null && 'the newest policy.change does not read: 0.16 fills the protected environments from it, and an Owner\'s change of the policy, on 0.15.0, writes one that does',
         protection?.length > 0 && `the newest policy.change and the rows disagree on protecting ${protection.join(', ')}: an Owner turns each off and on again (or on and off), on 0.15.0, to end where it should`,
