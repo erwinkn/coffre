@@ -1,11 +1,11 @@
 import { entryHash, type StoredEntry } from '@coffre/core/audit';
 import { ENDS_BELOW, parseCheckpoint, splitNote, type LogEntry, type PairNotes, type StoredPair } from '@coffre/core/merkle';
 import { USES_IN_FLIGHT } from '@coffre/core/memory';
-import { VOUCHED_AT_ONCE, type AuditCursorRow, type AuditEventRow, type CheckInput, type CheckState, type NoteInput } from '@coffre/core/vault';
+import { VOUCHED_AT_ONCE, type CheckInput, type CheckState, type NoteInput } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 
-import { cursorVouched, eventColumns, eventVouched, type AuditCursor, type AuditEvent } from './audit-rows.ts';
+import { cursorOf, cursorVouched, eventColumns, eventOf, eventVouched, type AuditCursor, type AuditEvent } from './audit-rows.ts';
 import type { Reached } from './checkpointer.ts';
 import { entryVouched, keyringOf, openUnder, type Keyring, type VerifierKeys } from './keyring.ts';
 import type { LogMacKey } from './log-entry.ts';
@@ -88,9 +88,7 @@ export async function checkAudit(db: Database, keys: VerifierKeys, input: CheckI
     next: options.beat === true && cursor !== null ? cursor.through : null,
   });
   const forged = shown.flatMap((row, i) => (row === null || !eventVouched(ring, row) ? [i] : []));
-  // The cursor's interim columns (`old_floor`, `old_top`) are outside its MAC and not in `AuditCursorRow`: filled
-  // so that their order holds whatever the five say, they leave the verdict to the MAC alone.
-  const listed = cursor !== null && cursorVouched(ring, { ...cursor, oldFloor: 0n, oldTop: cursor.oldFrom }) ? cursor : null;
+  const listed = cursor !== null && cursorVouched(ring, cursor) ? cursor : null;
   // The newest checkpoint, as its signatures open it: the walk's own when it found nothing wrong, else the row's, which
   // the beat's finding is named for (`findingEventId`). Genesis (0) seals nothing: shown as none.
   const opened = walked.checkpoint !== null ? walked.checkpoint : read.newest === null ? null : (await openUnder(ring, read.newest.notes))?.pair ?? null;
@@ -149,7 +147,9 @@ function uptoOf(notes: PairNotes): bigint {
  * Why the projection counts as stopped, or null: its cursor, MAC held, with a checkpoint
  * above it signed more than two beats ago, so what it has not listed has waited that long. Not the cursor's own `at`:
  * that is the time of the pair it stands at, an hour old after a quiet hour, when the first checkpoint after it is a
- * tick old and the projector a moment from listing it. The beat fails its run on it, with no finding.
+ * tick old and the projector a moment from listing it. A projector catching up, after a rebuild or on its first
+ * run over a log with history, counts as stopped until it lists within two beats of the newest checkpoint: one
+ * reading of the cursor cannot tell it moves. The beat fails its run on it, with no finding.
  */
 export function projectorStopped(listed: Checked['listed'], unlisted: Checked['unlisted'], everyMs: number, now = Date.now()): string | null {
   if (listed === null || unlisted === null) return null;
@@ -214,52 +214,6 @@ export function frozenLog(anchor: LogEntry | null, last: StoredEntry | null, rin
     hash = entryHash(last.prevHash, last, last.mac);
   } catch {}
   return hash !== null && hash.equals(named.hash) ? null : `the frozen log's last entry (seq ${last.seq}) is not the one its anchor names: it was altered`;
-}
-
-const DECIMAL = /^[0-9]{1,19}$/;
-const nullable = (v: unknown): v is string | null => v === null || typeof v === 'string';
-
-/** Bytes from base64, only if it is the canonical text of exactly `length` bytes: no padding games, no other alphabet. */
-function base64(text: unknown, length: number): Buffer | null {
-  if (typeof text !== 'string') return null;
-  const bytes = Buffer.from(text, 'base64');
-  return bytes.length === length && bytes.toString('base64') === text ? bytes : null;
-}
-
-/** A row the page handed in, as `AuditEvent`; null for one no projector writes, which is then `forged`. */
-function eventOf(raw: unknown): AuditEvent | null {
-  if (typeof raw !== 'object' || raw === null) return null;
-  const r = raw as Partial<Record<keyof AuditEventRow, unknown>>;
-  const mac = base64(r.mac, 16);
-  if (
-    mac === null || !Number.isSafeInteger(r.at) || typeof r.number !== 'string' || !DECIMAL.test(r.number) || (r.log !== 14 && r.log !== 15 && r.log !== 16)
-    || (r.author !== 'app' && r.author !== 'vault') || typeof r.action !== 'string' || typeof r.shown !== 'boolean' || typeof r.allowed !== 'boolean'
-    || typeof r.actor !== 'string' || typeof r.detail !== 'string' || !Array.isArray(r.places) || !r.places.every((p) => typeof p === 'string')
-    || !(r.related === null || (typeof r.related === 'string' && DECIMAL.test(r.related)))
-    || ![r.code, r.subject, r.credential, r.project, r.environment, r.secret, r.version, r.requestId, r.operationId, r.sourceIp].every(nullable)
-  ) return null;
-  return {
-    at: r.at as number, number: BigInt(r.number), log: r.log, author: r.author, action: r.action, shown: r.shown, allowed: r.allowed,
-    code: r.code as string | null, actor: r.actor, subject: r.subject as string | null, credential: r.credential as string | null,
-    project: r.project as string | null, environment: r.environment as string | null, secret: r.secret as string | null, version: r.version as string | null,
-    places: r.places as string[], requestId: r.requestId as string | null, operationId: r.operationId as string | null,
-    related: r.related === null ? null : BigInt(r.related as string), sourceIp: r.sourceIp as string | null, detail: r.detail, mac,
-  };
-}
-
-/**
- * The cursor the page handed in, the five columns its MAC covers (`AuditCursorRow`); null for one the projector never
- * writes. The cursor's interim `old_floor` and `old_top`, and retention's `reads_from`, carry none, and nothing here reads them.
- */
-function cursorOf(raw: unknown): Omit<AuditCursor, 'oldFloor' | 'oldTop'> | null {
-  if (typeof raw !== 'object' || raw === null) return null;
-  const r = raw as Partial<Record<keyof AuditCursorRow, unknown>>;
-  const decimal = (v: unknown) => (typeof v === 'string' && DECIMAL.test(v) ? BigInt(v) : null);
-  const [through, pair, oldFrom] = [decimal(r.through), decimal(r.pair), decimal(r.oldFrom)];
-  const oldHash = typeof r.oldHash === 'string' && /^[0-9a-f]{64}$/.test(r.oldHash) ? Buffer.from(r.oldHash, 'hex') : null;
-  const mac = r.mac === null ? null : base64(r.mac, 16);
-  if (through === null || pair === null || oldFrom === null || oldHash === null || !Number.isSafeInteger(r.at) || (r.mac !== null && mac === null)) return null;
-  return { through, pair, at: r.at as number, oldFrom, oldHash, mac };
 }
 
 // The audit projection's listing of the chains held to the sealed log: `coffre verify log`'s check, a

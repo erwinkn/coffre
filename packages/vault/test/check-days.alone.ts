@@ -2,7 +2,7 @@
 // `checkRead`). Its one statement bounds the uses above the newest checkpoint by that row's floor of `at`, a value of
 // the statement's own, which Postgres cannot prune `log_uses`' day partitions by: without the signer's floor beside it,
 // a constant, every visit planned and locked every day kept (without it, measured here: 380 locks and 290 planning
-// buffers at 104 days, against 83 and 92 at 5; 0054 was the same for `log_reads`). The 0.15 page check (`verifyTrees`) reads through the same
+// buffers at 104 days, against 83 and 92 at 5). The 0.15 page check (`verifyTrees`) reads through the same
 // statement, its bound the pairs held outside. Both are held here, at a handful of days and at a hundred more, and the
 // beat's statement too, the visit's with the first checkpoint above the cursor (`next`): a seek on `log_checkpoints`'
 // primary key, `upto`, which grows with the checkpoints kept only by the B-tree's depth (measured: 2
@@ -90,7 +90,7 @@ test('a visit\'s check, the beat\'s and the 0.15 page check plan and lock the sa
   await log.uses(200);
   assert.ok((await cp.tick()).signed);
   await log.uses(10);
-  const input: CheckInput = { events: [], cursor: { through: '0', pair: '0', at: 0, oldFrom: '0', oldHash: '0'.repeat(64), mac: null } };
+  const input: CheckInput = { events: [], cursor: { through: '0', pair: '0', at: 0, oldFloor: '0', oldFrom: '0', oldTop: '0', oldHash: '0'.repeat(64), mac: null } };
 
   const statements = async () => {
     const capture = capturing();

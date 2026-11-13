@@ -67,13 +67,12 @@ function shown(mac: LogMacKey, number: bigint, change: Partial<Omit<AuditEvent, 
   };
   return asRow({ ...row, mac: eventMac(mac, row) });
 }
-const asRow = (e: AuditEvent): AuditEventRow => ({ ...e, number: String(e.number), related: e.related === null ? null : String(e.related), mac: e.mac.toString('base64') });
+const asRow = (e: AuditEvent): AuditEventRow => ({ ...e, number: String(e.number), related: e.related === null ? null : String(e.related), mac: e.mac.toString('hex') });
 
 /** The cursor as the projector signs it, listed through `through`, at `at`. */
 function cursor(mac: LogMacKey, through: bigint, at: number): AuditCursorRow {
-  // The cursor's interim `oldFloor` and `oldTop` are outside the MAC: any value signs the same.
   const c = { through, pair: through, at, oldFloor: 0n, oldFrom: 0n, oldTop: 0n, oldHash: Buffer.alloc(32) };
-  return { through: String(through), pair: String(through), at, oldFrom: '0', oldHash: c.oldHash.toString('hex'), mac: cursorMac(mac, c).toString('base64') };
+  return { through: String(through), pair: String(through), at, oldFloor: '0', oldFrom: '0', oldTop: '0', oldHash: c.oldHash.toString('hex'), mac: cursorMac(mac, c).toString('hex') };
 }
 
 /** A log with history sealed, a few entries above its newest checkpoint, three rows shown and the cursor at that checkpoint. */
@@ -230,7 +229,7 @@ test('a row the page shows, altered: broken, its place in `forged`', async () =>
   const v = await visited();
   const rows_ = [...v.input.events];
   rows_[1] = { ...rows_[1]!, action: 'secret.read' };
-  rows_[2] = { ...rows_[2]!, mac: Buffer.alloc(16).toString('base64') };
+  rows_[2] = { ...rows_[2]!, mac: Buffer.alloc(16).toString('hex') };
   const checked = await v.check({ ...v.input, events: rows_ });
   assert.equal(checked.state, 'broken');
   assert.deepEqual(checked.forged, [1, 2]);
@@ -253,9 +252,13 @@ test('the cursor put back: shown, listed through less than the checkpoint; the c
   const moved = await v.check({ ...v.input, cursor: { ...cursor(v.mac, old.through, old.at), through: String(v.upto()) } });
   assert.equal(moved.state, 'broken');
   assert.match(moved.reason!, /audit cursor is not the projector's/);
-  // Retention's `reads_from` and the cursor's interim `old_floor`, `old_top` carry no MAC, and nothing reads them.
-  const extra = { ...cursor(v.mac, old.through, old.at), readsFrom: '999', oldFloor: '5', oldTop: '7' } as AuditCursorRow;
+  // Retention's `reads_from` carries no MAC, and nothing reads it. Nor do `old_floor` and `old_top`: only their order
+  // around `old_from` is held, as `vouch` holds it.
+  const extra = { ...cursor(v.mac, old.through, old.at), readsFrom: '999', oldTop: '7' } as AuditCursorRow;
   assert.equal((await v.check({ ...v.input, cursor: extra })).state, 'ok');
+  const unordered = await v.check({ ...v.input, cursor: { ...cursor(v.mac, old.through, old.at), oldFloor: '5' } });
+  assert.equal(unordered.state, 'broken');
+  assert.match(unordered.reason!, /audit cursor is not the projector's/);
 });
 
 /** `n` entries of the frozen log, chained from its start, written past its triggers; the last one's seq and hash. */
@@ -424,7 +427,7 @@ test('`beat`: a projector that stopped, a checkpoint above its cursor signed two
   const { vault, cp, mac } = await vaulted();
   const below = cp.pair.pair.upto;
   // After an hour's quiet, one use and its tick: the cursor's pair an hour old, the checkpoint above it just signed, the
-  // projector a moment from listing it. Not stopped, and neither is a first projection, its cursor at the start.
+  // projector a moment from listing it. Not stopped, nor a first projection while the checkpoint above its start is new.
   await logWriter(db.owner, mac).uses(3);
   assert.ok((await cp.tick()).signed);
   const above = cp.pair.pair.upto;
@@ -438,6 +441,11 @@ test('`beat`: a projector that stopped, a checkpoint above its cursor signed two
   const stopped = await vault.beat!({ cursor: cursor(mac, below, Date.now()), everyMs });
   assert.ok(stopped.ok && stopped.state === 'ok' && stopped.finding === null, JSON.stringify(stopped));
   assert.match(stopped.projector!, new RegExp(`lists through ${below}, and the checkpoint above it \\(up to ${above}\\) was signed \\d+ ms ago`));
+  // A rebuild, or a first projection over a log with history: its cursor at the start, under a checkpoint signed two
+  // beats ago. Catching up reads as stopped, the same answer, until it lists within two beats of the newest.
+  const rebuilt = await vault.beat!({ cursor: { ...cursor(mac, 0n, 0), mac: null }, everyMs });
+  assert.ok(rebuilt.ok && rebuilt.state === 'ok' && rebuilt.finding === null, JSON.stringify(rebuilt));
+  assert.match(rebuilt.projector!, /lists through 0, and the checkpoint above it \(up to \d+\) was signed \d+ ms ago/);
   // At the checkpoint, however old: nothing above it to list.
   const level = await vault.beat!({ cursor: cursor(mac, above, 0), everyMs });
   assert.ok(level.ok && level.projector === null, JSON.stringify(level));

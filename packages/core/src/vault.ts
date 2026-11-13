@@ -442,7 +442,11 @@ export interface Vault {
    * `projector`, null unless the projection has stopped: a checkpoint above the cursor signed more than two beats
    * (`everyMs`, the deployment's beat period) ago, so what it has not listed has waited that long (the cursor's own
    * `at` is the time of the pair it stands at, an hour old after a quiet hour). The app fails its run on it; it writes
-   * no finding, since nothing is wrong with the log. Nothing calls it yet. Only with 0.15's log on.
+   * no finding, since nothing is wrong with the log. A projector catching up counts as stopped too: after
+   * `coffre audit rebuild`, or on its first run over a log with history, its cursor starts at 0 under a checkpoint
+   * months old, and every beat says so until it lists within two beats of the newest. The beat keeps nothing between
+   * runs, so it cannot tell a cursor that moves from one that does not; either way the pages list that far behind.
+   * Nothing calls it yet. Only with 0.15's log on.
    *
    *   beat({ cursor, everyMs: 300_000 }) on a checkpointer stuck at 4410
    *   → { state: 'late', finding: 'system:vault/finding:4410:late', projector: null, … }
@@ -740,14 +744,9 @@ export type VouchInput = { entries: VouchedEntry[] };
 
 export type VouchedEntry =
   /** An entry as the projector listed it (`audit_events`), named `name` in the answer. */
-  | {
-    tree: 'event'; name: string; at: number; number: string; log: number; author: string; action: string; shown: boolean; allowed: boolean; code: string | null;
-    actor: string; subject: string | null; credential: string | null; project: string | null; environment: string | null; secret: string | null;
-    version: string | null; places: string[]; requestId: string | null; operationId: string | null; related: string | null; sourceIp: string | null;
-    detail: string; mac: string;
-  }
+  | ({ tree: 'event'; name: string } & AuditEventRow)
   /** The projection's cursor (`audit_cursor`), named `cursor` in the answer: whether the pages may say entries are listed up to it. */
-  | { tree: 'cursor'; name: 'cursor'; through: string; pair: string; at: number; oldFloor: string; oldFrom: string; oldTop: string; oldHash: string; mac: string | null };
+  | ({ tree: 'cursor'; name: 'cursor' } & AuditCursorRow);
 
 /**
  * 0.15's log as its check found it. `problems` names what does not hold,
@@ -1036,14 +1035,14 @@ export type NotePayload = Omit<NoteInput, 'actor' | 'id'> & { author: EventAutho
 export type NotedRow = { at: number; requestId: string; object: string; actor: string; payload: string; seal: null; mac: string };
 
 /**
- * A row of `audit_events` as the app read it, for `check`: every column, numbers that may pass 2^53 in decimal, the
- * MAC in base64. The vault holds it to its MAC.
+ * A row of `audit_events` as the app read it, for `vouch` and `check`: every column its MAC covers, numbers that may
+ * pass 2^53 in decimal, the MAC in hex. The vault holds it to its MAC, and takes `log` only as 14, 15 or 16.
  */
 export type AuditEventRow = {
   at: number;
   number: string;
   /** 14: `audit_log`; 15: `log_changes`; 16: `log_uses`. */
-  log: 14 | 15 | 16;
+  log: number;
   author: EventAuthor;
   action: string;
   shown: boolean;
@@ -1067,19 +1066,22 @@ export type AuditEventRow = {
 };
 
 /**
- * The row of `audit_cursor` as the app read it, for `check`: how far the projector has listed the chains (`through`,
- * `pair`, `at`) and the frozen log (`oldFrom`, `oldHash` in hex), numbers in decimal, the MAC in base64. The MAC is
- * null only on the row the migration inserts, before the projector's first batch: every number `0` and `oldHash` 32
- * zero bytes. `check` takes a null MAC with exactly those values, as nothing listed yet, and answers `broken` for any
- * other cursor without one. Its MAC covers these five, in this order. Not `reads_from`, retention's floor, which
- * carries no MAC: an app-DB writer could raise it and have entries still due pass as retired, so the floor is always
- * the sealed retention change's, never that column's.
+ * The row of `audit_cursor` as the app read it, for `vouch` and `check`: how far the projector has listed the chains
+ * (`through`, `pair`, `at`) and the frozen log (`oldFloor`, `oldFrom`, `oldTop`, `oldHash` in hex), numbers in
+ * decimal, the MAC in hex. Its MAC covers `through`, `pair`, `at`, `oldFrom` and `oldHash`; `oldFloor` and `oldTop`
+ * carry none, and the vault holds only their order (`oldFloor <= oldFrom <= oldTop`). The MAC is null only on the row
+ * the migration inserts, before the projector's first batch: every number `0` and `oldHash` 32 zero bytes. The vault
+ * takes a null MAC with exactly those values, as nothing listed yet, and any other cursor without one as not the
+ * projector's. Not `reads_from`, retention's floor, which carries no MAC: an app-DB writer could raise it and have
+ * entries still due pass as retired, so the floor is always the sealed retention change's, never that column's.
  */
 export type AuditCursorRow = {
   through: string;
   pair: string;
   at: number;
+  oldFloor: string;
   oldFrom: string;
+  oldTop: string;
   oldHash: string;
   mac: string | null;
 };

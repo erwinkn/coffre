@@ -89,7 +89,7 @@ const MAX_STATEMENT_MS = 2_147_483_647;
 export const RELEASES_KEPT_MS = MAX_BULK_WINDOW_MINUTES * 60_000 + 3_600_000;
 
 /**
- * Events through `log_events` (migration 0085), one statement, each row as `eventRow` signed it (note.ts): their
+ * Events through `log_events` (migration 0086), one statement, each row as `eventRow` signed it (note.ts): their
  * numbers, a retry's the one it was first written under. An id already written with another event throws (23505).
  */
 export async function logEvents(db: Queryable, events: readonly { at: number; requestId: string; actor: string; payload: string; mac: Buffer }[]): Promise<bigint[]> {

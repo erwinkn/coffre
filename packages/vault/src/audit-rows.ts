@@ -1,5 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
+import type { AuditCursorRow } from '@coffre/core/vault';
+
 import { keysAt, type Keyring } from './keyring.ts';
 import type { LogMacKey } from './log-entry.ts';
 
@@ -146,4 +148,39 @@ export function cursorVouched(ring: Keyring, cursor: AuditCursor): boolean {
   if (cursor.mac === null) return cursorColumns(cursor) === cursorColumns(CURSOR_START) && cursor.oldFloor === 0n && cursor.oldTop === 0n;
   if (cursor.pair > cursor.through || cursor.oldFloor > cursor.oldFrom || cursor.oldFrom > cursor.oldTop) return false;
   return keysAt(ring, cursor.through).some((key) => holds(cursorMac(key.mac, cursor), cursor.mac!));
+}
+
+const DECIMAL = /^[0-9]{1,19}$/;
+const hexOf = (value: unknown, bytes: number) => (typeof value === 'string' && value.length === bytes * 2 && /^[0-9a-f]*$/.test(value) ? Buffer.from(value, 'hex') : null);
+
+/** A row of `audit_events` as the app hands it in (`AuditEventRow`), for `vouch` and `check`; null for one of no shape the projector writes. */
+export function eventOf(entry: unknown): AuditEvent | null {
+  if (typeof entry !== 'object' || entry === null) return null;
+  const e = entry as Record<string, unknown>;
+  const text = (value: unknown): value is string => typeof value === 'string';
+  const maybe = (value: unknown): value is string | null => value === null || text(value);
+  const mac = hexOf(e.mac, 16);
+  if (mac === null || !Number.isSafeInteger(e.at) || !text(e.number) || !DECIMAL.test(e.number) || (e.log !== 14 && e.log !== 15 && e.log !== 16)
+    || (e.author !== 'app' && e.author !== 'vault') || !text(e.action) || typeof e.shown !== 'boolean' || typeof e.allowed !== 'boolean' || !maybe(e.code)
+    || !text(e.actor) || !maybe(e.subject) || !maybe(e.credential) || !maybe(e.project) || !maybe(e.environment) || !maybe(e.secret) || !maybe(e.version)
+    || !Array.isArray(e.places) || !e.places.every(text) || !maybe(e.requestId) || !maybe(e.operationId) || !(e.related === null || (text(e.related) && DECIMAL.test(e.related)))
+    || !maybe(e.sourceIp) || !text(e.detail)) return null;
+  return {
+    at: e.at as number, number: BigInt(e.number), log: e.log, author: e.author, action: e.action, shown: e.shown, allowed: e.allowed, code: e.code,
+    actor: e.actor, subject: e.subject, credential: e.credential, project: e.project, environment: e.environment, secret: e.secret, version: e.version,
+    places: e.places as string[], requestId: e.requestId, operationId: e.operationId, related: e.related === null ? null : BigInt(e.related as string),
+    sourceIp: e.sourceIp, detail: e.detail, mac,
+  };
+}
+
+/** The row of `audit_cursor` as the app hands it in (`AuditCursorRow`), for `vouch` and `check`; null for one of no shape it has. */
+export function cursorOf(raw: unknown): AuditCursor | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const entry = raw as Partial<Record<keyof AuditCursorRow, unknown>>;
+  const numbers = [entry.through, entry.pair, entry.oldFloor, entry.oldFrom, entry.oldTop];
+  const oldHash = hexOf(entry.oldHash, 32);
+  const mac = entry.mac === null ? null : hexOf(entry.mac, 16);
+  if (!numbers.every((value) => typeof value === 'string' && DECIMAL.test(value)) || !Number.isSafeInteger(entry.at) || oldHash === null || (entry.mac !== null && mac === null)) return null;
+  const [through, pair, oldFloor, oldFrom, oldTop] = numbers.map((value) => BigInt(value as string)) as [bigint, bigint, bigint, bigint, bigint];
+  return { through, pair, at: entry.at as number, oldFloor, oldFrom, oldTop, oldHash, mac };
 }

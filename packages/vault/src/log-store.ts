@@ -587,8 +587,8 @@ export async function callRebuild(db: Database, row: ReturnType<typeof rebuildRo
  * Every part is a seek on an index or the primary key, or a scan of what lies above the newest checkpoint: nothing it
  * reads grows with the log. `bound`, the floor of `at` a pair the database must have reached signed (the signer's), is
  * what keeps it so with the days kept: the row's floor is a value of the statement's own, which Postgres cannot prune
- * `log_uses`' day partitions by, so without a constant beside it the plan names, plans and locks every day (0054, the
- * same for `log_reads`). It is a lower bound the tail is never short of when used: the walk takes the statement's tail
+ * `log_uses`' day partitions by, so without a constant beside it the plan names, plans and locks every day (measured in
+ * check-days.alone.ts). It is a lower bound the tail is never short of when used: the walk takes the statement's tail
  * only when the row's floor is the signed one and at or above `bound` (`checkTrees`), and reads again otherwise.
  */
 export type CheckRead = {

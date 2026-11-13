@@ -209,7 +209,7 @@ import { TICK_MS } from './log-checkpointer.ts';
 import { changeEntry, changeHolds, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
 import { callRebuild, logStore } from './log-store.ts';
 import { checkListed } from './audit-check.ts';
-import { cursorVouched, eventVouched, oldWalkOpen, type AuditCursor, type AuditEvent } from './audit-rows.ts';
+import { cursorOf, cursorVouched, eventOf, eventVouched, oldWalkOpen } from './audit-rows.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { replayFault, type Replayed } from './replay.ts';
 import { principalObject } from './objects.ts';
@@ -4871,11 +4871,11 @@ class VaultService implements Vault {
     const asked = entries.map((entry: VouchedEntry): { named: string; holds: (ring: Keyring) => boolean } => {
       const named = typeof entry?.name === 'string' ? entry.name : '?';
       if (entry?.tree === 'cursor') {
-        const cursor = vouchedCursor(entry);
+        const cursor = cursorOf(entry);
         if (cursor !== null && oldWalkOpen(cursor)) listingOlder = true;
         return { named, holds: (ring) => cursor !== null && cursorVouched(ring, cursor) };
       }
-      const event = vouchedEvent(entry);
+      const event = eventOf(entry);
       return { named, holds: (ring) => event !== null && eventVouched(ring, event) };
     });
     const failing = asked.filter((a) => !a.holds(alone(keys)));
@@ -5654,37 +5654,3 @@ function base64(bytes: Uint8Array): string {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
 }
 
-const DECIMAL = /^[0-9]{1,19}$/;
-const hexOf = (value: unknown, bytes: number) => (typeof value === 'string' && value.length === bytes * 2 && /^[0-9a-f]*$/.test(value) ? Buffer.from(value, 'hex') : null);
-
-/** A projected entry as `vouch` was given it (`audit_events`); null for one of no shape the projector writes. */
-function vouchedEvent(entry: unknown): AuditEvent | null {
-  if (typeof entry !== 'object' || entry === null) return null;
-  const e = entry as Record<string, unknown>;
-  const text = (value: unknown): value is string => typeof value === 'string';
-  const maybe = (value: unknown): value is string | null => value === null || text(value);
-  const mac = hexOf(e.mac, 16);
-  if (mac === null || !Number.isSafeInteger(e.at) || !text(e.number) || !DECIMAL.test(e.number) || (e.log !== 14 && e.log !== 15 && e.log !== 16)
-    || (e.author !== 'app' && e.author !== 'vault') || !text(e.action) || typeof e.shown !== 'boolean' || typeof e.allowed !== 'boolean' || !maybe(e.code)
-    || !text(e.actor) || !maybe(e.subject) || !maybe(e.credential) || !maybe(e.project) || !maybe(e.environment) || !maybe(e.secret) || !maybe(e.version)
-    || !Array.isArray(e.places) || !e.places.every(text) || !maybe(e.requestId) || !maybe(e.operationId) || !(e.related === null || (text(e.related) && DECIMAL.test(e.related)))
-    || !maybe(e.sourceIp) || !text(e.detail)) return null;
-  return {
-    at: e.at as number, number: BigInt(e.number), log: e.log, author: e.author, action: e.action, shown: e.shown, allowed: e.allowed, code: e.code,
-    actor: e.actor, subject: e.subject, credential: e.credential, project: e.project, environment: e.environment, secret: e.secret, version: e.version,
-    places: e.places as string[], requestId: e.requestId, operationId: e.operationId, related: e.related === null ? null : BigInt(e.related as string),
-    sourceIp: e.sourceIp, detail: e.detail, mac,
-  };
-}
-
-/** The projection's cursor as `vouch` was given it (`audit_cursor`); null for one of no shape it has. */
-function vouchedCursor(entry: Extract<VouchedEntry, { tree: 'cursor' }>): AuditCursor | null {
-  const numbers = [entry.through, entry.pair, entry.oldFloor, entry.oldFrom, entry.oldTop];
-  const oldHash = hexOf(entry.oldHash, 32);
-  const mac = entry.mac === null ? null : hexOf(entry.mac, 16);
-  if (!numbers.every((value) => typeof value === 'string' && DECIMAL.test(value)) || !Number.isSafeInteger(entry.at) || oldHash === null || (entry.mac !== null && mac === null)) return null;
-  return {
-    through: BigInt(entry.through), pair: BigInt(entry.pair), at: entry.at, oldFloor: BigInt(entry.oldFloor), oldFrom: BigInt(entry.oldFrom), oldTop: BigInt(entry.oldTop),
-    oldHash, mac,
-  };
-}
