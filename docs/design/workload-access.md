@@ -156,15 +156,21 @@ DPoP-Nonce: g1.7Hq2…
   `jkt` is the thumbprint of the proof's `jwk`.
 - **In order** (`exchangeWorkloadSession`, `WorkloadService.signIn`): a
   deployment with no gate takes no session (503 `no_gate`); the per-source
-  limiter, at most
-  32 exchanges in flight per process (429 `busy`), the body (413 past
-  128 KiB); the proof by its kind (`PROOFS`), with one read of the service's
+  limiter (`admission`), which counts one address's requests to this entry
+  point, 10,000 per 10-second window by default (`processLimits`), and
+  answers 429 `busy` past it, or 503 when the limiter itself fails, never
+  letting a request through; the body (413 past 128 KiB); the `DPoP` header;
+  then, in `signIn`, the total limiter: at most 32 exchanges in flight per
+  isolate or process, from all sources together (`exchangeLimit`, 429
+  `busy`). The first bounds one address, the second the work before anyone
+  is authenticated; neither stands in for the other. Then the proof by its
+  kind (`PROOFS`), with one read of the service's
   live bindings of its profiles, checked outside any transaction; the
   binding's `noReads` and `sources`; then one vault call (`signIn`) that
   checks the binding's seal and the DPoP proof, spends the token where it is
   spent, weighs the account and binding under their rows' locks, and writes
   the session and its change, which records the run. A proof no binding
-  takes costs the limiter and one read.
+  takes costs the two limiters and one read.
 - **Refusals** stay out of the audit log, since nobody was authenticated:
   401 with a reason (`ExchangeReason`: `no_match`, `signature`, `expired`,
   `audience`, `replayed`, `dpop`, `source`, …), 429 `busy`, or 503
@@ -205,6 +211,13 @@ never reuses (`REQUIRED_CLAIMS`):
 | `github`, `github-reusable…` | GitHub's | as for bearer bindings | names the key |
 | `gitlab`, `custom` | as for bearer bindings | as for bearer bindings | `publicUrl` |
 
+- **Azure's audience depends on the token version.** The resource app's
+  `accessTokenAcceptedVersion` makes Entra issue v1 or v2 tokens, and the
+  binding's issuer is that version's. A v1 token's audience is the resource
+  as asked for, its application ID URI (`api://coffre-acme`); a v2 token's
+  is always the API's application (client) ID, a GUID. The exchange matches
+  `policy.audience` exactly (`expectedAudiences`), so a v2 binding set to
+  `api://coffre-acme` never signs in.
 - **The audience names the key wherever the caller picks it.** For the
   `KEY_NAMING_PROFILES` (GitHub's three, `gcp`, `fly`, `vercel`) the SDK
   asks for `<publicUrl>#jkt=<thumbprint>`, and the exchange takes that, or
