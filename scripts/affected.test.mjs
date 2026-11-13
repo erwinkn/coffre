@@ -32,6 +32,7 @@ const TREE = {
   'scripts/x.mjs': '',
   'scripts/x.test.mjs': "import { x } from './x.mjs'",
   'scripts/lonely.mjs': '',
+  'scripts/upgrade-check.sh': '',
   'scripts/formal.sh': 'REMOVALS=(\n  # One, without P\n  "One P Inv"\n)\nEXPECTED=(\n)\njava -jar tlc.jar',
   'eslint.config.js': "export default [{ files: ['packages/*/src/**/*.ts'] }]",
   'formal/A.tla': '---- MODULE A ----\nEXTENDS Naturals, Sequences\n====',
@@ -243,6 +244,11 @@ test('--full runs every step that is on, every file and every scenario', () => {
   assert.deepEqual(steps.formal.scenarios, ['One', 'Three', 'Two'])
   assert.equal(steps.sweep.why, '--full')
   assert.equal(steps.upgrade.why, '--full')
+})
+
+test('the upgrade check runs on a change to its own scripts, not to what it reads', () => {
+  assert.equal(run(['scripts/upgrade-check.sh']).steps.upgrade.why, 'scripts/upgrade-check.sh changed')
+  assert.ok(!run(['packages/db/src/migrations/postgres/0001.sql']).names.includes('upgrade'))
 })
 
 test('comments go, strings and regular expressions stay', () => {

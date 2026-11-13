@@ -26,7 +26,7 @@
 // installed from the lockfile first. Each step that needs Postgres gets a container of
 // its own (a compose project and a free port, never the shared :55432), removed when the
 // step ends, whether it passed, failed or was stopped; the containers of one run share
-// its network, so a run takes one of Docker's subnets. A run with a Postgres step first
+// its network, so a run takes one of Docker's subnets (and the upgrade check, which starts its own, one more). A run with a Postgres step first
 // removes what runs killed outright left behind: the projects and networks of a
 // validate.mjs of this boot no longer alive. A teardown that hangs holds the run until a
 // second signal, which ends that attempt and skips its retry. Each conformance run gets free ports of its own. The local COFFRE_TEST_* and
@@ -145,9 +145,10 @@ const STEPS = {
   },
   // No job of validate.yml: the growth sweep (docs/growth-sweep.md) runs before a tag, on the step's own Postgres, as it requires.
   sweep: { install: true, postgres: true, run: () => [`pnpm sweep:growth --out ${quote([join(logs, 'sweep')])}`] },
-  // A database of 0.14.5's through 0.15.0 to this revision, on a Postgres and ports the script picks itself
-  // (scripts/upgrade-check.sh): about 4.5 min, so --full alone runs it.
-  upgrade: { job: 'upgrade', install: true, build: true, run: () => ['pnpm upgrade:check'] },
+  // A database of 0.14.5's through 0.15.0 to this revision (scripts/upgrade-check.sh), about 4.5 min: --full
+  // runs it, and a change to its own files. Its Postgres is a compose project the script starts and removes
+  // itself, on a network of its own, beside the run's.
+  upgrade: { job: 'upgrade', install: true, build: true, ports: true, run: () => ['pnpm upgrade:check --port "$COFFRE_VALIDATE_PORT"'] },
 }
 
 const names = new Set(Object.keys(STEPS))

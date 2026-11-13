@@ -26,7 +26,8 @@
 //   upgrade check: a miss fails safe, never as a skip.
 // - `--full` runs everything, as the release's Validate does, and the growth sweep,
 //   which Validate has no job for: a tag's local `--full` is its only gate. The upgrade
-//   check (0.14.5 through 0.15.0 to this revision, minutes, from npm) runs there alone.
+//   check (0.14.5 through 0.15.0 to this revision, minutes, from npm) runs there, and on a
+//   change to its own scripts, not on what it reads: nearly every change reaches it.
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -60,6 +61,8 @@ const dependencies = any('pnpm-lock.yaml', /(?:^|\/)pnpm-workspace\.yaml$/, /(?:
 const compose = any('docker-compose.yml', 'docker-compose.subnet.yml', 'docker-compose.network.yml')
 // What scripts/check-pins.mjs reads, beside its own sources.
 const pinned = any(/(?:^|\/)package\.json$/, /\.ya?ml$/, /(?:^|\/)Dockerfile[^/]*$/, /\.sh$/, '.github/', 'action/', 'pnpm-workspace.yaml', /(?:^|\/)\.node-version$/)
+// The upgrade check's own scripts, the files that select it short of --full.
+const UPGRADE_CHECK = ['scripts/upgrade-check.sh', 'scripts/upgrade-check.mjs', 'scripts/compat/release.sh']
 const lintable = (f) => /^packages\/[^/]+\/(?:src|test|scripts)\/.+\.tsx?$/.test(f)
 
 /**
@@ -209,7 +212,7 @@ export function plan({ root, files, changed, read = (f) => readFileSync(join(roo
     { name: 'terraform', ...rule('terraform')() },
     { name: 'consumer', ...rule('consumer', { db: true })() },
     { name: 'sweep', why: full ? '--full' : null },
-    { name: 'upgrade', why: full ? '--full' : null },
+    { name: 'upgrade', why: full ? '--full' : why(changed.find((f) => UPGRADE_CHECK.includes(f))) },
   ]
   return { steps, everything, unclaimed }
 }
