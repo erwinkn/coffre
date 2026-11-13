@@ -627,28 +627,17 @@ run, the protection taken out and the invariant that then breaks, or says that n
 Not locks, and counted nowhere above: the UPDATEs' own row locks (a credential's last use, a binding's stamp, the
 cap's row), which no statement asks for by name.
 
-**What can go now.** Five, none of which needs a model:
+**What can go now.** Four, none of which needs a model:
 
-- **The election under the exclusive lock.** A batch's second round holds its principal's lock exclusive, and each key
-  still runs the election and wins it at once: up to 100 advisory locks a statement (`limits.batch`), each an entry in
-  Postgres's lock table, electing among nobody. The smallest change: the cap's write is a plain UPDATE when its
-  transaction holds the lock exclusive. The function knows one case itself (`locked`: it took the lock exclusive for
-  this key). The other it must be told: under `p_lock` from `use_id_batch` or `use_route`, each key's call takes the
-  lock shared (`moving`) and cannot see that its transaction already holds it exclusive. No new argument tells it. The
-  batch notes the principal it holds exclusive in a setting local to its transaction (`coffre.principal_held`), right
-  after it takes the lock, and `use_credential` reads the note only in its `in_set` branch, to skip the election,
-  never as `locked` (W386's shape, in #590). So a forged note gains nothing: its uses skip the election and queue on
-  the cap's row, and still stop at the cap, which a test holds by forging one. The signature keeps its 31 arguments.
 - **The batch that locks nothing first.** A second round whose rows name two principals for one credential, which only
   a credential's row written around the log produces, was sent with no lock ahead of its keys (`byIds`, `lock =
   null`): each key locked as its turn came, and two such calls could wait on each other until Postgres ended one. Now
   `byIds` refuses it as `tampered` before any statement is sent, which is what such rows are. `use_id_batch`'s round
   without `p_lock` stays in the SQL with no caller, and goes when V2b makes the function again.
 
-  Both are in #590 (V2a), as a commit of their own (W386, by the coordinator's ruling). V2a's claim, "the same locks
-  in the same order", which its test of the lean statement against the full one holds, stands for a single use; a
-  batch's second round takes fewer, and 0086's header and that test's file say so. V2a has nothing of L1's to undo
-  (W386, on #590: the fence inside the statement, no read before it, no new `moved`).
+  It is in #590 (V2a). V2a's claim, "the same locks in the same order", which its test of the lean statement against
+  the full one holds, stands. V2a has nothing of L1's to undo (W386, on #590: the fence inside the statement, no read
+  before it, no new `moved`).
 - **The members' queue, with its last shared caller: V1's (W391).** Its 5 shared callers on main are not reads of the
   log. They are the vault's key decisions, `unwrap`, `wrap` and `rewrap` (`#keys` and `#refuseVersions`,
   `vault.ts:1964` to `:2207`), which the app reaches from an interactive write, a reveal, a fork and a restore
@@ -707,6 +696,12 @@ cap's row), which no statement asks for by name.
   claim, with the dead branch of `renew` (`keeps015`), in the same follow-up. A1 deletes neither (W392, and read at
   its head `fd39887b7`: `rotation.ts` is untouched, and `renew` still ends in a plain transaction when its vault does
   not log).
+
+**What stays for now: the election under the exclusive lock.** A batch's second round holds its principal's lock
+exclusive, and each key still runs the cap's election and wins it at once: up to 100 advisory locks a statement
+(`limits.batch`), electing among nobody. Skipping it needs `use_credential` to be told what its transaction holds, by
+one more argument or by a session setting, which is an argument out of sight, and the function has 31. So the election
+goes with the function, when `/use` is made again (`simple-use.md`, being verified), not before.
 
 **What does not go now: the issue lock into the fence.** They do different jobs today. The fence orders uses against
 changes. The issue lock lets a transaction number a new credential, and compare the policy it was weighed on, without
