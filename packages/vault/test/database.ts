@@ -1,177 +1,56 @@
-import { randomUUID } from 'node:crypto';
-import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 
-import type { SecretRef, Through, WrappedKey } from '@coffre/core/vault';
-import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
-import { forgetLogHeads } from '@coffre/db/log';
-import { and, eq, sql, type SQL } from 'drizzle-orm';
-import pg from 'pg';
+import type { Database } from '@coffre/db';
+import { openDatabase } from '@coffre/db/connect';
+import { rowsOf } from '@coffre/db/dialect';
+import * as schema from '@coffre/db/schema';
+import { getTableName, is, sql, type SQL } from 'drizzle-orm';
+import { PgTable } from 'drizzle-orm/pg-core';
 
-import { openLocalVault as openRawVault, type LocalVault as RawLocalVault } from '../src/local.ts';
+import type { Running } from '../src/change.ts';
+import { keyOf } from '../src/rows.ts';
 
 /**
- * The suite's database, as the vault's tests use it: the one the server's
- * tests use, which scripts/test-suite.sh prepares. Opened twice: as its
- * owner, to set up places and play someone who edits rows, and as the
- * vault, through the vault's own login.
+ * The suite's database, which scripts/test-suite.sh prepares, opened twice:
+ * as the vault, through the vault's own login, and as its owner, to play
+ * someone who writes rows behind the vault.
  */
 const name = process.env.COFFRE_TEST_DATABASE ?? 'coffre_test';
 const url = (login: string) => `postgresql://${login}@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${name}`;
-export const OWNER_URL = url('coffre_owner:local-dev-only');
-export const VAULT_URL = url('coffre_vault_runtime:local-vault-only');
 
-/** A vault's input as a test writes it: its `caller` may be left out, for `speaking` to say. */
-type Spoken<I> = I extends Through ? Omit<I, 'caller'> & Partial<Through> : I;
+export type TestVault = Running & {
+  owner: Database;
+  /** The hashes the signer was woken with, oldest first. */
+  woken: Buffer[];
+  /** Move the vault's clock on. */
+  tick(ms: number): void;
+  close(): Promise<void>;
+};
 
-/** A vault whose calls may leave `caller` out (`speaking`). */
-export type SpeakingVault<V> = { [K in keyof V]: V[K] extends (input: infer I) => infer R ? (I extends Through ? (input: Spoken<I>) => R : V[K]) : V[K] };
-
-/**
- * `vault`, spoken to as the app does by a test about something other than
- * who asks: a call that leaves its `caller` out says the kind its acting
- * principal is, a person for `user:`, a bearer for `token:`. One about a
- * workload says so itself.
- */
-export function speaking<V extends object>(vault: V): SpeakingVault<V> {
-  return new Proxy(vault, {
-    get(target, name) {
-      const value: unknown = Reflect.get(target, name);
-      if (typeof value !== 'function') return value;
-      return (...args: unknown[]) => value.apply(target, [said(args[0]), ...args.slice(1)]);
-    },
-  }) as unknown as SpeakingVault<V>;
-}
-
-function said(input: unknown): unknown {
-  if (typeof input !== 'object' || input === null || 'caller' in input) return input;
-  const { actor, principal } = input as { actor?: unknown; principal?: unknown };
-  const asking = typeof actor === 'string' ? actor : principal;
-  return typeof asking === 'string' ? { ...input, caller: asking.startsWith('user:') ? 'person' : 'bearer' } : input;
-}
-
-/** The vault in this process, as the tests speak to it (`speaking`). */
-export type LocalVault = SpeakingVault<RawLocalVault>;
-
-/** `openLocalVault`, spoken to as the app does (`speaking`). */
-export async function openLocalVault(...args: Parameters<typeof openRawVault>): Promise<LocalVault> {
-  return speaking(await openRawVault(...args));
-}
-
-export type TestDatabase = { owner: Database; vault: Database; connect(connections?: number): Promise<Database>; close(): Promise<void> };
-
-/**
- * The database as its owner and as the vault; `connect` opens one more as the vault, as a second instance would, with
- * up to `connections` at once (pg's 10 unless set).
- */
-export async function openTestDatabase(): Promise<TestDatabase> {
-  const opened: (() => Promise<void>)[] = [];
-  const open = async (login: string, connections?: number): Promise<Database> => {
-    const pool = new pg.Pool({ connectionString: login, ...(connections === undefined ? {} : { max: connections }) });
-    opened.push(() => pool.end());
-    return createDatabase(pool);
-  };
+export async function openTestVault(): Promise<TestVault> {
+  const [owner, vault] = await Promise.all([openDatabase(url('coffre_owner:local-dev-only')), openDatabase(url('coffre_vault_runtime:local-vault-only'))]);
+  const woken: Buffer[] = [];
+  let now = Date.UTC(2026, 10, 13, 12);
   return {
-    owner: await open(OWNER_URL),
-    vault: await open(VAULT_URL),
-    connect: (connections) => open(VAULT_URL, connections),
-    close: async () => {
-      await Promise.all(opened.map((close) => close()));
-    },
+    db: vault.db,
+    owner: owner.db,
+    keys: [keyOf(randomBytes(32))],
+    now: () => now,
+    tick: (ms) => void (now += ms),
+    wake: (hash) => void woken.push(hash),
+    woken,
+    close: async () => void (await Promise.all([owner.close(), vault.close()])),
   };
 }
 
-/**
- * `work`, as the owner, with the audit log's append-only triggers lifted,
- * as someone who rewrites it would: disabled for one transaction.
- */
-export async function withLogUnlocked<T>(owner: Database, work: (db: Queryable) => Promise<T>): Promise<T> {
-  return owner.transaction(async (tx) => {
-    await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER USER`);
-    const result = await work(tx);
-    await tx.execute(sql`ALTER TABLE audit_log ENABLE TRIGGER USER`);
-    return result;
-  });
-}
+const TABLES = Object.values(schema).filter((value): value is PgTable => is(value, PgTable));
 
-/** Rows of a raw query. */
-export async function rows<Row>(db: Queryable, query: SQL): Promise<Row[]> {
-  return (await db.execute(query)).rows as Row[];
-}
-
-/** A raw statement. */
-export async function run(db: Queryable, query: SQL): Promise<void> {
-  await db.execute(query);
-}
-
-/** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
+/** Every table emptied. */
 export async function emptyDatabase(owner: Database): Promise<void> {
-  const { auditLog, auditChainHead, vaultGrants, vaultMembers, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys } = tablesOf(owner);
-  await owner.delete(secretReferences);
-  // Entries that point at others let go of them first: a RESTRICT foreign key.
-  await withLogUnlocked(owner, async (db) => {
-    await db.update(auditLog).set({ relatedSeq: null });
-    await db.delete(auditLog);
-  });
-  await owner.update(auditChainHead).set({ nextSeq: 0n, headHash: Buffer.alloc(32) });
-  // Kept from the log, and gone with it.
-  await owner.delete(vaultReleases);
-  await owner.delete(vaultGrants);
-  await owner.delete(vaultMembers);
-  await owner.delete(dismissedKeys);
-  await owner.update(secrets).set({ currentVersionId: null });
-  await run(owner, sql`DELETE FROM secret_versions`);
-  await owner.delete(secrets);
-  await owner.delete(environments);
-  await owner.delete(projects);
-  forgetLogHeads();
+  await owner.execute(sql`TRUNCATE ${sql.join(TABLES.map((table) => sql.identifier(getTableName(table))), sql`, `)} RESTART IDENTITY CASCADE`);
 }
 
-/** A project with two environments, and secrets in them on demand, as the app would have made them. */
-export async function places(owner: Database) {
-  const { environments, secrets } = tablesOf(owner);
-  const project = await newProject(owner);
-  const [dev, prod] = [randomUUID(), randomUUID()];
-  await owner.insert(environments).values([
-    { id: dev, projectId: project, slug: 'dev', name: 'Development' },
-    { id: prod, projectId: project, slug: 'prod', name: 'Production' },
-  ]);
-  let n = 0;
-  /** A new secret's ref, its row committed. */
-  const secret = async (environmentId: string, key = 'DATABASE_URL'): Promise<SecretRef> => {
-    const id = randomUUID();
-    await owner.insert(secrets).values({ id, projectId: project, environmentId, key: `${key}_${++n}` });
-    return { projectId: project, environmentId, secretId: id, version: 1, path: `p-${project.slice(0, 8)}/${environmentId === dev ? 'dev' : 'prod'}/${key}_${n}` };
-  };
-  return { project, dev, prod, secret };
-}
-
-/** A project of its own, with one environment, for a grant somewhere else. */
-export async function newProject(owner: Database): Promise<string> {
-  const { projects } = tablesOf(owner);
-  const id = randomUUID();
-  await owner.insert(projects).values({ id, slug: `p-${id.slice(0, 8)}`, name: 'Project' });
-  return id;
-}
-
-export async function newEnvironment(owner: Database, projectId: string): Promise<string> {
-  const { environments } = tablesOf(owner);
-  const id = randomUUID();
-  await owner.insert(environments).values({ id, projectId, slug: `e-${id.slice(0, 8)}`, name: 'Environment' });
-  return id;
-}
-
-/** Commit fixture versions, as the app would, before asking the vault to open them. */
-export async function storedVersions(owner: Database, items: { secret: SecretRef; wrapped: WrappedKey }[]): Promise<{ secretVersionId: string }[]> {
-  const { secretVersions } = tablesOf(owner);
-  return Promise.all(items.map(async ({ secret, wrapped }) => {
-    await owner.insert(secretVersions).values({
-      id: randomUUID(), secretId: secret.secretId, version: secret.version, envelopeVersion: 1,
-      ciphertext: Buffer.from('fixture'), iv: Buffer.alloc(12), authTag: Buffer.alloc(16),
-      wrappedDek: Buffer.from(wrapped.bytes, 'base64'), kekProvider: wrapped.kekProvider,
-      kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, createdBy: 'user:root@acme.example', sensitive: secret.sensitive === true,
-    }).onConflictDoNothing({ target: [secretVersions.secretId, secretVersions.version] });
-    const [row] = await owner.select().from(secretVersions).where(and(eq(secretVersions.secretId, secret.secretId), eq(secretVersions.version, secret.version)));
-    assert.equal(row.wrappedDek.toString('base64'), wrapped.bytes, 'fixture version already has another wrapped key');
-    return { secretVersionId: row.id };
-  }));
+/** Rows of a hand-written query. */
+export function rows<Row>(db: Database, query: SQL): Promise<Row[]> {
+  return rowsOf<Row>(db, query);
 }

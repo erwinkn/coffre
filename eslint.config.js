@@ -38,21 +38,14 @@ const uiBoundaries = {
  * what opens a database from a URL only in its Node entry, since the Worker
  * cannot load it.
  */
-function vaultBoundaries({ drizzle = false, connect = false } = {}) {
-  return {
-    paths: connect
-      ? []
-      : [
-          {
-            name: '@coffre/db/connect',
-            message: 'Only src/node.ts opens a database from a URL; the Worker builds its own from Hyperdrive.',
-          },
-        ],
-    patterns: [
-      ...(drizzle ? [] : [{ ...noDrizzle, message: "The vault's queries live in src/store.ts, and a decision's read in src/snapshot.postgres.ts; add or extend one there." }]),
-    ],
-  };
-}
+const vaultBoundaries = {
+  paths: [
+    {
+      name: '@coffre/db/connect',
+      message: 'Only src/node.ts opens a database from a URL; the Worker builds its own from Hyperdrive.',
+    },
+  ],
+};
 
 /**
  * A relative import stays inside its package: another package is imported by
@@ -117,31 +110,16 @@ export default defineConfig([
     },
   },
   {
-    // The vault's queries are in its store, and its Worker cannot load what
-    // opens a database on Node.
+    // The vault's Worker cannot load what opens a database on Node. Drizzle
+    // is not confined within the vault: an operation names its rows with
+    // Drizzle's conditions, and has no database to run a query on
+    // (`Operation`, in src/change.ts).
     name: 'coffre/vault-boundaries',
     files: ['packages/vault/src/**/*.ts'],
-    ignores: ['packages/vault/src/store.ts', 'packages/vault/src/snapshot.*.ts', 'packages/vault/src/node.ts'],
+    ignores: ['packages/vault/src/node.ts'],
     ...parsing,
     rules: {
-      'no-restricted-imports': ['error', vaultBoundaries()],
-    },
-  },
-  {
-    name: 'coffre/vault-store',
-    // Its store, and a decision's one read, a statement per dialect (snapshot.ts).
-    files: ['packages/vault/src/store.ts', 'packages/vault/src/snapshot.*.ts'],
-    ...parsing,
-    rules: {
-      'no-restricted-imports': ['error', vaultBoundaries({ drizzle: true })],
-    },
-  },
-  {
-    name: 'coffre/vault-node',
-    files: ['packages/vault/src/node.ts'],
-    ...parsing,
-    rules: {
-      'no-restricted-imports': ['error', vaultBoundaries({ connect: true })],
+      'no-restricted-imports': ['error', vaultBoundaries],
     },
   },
   {

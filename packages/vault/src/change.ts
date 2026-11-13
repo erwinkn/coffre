@@ -1,0 +1,191 @@
+import type { Database } from '@coffre/db';
+import { rowsOf } from '@coffre/db/dialect';
+import { sql, type SQL } from 'drizzle-orm';
+
+import { pending, type Entry, type Said } from './entry.ts';
+import { fromWire, nameOf, seal, sealedBy, shapeOf, toWire, type Fresh, type Key, type Row, type Sealed, type Wire } from './rows.ts';
+
+/**
+ * A change: anything that writes (docs/design/0.16.md, "Operations"). Every
+ * one runs the same way, in two database calls.
+ *
+ * 1. One read of the rows it depends on. A row whose MAC is not the vault's
+ *    is not a row: no decision sees it.
+ * 2. The decision, one function of those rows.
+ * 3. One write, under the change lock: it reads the same rows again, and
+ *    only if each still carries the MAC first read does it write the new
+ *    rows and the log entry. Otherwise nothing is written, and the change
+ *    starts again.
+ *
+ * So what an operation says is what it reads and how it decides. Reading
+ * again, comparing, writing, sealing each row and logging what it replaced
+ * are here, once.
+ */
+
+/** The vault as it runs: its database, its keys (the first seals, each verifies), its clock, and the signer's wake-up. */
+export type Running = {
+  db: Database;
+  keys: readonly Key[];
+  now(): number;
+  /** Told the hash of each entry once it is committed. It does not hold the reply. */
+  wake(hash: Buffer): void;
+};
+
+/**
+ * Rows a decision depends on: those of `table` that `where` holds for, a
+ * condition on its columns as Drizzle writes one (`eq(principals.id, id)`).
+ * Each an index lookup, and few.
+ */
+export type Part<T extends Sealed = Sealed> = { table: T; where: SQL };
+
+export function part<T extends Sealed>(table: T, where: SQL | undefined): Part<T> {
+  if (where === undefined) throw new Error('a part reads the rows a condition holds for, never a whole table by default');
+  return { table, where };
+}
+
+export type Parts = Readonly<Record<string, Part>>;
+
+/** What a read found, by part: the rows whose MAC is the vault's. */
+export type Seen<P extends Parts> = { [K in keyof P]: Row<P[K]['table']>[] };
+
+/**
+ * One row written. A row is put in place of the one read (`was`), which has
+ * its key, or as a new one; or the row read is dropped. Within one change a
+ * row is written once, and a unique value one row gives up is not taken by
+ * another: Postgres checks each as it goes, in no set order.
+ */
+export type Write = { table: Sealed; row: object | null; was: object | null };
+
+export function put<T extends Sealed>(table: T, row: Fresh<T>, was: Row<T> | null = null): Write {
+  return { table, row, was };
+}
+
+export function drop<T extends Sealed>(table: T, was: Row<T>): Write {
+  return { table, row: null, was };
+}
+
+/** Why a change is not made. It writes nothing, the log included. */
+export type Refusal = { refused: string };
+
+export type Plan<A> = { writes: readonly Write[]; entry: Said; answer: A };
+
+export type Operation<P extends Parts, A> = {
+  read: P;
+  /** From the rows read and the time, and nothing else. */
+  decide(seen: Seen<P>, at: number): Plan<A> | Refusal;
+};
+
+/** A change read and decided, not yet written. */
+export type Prepared<A> = { answer: A; statement: SQL; hash: Buffer };
+
+/**
+ * Only changes take it, each for its one write. Under it a write reads
+ * what its decision read as of now: every change before it has committed,
+ * and none runs beside it. `coffre`, in ASCII.
+ */
+const CHANGE_LOCK = sql.raw('0x636f66667265::bigint');
+
+/**
+ * How often a change starts again before it answers busy. Each new start
+ * means another change committed to the very rows this one read, so several
+ * in a row is a crowd on those rows, not bad luck.
+ */
+const ATTEMPTS = 5;
+
+export class Busy extends Error {
+  override readonly name = 'Busy';
+}
+
+const id = (name: string) => sql.identifier(name);
+const list = (names: readonly { name: string }[], of?: string) => sql.join(names.map(({ name }) => (of === undefined ? id(name) : sql`${id(of)}.${id(name)}`)), sql`, `);
+
+/** A change's read and its decision. */
+export async function prepare<P extends Parts, A>(vault: Running, operation: Operation<P, A>): Promise<Prepared<A> | Refusal> {
+  const at = vault.now();
+  const parts = Object.entries(operation.read);
+  const found = await rowsOf<{ part: string; row: Wire }>(
+    vault.db,
+    sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`), sql` UNION ALL `),
+  );
+  const seen = Object.fromEntries(parts.map(([name]) => [name, [] as object[]]));
+  const read = new Set<object>();
+  const tokens: string[] = [];
+  for (const { part: name, row: wire } of found) {
+    const { table } = operation.read[name]!;
+    const row = fromWire(table, wire) as Row<Sealed> & { mac: Buffer };
+    tokens.push(`${name}:${row.mac.toString('hex')}`);
+    if (sealedBy(vault.keys, table, row) === undefined) continue;
+    seen[name]!.push(row);
+    read.add(row);
+  }
+  const plan = operation.decide(seen as Seen<P>, at);
+  if ('refused' in plan) return plan;
+
+  const key = vault.keys[0]!;
+  const rows: Entry['rows'][number][] = [];
+  const written = new Map<string, { table: Sealed; inserts: Wire[]; updates: Wire[]; deletes: Wire[] }>();
+  for (const { table, row, was } of plan.writes) {
+    if (was !== null && !read.has(was)) throw new Error(`a change of ${shapeOf(table).name} replaces a row its decision did not read`);
+    const name = nameOf(table, row ?? was!);
+    if (row !== null && was !== null && nameOf(table, was) !== name) throw new Error(`a change of ${name} moves its key`);
+    if (rows.some((other) => other.row === name)) throw new Error(`a change writes ${name} twice`);
+    const mac = row === null ? null : seal(key, table, row);
+    rows.push({ row: name, was: was === null ? null : (was as { mac: Buffer }).mac.toString('hex'), now: mac?.toString('hex') ?? null });
+    const shape = shapeOf(table);
+    const group = written.get(shape.name) ?? { table, inserts: [], updates: [], deletes: [] };
+    written.set(shape.name, group);
+    if (row === null) group.deletes.push(toWire(table, was!, shape.key));
+    else (was === null ? group.inserts : group.updates).push({ ...toWire(table, row), mac: `\\x${mac!.toString('hex')}` });
+  }
+  const entry = pending(key, plan.entry, at, rows);
+
+  // The same rows, read again by the same conditions: one that changed, went or came since makes the lists differ.
+  const again = sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || encode(${table}.mac, 'hex') FROM ${table} WHERE ${where}`), sql` UNION ALL `);
+  const statements: SQL[] = [sql`same AS (SELECT (SELECT coalesce(array_agg(x ORDER BY x COLLATE "C"), '{}') FROM (${again}) seen (x)) = ${sql.param(tokens.sort())}::text[] AS ok)`];
+  for (const { table, inserts, updates, deletes } of written.values()) {
+    const shape = shapeOf(table);
+    const from = (wires: Wire[]) => sql`jsonb_populate_recordset(null::${table}, ${JSON.stringify(wires)}::jsonb) j, same WHERE same.ok`;
+    const onKey = sql.join(shape.key.map(({ name }) => sql`${table}.${id(name)} = j.${id(name)}`), sql` AND `);
+    const stored = shape.columns.filter((column) => !column.generated);
+    // A row keeps its key, and what only says when it was last seen, which a use may have moved on since the read.
+    const set = shape.columns.filter((column) => (column.sealed || column.name === 'mac') && !column.primary);
+    if (inserts.length > 0) statements.push(sql`w${sql.raw(String(statements.length))} AS (INSERT INTO ${table} (${list(stored)}) SELECT ${list(stored, 'j')} FROM ${from(inserts)})`);
+    if (updates.length > 0) statements.push(sql`w${sql.raw(String(statements.length))} AS (UPDATE ${table} SET (${list(set)}) = ROW(${list(set, 'j')}) FROM ${from(updates)} AND ${onKey})`);
+    if (deletes.length > 0) statements.push(sql`w${sql.raw(String(statements.length))} AS (DELETE FROM ${table} USING ${from(deletes)} AND ${onKey})`);
+  }
+  statements.push(sql`entry AS (INSERT INTO log_pending (kept, body, mac) SELECT ${entry.kept}, ${entry.body}, decode(${entry.mac.toString('hex')}, 'hex') FROM same WHERE same.ok)`);
+  return { answer: plan.answer, statement: sql`WITH ${sql.join(statements, sql`, `)} SELECT ok FROM same`, hash: entry.hash };
+}
+
+/** A part's name goes into the statement as written, so it is a plain word. */
+function label(name: string): string {
+  if (!/^[a-z][A-Za-z0-9]*$/.test(name)) throw new Error(`a part's name is a plain word, not ${JSON.stringify(name)}`);
+  return name;
+}
+
+/**
+ * A prepared change's write. False when a row it read has changed since:
+ * nothing was written. The lock is taken by a statement of its own, ahead
+ * of the write: a statement sees the database as of when it starts, so a
+ * write that took the lock itself would compare against rows from before
+ * it waited.
+ */
+export async function commit<A>(vault: Running, prepared: Prepared<A>): Promise<boolean> {
+  const ok = await vault.db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${CHANGE_LOCK})`);
+    const [same] = await rowsOf<{ ok: boolean }>(tx, prepared.statement);
+    return same!.ok;
+  });
+  if (ok) vault.wake(prepared.hash);
+  return ok;
+}
+
+/** Make a change: its answer, once committed, or why it is refused. */
+export async function change<P extends Parts, A>(vault: Running, operation: Operation<P, A>): Promise<{ answer: A } | Refusal> {
+  for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
+    const prepared = await prepare(vault, operation);
+    if ('refused' in prepared) return prepared;
+    if (await commit(vault, prepared)) return { answer: prepared.answer };
+  }
+  throw new Busy(`a change started ${ATTEMPTS} times over, each time behind another change to the rows it read`);
+}
