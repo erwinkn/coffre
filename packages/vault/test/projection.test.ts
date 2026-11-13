@@ -16,6 +16,7 @@ import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { canonical } from '../src/inputs.ts';
 import { callRebuild, logStore } from '../src/log-store.ts';
 import { vaultLogKey } from '../src/log.ts';
+import { eventObject, eventRow, findingEventId } from '../src/note.ts';
 import { changeEvent, projectAudit, rebuildRow } from '../src/projection.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
@@ -375,6 +376,80 @@ test("a carried entry's credential is its own, else its detail's, as audit_log's
   const named = randomUUID();
   const placed = { ...parsed, reported: { ...parsed.reported, places: { ...parsed.reported.places, versionId: named } } };
   assert.equal(change(canonical(placed), 'token:ci')?.version, named);
+});
+
+/** An event as `log_events` writes it, the vault's or the app's (note.ts), signed under the vault's log key. Its number. */
+async function noted(input: Parameters<typeof eventRow>[2], author: 'app' | 'vault', at = Date.now()): Promise<bigint> {
+  const row = eventRow(logMacKey(SIGNING_KEY), at, input, author);
+  const [written] = await rows<{ n: string }>(db.vault, sql`SELECT (log_events(ARRAY[${row.requestId}]::text[], ARRAY[${row.at}]::bigint[],
+    ARRAY[${row.actor}]::text[], ARRAY[${row.payload}]::text[], ARRAY[${row.mac}]::bytea[]))[1]::text AS n`);
+  return BigInt(written!.n);
+}
+
+test("an event is listed from its payload once a checkpoint seals it: who decided its author, the row's actor and time; it records no write, and a rebuild lists it again", async () => {
+  const tick = await signer();
+  const nowhere = { projectId: null, environmentId: null, secretId: null, versionId: null };
+  const [project, environment, secret, version, credential] = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+  const linked = {
+    id: randomUUID(), requestId: 'req-link', action: 'account.link', allowed: true, code: null, actor: ADA, subject: null, places: nowhere,
+    credential, operationId: null, sourceIp: '203.0.113.7', detail: { provider: 'github', confirmedBy: 'passkey', confirmedAt: '2026-11-13T02:00:00.000Z' },
+  };
+  const refused = {
+    id: randomUUID(), requestId: 'req-read', action: 'secret.read', allowed: false, code: 'no_grant', actor: `token:${credential}`, subject: null,
+    places: { projectId: project, environmentId: environment, secretId: secret, versionId: version }, credential, operationId: randomUUID(), sourceIp: null, detail: { key: 'DB_URL' },
+  };
+  const finding = {
+    id: findingEventId(null, 'late'), requestId: null, action: 'audit.check', allowed: false, code: 'late', actor: 'system:vault', subject: null, places: nowhere,
+    credential: null, operationId: null, sourceIp: null, detail: {},
+  };
+  const numbers = [await noted(linked, 'app'), await noted(refused, 'vault'), await noted(finding, 'vault')];
+  // The same event again: its first number, one row.
+  assert.equal(await noted(linked, 'app'), numbers[0]);
+  // Unsealed, nothing; sealed, each once.
+  await projectAll();
+  assert.equal(await count(sql`SELECT count(*) AS n FROM audit_events WHERE log = 15`), 0);
+  await tick();
+  await projectAll();
+  const listed = await events(sql`log = 15`);
+  const columns = (r: Row) => [String(r.number), r.author, r.action, r.allowed, r.code, r.actor, r.credential, r.project, r.environment, r.secret, r.version, r.request_id, r.operation_id, r.source_ip];
+  assert.deepEqual(listed.map(columns), [
+    [String(numbers[0]), 'app', 'account.link', true, null, ADA, credential, null, null, null, null, 'req-link', null, '203.0.113.7'],
+    [String(numbers[1]), 'vault', 'secret.read', false, 'no_grant', `token:${credential}`, credential, project, environment, secret, version, 'req-read', refused.operationId, null],
+    [String(numbers[2]), 'vault', 'audit.check', false, 'late', 'system:vault', null, null, null, null, null, null, null, null],
+  ]);
+  assert.deepEqual(JSON.parse(String(listed[0]!.detail)), linked.detail);
+  assert.deepEqual([...(listed[1]!.places as string[])].sort(), [project, environment, secret].sort());
+  const ring = alone(await keys());
+  for (const r of listed) assert.ok(eventVouched(ring, eventOf(r)));
+  assert.equal(await count(sql`SELECT count(*) AS n FROM audit_member_keys`), 0);
+  // Replayed from the start, the same rows, and the rebuild's own.
+  const before = listed.map((r) => `${String(r.number)}:${String(r.mac)}`);
+  await callRebuild(db.vault, rebuildRow(logMacKey(SIGNING_KEY), { actor: ROOT, requestId: 'rebuild-events' }, Date.now()));
+  await tick();
+  await projectAll();
+  const again = await events(sql`log = 15 AND action <> 'audit.rebuild'`);
+  assert.deepEqual(again.map((r) => `${String(r.number)}:${String(r.mac)}`), before);
+});
+
+test("an event's payload under another object than its id's is no event, and lists nothing", () => {
+  const id = randomUUID();
+  const payload = canonical({
+    action: 'secret.read', allowed: false, author: 'vault', code: 'no_grant', credential: null, detail: {}, op: 'event', operationId: null,
+    places: { environmentId: null, projectId: null, secretId: null, versionId: null }, ref: { id, kind: 'event' }, requestId: null, sourceIp: null, subject: null,
+  });
+  assert.equal(changeEvent({ tree: 'changes', number: 7n, at: 1, columns: [7n, id, `secret:${randomUUID()}`, ADA, payload] }), null);
+  assert.equal(changeEvent({ tree: 'changes', number: 7n, at: 1, columns: [7n, randomUUID(), eventObject(id), ADA, payload] }), null);
+  assert.equal(changeEvent({ tree: 'changes', number: 7n, at: 1, columns: [7n, id, eventObject(id), ADA, payload] })?.author, 'vault');
+});
+
+test("an event with no credential or code of its own takes its detail's, as a carried entry does", () => {
+  const [id, credential] = [randomUUID(), randomUUID()];
+  const payload = canonical({
+    action: 'secret.read', allowed: false, author: 'vault', code: null, credential: null, detail: { credentialId: credential, reason: 'no_grant' }, op: 'event',
+    operationId: null, places: { environmentId: null, projectId: null, secretId: null, versionId: null }, ref: { id, kind: 'event' }, requestId: null, sourceIp: null, subject: null,
+  });
+  const event = changeEvent({ tree: 'changes', number: 7n, at: 1, columns: [7n, id, eventObject(id), ADA, payload] });
+  assert.deepEqual([event?.credential, event?.code], [credential, 'no_grant']);
 });
 
 test('a projector another overtook writes nothing (the cursor no longer where its batch started)', async () => {

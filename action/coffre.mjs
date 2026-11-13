@@ -1256,7 +1256,7 @@ function githubEnvironment(entries, nextDelimiter = () => `coffre_${randomUUID()
 	return out;
 }
 //#endregion
-//#region ../client/dist/src-DVRJA0BD.js
+//#region ../client/dist/src-DEhIZXyW.js
 /** Two colons or more, in hex: an IPv6 address, as `::1` or `2001:db8::1:443` with its port. */
 const IPV6 = /[0-9a-f]*:[0-9a-f]*:[0-9a-f:]*/i;
 const TIMEOUT_OR_REFUSAL = /* @__PURE__ */ new Set([
@@ -1850,7 +1850,9 @@ set: (member, access) => call("PATCH /access/:member", { member }, access) },
 			* the whole instance: the audit watch's finding, inside the range, stays
 			* in the log, and its anchor goes on past them.
 			*/
-			acceptLoss: (range) => call("POST /audit/loss", {}, range)
+			acceptLoss: (range) => call("POST /audit/loss", {}, range),
+			/** Start the audit projection over, as an Owner of the whole instance: the vault records who asked. */
+			rebuild: () => call("POST /audit/rebuild", {}, void 0)
 		}
 	};
 }
@@ -7464,7 +7466,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload-CQib9NFS.js
+//#region ../client/dist/workload-VGGT4jue.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;
@@ -14785,15 +14787,23 @@ const SECTIONS = [
 	},
 	{
 		title: "Audit",
-		entries: [{
-			command: "audit",
-			usage: ["audit [<path>] [--limit N] [--actor <id>] [--denied] [--detail]", "      [--before <next>] [--json]"],
-			about: ["a project, environment or KEY: market/prod/DATABASE_URL lists", "who read or changed it, reads of several that listed it included"]
-		}, {
-			command: "audit accept-loss",
-			usage: ["audit accept-loss <from> <to>"],
-			about: ["as an owner of the whole instance: entries <from> to <to> are lost for", "good, a cut with no backup; the audit watch's finding stays logged"]
-		}]
+		entries: [
+			{
+				command: "audit",
+				usage: ["audit [<path>] [--limit N] [--actor <id>] [--denied] [--detail]", "      [--before <next>] [--json]"],
+				about: ["a project, environment or KEY: market/prod/DATABASE_URL lists", "who read or changed it, reads of several that listed it included"]
+			},
+			{
+				command: "audit accept-loss",
+				usage: ["audit accept-loss <from> <to>"],
+				about: ["as an owner of the whole instance: entries <from> to <to> are lost for", "good, a cut with no backup; the audit watch's finding stays logged"]
+			},
+			{
+				command: "audit rebuild",
+				usage: ["audit rebuild"],
+				about: ["as an owner of the whole instance: the audit pages' listing started over;", "the vault records who asked, and lists every log again, the oldest too"]
+			}
+		]
 	},
 	{
 		title: "Verify",
@@ -15793,7 +15803,8 @@ const EVERY_ROUTE = {
 	"GET /audit/trees": true,
 	"GET /audit/reads": true,
 	"GET /audit/keys": true,
-	"POST /audit/loss": true
+	"POST /audit/loss": true,
+	"POST /audit/rebuild": true
 };
 /**
 * Every route as a method and a URL, each parameter a made-up value: what
@@ -18842,6 +18853,12 @@ async function acceptLoss(args) {
 	});
 	process.stdout.write(`entries ${from} to ${to} accepted as lost: the audit watch goes on from entry ${resumes ?? 0}\n`);
 }
+/** `coffre audit rebuild`: the audit pages' listing started over, its record naming who asked. */
+async function rebuildAudit(args) {
+	if (args.length > 0) fail("usage: coffre audit rebuild");
+	const { number } = await client().audit.rebuild();
+	process.stdout.write(`the audit listing starts over (its record is change ${number}): the pages say how far it has listed again\n`);
+}
 /** One check of the instance, named, or chosen on the terminal (`verify/index.ts`). */
 async function verify(args) {
 	const [named, ...more] = args;
@@ -19021,6 +19038,7 @@ const COMMANDS = {
 	serve: (args) => serve(args, sessionFlags.url, fetching),
 	audit,
 	"audit accept-loss": acceptLoss,
+	"audit rebuild": rebuildAudit,
 	verify,
 	"verify instance": (args) => verify(["instance", ...args]),
 	"verify keys": (args) => verify(["keys", ...args]),

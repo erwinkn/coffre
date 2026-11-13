@@ -9,6 +9,7 @@ import { cursorMac, cursorVouched, eventMac, type AuditCursor, type AuditEvent }
 import { logObject } from './inputs.ts';
 import { keyringOf, type Keyring, type VerifierKeys } from './keyring.ts';
 import { entryMac, type LogMacKey } from './log-entry.ts';
+import { EVENT_KIND, eventObject } from './note.ts';
 import { derive, newestHeld, NOWHERE, rangeAt, sealedCut, sealedRange, type ReadRow, type ReadsStore } from './reads.ts';
 
 // The audit projector (0.16; docs/design/state-rows.md, sections 2 and 6; formal/Reads.tla): the one job that
@@ -34,9 +35,9 @@ import { derive, newestHeld, NOWHERE, rangeAt, sealedCut, sealedRange, type Read
 // a read; and of the changes, those that `audit_log` does not record too, which today's pages list from `log_changes`
 // (`RECORDS`; here, from the payload's top-level keys: `SHAPES`): a sign-in through a trust binding, the vault's token
 // issues, revokes and sign-outs, the two-trip key writes and first adds and their refusals, and the rebuilds
-// (`rebuildAudit`); and a change that carries its entry (`reported`), from that entry alone, ahead of all of these. A
-// site that hands its entry to its change stops appending it to `audit_log` in the same commit, so no act is listed
-// twice; every other change lists nothing.
+// (`rebuildAudit`); a change that carries its entry (`reported`), from that entry alone, ahead of all of these; and
+// every event (note.ts), from its payload. A site that hands its entry to its change, or writes it as an event, stops
+// appending it to `audit_log` in the same commit, so no act is listed twice; every other change lists nothing.
 
 /** A member's newest read or write of a version of a key (`audit_member_keys`). */
 export type MemberKey = { principal: string; secret: string; version: string; wrote: boolean; at: number; number: bigint };
@@ -441,14 +442,14 @@ export const changeEvent = (entry: LogEntry): Omit<AuditEvent, 'mac'> | null => 
 
 /**
  * A change as a row, for those the pages list from `log_changes` (see the
- * top): a change that carries its entry, from it; the vault's own records,
+ * top): an event, from its payload; a change that carries its entry, from it; the vault's own records,
  * as the server's audit page shows them today (`sealedView`, `twoTripView`,
  * `refusalView` in packages/server/src/api/audit.ts); null for every other.
  * `at` is the vault's time when it asked. With the value its member wrote
  * (`audit_member_keys`), for a key write that supplied one.
  */
 function changeRow(entry: LogEntry): { event: Omit<AuditEvent, 'mac'>; wrote: { secret: string; version: string } | null } | null {
-  const [, requestId, , actor, payloadText] = entry.columns as [bigint, string, string, string, string];
+  const [, requestId, object, actor, payloadText] = entry.columns as [bigint, string, string, string, string];
   if (typeof payloadText !== 'string' || typeof actor !== 'string') return null;
   const payload = parse(payloadText);
   const ref = record(payload.ref);
@@ -458,6 +459,12 @@ function changeRow(entry: LogEntry): { event: Omit<AuditEvent, 'mac'>; wrote: { 
     const [secret, version] = [ref?.kind === 'secret' && payload.op === 'secret.write' ? uuid(ref.id) : null, uuid(payload.version)];
     return secret === null || version === null ? null : { secret, version };
   };
+  // An event (note.ts: its object its own, from its id, and its op `event`): the same fields as a carried entry, at
+  // its payload's top level, `author` among them, and the row's actor and time. It records no write.
+  if (payload.op === EVENT_KIND && ref?.kind === EVENT_KIND && ref.id === requestId && object === eventObject(requestId)) {
+    const event = carriedEvent(entry, actor, payload, null);
+    return event === null ? null : { event, wrote: null };
+  }
   // A change carrying its entry is listed from that entry alone, before the records below: one row whatever else its
   // payload holds (a two-trip write's record beside it), as `reported` is a key at the top level, never by text. A
   // `reported` of no entry's shape lists nothing, and no record is read in its place. The entry is whole (its detail
@@ -478,8 +485,8 @@ function changeRow(entry: LogEntry): { event: Omit<AuditEvent, 'mac'>; wrote: { 
 }
 
 /**
- * A carried entry as a row (state-rows.md, "A change carries its entry"): an event's fields, as `note` takes them,
- * with the change's own actor and time; the places it carries, as they were when it was written, but the version a
+ * A carried entry or an event as a row (state-rows.md, "A change carries its entry"): an event's fields, as `note`
+ * takes them, with the change's own actor and time; the places it carries, as they were when it was written, but the version a
  * key write sealed (`sealed`, the change's own `version`: the app's entry, `reportedPayload`, names it null).
  * Null for an entry of another shape, which the vault never signs.
  */
