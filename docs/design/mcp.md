@@ -434,7 +434,7 @@ drifts.
 
 ## 12. Storage
 
-Three tables on both engines (`packages/db/src/schema.ts`):
+Three tables (`packages/db/src/schema.ts`):
 
 - **`oauth_clients`**: registered clients: ID, name, redirect URIs, created at and from where,
   revoked at. MACed over its ID, name, redirect URIs and revocation, so a database writer can't
@@ -509,6 +509,6 @@ Access tokens and `requestState` have no rows: both are MACed and checked agains
    the next call, each end logged with its reason.
 
 The server's own suites (`packages/server/test/mcp-endpoint.test.ts`, `mcp-oauth.test.ts`,
-`mcp-approvals.test.ts`, `mcp-values.test.ts` and others, on both engines) test each piece and
+`mcp-approvals.test.ts`, `mcp-values.test.ts` and others) test each piece and
 run the official client against coffre, under the integration fixture that rejects a vault call
 made inside a transaction.

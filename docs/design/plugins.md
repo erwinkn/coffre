@@ -183,5 +183,5 @@ polling 10 environments every 15 minutes makes about 1,000 entries a day. A read
 adapter is not marked as such.
 
 **Checks.** `packages/server/test/vault-kv.test.ts` and `vault-kv-login.test.ts` send requests as
-HashiCorp's Go client sends them, on Postgres and SQLite. `dev/vault-kv/main.go` makes ESO's exact
+HashiCorp's Go client sends them. `dev/vault-kv/main.go` makes ESO's exact
 calls against `pnpm dev`, by hand; the suite does not run it.
