@@ -747,13 +747,14 @@ tests and the `Reads.tla` scenario. Lost: its table, triggers and migration, whi
    transaction. It refuses unless `/readyz` answers `migrating` at this release, and it refuses a database that is not
    a cut-over 0.15.0 (no cutover change in `log_changes`, or a schema past 0049 that is not 0.16's). Its first
    statements lock `audit_chain_head`, `audit_log`, `log_changes` and `log_uses`, ACCESS EXCLUSIVE and held to the
-   commit, and replace the sequence both newer logs number from: `log_number` is dropped, and `log_next` starts where
-   it stood. Then it compares the three numbers to the mark and refuses if one moved, or with no mark ("run the
+   commit. Then it compares the three numbers to the mark and refuses if one moved, or with no mark ("run the
    precheck, then back up"), and drops the mark. Then it creates the tables; fills `settings` and `log_keys` from the
    newest entries, unsealed, and the policy's protected set (section 3); drops the indexes, triggers, functions and
-   tables of section 5; revokes INSERT on `audit_log`. It copies nothing into the projections. A lock it cannot have
-   within 500 ms ends the transaction (55P03): the migrator tries 5 times, a second apart, then fails naming the
-   sessions that hold the tables, and has written nothing. Nothing in it depends on an index built after its commit.
+   tables of section 5; revokes INSERT on `audit_log`; and, anywhere in the same transaction, replaces the sequence
+   both newer logs number from (`log_number` dropped, `log_next` started where it stood; below). It copies nothing
+   into the projections. A lock it cannot have within 500 ms ends the transaction (55P03): the migrator tries 5 times,
+   a second apart, then fails naming the sessions that hold the tables, and has written nothing. Nothing in it depends
+   on an index built after its commit.
 5. **The vault's step**, on its first call, while the app answers 503 `upgrading` at its one door. It is the same size
    whatever the log holds. The vault cannot read the watch's store, so the app reads it at the door and hands the
    checkpoint it holds in on the call that runs the step; the vault verifies its own signature on it and requires the
@@ -795,14 +796,30 @@ Each log's numbers come from one place, and the migration removes both:
   `revoke_credential`, `log_retention`, `use_credential` among them). With the sequence gone the held call of the
   measurement fails, `relation "public.log_number" does not exist`, its plan cached or not. It has to go under another
   name: dropped and created again as `log_number`, a body planned after the commit finds the new one and writes.
-- *A call sent after the commit must not resolve.* Seven functions are called in a statement of their own, with no
-  `audit_log` append beside them: `sign_in`, `issue_token`, `change_bindings`, `revoke_credential`, `use_credential`,
-  `use_batch`, `log_retention`. 0.16 keeps none of them under 0.15.0's argument list, nor with trailing defaults a
-  0.15.0 call would fit. On main all seven still resolve (`use_credential`'s 31 arguments take a call of 27), so this
-  is work: section 5's three overloads go, A1's two numbers change two more, V2a owns the uses'.
+- *A call sent after the commit must not resolve.* One rule: no SQL function a runtime login calls has a defaulted
+  argument, and none of the seven that append in a statement of their own, with no `audit_log` append beside them,
+  keeps 0.15.0's argument list. On main all seven still take a 0.15.0 call. The judge is a test: 0.15.0 started once
+  more on the migrated database, every write refused. Its real use is the operator who redeploys 0.15.0 without
+  restoring, more than a straggler.
 
-A running 0.15.0 checkpointer can still raise the floor or write a checkpoint (`close_one`, `write_checkpoint`), and a
-request can still stamp a last use: rows in the form 0.16 writes them, none of which the rule above counts.
+| Function, with 0.15.0's argument count | What changes its list in 0.16 | PR |
+|---|---|---|
+| `sign_in` (35) | The 35-argument overload goes; 0.16's takes 48 (passkeys, migration 0075) | V2b |
+| `issue_token` (28) | The overload goes; 0.16's takes 29 (`p_passkey`, 0064), then two policy numbers for one | V2b, A1 |
+| `change_bindings` (53) | The overload goes; 0.16's takes 54 (`p_sweep`, 0079), then the two numbers and the entries it carries | V2b, A1, the carrier |
+| `revoke_credential` (16) | The policy revision becomes two numbers: 17 | A1 |
+| `use_credential` (27) | Main's 31 lose their four defaults, which take a call of 27 today; rewritten as two statements | V2a |
+| `use_batch` (19) | Unchanged since 0048. If V2b reads the cap from its row, the two cap arguments leave its list and `use_credential`'s; to confirm | V2b, open |
+| `log_retention` (4) | Nothing: unchanged since 0027, and no PR of this plan touches it | none, open |
+
+The last two are the ones whose list could stay 0.15.0's. No argument is invented for them: either the list changes
+for a reason of its own, or the function takes another name, which is a part of what a call resolves.
+
+A running 0.15.0 checkpointer can still raise the floor or write a checkpoint (`close_one`, `write_checkpoint`, whose
+lists do not change), and a request can still stamp a last use. The vault's step reads neither the floor nor a
+checkpoint of the newer logs. A checkpoint written so is one 0.16 takes as its own: the same key, the same row, over
+log rows the migration did not touch; a floor raised only refuses an older `at`. The refusal test does not cover
+these, and need not: none is a write the rule above counts.
 
 **The projector lists the old log; the migration does not.** From the anchor it walks `audit_log` backward, 5,000
 entries a batch. An entry's hash covers its content and the hash before it (`entryHash`), so each batch is
