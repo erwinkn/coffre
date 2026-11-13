@@ -1,0 +1,7 @@
+# Added by scripts/validate.mjs: the Postgres of each step of one run joins that
+# run's network, which validate.mjs creates and removes, so a run takes one of
+# Docker's subnets however many steps it runs side by side (the host has about 31).
+networks:
+  default:
+    name: ${COFFRE_POSTGRES_NETWORK:?}
+    external: true

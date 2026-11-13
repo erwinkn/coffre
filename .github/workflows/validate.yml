@@ -385,7 +385,11 @@ jobs:
         run: |
           pnpm conformance:workers --browser /usr/bin/google-chrome
 
+  # Off while 0.16.0 ships Workers alone (D198): Node is built and typechecked, nothing more, and `Validate` does
+  # not need it. T270 (0.16.1) turns it back on: drop this `if`, put `node` back in `validate`'s needs, and drop the
+  # consumer's `--skip-conformance node`, as `nodeConformance` in scripts/affected.mjs does for `pnpm validate`.
   node:
+    if: false
     name: Node conformance
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -460,28 +464,12 @@ jobs:
       - name: Name Node.js 26
         run: echo "COFFRE_CLIENT_NODES=$COFFRE_CLIENT_NODES $(command -v node)" >> "$GITHUB_ENV"
       - name: Packed consumer
-        run: pnpm test:consumer --kind ${{ matrix.kind }}
+        # Node's conformance is off until 0.16.1 (T270, the `node` job above); the rest of the Node consumer runs.
+        run: pnpm test:consumer --kind ${{ matrix.kind }} --skip-conformance node
 
-  compat:
-    name: Previous release on this schema (${{ matrix.kind }})
-    strategy:
-      fail-fast: false
-      matrix:
-        # Not node until the newest release runs Node on Postgres: 0.15.0's runs on SQLite (scripts/compat-check.sh).
-        kind: [workers]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Check out the selected revision
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: $/.github/actions/prepare
-        with:
-          # The schema comes from this checkout's sources; the release from npm.
-          build: 'false'
-      - name: The newest release, migrated with this revision's migrations
-        run: pnpm test:compat --kind ${{ matrix.kind }}
+  # `compat` (the newest release migrated with this revision's migrations, `pnpm test:compat`) is off until 0.16.0 is
+  # tagged: 0.16 upgrades offline from exactly 0.15.0 and no 0.15 code serves on its schema (D197). It returns, here and
+  # in `pnpm validate`, with the first change after that tag.
 
   image:
     name: CLI image
@@ -504,7 +492,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [action, pins, checks, tests, matrices, schema, formal, proofs, workers, node, terraform, consumer, compat, image]
+    needs: [action, pins, checks, tests, matrices, schema, formal, proofs, workers, terraform, consumer, image]
     if: always()
     steps:
       - name: Require every job

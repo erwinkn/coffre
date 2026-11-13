@@ -5,8 +5,13 @@
 # workspace in sight, then typecheck and build each one, and hold it to
 # `coffre-conformance`, as its own `pnpm conformance`.
 #
-#   pnpm test:consumer [--kind workers|node] [--port <n>] [<dir>]
+#   pnpm test:consumer [--kind workers|node] [--skip-conformance node] [--built] [--port <n>] [<dir>]
 # <dir> defaults to a new temporary one. Without --kind, exercise both kinds.
+# --skip-conformance leaves out that kind's conformance run, and only that: both
+# gates pass it for Node while 0.16.0 ships Workers alone (T270).
+# --built packs the packages' dist/ as it is, built from this checkout already:
+# pnpm validate's, whose other steps read dist/ while this one runs, and a build
+# empties it first.
 # --port is conformance's: coffre's port, the IdP the next, wrangler's
 # inspector the one after (3082 unless given), for a run beside another.
 #
@@ -24,12 +29,18 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 kinds=(workers node)
+skip_conformance=
+built=false
 port=3082
 while [[ "${1:-}" == --* ]]; do
     case "$1" in
         --kind)
             case "${2:-}" in workers | node) kinds=("$2") ;; *) echo 'consumer-test: --kind must be workers or node' >&2; exit 2 ;; esac
             shift 2 ;;
+        --skip-conformance)
+            case "${2:-}" in workers | node) skip_conformance="$2" ;; *) echo 'consumer-test: --skip-conformance must be workers or node' >&2; exit 2 ;; esac
+            shift 2 ;;
+        --built) built=true; shift ;;
         --port) port="${2:?--port needs a number}"; shift 2 ;;
         *) echo "consumer-test: unknown option $1" >&2; exit 2 ;;
     esac
@@ -75,7 +86,7 @@ vault_runtime=postgresql://coffre_vault_runtime:local-vault-only@127.0.0.1:${COF
 hot_runtime=postgresql://coffre_vault_hot:local-hot-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}
 
 echo '==> build and pack'
-pnpm --dir "$root" build
+[[ "$built" == true ]] || pnpm --dir "$root" build
 packages=(core db client ui server vault cli conformance)
 for name in "${packages[@]}"; do
     pnpm --dir "$root/packages/$name" pack --pack-destination "$work/tarballs" >/dev/null
@@ -168,6 +179,10 @@ for kind in "${kinds[@]}"; do
         grep -E 'Total Upload' "$work/$kind-build.log" | sed 's/^/    /'
     fi
 
+    if [[ "$kind" == "$skip_conformance" ]]; then
+        echo "==> conformance of coffre-$kind: skipped (--skip-conformance)"
+        continue
+    fi
     echo "==> conformance of coffre-$kind"
     pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime" --hot-runtime "$hot_runtime" --port "$port"
 done

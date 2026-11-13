@@ -3,7 +3,8 @@
 # file still run sequentially and retain all their resets and transaction guards.
 # COFFRE_TEST_DATABASE is the base name; a random suffix isolates each run.
 # `--files <file>...` runs only those files, on the same footing: the use
-# matrices (`pnpm test:matrices`), which CI runs in shards (`scripts/matrix-shard.ts`).
+# matrices (`pnpm test:matrices`), which CI runs in shards (`scripts/matrix-shard.ts`),
+# and the files `pnpm validate` picks; `--serial --files <file>...` runs them one at a time.
 # Without it, the files that must run alone (`*.alone.ts`) run after the rest.
 set -euo pipefail
 
@@ -21,6 +22,10 @@ trap 'node --conditions=coffre:source scripts/test-databases.mjs cleanup "$COFFR
 
 files=("scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts")
 concurrency=4
+if [ "${1:-}" = --serial ]; then
+    concurrency=1
+    shift
+fi
 if [ "${1:-}" = --files ]; then
     shift
     # The files side by side share Postgres's connections, each a share of them while it runs
