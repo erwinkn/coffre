@@ -36,6 +36,21 @@ test('an unhandled database error is logged with its message and what Postgres s
   assert.match(String(cause.message), /relation "no_such_table" does not exist/);
 });
 
+test('a constraint a write breaks is logged by its name and its table', async (t) => {
+  const error = await db.owner.transaction(async (tx) => {
+    await tx.execute(sql`CREATE TEMPORARY TABLE logged_probe (id integer CONSTRAINT logged_probe_key PRIMARY KEY) ON COMMIT DROP`);
+    await tx.execute(sql`INSERT INTO logged_probe VALUES (1), (1)`);
+  }).then(
+    () => assert.fail('the insert ran'),
+    (thrown: unknown) => thrown,
+  );
+  const logged: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => void logged.push(args));
+  assert.equal(toErrorBody(error).status, 500);
+  const cause = (logged[0]?.[1] as { cause: Record<string, unknown> }).cause;
+  assert.deepEqual([cause.code, cause.schema !== undefined, cause.table, cause.constraint], ['23505', true, 'logged_probe', 'logged_probe_key']);
+});
+
 test("a database that does not answer is 503 unavailable, the request's to ask again, and logged as such", (t) => {
   const logged: unknown[][] = [];
   t.mock.method(console, 'error', (...args: unknown[]) => void logged.push(args));
