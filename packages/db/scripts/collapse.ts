@@ -96,7 +96,7 @@ const aboutFunctions = (statement: string) =>
   !temporary(statement) &&
   /^(?:CREATE (?:OR REPLACE )?FUNCTION|DROP FUNCTION|ALTER FUNCTION|(?:GRANT|REVOKE)\s[^;]*?\sON (?:FUNCTION|ALL (?:FUNCTIONS|ROUTINES) IN SCHEMA))\s/i.test(bare(statement));
 const ownerGrant = (statement: string) => /^DO\s/.test(bare(statement)) && statement.includes('pg_get_userbyid(proowner)');
-/** A DO block that makes functions anew from their own definitions, as 0086 points their bodies at another sequence. */
+/** A DO block that makes functions anew from their own definitions, as 0089 points their bodies at another sequence. */
 const remakes = (statement: string) => /^DO\s/.test(bare(statement)) && statement.includes('pg_get_functiondef(');
 
 /**
