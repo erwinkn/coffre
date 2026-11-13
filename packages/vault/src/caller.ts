@@ -59,15 +59,11 @@ export type Stop = 'pending' | 'no_reads' | 'source' | 'frozen';
 export type Workload = {
   binding: Row<typeof bindings>;
   policy: BindingPolicy;
-  /** A session `narrow` made from another, which uses values within its limits and is handed none. */
+  /** A session `narrow` made from another, or one with limits: it uses values within them and is handed none. */
   narrowed: boolean;
   constraints: Constraints | null;
-  /**
-   * What stops it, in the order 0.14 answered them. An operation takes the
-   * first, but for logout, which none stops, and renewal, which a freeze
-   * does not: a renewal refused would end the session the lift restores.
-   */
-  stops: readonly Stop[];
+  /** What stops it, the first of them in the order 0.14 answered: null, it serves. */
+  stop: Stop | null;
 };
 
 export type Caller = {
@@ -126,13 +122,13 @@ function sessionOf(rows: CallerRows, session: Row<typeof credentials>, binding: 
   }
 
   const [instance] = rows.policy;
-  const stops: Stop[] = [];
-  if (says.approve === true && session.approvedAt === null) stops.push('pending');
-  if (workloads.noReads && says.reads !== undefined) stops.push('no_reads');
-  if (says.sources !== undefined && (shown.ip === null || !addressWithin(shown.ip, says.sources))) stops.push('source');
   // Each freeze is a field of the row it stops. An instance whose policy row is gone cannot say it is not frozen.
-  if (instance?.workloadsFrozenAt !== null || rows.principal.some((row) => row.frozenAt !== null) || binding.frozenAt !== null || session.frozenAt !== null || lineage.some((row) => row!.frozenAt !== null)) stops.push('frozen');
-  return { binding, policy: says, narrowed: ids.length > 0, constraints, stops };
+  const frozen = instance?.workloadsFrozenAt !== null || rows.principal.some((row) => row.frozenAt !== null) || binding.frozenAt !== null || session.frozenAt !== null || lineage.some((row) => row!.frozenAt !== null);
+  const stop = says.approve === true && session.approvedAt === null ? 'pending'
+    : workloads.noReads && says.reads !== undefined ? 'no_reads'
+    : says.sources !== undefined && (shown.ip === null || !addressWithin(shown.ip, says.sources)) ? 'source'
+    : frozen ? 'frozen' : null;
+  return { binding, policy: says, narrowed: ids.length > 0 || constraints !== null, constraints, stop };
 }
 
 /**
@@ -186,8 +182,8 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
       // Its own scope, an enrollment code's, or else its binding's, with the binding's `reads` on the environments they list.
       // A binding is made with a grant of its own at each environment it lists, so its scope says each one's project.
       const cap = capOf(credential.scope ?? binding.scope);
-      const projectOf = new Map(cap.flatMap((grant): [string, string][] => (grant.environmentId != null && grant.projectId !== null ? [[grant.environmentId, grant.projectId]] : [])));
-      credentialScope = scopeWithReads(cap, workload.policy.reads, projectOf);
+      const listed = new Map(cap.flatMap((grant): [string, string][] => (grant.environmentId != null && grant.projectId !== null ? [[grant.environmentId, grant.projectId]] : [])));
+      credentialScope = scopeWithReads(cap, workload.policy.reads, listed);
       break;
     }
     // An MCP connection's requests come with an access token, which has no row: not built yet.

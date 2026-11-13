@@ -425,9 +425,11 @@ test('a session that stands and is stopped is told why, writes nothing, and serv
 test('a narrowed session uses values within its limits, is handed none, and stands while every session above it does', async () => {
   const { bound, pod } = await workload();
   const narrowed = (label: string, above: string[], constraints: object | null = null) => session(label, bound, { ancestors: JSON.stringify(above), constraints: constraints && JSON.stringify(constraints) });
-  const agent = narrowed('agent', [pod.id], { places: ['market/prod'], credentials: ['stripe'] });
+  // `narrow` stores a child's limits within its parent's: `tool`, made from `agent`, holds the same.
+  const limits = { places: ['market/prod'], credentials: ['stripe'] };
+  const agent = narrowed('agent', [pod.id], limits);
   const stray = credential('stray', ci, { kind: 'workload', jkt: 'stray', notAfter: new Date(Date.UTC(2027, 0, 1)) });
-  await write(vault, ...rows('credentials', agent, narrowed('tool', [pod.id, agent.id]), stray, narrowed('adopted', [stray.id]), narrowed('deep', [pod.id, pod.id, pod.id, pod.id, pod.id])));
+  await write(vault, ...rows('credentials', agent, narrowed('tool', [pod.id, agent.id], limits), narrowed('free', [pod.id]), session('limited', bound, { constraints: JSON.stringify(limits) }), stray, narrowed('adopted', [stray.id]), narrowed('deep', [pod.id, pod.id, pod.id, pod.id, pod.id])));
   await settled();
   const uses = (label: string, place: string, credential: string | null, purpose = 'use') => got(ask(label, place, ['STRIPE_KEY'], { proof: label, purpose, credential }));
 
@@ -435,23 +437,32 @@ test('a narrowed session uses values within its limits, is handed none, and stan
   // Handed nothing, a plain value included; and nothing past the places and credentials it was narrowed to.
   assert.equal(await got(ask('agent', 'market/prod', ['FLAG'], { proof: 'agent', credential: 'stripe' })), 'narrowed');
   for (const [place, credential] of [['market/staging', 'stripe'], ['market/prod', 'openai'], ['market/prod', null]] as const) assert.equal(await uses('agent', place, credential), 'narrowed', `${place} ${credential}`);
-  // One narrowed with no limit of its own uses what its service does.
-  assert.deepEqual(await uses('tool', 'market/staging', null), { STRIPE_KEY: 'sk_live' });
+  // One narrowed with no limit uses what its service does; and limits bind whatever the row says of sessions above it.
+  assert.deepEqual(await uses('free', 'market/staging', null), { STRIPE_KEY: 'sk_live' });
+  assert.equal(await uses('limited', 'market/prod', 'openai'), 'narrowed');
   // Above it, only its own service's sessions, four at most.
   for (const label of ['adopted', 'deep']) assert.equal(await uses(label, 'market/prod', null), 'unauthenticated', label);
   // A session above it frozen stops it; one ended ends it.
   await amend(vault, 'credentials', sql`id = ${agent.id}`, { frozenAt: new Date(vault.now()) });
   vault.tick(2000);
-  assert.equal(await uses('tool', 'market/prod', null), 'frozen');
+  assert.equal(await uses('tool', 'market/prod', 'stripe'), 'frozen');
   await amend(vault, 'credentials', sql`id = ${pod.id}`, { revokedAt: new Date(vault.now()), revokedBy: cy });
   vault.tick(2000);
   for (const label of ['agent', 'tool']) assert.equal(await uses(label, 'market/prod', 'stripe'), 'unauthenticated', label);
+  // Sessions above it written around the vault are no row's: nobody, and no error.
+  for (const junk of ['not json', '{}', '["not-an-id"]']) {
+    await vault.owner.execute(sql`UPDATE credentials SET ancestors = ${junk} WHERE label = 'free'`);
+    vault.tick(2000);
+    assert.equal(await uses('free', 'market/prod', null), 'unauthenticated', junk);
+  }
 });
 
-test('a handle is used and never read; an upstream credential frozen in an environment is used by nobody there', async () => {
-  await write(vault, ...rows('credentials', credential('handle', ada, { kind: 'handle', scope: scopeOf({ projectId: w.market.id, environmentId: null, role: 'viewer' }) })));
+test('a handle reaches what its scope does; an upstream credential frozen in an environment is used by nobody there', async () => {
+  await write(vault, ...rows('credentials', credential('handle', ada, { kind: 'handle', scope: scopeOf({ projectId: w.market.id, environmentId: w.prod.id, role: 'viewer' }) })));
   await settled();
-  assert.equal(await got(ask('handle', 'market/prod', ['DATABASE_URL'])), 'no_access');
+  // `coffre run` reads its plan through the handle: what its person reads where it was made, and nothing elsewhere.
+  assert.deepEqual(await got(ask('handle', 'market/prod', ['DATABASE_URL'], { purpose: 'expose' })), { DATABASE_URL: 'postgres://prod' });
+  assert.equal(await got(ask('handle', 'market/staging', ['DATABASE_URL'], { purpose: 'expose' })), 'no_access');
   assert.deepEqual(await got(ask('handle', 'market/prod', ['DATABASE_URL'], { purpose: 'use', credential: 'stripe' })), { DATABASE_URL: 'postgres://prod' });
 
   await amend(vault, 'environments', sql`id = ${w.prod.id}`, { frozenCredentials: ['stripe'] });

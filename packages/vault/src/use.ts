@@ -118,6 +118,9 @@ export function recall(vault: Serving, ask: Ask): Read | undefined {
   return undefined;
 }
 
+/** A UUID as the vault writes one, for the statement to tell before it casts. */
+const ID = sql.raw('[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}');
+
 /** A use's one read. */
 export async function read(vault: Serving, ask: Ask): Promise<Read> {
   if (ask.token.length !== 32 || (ask.keys?.length ?? 0) > 1000) throw new Error('a use names a token by its SHA-256, and 1,000 keys at most');
@@ -143,8 +146,10 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
     UNION ALL SELECT 'grant', to_jsonb(t) FROM grants t, c WHERE t.principal = c.principal
     UNION ALL SELECT 'role', to_jsonb(t) FROM roles t
     -- What a trust binding issued names it, and a narrowed session the sessions above it: each by its id, and only for a row that has them.
-    UNION ALL SELECT 'binding', to_jsonb(t) FROM bindings t, c WHERE t.id = CASE WHEN c.created_by ~ '^binding:[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' THEN substr(c.created_by, 9)::uuid END
-    UNION ALL SELECT 'ancestor', to_jsonb(t) FROM credentials t WHERE t.id IN (SELECT above::uuid FROM c, jsonb_array_elements_text(CASE WHEN c.kind = 'workload' THEN c.ancestors::jsonb END) above)
+    -- Read before its MAC is checked, so only what is shaped like ids is cast: a row someone else wrote is no row, not an error.
+    UNION ALL SELECT 'binding', to_jsonb(t) FROM bindings t, c WHERE t.id = CASE WHEN c.created_by ~ '^binding:${ID}$' THEN substr(c.created_by, 9)::uuid END
+    -- An array the statement works out once, so each id is one lookup by the key.
+    UNION ALL SELECT 'ancestor', to_jsonb(t) FROM credentials t WHERE t.id = ANY(ARRAY(SELECT above::uuid FROM c, jsonb_array_elements_text(CASE WHEN c.kind = 'workload' AND c.ancestors ~ '^\\[("${ID}"(,"${ID}")*)?\\]$' THEN c.ancestors::jsonb END) above))
     UNION ALL SELECT 'policy', to_jsonb(t) FROM policy t, c WHERE c.kind = 'workload'
     UNION ALL SELECT 'project', to_jsonb(t) FROM projects t WHERE t.id IN (SELECT project_id FROM held UNION ALL SELECT id FROM p)
     UNION ALL SELECT 'environment', to_jsonb(t) FROM environments t WHERE t.id IN (SELECT environment_id FROM held UNION ALL SELECT id FROM chain)
@@ -185,12 +190,10 @@ export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): 
   const handed = ask.purpose !== 'use';
   const { workload } = caller;
   // A session that stands and is stopped is told why, before anything about the place: lifting it restores service.
-  if (workload !== null && workload.stops.length > 0) return { refused: workload.stops[0]! };
+  if (workload?.stop != null) return { refused: workload.stop };
   // A narrowed session uses values, within the places and credentials it was narrowed to, and is handed none.
   const within = (list: readonly string[] | undefined, name: string | null) => list === undefined || (name !== null && list.includes(name));
   if (workload?.narrowed === true && (handed || !within(workload.constraints?.places, `${ask.project}/${ask.environment}${ask.mine ? '@me' : ''}`) || !within(workload.constraints?.credentials, ask.credential))) return { refused: 'narrowed' };
-  // A handle stands in for values in its person's app: they are used for it, and never handed to it.
-  if (caller.credential.kind === 'handle' && handed) return NO_ACCESS;
   const permission = handed ? 'secret.read' : 'secret.use';
   const environment = new Map(seen.environment.map((row) => [row.id, row]));
   const place = (row: Row<typeof environments>): Place => ({ projectId: row.projectId, environmentId: row.id, environmentSlug: row.slug });
