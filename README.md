@@ -98,8 +98,6 @@ anywhere reloads in place; it resets and reseeds its database each time.
 The Postgres container is Debian's `postgres:16.14` (glibc), as managed
 Postgres is, not Alpine's: musl's malloc skews every benchmark. A container
 already running keeps its image; `pnpm db:up` reuses it and says so.
-AGENTS.md has the one-time swap (`--force-recreate`, on a fresh volume that
-`pnpm dev` reseeds), which is for when nothing else is using that container.
 
 To sign in from another machine through a tunnel (`bb connect expose`, ngrok),
 give `pnpm dev` the URLs a browser uses, one per port:
@@ -134,7 +132,7 @@ pnpm check:docs        # every path and script the docs name exists
 
 `scripts/restore-drill.sh` restores a backup end to end on this machine
 ([docs/restore.md](docs/restore.md)). [AGENTS.md](AGENTS.md) has the rest:
-ports, a second stack beside the first, and how the packages find each
+a second stack beside the first, and how the packages find each
 other's sources.
 
 ## The CLI

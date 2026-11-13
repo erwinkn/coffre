@@ -1270,6 +1270,36 @@ the audit chain reads the previous hash, computes the next in JavaScript, then
 writes. Drizzle's D1 transactions send `BEGIN`, which D1 rejects. Both
 Workers use Postgres.
 
+### One connection per call
+
+On Workers, each app request and each vault
+call has one Postgres client through Hyperdrive (`HyperdrivePool` in
+`@coffre/db`), connected on its first query. Its queries take turns on it,
+and a transaction holds it from BEGIN to COMMIT; plain reads asked
+together, the app's and the vault's, take one turn, under one Sync, one
+round trip (`groupReads`), and fail together: a cold isolate's start asks
+its first reads so. A transaction's statements asked
+together go under one Sync too, BEGIN with the first, in the order they
+were started, and the writes
+it leaves to `later` (`@coffre/db`) with its
+COMMIT: a transaction that reads what it needs together (`Promise.all`)
+and leaves the writes whose answer it does not need to `later` is two
+round trips, which `packages/server/test/change-cost.test.ts` holds each
+change route to. So code inside a
+transaction queries through its `tx`, never the database: a query on the
+database would wait for the transaction, which waits for it. `createDatabase`
+refuses one at once, on Node too, so the suites catch it: each transaction's
+work runs in an `AsyncLocalStorage` naming it, and a query or a transaction
+asked of its pool from there throws `QueryOutsideTransaction`. A call that
+opened several Hyperdrive connections at once was now and then cancelled
+as hung on Cloudflare (`packages/vault/test/workers.test.ts` counts them).
+A request asks the vault about its caller once: a page's render checks its
+credential once for all its API calls (`pageClient`), and a read of values
+asks nothing first when the app kept the vault's last answer, which its
+unwrap checks (`Accesses`). `GET /api/me` asks it nothing: it only shows its
+caller, whom the app reads from the vault's rows, unchecked, and no other
+route takes such a caller ([The API](#the-api)).
+
 ### Expand, then contract
 
 A deployment migrates in its pipeline, before it deploys
