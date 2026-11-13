@@ -12,6 +12,8 @@ function owner(t, databases = []) {
         return {
             unsafe: async (sql) => {
                 queries.push(sql);
+                // The runtime logins' statement timeout, which they already hold.
+                if (sql.includes('to_regrole')) return [{ exists: true, held: '60s' }];
                 return databases.map((datname) => ({ datname }));
             },
             end: async () => { closed.push(database); },
@@ -23,8 +25,13 @@ function owner(t, databases = []) {
 test('a clone preserves schema grants and restricts its new database ACL', async (t) => {
     const { queries, connected, closed } = owner(t);
     const restriction = [];
-    await restrictDatabase({ unsafe: async (sql) => { restriction.push(sql); } });
-    assert.equal(restriction.length, 3);
+    await restrictDatabase({
+        unsafe: async (sql) => {
+            restriction.push(sql);
+            return sql.includes('to_regrole') ? [{ exists: true, held: '60s' }] : [];
+        },
+    });
+    assert.equal(restriction.length, 5);
     await cloneDatabase('coffre_template', 'coffre_worker');
     assert.deepEqual(queries, [
         'CREATE DATABASE "coffre_worker" TEMPLATE "coffre_template"',

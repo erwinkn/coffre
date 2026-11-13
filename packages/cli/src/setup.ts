@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { postgresClient, postgresSession, quoteIdentifier, quoteLiteral, type PostgresClient } from '@coffre/db/connect';
-import { HOT_SETTINGS, migrateDatabase, type MigrationPlan, unbuiltNote } from '@coffre/db/migrate';
+import { HOT_SETTINGS, migrateDatabase, type MigrationPlan, unbuiltNote, untimedNote } from '@coffre/db/migrate';
 
 import { cappedLimit, type Connections, connectionsOf, hyperdriveLimit, limitReason, tooFewConnections } from './connections.ts';
 import { readDatabaseUrl } from './database-url.ts';
@@ -400,7 +400,7 @@ async function run(
     });
     await step(1, async (progress) => {
       let plan: MigrationPlan = { applied: 0, total: 0, pending: [] };
-      const { unbuilt } = await migrateDatabase(administrator.href, {
+      const { unbuilt, untimed } = await migrateDatabase(administrator.href, {
         backupLogin: ROLES.backup,
         onPlan(planned) {
           plan = planned;
@@ -414,7 +414,7 @@ async function run(
           pending === 0
             ? `The database is up to date, at coffre ${version}'s schema`
             : `Migrated the database to coffre ${version}'s schema: ${count(pending, 'migration')} applied`,
-        details: [`${ROLES.backup} is a member of coffre_backup, which reads every row and writes none`, ...[unbuiltNote(unbuilt)].filter((note) => note !== null)],
+        details: [`${ROLES.backup} is a member of coffre_backup, which reads every row and writes none`, ...[unbuiltNote(unbuilt), untimedNote(untimed)].filter((note) => note !== null)],
       };
     });
     let used = false;

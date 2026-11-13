@@ -1846,6 +1846,19 @@ export const HOT_STATEMENT_TIMEOUT_MS = 2000;
  */
 export const LOCK_WAIT_MS = HOT_LOCK_TIMEOUT_MS / 2;
 
+/**
+ * The app's and the vault's logins' `statement_timeout` (`coffre_runtime`, `coffre_vault_runtime`): a ceiling on every
+ * statement either sends, whatever path sent it, so that a stuck one gives its connection back rather than hold it.
+ * 60 s for now, Hyperdrive's own bound on a query, so that nothing that runs today is cut short; it becomes a read
+ * call's deadline (the vault's `CALL_DEADLINE_MS`, 5 s) once no runtime statement grows with history
+ * (`scripts/growth-sweep-known.txt` empty; docs/design/config.md, Q5). The vault's transactions with a deadline
+ * tighten it for themselves (`SET LOCAL`), and the hot login keeps its own (`HOT_STATEMENT_TIMEOUT_MS`).
+ * `coffre migrate` and `coffre setup` give it to the roles where their login may (`holdRuntimeTimeouts`,
+ * `@coffre/db/migrate`). It is the role's setting, server-wide, so a `statement_timeout` in the login's URL or set for
+ * the role in one database outranks it, and coffre leaves both (docs/deploy.md, "Statement timeouts").
+ */
+export const RUNTIME_STATEMENT_TIMEOUT_MS = 60_000;
+
 /** A use's request id: 63 random bits, as text, unique within its millisecond (hot-path-one.md, "Row size"). */
 export function newUseRequestId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(8));

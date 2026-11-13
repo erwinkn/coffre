@@ -463,6 +463,43 @@ test("in a deployment's folder, its pipeline migrates a new database before the 
   assert.match(absent.output, /reasserting its privileges failed: role "nobody_here" does not exist/);
 });
 
+/** A runtime login's settings, server-wide, as `pg_db_role_setting` holds them. */
+function roleSettings(login: string): Promise<string[]> {
+  return asSuperuser('postgres', async (client) =>
+    [...((await client.unsafe<{ setconfig: string[] }[]>('SELECT setconfig FROM pg_db_role_setting WHERE setrole = $1::regrole AND setdatabase = 0', [login]))[0]?.setconfig ?? [])]);
+}
+
+test("a login that may alter the runtime logins gives them their statement timeout; one that may not migrates, and says what an administrator runs", needsCluster, async () => {
+  const dir = deploymentFolder(pinnedAt(cliVersion()));
+  const timeouts = async () => [await roleSettings('coffre_runtime'), await roleSettings('coffre_vault_runtime')];
+  // A superuser may: nothing said, the timeout given.
+  const run = await migrateIn(dir, await fresh('setup_migrate_timeouts'));
+  assert.equal(run.code, 0, run.output);
+  assert.doesNotMatch(run.output, /statement timeout/);
+  assert.deepEqual(await timeouts(), [['statement_timeout=60s'], ['statement_timeout=60s']]);
+
+  // An owner with CREATEROLE but not ADMIN on the logins, which a superuser made: the run goes on, and says so.
+  await emptyCluster();
+  const owned = await database('setup_migrate_timeouts_owner', 'owner');
+  await asSuperuser('postgres', async (client) => {
+    await client.unsafe('CREATE ROLE coffre_runtime LOGIN');
+    await client.unsafe('CREATE ROLE coffre_vault_runtime LOGIN');
+  });
+  const said =
+    /\n {2}! coffre_runtime and coffre_vault_runtime lack coffre's statement timeout, 60s, which this login may not give them\. coffre works without it; to bound a stuck statement, have a login with CREATEROLE and ADMIN on them run, once per server: ALTER ROLE coffre_runtime SET statement_timeout = '60s'; ALTER ROLE coffre_vault_runtime SET statement_timeout = '60s'; \(docs\/deploy\.md, "Statement timeouts"\)\n/;
+  const left = await migrateIn(dir, owned);
+  assert.equal(left.code, 0, left.output);
+  assert.match(left.output, said);
+  assert.deepEqual(await timeouts(), [[], []]);
+  // A run with nothing to apply says it again, until an administrator has run them.
+  assert.match((await migrateIn(dir, owned)).output, said);
+  await asSuperuser('postgres', async (client) => {
+    await client.unsafe("ALTER ROLE coffre_runtime SET statement_timeout = '60s'");
+    await client.unsafe("ALTER ROLE coffre_vault_runtime SET statement_timeout = '60s'");
+  });
+  assert.doesNotMatch((await migrateIn(dir, owned)).output, /statement timeout/);
+});
+
 test("a database a newer coffre migrated is refused in a deployment's folder, its unknown migration named, and nothing changes", needsCluster, async () => {
   const url = await fresh('setup_migrate_ahead');
   const dir = deploymentFolder(pinnedAt(cliVersion()));

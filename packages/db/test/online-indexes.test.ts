@@ -25,7 +25,7 @@ before(async () => {
   } finally {
     await admin.end();
   }
-  assert.deepEqual(await migrateDatabase(url), { unbuilt: [] });
+  assert.deepEqual((await migrateDatabase(url)).unbuilt, []);
 });
 
 after(async () => {
@@ -121,7 +121,7 @@ test('an online build waits for an older transaction without holding up writes, 
     await sleep(200);
     assert.equal(ended, false, 'the run waits for the snapshot');
     await holder.unsafe('COMMIT');
-    assert.deepEqual(await run, { unbuilt: [] });
+    assert.deepEqual((await run).unbuilt, []);
     assert.ok((await state(session)).every(({ valid }) => valid));
   } finally {
     await Promise.all([session.end(), holder.end(), writer.end()]);
@@ -134,7 +134,7 @@ test('an index a cut-short build left invalid is dropped and built again; one bu
     // What a run killed during CREATE INDEX CONCURRENTLY leaves: the index there, invalid.
     await session.unsafe("UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'audit_log_vault_idx'::regclass");
     const [before] = await session.unsafe<{ oid: number }[]>("SELECT 'audit_log_vault_key_idx'::regclass::oid::int AS oid");
-    assert.deepEqual(await migrateDatabase(url), { unbuilt: [] });
+    assert.deepEqual((await migrateDatabase(url)).unbuilt, []);
     assert.ok((await state(session)).every(({ valid }) => valid));
     const [kept] = await session.unsafe<{ oid: number }[]>("SELECT 'audit_log_vault_key_idx'::regclass::oid::int AS oid");
     assert.equal(kept!.oid, before!.oid, 'a valid index is not built again');
@@ -151,7 +151,7 @@ test("a run that finds every index built takes no lock a use's insert waits for:
     await writer.unsafe('BEGIN');
     await writer.unsafe('LOCK TABLE log_uses, log_reads IN ROW EXCLUSIVE MODE');
     const started = Date.now();
-    assert.deepEqual(await migrateDatabase(url), { unbuilt: [] });
+    assert.deepEqual((await migrateDatabase(url)).unbuilt, []);
     // In this database: pg_locks lists the cluster's, and another test file's waiter is not the run's (two in another
     // file of 0.14's suite failed it, the run having waited for nothing).
     const waiting = await session.unsafe<{ lock: string }[]>(`SELECT l.locktype || ' ' || l.mode || coalesce(' on ' || l.relation::regclass::text, '') AS lock
@@ -170,9 +170,9 @@ test('a run that finds another building its indexes says which are not built yet
   try {
     await session.unsafe('DROP INDEX audit_log_vault_key_idx');
     await other.unsafe('SELECT pg_advisory_lock($1::bigint)', [ONLINE_LOCK_KEY]);
-    assert.deepEqual(await migrateDatabase(url), { unbuilt: [{ name: 'audit_log_vault_key_idx', table: 'audit_log', reason: 'another migration run is building it' }] });
+    assert.deepEqual((await migrateDatabase(url)).unbuilt, [{ name: 'audit_log_vault_key_idx', table: 'audit_log', reason: 'another migration run is building it' }]);
     await other.unsafe('SELECT pg_advisory_unlock($1::bigint)', [ONLINE_LOCK_KEY]);
-    assert.deepEqual(await migrateDatabase(url), { unbuilt: [] });
+    assert.deepEqual((await migrateDatabase(url)).unbuilt, []);
     assert.ok((await state(session)).every(({ valid }) => valid));
   } finally {
     await Promise.all([session.end(), other.end()]);
@@ -190,7 +190,7 @@ test("a partitioned table's index left part-built is finished a day at a time, a
     await session.unsafe(`CREATE INDEX ${quoteIdentifier(`${first!.day}_by_number_idx`)} ON ${quoteIdentifier(first!.day)} USING btree (number)`);
     await session.unsafe(`ALTER INDEX log_reads_by_number_idx ATTACH PARTITION ${quoteIdentifier(`${first!.day}_by_number_idx`)}`);
     assert.equal((await state(session)).find(({ index }) => index === 'log_reads_by_number_idx')?.valid, false);
-    assert.deepEqual(await migrateDatabase(url), { unbuilt: [] });
+    assert.deepEqual((await migrateDatabase(url)).unbuilt, []);
     const reads = (await state(session)).find(({ index }) => index === 'log_reads_by_number_idx')!;
     assert.ok(reads.valid && reads.indexed === reads.days, `${reads.indexed} of ${reads.days} days`);
     // A day made later, as the vault makes them ahead: attached, it takes the index, empty.
@@ -249,7 +249,7 @@ test('a day retention detaches between its build and its ATTACH is left out; a f
       },
     };
     await assert.rejects(buildOnline(failing, index), { code: '55000' });
-    assert.deepEqual(await migrateDatabase(url), { unbuilt: [] });
+    assert.deepEqual((await migrateDatabase(url)).unbuilt, []);
     assert.ok((await state(session)).every(({ valid }) => valid));
   } finally {
     await session.end();
