@@ -97,6 +97,24 @@ SQL
     guarantees "$database"
 done
 
+# Two databases' first 0000 at once, as two deployments on one server may, once the groups and memberships are right:
+# its role statements then write nothing and lock no role, so the second commits under a short lock timeout while the
+# first is still open.
+awk -v RS='--> statement-breakpoint' '/NOLOGIN INHERIT NOCREATEDB|WITH ADMIN FALSE/' \
+    packages/db/src/migrations/postgres/0000_baseline.sql >"$scratch/0000-roles.sql"
+psql_owner -d postgres -c 'CREATE DATABASE race_a' -c 'CREATE DATABASE race_b'
+{ echo 'BEGIN;'; cat "$scratch/0000-roles.sql"; echo 'SELECT pg_sleep(3); COMMIT;'; } | psql_owner -d race_a >"$scratch/race_a.log" 2>&1 &
+racer=$!
+for attempt in $(seq 50); do
+    [[ "$(psql_owner -d postgres -At -c "SELECT count(*) FROM pg_stat_activity WHERE datname = 'race_a' AND query LIKE '%pg_sleep(3)%'")" == 1 ]] && break
+    if ((attempt == 50)); then echo 'the first 0000 did not start' >&2; exit 1; fi
+    sleep 0.1
+done
+{ echo "SET lock_timeout = '1s';"; cat "$scratch/0000-roles.sql"; } | psql_owner -d race_b >"$scratch/race_b.log" 2>&1 \
+    || { cat "$scratch/race_b.log" >&2; exit 1; }
+wait "$racer" || { cat "$scratch/race_a.log" >&2; exit 1; }
+psql_owner -d postgres -c 'DROP DATABASE race_a' -c 'DROP DATABASE race_b'
+
 # A member of the owner may migrate (a managed Postgres's admin login, say). Under drizzle's migrator, as below, what it
 # made stayed its own, and databases it migrated so stay as it left them: a function it made is its own, one it
 # replaced kept its owner, and each use function runs as its owner, its helpers (which are not SECURITY DEFINER) as

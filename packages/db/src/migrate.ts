@@ -735,12 +735,16 @@ const CLEAN_BREAK = '0.4.0';
 /**
  * Migrations rewritten after a release, by tag: the hashes of their earlier
  * texts, which a database that applied one keeps in its ledger. A rewrite
- * changes only what a database yet to apply it would do. 0022 gave the hot
- * login generic plans until 0.16.0; once a run had cleared them, a login
- * without ADMIN on the role could no longer migrate another database of the
- * server through it (docs/design/planner-defaults.md).
+ * changes only what a database yet to apply it would do. 0000 altered and
+ * granted the group roles even when they were already right, so two
+ * databases of one server migrating at once failed on the shared role row
+ * or waited on the group's lock. 0022 gave the hot login generic plans until
+ * 0.16.0; once a run had cleared them, a login without ADMIN on the role
+ * could no longer migrate another database of the server through it
+ * (docs/design/planner-defaults.md).
  */
 const REWRITTEN: Readonly<Record<string, readonly string[]>> = {
+  '0000_baseline': ['9d41ba8fdca496e46583f631984217b9d571f08700af891e44652e1f818d78fd'],
   '0022_log_015': ['738dd033a0339eac8218494a5cc43568c1b06ad363cd2aa3c0dfc9c82570a2da'],
 };
 

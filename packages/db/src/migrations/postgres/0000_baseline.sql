@@ -431,7 +431,14 @@ BEGIN
             ) THEN
                 RAISE EXCEPTION '% has unsafe role attributes: SUPERUSER, REPLICATION and BYPASSRLS must be off', name;
             END IF;
-            EXECUTE format('ALTER ROLE %I NOLOGIN INHERIT NOCREATEDB NOCREATEROLE', name);
+            -- Roles belong to the cluster: an ALTER that changes nothing still writes the role's row, and
+            -- fails (tuple concurrently updated) when another database's migration writes it at the same time.
+            IF EXISTS (
+                SELECT 1 FROM pg_roles WHERE rolname = name
+                AND (rolcanlogin OR NOT rolinherit OR rolcreatedb OR rolcreaterole)
+            ) THEN
+                EXECUTE format('ALTER ROLE %I NOLOGIN INHERIT NOCREATEDB NOCREATEROLE', name);
+            END IF;
         END IF;
     END LOOP;
 END
@@ -623,11 +630,14 @@ BEGIN
         LOOP
             EXECUTE format('REVOKE %I FROM %I', membership.rolname, login.name);
         END LOOP;
+        -- A GRANT that changes nothing still locks the group role until commit, and another database's
+        -- migration granting it waits that long.
+        IF NOT coalesce((
+            SELECT bool_and(inherit_option AND NOT admin_option AND NOT set_option) FROM pg_auth_members
+             WHERE member = login.name::regrole AND roleid = login.grp::regrole
+        ), false) THEN
+            EXECUTE format('GRANT %I TO %I WITH ADMIN FALSE, INHERIT TRUE, SET FALSE', login.grp, login.name);
+        END IF;
     END LOOP;
 END
 $$;
---> statement-breakpoint
-
-GRANT coffre_app TO coffre_runtime WITH ADMIN FALSE, INHERIT TRUE, SET FALSE;
---> statement-breakpoint
-GRANT coffre_vault TO coffre_vault_runtime WITH ADMIN FALSE, INHERIT TRUE, SET FALSE;
