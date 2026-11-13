@@ -7,10 +7,11 @@
 -- a key the place holds. The lean statement, the old cached plain form, is a fast path in front of it for the common
 -- use, and answers what the full one would or hands off (`whole`); it exists only because Postgres sets up every node
 -- of a plan on each run, read or not, and the full plan costs a lean use about 130 us more of it. The rule is
--- `use_state`, a SQL function the planner inlines into both. Same locks, in the same order, and the same re-checks:
--- the fence shared before the statements, the principal's lock only after the vault decided, the bulk write in a
--- statement of its own. The route's read (its levels, its item's editor, the keys it names), which a route's named call
--- and `use_route` each held a copy of, is one function both call, `use_route_read`. No login may call either helper.
+-- `use_refused` then `use_lock`, SQL functions the planner inlines into both. Same locks, in the same order, and the
+-- same re-checks: the fence shared before the statements, the principal's lock only after the vault decided, the bulk
+-- write in a statement of its own. The route's read (its levels, its item's editor, the keys it names), which a route's
+-- named call and `use_route` each held a copy of, is one function both call, `use_route_read`. No login may call any
+-- of the three helpers.
 -- The warm-up's mark moves on (`coffre.use_planned`), so a session plans both statements before it holds the fence.
 -- A route's read (T205; T200), as both `use_route` and a route's named call in `use_credential` make it, written once:
 -- each level of the place's chain (`p_layers`, nearest first), its environment's row, seal and newest change, and,
@@ -114,18 +115,18 @@ $function$;
 REVOKE ALL ON FUNCTION public.use_route_read(uuid[], text) FROM PUBLIC;
 --> statement-breakpoint
 -- The use's rule (T158; Probing.tla, AdmissionBeforeKey; review d3 of #416), written once for both of `use_credential`'s
--- statements, each of which calls it on the rows it read. What no key decides comes first: a MAC by a retired key, the
--- floor, the deadline, the clock, the cap's config; then what the names decide, which the vault answers on the caller's
--- standing first (`p_named`: no credential of that token, no live place of those names), the ids the vault passed not
--- the ones the names name now (`p_right`, D153), and, for a named call (`p_names`), an environment it reads through
--- archived or its chain cut. Then the principal's lock: to enter its key in the cap's set (`lock`), or to move it on
--- (`share`), unless the use writes no entry (`p_silent`: a quiet use of no key or of a plain value). Null: the use is
--- made. A plain SQL expression, so that the planner inlines it into each statement: no call at run time (not SECURITY
--- DEFINER, no SET, no subquery, each argument used more than once a column or a parameter, and VOLATILE, as
--- `clock_timestamp` is). No login may call it.
-CREATE OR REPLACE FUNCTION public.use_state(p_mac bytea, p_retired bytea[], p_floor bigint, p_at bigint, p_deadline bigint, p_configured boolean,
-                                 p_named text, p_right boolean, p_names boolean, p_archived boolean,
-                                 p_principal text, p_locked boolean, p_moving boolean, p_silent boolean, p_in boolean, p_behind boolean)
+-- statements, each of which calls it on the rows it read, as `coalesce(use_refused(...), use_lock(...))`: two rules, in
+-- order. Refused: what no key decides comes first, a MAC by a retired key, the floor, the deadline, the clock, the cap's
+-- config; then what the names decide, which the vault answers on the caller's standing first (`p_named`: no credential
+-- of that token, no live place of those names), the ids the vault passed not the ones the names name now (`p_right`,
+-- D153), and a named call's environment read through archived or its chain cut (`p_archived`). Then the lock: the
+-- principal's, to enter its key in the cap's set (`lock`), or to move it on (`share`), unless the use writes no entry
+-- (`p_silent`: a quiet use of no key or of a plain value). Null from both: the use is made. Plain SQL expressions, so
+-- that the planner inlines them into each statement: no call at run time (not SECURITY DEFINER, no SET, no subquery,
+-- each argument used more than once a column or a parameter, and `use_refused` VOLATILE, as `clock_timestamp` is).
+-- No login may call either.
+CREATE OR REPLACE FUNCTION public.use_refused(p_mac bytea, p_retired bytea[], p_floor bigint, p_at bigint, p_deadline bigint,
+                                   p_configured boolean, p_named text, p_right boolean, p_archived boolean)
  RETURNS text
  LANGUAGE sql
 AS $function$
@@ -135,12 +136,20 @@ SELECT CASE WHEN substring(p_mac FROM 1 FOR 4) = ANY(p_retired) THEN 'superseded
             WHEN NOT p_configured THEN 'unconfigured'
             WHEN p_named IS NOT NULL THEN p_named
             WHEN NOT p_right THEN 'moved'
-            WHEN p_names AND p_archived THEN 'archived'
-            WHEN p_principal IS NOT NULL AND NOT p_locked AND NOT p_silent AND NOT p_in THEN 'lock'
+            WHEN p_archived THEN 'archived' END
+$function$;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION public.use_refused(bytea, bytea[], bigint, bigint, bigint, boolean, text, boolean, boolean) FROM PUBLIC;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION public.use_lock(p_principal text, p_locked boolean, p_moving boolean, p_silent boolean, p_in boolean, p_behind boolean)
+ RETURNS text
+ LANGUAGE sql
+AS $function$
+SELECT CASE WHEN p_principal IS NOT NULL AND NOT p_locked AND NOT p_silent AND NOT p_in THEN 'lock'
             WHEN p_principal IS NOT NULL AND NOT p_locked AND NOT p_moving AND NOT p_silent AND p_behind THEN 'share' END
 $function$;
 --> statement-breakpoint
-REVOKE ALL ON FUNCTION public.use_state(bytea, bytea[], bigint, bigint, bigint, boolean, text, boolean, boolean, boolean, text, boolean, boolean, boolean, boolean, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.use_lock(text, boolean, boolean, boolean, boolean, boolean) FROM PUBLIC;
 --> statement-breakpoint
 -- No argument has a default, here and in every use function a runtime login calls: 0.15.0's call of 27 resolves to
 -- none, and no 0.16 function answers it (#569, section 6). Made again, since a replace cannot drop a default.
@@ -476,7 +485,7 @@ BEGIN
         -- common use: no place read through, a key with a version of its own, the isolate's seals still the log's. It reads
         -- a subset of the full one's rows by the same keys and must answer what the full one would, or hand off (`whole`),
         -- writing and locking nothing; the full one then runs, as the old forms' handoff did. Both decide by one rule,
-        -- `use_state`, which the planner inlines into each. Two, not one: Postgres sets up every node of a plan on each run,
+        -- `use_refused` then `use_lock`, which the planner inlines into each. Two, not one: Postgres sets up every node of a plan on each run,
         -- run or not, and the full plan's probes and reference chain cost a lean use about 130 us of executor start-up.
         IF (dry AND form = 0) OR (NOT dry AND NOT probe AND NOT whole) THEN
             -- The isolate's seals, and its cap, read at the change it names: no probe, only whether a change came since.
@@ -535,10 +544,9 @@ BEGIN
                 SELECT i.*, c_refresh AS refresh, cap.period,
                     -- A key with no version of its own, or a change since the isolate's seals: the full statement's.
                     CASE WHEN NOT i.cached OR (i.s_project IS NOT NULL AND i.s_version IS NULL) THEN 'whole'
-                         ELSE public.use_state(p_mac, i.retired, i.at_floor, p_at, p_deadline, true, v_named, v_right,
-                                               false, false,
-                                               i.p, locked, moving, v_quiet AND (i.s_project IS NULL OR coalesce(i.v_plain, false)),
-                                               coalesce(i.bulk_last > p_at - p_cap_window - c_refresh, false), i.bulk_last < cap.period) END AS state,
+                         ELSE coalesce(public.use_refused(p_mac, i.retired, i.at_floor, p_at, p_deadline, true, v_named, v_right, false),
+                                       public.use_lock(i.p, locked, moving, v_quiet AND (i.s_project IS NULL OR coalesce(i.v_plain, false)),
+                                                       coalesce(i.bulk_last > p_at - p_cap_window - c_refresh, false), i.bulk_last < cap.period)) END AS state,
                     coalesce(i.bulk_last > p_at - p_cap_window - c_refresh, false) AS is_in,
                     -- The other keys in the set, up to the cap: read only under the principal's lock, for a key not in it.
                     CASE WHEN locked AND i.p IS NOT NULL AND NOT coalesce(i.bulk_last > p_at - p_cap_window - c_refresh, false) THEN (
@@ -693,12 +701,12 @@ BEGIN
             ),
             v AS MATERIALIZED (
                 SELECT i.*, cp.cap_count, cp.cap_window, cap.refresh, cap.period, pr.inputs, pr.changes,
-                    public.use_state(p_mac, i.retired, i.at_floor, p_at, p_deadline, cp.cap_count IS NOT NULL AND cp.cap_window IS NOT NULL, v_named, v_right,
-                                     p_token_hash IS NOT NULL AND NOT v_routed,
-                                     coalesce(i.e1_archived, false) OR coalesce(i.e2_archived, false) OR coalesce(i.e3_archived, false)
-                                       OR coalesce(i.e1_project_archived, false) OR coalesce(i.e2_project_archived, false) OR coalesce(i.e3_project_archived, false) OR v_cut,
-                                     i.p, locked, moving, v_quiet AND (i.s_project IS NULL OR coalesce(i.v_plain, false)),
-                                     coalesce(i.bulk_last > p_at - cp.cap_window - cap.refresh, false), i.bulk_last < cap.period) AS state,
+                    coalesce(public.use_refused(p_mac, i.retired, i.at_floor, p_at, p_deadline, cp.cap_count IS NOT NULL AND cp.cap_window IS NOT NULL, v_named, v_right,
+                                         p_token_hash IS NOT NULL AND NOT v_routed
+                                           AND (coalesce(i.e1_archived, false) OR coalesce(i.e2_archived, false) OR coalesce(i.e3_archived, false)
+                                             OR coalesce(i.e1_project_archived, false) OR coalesce(i.e2_project_archived, false) OR coalesce(i.e3_project_archived, false) OR v_cut)),
+                             public.use_lock(i.p, locked, moving, v_quiet AND (i.s_project IS NULL OR coalesce(i.v_plain, false)),
+                                             coalesce(i.bulk_last > p_at - cp.cap_window - cap.refresh, false), i.bulk_last < cap.period)) AS state,
                     pr.c_last, pr.m_last, (pr.m_payload::jsonb ->> 'old')::bigint AS m_old, pr.r_last, pr.p_last, pr.s_last, pr.x_last, pr.e1_last, pr.e2_last, pr.e3_last, pr.e4_last,
                     coalesce(i.bulk_last > p_at - cp.cap_window - cap.refresh, false) AS is_in,
                     -- The other keys in the set, up to the cap: read only under the principal's lock, for a key not in it.
@@ -902,9 +910,12 @@ BEGIN
     IF NOT has_function_privilege(v_owner, 'public.use_route_read(uuid[], text)'::regprocedure, 'EXECUTE') THEN
         EXECUTE format('GRANT EXECUTE ON FUNCTION public.use_route_read(uuid[], text) TO %I', v_owner);
     END IF;
-    -- The planner inlines `use_state` only where the statement's owner may call it.
-    IF NOT has_function_privilege(v_owner, 'public.use_state(bytea, bytea[], bigint, bigint, bigint, boolean, text, boolean, boolean, boolean, text, boolean, boolean, boolean, boolean, boolean)'::regprocedure, 'EXECUTE') THEN
-        EXECUTE format('GRANT EXECUTE ON FUNCTION public.use_state(bytea, bytea[], bigint, bigint, bigint, boolean, text, boolean, boolean, boolean, text, boolean, boolean, boolean, boolean, boolean) TO %I', v_owner);
+    -- The planner inlines `use_refused` and `use_lock` only where the statement's owner may call them.
+    IF NOT has_function_privilege(v_owner, 'public.use_refused(bytea, bytea[], bigint, bigint, bigint, boolean, text, boolean, boolean)'::regprocedure, 'EXECUTE') THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION public.use_refused(bytea, bytea[], bigint, bigint, bigint, boolean, text, boolean, boolean) TO %I', v_owner);
+    END IF;
+    IF NOT has_function_privilege(v_owner, 'public.use_lock(text, boolean, boolean, boolean, boolean, boolean)'::regprocedure, 'EXECUTE') THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION public.use_lock(text, boolean, boolean, boolean, boolean, boolean) TO %I', v_owner);
     END IF;
 END
 $$;
@@ -1339,7 +1350,8 @@ REVOKE ALL ON FUNCTION public.use_named_batch(bytea, text, text, boolean, text[]
 GRANT EXECUTE ON FUNCTION public.use_named_batch(bytea, text, text, boolean, text[], boolean, text[], jsonb, bigint, smallint, bigint, bytea, text[], uuid[], uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], smallint, text, integer, text) TO coffre_vault;
 --> statement-breakpoint
 -- 0048's `use_batch`, by its new name: its arguments are 0.15.0's, so its old name would answer 0.15.0's call. Its
--- call of `use_credential` names every argument.
+-- call of `use_credential` names every argument. 19 arguments, over the 10 a function may take (AGENTS.md), only because
+-- they are `use_credential`'s, a list each; V2a renames them and adds none, and the use's redesign (`simple-use.md`) cuts both.
 DROP FUNCTION IF EXISTS public.use_batch(uuid, uuid[], bigint[], bigint, smallint, uuid[], bytea[], bigint, bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], boolean[], smallint, text, text);
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION public.use_id_batch(p_credential uuid, p_secrets uuid[], p_requests bigint[], p_at bigint, p_purpose smallint, p_places uuid[], p_macs bytea[], p_deadline bigint, p_covers bigint[], p_cover_ats bigint[], p_cover_requests bigint[], p_knowns bigint[], p_known_macs bytea[], p_cap_counts integer[], p_cap_windows bigint[], p_decided boolean[], p_way smallint, p_principal text, p_lock text)

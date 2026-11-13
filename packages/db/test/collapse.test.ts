@@ -281,7 +281,7 @@ const OVER_TEN: Record<string, number[]> = {
   use_route: [31],
   issue_token: [29, 28],
   use_named_batch: [29],
-  use_batch: [19],
+  use_id_batch: [19],
   revoke_credential: [16],
   write_checkpoint: [13],
 };
