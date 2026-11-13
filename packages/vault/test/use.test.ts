@@ -628,8 +628,8 @@ test('a session\'s first call does its planning\'s cold work before it takes the
   try {
     await fence.unsafe('BEGIN');
     await fence.unsafe('SELECT pg_advisory_xact_lock(1668244070, 0)');
-    // The call never held the fence, and yet it has planned both statements (two since 0086, V2a; four before): their
-    // dry runs, before it.
+    // The call never held the fence, and yet it has planned both its statements, the lean and the full: their dry runs,
+    // before it.
     assert.deepEqual(await beforeFence(false), { parsed: 2, indexes: opened });
     // Told its statements are planned, the same call does none of that before the fence: it would all be under it.
     assert.deepEqual(await beforeFence(true), { parsed: 0, indexes: [] });

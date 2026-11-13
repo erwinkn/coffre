@@ -119,9 +119,11 @@ REVOKE ALL ON FUNCTION public.use_route_read(uuid[], text) FROM PUBLIC;
 -- and a named call's environment read through archived or its chain cut (`p_archived`). Then the lock: the
 -- principal's, to enter its key in the cap's set (`lock`), or to move it on (`share`), unless the use writes no entry
 -- (`p_silent`: a quiet use of no key or of a plain value). Null from both: the use is made. Plain SQL expressions, so
--- that the planner inlines them into each statement: no call at run time (not SECURITY DEFINER, no SET, no subquery,
--- each argument used more than once a column or a parameter, and `use_refused` VOLATILE, as `clock_timestamp` is).
--- No login may call either.
+-- that the planner inlines them into each statement: no call at run time. Postgres inlines a SQL function's single
+-- expression only if the function is not SECURITY DEFINER, has no SET and is no less volatile than its body (so
+-- `use_refused` stays VOLATILE, as `clock_timestamp` is), and only if each argument the body reads more than once has
+-- no subquery, nothing volatile and costs at most ten operators (`p_silent`'s, an AND of a variable and two columns,
+-- costs none). `log-guarantees.sql` holds the first two. No login may call either.
 CREATE OR REPLACE FUNCTION public.use_refused(p_mac bytea, p_retired bytea[], p_floor bigint, p_at bigint, p_deadline bigint,
                                    p_configured boolean, p_named text, p_right boolean, p_archived boolean)
  RETURNS text
@@ -481,7 +483,7 @@ BEGIN
         -- each by its key, then the entry; it answers every call alone. The lean one is a fast path in front of it, for the
         -- common use: no place read through, a key with a version of its own, the isolate's seals still the log's. It reads
         -- a subset of the full one's rows by the same keys and must answer what the full one would, or hand off (`whole`),
-        -- writing and locking nothing; the full one then runs, as the old forms' handoff did. Both decide by one rule,
+        -- writing and locking nothing; the full one then runs. Both decide by one rule,
         -- `use_refused` then `use_lock`, which the planner inlines into each. Two, not one: Postgres sets up every node of a plan on each run,
         -- run or not, and the full plan's probes and reference chain cost a lean use about 130 us of executor start-up.
         IF (dry AND form = 0) OR (NOT dry AND NOT probe AND NOT whole) THEN
@@ -621,7 +623,7 @@ BEGIN
                     CASE WHEN ve.owner IS NOT NULL THEN ve.parent END AS e4_id, e4.project_id AS e4_project, e4.slug AS e4_slug, e4.owner AS e4_owner, e4.parent_id AS e4_parent, e4.protected AS e4_protected, e4.archived_at IS NOT NULL AS e4_archived, CASE WHEN e4.id IS NOT NULL THEN (SELECT q.archived_at IS NOT NULL FROM public.projects q WHERE q.id = e4.project_id) END AS e4_project_archived, e4.seal AS e4_seal,
                     b.last AS bulk_last,
                     -- Each input's object key, computed once (a key in a probe's own condition is computed again for every row
-                    -- it reads: 0022, decision 3), in the order of the probe's slots below: the way in, the principal, the
+                    -- it reads), in the order of the probe's slots below: the way in, the principal, the
                     -- roles, the policy, the key, its source, then e1 to e4. No row, no key, and no probe: no index scan
                     -- descends for a null. None at all while the isolate's seals are still the log's.
                     CASE WHEN sk.seeks THEN ARRAY[public.log_object(w.kind, v_credential::text), public.log_object('principal', w.principal), public.log_object('roles', 'instance'),
@@ -899,24 +901,6 @@ REVOKE ALL ON FUNCTION public.use_credential(uuid, uuid, bigint, bigint, smallin
 --> statement-breakpoint
 GRANT EXECUTE ON FUNCTION public.use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean, text, boolean, text) TO coffre_vault;
 --> statement-breakpoint
--- As 0057 says of the use's other helpers: `use_credential` runs as its owner, which may not be the login that made this.
-DO $$
-DECLARE
-    v_owner name := (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE proname = 'use_credential' AND pronamespace = 'public'::regnamespace);
-BEGIN
-    IF NOT has_function_privilege(v_owner, 'public.use_route_read(uuid[], text)'::regprocedure, 'EXECUTE') THEN
-        EXECUTE format('GRANT EXECUTE ON FUNCTION public.use_route_read(uuid[], text) TO %I', v_owner);
-    END IF;
-    -- The planner inlines `use_refused` and `use_lock` only where the statement's owner may call them.
-    IF NOT has_function_privilege(v_owner, 'public.use_refused(bytea, bytea[], bigint, bigint, bigint, boolean, text, boolean, boolean)'::regprocedure, 'EXECUTE') THEN
-        EXECUTE format('GRANT EXECUTE ON FUNCTION public.use_refused(bytea, bytea[], bigint, bigint, bigint, boolean, text, boolean, boolean) TO %I', v_owner);
-    END IF;
-    IF NOT has_function_privilege(v_owner, 'public.use_lock(text, boolean, boolean, boolean, boolean, boolean)'::regprocedure, 'EXECUTE') THEN
-        EXECUTE format('GRANT EXECUTE ON FUNCTION public.use_lock(text, boolean, boolean, boolean, boolean, boolean) TO %I', v_owner);
-    END IF;
-END
-$$;
---> statement-breakpoint
 -- `use_route` with no default either, each of its calls of `use_credential` naming every argument.
 DROP FUNCTION IF EXISTS public.use_route(bytea, text, text, text, text, smallint, boolean, text[], jsonb, uuid, smallint, text, uuid, bigint, smallint, bigint, bytea, uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], boolean[], integer, integer, text, boolean, boolean, text);
 --> statement-breakpoint
@@ -1057,11 +1041,11 @@ BEGIN
     <<route>>
     BEGIN
         EXIT route WHEN v_unstood;
-        -- The place itself (C2b4): a place reading of no route (`''`, a name no item has) taken, for the plan, compute or
+        -- The place itself: a place reading of no route (`''`, a name no item has) taken, for the plan, compute or
         -- code's credential under the place. The reading and the gate are the answer: no definition is read.
         EXIT route WHEN v_reading = 1 AND v_route = '';
         SELECT e.project_id, e.owner INTO v_project, v_owner FROM public.environments e WHERE e.id = v_np;
-        -- A personal config serves no UI route (decision 7): its owner's values are no editor's to route.
+        -- A personal config serves no UI route: its owner's values are no editor's to route.
         IF v_owner IS NOT NULL OR (v_handle AND v_reading = 1 AND right(p_environment, 3) = '@me') THEN
             v_personal := true;
             EXIT route;

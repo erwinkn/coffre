@@ -228,12 +228,18 @@ BEGIN
        OR has_database_privilege('coffre_vault_hot', current_database(), 'CREATE') OR has_database_privilege('coffre_vault_hot', current_database(), 'TEMPORARY') THEN
         RAISE EXCEPTION 'FAIL: coffre_vault_hot holds what the vault does not, or not what it does';
     END IF;
-    -- W268's gate and its helpers run inside use_credential, as its owner: no login calls them itself (a personal
-    -- config's, 0051's, the cover's probe, 0057's, and a route's read and the use's rule, 0086's, too).
+    -- The named use's gate and its helpers run inside use_credential, as its owner: no login calls them itself (a
+    -- personal config's, the cover's probe, a route's read and the use's rule, too).
     IF EXISTS (SELECT 1 FROM pg_proc p CROSS JOIN (VALUES ('coffre_app'), ('coffre_vault'), ('coffre_vault_hot'), ('coffre_backup')) AS login (name)
                 WHERE p.proname IN ('use_stands', 'use_admits', 'use_stands_personal', 'use_scope_holds', 'use_covered', 'use_route_read', 'use_refused', 'use_lock') AND p.pronamespace = 'public'::regnamespace
                   AND has_function_privilege(login.name, p.oid, 'EXECUTE')) THEN
         RAISE EXCEPTION 'FAIL: a login may call the named use''s gate itself';
+    END IF;
+    -- The use's rule is inlined into use_credential's statements only while it is plain SQL, run as its caller, with no SET.
+    IF (SELECT count(*) FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
+         WHERE p.proname IN ('use_refused', 'use_lock') AND p.pronamespace = 'public'::regnamespace
+           AND l.lanname = 'sql' AND NOT p.prosecdef AND p.proconfig IS NULL) <> 2 THEN
+        RAISE EXCEPTION 'FAIL: the use''s rule is no longer a SQL function the planner can inline';
     END IF;
     RAISE NOTICE 'PASS: coffre_vault_hot is the vault''s, with lock_timeout 1s, statement_timeout 2s and generic plans';
 END
