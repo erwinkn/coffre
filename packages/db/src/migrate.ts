@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import type { PoolClient } from 'pg';
-
 import { checkDatabaseUrl } from './connect.ts';
-import { postgresConnection } from './postgres.ts';
+import { createDatabase } from './database.ts';
+import { postgresSession, quoteIdentifier, type PostgresClient } from './postgres.ts';
 
 /**
  * Bring a database up to date with the migration tree, migrations/postgres.
@@ -17,8 +16,8 @@ import { postgresConnection } from './postgres.ts';
 const MIGRATION_LOCK_KEY = '7165058122361679213';
 
 /** Reassert database privileges that pg_dump and CREATE DATABASE TEMPLATE do not carry. */
-export async function restrictDatabase(client: Pick<PoolClient, 'query'>): Promise<void> {
-  await client.query(`DO $$ BEGIN
+export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): Promise<void> {
+  await client.unsafe(`DO $$ BEGIN
     EXECUTE format(
       'REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC, coffre_app, coffre_runtime, coffre_vault, coffre_vault_runtime, coffre_backup',
       current_database()
@@ -255,50 +254,45 @@ function verifyHistory(
 }
 
 async function postgresMigrator(url: string): Promise<Migrator> {
-  const [{ default: pg }, { drizzle }, { migrate }] = await Promise.all([
-    import('pg'),
-    import('drizzle-orm/node-postgres'),
-    import('drizzle-orm/node-postgres/migrator'),
-  ]);
-  const pool = new pg.Pool({ ...postgresConnection(url), application_name: 'coffre-migrations', max: 1 });
-  const client = await pool.connect();
+  const { migrate } = await import('drizzle-orm/postgres-js/migrator');
+  // One session: the advisory lock and lock_timeout are the session's, and a statement after it is lost fails.
+  const client = postgresSession(url, { application_name: 'coffre-migrations' });
   return {
     async applied() {
-      const relation = await client.query<{ relation: string | null }>(
+      const [found] = await client.unsafe<{ relation: string | null }[]>(
         "SELECT to_regclass('drizzle.__drizzle_migrations')::text AS relation",
       );
-      if (!relation.rows[0]?.relation) return null;
-      const result = await client.query<AppliedMigration>(
+      if (!found?.relation) return null;
+      return [...await client.unsafe<AppliedMigration[]>(
         'SELECT hash, created_at::text FROM drizzle.__drizzle_migrations ORDER BY created_at, id',
-      );
-      return result.rows;
+      )];
     },
     async lock() {
-      await client.query("SET lock_timeout = '5min'");
-      await client.query('SELECT pg_advisory_lock($1::bigint)', [MIGRATION_LOCK_KEY]);
+      await client.unsafe("SET lock_timeout = '5min'");
+      await client.unsafe('SELECT pg_advisory_lock($1::bigint)', [MIGRATION_LOCK_KEY]);
     },
     async unlock() {
-      await client.query('SELECT pg_advisory_unlock($1::bigint)', [MIGRATION_LOCK_KEY]);
+      await client.unsafe('SELECT pg_advisory_unlock($1::bigint)', [MIGRATION_LOCK_KEY]);
     },
-    migrate: (migrationsFolder) => migrate(drizzle(client), { migrationsFolder }),
+    // Drizzle's migrator, on a database of coffre's own driver: drizzle-orm/postgres-js's `drizzle` would import the npm postgres.
+    migrate: (migrationsFolder) => migrate(createDatabase(client) as unknown as Parameters<typeof migrate>[0], { migrationsFolder }),
     async restrict(backupLogin) {
       await restrictDatabase(client);
       if (backupLogin !== undefined) {
         // Compared as text: as a name, Postgres would cut it to 63 bytes, and grant whichever role bears the cut.
-        const { rowCount } = await client.query('SELECT 1 FROM pg_roles WHERE rolname::text = $1', [backupLogin]);
-        if (rowCount === 0) throw new Error(`role ${client.escapeIdentifier(backupLogin)} does not exist: make it, coffre never does`);
-        await client.query(`GRANT coffre_backup TO ${client.escapeIdentifier(backupLogin)} WITH ADMIN FALSE, INHERIT TRUE, SET FALSE`);
+        const found = await client.unsafe('SELECT 1 FROM pg_roles WHERE rolname::text = $1', [backupLogin]);
+        if (found.count === 0) throw new Error(`role ${quoteIdentifier(backupLogin)} does not exist: make it, coffre never does`);
+        await client.unsafe(`GRANT coffre_backup TO ${quoteIdentifier(backupLogin)} WITH ADMIN FALSE, INHERIT TRUE, SET FALSE`);
       }
     },
     async notOwner({ relations, functions }) {
-      const { rows } = await client.query<{ owner: string; member: boolean; login: string; grants_inherit: boolean; inherits: boolean }>(FOREIGN_OWNERS, [relations, functions]);
+      const rows = [...await client.unsafe<{ owner: string; member: boolean; login: string; grants_inherit: boolean; inherits: boolean }[]>(FOREIGN_OWNERS, [relations, functions])];
       if (rows.length === 0) return null;
       const [{ login, grants_inherit: grantsInherit, inherits }] = rows as [(typeof rows)[number]];
       return new NotOwner(login, rows.map(({ owner, member }) => ({ name: owner, member })), { grantsInherit, inherits });
     },
     async close() {
-      client.release();
-      await pool.end();
+      await client.end();
     },
   };
 }

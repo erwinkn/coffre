@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createDatabase } from '@coffre/db';
 
 import { findCredential } from '../../src/db/queries.ts';
+import { answering, watched } from './postgres-pool.ts';
 
 // Hyperdrive caches a read for up to a minute unless its config was created
 // with --caching-disabled, and never caches one that calls a stable or
@@ -13,11 +14,7 @@ import { findCredential } from '../../src/db/queries.ts';
 /** A Postgres database whose pool records each statement and finds nothing. */
 function recording() {
   const statements: string[] = [];
-  const query = async (config: string | { text: string }) => {
-    statements.push(typeof config === 'string' ? config : config.text);
-    return { rows: [], fields: [], rowCount: 0 };
-  };
-  const db = createDatabase({ query, connect: async () => ({ query, release: () => {} }) } as never);
+  const db = createDatabase(watched(answering(), ({ text }) => void statements.push(text)));
   return { db, statements };
 }
 

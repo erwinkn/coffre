@@ -33,12 +33,10 @@
     "@coffre/db": "workspace:*",
     "@hegeldev/hegel": "0.4.7",
     "@types/node": "26.1.1",
-    "@types/pg": "8.20.0",
     "@types/ws": "8.18.1",
     "jsonc-parser": "3.3.1",
     "libsodium-wrappers": "0.8.4",
     "openai": "7.36.0",
-    "pg": "8.16.3",
     "tsdown": "0.23.0",
     "typescript": "5.9.3",
     "ws": "8.21.3"

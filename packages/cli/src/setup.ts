@@ -17,9 +17,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
-import { postgresConnection } from '@coffre/db/connect';
+import { postgresClient, postgresSession, quoteIdentifier, quoteLiteral, type PostgresClient } from '@coffre/db/connect';
 import { migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
-import pg from 'pg';
 
 import { cappedLimit, type Connections, connectionsOf, hyperdriveLimit, limitReason, tooFewConnections } from './connections.ts';
 import { readDatabaseUrl } from './database-url.ts';
@@ -273,18 +272,17 @@ async function inspect(administrator: URL, workers: boolean, out: Output, clean:
     () => null,
     clean,
   );
-  const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
+  const client = postgresClient(administrator.href, { max: 1, application_name: 'coffre-setup' });
   let inspected!: Inspected;
   try {
     await steps.run(0, async () => {
-      await client.connect();
       inspected = { connections: await connectionsOf(client), used: await holdsData(client), existing: await existingLogins(client) };
       return `Connected to ${where} as ${user}`;
     });
     await steps.run(1, async () => {
-      const [self] = (await client.query<{ rolsuper: boolean; rolcreaterole: boolean }>(
+      const [self] = await client.unsafe<{ rolsuper: boolean; rolcreaterole: boolean }[]>(
         'SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user',
-      )).rows;
+      );
       if (!self?.rolsuper && !self?.rolcreaterole) {
         throw new SetupError(`${user} cannot create roles: connect as the database's administrator, which has CREATEROLE`);
       }
@@ -347,11 +345,10 @@ async function run(
   );
   const step = (i: number, work: Parameters<Steps['run']>[1]) => steps.run(i, work);
 
-  const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
+  const client = postgresClient(administrator.href, { max: 1, application_name: 'coffre-setup' });
   try {
     let logins!: Record<Component, Login>;
     await step(0, async (progress) => {
-      await client.connect();
       // On Cloudflare, a login gets a new password when its Hyperdrive config needs one, as decided before Cloudflare changed (`newPasswords`).
       const reset =
         cloudflare === null
@@ -447,10 +444,10 @@ async function run(
 }
 
 /** Whether the database holds data: coffre's log has an entry. Before the first migration, it holds none. */
-async function holdsData(client: pg.Client): Promise<boolean> {
-  const [migrated] = (await client.query<{ migrated: boolean }>("SELECT to_regclass('public.audit_log') IS NOT NULL AS migrated")).rows;
+async function holdsData(client: PostgresClient): Promise<boolean> {
+  const [migrated] = await client.unsafe<{ migrated: boolean }[]>("SELECT to_regclass('public.audit_log') IS NOT NULL AS migrated");
   if (!migrated!.migrated) return false;
-  return (await client.query<{ used: boolean }>('SELECT EXISTS (SELECT 1 FROM audit_log) AS used')).rows[0]!.used;
+  return (await client.unsafe<{ used: boolean }[]>('SELECT EXISTS (SELECT 1 FROM audit_log) AS used'))[0]!.used;
 }
 
 /** The database as Cloudflare's checks take it (`Database`). */
@@ -461,8 +458,8 @@ function asRead(administrator: URL, used: boolean, existing: ReadonlyMap<string,
 }
 
 /** Coffre's logins that exist, by role, and whether each may log in. */
-async function existingLogins(client: pg.Client): Promise<Map<string, boolean>> {
-  const { rows } = await client.query<{ rolname: string; rolcanlogin: boolean }>('SELECT rolname, rolcanlogin FROM pg_roles WHERE rolname = ANY($1)', [Object.values(ROLES)]);
+async function existingLogins(client: PostgresClient): Promise<Map<string, boolean>> {
+  const rows = await client.unsafe<{ rolname: string; rolcanlogin: boolean }[]>('SELECT rolname, rolcanlogin FROM pg_roles WHERE rolname = ANY($1)', [Object.values(ROLES)]);
   return new Map(rows.map(({ rolname, rolcanlogin }) => [rolname, rolcanlogin]));
 }
 
@@ -476,7 +473,7 @@ async function existingLogins(client: pg.Client): Promise<Map<string, boolean>> 
  * one that exists keeps its password, until then.
  */
 async function provision(
-  client: pg.Client,
+  client: PostgresClient,
   administrator: URL,
   user: string,
   reset: (existing: ReadonlyMap<string, boolean>) => Promise<(component: Component) => boolean>,
@@ -493,7 +490,7 @@ async function provision(
     const locked = component === 'backup' && existing.get(role) === false;
     const login: Login = { role, login: loginFor(role, user), password: create ? 'created' : 'reset', url: null };
     const sql = (attributes: string) =>
-      `${create ? 'CREATE' : 'ALTER'} ROLE ${client.escapeIdentifier(role)} ${attributes}${create ? ' INHERIT NOCREATEDB NOCREATEROLE' : ''}`;
+      `${create ? 'CREATE' : 'ALTER'} ROLE ${quoteIdentifier(role)} ${attributes}${create ? ' INHERIT NOCREATEDB NOCREATEROLE' : ''}`;
     if (!create && !locked && !resets(component)) {
       logins[component] = { ...login, password: 'kept' };
     } else if (component === 'backup' && later) {
@@ -503,7 +500,7 @@ async function provision(
     } else {
       const password = newPassword();
       secrets.push(password);
-      await changeRole(client, user, role, sql(`LOGIN PASSWORD ${client.escapeLiteral(scramVerifier(password))}`));
+      await changeRole(client, user, role, sql(`LOGIN PASSWORD ${quoteLiteral(scramVerifier(password))}`));
       logins[component] = { ...login, url: loginUrl(administrator, login.login, password) };
     }
   }
@@ -515,9 +512,9 @@ async function provision(
  * default, and a managed owner may not name them, even to turn them off.
  * On Postgres 16 and later, changing a role another made takes its ADMIN.
  */
-async function changeRole(client: pg.Client, user: string, role: string, sql: string): Promise<void> {
+async function changeRole(client: PostgresClient, user: string, role: string, sql: string): Promise<void> {
   try {
-    await client.query(sql);
+    await client.unsafe(sql);
   } catch (error) {
     if ((error as { code?: string }).code !== '42501' || sql.startsWith('CREATE')) throw error;
     throw new SetupError(`${user} may not change ${role}, which another role made: have that role grant ${user} ADMIN on ${role}, or drop ${role}, then run coffre setup again`);
@@ -533,13 +530,12 @@ async function changeRole(client: pg.Client, user: string, role: string, sql: st
 async function activate(administrator: URL, backup: Login, out: Output, clean: (error: unknown) => string): Promise<void> {
   const user = decodeURIComponent(administrator.username);
   const steps = new Steps(out, [`Give ${backup.role} the password shown`], () => null, clean);
-  const client = new pg.Client({ ...postgresConnection(administrator.href), application_name: 'coffre-setup' });
+  const client = postgresClient(administrator.href, { max: 1, application_name: 'coffre-setup' });
   try {
     await steps.run(0, async () => {
       try {
-        await client.connect();
-        const verifier = client.escapeLiteral(scramVerifier(decodeURIComponent(new URL(backup.url!).password)));
-        await changeRole(client, user, backup.role, `ALTER ROLE ${client.escapeIdentifier(backup.role)} LOGIN PASSWORD ${verifier}`);
+        const verifier = quoteLiteral(scramVerifier(decodeURIComponent(new URL(backup.url!).password)));
+        await changeRole(client, user, backup.role, `ALTER ROLE ${quoteIdentifier(backup.role)} LOGIN PASSWORD ${verifier}`);
       } catch (error) {
         throw new SetupError(
           `${clean(error)}. The password shown is not in effect: ${backup.role} ` +
@@ -618,20 +614,20 @@ const BOUNDARY = [
 
 /** Each probe, tried as the login in a transaction rolled back: allowed, or refused for want of a privilege. */
 async function probed(url: string): Promise<boolean[]> {
-  const client = new pg.Client({ ...postgresConnection(url), application_name: 'coffre-setup' });
-  await client.connect();
+  // One session: a probe runs in the transaction rolled back after it, or not at all, never on a connection of its own.
+  const client = postgresSession(url, { application_name: 'coffre-setup' });
   try {
     const allowed: boolean[] = [];
     for (const { sql } of BOUNDARY) {
-      await client.query('BEGIN');
+      await client.unsafe('BEGIN');
       try {
-        await client.query(sql);
+        await client.unsafe(sql);
         allowed.push(true);
       } catch (error) {
         if ((error as { code?: string }).code !== '42501') throw error;
         allowed.push(false);
       } finally {
-        await client.query('ROLLBACK');
+        await client.unsafe('ROLLBACK');
       }
     }
     return allowed;
@@ -641,10 +637,10 @@ async function probed(url: string): Promise<boolean[]> {
 }
 
 /** The same, from the catalog, for a login whose password this run did not set: the administrator asks for it. */
-async function granted(client: pg.Client, role: string): Promise<boolean[]> {
+async function granted(client: PostgresClient, role: string): Promise<boolean[]> {
   const allowed: boolean[] = [];
   for (const { privilege } of BOUNDARY) {
-    allowed.push((await client.query<{ allowed: boolean }>(`SELECT ${privilege} AS allowed`, [role])).rows[0]!.allowed);
+    allowed.push((await client.unsafe<{ allowed: boolean }[]>(`SELECT ${privilege} AS allowed`, [role]))[0]!.allowed);
   }
   return allowed;
 }

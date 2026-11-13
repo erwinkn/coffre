@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 
 import type { SecretRef, Through, WrappedKey } from '@coffre/core/vault';
 import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
+import { postgresClient } from '@coffre/db/connect';
 import { forgetLogHeads } from '@coffre/db/log';
 import { and, eq, sql, type SQL } from 'drizzle-orm';
-import pg from 'pg';
 
 import { openLocalVault as openRawVault, type LocalVault as RawLocalVault } from '../src/local.ts';
 
@@ -61,14 +61,14 @@ export type TestDatabase = { owner: Database; vault: Database; connect(connectio
 
 /**
  * The database as its owner and as the vault; `connect` opens one more as the vault, as a second instance would, with
- * up to `connections` at once (pg's 10 unless set).
+ * up to `connections` at once (10 unless set).
  */
 export async function openTestDatabase(): Promise<TestDatabase> {
   const opened: (() => Promise<void>)[] = [];
   const open = async (login: string, connections?: number): Promise<Database> => {
-    const pool = new pg.Pool({ connectionString: login, ...(connections === undefined ? {} : { max: connections }) });
-    opened.push(() => pool.end());
-    return createDatabase(pool);
+    const client = postgresClient(login, { max: connections ?? 10 });
+    opened.push(() => client.end());
+    return createDatabase(client);
   };
   return {
     owner: await open(OWNER_URL),
@@ -95,7 +95,7 @@ export async function withLogUnlocked<T>(owner: Database, work: (db: Queryable) 
 
 /** Rows of a raw query. */
 export async function rows<Row>(db: Queryable, query: SQL): Promise<Row[]> {
-  return (await db.execute(query)).rows as Row[];
+  return [...await db.execute(query)] as Row[];
 }
 
 /** A raw statement. */

@@ -24,6 +24,6 @@ export async function migrated(db: Queryable): Promise<boolean> {
 }
 
 async function hasLedger(db: Queryable): Promise<boolean> {
-  const { rows } = await db.execute<{ present: boolean }>(sql`SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS present`);
-  return rows[0]?.present === true;
+  const [found] = await db.execute<{ present: boolean }>(sql`SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL AS present`);
+  return found?.present === true;
 }

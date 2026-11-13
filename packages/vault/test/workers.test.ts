@@ -18,7 +18,7 @@ import type { WrappedKey } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { isUnavailable } from '@coffre/db/dialect';
 import { and, eq, inArray } from 'drizzle-orm';
-import pg from 'pg';
+import { postgresSession } from '@coffre/db/connect';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
 import { emptyDatabase, openTestDatabase, OWNER_URL, places, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
@@ -236,8 +236,7 @@ test('through the entrypoint, a read past the head\'s places in line fails at on
   const placed = await places(db.owner);
   const secret = await placed.secret(placed.dev);
   const vault = await freshVault(VAULT_URL);
-  const holder = new pg.Client({ connectionString: OWNER_URL });
-  await holder.connect();
+  const holder = postgresSession(OWNER_URL);
   try {
     assert.ok((await vault.call('access', ROOT)).ok);
     const wrapped = (await vault.call('wrap', { principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] })) as { ok: boolean; result: { wrapped: WrappedKey[] } };
@@ -246,9 +245,9 @@ test('through the entrypoint, a read past the head\'s places in line fails at on
     const read = () => vault.call('unwrap', { principal: ROOT, caller: 'person', purpose: 'reveal', items });
     // Once, so that what a process does once is done; then the head held, and every place in line taken.
     assert.equal(((await read()).result as { ok: boolean }).ok, true);
-    await holder.query('BEGIN');
-    await holder.query('SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE');
-    await holder.query('SELECT pg_advisory_xact_lock($1, place) FROM generate_series(1, $2::int) AS place', [0x636f6668, READ_HEAD_WAITERS]);
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE');
+    await holder.unsafe('SELECT pg_advisory_xact_lock($1, place) FROM generate_series(1, $2::int) AS place', [0x636f6668, READ_HEAD_WAITERS]);
     const started = Date.now();
     const refused = await read();
     assert.ok(Date.now() - started < 2_000, `refused after ${Date.now() - started} ms`);
@@ -256,7 +255,7 @@ test('through the entrypoint, a read past the head\'s places in line fails at on
     assert.equal(refused.code, '55P03', 'the code crossed the binding');
     assert.ok(isUnavailable({ code: refused.code }), 'which the app answers as unavailable');
   } finally {
-    await holder.query('ROLLBACK').catch(() => undefined);
+    await holder.unsafe('ROLLBACK').catch(() => undefined);
     await holder.end();
     await vault.stop();
   }

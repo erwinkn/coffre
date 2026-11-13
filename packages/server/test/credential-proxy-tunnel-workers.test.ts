@@ -10,17 +10,16 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
-import { createServer, type AddressInfo } from 'node:net';
+import { connect as tcp, createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import pg from 'pg';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 import { WebSocket } from 'ws';
 
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
-import { tunnelListener, WINDOW } from './tunnel-listener.ts';
+import { appClient, tunnelListener, WINDOW } from './tunnel-listener.ts';
 
 const HANDLE = `coffre_use_${'h'.repeat(43)}`;
 const REVOKED = `coffre_use_${'r'.repeat(43)}`;
@@ -73,14 +72,11 @@ async function listen(tunnel: string, handle = HANDLE): Promise<number> {
   return port;
 }
 
-const appClient = (port: number, handle = HANDLE) => new pg.Client({ connectionString: `postgres://app:${handle}@127.0.0.1:${port}/app` });
-
 test('queries through the object, over cloudflare:sockets and over a network binding to a private address', { timeout: 60_000 }, async () => {
   for (const tunnel of ['db', 'replica']) {
-    const client = appClient(await listen(tunnel));
-    await client.connect();
+    const client = appClient(await listen(tunnel), HANDLE);
     try {
-      assert.deepEqual((await client.query('SELECT current_user AS who, $1::int + 1 AS two', [1])).rows, [{ who: 'coffre_runtime', two: 2 }], tunnel);
+      assert.deepEqual([...await client.unsafe('SELECT current_user AS who, $1::int + 1 AS two', [1])], [{ who: 'coffre_runtime', two: 2 }], tunnel);
     } finally {
       await client.end();
     }
@@ -89,32 +85,41 @@ test('queries through the object, over cloudflare:sockets and over a network bin
 
 test('a cancel request, on a connection of its own, reaches the session in the same object', { timeout: 60_000 }, async () => {
   const port = await listen('db');
-  const client = appClient(port);
-  await client.connect();
+  const client = appClient(port, HANDLE);
   try {
-    const sleeping = client.query('SELECT pg_sleep(30)');
+    // The key the tunnel gave the app, at its startup.
+    const { state } = await client.unsafe('SELECT 1');
+    const sleeping = client.unsafe('SELECT pg_sleep(30)').execute();
     await new Promise((resolve) => setTimeout(resolve, 300));
     const started = Date.now();
-    // pg sends it as psql does: a CancelRequest with the key it was given, on a new connection to the listener.
-    const canceller = appClient(port) as unknown as { cancel(client: pg.Client, query: unknown): void };
-    canceller.cancel(client, (client as unknown as { activeQuery: unknown }).activeQuery);
+    // As psql sends one: a CancelRequest with the key the session was given, on a new connection to the listener.
+    const cancel = tcp({ host: '127.0.0.1', port });
+    await once(cancel, 'connect');
+    cancel.write(cancelRequest(state!));
     await assert.rejects(sleeping, (error: { code?: string }) => error.code === '57014');
     assert.ok(Date.now() - started < 5000);
+    cancel.destroy();
   } finally {
     await client.end();
   }
 });
 
+/** A CancelRequest, as psql sends one, with the key a session was given. */
+function cancelRequest({ pid, secret }: { pid: number; secret: number }): Buffer {
+  const packet = Buffer.alloc(16);
+  packet.writeInt32BE(16, 0);
+  packet.writeInt32BE(80877102, 4);
+  packet.writeUInt32BE(pid >>> 0, 8);
+  packet.writeUInt32BE(secret >>> 0, 12);
+  return packet;
+}
+
 test("a revoked handle's session ends at the object's recheck", { timeout: 60_000 }, async () => {
   const client = appClient(await listen('db', REVOKED), REVOKED);
-  // The driver says the connection dropped, then ends.
-  client.on('error', () => undefined);
-  const ended = new Promise((resolve) => client.once('end', resolve));
-  await client.connect();
   // Live, until the worker's stand-in refuses the handle, from its fourth use: its admission's, then a recheck each half second.
-  assert.deepEqual((await client.query('SELECT 1 AS one')).rows, [{ one: 1 }]);
+  assert.deepEqual([...await client.unsafe('SELECT 1 AS one')], [{ one: 1 }]);
   const started = Date.now();
-  await ended;
+  await client.ended;
   assert.ok(Date.now() - started < 5000);
 });
 
