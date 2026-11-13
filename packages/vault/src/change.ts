@@ -1,5 +1,5 @@
 import type { Database } from '@coffre/db';
-import { gaveUp, rowsOf } from '@coffre/db/dialect';
+import { gaveUpCode, rowsOf } from '@coffre/db/dialect';
 import { later, laterRows } from '@coffre/db/later';
 import { sql, type SQL } from 'drizzle-orm';
 
@@ -129,17 +129,19 @@ const WRITE_MS = 5000;
 
 /**
  * The database had no turn for it in time: a wait that gave up, its cause,
- * whose code Postgres gave, or a change that started over too often, which
- * never had its turn and says so in Postgres's code for that,
- * `lock_not_available`. By that code the vault answers it as the outage it
- * is, 503, and not as a bug (`failureOf`).
+ * or a change that started over too often. It carries Postgres's code for
+ * the wait that ended, `lock_not_available` for a change that never had its
+ * turn, and by it the app answers the outage it is, 503, and not a bug.
+ * The code is its own, not only its cause's: an error crosses to the app
+ * with its own fields, on Workers, and a cause may not (as `Overdue` and
+ * `HeadBusy`).
  */
 export class Busy extends Error {
   override readonly name = 'Busy';
-  readonly code: string | undefined;
-  constructor(message: string, cause?: unknown) {
+  readonly code: string;
+  constructor(message: string, code = '55P03', cause?: unknown) {
     super(message, { cause });
-    this.code = cause === undefined ? '55P03' : undefined;
+    this.code = code;
   }
 }
 
@@ -166,7 +168,8 @@ export async function bounded<Row>(db: Database, statement: SQL, { first, runMs 
       { isolationLevel: 'read committed' },
     )
     .catch((error: unknown) => {
-      throw gaveUp(error) ? new Busy(`a statement waited ${LOCK_WAIT_MS} ms for a lock, or ran ${runMs} ms`, error) : error;
+      const code = gaveUpCode(error);
+      throw code === undefined ? error : new Busy(`a statement waited ${LOCK_WAIT_MS} ms for a lock, or ran ${runMs} ms`, code, error);
     });
   // Read once the transaction has resolved: it committed.
   return rows;

@@ -317,6 +317,8 @@ test('a decision that writes around its read is a fault, not a change', async ()
 /** Busy, which the vault answers as an outage, 503, with Postgres's code for the wait that ended. */
 const busy = (code: string) => (error: unknown) => {
   assert.ok(error instanceof Busy);
+  // Its own, which crosses a Worker's binding to the app, where a cause may not.
+  assert.equal(error.code, code);
   assert.deepEqual(failureOf(error), { status: 503, body: { error: error.message, code } });
   return true;
 };
