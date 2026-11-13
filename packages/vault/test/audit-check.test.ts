@@ -91,7 +91,7 @@ test('a visit with nothing wrong: ok, the newest checkpoint, the cursor listed t
   const checked = await v.check(v.input);
   assert.deepEqual(checked, {
     state: 'ok', reason: null, checkpoint: { number: String(v.upto()), at: v.at }, listedThrough: { number: String(v.upto()), at: v.at }, forged: [],
-    listed: { through: v.upto(), at: v.at },
+    listed: { through: v.upto(), at: v.at }, unlisted: null,
   });
 });
 
@@ -219,7 +219,7 @@ test('a signer that does not seal, or holds no pair: late, its reason; broken st
   assert.match(stalled.reason!, /does not seal: its last tick ended 9000 ms ago/);
   // Not open: no pair to hold the database to, and its host says why.
   const closed = await v.check(v.input, { reached: reachedOf(null, { ok: false, reason: 'the checkpointer is not open' }) });
-  assert.deepEqual([closed.state, closed.reason], ['late', 'the checkpointer does not seal: the checkpointer is not open']);
+  assert.deepEqual([closed.state, closed.reason], ['late', 'the signer holds no pair to check the database against: the checkpointer is not open']);
   const forged = await v.check({ ...v.input, events: [{ ...v.input.events[0]!, allowed: false }] }, { reached: reachedOf(null, { ok: false, reason: 'down' }) });
   assert.equal(forged.state, 'broken');
 });
@@ -418,21 +418,29 @@ test('`beat`: ok writes nothing; not ok, the finding, an event of the vault\'s u
   await assert.rejects(vault.beat!(input), /the row under the finding's id .* is not the vault's/);
 });
 
-test('`beat`: a projector that stopped, below the checkpoint and still two beats on, fails the run with no finding', async () => {
+test('`beat`: a projector that stopped, a checkpoint above its cursor signed two beats ago, fails the run with no finding', async () => {
   const { vault, cp, mac } = await vaulted();
   const below = cp.pair.pair.upto;
-  const everyMs = 300_000;
-  // A checkpoint above the cursor, the cursor's pair signed three beats ago.
+  // After an hour's quiet, one use and its tick: the cursor's pair an hour old, the checkpoint above it just signed, the
+  // projector a moment from listing it. Not stopped, and neither is a first projection, its cursor at the start.
   await logWriter(db.owner, mac).uses(3);
   assert.ok((await cp.tick()).signed);
-  const stopped = await vault.beat!({ cursor: cursor(mac, below, Date.now() - 3 * everyMs), everyMs });
+  const above = cp.pair.pair.upto;
+  const quiet = await vault.beat!({ cursor: cursor(mac, below, Date.now() - 3_600_000), everyMs: 300_000 });
+  assert.ok(quiet.ok && quiet.state === 'ok' && quiet.projector === null, JSON.stringify(quiet));
+  const first = await vault.beat!({ cursor: { ...cursor(mac, 0n, 0), mac: null }, everyMs: 300_000 });
+  assert.ok(first.ok && first.projector === null, JSON.stringify(first));
+  // The same checkpoint, two beats on (a beat of 50 ms): stopped, and the run fails with no finding.
+  const everyMs = 50;
+  await new Promise((done) => setTimeout(done, 3 * everyMs));
+  const stopped = await vault.beat!({ cursor: cursor(mac, below, Date.now()), everyMs });
   assert.ok(stopped.ok && stopped.state === 'ok' && stopped.finding === null, JSON.stringify(stopped));
-  assert.match(stopped.projector!, new RegExp(`lists through ${below}, below the newest checkpoint \\(${cp.pair.pair.upto}\\)`));
-  // Behind by a beat only: catching up.
-  const behind = await vault.beat!({ cursor: cursor(mac, below, Date.now() - everyMs), everyMs });
-  assert.ok(behind.ok && behind.projector === null);
-  // At the checkpoint, however old: nothing to catch up on.
-  assert.equal(projectorStopped({ through: cp.pair.pair.upto, at: 0 }, { number: String(cp.pair.pair.upto), at: 0 }, everyMs), null);
+  assert.match(stopped.projector!, new RegExp(`lists through ${below}, and the checkpoint above it \\(up to ${above}\\) was signed \\d+ ms ago`));
+  // At the checkpoint, however old: nothing above it to list.
+  const level = await vault.beat!({ cursor: cursor(mac, above, 0), everyMs });
+  assert.ok(level.ok && level.projector === null, JSON.stringify(level));
+  // A checkpoint above it that does not open under the vault's keys: said, not taken as a time.
+  assert.match(projectorStopped({ through: below, at: 0 }, { upto: above, at: null }, everyMs)!, /does not open under the vault's keys/);
   await assert.rejects(vault.beat!({ cursor: cursor(mac, below, Date.now()), everyMs: 0 }), /positive integer/);
 });
 

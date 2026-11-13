@@ -439,8 +439,9 @@ export interface Vault {
    * same state again, for another reason or the same, finds the event under its id and writes nothing. No outcome is
    * stored between beats, so no event says a finding cleared. A finding it cannot write throws, and the app's run fails.
    *
-   * `projector`, null unless the projection has stopped: the cursor below the newest checkpoint, and the pair it stands
-   * at signed more than two beats (`everyMs`, the deployment's beat period) ago. The app fails its run on it; it writes
+   * `projector`, null unless the projection has stopped: a checkpoint above the cursor signed more than two beats
+   * (`everyMs`, the deployment's beat period) ago, so what it has not listed has waited that long (the cursor's own
+   * `at` is the time of the pair it stands at, an hour old after a quiet hour). The app fails its run on it; it writes
    * no finding, since nothing is wrong with the log. Nothing calls it yet (P3's swap). Only with 0.15's log on.
    *
    *   beat({ cursor, everyMs: 300_000 }) on a checkpointer stuck at 4410

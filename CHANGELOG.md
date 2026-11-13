@@ -103,7 +103,9 @@
   `beat` is the same check with no rows, and writes a finding, an event
   of the vault's, once per checkpoint and state. Nothing calls either
   yet. The check of 0.15's log the page asks today reads in the same one
-  statement, where it took three.
+  statement, where it took three, and reads no day of uses below the
+  floor its signer signed, so it plans and locks the same however many
+  days the log keeps.
 - **Node deployments are not tested in 0.16.0.** A Node deployment stays
   on 0.15.0 until 0.16.1, which brings Node back on Postgres; SQLite is
   gone.

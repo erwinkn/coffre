@@ -575,15 +575,21 @@ export async function callRebuild(db: Database, row: ReturnType<typeof rebuildRo
  *
  * - `newest`, the newest checkpoint row, and `floor`, the floor of `at` its row says (a verifier holds it to the one
  *   its pair signed, which a writer cannot raise: `checkTail` reads the tail again from that one when they differ);
- * - `tail`, the entries above it, both trees, by number, uses from that floor: the first `limit`;
+ * - `tail`, the entries above it, both trees, by number, uses from that floor and from `bound`: the first `limit`;
  * - `rotations`, every rotation of the vault's signing key, which bound a replaced key (keyring.ts), read only when
  *   asked (`rotations: true`, a vault that holds a replaced key), else none;
  * - `anchor`, the first change of the object `anchor`, the frozen log's anchor (upgrade.ts), and `last`, the frozen
  *   log's last entry, each null for none;
- * - `indexes`, the definitions of the indexes that keep a request to one entry (`requestsUniqueIn`).
+ * - `indexes`, the definitions of the indexes that keep a request to one entry (`requestsUniqueIn`);
+ * - `next`, the first checkpoint above `next` when asked (the beat's: the first pair the projection has not listed,
+ *   `projectorStopped`), else null.
  *
  * Every part is a seek on an index or the primary key, or a scan of what lies above the newest checkpoint: nothing it
- * reads grows with the log.
+ * reads grows with the log. `bound`, the floor of `at` a pair the database must have reached signed (the signer's), is
+ * what keeps it so with the days kept: the row's floor is a value of the statement's own, which Postgres cannot prune
+ * `log_uses`' day partitions by, so without a constant beside it the plan names, plans and locks every day (0054, the
+ * same for `log_reads`). It is a lower bound the tail is never short of when used: the walk takes the statement's tail
+ * only when the row's floor is the signed one and at or above `bound` (`checkTrees`), and reads again otherwise.
  */
 export type CheckRead = {
   newest: StoredPair | null;
@@ -593,6 +599,7 @@ export type CheckRead = {
   anchor: LogEntry | null;
   last: StoredEntry | null;
   indexes: { name: string; def: string }[];
+  next: StoredPair | null;
 };
 
 type RawLast = {
@@ -602,14 +609,16 @@ type RawLast = {
   prevHash: string; mac: string; hash: string;
 };
 
-export async function checkRead(db: Database, options: { limit: number; anchor: string; rotations: boolean }): Promise<CheckRead> {
-  const { limit, anchor } = options;
+export async function checkRead(db: Database, options: { limit: number; anchor: string; rotations: boolean; bound: number | null; next: bigint | null }): Promise<CheckRead> {
+  const { limit, anchor, bound, next } = options;
   tailLimit(limit);
+  if (bound !== null && !Number.isSafeInteger(bound)) throw new Error(`a check's floor of at is a time in ms, not ${bound}`);
   const read = await one<{
     newest: (RawPair & { floor: string }) | null; tail: RawEntry[]; rotations: RawEntry[]; anchor: RawEntry | null; last: RawLast | null; indexes: { name: string; def: string }[];
+    next: RawPair | null;
   }>(db, sql`
     WITH k AS (SELECT k.upto, k.at_floor, k.changes_note, k.uses_note FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1),
-    t AS (${tailOf(sql`k.upto`, sql`k.at_floor`, limit, sql`k,`)})
+    t AS (${tailOf(sql`k.upto`, sql`k.at_floor`, limit, sql`k,`, bound)})
     SELECT json_build_object(
       'newest', (SELECT json_build_object('upto', k.upto::text, 'changes', k.changes_note, 'uses', k.uses_note, 'floor', k.at_floor::text) FROM k),
       'tail', (SELECT coalesce(json_agg(t.v ORDER BY t.n), '[]') FROM t),
@@ -621,7 +630,8 @@ export async function checkRead(db: Database, options: { limit: number; anchor: 
           'requestId', a.request_id, 'sourceIp', a.source_ip, 'relatedSeq', a.related_seq::text, 'metadata', a.metadata,
           'prevHash', encode(a.prev_hash, 'hex'), 'mac', encode(a.mac, 'hex'), 'hash', encode(a.hash, 'hex'))
         FROM audit_log a ORDER BY a.seq DESC LIMIT 1),
-      'indexes', ${REQUEST_INDEXES}) AS v`);
+      'indexes', ${REQUEST_INDEXES},
+      'next', ${next === null ? sql`NULL::json` : sql`(SELECT ${PAIR} FROM log_checkpoints k WHERE k.upto > ${next}::bigint ORDER BY k.upto LIMIT 1)`}) AS v`);
   const last = read.last;
   return {
     newest: toPair(read.newest),
@@ -639,6 +649,7 @@ export async function checkRead(db: Database, options: { limit: number; anchor: 
       hash: Buffer.from(last.hash, 'hex'),
     },
     indexes: read.indexes,
+    next: toPair(read.next),
   };
 }
 
@@ -657,11 +668,14 @@ export async function checkTail(db: Database, options: { after: bigint; floor: n
   return { tail: read.tail.map(toEntry), indexes: read.indexes };
 }
 
-/** The first `limit` entries above `after`, both trees, by number, uses from `floor`, each as one JSON value (`v`, by `n`); `from` names what they read beside. */
-const tailOf = (after: SQL, floor: SQL, limit: number, from: SQL) => sql`SELECT w.n, w.v FROM (
+/**
+ * The first `limit` entries above `after`, both trees, by number, uses from `floor` (and from `bound`, a constant the
+ * planner prunes the days by), each as one JSON value (`v`, by `n`); `from` names what they read beside.
+ */
+const tailOf = (after: SQL, floor: SQL, limit: number, from: SQL, bound: number | null = null) => sql`SELECT w.n, w.v FROM (
     (SELECT c.number AS n, ${CHANGE} AS v FROM ${from} log_changes c WHERE c.number > ${after} ORDER BY c.number LIMIT ${limit})
     UNION ALL
-    (SELECT u.number, ${USE} FROM ${from} log_uses u WHERE u.at >= ${floor} AND u.number > ${after} ORDER BY u.at LIMIT ${limit})
+    (SELECT u.number, ${USE} FROM ${from} log_uses u WHERE u.at >= ${floor}${bound === null ? sql`` : sql` AND u.at >= ${bound}::bigint`} AND u.number > ${after} ORDER BY u.at LIMIT ${limit})
   ) w ORDER BY w.n LIMIT ${limit}`;
 
 function tailLimit(limit: number): void {

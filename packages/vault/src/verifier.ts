@@ -1,4 +1,4 @@
-import { MAX_NUMBER, openPair, verifyLog, type LogEntry, type LogReader, type PairNotes, type StoredPair } from '@coffre/core/merkle';
+import { MAX_NUMBER, openPair, parseCheckpoint, splitNote, verifyLog, type LogEntry, type LogReader, type PairNotes, type StoredPair } from '@coffre/core/merkle';
 import type { TreeVerification } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
@@ -111,15 +111,24 @@ export type TreesChecked = { walked: Walked; read: CheckRead; ring: Keyring };
  * again with the entries they keep unique.
  *
  * `anchors`, the pairs held outside, or what picks them from the newest row the statement read (`check`'s: the pair its
- * signer is writing once the database has it, else the one it wrote).
+ * signer is writing once the database has it, else the one it wrote). `bound`, the floor of `at` signed by a pair the
+ * database must have reached, read before the statement so that Postgres prunes the days of uses below it (`checkRead`):
+ * given, or the highest of `anchors`' when they are a list. `next`, the place above which the statement also reads the
+ * first checkpoint (`CheckRead.next`).
  */
 export async function checkTrees(
   db: Database,
   keys: VerifierKeys,
-  options: Omit<VerifyOptions, 'anchors'> & { above: number; anchors?: readonly PairNotes[] | ((newest: StoredPair | null) => readonly PairNotes[]) },
+  options: Omit<VerifyOptions, 'anchors'> & {
+    above: number;
+    anchors?: readonly PairNotes[] | ((newest: StoredPair | null) => readonly PairNotes[]);
+    bound?: number | null;
+    next?: bigint | null;
+  },
 ): Promise<TreesChecked> {
   const { above } = options;
-  const read = await checkRead(db, { limit: above + 1, anchor: ANCHOR_OBJECT, rotations: keys.previous.length > 0 });
+  const bound = options.bound !== undefined ? options.bound : Array.isArray(options.anchors) ? floorOf(options.anchors) : null;
+  const read = await checkRead(db, { limit: above + 1, anchor: ANCHOR_OBJECT, rotations: keys.previous.length > 0, bound, next: options.next ?? null });
   const store = logStore(db);
   const anchors = typeof options.anchors === 'function' ? options.anchors(read.newest) : (options.anchors ?? []);
   // From the newest pair, which its signatures and the pairs held outside vouch for. It walks no use below it, so
@@ -145,7 +154,8 @@ export async function checkTrees(
     tiles: (tree, keys) => store.tiles(tree, keys),
     entries: async (after, upto, o = {}) => {
       if (read.newest === null || after !== read.newest.upto || upto !== MAX_NUMBER || o.limit !== above + 1 || o.floor === undefined) return store.entries(after, upto, o);
-      if (o.floor === read.floor) return read.tail;
+      // The statement's tail is short of nothing only from a floor at or above its bound.
+      if (o.floor === read.floor && (bound === null || o.floor >= bound)) return read.tail;
       const again = await checkTail(db, { after, floor: o.floor, limit: o.limit });
       indexes.push(again.indexes);
       return again.tail;
@@ -175,6 +185,21 @@ export async function checkTrees(
       behind: verdict.behind,
     },
   };
+}
+
+/**
+ * The highest floor of `at` the pairs sign, from their notes' text, or null for none: a bound to read from, not a check
+ * (the walk opens each pair under the keys, and a floor that comes down is its problem to report).
+ */
+export function floorOf(pairs: readonly PairNotes[]): number | null {
+  let floor: number | null = null;
+  for (const notes of pairs) {
+    try {
+      const signed = parseCheckpoint(splitNote(notes.uses).text).floor;
+      floor = floor === null ? signed : Math.max(floor, signed);
+    } catch {}
+  }
+  return floor;
 }
 
 /**

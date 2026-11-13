@@ -167,14 +167,15 @@ export function heldIn(record: string | null): PairNotes[] {
 /**
  * What the signer answers `check`, in one ask, before the database is read (T277; state-rows.md, section 3): the pair
  * the database must have reached (`Checkpointer.reached`), the one it is writing, and whether it seals (`sealingOf`).
- * A signer that is not open answers no pair: it cannot tell a write still in flight from a deleted checkpoint, and
- * `check` says `late` on its `sealing`.
+ * A signer that is not open answers no pair, and why: it cannot tell a write still in flight from a deleted
+ * checkpoint, and `check` says `late` with its reason.
  */
-export type Reached = { pair: PairNotes | null; writing: PairNotes | null; sealing: Sealing };
+export type Reached = { pair: PairNotes; writing: PairNotes | null; sealing: Sealing } | { pair: null; reason: string };
 
-/** What a host answers for its checkpointer: open, its pairs and whether it seals; closed, no pair and why. */
+/** What a host answers for its checkpointer: open, its pairs and whether it seals; closed, no pair and why (`sealing`'s reason). */
 export function reachedOf(checkpointer: Checkpointer | null, sealing: Sealing): Reached {
-  return checkpointer === null ? { pair: null, writing: null, sealing } : { ...checkpointer.reached, sealing };
+  if (checkpointer === null) return { pair: null, reason: sealing.ok ? 'the checkpointer is not open' : sealing.reason };
+  return { ...checkpointer.reached, sealing };
 }
 
 /** Somewhere each signed pair goes that a database writer cannot reach: a witness, an archive (R40's plugin). */
@@ -653,7 +654,7 @@ export class Checkpointer {
    * database has it, so for the length of one write the database is honestly one pair below its memory; it is never below
    * `pair`.
    */
-  get reached(): Pick<Reached, 'pair' | 'writing'> {
+  get reached(): { pair: PairNotes; writing: PairNotes | null } {
     return { pair: this.head.notes, writing: this.pending?.next.notes ?? null };
   }
 

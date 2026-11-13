@@ -4006,7 +4006,7 @@ class VaultService implements Vault {
    */
   async check(input: CheckInput): Promise<CheckOutcome> {
     await this.#settled();
-    const { listed: _listed, ...outcome } = await this.#audit(input);
+    const { listed: _listed, unlisted: _unlisted, ...outcome } = await this.#audit(input);
     return { ok: true, ...outcome };
   }
 
@@ -4018,22 +4018,24 @@ class VaultService implements Vault {
     await this.#settled();
     const everyMs: unknown = (input as { everyMs?: unknown } | undefined)?.everyMs;
     if (!Number.isSafeInteger(everyMs) || (everyMs as number) <= 0) throw new Error(`a beat runs every so many ms, a positive integer, not ${String(everyMs)}`);
-    const { forged: _forged, listed, ...checked } = await this.#audit({ events: [], cursor: input.cursor });
+    const { forged: _forged, listed, unlisted, ...checked } = await this.#audit({ events: [], cursor: input.cursor }, true);
     const finding = checked.state === 'ok' ? null : await writeFinding(this.#db, this.#log015().macs, checked);
-    return { ok: true, ...checked, finding, projector: projectorStopped(listed, checked.checkpoint, everyMs as number) };
+    return { ok: true, ...checked, finding, projector: projectorStopped(listed, unlisted, everyMs as number) };
   }
 
   /** `check`'s and `beat`'s one ask of the signer, then the check (audit-check.ts). */
-  async #audit(input: CheckInput): Promise<Checked> {
+  async #audit(input: CheckInput, beat = false): Promise<Checked> {
     const reached = this.#log015().reached;
     if (reached === undefined) throw new Error("the audit check asks the signer first: give the vault the checkpointer's reached");
     const said = await reached();
-    return checkAudit(this.#db, await this.#verifierKeys(), input, { reached: said, upgraded: this.#upgraded() });
+    return checkAudit(this.#db, await this.#verifierKeys(), input, { reached: said, upgraded: this.#upgraded(), beat });
   }
 
   /**
    * Whether the upgrade step has anchored the frozen log (upgrade.ts): V1 writes the step and answers here. Until it
-   * does, no database has an anchor, `audit_log` still grows, and `check` holds no last entry to one.
+   * does, no database has an anchor, `audit_log` still grows, and `check` holds no last entry to one. V1 answers from
+   * what no database writer can delete (`frozenLog`): never a row, such as the upgrade's done marker, a writer could
+   * delete with the anchor.
    */
   #upgraded(): boolean {
     return false;
