@@ -1412,6 +1412,7 @@ function standingOf(checked: CheckedView, request: UseRequest): Access {
       : principal.grants.filter((grant) => grant.expiresAt === null || grant.expiresAt > request.at).map(({ projectId, environmentId, role, expiresAt }) => ({ projectId, environmentId, role, expiresAt })),
     since: null,
     by: null,
+    seal: null,
     ...(live.policy === undefined ? {} : { policy: live.policy }),
   } as Access;
 }

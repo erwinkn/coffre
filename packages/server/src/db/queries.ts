@@ -836,8 +836,8 @@ export function memberOf(principal: string): { type: 'user' | 'service'; id: str
 }
 
 /**
- * A member's status, generation and seal (`memberSeal`) as the vault last
- * committed them, or null for no member: `user:…` or `token:…`. Read without a lock:
+ * A member's status, generation and seal as the vault last committed them
+ * (the seal: the vault's MAC over their object, base64 as `Access.seal`), or null for no member: `user:…` or `token:…`. Read without a lock:
  * a member's row is the vault's to lock. Inside a transaction that holds
  * the log's head, any change the vault is making waits for it, so what this
  * reads holds until it commits.
@@ -848,20 +848,6 @@ export async function memberStanding(db: Queryable, principal: string): Promise<
     .from(principals)
     .where(eq(principals.principal, principal));
   return row === undefined ? null : { ...row, seal: row.seal?.toString('base64') ?? null };
-}
-
-/**
- * `principal`'s seal, the vault's MAC over their object (status,
- * generation, role, scope, grants), base64 as `Access.seal`; null for no
- * row. Read under the head, it says whether the vault's answer about them
- * is still theirs (`issuerStill`): the vault reseals the row with each
- * change of their access, under the same head. With the database clock, as
- * `findCredential` reads, so that Hyperdrive never answers it from its
- * cache.
- */
-export async function memberSeal(db: Queryable, principal: string): Promise<string | null> {
-  const [row] = await db.select({ seal: principals.seal, now: clock() }).from(principals).where(eq(principals.principal, principal));
-  return row?.seal?.toString('base64') ?? null;
 }
 
 /**

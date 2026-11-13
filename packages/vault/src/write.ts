@@ -401,6 +401,7 @@ export function writeStanding(decided: Pick<WriteDecided, 'credential' | 'princi
       .map(({ projectId, environmentId, role, expiresAt }) => ({ projectId, environmentId, role, expiresAt })),
     since: null,
     by: null,
+    seal: null,
     ...(live.policy === undefined ? {} : { policy: live.policy }),
   } as Access;
 }

@@ -352,7 +352,7 @@ test("an issue weighed before its issuer's demotion commits is weighed again, on
   }
 });
 
-/** A member's seal as their row holds it (`memberSeal`): base64, null for no row. */
+/** A member's seal as their row holds it (`memberStanding`'s): base64, null for no row. */
 async function sealOf(principal: string): Promise<string | null> {
   const [row] = await db.owner.select({ seal: principals.seal }).from(principals).where(eq(principals.principal, principal));
   return row?.seal?.toString('base64') ?? null;

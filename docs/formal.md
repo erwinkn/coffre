@@ -892,6 +892,10 @@ batch's buffers its gate's and its keys' lone uses', its own 16 flat from
     discipline, and the roles tests).
   - A grant that lapses by its end time, with no entry, between the
     answer and the commit.
+  - An issuer whose row fails its check. The vault weighs them as no
+    Owner, so the first use seals the older token insensitive and holds
+    them to no seal (`sealCredentials`): `SensitiveOnlyFromOwners` holds
+    with no fence, and the model's `SealCommit` always fences.
 - **Bulk.tla:**
   - The intent a key service's read logs first, which counts the same way
     and releases nothing.

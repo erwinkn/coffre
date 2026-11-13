@@ -41,7 +41,7 @@ import type { AuditEntry } from '../db/audit.ts';
 // A row's scope, read and stored (`@coffre/core/access`, where the vault makes a credential's too).
 export { readScope, storedScope } from '@coffre/core/access';
 
-import { credentialsBy, liveCredentialsWhere, memberOf, memberSeal, places, holdingSensitive, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
+import { credentialsBy, liveCredentialsWhere, memberOf, memberStanding, places, holdingSensitive, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
 import type { Caller, PrincipalRef } from './caller.ts';
 import { callerFrom, newestPolicySeq, placeOf } from './caller.ts';
 import { AppChanges, COFFRE_ACTOR, credentialChange } from './changes.ts';
@@ -182,9 +182,12 @@ export async function issuerNow(
   return { caller: callerFrom(principal, access, policySeq, as?.ctx.caller.credentialScope ?? null, as?.ctx.caller.kind), seal: access.seal };
 }
 
-/** Refuse, 409, unless the issuer's row still has the seal of the answer `issuerNow` weighed: under the head, so no change commits between. */
+/**
+ * Refuse, 409, unless the issuer's row still has the seal of the answer `issuerNow` weighed: under the head, so no change commits between.
+ * The vault reseals the row with each change of their access, under the same head. No row reads as no seal.
+ */
 export async function issuerStill(db: Queryable, issuer: Pick<Caller, 'principal'>, seal: string | null): Promise<void> {
-  if ((await memberSeal(db, formatMember(issuer.principal))) === seal) return;
+  if (((await memberStanding(db, formatMember(issuer.principal)))?.seal ?? null) === seal) return;
   throw new ApiError('conflict', 'your access changed while this ran: try again', ACCESS_CHANGED);
 }
 
