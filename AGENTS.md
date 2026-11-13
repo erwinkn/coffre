@@ -126,8 +126,9 @@ holds each change route to. A request asks the vault about its caller once.
 **Tests / checks.** No pull request runs CI. A change merges on `pnpm validate`, run
 by its author on its exact head, rebased on `main`. It runs what the diff against
 `origin/main` can change (`scripts/affected.mjs --list` shows what and why), but the test
-cases named `[full]` (a growth, heap or large-N check); `--full`, `pnpm test` and CI run
-every case, and before a tag a local `--full` is the growth sweep's only run.
+cases named `[full]` (a growth, heap or large-N check), and the growth sweep only on a
+diff to the migrations or to source the sweep runs. `--full`, `pnpm test` and
+CI run every case; `Validate` has no sweep job, so before a tag a local `--full` runs it.
 When `main` moves after a gate and the rebase is mechanical (clean, or conflicting only
 in a migration or `CHANGELOG.md`, `git range-diff` showing the patch unchanged), run
 it again and put the summary and the `git range-diff` verdict on the PR; any other

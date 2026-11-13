@@ -22,7 +22,8 @@
 //   module, or a module it extends or instantiates changed; Node conformance on what
 //   only the Node deployment runs, while `nodeConformance` is on; Terraform on its
 //   provider and the routes it calls; the packed consumer on manifests, build configs
-//   and the examples `init` writes.
+//   and the examples `init` writes; the growth sweep on the migrations and the source
+//   it runs, so that a statement that starts reading history fails before it merges.
 // - A changed file no rule claims selects every step but TLC and the growth sweep: a
 //   miss fails safe, never as a skip.
 // - `--full` runs everything, as the release's Validate does, and the growth sweep,
@@ -132,6 +133,8 @@ export function plan({ root, files, changed, read = (f) => readFileSync(join(roo
       ...files.filter((f) => /^packages\/[^/]+\/(?:package\.json|tsdown\.config\.ts|vite\.config\.ts)$/.test(f)),
       ...under('examples/'),
     ]),
+    // The migrations and the source the sweep runs: its tests and scripts are its own harness.
+    sweep: new Set([...inputs('package.json#sweep:growth')].filter((f) => tracked.has(f) && (f.endsWith('.sql') || f.includes('/src/')))),
     // The matrices, the worlds and scripts they run, and the vault's use path: what use.ts runs in the vault, not in core.
     matrices: new Set([
       ...[...inputs(matrices)].filter((f) => !f.includes('/src/')),
@@ -209,7 +212,7 @@ export function plan({ root, files, changed, read = (f) => readFileSync(join(roo
     { name: 'node', ...(nodeConformance ? rule('node')() : { why: null, off: 'off until 0.16.1 (T270)' }) },
     { name: 'terraform', ...rule('terraform')() },
     { name: 'consumer', ...rule('consumer', { db: true })() },
-    { name: 'sweep', why: full ? '--full' : null },
+    { name: 'sweep', why: full ? '--full' : why(ownHit('sweep')) },
   ]
   return { steps, everything, unclaimed }
 }
