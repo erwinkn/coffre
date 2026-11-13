@@ -149,7 +149,7 @@ async function seed(name: string, { log = ROTATED, edit }: { log?: Written[]; ed
       await client.query(
         `INSERT INTO secret_versions (secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by, plaintext, sensitive)
          VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, 'user:admin@acme.example', $10, $11)`,
-        [secret, sealed.envelopeVersion, sealed.ciphertext, sealed.iv, sealed.authTag, wrapped.bytes, wrapped.kekProvider, wrapped.kekId, wrapped.kekVersion, value.plain ? value.value : null, value.sensitive === true],
+        [secret, 1, sealed.ciphertext, sealed.iv, sealed.authTag, wrapped.bytes, wrapped.kekProvider, wrapped.kekId, wrapped.kekVersion, value.plain ? value.value : null, value.sensitive === true],
       );
     }
     // A version deleted for good: its row stays, its value gone (`eraseVersions` in @coffre/server).

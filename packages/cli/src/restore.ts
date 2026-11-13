@@ -498,7 +498,7 @@ async function openValues(client: pg.ClientBase, vaultKeys: string): Promise<str
     const dek = await provider.unwrap({ kekProvider: row.kek_provider, kekId: row.kek_id, kekVersion: row.kek_version, bytes: row.wrapped_dek }, context);
     let value: Buffer | null = null;
     try {
-      value = decrypt({ envelopeVersion: row.envelope_version, iv: row.iv, authTag: row.auth_tag, ciphertext: row.ciphertext }, ids, dek);
+      value = decrypt({ iv: row.iv, authTag: row.auth_tag, ciphertext: row.ciphertext }, ids, dek);
       return row.plaintext !== null && value.toString('utf8') !== row.plaintext ? 'mismatch' : 'opened';
     } finally {
       dek.fill(0);

@@ -21,7 +21,8 @@ import { createHash } from 'node:crypto';
  *
  * From envelope version 2 the wrap names the version's number too,
  * `version`: a version's row copied over another of the same secret, an old
- * value put back as the current one, does not open either.
+ * value put back as the current one, does not open either. And whether the
+ * value is plain, `plain`, as it names whether it is sensitive.
  */
 export type SecretContext = {
   projectId: string;
@@ -31,6 +32,13 @@ export type SecretContext = {
   owner?: string;
   /** A sensitive value's: never handed back to a person (`sensitive` in @coffre/core/vault). Absent otherwise, never false. */
   sensitive?: true;
+  /**
+   * A plain value's, one marked not secret, which whoever lists its
+   * environment sees: never sensitive too. From envelope version 2, so that
+   * a secret relabelled plain, to be handed to whoever reads plain values,
+   * does not open. Absent otherwise, never false.
+   */
+  plain?: true;
   /** The version's number among its secret's, from 1. Absent in the wrap of a value written before envelope version 2. */
   version?: number;
 };
@@ -50,7 +58,7 @@ function assertUuid(value: string, field: string): void {
   }
 }
 
-/** Throw unless every field is a lowercase UUID, an owner a lowercase SHA-256, `sensitive` true if there, and a version a number from 1. */
+/** Throw unless every field is a lowercase UUID, an owner a lowercase SHA-256, `sensitive` and `plain` true if there and never both, and a version a number from 1. */
 export function checkContext(ctx: SecretContext): void {
   assertUuid(ctx.projectId, 'projectId');
   assertUuid(ctx.environmentId, 'environmentId');
@@ -59,6 +67,7 @@ export function checkContext(ctx: SecretContext): void {
     throw new Error(`context.owner must be a lowercase SHA-256, got: ${String(ctx.owner)}`);
   }
   if (ctx.sensitive !== undefined && ctx.sensitive !== true) throw new Error(`context.sensitive is true or absent, got: ${String(ctx.sensitive)}`);
+  if (ctx.plain !== undefined && (ctx.plain !== true || ctx.sensitive === true)) throw new Error(`context.plain is true or absent, and never with sensitive, got: ${String(ctx.plain)}`);
   if (ctx.version !== undefined && !(Number.isSafeInteger(ctx.version) && ctx.version > 0)) throw new Error(`context.version is a version's number, from 1, got: ${String(ctx.version)}`);
 }
 
@@ -83,7 +92,7 @@ export function ownerKey(member: string): string {
 export function encodeAad(ctx: SecretContext): Buffer {
   checkContext(ctx);
   return Buffer.from(
-    `${AAD_VERSION}|${ctx.projectId}|${ctx.environmentId}|${ctx.secretId}${ctx.owner === undefined ? '' : `|owner:${ctx.owner}`}${ctx.sensitive === true ? '|sensitive' : ''}${ctx.version === undefined ? '' : `|version:${ctx.version}`}`,
+    `${AAD_VERSION}|${ctx.projectId}|${ctx.environmentId}|${ctx.secretId}${ctx.owner === undefined ? '' : `|owner:${ctx.owner}`}${ctx.sensitive === true ? '|sensitive' : ''}${ctx.plain === true ? '|plain' : ''}${ctx.version === undefined ? '' : `|version:${ctx.version}`}`,
     'utf8',
   );
 }

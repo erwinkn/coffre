@@ -199,7 +199,7 @@ export const secrets = pgTable(
   ],
 );
 
-/** No MAC: a version's encryption names its secret, its number and its sensitivity, so one moved or relabelled does not open. */
+/** No MAC: a version's encryption names its secret, its number and whether it is plain or sensitive, so one moved or relabelled does not open (docs/design/0.16.md, "Value encryption", which says what that leaves unbound). */
 export const secretVersions = pgTable(
   'secret_versions',
   {

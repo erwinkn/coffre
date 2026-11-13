@@ -13,20 +13,19 @@ const TAG_BYTES = 16;
  * The envelope's format, stored on every row so that it can change without a
  * bulk re-encryption. The two differ in what the wrap of a value's key
  * names (`SecretContext`). In 1, all 0.14 wrote, its secret, a personal
- * config's owner and whether it is sensitive. In 2 the version's number too:
- * without it, a database writer could copy a secret's old version over its
- * current one, and it would open.
+ * config's owner and whether it is sensitive. In 2 the version's number
+ * too, and whether the value is plain: without the number, a database
+ * writer could copy a secret's old version over its current one, and it
+ * would open.
  *
  * `seal` writes format 2 and `open` reads nothing else. Were format 1 still
  * read, a row of 0.14's kept aside could be put back over any later version
  * of its secret, relabelled 1, and open. The vault's adoption of a 0.14
- * database wraps every key again with its number, through the two halves
- * below, and from then on a format-1 row is one nobody wrote.
+ * database wraps every key again under its number, with the registry's own
+ * `unwrap` and `wrap`: the ciphertext stays. From then on a format-1 row
+ * with a key to open is one nobody wrote.
  */
 export const ENVELOPE_VERSION = 2;
-
-/** Format 1: a wrap that names no version number. What `encrypt`'s other callers pair it with. */
-const UNNUMBERED = 1;
 
 /**
  * One sealed secret value, exactly as it is stored in `secret_versions`.
@@ -46,8 +45,11 @@ export type Envelope = {
   ciphertext: Buffer;
 };
 
-/** The part of an envelope the data key produces: everything but the wrapped key. */
-export type Sealed = Pick<Envelope, 'envelopeVersion' | 'iv' | 'authTag' | 'ciphertext'>;
+/**
+ * The part of an envelope the data key produces. It has no format of its
+ * own: an envelope's format is its wrap's, which whoever wraps the key says.
+ */
+export type Sealed = Pick<Envelope, 'iv' | 'authTag' | 'ciphertext'>;
 
 /** A fresh data key. One per version, so no key ever encrypts two values. */
 export function freshDek(): Buffer {
@@ -64,8 +66,7 @@ export function encrypt(plaintext: Buffer, ctx: SecretIds, dek: Buffer): Sealed 
   const cipher = createCipheriv('aes-256-gcm', dek, iv);
   cipher.setAAD(valueAad(ctx));
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  // The value's half is the same in both formats. `seal` says which the wrap is.
-  return { envelopeVersion: UNNUMBERED, iv, authTag: cipher.getAuthTag(), ciphertext };
+  return { iv, authTag: cipher.getAuthTag(), ciphertext };
 }
 
 /**
@@ -75,9 +76,6 @@ export function encrypt(plaintext: Buffer, ctx: SecretIds, dek: Buffer): Sealed 
  * ciphertext across environments fail closed.
  */
 export function decrypt(envelope: Sealed, ctx: SecretIds, dek: Buffer): Buffer {
-  if (envelope.envelopeVersion !== UNNUMBERED && envelope.envelopeVersion !== ENVELOPE_VERSION) {
-    throw new Error(`unsupported envelope version: ${envelope.envelopeVersion}`);
-  }
   if (envelope.iv.length !== IV_BYTES) {
     throw new Error('envelope IV has the wrong length');
   }

@@ -23,7 +23,8 @@ const context = gs.composite((tc): NumberedContext => {
   const ctx: NumberedContext = { projectId: tc.draw(uuid), environmentId: tc.draw(uuid), secretId: tc.draw(uuid), version: tc.draw(gs.integers({ minValue: 1, maxValue: 1_000_000 })) };
   const owner = tc.draw(gs.optional(member));
   if (owner !== null) ctx.owner = ownerKey(owner);
-  if (tc.draw(gs.booleans())) ctx.sensitive = true;
+  const nature = tc.draw(gs.sampledFrom(['secret', 'sensitive', 'plain'] as const));
+  if (nature !== 'secret') ctx[nature] = true;
   return ctx;
 });
 /** Empty, short, or a repeated pattern up to 64 KiB: Hegel shrinks the pattern and the length, not 64 KiB of draws. */
@@ -54,19 +55,22 @@ function mutate(bytes: Buffer, change: Mutation): Buffer {
 function sameIds(a: SecretContext, b: SecretContext): boolean {
   return a.projectId === b.projectId && a.environmentId === b.environmentId && a.secretId === b.secretId;
 }
-/** Everything the wrap of a data key binds: the ids, the owner, sensitivity and the version's number, absent and undefined alike. */
+/** Everything the wrap of a data key binds: the ids, the owner, whether it is sensitive or plain and the version's number, absent and undefined alike. */
 function sameContext(a: SecretContext, b: SecretContext): boolean {
-  return sameIds(a, b) && a.owner === b.owner && (a.sensitive === true) === (b.sensitive === true) && a.version === b.version;
+  return sameIds(a, b) && a.owner === b.owner && (a.sensitive === true) === (b.sensitive === true) && (a.plain === true) === (b.plain === true) && a.version === b.version;
 }
 
-/** `ctx` moved: one to three fields changed, ids to fresh ones or to one of its other ids, an owner added, removed or changed, sensitivity toggled, the version given another number. */
+/** `ctx` moved: one to three fields changed, ids to fresh ones or to one of its other ids, an owner added, removed or changed, its nature made another of secret, sensitive and plain, the version given another number. */
 function relocate(tc: hegel.TestCase, ctx: NumberedContext): NumberedContext {
-  const fields = new Set(tc.draw(gs.arrays(gs.sampledFrom(['projectId', 'environmentId', 'secretId', 'owner', 'sensitive', 'version'] as const), { minSize: 1, maxSize: 3 })));
+  const fields = new Set(tc.draw(gs.arrays(gs.sampledFrom(['projectId', 'environmentId', 'secretId', 'owner', 'nature', 'version'] as const), { minSize: 1, maxSize: 3 })));
   const moved = { ...ctx };
   for (const field of fields) {
-    if (field === 'sensitive') {
-      if (moved.sensitive) delete moved.sensitive;
-      else moved.sensitive = true;
+    if (field === 'nature') {
+      // To one of the other two of secret, sensitive and plain.
+      const to = tc.draw(gs.sampledFrom((['secret', 'sensitive', 'plain'] as const).filter((nature) => nature !== (ctx.sensitive ? 'sensitive' : ctx.plain ? 'plain' : 'secret'))));
+      delete moved.sensitive;
+      delete moved.plain;
+      if (to !== 'secret') moved[to] = true;
     } else if (field === 'version') {
       moved.version = tc.draw(gs.integers({ minValue: 1, maxValue: 1_000_000 }).filter((version) => version !== ctx.version));
     } else if (field === 'owner') {
@@ -143,8 +147,9 @@ test(`an envelope with any stored byte string or key claim changed fails to open
     await assert.rejects(open({ ...envelope, [field]: claimed === envelope[field] ? `${claimed}\0` : claimed }, ctx, keks), `${field} claimed`);
   }
   const version = tc.draw(gs.integers({ minValue: -1, maxValue: 1_000 }));
-  // Any other format, 0.14's included.
+  // Any other format, and 0.14's every time.
   await assert.rejects(open({ ...envelope, envelopeVersion: version === ENVELOPE_VERSION ? 1 : version }, ctx, keks), /unsupported envelope version/);
+  await assert.rejects(open({ ...envelope, envelopeVersion: 1 }, ctx, keks), /unsupported envelope version: 1/);
   // Nothing above touched the original.
   assert.deepEqual(await open(envelope, ctx, keks), value);
 }, mutations));
@@ -174,7 +179,8 @@ const contextPair = gs.composite((tc) => {
     const ctx: SecretContext = { projectId: tc.draw(gs.sampledFrom(ids)), environmentId: tc.draw(gs.sampledFrom(ids)), secretId: tc.draw(gs.sampledFrom(ids)) };
     const owner = tc.draw(gs.sampledFrom([undefined, 'absent', ...owners]));
     if (owner !== 'absent') ctx.owner = owner;
-    if (tc.draw(gs.booleans())) ctx.sensitive = true;
+    const nature = tc.draw(gs.sampledFrom(['secret', 'sensitive', 'plain'] as const));
+    if (nature !== 'secret') ctx[nature] = true;
     const version = tc.draw(gs.sampledFrom([undefined, 1, 2]));
     if (version !== undefined) ctx.version = version;
     return ctx;
@@ -221,12 +227,13 @@ const nearUuid = gs.oneOf<unknown>(near(uuid), gs.sampledFrom([undefined, null, 
 const nearOwner = gs.oneOf<unknown>(near(member.map(ownerKey)), member, gs.sampledFrom([undefined, null, 0, '']));
 
 const validation = propertySettings(128);
-test(`a context is refused unless its ids are lowercase UUIDs, its owner a lowercase SHA-256, sensitive true or absent and its version a number from 1 or absent, seed ${validation.seed}`, () => hegel.testAsync(async (tc) => {
+test(`a context is refused unless its ids are lowercase UUIDs, its owner a lowercase SHA-256, sensitive and plain true or absent and never both, and its version a number from 1 or absent, seed ${validation.seed}`, () => hegel.testAsync(async (tc) => {
   const ctx = tc.draw(context) as Record<string, unknown>;
-  const field = tc.draw(gs.sampledFrom(['projectId', 'environmentId', 'secretId', 'owner', 'sensitive', 'version'] as const));
+  delete ctx.plain;
+  const field = tc.draw(gs.sampledFrom(['projectId', 'environmentId', 'secretId', 'owner', 'sensitive', 'plain', 'version'] as const));
   const candidate = tc.draw(
     field === 'owner' ? nearOwner
-      : field === 'sensitive' ? gs.sampledFrom<unknown>([undefined, true, false, 'true', 1, null])
+      : field === 'sensitive' || field === 'plain' ? gs.sampledFrom<unknown>([undefined, true, false, 'true', 1, null])
         : field === 'version' ? gs.sampledFrom<unknown>([undefined, 1, 7, 0, -1, 1.5, NaN, '1', 2 ** 53, null])
           : nearUuid,
   );
@@ -235,7 +242,9 @@ test(`a context is refused unless its ids are lowercase UUIDs, its owner a lower
   tc.note(`${field} = ${JSON.stringify(candidate)}`);
   const valid = field === 'owner' ? candidate === undefined || isOwner(candidate)
     : field === 'sensitive' ? candidate === undefined || candidate === true
-      : field === 'version' ? candidate === undefined || candidate === 1 || candidate === 7
+      // Never both: a plain value is no secret, and a sensitive one never plain.
+      : field === 'plain' ? candidate === undefined || (candidate === true && ctx.sensitive !== true)
+        : field === 'version' ? candidate === undefined || candidate === 1 || candidate === 7
         : isUuid(candidate);
   const bad = ctx as SecretContext;
   if (valid) {
@@ -303,7 +312,7 @@ test(`through any rotations, an envelope opens while its vault key is configured
 }, rotation));
 
 const kmsContext = propertySettings(32);
-test(`the KMS encryption context names the secret's ids, owner, sensitivity and version, and binds exactly what the local wrap does, seed ${kmsContext.seed}`, () => hegel.testAsync(async (tc) => {
+test(`the KMS encryption context names the secret's ids, owner, nature and version, and binds exactly what the local wrap does, seed ${kmsContext.seed}`, () => hegel.testAsync(async (tc) => {
   const kms = fakeKms();
   const kek = awsKms({ keyArn: ARN, credentials: CREDENTIALS, fetch: kms.fetch });
   const local = new LocalKekProvider(tc.draw(key), 'kek-a');
@@ -317,6 +326,7 @@ test(`the KMS encryption context names the secret's ids, owner, sensitivity and 
     'coffre:secret': a.secretId,
     ...(a.owner === undefined ? {} : { 'coffre:owner': a.owner }),
     ...(a.sensitive ? { 'coffre:sensitive': 'true' } : {}),
+    ...(a.plain ? { 'coffre:plain': 'true' } : {}),
     ...(a.version === undefined ? {} : { 'coffre:version': String(a.version) }),
   });
   const locally = await local.wrap(dek, a);

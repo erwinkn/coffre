@@ -222,6 +222,8 @@ function encryptionContext(ctx: SecretContext): Record<string, string> {
     ...(ctx.owner === undefined ? {} : { 'coffre:owner': ctx.owner }),
     // A sensitive value's: KMS refuses to decrypt it as anything else.
     ...(ctx.sensitive === true ? { 'coffre:sensitive': 'true' } : {}),
+    // A plain value's, from envelope version 2: KMS refuses to decrypt a secret as one.
+    ...(ctx.plain === true ? { 'coffre:plain': 'true' } : {}),
     // The version's number, from envelope version 2: KMS refuses to decrypt one version's key as another's.
     ...(ctx.version === undefined ? {} : { 'coffre:version': String(ctx.version) }),
   };

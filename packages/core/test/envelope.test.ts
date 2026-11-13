@@ -50,14 +50,23 @@ test('a version opens under its own number only', async () => {
   await assert.rejects(seal(Buffer.from('x'), unnumbered as typeof dev, keks), /version's number/);
 });
 
+test('a plain value opens as plain only, and a secret never as plain: relabelled, neither is handed to whoever reads the other', async () => {
+  const { dev, keks } = fixture();
+  const plain = await seal(Buffer.from('acct_123', 'utf8'), { ...dev, plain: true }, keks);
+  const secret = await seal(Buffer.from('sk_live', 'utf8'), dev, keks);
+  assert.deepEqual(await open(plain, { ...dev, plain: true }, keks), Buffer.from('acct_123', 'utf8'));
+  await assert.rejects(open(secret, { ...dev, plain: true }, keks), KekBadClaimError);
+  await assert.rejects(open(plain, dev, keks), KekBadClaimError);
+  await assert.rejects(seal(Buffer.from('x'), { ...dev, plain: true, sensitive: true }, keks), /never with sensitive/);
+});
+
 test("a row in 0.14's format does not open, as itself or relabelled: one kept aside is not put back over a later version", async () => {
   const { dev, keks } = fixture();
   const { version: _, ...unnumbered } = dev;
   // As 0.14 wrote one: the value under its data key, and the key wrapped with no number.
   const dek = randomBytes(32);
   const wrapped = await keks.wrap(dek, unnumbered);
-  const legacy = { ...encrypt(Buffer.from('from 0.14', 'utf8'), dev, dek), kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, wrappedDek: wrapped.bytes };
-  assert.equal(legacy.envelopeVersion, 1);
+  const legacy = { envelopeVersion: 1, ...encrypt(Buffer.from('from 0.14', 'utf8'), dev, dek), kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, wrappedDek: wrapped.bytes };
   await assert.rejects(open(legacy, { ...dev, version: 3 }, keks), /unsupported envelope version: 1/);
   await assert.rejects(open({ ...legacy, envelopeVersion: ENVELOPE_VERSION }, { ...dev, version: 3 }, keks), KekBadClaimError);
   // What adoption does: the same data key, wrapped again with its number, opens as that version alone.
