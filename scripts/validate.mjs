@@ -103,6 +103,14 @@ const quote = (list) => list.map((f) => `'${f}'`).join(' ')
 // stock Postgres), each from a database of its own, then `matrix-coverage.mjs` holds the reports to every case run
 // exactly once.
 const MATRIX_SHARDS = 6
+// The suite's files: those the plan runs whole with their `[full]` cases, the others without.
+const suite = (flags, { files, whole }) => {
+  const rest = files.filter((f) => !whole.includes(f))
+  return [
+    ...(rest.length ? [`./scripts/test-suite.sh${flags} --skip-full --files ${quote(rest)}`] : []),
+    ...(whole.length ? [`./scripts/test-suite.sh${flags} --files ${quote(whole)}`] : []),
+  ]
+}
 const STEPS = {
   docs: { job: 'checks', cheap: true, run: () => ['pnpm check:docs'] },
   pins: { job: 'pins', cheap: true, install: true, run: () => ['pnpm check:pins', 'pnpm check:workflows'] },
@@ -116,9 +124,9 @@ const STEPS = {
     run: ({ units }) => [`pnpm -r --no-sort ${units.map((u) => `--filter ./${u}`).join(' ')} run typecheck`],
   },
   action: { job: 'action', install: true, build: true, run: () => ['pnpm check:action'] },
-  tests: { job: 'tests', install: true, postgres: true, run: ({ files, skipFull }) => [`./scripts/test-suite.sh${skipFull ? ' --skip-full' : ''} --files ${quote(files)}`] },
+  tests: { job: 'tests', install: true, postgres: true, run: (s) => suite('', s) },
   // On a cluster of their own, no other test's migration resets their backends' caches (scripts/test-suite.sh).
-  alone: { job: 'tests', install: true, postgres: true, run: ({ files, skipFull }) => [`./scripts/test-suite.sh --serial${skipFull ? ' --skip-full' : ''} --files ${quote(files)}`] },
+  alone: { job: 'tests', install: true, postgres: true, run: (s) => suite(' --serial', s) },
   matrices: {
     job: 'matrices-shard',
     install: true,
@@ -144,7 +152,7 @@ const STEPS = {
     run: () => [`pnpm test:consumer --built --port "$COFFRE_VALIDATE_PORT"${nodeConformance ? '' : ' --skip-conformance node'}`],
   },
   // No job of validate.yml: the growth sweep (docs/growth-sweep.md), on the step's own Postgres, as it requires. --full runs
-  // it, and a change to its own files, its Postgres, the migrations or the source it runs (scripts/affected.mjs).
+  // it, and a change to its own files, the suite's harness, its Postgres, the migrations or the source it runs (scripts/affected.mjs).
   sweep: { install: true, postgres: true, run: () => [`pnpm sweep:growth --out ${quote([join(logs, 'sweep')])}`] },
   // A database of 0.14.5's through 0.15.0 to this revision (scripts/upgrade-check.sh), about 4.5 min: --full
   // runs it, and a change to its own scripts, its Postgres, the migrations, the migrator or the vault's upgrade step (scripts/affected.mjs). Its Postgres is a compose project the script starts and removes
@@ -168,7 +176,8 @@ const entries = selected.map((s) => {
   return s.why ? { ...s, run: true } : { ...s, run: false, status: 'skipped', note: s.off ?? 'diff does not touch it' }
 })
 const detail = (s) => {
-  if (s.files) return `${s.skipFull ? ' (cases named [full] left out)' : ''}\n    ${s.files.join('\n    ')}`
+  if (s.whole) return s.files.map((f) => `\n    ${f}${s.whole.includes(f) ? '' : ' (cases named [full] left out)'}`).join('')
+  if (s.files) return `\n    ${s.files.join('\n    ')}`
   if (s.scenarios && s.why !== '--full') return `: ${s.scenarios.join(' ')}`
   if (s.units) return `: ${s.units.join(' ')}`
   return ''

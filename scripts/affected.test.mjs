@@ -242,23 +242,28 @@ test('the slow tier runs on its own inputs: the matrices and Terraform', () => {
 
 test('the growth sweep runs on the migrations and on the source it runs', () => {
   // missing.ts imports no query builder: a file that passes a table and a filter to a helper changes a plan too.
-  // Its own files (its command, the requests it makes, its runner and the growths it knows) and the Postgres it starts.
+  // Its own files (its command, the requests it makes, its runner and the growths it knows), the suite's harness it runs
+  // through and the Postgres it starts.
   for (const file of ['packages/db/src/migrations/postgres/0001.sql', 'packages/server/src/api/missing.ts', 'packages/server/test/growth.sweep.ts',
     'scripts/growth-sweep.sh', 'scripts/growth-sweep.mjs', 'scripts/growth-sweep-known.txt', 'package.json#sweep:growth',
-    'scripts/ensure-postgres.sh', 'docker-compose.yml']) assert.equal(run([file]).steps.sweep?.why, `${file} changed`, file)
+    'scripts/test-suite.sh', 'scripts/test-databases.mjs', 'scripts/setup-test-database.sh', 'scripts/ensure-postgres.sh', 'docker-compose.yml',
+  ]) assert.equal(run([file]).steps.sweep?.why, `${file} changed`, file)
   // The test helpers it shares with the suite, source it does not run, SQL it does not run, docs and the dependencies.
   for (const file of ['packages/server/test/helpers.ts', 'packages/vault/src/other.ts', 'packages/server/test/fixtures/seed.sql', 'docs/guide.md', 'pnpm-lock.yaml']) {
     assert.ok(!run([file]).names.includes('sweep'), file)
   }
 })
 
-test('a diff leaves out the cases named [full], which --full runs', () => {
+test('a diff leaves out the cases named [full] but in the test files it edits; --full runs them all', () => {
   for (const changed of [['packages/server/src/app.ts'], ['scripts/test-databases.mjs'], ['pnpm-lock.yaml']]) {
     const { steps } = run(changed)
-    assert.deepEqual([steps.tests.skipFull, steps.alone.skipFull], [true, true], changed[0])
+    assert.deepEqual([steps.tests.whole, steps.alone.whole], [[], []], changed[0])
   }
+  const edited = run(['packages/server/test/app.test.ts', 'packages/server/test/cost.alone.ts', 'packages/server/src/app.ts'])
+  assert.deepEqual([edited.steps.tests.whole, edited.steps.alone.whole], [['packages/server/test/app.test.ts'], ['packages/server/test/cost.alone.ts']])
+  assert.ok(edited.files('tests').length > 1, 'the files it does not edit run too, without their [full] cases')
   const { steps } = run([], { full: true })
-  assert.deepEqual([steps.tests.skipFull, steps.alone.skipFull], [false, false])
+  assert.deepEqual([steps.tests.whole, steps.alone.whole], [steps.tests.files, steps.alone.files])
 })
 
 test('--full runs every step that is on, every file and every scenario', () => {

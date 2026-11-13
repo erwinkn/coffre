@@ -10,7 +10,8 @@
 //   The suite runs each test file that runs or reads a changed file; all of them when
 //   the diff touches the harness every file runs on (scripts/test-suite.sh, the
 //   migrations its template takes, Postgres's compose file). A diff leaves out the
-//   cases named `[full]` (a growth, heap or large-N check), which `--full` runs.
+//   cases named `[full]` (a growth, heap or large-N check, or a buffer count a dead row
+//   can move) but in the test files it edits; `--full` runs them all.
 // - A file of a package, an example or the dev deployment that no test reaches (a path
 //   built in pieces, or code nothing tests) runs that package's tests.
 // - The dependencies (a lockfile, a manifest's fields other than its scripts, the
@@ -71,9 +72,9 @@ const pinned = any(/(?:^|\/)package\.json$/, /\.ya?ml$/, /(?:^|\/)Dockerfile[^/]
 const UPGRADE_CHECK = ['package.json#upgrade:check', 'scripts/upgrade-check.sh', 'scripts/upgrade-check.mjs', 'scripts/compat/release.sh',
   'scripts/ensure-postgres.sh', 'scripts/ensure-database.mjs', 'docker-compose.yml', 'docker-compose.subnet.yml', 'docker-compose.network.yml',
   'packages/db/src/migrate.ts', 'packages/db/src/online-indexes.ts', 'packages/cli/src/migrate.ts', 'packages/vault/src/upgrade.ts']
-// The growth sweep's own files (its command, its runner, the requests it makes and the growths it knows) and the
-// Postgres it starts and reads the plans from.
-const SWEEP = ['package.json#sweep:growth', 'scripts/ensure-postgres.sh', 'docker-compose.yml', 'docker-compose.subnet.yml',
+// The growth sweep's own files (its command, its runner, the requests it makes and the growths it knows), the suite's
+// harness it runs through, and the Postgres it starts and reads the plans from.
+const SWEEP = ['package.json#sweep:growth', 'scripts/test-suite.sh', 'scripts/test-databases.mjs', 'scripts/setup-test-database.sh', 'scripts/ensure-postgres.sh', 'docker-compose.yml', 'docker-compose.subnet.yml',
   'docker-compose.network.yml', 'scripts/growth-sweep.sh', 'scripts/growth-sweep.mjs', 'scripts/growth-sweep-known.txt', 'packages/server/test/growth.sweep.ts']
 const upgrades = (f) => UPGRADE_CHECK.includes(f) || f.startsWith('packages/db/src/migrations/')
 const lintable = (f) => /^packages\/[^/]+\/(?:src|test|scripts)\/.+\.tsx?$/.test(f)
@@ -190,14 +191,15 @@ export function plan({ root, files, changed, read = (f) => readFileSync(join(roo
 
   const testsFrom = (list, label) => {
     const harnessHit = changed.find((f) => hits(harness, f)) ?? postgres
-    const skipFull = !full
-    if (wide) return { why: wide, files: list, skipFull }
-    if (harnessHit) return { why: `${harnessHit} changed (every test file runs on it)`, files: list, skipFull }
+    // The files run whole, their `[full]` cases too: every one under --full, else the ones the diff edits.
+    const whole = (files) => (full ? files : files.filter((f) => changed.includes(f)))
+    if (wide) return { why: wide, files: list, whole: whole(list) }
+    if (harnessHit) return { why: `${harnessHit} changed (every test file runs on it)`, files: list, whole: whole(list) }
     const hit = list.filter((f) => affected.has(f) || fallback.has(unitOf(f)))
     if (!hit.length) return { why: null }
     const read = inputs(hit)
     const by = changed.filter((f) => read.has(f) || fallback.has(unitOf(f)))
-    return { why: `${hit.length} of ${list.length} ${label}, for ${by.slice(0, 2).join(', ')}${by.length > 2 ? ` and ${by.length - 2} more` : ''}`, files: hit, skipFull }
+    return { why: `${hit.length} of ${list.length} ${label}, for ${by.slice(0, 2).join(', ')}${by.length > 2 ? ` and ${by.length - 2} more` : ''}`, files: hit, whole: whole(hit) }
   }
   const rule = (name, { slow = false, db = false } = {}) => () => ({
     why: everything ?? (slow ? null : why(deps)) ?? (db ? why(postgres) : null) ?? why(ownHit(name)),

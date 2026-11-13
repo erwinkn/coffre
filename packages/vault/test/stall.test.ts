@@ -229,9 +229,6 @@ test("T169, review r8 of #437, Node, Postgres: a reads' projection hung in the d
   }
 });
 
-// Both trees' entries: the length a sealer that fell behind has to catch up on.
-const logLength = async () => (await rows<{ n: number }>(db.owner, sql`SELECT ((SELECT count(*) FROM log_uses) + (SELECT count(*) FROM log_changes))::int AS n`))[0]!.n;
-
 test('Node, Postgres: stall after stall, each on a connection of its own, which it cuts: none is left holding one; answered again, it seals', { timeout: 60_000 }, async () => {
   const w = await world();
   const proxy = await stallProxy(VAULT_URL);
@@ -254,16 +251,18 @@ test('Node, Postgres: stall after stall, each on a connection of its own, which 
     proxy.release();
     await until(() => kept.sealing().ok, 10_000, 'sealing again');
     const number = await commitChange(w);
-    // At this test's 200 ms tick bound, a loaded host can stall one tick with nothing held: the change answers unsealed,
-    // the app's 503 (each ask ends within `SEAL_WAIT_MS`), and the next runner seals it. So it is asked once more; a
-    // second unsealed answer fails the case with the change's number and the log's length, which tells a backlog from a
-    // stuck sealer, and any other answer fails it at once.
+    // At this test's 200 ms tick bound, a loaded host can stall one tick with nothing held (measured: once in a
+    // 4-way suite run, 'a tick ran past 200 ms'; never in 6 runs alone). The change then answers unsealed, the app's
+    // 503, and the runner the keeper opens next seals it: the case waits for that runner, as after the release, and
+    // asks once more. A second unsealed answer fails it with what the checkpointer says then, and any other at once.
     const waitSealed = () => vault.waitSealed!({ number: String(number) });
-    const sealed = await waitSealed().catch((error: Error) => {
+    const sealed = await waitSealed().catch(async (error: Error) => {
       if (!isUnsealed(error)) throw error;
-      return waitSealed().catch(async (again: Error) => {
+      await until(() => kept.sealing().ok, 10_000, `sealing again after change ${number} answered unsealed: ${error.message}`);
+      return waitSealed().catch((again: Error) => {
         if (!isUnsealed(again)) throw again;
-        throw new Error(`change ${number} answered unsealed twice: ${again.message}, log at ${await logLength()} entries`, { cause: again });
+        const sealing = kept.sealing();
+        throw new Error(`change ${number} answered unsealed twice: ${again.message}; the checkpointer: ${sealing.ok ? 'sealing' : sealing.reason}`, { cause: again });
       });
     });
     assert.ok(sealed.ok);

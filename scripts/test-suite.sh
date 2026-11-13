@@ -5,8 +5,9 @@
 # `--files <file>...` runs only those files, on the same footing: the use
 # matrices (`pnpm test:matrices`), which CI runs in shards (`scripts/matrix-shard.ts`),
 # and the files `pnpm validate` picks; `--serial --files <file>...` runs them one at a time.
-# `--skip-full` leaves out the cases whose name says `[full]`: a growth, heap or large-N check
-# that `pnpm validate` runs only with `--full`, as `pnpm test` and CI always do.
+# `--skip-full` leaves out the cases whose name says `[full]` (a growth, heap or large-N check,
+# or a buffer count a dead row can move): `pnpm validate` runs them in the test files a diff
+# edits and with `--full`, as `pnpm test` and CI always do.
 # Without `--files`, the files that must run alone (`*.alone.ts`) run after the rest.
 set -euo pipefail
 

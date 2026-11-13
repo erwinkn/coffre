@@ -126,9 +126,10 @@ holds each change route to. A request asks the vault about its caller once.
 **Tests / checks.** No pull request runs CI. A change merges on `pnpm validate`, run
 by its author on its exact head, rebased on `main`. It runs what the diff against
 `origin/main` can change (`scripts/affected.mjs --list` shows what and why), except the test
-cases named `[full]` (a growth, heap or large-N check, or a buffer count a dead row can move),
+cases named `[full]` (a growth, heap or large-N check, or a buffer count a dead row can move)
+outside the test files it edits,
 and the growth sweep only on a diff to the migrations, to source the sweep runs, to its own
-files or to its Postgres. `--full`, `pnpm test` and CI run every case; `Validate` has no sweep job, so before a
+files, to the suite's harness or to its Postgres. `--full`, `pnpm test` and CI run every case; `Validate` has no sweep job, so before a
 tag a local `--full` runs it. The upgrade check (`pnpm upgrade:check`) runs with `--full` too, and on a
 change to its own scripts, its Postgres, the migrations, the migrator or the vault's upgrade step; it starts its own Postgres, on one
 more Docker network.
