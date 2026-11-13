@@ -255,7 +255,7 @@ export function describeUnsealed(unsealed: readonly Unsealed[], empty: ReadonlyS
  * The tokens and trust bindings of a release before 0.11, by account, and
  * who issued them: when this version first checks a credential, each reads
  * the sensitive values of a place only where whoever issued it is an Owner
- * of its project then (`sealScopes` in @coffre/server, R32). Nothing when
+ * of its project then (`sealScopes` in @coffre/server). Nothing when
  * there are none.
  *
  *   service:ci-web   2 tokens and 1 trust binding, issued by erwin@acme.example

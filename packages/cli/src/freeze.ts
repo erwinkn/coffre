@@ -1,7 +1,6 @@
 // `coffre freeze` and `coffre unfreeze` (docs/design/workload-access.md,
 // section 8.2): every use under a target refused from its next request, and
-// lifted. Declared in `coffre help` by that design's PR 0; PR 4 builds them,
-// here.
+// lifted.
 import { parse } from './manage.ts';
 
 /** `coffre freeze [<target> --reason <text>]`: alone, what is frozen. */

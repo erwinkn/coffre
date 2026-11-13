@@ -962,7 +962,7 @@ export async function tokensIssue(connect: () => CoffreClient, args: string[], i
   const about = personal
     ? `your personal token ${issued.id} "${values.label!.trim()}", acting as you on ${reaches(issued.scope)}, until ${ends(issued.expiresAt, true)}`
     : `${shownMember(member)}'s bearer token ${issued.id}, reaching ${reaches(issued.scope)}, until ${day(issued.expiresAt)}`;
-  // What it will not read, said now rather than at its first run's refusal (R32).
+  // What it will not read, said now rather than at its first run's refusal.
   const unread = withheldLine(issued.withheld);
   if (fd !== null) {
     writeSync(fd, `${issued.token}\n`);
