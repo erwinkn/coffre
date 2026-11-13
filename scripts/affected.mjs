@@ -72,10 +72,10 @@ const pinned = any(/(?:^|\/)package\.json$/, /\.ya?ml$/, /(?:^|\/)Dockerfile[^/]
 const UPGRADE_CHECK = ['package.json#upgrade:check', 'scripts/upgrade-check.sh', 'scripts/upgrade-check.mjs', 'scripts/compat/release.sh',
   'scripts/ensure-postgres.sh', 'scripts/ensure-database.mjs', 'docker-compose.yml', 'docker-compose.subnet.yml', 'docker-compose.network.yml',
   'packages/db/src/migrate.ts', 'packages/db/src/online-indexes.ts', 'packages/cli/src/migrate.ts', 'packages/vault/src/upgrade.ts']
-// The growth sweep's own files (its command, its runner, the requests it makes and the growths it knows), the suite's
-// harness it runs through, and the Postgres it starts and reads the plans from.
-const SWEEP = ['package.json#sweep:growth', 'scripts/test-suite.sh', 'scripts/test-databases.mjs', 'scripts/setup-test-database.sh', 'scripts/ensure-postgres.sh', 'docker-compose.yml', 'docker-compose.subnet.yml',
-  'docker-compose.network.yml', 'scripts/growth-sweep.sh', 'scripts/growth-sweep.mjs', 'scripts/growth-sweep-known.txt', 'packages/server/test/growth.sweep.ts']
+// What the growth sweep's command graph cannot see: the command, the requests it makes, the growths it knows and the
+// Postgres containers its scripts start.
+const SWEEP = ['package.json#sweep:growth', 'packages/server/test/growth.sweep.ts', 'scripts/growth-sweep-known.txt',
+  'docker-compose.yml', 'docker-compose.subnet.yml', 'docker-compose.network.yml']
 const upgrades = (f) => UPGRADE_CHECK.includes(f) || f.startsWith('packages/db/src/migrations/')
 const lintable = (f) => /^packages\/[^/]+\/(?:src|test|scripts)\/.+\.tsx?$/.test(f)
 
@@ -84,7 +84,8 @@ const lintable = (f) => /^packages\/[^/]+\/(?:src|test|scripts)\/.+\.tsx?$/.test
  * command changed). `files` are the tracked files at the head, `read` reads one,
  * `readBase` reads one at the base (or throws), and `full` asks for every step.
  * Returns `{ steps, everything }`: each step `{ name, why }`, `why` null when it does
- * not run, and what it runs: `files` (null for all), `scenarios` or `units`.
+ * not run, and what it runs: `files` (null for all), `scenarios` or `units`; the `tests` and
+ * `alone` steps also give `whole`, the files among `files` that run with their `[full]` cases.
  */
 export function plan({ root, files, changed, read = (f) => readFileSync(join(root, f), 'utf8'), readBase = () => '', full = false }) {
   const graph = buildGraph(root, files, read)
@@ -149,8 +150,9 @@ export function plan({ root, files, changed, read = (f) => readFileSync(join(roo
       ...files.filter((f) => /^packages\/[^/]+\/(?:package\.json|tsdown\.config\.ts|vite\.config\.ts)$/.test(f)),
       ...under('examples/'),
     ]),
-    // Its own files, its Postgres, the migrations and the source it runs; not the test helpers it shares with the suite.
-    sweep: new Set([...SWEEP, ...[...inputs('package.json#sweep:growth')].filter((f) => tracked.has(f) && (f.endsWith('.sql') || f.includes('/src/')))]),
+    // Its own files, the scripts it runs through (its runner, the suite's harness, its Postgres), the migrations and the
+    // source it runs; not the test helpers it shares with the suite.
+    sweep: new Set([...SWEEP, ...[...inputs('package.json#sweep:growth')].filter((f) => tracked.has(f) && (f.endsWith('.sql') || f.includes('/src/') || f.startsWith('scripts/')))]),
     // The matrices, the worlds and scripts they run, and the vault's use path: what use.ts runs in the vault, not in core.
     matrices: new Set([
       ...[...inputs(matrices)].filter((f) => !f.includes('/src/')),

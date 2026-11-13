@@ -22,14 +22,17 @@ const TREE = {
   'docker-compose.yml': '',
   'README.md': '',
   'docs/guide.md': '',
-  'scripts/test-suite.sh': '# runs every file on a migrated template\n./scripts/setup-test-database.sh\nnode --import ./scripts/test-database-worker.mjs --test',
+  'scripts/test-suite.sh': '# runs every file on a migrated template\n./scripts/setup-test-database.sh\nnode --import ./scripts/test-database-worker.mjs --import ./scripts/test-file-exits.mjs --test',
   // `coffre` here is no command: the CLI's bin is not the harness's.
   'scripts/setup-test-database.sh': 'node --conditions=coffre:source scripts/ensure-database.mjs coffre\npnpm --filter @coffre/db run db:migrate',
   'scripts/test-database-worker.mjs': "import { clone } from './test-databases.mjs'",
   'scripts/test-databases.mjs': '',
+  'scripts/test-file-exits.mjs': '',
+  'scripts/ensure-postgres.sh': '',
+  'scripts/growth-sweep.mjs': '',
   'scripts/test-schema.sh': './scripts/setup-test-database.sh\npsql < packages/db/test/schema.sql',
   'scripts/check-pins.mjs': '',
-  'scripts/growth-sweep.sh': './scripts/setup-test-database.sh\nnode --test packages/server/test/growth.sweep.ts',
+  'scripts/growth-sweep.sh': './scripts/ensure-postgres.sh\n./scripts/test-suite.sh --files packages/server/test/growth.sweep.ts\nnode scripts/growth-sweep.mjs',
   'scripts/terraform-provider.sh': 'node packages/conformance/scripts/terraform-fixture.ts',
   'scripts/x.mjs': '',
   'scripts/x.test.mjs': "import { x } from './x.mjs'",
@@ -246,7 +249,8 @@ test('the growth sweep runs on the migrations and on the source it runs', () => 
   // through and the Postgres it starts.
   for (const file of ['packages/db/src/migrations/postgres/0001.sql', 'packages/server/src/api/missing.ts', 'packages/server/test/growth.sweep.ts',
     'scripts/growth-sweep.sh', 'scripts/growth-sweep.mjs', 'scripts/growth-sweep-known.txt', 'package.json#sweep:growth',
-    'scripts/test-suite.sh', 'scripts/test-databases.mjs', 'scripts/setup-test-database.sh', 'scripts/ensure-postgres.sh', 'docker-compose.yml',
+    'scripts/test-suite.sh', 'scripts/test-databases.mjs', 'scripts/setup-test-database.sh', 'scripts/test-database-worker.mjs', 'scripts/test-file-exits.mjs',
+    'scripts/ensure-postgres.sh', 'docker-compose.yml',
   ]) assert.equal(run([file]).steps.sweep?.why, `${file} changed`, file)
   // The test helpers it shares with the suite, source it does not run, SQL it does not run, docs and the dependencies.
   for (const file of ['packages/server/test/helpers.ts', 'packages/vault/src/other.ts', 'packages/server/test/fixtures/seed.sql', 'docs/guide.md', 'pnpm-lock.yaml']) {

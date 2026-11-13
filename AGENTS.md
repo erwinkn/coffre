@@ -125,7 +125,7 @@ holds each change route to. A request asks the vault about its caller once.
 
 **Tests / checks.** No pull request runs CI. A change merges on `pnpm validate`, run
 by its author on its exact head, rebased on `main`. It runs what the diff against
-`origin/main` can change (`scripts/affected.mjs --list` shows what and why), except the test
+`origin/main` can change (`pnpm validate --list` shows what and why), except the test
 cases named `[full]` (a growth, heap or large-N check, or a buffer count a dead row can move)
 outside the test files it edits,
 and the growth sweep only on a diff to the migrations, to source the sweep runs, to its own
