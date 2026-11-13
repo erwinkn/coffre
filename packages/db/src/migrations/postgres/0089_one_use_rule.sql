@@ -175,7 +175,7 @@ DECLARE
     -- handed it off.
     whole boolean := p_place IS NOT NULL OR p_token_hash IS NOT NULL;
     -- Whether this session has yet to plan the two statements, and which the warm-up is at.
-    dry boolean := current_setting('coffre.use_planned', true) IS DISTINCT FROM '0086';
+    dry boolean := current_setting('coffre.use_planned', true) IS DISTINCT FROM '0089';
     form integer := 0;
     -- The period this call writes, if it writes the cap's row, and the lock that elects the one use that moves it.
     b_refresh bigint;
@@ -800,7 +800,7 @@ BEGIN
             IF form < 2 THEN
                 CONTINUE;
             END IF;
-            PERFORM set_config('coffre.use_planned', '0086', false);
+            PERFORM set_config('coffre.use_planned', '0089', false);
             dry := false;
             v_secret := p_secret;
             PERFORM pg_advisory_xact_lock_shared(1668244070, 0);

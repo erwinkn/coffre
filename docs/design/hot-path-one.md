@@ -299,7 +299,7 @@ account for.
 - **Seal cache:** each shape has a probing form and a cached form. That makes
   four statements, generated from one template, and the migration holds all
   four.
-- **Two statements since 0.16 (migration 0086).** The full statement
+- **Two statements since 0.16 (migration 0089).** The full statement
   reads what the four read and answers every call alone: it probes only when
   the isolate's seals are no longer the log's, and reads a reference's rows
   only for a key with no version of its own. The lean statement, 0.15's

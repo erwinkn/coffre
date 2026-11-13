@@ -1,4 +1,4 @@
-// The lean statement answers what the full one would, or hands off (0086). A suite run as a twin makes every use
+// The lean statement answers what the full one would, or hands off (0089). A suite run as a twin makes every use
 // twice on the same rows: a copy of `use_credential` that answers `whole` wherever the full statement would run, in a
 // subtransaction rolled back, then a copy that never runs the lean one, which makes the use. Wherever the lean copy
 // answered, both answers must be the same but for the entry's number, or the call fails.

@@ -62,7 +62,7 @@ async function useText(db: Queryable, call: UseCall): Promise<string> {
 }
 
 /**
- * A batch of uses by ids on Postgres: one call of `use_id_batch` (0086), one statement and one round trip, its
+ * A batch of uses by ids on Postgres: one call of `use_id_batch` (0089), one statement and one round trip, its
  * own transaction, each key's use `use_credential`'s, in order. `lock`: the principal whose lock the batch takes
  * exclusive before its first key (StrongestFirst), its keys decided. It answers a JSON array of `use_credential`'s rows.
  */

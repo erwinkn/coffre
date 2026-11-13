@@ -611,7 +611,7 @@ test('a session\'s first call does its planning\'s cold work before it takes the
     const fresh = postgresSession(OWNER_URL);
     try {
       await fresh.unsafe(`SET lock_timeout = '200ms'`);
-      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0086', false)`);
+      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0089', false)`);
       const at = Date.now();
       await assert.rejects(
         fresh.unsafe(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, false, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL)`, [w.credentialId, id, newRequestId(), String(at), randomBytes(16), String(at + 3000)]),
@@ -643,7 +643,7 @@ test('a session\'s first call does its planning\'s cold work before it takes the
         [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
       assert.equal(answer!.use.state, null);
       const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-      assert.equal(setting!.planned, '0086');
+      assert.equal(setting!.planned, '0089');
     } finally {
       await fresh.end();
     }

@@ -611,7 +611,7 @@ async function useSeated(path: UsePath, input: UseInput): Promise<UseOutcome> {
 }
 
 /**
- * A request's several keys, one call (formal/Batching.tla; `use_id_batch`, migration 0086): each key's use made
+ * A request's several keys, one call (formal/Batching.tla; `use_id_batch`, migration 0089): each key's use made
  * as `use` makes it, by ids, in the request's order, in one statement (of at most `limits.batch` keys: more are made
  * in statements of that many, in turn), and decided on what it read (`settle`), under one admission and one deadline. Then, only once every key is allowed on those rows (AllDecidedFirst), one more call
  * for the keys that would take the principal's lock, which answered `decide` having written and locked nothing: it

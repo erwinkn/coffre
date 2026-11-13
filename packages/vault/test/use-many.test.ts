@@ -1,5 +1,5 @@
 // A request's several keys as one vault call, `useMany`, one
-// statement (`use_id_batch`, migration 0086) rather than a call a key.
+// statement (`use_id_batch`, migration 0089) rather than a call a key.
 // Each case is named for what formal/Batching.tla holds of it;
 // every key's use is `use_credential`'s, whose own guarantees use.test.ts holds.
 // Every run's live answers are held to the replay of the log.
