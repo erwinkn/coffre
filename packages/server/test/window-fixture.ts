@@ -97,6 +97,22 @@ export async function pastBulkTurn(ms: number, db: Queryable, principals: readon
   throw new Error(`no turn in the next minute of ${phases.length} keys' periods leaves ${ms} ms before the next`);
 }
 
+/**
+ * Returns what `run` returns after `wait` (`inBulkPeriod` or `pastBulkTurn`), unless a key's bulk-cap period turned
+ * while it ran, as it does on a loaded machine when `run`'s calls take longer than `wait`'s room: then that result is
+ * discarded and `run` goes again after `wait`, `tries` times in all. `run` asserts nothing: it only measures.
+ */
+export async function inOnePeriod<T>(wait: () => Promise<void>, db: Queryable, principals: readonly string[], place: string, run: () => Promise<T>, tries = 3, now: () => number = Date.now): Promise<T> {
+  const phases = await bulkPhases(db, principals, place);
+  for (let attempt = 1; ; attempt++) {
+    await wait();
+    const start = now();
+    const result = await run();
+    if (now() - start < untilTurn(phases, start)) return result;
+    if (attempt === tries) throw new Error(`a key's period of the bulk cap turned during each of ${tries} runs of ${now() - start} ms`);
+  }
+}
+
 const DAY_MS = 86_400_000;
 
 /**
