@@ -27,7 +27,7 @@ import { Accesses } from '../src/accesses.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
 import {
-  distinctSecretCounts, environmentSecrets, liveKeysIn, lock, originsOf, places, resolvePath, secretFolderOf, secretHeads, secretsInFolder,
+  distinctSecretCounts, environmentSecrets, liveKeysIn, originsOf, places, resolvePath, secretFolderOf, secretHeads, secretRows, secretsInFolder,
   secretObjects, holdingSensitive,
 } from '../src/db/queries.ts';
 import { eventsPage, memberKeys } from '../src/db/events.ts';
@@ -1183,7 +1183,7 @@ test("a read of an environment's keys reads as many pages however many keys the 
     // The environment that piles up archived keys of its own, read by key.
     "an archiving environment's key": () => environmentSecrets(counted, ids.prod!, { key: 'API_KEY' }),
     "an archiving environment's heads by key": () => secretHeads(counted, ids.prod!, { keys: ['API_KEY', 'DATABASE_URL'] }),
-    "an archiving environment's lock on keys": () => counted.transaction((tx) => lock(tx, secrets, { projectId: market!.id, environmentId: ids.prod!, key: ['API_KEY', 'DATABASE_URL'] })),
+    "an archiving environment's rows by key": () => counted.transaction((tx) => secretRows(tx, { projectId: market!.id, environmentId: ids.prod!, key: ['API_KEY', 'DATABASE_URL'] })),
     'the keys of three environments': () => liveKeysIn(counted, everything),
     'their distinct counts': () => distinctSecretCounts(counted, everything),
     'their sensitive values': () => holdingSensitive(counted, everything),
@@ -1191,7 +1191,7 @@ test("a read of an environment's keys reads as many pages however many keys the 
     'a path with a key': () => resolvePath(counted, { project: 'market', environment: 'dev', key: 'API_KEY' }),
     "an environment's folders": () => secretFolderOf(counted, ids.dev!),
     "a folder's keys": () => secretsInFolder(counted, ids.dev!, 'tools'),
-    "a write's lock on keys": () => counted.transaction((tx) => lock(tx, secrets, { projectId: market!.id, environmentId: ids.dev!, key: ['API_KEY', 'DATABASE_URL'] })),
+    "a write's rows by key": () => counted.transaction((tx) => secretRows(tx, { projectId: market!.id, environmentId: ids.dev!, key: ['API_KEY', 'DATABASE_URL'] })),
   };
   const pages = async () => {
     const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};

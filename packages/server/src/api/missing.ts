@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { Transaction } from '@coffre/db';
 import { dismissedKeys, secrets } from '@coffre/db/schema';
 
-import { dismissalsAcross, dismissalsIn, keysAcross, lock, update, upsert, type ResolvedPath } from '../db/queries.ts';
+import { dismissalsAcross, dismissalsIn, keysAcross, secretRows, update, upsert, type ResolvedPath } from '../db/queries.ts';
 import { AppChanges, retrying } from './changes.ts';
 import { allowed, audited, denied, eventsOf, Refusal, type ApiContext } from './context.ts';
 import { ApiError, conflict, notFound } from './errors.ts';
@@ -90,7 +90,7 @@ export async function missingKeys(ctx: ApiContext, place: ResolvedPath): Promise
  */
 async function refuseOwnRemovals(ctx: ApiContext, tx: Transaction, place: ResolvedPath, keys: readonly string[], operationId: string): Promise<void> {
   if (keys.length === 0) return;
-  const own = (await lock(tx, secrets, { projectId: place.project.id, environmentId: place.environment!.id, key: [...keys] })).filter((row) => row.archivedAt === null);
+  const own = (await secretRows(tx, { projectId: place.project.id, environmentId: place.environment!.id, key: [...keys] })).filter((row) => row.archivedAt === null);
   if (own.length === 0) return;
   const held = (await inheritedRows(tx, place.environment!.id))?.held ?? new Map();
   const path = `${place.project.slug}/${place.environment!.slug}`;

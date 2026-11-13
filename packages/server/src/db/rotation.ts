@@ -54,14 +54,24 @@ function signedTable(table: AuthTable) {
 
 /**
  * Up to `limit` of a signed table's rows after id `after` (null: from the
- * first), by id, locked until the step commits: a change that does not
- * take the log's head, a session's renewal, waits for it, then finds the
- * row signed again and refuses, rather than the step missing it.
+ * first), by id, with no lock. Every change to a signed field
+ * (`auth-rows.ts`, `FIELDS`) is compare-and-set on the row's MAC, in its
+ * `UPDATE` or under the row's lock, as the step's own write is (`reseal`):
+ * whichever of a writer and the step writes second changes nothing, and
+ * the step then reads again (`rotateStep`). That alone is the guarantee.
+ * The step holds the change lock and the log's head from before its read,
+ * so the writers that hold either never meet it: the app's but one (the
+ * head) and the vault's (`revoke_credential`, `change_bindings`: the
+ * change lock). The one that holds neither (`sweepOauthClients`) does,
+ * and the compare settles it. The columns outside the MAC (a last
+ * use, a passkey's name or counter) change with neither, which is safe
+ * only while the MAC and `endsAt` read none of them: a column that joins
+ * `FIELDS` takes the compare-and-set with it.
  */
 export async function signedRowsAfter(tx: Queryable, table: AuthTable, after: string | null, limit: number): Promise<AuthRow[]> {
   const rows = signedTable(table);
   const query = tx.select().from(rows);
-  return (await (after === null ? query : query.where(gt(rows.id, after))).orderBy(asc(rows.id)).limit(limit).for('update')) as AuthRow[];
+  return (await (after === null ? query : query.where(gt(rows.id, after))).orderBy(asc(rows.id)).limit(limit)) as AuthRow[];
 }
 
 /** A row signed again: its MAC as read, which it must still carry, and its new one; and when it ends, a session signed out or a device's login used up. */

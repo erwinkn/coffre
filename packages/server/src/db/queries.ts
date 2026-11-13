@@ -132,11 +132,12 @@ export async function updateAuth<
 }
 
 /**
- * Lock the matching rows until the transaction ends, and read them as they
- * are once the lock is ours. Only for real races; each caller says which.
+ * The matching keys' rows as they are now, with no lock of their own: every
+ * write of a key's row holds the change lock from before its first read to
+ * its commit, so under it they stay as read.
  */
-export async function lock<T extends Table>(tx: Transaction, table: T, match: Match<T>): Promise<Row<T>[]> {
-  return (await tx.select().from(table as Table).where(matching(table, match)).for('update')) as Row<T>[];
+export async function secretRows(tx: Transaction, match: Match<typeof secrets>): Promise<Row<typeof secrets>[]> {
+  return tx.select().from(secrets).where(matching(secrets, match));
 }
 
 /**

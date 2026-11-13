@@ -26,7 +26,7 @@ import type { Database, Queryable, Transaction } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { lockChange, lockChangeIfFree, lockLogHead, lockLogHeadIfFree } from '@coffre/db/log';
 
-import { AppChanges, COFFRE_ACTOR, keeps015, retrying, revokes } from './api/changes.ts';
+import { AppChanges, COFFRE_ACTOR, keeps015, ObjectMoved, retrying, revokes } from './api/changes.ts';
 import { signedAgain, signedBy, type AuthRow, type AuthTable } from './auth-rows.ts';
 import { appendAudit, appLogKey, type AppKeys, type AuditEntry } from './db/audit.ts';
 import type { CredentialRow } from './db/queries.ts';
@@ -173,6 +173,7 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
   // With 0.15's log, each session it signs out is a change: prepared from the rows the step will read, read before its
   // transaction as it reads them, which must find the same (`expectRevoked`). Read again while another start's step
   // comes between, each moving the rotation on: starts racing each other at an app's deploy take turns, a few at most.
+  // Read again too when a row it read was changed before it wrote it (below).
   return retrying(async () => {
   const prepared = await AppChanges.prepare(vault, COFFRE_ACTOR, async () => {
     const before = await keyState(db, keys);
@@ -207,10 +208,12 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
         else if (others.some((key) => signedBy(key, table, row))) later += 1;
         else unsigned.push({ table, id: row.id });
       }
-      const changed = new Set(await reseal(tx, table, changes));
+      // A row changed between the step's read and its write, by the writer of a signed row that takes neither the
+      // change lock nor the head (`sweepOauthClients`, from an instance still under the old key): the step again,
+      // which signs it as it now is.
+      if ((await reseal(tx, table, changes)).length < changes.length) throw new ObjectMoved();
       for (const change of changes) {
-        if (!changed.has(change.id)) unsigned.push({ table, id: change.id });
-        else if (change.ends !== null) {
+        if (change.ends !== null) {
           signedOut += 1;
           if (table === 'credentials') ended.push(change.id);
         } else resealed += 1;
@@ -242,7 +245,11 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
   }, ROTATION_TRIES);
 }
 
-/** How many times a step is read and prepared again while other starts' steps come between it and its transaction. */
+/**
+ * How many times a step is read and prepared again while other starts' steps come between it and its transaction, or
+ * another writer changes a row between its read and its write. Past them it throws `ObjectMoved`, its last transaction
+ * rolled back as each before: nothing signed, no entry, and the next call steps from the same place (`keyReady`).
+ */
 const ROTATION_TRIES = 20;
 
 /**
