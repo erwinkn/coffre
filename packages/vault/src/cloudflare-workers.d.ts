@@ -15,7 +15,6 @@ declare module 'cloudflare:workers' {
   export type DurableObjectState = {
     storage: import('./signer-host.ts').Storage;
     blockConcurrencyWhile<T>(run: () => Promise<T>): Promise<T>;
-    waitUntil(promise: Promise<unknown>): void;
   };
   export abstract class DurableObject<Env = unknown> {
     protected env: Env;

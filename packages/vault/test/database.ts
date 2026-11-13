@@ -70,7 +70,7 @@ export function memoryStore() {
 /**
  * A Durable Object's storage, in memory, as the signer's host uses it
  * (`Storage` in signer-host.ts). `down` makes its writes fail, `refuses` a
- * write to one key; `alarm` is when its alarm is set for, `sets` how often
+ * write to one key, `noAlarm` the setting of its alarm; `alarm` is when its alarm is set for, `sets` how often
  * it was set, and `syncs` how often it was asked to be on disk.
  */
 export function objectStorage() {
@@ -79,6 +79,7 @@ export function objectStorage() {
     kept,
     down: false,
     refuses: null as string | null,
+    noAlarm: false,
     alarm: null as number | null,
     sets: 0,
     syncs: 0,
@@ -108,6 +109,7 @@ export function objectStorage() {
     },
     getAlarm: async (): Promise<number | null> => storage.alarm,
     async setAlarm(at: number): Promise<void> {
+      if (storage.noAlarm) throw new Error('the alarm cannot be set');
       storage.alarm = at;
       storage.sets += 1;
     },

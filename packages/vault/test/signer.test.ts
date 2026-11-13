@@ -194,6 +194,22 @@ test('what was found is let go once it is sent: not if sending fails, and not wh
   assert.deepEqual(await signer.take(), []);
 });
 
+test('a check names a thousand rows at most, the first by name, however many are wrong', async () => {
+  await member(ada, 'owner');
+  assert.deepEqual(await run(), []);
+  // Rows written behind the vault, as many as a writer likes.
+  const planted = Array.from({ length: 1001 }, (_, index) => user(`planted-${String(index).padStart(4, '0')}`));
+  await vault.owner.insert(principals).values(planted.map((id) => ({ ...principal(id, { role: 'member' }), mac: Buffer.alloc(36) })));
+  const first = planted.map(named).sort().slice(0, 1000).map((of) => ({ found: 'row', of }));
+  assert.deepEqual(await run(), first);
+  // The same ones at the next check; the last one once one of them is put right.
+  vault.tick(60_000);
+  assert.deepEqual(await run(), first);
+  await vault.owner.execute(sql`DELETE FROM principals WHERE id = ${planted[0]!}`);
+  vault.tick(60_000);
+  assert.deepEqual(await run(), [...first.slice(1), { found: 'row', of: planted.map(named).sort()[1000]! }]);
+});
+
 test('a change that replaced a MAC the mirror does not hold is false history', async () => {
   await member(bo, 'member');
   assert.deepEqual(await run(), []);

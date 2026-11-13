@@ -70,7 +70,7 @@ after(async () => {
   await vault.close();
 });
 
-async function call(body: { method: 'wake'; hash: string } | { method: 'status' }): Promise<unknown> {
+async function call(body: { method: 'wake'; hash: string } | { method: 'status' | 'refusedStep' }): Promise<unknown> {
   const response = await worker.fetch('/', { method: 'POST', body: JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
   const answer = (await response.json()) as { ok: boolean; result?: unknown; error?: string };
   assert.ok(answer.ok, answer.error ?? 'the call failed');
@@ -84,6 +84,10 @@ async function until(ready: () => Promise<boolean> | boolean, ms: number, what: 
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
+
+test('in workerd: a step\'s changes are stored all of them or none', { timeout: 120_000 }, async () => {
+  assert.deepEqual(await call({ method: 'refusedStep' }), { refused: true, was: 1, new: null });
+});
 
 test('in workerd: an entry the vault told of is in the log a second later, under a head of the vault\'s, and one planted beside it is alerted', { timeout: 120_000 }, async () => {
   const entries = ['a', 'b'].map((name) => pending(key, { kept: name === 'a', action: 'secret.read', actor: 'user:ada@acme.example', credential: null, request: null, ip: null, objects: [`secret:${name}`], detail: {} }, Date.now(), []));

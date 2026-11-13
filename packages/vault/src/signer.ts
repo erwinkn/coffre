@@ -71,6 +71,13 @@ const FRESH_MS = 60_000;
 /** The most entries one run takes: a tile's worth. More wait for the next, at once. */
 const MOST = 256;
 /**
+ * The most rows one check names. What a run found is one value of the
+ * signer's storage, which has a size: after a restore from a backup every
+ * row changed since is wrong, and whoever writes the database can make as
+ * many wrong as they like, which must not cost the check its findings.
+ */
+const MOST_ROWS = 1000;
+/**
  * How long a statement of the signer's runs: half the minute its full run
  * comes round in. Whoever writes the database can hold a lock for good; the
  * run then fails, and the next one tries again, where it would have waited
@@ -221,6 +228,11 @@ export class Signer {
     }
   }
 
+  /** How many findings wait to be taken. */
+  get unsent(): number {
+    return this.#found.length;
+  }
+
   /** Whether a step failed: its memory and its storage may differ, and whoever runs it opens another. */
   get dead(): boolean {
     return this.#dead;
@@ -341,7 +353,9 @@ export class Signer {
       for (const hex of [...seen, ...gone]) if (this.#expected.delete(hex)) changes.set(`expected ${hex}`, undefined);
 
       if (snapshot.drained && snapshot.rows !== null && snapshot.ends !== null) {
-        for (const name of new Set([...snapshot.rows.keys(), ...this.#mirror.keys()])) if (snapshot.rows.get(name) !== this.#mirror.get(name)) this.#find(changes, 'row', name);
+        const wrong = [...new Set([...snapshot.rows.keys(), ...this.#mirror.keys()])].filter((name) => snapshot.rows!.get(name) !== this.#mirror.get(name));
+        // More than it names at once: the first by name, the same at each check, and the rest by the checks after those are put right.
+        for (const name of wrong.length > MOST_ROWS ? wrong.sort().slice(0, MOST_ROWS) : wrong) this.#find(changes, 'row', name);
         // Before this run's entries: the log read is the one the last run signed, and must end as that one did.
         for (const tree of TREES) if (snapshot.ends[tree].size !== this.#trees[tree].size || snapshot.ends[tree].last !== this.#last[tree]) this.#find(changes, 'cut', tree);
         this.#checked = snapshot.at;
