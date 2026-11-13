@@ -695,7 +695,7 @@ test("a try the vault served, abandoned at its hold, then not served (the key ma
   assert.equal(verified, true);
 });
 
-test("a key write down the two-trip path, recorded in 0.15's log alone, is listed where 0.14's `secret.write` stood: the whole log, its project's, environment's and key's pages, Ada's, a reader of its environment's; none of another place's, another member's or the refusals' (T179, 0.16.0)", async () => {
+test("a key write down the two-trip path, recorded in 0.15's log alone, is listed where 0.14's `secret.write` stood: the whole log, its project's, environment's and key's pages, Ada's, a reader of its environment's; none of another place's, another member's or the refusals' (0.16.0)", async () => {
   const w = await world();
   await w.root.environments.create('market/prod');
   const wrote = await w.write({ API_KEY: 'fake-new' });
@@ -721,9 +721,10 @@ test("a key write down the two-trip path, recorded in 0.15's log alone, is liste
     // Beside it, the root's write of the key's first version, on a page that is not Ada's alone.
     assert.deepEqual(shown.filter((one) => one.actorId !== ADA).map((one) => one.version), 'actor' in query ? [] : [1], JSON.stringify(query));
   }
-  for (const query of [{ path: 'market/prod' }, { actor: ROOT }, { decision: 'deny' }]) {
-    assert.deepEqual((await written(w.root, query)).filter((entry) => entry.actorId === ADA), [], JSON.stringify(query));
+  for (const query of [{ path: 'market/prod' }, { decision: 'deny' }]) {
+    assert.deepEqual(await written(w.root, query), [], JSON.stringify(query));
   }
+  assert.deepEqual((await written(w.root, { actor: ROOT })).filter((entry) => entry.actorId === ADA), []);
   // A reader of market/dev alone (an auditor there) reads it, on the whole log and the project's page; of prod alone, not.
   const bob = 'bob@acme.example';
   await w.root.members.add(`user:${bob}`);
