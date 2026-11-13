@@ -26,14 +26,18 @@ import { macOf, shapeOf, type Key, type Sealed } from './rows.ts';
  *    the tiles and the head. A run that died before it is finished by the
  *    next.
  *
- * What it finds it reports, and goes on (D216).
+ * What it finds it keeps until it is taken (`take`), and goes on (D216): a
+ * run that fails after its finding says it again on the next.
  */
 
-/** The signer's storage: outside the database, so whoever writes the database does not write it. */
+/**
+ * The signer's storage: outside the database, so whoever writes the database
+ * does not write it. A Durable Object's, in a deployment.
+ */
 export type Store = {
   /** Everything kept, by key. */
   read(): Promise<Map<string, unknown>>;
-  /** All of it or none of it. A key set to `undefined` is removed. */
+  /** All of it or none of it, and each write after the one asked before it. A key set to `undefined` is removed. */
   write(changes: ReadonlyMap<string, unknown>): Promise<void>;
 };
 
@@ -49,8 +53,8 @@ export type Signing = { db: Database; keys: readonly Key[]; now(): number; store
  * - `missing`: one the vault told of, gone before it was signed.
  * - `rewritten`: a change replaced a MAC that is not the one the mirror holds: false history.
  * - `row`: on a full run, a row that is not what the entries say.
- * - `cut`: on a full run, a tree shorter or longer than was signed.
- * - `lost`: an entry signed, then gone or changed before it was moved.
+ * - `cut`: on a full run, a tree that does not end with the entry signed last.
+ * - `lost`: an entry signed, and not in the log as it was signed once moved.
  */
 export type Finding = { found: 'forged' | 'replayed' | 'stale' | 'missing' | 'rewritten' | 'row' | 'cut' | 'lost'; of: string };
 
@@ -66,10 +70,16 @@ const MOST = 256;
 
 const TREES = ['kept', 'aging'] as const;
 type Tree = (typeof TREES)[number];
+const treeOf = (kept: boolean): Tree => (kept ? 'kept' : 'aging');
 
 /** Every table whose rows carry the vault's MAC: the mirror holds each one's. */
 const MIRRORED = (Object.values(schema) as unknown[]).filter((table): table is Sealed => is(table, PgTable) && 'mac' in table && table !== schema.logPending && table !== schema.logHead && table !== schema.auditArchive);
 
+/** An entry's hash as the database works it out: RFC 9162's leaf hash of its body. */
+const leafOf = (body: string) => sql.raw(`sha256('\\x00'::bytea || convert_to(${body}, 'UTF8'))`);
+
+// By id, which for changes is the order they committed in: each takes its id under the change lock, held until its
+// commit shows (`commit` in change.ts), and the sequence hands ids out one at a time. Uses commit in any order, and write no row.
 const WAITING = sql`SELECT 'pending' AS part, id::text AS name, NULL::jsonb AS key, kept, body, mac FROM (SELECT * FROM log_pending ORDER BY id LIMIT ${MOST + 1}) waiting`;
 const ROWS = sql.join(
   MIRRORED.map((table) => {
@@ -78,10 +88,13 @@ const ROWS = sql.join(
   }),
   sql` UNION ALL `,
 );
-// Each tree's size by its last leaf, one step down an index: a count would read the whole log.
-const SIZES = sql`SELECT 'size', NULL, to_jsonb(coalesce((SELECT max(leaf) FROM log WHERE log.kept = tree.kept) + 1, 0)), kept, NULL, NULL FROM (VALUES (true), (false)) tree(kept)`;
+// Where each tree ends: its last leaf and that entry's hash, one step down an index. A count would read the whole log.
+const ENDS = sql`SELECT 'end', encode(${leafOf('last.body')}, 'hex'), to_jsonb(coalesce(last.leaf + 1, 0)), tree.kept, NULL, NULL
+  FROM (VALUES (true), (false)) tree(kept) LEFT JOIN LATERAL (SELECT leaf, body FROM log WHERE log.kept = tree.kept ORDER BY leaf DESC LIMIT 1) last ON true`;
 
 type Waiting = { id: string; kept: boolean; body: string; mac: Uint8Array };
+/** Where a tree ends: how many leaves, and the last one's hash, hex. */
+type End = { size: number; last: string | null };
 
 /** What one read found, and what the signer had been told to expect before it. */
 export type Snapshot = {
@@ -90,9 +103,9 @@ export type Snapshot = {
   pending: Waiting[];
   /** Nothing waits past these. Only then is a missing entry missing, and the rows comparable. */
   drained: boolean;
-  /** On a full run: each sealed row's MAC by the row's name, and each tree's size. */
+  /** On a full run: each sealed row's MAC by the row's name, and where each tree ends. */
   rows: Map<string, string> | null;
-  sizes: Record<Tree, number> | null;
+  ends: Record<Tree, End> | null;
 };
 
 /** What was signed and is not yet moved, as its statement takes it. */
@@ -102,10 +115,12 @@ type Move = {
   tiles: { kept: boolean; level: number; number: number; hashes: string }[];
   head: { size: number; keptSize: number; keptRoot: string; agingSize: number; agingRoot: string; agingFrom: number; signedAt: number; mac: string };
 };
+
 /** What the head's MAC covers: both trees at once, so the two never disagree about when. No entry's body begins as it does. */
 export const headText = (head: Omit<Move['head'], 'mac'>) => `head\n${JSON.stringify([head.size, head.keptSize, head.keptRoot, head.agingSize, head.agingRoot, head.agingFrom, head.signedAt])}`;
 
-type Kept = { drained: number; size: number; agingFrom: number; trees: Record<Tree, { size: number; tiles: { level: number; index: number; hashes: string }[] }> };
+/** Beside the mirror and the entries: when it last read everything that waited, and each tree's growing edge and end. */
+type Kept = { drained: number; trees: Record<Tree, End & { tiles: { level: number; index: number; hashes: string }[] }> };
 
 export class Signer {
   readonly #on: Signing;
@@ -117,12 +132,17 @@ export class Signer {
   readonly #signed = new Map<string, number>();
   /** When it last read everything that waited. */
   #drained = 0;
-  /** How many entries are numbered, and the first use pruning has kept. */
-  #size = 0;
-  #agingFrom = 0;
   #trees: Record<Tree, Edge> = { kept: Edge.empty(), aging: Edge.empty() };
+  /** Each tree's last leaf, hex: what the log must end with. */
+  #last: Record<Tree, string | null> = { kept: null, aging: null };
   #moving: Move | null = null;
-  /** Its storage refused a write after its memory moved on: nothing more is asked of it. */
+  /** What it found and nobody has taken yet. */
+  #found: Finding[] = [];
+  /** A full run asked for and not yet done, and whether entries waited past the last read. In memory only: the next minute asks again. */
+  #owed = false;
+  #behind = false;
+  #running = false;
+  /** Its memory and its storage may differ: nothing more is asked of it. */
   #dead = false;
 
   private constructor(on: Signing) {
@@ -138,21 +158,33 @@ export class Signer {
       else if (kind === 'expected') signer.#expected.add(name);
       else if (kind === 'signed') signer.#signed.set(name, value as number);
       else if (kind === 'moving') signer.#moving = value as Move;
+      else if (kind === 'found') signer.#found = value as Finding[];
       else if (kind === 'state') {
-        const { drained, size, agingFrom, trees } = value as Kept;
+        const { drained, trees } = value as Kept;
         signer.#drained = drained;
-        signer.#size = size;
-        signer.#agingFrom = agingFrom;
-        for (const tree of TREES) signer.#trees[tree] = Edge.load(trees[tree].size, tileMap(trees[tree].tiles.map((tile) => ({ ...tile, hashes: Buffer.from(tile.hashes, 'hex') }))));
+        for (const tree of TREES) {
+          signer.#trees[tree] = Edge.load(trees[tree].size, tileMap(trees[tree].tiles.map((tile) => ({ ...tile, hashes: Buffer.from(tile.hashes, 'hex') }))));
+          signer.#last[tree] = trees[tree].last;
+        }
       }
     }
     return signer;
   }
 
-  /** Its memory has moved on before its storage: if the write fails, the two differ, and the signer is opened again. */
-  async #keep(changes: ReadonlyMap<string, unknown>): Promise<void> {
+  /**
+   * A step that changes the signer's memory, then its storage. Memory
+   * first, so that a wake-up that comes while the storage answers sees what
+   * was decided. If anything fails the two may differ, and the signer is
+   * opened again from its storage.
+   */
+  async #step(change: (changes: Map<string, unknown>) => void | Promise<void>): Promise<void> {
+    this.#alive();
+    const changes = new Map<string, unknown>();
+    const found = this.#found.length;
     try {
-      await this.#on.store.write(changes);
+      await change(changes);
+      if (this.#found.length !== found) changes.set('found', this.#found.length > 0 ? this.#found : undefined);
+      if (changes.size > 0) await this.#on.store.write(changes);
     } catch (error) {
       this.#dead = true;
       throw error;
@@ -160,130 +192,144 @@ export class Signer {
   }
 
   #alive(): void {
-    if (this.#dead) throw new Error('this signer lost a write to its storage: open another');
+    if (this.#dead) throw new Error('this signer failed a step: open another');
   }
 
   /** The vault's word that an entry was committed (D223). One already signed is not expected again. */
-  async wake(hash: Uint8Array): Promise<void> {
-    this.#alive();
+  wake(hash: Uint8Array): Promise<void> {
     const hex = Buffer.from(hash).toString('hex');
-    if (this.#signed.has(hex) || this.#expected.has(hex)) return;
-    this.#expected.add(hex);
-    await this.#keep(new Map([[`expected ${hex}`, true]]));
+    return this.#step((changes) => {
+      if (this.#signed.has(hex) || this.#expected.has(hex)) return;
+      this.#expected.add(hex);
+      changes.set(`expected ${hex}`, true);
+    });
   }
 
-  /** One read. What is expected is noted before it: an entry told of during the read may be in it or not. */
+  /** What was found since this was last asked. Kept until then, so a run that failed after a finding says it on the next. */
+  async take(): Promise<Finding[]> {
+    const found = this.#found;
+    await this.#step(() => void (this.#found = []));
+    return found;
+  }
+
+  /**
+   * One read, in one statement: the rows and the entries that wait are of
+   * one moment. What is expected is noted before it: an entry told of during
+   * the read may be in it or not. The database's clock is read with it so
+   * that no pooler answers from a cache (`read` in use.ts).
+   */
   async read(full: boolean): Promise<Snapshot> {
     this.#alive();
     const expected = new Set(this.#expected);
     const at = this.#on.now();
-    const found = await rowsOf<{ part: 'pending' | 'row' | 'size'; name: string; key: unknown; kept: boolean; body: string; mac: Uint8Array }>(
+    const found = await rowsOf<{ part: 'pending' | 'row' | 'end'; name: string | null; key: unknown; kept: boolean; body: string; mac: Uint8Array }>(
       this.#on.db,
-      full ? sql`${WAITING} UNION ALL ${ROWS} UNION ALL ${SIZES}` : WAITING,
+      sql`SELECT parts.*, clock_timestamp() AS read_at FROM (${full ? sql`${WAITING} UNION ALL ${ROWS} UNION ALL ${ENDS}` : WAITING}) parts`,
     );
-    const waiting = found.filter((row) => row.part === 'pending').map(({ name: id, kept, body, mac }) => ({ id, kept, body, mac }));
+    const waiting = found.filter((row) => row.part === 'pending').map(({ name, kept, body, mac }) => ({ id: name!, kept, body, mac }));
     waiting.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
-    const sizes = Object.fromEntries(found.filter((row) => row.part === 'size').map((row) => [row.kept ? 'kept' : 'aging', row.key])) as Record<Tree, number>;
     return {
       at,
       expected,
       pending: waiting.slice(0, MOST),
       drained: waiting.length <= MOST,
       rows: full ? new Map(found.filter((row) => row.part === 'row').map((row) => [JSON.stringify([row.name, ...(row.key as unknown[])]), Buffer.from(row.mac).toString('hex')])) : null,
-      sizes: full ? sizes : null,
+      ends: full ? (Object.fromEntries(found.filter((row) => row.part === 'end').map((row) => [treeOf(row.kept), { size: row.key, last: row.name }])) as Record<Tree, End>) : null,
     };
   }
 
   /** Decide on a read, with no database, and keep the decision before anything moves. */
-  async sign(snapshot: Snapshot): Promise<Finding[]> {
-    this.#alive();
-    if (this.#moving !== null) throw new Error('the last run is not moved yet');
-    const findings: Finding[] = [];
-    const changes = new Map<string, unknown>();
-    const taken: { id: string; kept: boolean; hash: Buffer; hex: string; entry: Entry; seq: number; leaf: number }[] = [];
-    const refused: string[] = [];
-    /** The vault's entries among those that wait, taken or not. */
-    const seen = new Set<string>();
-    for (const row of snapshot.pending) {
-      const entry = entryOf(this.#on.keys, row);
-      const hash = leafHash(Buffer.from(row.body));
-      const hex = hash.toString('hex');
-      const found = entry === undefined ? 'forged' : this.#signed.has(hex) || seen.has(hex) ? 'replayed' : entry.at + FRESH_MS < this.#drained ? 'stale' : null;
-      if (entry !== undefined) seen.add(hex);
-      if (entry === undefined || found !== null) {
-        findings.push({ found: found!, of: entry === undefined ? `pending:${row.id}` : hex });
-        refused.push(row.id);
-        continue;
+  sign(snapshot: Snapshot): Promise<void> {
+    return this.#step((changes) => {
+      if (this.#moving !== null) throw new Error('the last run is not moved yet');
+      const taken: Move['taken'] = [];
+      const hashes: Record<Tree, Buffer[]> = { kept: [], aging: [] };
+      const refused: string[] = [];
+      /** The vault's entries among those that wait, taken or not. */
+      const seen = new Set<string>();
+      for (const row of snapshot.pending) {
+        const entry = entryOf(this.#on.keys, row);
+        const hash = leafHash(Buffer.from(row.body));
+        const hex = hash.toString('hex');
+        const found = entry === undefined ? 'forged' : this.#signed.has(hex) ? 'replayed' : entry.at + FRESH_MS < this.#drained ? 'stale' : null;
+        if (entry !== undefined) seen.add(hex);
+        if (entry === undefined || found !== null) {
+          this.#found.push({ found: found!, of: entry === undefined ? `pending:${row.id}` : hex });
+          refused.push(row.id);
+          continue;
+        }
+        // In the order written: each change moves the mirror on from the MAC it replaced.
+        for (const { row: name, was, now } of entry.rows) {
+          if ((this.#mirror.get(name) ?? null) !== was) this.#found.push({ found: 'rewritten', of: name });
+          if (now === null) this.#mirror.delete(name);
+          else this.#mirror.set(name, now);
+          changes.set(`row ${name}`, now ?? undefined);
+        }
+        const tree = treeOf(row.kept);
+        taken.push({ id: row.id, kept: row.kept, seq: this.#trees.kept.size + this.#trees.aging.size + taken.length, leaf: this.#trees[tree].size + hashes[tree].length, hash: hex });
+        hashes[tree].push(hash);
+        this.#signed.set(hex, entry.at);
+        changes.set(`signed ${hex}`, entry.at);
       }
-      // In the order written: each change moves the mirror on from the MAC it replaced.
-      for (const { row: name, was, now } of entry.rows) {
-        if ((this.#mirror.get(name) ?? null) !== was) findings.push({ found: 'rewritten', of: name });
-        if (now === null) this.#mirror.delete(name);
-        else this.#mirror.set(name, now);
-        changes.set(`row ${name}`, now ?? undefined);
+      // Told of before the read, and not in it: gone. Known only when the read took everything that waited.
+      const gone = snapshot.drained ? [...snapshot.expected].filter((hex) => !seen.has(hex)) : [];
+      for (const hex of gone) this.#found.push({ found: 'missing', of: hex });
+      for (const hex of [...seen, ...gone]) if (this.#expected.delete(hex)) changes.set(`expected ${hex}`, undefined);
+
+      if (snapshot.drained && snapshot.rows !== null && snapshot.ends !== null) {
+        for (const name of new Set([...snapshot.rows.keys(), ...this.#mirror.keys()])) if (snapshot.rows.get(name) !== this.#mirror.get(name)) this.#found.push({ found: 'row', of: name });
+        // Before this run's entries: the log read is the one the last run signed, and must end as that one did.
+        for (const tree of TREES) if (snapshot.ends[tree].size !== this.#trees[tree].size || snapshot.ends[tree].last !== this.#last[tree]) this.#found.push({ found: 'cut', of: tree });
       }
-      taken.push({ id: row.id, kept: row.kept, hash, hex, entry, seq: this.#size + taken.length, leaf: 0 });
-    }
-    // Told of before the read, and not in it: gone. Known only when the read took everything that waited.
-    const gone = snapshot.drained ? [...snapshot.expected].filter((hex) => !seen.has(hex)) : [];
-    for (const hex of gone) findings.push({ found: 'missing', of: hex });
-    for (const hex of [...seen, ...gone]) if (this.#expected.delete(hex)) changes.set(`expected ${hex}`, undefined);
 
-    if (snapshot.drained && snapshot.rows !== null && snapshot.sizes !== null) {
-      for (const name of new Set([...snapshot.rows.keys(), ...this.#mirror.keys()])) if (snapshot.rows.get(name) !== this.#mirror.get(name)) findings.push({ found: 'row', of: name });
-      // Before this run's entries: the log read is the one the last run signed.
-      for (const tree of TREES) if (snapshot.sizes[tree] !== this.#trees[tree].size) findings.push({ found: 'cut', of: tree });
-    }
-
-    const tiles: Move['tiles'] = [];
-    for (const tree of TREES) {
-      const mine = taken.filter((each) => each.kept === (tree === 'kept'));
-      mine.forEach((each, i) => (each.leaf = this.#trees[tree].size + i));
-      for (const { level, index, hashes } of this.#trees[tree].append(mine.map((each) => each.hash))) tiles.push({ kept: tree === 'kept', level, number: index, hashes: hashes.toString('hex') });
-    }
-    this.#size += taken.length;
-    for (const { hex, entry } of taken) {
-      this.#signed.set(hex, entry.at);
-      changes.set(`signed ${hex}`, entry.at);
-    }
-    if (snapshot.drained) this.#drained = snapshot.at;
-    // What it would no longer take, it need not remember.
-    for (const [hex, at] of this.#signed) {
-      if (at + FRESH_MS >= this.#drained) continue;
-      this.#signed.delete(hex);
-      changes.set(`signed ${hex}`, undefined);
-    }
-
-    if (taken.length > 0 || refused.length > 0) {
-      const head = { size: this.#size, keptSize: this.#trees.kept.size, keptRoot: this.#trees.kept.root().toString('hex'), agingSize: this.#trees.aging.size, agingRoot: this.#trees.aging.root().toString('hex'), agingFrom: this.#agingFrom, signedAt: this.#on.now() };
-      const key = this.#on.keys[0]!;
-      this.#moving = { taken: taken.map(({ id, kept, seq, leaf, hex }) => ({ id, kept, seq, leaf, hash: hex })), refused, tiles, head: { ...head, mac: macOf(key, key.entries, headText(head)).toString('hex') } };
-      changes.set('moving', this.#moving);
-    }
-    const trees = Object.fromEntries(TREES.map((tree) => [tree, { size: this.#trees[tree].size, tiles: this.#trees[tree].edgeTiles().map(({ level, index, hashes }) => ({ level, index, hashes: hashes.toString('hex') })) }])) as Kept['trees'];
-    changes.set('state', { drained: this.#drained, size: this.#size, agingFrom: this.#agingFrom, trees } satisfies Kept);
-    await this.#keep(changes);
-    return findings;
+      const tiles: Move['tiles'] = [];
+      for (const tree of TREES) {
+        for (const { level, index, hashes: tile } of this.#trees[tree].append(hashes[tree])) tiles.push({ kept: tree === 'kept', level, number: index, hashes: tile.toString('hex') });
+        this.#last[tree] = hashes[tree].at(-1)?.toString('hex') ?? this.#last[tree];
+      }
+      if (snapshot.drained) {
+        this.#drained = snapshot.at;
+        // What it would no longer take, it need not remember.
+        for (const [hex, at] of this.#signed) {
+          if (at + FRESH_MS >= this.#drained) continue;
+          this.#signed.delete(hex);
+          changes.set(`signed ${hex}`, undefined);
+        }
+      }
+      if (taken.length > 0 || refused.length > 0) {
+        const { kept, aging } = this.#trees;
+        // `agingFrom`: the first use pruning has kept, once there is pruning.
+        const head = { size: kept.size + aging.size, keptSize: kept.size, keptRoot: kept.root().toString('hex'), agingSize: aging.size, agingRoot: aging.root().toString('hex'), agingFrom: 0, signedAt: this.#on.now() };
+        const key = this.#on.keys[0]!;
+        this.#moving = { taken, refused, tiles, head: { ...head, mac: macOf(key, key.entries, headText(head)).toString('hex') } };
+        changes.set('moving', this.#moving);
+      }
+      // With whatever else is kept, never alone: an idle run writes nothing, and its storage's window is only wider for it.
+      if (changes.size === 0) return;
+      const trees = Object.fromEntries(TREES.map((tree) => [tree, { size: this.#trees[tree].size, last: this.#last[tree], tiles: this.#trees[tree].edgeTiles().map(({ level, index, hashes: tile }) => ({ level, index, hashes: tile.toString('hex') })) }])) as Kept['trees'];
+      changes.set('state', { drained: this.#drained, trees } satisfies Kept);
+    });
   }
 
   /**
    * Into the log, in one statement: each entry signed, if it still waits as
    * it was signed, with a row of the index per object it mentions; the
-   * tiles; the head. Run again after it committed, it changes nothing.
+   * tiles; the head. Run again after it committed, it changes nothing. An
+   * entry that is not in the log as it was signed once this is done, gone
+   * from where it waited or with another row in its place, is `lost`.
    */
-  async move(): Promise<Finding[]> {
-    this.#alive();
+  async move(): Promise<void> {
     const moving = this.#moving;
-    if (moving === null) return [];
+    if (moving === null) return;
     const { head } = moving;
     const bytes = (hex: string) => sql`decode(${hex}, 'hex')`;
     const time = sql`${new Date(head.signedAt).toISOString()}::timestamptz`;
-    const [{ moved, there }] = (await rowsOf<{ moved: number; there: number }>(
+    const there = await rowsOf<{ seq: number }>(
       this.#on.db,
       sql`
       WITH taken AS (SELECT * FROM jsonb_to_recordset(${JSON.stringify(moving.taken)}::jsonb) AS t(id bigint, kept boolean, seq bigint, leaf bigint, hash text)),
-        moved AS (DELETE FROM log_pending p USING taken t WHERE p.id = t.id AND p.kept = t.kept AND sha256('\\x00'::bytea || convert_to(p.body, 'UTF8')) = decode(t.hash, 'hex') RETURNING t.seq, t.kept, t.leaf, p.body),
-        logged AS (INSERT INTO log (seq, kept, leaf, body) SELECT seq, kept, leaf, body FROM moved ON CONFLICT (seq) DO UPDATE SET kept = excluded.kept, leaf = excluded.leaf, body = excluded.body),
+        moved AS (DELETE FROM log_pending p USING taken t WHERE p.id = t.id AND p.kept = t.kept AND ${leafOf('p.body')} = decode(t.hash, 'hex') RETURNING t.seq, t.kept, t.leaf, p.body),
+        logged AS (INSERT INTO log (seq, kept, leaf, body) SELECT seq, kept, leaf, body FROM moved ON CONFLICT DO NOTHING RETURNING seq),
         indexed AS (INSERT INTO log_index (object, seq) SELECT DISTINCT object, seq FROM moved, jsonb_array_elements_text(body::jsonb -> 'objects') object ON CONFLICT DO NOTHING),
         refused AS (DELETE FROM log_pending WHERE id IN (SELECT id::bigint FROM jsonb_array_elements_text(${JSON.stringify(moving.refused)}::jsonb) id)),
         tiled AS (
@@ -293,19 +339,38 @@ export class Signer {
           INSERT INTO log_head (only_row, size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at, mac)
           VALUES (true, ${head.size}, ${head.keptSize}, ${bytes(head.keptRoot)}, ${head.agingSize}, ${bytes(head.agingRoot)}, ${head.agingFrom}, ${time}, ${bytes(head.mac)})
           ON CONFLICT (only_row) DO UPDATE SET size = excluded.size, kept_size = excluded.kept_size, kept_root = excluded.kept_root, aging_size = excluded.aging_size, aging_root = excluded.aging_root, aging_from = excluded.aging_from, signed_at = excluded.signed_at, mac = excluded.mac)
-      SELECT (SELECT count(*) FROM moved)::int AS moved, (SELECT count(*) FROM log WHERE seq IN (SELECT seq FROM taken))::int AS there`,
-    )) as [{ moved: number; there: number }];
-    this.#moving = null;
-    await this.#keep(new Map([['moving', undefined]]));
-    // Moved now, or there already from a run that died after its statement: anything else was taken from under it.
-    return moved + there === moving.taken.length ? [] : [{ found: 'lost', of: 'log' }];
+      -- Put there now, or there already, as signed, from a run that died after this statement.
+      SELECT seq::int FROM logged UNION SELECT l.seq::int FROM log l JOIN taken t ON l.seq = t.seq AND l.kept = t.kept AND l.leaf = t.leaf AND ${leafOf('l.body')} = decode(t.hash, 'hex')`,
+    );
+    await this.#step((changes) => {
+      const seqs = new Set(there.map((row) => row.seq));
+      for (const { seq, hash } of moving.taken) if (!seqs.has(seq)) this.#found.push({ found: 'lost', of: hash });
+      this.#moving = null;
+      changes.set('moving', undefined);
+    });
   }
 
-  /** One run: the last one's move if it died before it, then a read, its signing and its move. `more`: entries still wait. */
+  /**
+   * One run: the last one's move if it died before it, then a read, its
+   * signing and its move. Only one at a time, and a second is refused, not
+   * queued: two that read the same entries would each sign them. A full run
+   * reads the rows once nothing waited past the last read; until then it is
+   * owed. `more`: run again at once.
+   */
   async run(full: boolean): Promise<{ findings: Finding[]; more: boolean }> {
-    const findings = await this.move();
-    const snapshot = await this.read(full);
-    findings.push(...(await this.sign(snapshot)), ...(await this.move()));
-    return { findings, more: !snapshot.drained };
+    if (this.#running) throw new Error('the signer runs one at a time');
+    this.#running = true;
+    try {
+      this.#owed ||= full;
+      await this.move();
+      const snapshot = await this.read(this.#owed && !this.#behind);
+      await this.sign(snapshot);
+      await this.move();
+      this.#behind = !snapshot.drained;
+      if (snapshot.drained && snapshot.rows !== null) this.#owed = false;
+      return { findings: await this.take(), more: this.#behind || this.#owed };
+    } finally {
+      this.#running = false;
+    }
   }
 }

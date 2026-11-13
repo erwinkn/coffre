@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
 import { inclusionProof, leafHash, nodesFrom, tileMap, verifyInclusion } from '@coffre/core/log';
+import { openDatabase } from '@coffre/db/connect';
 import { rowsOf } from '@coffre/db/dialect';
 import { principals } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
@@ -10,7 +11,8 @@ import { change, drop, part, put } from '../src/change.ts';
 import { pending, type Pending } from '../src/entry.ts';
 import { checked } from '../src/rows.ts';
 import { headText, Signer, type Finding, type Store } from '../src/signer.ts';
-import { emptyDatabase, openTestVault } from './database.ts';
+import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
+import { emptyDatabase, openTestVault, VAULT_URL } from './database.ts';
 import { principal, user } from './world.ts';
 
 /**
@@ -57,6 +59,16 @@ async function told(): Promise<void> {
 async function run(full = true): Promise<Finding[]> {
   await told();
   return (await signer.run(full)).findings;
+}
+/** Quick runs until nothing waits and no full run is owed: all they found. */
+async function runs(): Promise<Finding[]> {
+  const found: Finding[] = [];
+  for (let more = true; more; ) {
+    const result = await signer.run(false);
+    found.push(...result.findings);
+    ({ more } = result);
+  }
+  return found;
 }
 const kinds = (findings: Finding[]) => findings.map((each) => each.found).sort();
 
@@ -159,6 +171,10 @@ test('an entry gone before it was signed is missed, because the vault told of it
   await member(bo, 'member');
   await vault.owner.execute(sql`DELETE FROM log_pending WHERE body::jsonb -> 'objects' ->> 0 = ${`principal:${bo}`}`);
   const hash = vault.woken[1]!.toString('hex');
+  // A run that dies once it has found something says it on the next: the finding is in its storage, as its decision is.
+  await told();
+  await signer.sign(await signer.read(false));
+  signer = await open();
   assert.deepEqual(await run(false), [{ found: 'missing', of: hash }]);
   // Said once. And Bo's row is there with no entry that says so, which the full run finds.
   assert.deepEqual(await run(false), []);
@@ -186,9 +202,14 @@ test('the full run finds a row put back, one deleted, one written behind the vau
   assert.deepEqual(await run(), [{ found: 'row', of: named(bo) }]);
   await vault.owner.insert(principals).values(principal(cy));
   await vault.owner.execute(sql`DELETE FROM principals WHERE id = ${ada}`);
-  await vault.owner.execute(sql`DELETE FROM log WHERE seq = 2`);
+  const found = [{ found: 'row', of: named(bo) }, { found: 'row', of: named(cy) }, { found: 'row', of: named(ada) }, { found: 'cut', of: 'kept' }];
+  // The log's last entry moved further on: it ends with the entry signed, and not where.
+  await vault.owner.execute(sql`UPDATE log SET seq = 9, leaf = 7 WHERE seq = 2`);
   assert.deepEqual(await run(false), []);
-  assert.deepEqual(await run(), [{ found: 'row', of: named(bo) }, { found: 'row', of: named(cy) }, { found: 'row', of: named(ada) }, { found: 'cut', of: 'kept' }]);
+  assert.deepEqual(await run(), found);
+  // Put back and replaced: it ends where it did, and not with the entry signed.
+  await vault.owner.execute(sql`UPDATE log SET seq = 2, leaf = 2, body = 'another' WHERE seq = 9`);
+  assert.deepEqual(await run(), found);
 });
 
 test('an entry told of during a run, or after it was signed, raises nothing', async () => {
@@ -198,7 +219,9 @@ test('an entry told of during a run, or after it was signed, raises nothing', as
   // Committed and told of after the read: not in it, and not missed. Its row is not in the read either.
   await member(bo, 'member');
   await told();
-  assert.deepEqual([...(await signer.sign(snapshot)), ...(await signer.move())], []);
+  await signer.sign(snapshot);
+  await signer.move();
+  assert.deepEqual(await signer.take(), []);
   assert.deepEqual(await run(), []);
   // The signer's own run takes an entry before the vault's word of it arrives.
   await member(cy, 'member');
@@ -211,7 +234,7 @@ test('a run that died before its move, or before it could say it had moved, is f
   await member(ada, 'owner');
   await wait(reading('a'));
   await told();
-  assert.deepEqual(await signer.sign(await signer.read(true)), []);
+  await signer.sign(await signer.read(true));
   signer = await open();
   assert.deepEqual(await run(), []);
   assert.equal((await logged()).length, 2);
@@ -221,7 +244,7 @@ test('a run that died before its move, or before it could say it had moved, is f
   const [waited] = await rowsOf<{ body: string; mac: string }>(vault.owner, sql`SELECT body, encode(mac, 'hex') AS mac FROM log_pending`);
   await signer.sign(await signer.read(false));
   const before = structuredClone(store.kept);
-  assert.deepEqual(await signer.move(), []);
+  await signer.move();
   store.kept.clear();
   for (const [key, value] of before) store.kept.set(key, value);
   signer = await open();
@@ -239,6 +262,7 @@ test('a run that died before its move, or before it could say it had moved, is f
   await assert.rejects(told(), /storage is down/);
   store.down = false;
   await assert.rejects(signer.run(true), /open another/);
+  await assert.rejects(signer.wake(Buffer.alloc(32)), /open another/);
   signer = await open();
   assert.deepEqual((await signer.run(true)).findings, []);
   assert.equal((await logged()).length, 4);
@@ -250,21 +274,80 @@ test('an entry that is nobody\'s is refused and removed; one changed between its
   assert.deepEqual([await logged(), await waiting()], [[], 0]);
 
   await member(ada, 'owner');
+  const [hash] = vault.woken.map((each) => each.toString('hex'));
   await told();
-  assert.deepEqual(await signer.sign(await signer.read(false)), []);
+  await signer.sign(await signer.read(false));
   await vault.owner.execute(sql`UPDATE log_pending SET body = replace(body, 'member.role', 'member.gone')`);
-  assert.deepEqual(await signer.move(), [{ found: 'lost', of: 'log' }]);
+  await signer.move();
+  assert.deepEqual(await signer.take(), [{ found: 'lost', of: hash }]);
   // What is left of it is nobody's, and the tree holds a leaf the log does not.
   assert.deepEqual(kinds(await run()), ['cut', 'forged']);
 });
 
-test('a run takes a tile\'s worth; the rest wait for the next, and the full check for the last', async () => {
-  await wait(...Array.from({ length: 600 }, (_, i) => ({ ...reading(`k${i}`), ...(i % 3 === 0 ? pending(vault.keys[0]!, { kept: true, action: 'test.kept', actor: null, credential: null, request: null, ip: null, objects: [], detail: { i } }, vault.now(), []) : {}) })));
+test('a row planted where an entry is about to go does not stop the signer: the entry is lost, and said so', async () => {
+  // At the next leaf of the tree, under a number far away; then at the next number itself, with the entry taken from where it waited.
+  await vault.owner.execute(sql`INSERT INTO log (seq, kept, leaf, body) VALUES (1000000, true, 0, '{}')`);
+  await member(ada, 'owner');
+  const [first] = vault.woken.map((each) => each.toString('hex'));
+  assert.deepEqual(await run(false), [{ found: 'lost', of: first }]);
+  await member(bo, 'member');
+  const [second] = vault.woken.map((each) => each.toString('hex'));
+  await told();
+  await signer.sign(await signer.read(false));
+  await vault.owner.execute(sql`DELETE FROM log_pending`);
+  await vault.owner.execute(sql`INSERT INTO log (seq, kept, leaf, body) VALUES (1, true, 1, '{}')`);
+  await signer.move();
+  assert.deepEqual(await signer.take(), [{ found: 'lost', of: second }]);
+  // It goes on: the next entry is numbered and moved. The log then ends as signed, so the full run has nothing to add:
+  // what was planted before its end was said when it was lost, and is the re-check of old entries' to find again (D222).
+  await member(cy, 'member');
+  assert.deepEqual(await run(false), []);
+  assert.deepEqual((await logged()).map((entry) => entry.seq), [1, 2, 1000000]);
+  assert.deepEqual(await run(), []);
+});
+
+test('a run is two statements, its read and its move, and only one runs at a time', async () => {
+  const sent: string[] = [];
+  const proxy = await postgresProxy(VAULT_URL, { onSync: (statements) => sent.push(...statements.map((text) => text.trimStart())) });
+  const through = await openDatabase(proxy.url);
+  try {
+    signer = await Signer.open({ db: through.db, keys: vault.keys, now: vault.now, store });
+    await signer.run(false);
+    await member(ada, 'owner');
+    sent.length = 0;
+    // The rows and the entries that wait are of one moment: one statement reads both.
+    assert.deepEqual(await run(), []);
+    assert.deepEqual(sent.map((text) => text.slice(0, 12)), ['SELECT parts', 'WITH taken A']);
+    // With the database's clock, so that no pooler answers the read from a cache.
+    assert.match(sent[0]!, /^SELECT parts\.\*, clock_timestamp\(\)/);
+    const first = signer.run(true);
+    await assert.rejects(signer.run(true), /one at a time/);
+    assert.deepEqual(await first, { findings: [], more: false });
+  } finally {
+    await through.close();
+    await proxy.close();
+  }
+});
+
+test('a run takes a tile\'s worth; the rest wait for the next, and the full check for the last, however long the signer was away', async () => {
+  const some = (count: number, from: number) =>
+    Array.from({ length: count }, (_, i) => ({ ...reading(`k${from + i}`), ...((from + i) % 3 === 0 ? pending(vault.keys[0]!, { kept: true, action: 'test.kept', actor: null, credential: null, request: null, ip: null, objects: [], detail: { i: from + i } }, vault.now(), []) : {}) }));
+  assert.deepEqual(await run(), []);
+  // 300 entries a minute after its last run, 300 an hour later, and only then does it run again.
+  vault.tick(60_000);
+  await wait(...some(300, 0));
+  vault.tick(60 * 60_000);
+  await wait(...some(300, 300));
   await vault.owner.insert(principals).values(principal(cy));
   await told();
-  // While entries wait past the read, nothing is missing and no row is compared.
-  assert.deepEqual([await signer.run(true), await signer.run(true)], [{ findings: [], more: true }, { findings: [], more: true }]);
-  assert.deepEqual(await signer.run(true), { findings: [{ found: 'row', of: named(cy) }], more: false });
+  const fulls: boolean[] = [];
+  const read = signer.read.bind(signer);
+  signer.read = (full) => (fulls.push(full), read(full));
+  // While entries wait past the read, nothing is missing, no row is compared, and its window does not move: the oldest are still taken.
+  assert.deepEqual(await signer.run(true), { findings: [], more: true });
+  // The full run stays owed, whatever is asked next, and reads the rows again only once nothing waits.
+  assert.deepEqual(await runs(), [{ found: 'row', of: named(cy) }]);
+  assert.deepEqual(fulls, [true, false, false, true]);
   const entries = await logged();
   assert.deepEqual(entries.map((entry) => entry.seq), Array.from({ length: 600 }, (_, seq) => seq));
   assert.deepEqual(entries.map((entry) => entry.kept), Array.from({ length: 600 }, (_, i) => i % 3 === 0));

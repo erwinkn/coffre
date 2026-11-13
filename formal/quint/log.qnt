@@ -9,8 +9,10 @@
 // must equal the mirror.
 //
 // A row's MAC is a number, 0 for no row. The writer can put back any MAC the
-// vault once made, delete or put back any entry, and cut the log; it cannot
-// make a MAC. `quiet`: without tampering, and with the signer on time, nothing
+// vault once made, delete or put back any waiting entry, and cut the log from
+// its end; it cannot make a MAC. An entry deleted from the middle of the log is
+// not this check's: the signer compares where the log ends, which costs one
+// step whatever its size, and the re-check of old entries finds the rest (D222). `quiet`: without tampering, and with the signer on time, nothing
 // alerts. `caught`: no full check passes over a row that differs from what
 // the entries say, a change decided on such a row, a missing entry the signer
 // heard of, or a shortened log. The one exception is a row with an entry
@@ -20,7 +22,7 @@ module log {
   type Snap = { on: bool, full: bool, at: int, pending: Set[int], expected: Set[int], rows: str -> int, logSize: int, wrong: bool }
   type Db = { rows: str -> int, pending: Set[int], log: Set[int] }
   type Vault = { made: List[Entry], calls: Set[int], lost: Set[int] }
-  type Signer = { expected: Set[int], root: Set[int], mirror: str -> int, moving: Set[int], snap: Snap, drained: int, alert: bool }
+  type Signer = { expected: Set[int], root: Set[int], mirror: str -> int, moving: Set[int], order: List[int], snap: Snap, drained: int, alert: bool }
   type World = { clock: int, attacks: int, slow: bool, tainted: Set[int], missed: bool }
 
   const Rows: Set[str]
@@ -79,7 +81,7 @@ module log {
   action init = all {
     db' = { rows: Rows.mapBy(_ => 0), pending: Set(), log: Set() },
     vault' = { made: [], calls: Set(), lost: Set() },
-    signer' = { expected: Set(), root: Set(), mirror: Rows.mapBy(_ => 0), moving: Set(), snap: idle, drained: 0, alert: false },
+    signer' = { expected: Set(), root: Set(), mirror: Rows.mapBy(_ => 0), moving: Set(), order: [], snap: idle, drained: 0, alert: false },
     world' = { clock: 0, attacks: Attacks, slow: false, tainted: Set(), missed: false },
   }
 
@@ -137,7 +139,8 @@ module log {
       s.on,
       signer' = {
         expected: signer.expected.exclude(good), root: signer.root.union(good), mirror: held.rows,
-        moving: good, snap: idle, drained: s.at, alert: signer.alert or found,
+        moving: good, order: signer.order.concat(range(0, made.length()).select(n => good.contains(n))),
+        snap: idle, drained: s.at, alert: signer.alert or found,
       },
       world' = { ...world, slow: world.slow or late(s.at), missed: world.missed or (s.wrong and not(signer.alert or found)) },
       db' = db, vault' = vault,
@@ -164,8 +167,11 @@ module log {
     db' = db, vault' = vault, signer' = signer,
   }
 
-  // The writer: a MAC the vault once gave the row or no row, an entry out or
-  // back in, an entry out of the log.
+  // The log's end: the entry signed last among those still in it.
+  val newest = signer.order.foldl(-1, (last, n) => if (db.log.contains(n)) n else last)
+
+  // The writer: a MAC the vault once gave the row or no row, a waiting entry out
+  // or back in, the log's last entry cut off.
   action attack: bool = all {
     world.attacks > 0,
     world' = { ...world, attacks: world.attacks - 1 },
@@ -182,7 +188,7 @@ module log {
       any {
         all { db.pending.contains(n), db' = { ...db, pending: db.pending.exclude(Set(n)) } },
         all { not(db.pending.contains(n)), db' = { ...db, pending: db.pending.union(Set(n)) } },
-        all { db.log.contains(n), db' = { ...db, log: db.log.exclude(Set(n)) } },
+        all { n == newest, db' = { ...db, log: db.log.exclude(Set(n)) } },
       },
     },
   }
