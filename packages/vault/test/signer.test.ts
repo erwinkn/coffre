@@ -176,6 +176,24 @@ test('an entry gone before it was signed is missed, because the vault told of it
   assert.deepEqual(await run(), [{ found: 'row', of: named(bo) }]);
 });
 
+test('what was found is let go once it is sent: not if sending fails, and not what a run found meanwhile', async () => {
+  const forge = () => vault.owner.execute(sql`INSERT INTO log_pending (kept, body, mac) VALUES (false, '{}', decode(repeat('00', 36), 'hex'))`);
+  await forge();
+  await signer.run(false);
+  const first = [{ found: 'forged', of: 'pending:1' }];
+  await assert.rejects(signer.take(() => Promise.reject(new Error('not sent'))), /not sent/);
+  // Still there, and in its storage.
+  assert.deepEqual(store.kept.get('found'), first);
+  const sent = await signer.take(async (found) => {
+    assert.deepEqual(found, first);
+    await forge();
+    await signer.run(false);
+  });
+  assert.deepEqual(sent, first);
+  assert.deepEqual(await signer.take(), [{ found: 'forged', of: 'pending:2' }]);
+  assert.deepEqual(await signer.take(), []);
+});
+
 test('a change that replaced a MAC the mirror does not hold is false history', async () => {
   await member(bo, 'member');
   assert.deepEqual(await run(), []);

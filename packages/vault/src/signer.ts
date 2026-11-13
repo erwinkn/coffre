@@ -221,6 +221,11 @@ export class Signer {
     }
   }
 
+  /** Whether a step failed: its memory and its storage may differ, and whoever runs it opens another. */
+  get dead(): boolean {
+    return this.#dead;
+  }
+
   #alive(): void {
     if (this.#dead) throw new Error('this signer failed a step: open another');
   }
@@ -245,18 +250,23 @@ export class Signer {
   }
 
   /**
-   * What was found since this was last asked: where a finding goes is its
-   * caller's. Kept in the signer's storage until then, so that neither a
-   * run that fails after a finding nor a signer that dies loses it.
+   * What was found and not yet let go, to `send`, which says where a
+   * finding goes; let go once `send` has returned. One that throws leaves
+   * them for the next call, and the same ones are sent again: twice is
+   * better than never. Kept in the signer's storage until then, so that
+   * neither a run that fails after a finding nor a signer that dies loses
+   * it.
    */
-  async take(): Promise<Finding[]> {
-    let found: Finding[] = [];
+  async take(send: (found: Finding[]) => void | Promise<void> = () => {}): Promise<Finding[]> {
+    this.#alive();
+    const found = [...this.#found];
+    await send(found);
     await this.#step((changes) => {
-      found = this.#found;
-      this.#found = [];
-      if (found.length > 0) changes.set('found', undefined);
+      // Those sent, and not what a run found meanwhile.
+      const sent = new Set(found);
+      this.#found = this.#found.filter((each) => !sent.has(each));
+      if (found.length > 0) changes.set('found', this.#found.length > 0 ? [...this.#found] : undefined);
     });
-    // Given even if a step beside this one failed meanwhile: the next signer may find its findings again, and twice is better than never.
     return found;
   }
 

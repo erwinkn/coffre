@@ -9,6 +9,7 @@ import { PgTable } from 'drizzle-orm/pg-core';
 
 import { keyOf } from '../src/rows.ts';
 import type { Store } from '../src/signer.ts';
+import type { Storage } from '../src/signer-host.ts';
 import { memoryOf, type Serving } from '../src/use.ts';
 
 /**
@@ -64,6 +65,54 @@ export function memoryStore() {
       else kept.set(key, value);
     },
   } satisfies Store & Record<string, unknown>;
+}
+
+/**
+ * A Durable Object's storage, in memory, as the signer's host uses it
+ * (`Storage` in signer-host.ts). `down` makes its writes fail, `refuses` a
+ * write to one key; `alarm` is when its alarm is set for, `sets` how often
+ * it was set, and `syncs` how often it was asked to be on disk.
+ */
+export function objectStorage() {
+  const kept = new Map<string, unknown>();
+  const storage = {
+    kept,
+    down: false,
+    refuses: null as string | null,
+    alarm: null as number | null,
+    sets: 0,
+    syncs: 0,
+    kv: {
+      get: (key: string): unknown => structuredClone(kept.get(key)),
+      list: (): [string, unknown][] => structuredClone([...kept]),
+      put(key: string, value: unknown): void {
+        if (key === storage.refuses) throw new Error(`storage refuses ${key}`);
+        kept.set(key, structuredClone(value));
+      },
+      delete: (key: string): boolean => kept.delete(key),
+    },
+    transactionSync<T>(run: () => T): T {
+      if (storage.down) throw new Error('storage is down');
+      const before = new Map(kept);
+      try {
+        return run();
+      } catch (error) {
+        kept.clear();
+        for (const [key, value] of before) kept.set(key, value);
+        throw error;
+      }
+    },
+    async sync(): Promise<void> {
+      if (storage.down) throw new Error('storage is down');
+      storage.syncs += 1;
+    },
+    getAlarm: async (): Promise<number | null> => storage.alarm,
+    async setAlarm(at: number): Promise<void> {
+      storage.alarm = at;
+      storage.sets += 1;
+    },
+  };
+  return storage satisfies Storage;
 }
 
 const TABLES = Object.values(schema).filter((value: unknown): value is PgTable => is(value, PgTable));
