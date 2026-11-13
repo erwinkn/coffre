@@ -94,7 +94,9 @@ test(`${TAG}: a rotation numbered before the swap holds the sequence: the swap f
   const [taken] = await rotation.unsafe<{ n: string }[]>(`SELECT log_rotate_number(decode('ffffffff', 'hex'))::text AS n`);
   await migrator.unsafe('BEGIN');
   await migrator.unsafe(`SET LOCAL lock_timeout = '${MIGRATION_LOCK_WAIT_MS}ms'`);
-  await assert.rejects(async () => { for (const statement of SWAP) await migrator.unsafe(statement); }, { code: '55P03' });
+  let failing: string | undefined;
+  await assert.rejects(async () => { for (const statement of SWAP) { failing = statement; await migrator.unsafe(statement); } }, { code: '55P03' });
+  assert.match(failing!, /^\s*DROP SEQUENCE/, 'the sequence, not a table, holds the swap');
   await migrator.unsafe('ROLLBACK');
   await rotation.unsafe(`SELECT log_rotate(${taken!.n}, 'rotate', ${NOW}, '{"op":"rotate","at":"${taken!.n}"}', decode(repeat('11', 16), 'hex'), decode('ffffffff', 'hex'))`);
   await rotation.unsafe('COMMIT');
