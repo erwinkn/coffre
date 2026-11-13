@@ -1317,8 +1317,8 @@ export async function consumeToken(db: Queryable, hash: Buffer): Promise<boolean
  * 0016). How many went.
  */
 export async function pruneSpentTokens(db: Queryable, atMost: number): Promise<number> {
-  const { rows } = await db.execute<{ pruned: number }>(sql`SELECT prune_consumed_tokens(${atMost}) AS pruned`);
-  return rows[0]!.pruned;
+  const [row] = await db.execute<{ pruned: number }>(sql`SELECT prune_consumed_tokens(${atMost}) AS pruned`);
+  return row!.pruned;
 }
 
 /**

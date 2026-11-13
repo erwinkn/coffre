@@ -23,7 +23,7 @@ import { parseArgs } from 'node:util';
 
 import { github, signin } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
-import { createDatabase } from '@coffre/db';
+import { createDatabase, type Client } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import { localVault, type LocalVault } from '@coffre/vault/node';
 
@@ -36,6 +36,7 @@ import { auditWatch } from '../../src/plugins/audit-watch.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
 import { answer, type Pages } from '../start-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from '../db/connections.ts';
+import { watched } from '../db/postgres-pool.ts';
 
 const { values } = parseArgs({
   options: {
@@ -82,39 +83,25 @@ async function farPostgres(at: string, rtt: number): Promise<{ url: string; clos
 type Cost = { app: number; vault: number; vaultCalls: number; waitedMs: number; waits: Map<string, number> };
 const newCost = (): Cost => ({ app: 0, vault: 0, vaultCalls: 0, waitedMs: 0, waits: new Map() });
 
-/** A connection's pool, timing each statement it runs on `cost()`, a transaction's included; its class name ends in `Pool`, as Drizzle needs. */
+/** A connection's pool, timing each statement it runs on `cost`, a transaction's included. */
 class TimedPool {
   readonly #pool: HyperdrivePool;
-  readonly #side: 'app' | 'vault';
+  /** The pool as the database runs on it, timed. */
+  readonly client: Client;
   cost: Cost = newCost();
 
   constructor(pool: HyperdrivePool, side: 'app' | 'vault') {
     this.#pool = pool;
-    this.#side = side;
-  }
-
-  async #time(query: (...args: unknown[]) => Promise<unknown>, args: unknown[]): Promise<unknown> {
-    const started = performance.now();
-    try {
-      return await query(...args);
-    } finally {
-      const waited = Math.max(0, performance.now() - started - RTT);
+    this.client = watched(pool, ({ text, ms }) => {
+      const waited = Math.max(0, ms - RTT);
       const cost = this.cost;
-      cost[this.#side] += 1;
+      cost[side] += 1;
       cost.waitedMs += waited;
       if (waited > 2) {
-        const text = typeof args[0] === 'string' ? args[0] : String((args[0] as { text?: string })?.text ?? '?');
-        const what = `${this.#side}: ${text.replace(/\s+/g, ' ').trim().slice(0, 70)}`;
+        const what = `${side}: ${text.replace(/\s+/g, ' ').trim().slice(0, 70)}`;
         cost.waits.set(what, (cost.waits.get(what) ?? 0) + waited);
       }
-    }
-  }
-
-  query = ((...args: unknown[]) => this.#time(this.#pool.query as never, args)) as HyperdrivePool['query'];
-
-  async connect() {
-    const client = await this.#pool.connect();
-    return { query: ((...args: unknown[]) => this.#time(client.query as never, args)) as typeof client.query, release: client.release };
+    });
   }
 
   end() {
@@ -154,7 +141,7 @@ try {
     get: (_, name: string) => async (...args: unknown[]) => {
       const instance = idle.pop() ?? await (async () => {
         const pool = new TimedPool(new HyperdrivePool(farVault.url), 'vault');
-        return { pool, vault: await localVault({ database: createDatabase(pool), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], bulkLimit: { count: 1_000_000, windowMinutes: 1 } }) };
+        return { pool, vault: await localVault({ database: createDatabase(pool.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], bulkLimit: { count: 1_000_000, windowMinutes: 1 } }) };
       })();
       instance.pool.cost = cost;
       cost.vaultCalls += 1;
@@ -203,9 +190,9 @@ try {
     const cost = newCost();
     const pool = new TimedPool(new HyperdrivePool(farApp.url), 'app');
     const background: Promise<unknown>[] = [];
-    (await pool.connect()).release();
+    await pool.client.unsafe('select 1');
     pool.cost = cost;
-    const runtime = createRuntime(config, createDatabase(pool), vaultFor(cost), transport, (promise) => void background.push(promise));
+    const runtime = createRuntime(config, createDatabase(pool.client), vaultFor(cost), transport, (promise) => void background.push(promise));
     const started = performance.now();
     try {
       const response = await answer(make(), runtime, ui, '203.0.113.9');

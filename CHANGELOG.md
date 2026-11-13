@@ -11,6 +11,11 @@
   dependencies. Node conformance, the packed consumer test and `pnpm
   bench:node` run the Node example on a Postgres database of their own,
   each process through its own login, as Workers did.
+- **One Postgres driver, coffre's own.** `@coffre/db` speaks Postgres
+  through its own copy of postgres.js, in TypeScript, on Node and on
+  Workers alike, where it used node-postgres (`pg`). No package of coffre's
+  depends on `pg` or `pg-connection-string` any more, and a deployment
+  installs no driver. Database URLs are read as before, TLS included.
 
 ## 0.14.7 (2026-11-13)
 

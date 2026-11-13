@@ -128,6 +128,21 @@ export class TunnelStream extends Duplex {
     );
   }
 
+  /**
+   * As a socket's: `opening` until the WebSocket opens; then `open` while
+   * both ways are, `readOnly` once the app ended its side, `writeOnly`
+   * once coffre ended its own, and `closed` once neither is, or the stream
+   * was destroyed. A driver reads it to know whether to say goodbye and wait
+   * for the close: postgres.js ends only an open socket, and its `end()`
+   * waits for the `close` of any socket that is not closed.
+   */
+  get readyState(): 'opening' | 'open' | 'readOnly' | 'writeOnly' | 'closed' {
+    if (this.destroyed) return 'closed';
+    if (!this.#opened) return 'opening';
+    if (this.readable && this.writable) return 'open';
+    return this.readable ? 'readOnly' : this.writable ? 'writeOnly' : 'closed';
+  }
+
   /** node-postgres connects its stream itself; this one is connecting already, and says so with `connect`. */
   connect(): this {
     return this;

@@ -3,7 +3,8 @@ import { defineConfig } from 'tsdown';
 // One file with no dependencies: the client, core and db, devDependencies
 // here, are bundled in. `coffre setup` is a chunk of its own, with the
 // Postgres driver and the migrator, which scripts/copy-migrations.ts puts
-// the migrations beside. pg's optional native binding stays out. jsonc-parser's `main` is
+// the migrations beside. The Postgres driver is @coffre/db's own copy of postgres.js,
+// on its Node platform (`#postgres/platform`'s default). jsonc-parser's `main` is
 // a UMD build that requires its parts at run time, which a bundle cannot
 // follow: its ES modules are bundled instead. libsodium, which seals the
 // GitHub secrets setup sets, is bundled too, at the lockfile's version,
@@ -21,7 +22,6 @@ export default defineConfig({
   target: 'node20',
   dts: false,
   fixedExtension: false,
-  external: ['pg-native'],
   alias: { 'jsonc-parser': 'jsonc-parser/lib/esm/main.js' },
   inputOptions: {
     onLog(level, log, handler) {

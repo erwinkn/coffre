@@ -1138,9 +1138,44 @@ still there": `{ id, revokedAt: null }` changes one row or none. Row locks are
 kept for real races (the audit head, offboarding against sign-in, version counters), and each one says which race it guards.
 
 The database comes from its URL: `postgres://` or `postgresql://` opens
-node-postgres (`packages/db/src/connect.ts`); any other scheme is refused. The Worker builds its Postgres database from the Hyperdrive pool
+postgres.js (`packages/db/src/connect.ts`); any other scheme is refused. The Worker builds its Postgres database from the Hyperdrive pool
 with `createDatabase`: one connection for each request or vault call, which
 its queries take turns on and a transaction holds until it ends.
+
+postgres.js is coffre's own copy, in TypeScript, in `packages/db/src/postgres-js`,
+so a deployment installs no driver. It keeps what coffre uses (statements,
+transactions and savepoints, reserved connections, the pool) and leaves the
+rest out: COPY, LISTEN/NOTIFY, cursors, named prepared statements, the
+tagged template, reading URLs and the environment. One tree runs on Node and
+on Workers: its sockets, TLS and hashes are behind `@coffre/db`'s
+`#postgres/platform` import, Node's own modules or `cloudflare:sockets` and
+WebCrypto, chosen where the package runs. It differs from upstream in nine
+places (`packages/db/src/postgres-js/README.md`): a statement's values go with the
+statement, as text the server types, as node-postgres sends them, where
+upstream first asks the server for their types, a round trip more for every
+statement with parameters (porsager/postgres#1225); a transaction's BEGIN
+goes with its first statement, under one Sync, a round trip less, and
+nothing of a transaction is sent once its BEGIN failed, its connection
+closed or it ended, so none of it runs outside it;
+a query cut short by its connection's close no longer keeps `end()` waiting,
+a connection closed while it opens fails its query rather than being
+dialled again for ever, an ending client opens no connection again, a
+`reserve()` that opens its connection gets it, and a statement the client
+cannot write fails alone;
+the pool takes the connection idle the shortest, as pg-pool does, so
+that a steady load keeps to a few warm backends rather than cycling through
+all of them; and a sign-in the client cannot work out fails its connection
+rather than leave an unhandled rejection.
+
+A postgres.js client dials a new connection for the next statement once its
+own has closed, which holds none of what the last one set. What keeps a
+session's state across statements, its own BEGIN, SETs or advisory locks
+(the migrator, `coffre backup` and `restore`, `coffre setup`'s probes),
+opens a `postgresSession` instead: once its connection has closed, every
+statement after fails (`SessionLost`). `postgresClient` (`packages/db/src/postgres.ts`)
+opens each client as coffre needs it: unnamed statements, no type lookup on
+connecting, arrays, dates and objects sent and arrays read as node-postgres
+does, and the URL read as node-postgres reads it, TLS included.
 
 Each query is written once, typed against the Postgres schema. How the
 queries reach the database:
