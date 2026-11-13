@@ -3402,7 +3402,10 @@ locks order a use against a change.
 **One order.** The rows a flow shares with an issue, the change lock, the
 issue lock, the fence, the objects' locks in key order, then a use's
 principal's lock, and last the lock of the cap's row it moves on (`b_lock`,
-tried and never waited for, with nothing taken after it). A transaction takes its objects' locks once, all of them,
+in no model): the use that writes the row tries it without waiting and
+takes nothing after it; a use that lost takes it shared, which waits only
+for that one's end, and one more a round if that one rolled back. A
+transaction takes its objects' locks once, all of them,
 sorted by lock key, before the first read or write they protect: a batch
 every key's, a statement of several changes every call's. `ObjectLocks`
 checks it with Postgres's queue, one run per lock taken out of turn
@@ -3418,9 +3421,11 @@ they take it shared first. The revoke's compare is ordered by the change
 lock, which it and a policy change both hold, before L1 and after. What the
 revoke gains with L1 is the issue lock, shared, as every other change takes
 it. Until L1 its fence was exclusive, which ordered it against the barrier;
-with the fence shared the issue lock does, and that is why no flow needs
-the fence before its objects (`ObjectLocksFenceLast`, which holds only
-while every change takes the issue lock first).
+with the fence shared the issue lock does, and that is why a change's last
+statement does not need the fence before its objects
+(`ObjectLocksFenceLast`, the objects flow, which holds only while every
+change takes the issue lock first; a hold takes the fence first in every
+scenario, and its other order is not checked).
 
 **The barrier.** It alone takes the fence exclusive, so it waits for every
 use and every change's last statement in flight, and every number handed
