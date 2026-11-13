@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { deriveKey } from '@coffre/core/identity';
 import { postgresClient } from '@coffre/db/connect';
-import { migrateDatabase, migrationsFolder } from '@coffre/db/migrate';
+import { migrationsFolder } from '@coffre/db/migrate';
 
 import { signedBy } from '../../src/auth-rows.ts';
 import { TEST_OWNER_DATABASE_URL } from './connections.ts';
@@ -26,9 +26,8 @@ const CLIENTS: [string, string[]][] = [
   ['77777777-7777-4777-8777-777777777773', []],
 ];
 
-/** The three columns as 0083 left them, and the ledger without 0084: what `coffre migrate` finds on 0.15.0's schema. */
+/** The three columns as 0083 left them: 0.15.0's schema, for these. */
 const BEFORE = [
-  `DELETE FROM drizzle.__drizzle_migrations WHERE created_at = ${JSON.parse(readFileSync(join(migrationsFolder(), 'meta/_journal.json'), 'utf8')).entries.find((entry: { tag: string }) => entry.tag === TAG).when}`,
   `ALTER TABLE oauth_clients ALTER COLUMN redirect_uris TYPE text USING to_jsonb(redirect_uris)::text`,
   `ALTER TABLE oauth_clients ADD CONSTRAINT oauth_clients_redirect_uris_check CHECK (redirect_uris::jsonb IS NOT NULL)`,
   `ALTER TABLE passkeys ALTER COLUMN transports DROP DEFAULT`,
@@ -64,7 +63,9 @@ test(`${TAG} turns the JSON lists into text[], and a client registered before ke
   await passkey('88888888-8888-4888-8888-888888888882', 2);
   await db.unsafe(`UPDATE passkeys SET transports = '["hybrid","internal"]' WHERE id = '88888888-8888-4888-8888-888888888882'`);
 
-  await migrateDatabase(TEST_OWNER_DATABASE_URL);
+  // 0084 itself, on this one session (its function is `pg_temp`'s). Through the migrator, it would apply the migrations
+  // after 0084 again too, which drop what is already gone.
+  for (const statement of readFileSync(join(migrationsFolder(), `${TAG}.sql`), 'utf8').split('--> statement-breakpoint')) await db.unsafe(statement);
 
   const clients = await db.unsafe(`SELECT id, name, redirect_uris, auth_mac FROM oauth_clients ORDER BY id`);
   assert.deepEqual(clients.map((client) => [client.id, client.redirect_uris]), CLIENTS);
