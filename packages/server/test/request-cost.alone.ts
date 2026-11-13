@@ -43,7 +43,7 @@ import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport
 import { clientFor, contextFor, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testAnchor, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { assertOver, assertWithin, BUDGET, OVER, overBudget, type Budget } from './budgets.ts';
-import { inBulkPeriod, pastBulkTurn } from './window-fixture.ts';
+import { inBulkPeriod, inOnePeriod, pastBulkTurn } from './window-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
@@ -515,13 +515,14 @@ const PERIOD_ROOM_MS = 2_000;
 
 /**
  * What `request` costs once its keys' rows of the cap's are their periods': run once, then measured, both within
- * every key's period (`inBulkPeriod`). What a hot request costs any other time; the first after a key's period turned
- * is a test of its own ("a reveal's first use of its keys in a new period").
+ * every key's period (`inOnePeriod`: a pair a turn fell in is run again). What a hot request costs any other time; the
+ * first after a key's period turned is a test of its own ("a reveal's first use of its keys in a new period").
  */
 async function repeated(request: () => Promise<unknown>): Promise<Cost> {
-  await inBulkPeriod(PERIOD_ROOM_MS, db.owner, CAPPED, 'market/dev');
-  await request();
-  return cost(request);
+  return inOnePeriod(() => inBulkPeriod(PERIOD_ROOM_MS, db.owner, CAPPED, 'market/dev'), db.owner, CAPPED, 'market/dev', async () => {
+    await request();
+    return cost(request);
+  });
 }
 
 /** Each hot request and its class, measured warm, within one period of the bulk cap (`repeated`). */
@@ -842,13 +843,15 @@ test("each hot request's statements read as many pages however long the log grow
     const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
     for (const [name, request] of Object.entries(measured)) {
       // Both calls within every key's period of the bulk cap, as `repeated`'s: a turn between them adds a statement.
-      await inBulkPeriod(PERIOD_ROOM_MS, db.owner, CAPPED, 'market/dev');
-      await request();
-      app.recorded = [];
-      vaultPool.recorded = [];
-      await request();
-      const run = [...app.recorded.map((statement) => ({ pool: app, statement })), ...vaultPool.recorded.map((statement) => ({ pool: vaultPool, statement }))];
-      app.recorded = vaultPool.recorded = null;
+      const run = await inOnePeriod(() => inBulkPeriod(PERIOD_ROOM_MS, db.owner, CAPPED, 'market/dev'), db.owner, CAPPED, 'market/dev', async () => {
+        await request();
+        app.recorded = [];
+        vaultPool.recorded = [];
+        await request();
+        const recorded = [...app.recorded.map((statement) => ({ pool: app, statement })), ...vaultPool.recorded.map((statement) => ({ pool: vaultPool, statement }))];
+        app.recorded = vaultPool.recorded = null;
+        return recorded;
+      });
       read[name] = [];
       for (const { pool, statement } of run) {
         if (!/^\s*(select|with|insert|update|delete)\b/i.test(statement.text)) continue;
