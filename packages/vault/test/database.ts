@@ -26,8 +26,11 @@ export type TestVault = Running & {
   close(): Promise<void>;
 };
 
+/** The vault's own login's connection string. */
+export const VAULT_URL = url('coffre_vault_runtime:local-vault-only');
+
 export async function openTestVault(): Promise<TestVault> {
-  const [owner, vault] = await Promise.all([openDatabase(url('coffre_owner:local-dev-only')), openDatabase(url('coffre_vault_runtime:local-vault-only'))]);
+  const [owner, vault] = await Promise.all([openDatabase(url('coffre_owner:local-dev-only')), openDatabase(VAULT_URL)]);
   const woken: Buffer[] = [];
   let now = Date.UTC(2026, 10, 13, 12);
   return {
