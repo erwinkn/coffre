@@ -76,9 +76,14 @@ export async function fakeCoffre(options: FakeOptions = {}) {
   const refuse = (res: ServerResponse, reason: string, status = 401) =>
     answer(res, { status, body: { error: 'unauthorized', reason, message: `refused: ${reason}` }, headers: { 'www-authenticate': `DPoP error="invalid_dpop_proof"` } });
 
+  /** The bytes of request bodies read so far, as they come: whether a body streamed through, or was held before it was sent. */
+  let received = 0;
   const read = async (req: IncomingMessage) => {
     const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk as Buffer);
+    for await (const chunk of req) {
+      received += (chunk as Buffer).length;
+      chunks.push(chunk as Buffer);
+    }
     return Buffer.concat(chunks);
   };
 
@@ -242,6 +247,9 @@ export async function fakeCoffre(options: FakeOptions = {}) {
     url: publicUrl,
     sessions,
     forwarded,
+    get received() {
+      return received;
+    },
     log,
     gate: {
       rotate,

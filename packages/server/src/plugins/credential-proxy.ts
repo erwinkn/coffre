@@ -51,7 +51,7 @@ import { isUnavailable } from '@coffre/db/dialect';
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
-import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
+import { hmacParts, hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
 import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
@@ -263,8 +263,12 @@ export type Hmac = { kind: 'hmac'; key: string; encoding: Encoding; prefix?: str
  * is written in `encoding`, `hex`, `base64` or `base64url`, after
  * `prefix`: `hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' })`
  * checks Yousign's `x-yousign-signature-256`. `maxBytes` is the longest
- * message it signs or checks, 64 KiB unless set, 1 MiB at most: such a
- * body costs about 5 ms of CPU, of a Worker's 10 ms on the Free plan.
+ * message it signs or checks, 64 KiB unless set. A message goes as JSON up
+ * to 1 MiB (about 5 ms of CPU, of a Worker's 10 ms on the Free plan); a
+ * signer's longer one goes raw, its bytes as the request's body, never
+ * held (`signRaw`), up to `MAX_RAW_MESSAGE_BYTES`: SumSub's document
+ * upload, `hmac('SUMSUB_SECRET_KEY', { encoding: 'hex', maxBytes: 11 * 1024 * 1024 })`.
+ * A verifier checks JSON alone, 1 MiB at most: a webhook's body is small.
  * `limit`, as a credential's.
  */
 export function hmac(key: string, options: { encoding: Encoding; prefix?: string; maxBytes?: number; limit?: Limits }): Hmac {
@@ -352,6 +356,18 @@ const MESSAGE_BYTES = 64 * 1024;
  * credential's, and the CPU within a Worker's Free plan.
  */
 const MAX_MESSAGE_BYTES = 1024 * 1024;
+/**
+ * The longest message an `hmac()` signer's `maxBytes` may take, raw (`signRaw`): what 20 ms of a request's CPU holds of
+ * the signing's own work, two passes of SHA-256 over the message (the HMAC's and a workload's `Content-Digest` check),
+ * 1.2 ms per MiB, past about 4 ms of every request's: (20 − 4) ÷ 1.2, about 13 MiB, rounded down. SumSub's document
+ * upload is 10.1 MiB at most.
+ */
+const MAX_RAW_MESSAGE_BYTES = 12 * 1024 * 1024;
+/**
+ * What a raw message is read in, into one buffer used again: workerd hands a body in parts of 4 KiB, each read a turn of
+ * the isolate's, and its own `readAtLeast` into 64 KiB cost the isolate 35 ms at 10 MiB against 53 ms part by part.
+ */
+const RAW_PART_BYTES = 64 * 1024;
 /** What `binary` decodes bytes widened to UTF-16 units with: before anything below calls it. */
 const UTF16 = new TextDecoder('utf-16le');
 /** What heads a JWT placeholder: no signature, which the third part, the handle, takes the place of. */
@@ -384,7 +400,8 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const tunnels = new Map(Object.entries(options.tunnels ?? {}).map(([name, tunnel]) => [name, checkTunnel(name, tunnel, credentials, options.insecureUpstreams === true)]));
   const signers = new Map(Object.entries(options.signers ?? {}).map(([name, signer]) => [name, checkSigner(name, signer, credentials, tunnels, new Map(), 'signer')]));
   const verifiers = new Map(Object.entries(options.verifiers ?? {}).map(([name, verifier]) => [name, checkSigner(name, verifier, credentials, tunnels, signers, 'verifier') as Hmac]));
-  const messageBytes = Math.max(...[...signers.values(), ...verifiers.values()].map(longest), MESSAGE_BYTES);
+  // What a message as JSON takes, read whole: 1 MiB at most, whatever a signer's longer `maxBytes`, which it signs raw.
+  const messageBytes = Math.min(Math.max(...[...signers.values(), ...verifiers.values()].map(longest), MESSAGE_BYTES), MAX_MESSAGE_BYTES);
   const recheckMs = (options.recheckSeconds ?? 60) * 1000;
   if (!(recheckMs > 0 && recheckMs <= 3_600_000)) throw new Error('credentialProxy: recheckSeconds is above 0, an hour at most');
   const cacheMs = (options.cacheSeconds ?? 60) * 1000;
@@ -496,6 +513,9 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     return failure(400, 'the path is not valid percent-encoding');
   }
   const stable = proxy.credentials.get(place[0]!);
+  // A raw sign, `POST /use/<a>/<b>` whose body is the message (octet-stream): no handle is ever looked for in that body,
+  // and `signRaw` refuses before a byte of it is read.
+  const rawSign = raw.length === 2 && request.method === 'POST' && isRaw(request);
   // A workload's: `/use/<credential>/<path>` whenever `<credential>` is one, for the one environment it reaches, and
   // `/use/<project>/<env>/<credential>/<path>` otherwise. Nothing tells a session's environments by name before its
   // one statement, so the URL alone decides; a handle's are below.
@@ -513,7 +533,8 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     // A form or JSON rule's refusal of the body, which says more than that no handle came: the named credential's, if both refuse.
     let refused: Response | null = null;
     const found = async (credential: Resolved) => {
-      const read = await peekField(request, credential);
+      // Never a raw sign's body: the handle it needs is its Bearer, outside the body.
+      const read = rawSign ? null : await peekField(request, credential);
       if (read instanceof Response) refused = read;
       else if (read !== null) peeked.set(credential, read);
       return handleIn(request, credential, url, read instanceof Response ? null : (read?.field.value ?? null));
@@ -939,9 +960,11 @@ function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bo
  * naming the credential it uses, as these do.
  */
 async function compute(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null): Promise<Response> {
+  // A message sent raw, the body itself, which is never read whole: an hmac() signer's (`signRaw`).
+  if (isRaw(request)) return signRaw(request, coffre, proxy, path);
   // Read up to what the longest message takes, as base64url in JSON beside the rest.
   const raw = await boundedBody(request, Math.ceil(proxy.messageBytes / 3) * 4 + 4096);
-  if (raw === null) return failure(413, `a message to sign or verify is at most ${sized(proxy.messageBytes)} here: an hmac()'s maxBytes takes a longer one`);
+  if (raw === null) return failure(413, `a message to sign or verify is at most ${sized(proxy.messageBytes)} here as JSON; a longer one to an hmac() signer whose maxBytes takes it goes raw, its bytes as the body: POST ?sign=<signer>, Content-Type: application/octet-stream, as @coffre/client sends it`);
   type Asked = { presign?: Record<string, unknown>; sign?: Record<string, unknown>; verify?: Record<string, unknown> };
   let asked: Asked | null = null;
   try {
@@ -988,6 +1011,7 @@ async function compute(request: Request, coffre: PluginContext, proxy: Proxy, pa
 async function sign(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, signer: Signer, asked: { message?: unknown }): Promise<Response> {
   const message = messageOf(asked.message);
   if (message === null) return failure(400, 'sign a message given as base64url');
+  if (message.byteLength > MAX_MESSAGE_BYTES) return failure(413, `a message to sign as JSON is ${sized(MAX_MESSAGE_BYTES)} at most; a longer one to an hmac() signer whose maxBytes takes it goes raw, its bytes as the body: POST ?sign=${name}, Content-Type: application/octet-stream`);
   if (message.byteLength > longest(signer)) return failure(413, `${name} signs a message of ${sized(longest(signer))} at most${signer.kind === 'hmac' ? ': its hmac()\'s maxBytes takes a longer one' : ''}`);
   // A narrowed session's signers are named, and one limited to methods or paths signs nothing: no request to check them on.
   if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: name })) return failure(403, `this narrowed session may not sign with ${name}`, 'narrowed');
@@ -1019,11 +1043,131 @@ async function sign(coffre: PluginContext, proxy: Proxy, path: string, who: User
 async function verify(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, verifier: Hmac, asked: { message?: unknown; signature?: unknown }): Promise<Response> {
   const message = messageOf(asked.message);
   if (message === null) return failure(400, 'verify a message given as base64url: the body as it came, byte for byte');
-  if (message.byteLength > longest(verifier)) return failure(413, `${name} checks a message of ${sized(longest(verifier))} at most: its hmac()'s maxBytes takes a longer one`);
+  // A signer's maxBytes may take a raw message; a message to verify is JSON's, 1 MiB at most.
+  const most = Math.min(longest(verifier), MAX_MESSAGE_BYTES);
+  if (message.byteLength > most) return failure(413, `${name} checks a message of ${sized(most)} at most${most < MAX_MESSAGE_BYTES ? ": its hmac()'s maxBytes takes a longer one" : ''}`);
   if (typeof asked.signature !== 'string') return failure(400, 'verify a signature given as a string, as its header carried it');
   if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: name })) return failure(403, `this narrowed session may not verify with ${name}`, 'narrowed');
   const secret = await hmacSecret(coffre, proxy, path, who, name, verifier);
   return answer({ valid: await hmacVerify(secret, message, asked.signature, { encoding: verifier.encoding, prefix: verifier.prefix ?? '' }) });
+}
+
+/**
+ * A signature of the request's body, raw (`Content-Type: application/octet-stream`), by the `hmac()` signer `?sign=`
+ * names: `POST /use/<project>/<env>?sign=sumsub-key`, or `POST /use?sign=…` for a workload that reaches one
+ * environment. The body is the message as it is, `ts + method + path` then the file for SumSub's, fed to the HMAC as
+ * it comes and never held: up to the signer's `maxBytes`. Everything is refused before a byte of it is read: the signer
+ * and its kind, the length it says, the caller and its proof, the environment, the secret. A workload's proof signs the
+ * SHA-256 its `Content-Digest` declares, which the bytes are held to as they pass (`declaredBody`), as a streamed body
+ * through a credential is; a handle's request may declare one too. The signature answers once the body ended at its
+ * length and matched its digest. Opened, logged and limited as a JSON sign is (`hmacSecret`).
+ */
+async function signRaw(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null): Promise<Response> {
+  const name = new URL(request.url).searchParams.get('sign') ?? '';
+  const signer = proxy.signers.get(name);
+  if (signer?.kind === 'private-key') return failure(415, `${name} signs with a private key, whose message goes as JSON, ${sized(MESSAGE_BYTES)} at most: { sign: { credential, message } }`);
+  if (signer === undefined) {
+    const why = proxy.verifiers.has(name) ? `${name} is a verifier, which checks signatures and makes none` : 'its deployment\'s credentialProxy names them, signers: { … }';
+    return failure(404, `?sign= names the hmac() signer of a raw message: ${why}`);
+  }
+  const said = request.headers.get('content-length');
+  if (said === null || !/^\d+$/.test(said)) return failure(411, 'a raw message says its length before a byte of it is read: send its Content-Length');
+  const length = Number(said);
+  if (length > longest(signer)) return failure(413, `${name} signs a message of ${sized(longest(signer))} at most: its hmac()'s maxBytes takes a longer one, up to ${sized(MAX_RAW_MESSAGE_BYTES)}`);
+  let digest: string | null;
+  try {
+    digest = declaredDigest(request.headers.get('content-digest') ?? '');
+  } catch (error) {
+    return failure(400, (error as Error).message);
+  }
+  // A session's proof signs the body's line before its first byte is read: the SHA-256 its Content-Digest declares.
+  const token = sessionToken(request);
+  if (token !== null && digest === null && length > 0) {
+    return failure(400, "a workload's raw message declares its SHA-256, which its proof signs: Content-Digest: sha-256=:<base64>:, as @coffre/client/workload and coffre serve send it");
+  }
+  const body = token === null ? {} : { body: await bodyLine({ declared: digest, length }) };
+  const caller = await workloadOf(request, coffre, { place: path, credential: name, ...body, ...countsOf(name, signer.limit) });
+  if (caller instanceof Response) return caller;
+  const run = async (who: User, at: string): Promise<Response> => {
+    if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: at, credential: name })) return failure(403, `this narrowed session may not sign with ${name}`, 'narrowed');
+    const secret = await hmacSecret(coffre, proxy, at, who, name, signer);
+    const mac = hmacParts(secret, { encoding: signer.encoding, prefix: signer.prefix ?? '' });
+    const refused = await fed(request.body, length, digest, (part) => mac.update(part));
+    return refused === null ? answer({ signature: mac.signature() }) : failure(400, refused);
+  };
+  if (caller !== null) {
+    return answering(caller, async () => {
+      if (caller.path === null) return failure(409, 'name the environment, POST /use/<project>/<environment>: this session reaches none, or several, or one gone');
+      // The header that binds the body is one the proof signs, as through a credential (`workloadForward`).
+      if (digest !== null && length > 0 && caller.hdr !== null && !caller.hdr.includes('content-digest')) return failure(400, 'content-digest says what binds the body, so the proof signs it: name it in hdr');
+      return run(caller, caller.path);
+    });
+  }
+  if (path === null) return failure(405, 'GET only: a handle names its environment, POST /use/<project>/<environment>');
+  const handle = bearer(request);
+  if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
+  return run(handle, path);
+}
+
+/** Whether a request to `compute` sends its message raw, the body itself (`Content-Type: application/octet-stream`). */
+function isRaw(request: Request): boolean {
+  return (request.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase() === 'application/octet-stream';
+}
+
+/**
+ * A raw message, each part given to `feed` once `declaredBody` takes it, and let go: why it stopped, or null once whole.
+ * A part is good until the next is read, which reads into the same buffer.
+ */
+async function fed(body: ReadableStream<Uint8Array> | null, length: number, digest: string | null, feed: (part: Uint8Array) => void): Promise<string | null> {
+  const declared = declaredBody(length, digest);
+  if (body === null) return declared.end();
+  const parts = partsOf(body);
+  for (;;) {
+    let read: ReadableStreamReadResult<Uint8Array>;
+    // Only the read is the caller's to break: a throw past it is coffre's, a 500.
+    try {
+      read = await parts.read();
+    } catch {
+      parts.cancel();
+      return 'the body broke off before its end';
+    }
+    const { done, value } = read;
+    const refused = value === undefined || value.length === 0 ? null : declared.take(value);
+    if (refused !== null) {
+      parts.cancel();
+      return refused;
+    }
+    if (value !== undefined && value.length > 0) feed(value);
+    if (done) return declared.end();
+  }
+}
+
+type AtLeast = ReadableStreamBYOBReader & { readAtLeast?(min: number, view: Uint8Array<ArrayBuffer>): Promise<ReadableStreamReadResult<Uint8Array<ArrayBuffer>>> };
+
+/** A body's reader: in workerd, `RAW_PART_BYTES` at a time into one buffer (`readAtLeast`, workerd's own); elsewhere, its parts as they come. */
+function partsOf(body: ReadableStream<Uint8Array>): { read(): Promise<ReadableStreamReadResult<Uint8Array>>; cancel(): void } {
+  let byob: AtLeast | null = null;
+  try {
+    byob = body.getReader({ mode: 'byob' }) as AtLeast;
+  } catch {
+    // Not a byte stream.
+  }
+  const fill = byob?.readAtLeast?.bind(byob);
+  if (byob === null || fill === undefined) {
+    byob?.releaseLock();
+    const reader = body.getReader();
+    return { read: () => reader.read(), cancel: () => void reader.cancel().catch(() => undefined) };
+  }
+  const own = byob;
+  let buffer = new ArrayBuffer(RAW_PART_BYTES);
+  return {
+    read: async () => {
+      const read = await fill(RAW_PART_BYTES, new Uint8Array(buffer));
+      if (read.value !== undefined) buffer = read.value.buffer;
+      return read;
+    },
+    cancel: () => void own.cancel().catch(() => undefined),
+  };
 }
 
 /** The longest message a signer or verifier takes. */
@@ -1526,20 +1670,18 @@ const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((byte) => byt
 function scanned(body: ReadableStream<Uint8Array>, length: number, secret: Sending['secret'], digest: string | null): { body: ReadableStream<Uint8Array>; refused: () => string | null } {
   // The last bytes seen, held back: what a handle (or session token) could still be the start of, and the end, sent only once it is the length declared, and its digest.
   let held = new Uint8Array(0);
-  let seen = 0;
+  const declared = declaredBody(length, digest);
   let refusal: string | null = null;
   const refuse = (why: string): never => {
     refusal = why;
     throw new Error(why);
   };
-  const hash = digest === null ? null : createHash('sha256');
   const keep = Math.max(1, (secret?.length ?? 0) - 1);
   const checked = body.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, out) {
-        seen += chunk.length;
-        if (seen > length) refuse('the body ran past the length it declared');
-        hash?.update(chunk);
+        const past = declared.take(chunk);
+        if (past !== null) refuse(past);
         const window = new Uint8Array(held.length + chunk.length);
         window.set(held);
         window.set(chunk, held.length);
@@ -1550,14 +1692,33 @@ function scanned(body: ReadableStream<Uint8Array>, length: number, secret: Sendi
         held = window.slice(window.length - kept);
       },
       flush(out) {
-        if (seen !== length) refuse('the body ended short of the length it declared');
-        if (hash !== null && hash.digest('hex') !== digest) refuse('the body is not what its Content-Digest says');
+        const ended = declared.end();
+        if (ended !== null) refuse(ended);
         if (held.length > 0) out.enqueue(held);
       },
     }),
   );
   const Fixed = (globalThis as { FixedLengthStream?: new (length: number) => TransformStream<Uint8Array, Uint8Array> }).FixedLengthStream;
   return { body: Fixed === undefined ? checked : checked.pipeThrough(new Fixed(length)), refused: () => refusal };
+}
+
+/**
+ * A body held to the length it declared and, with `digest`, to the SHA-256 its `Content-Digest` declares, as its parts
+ * pass: `take` each, then `end`; each says why the body stops there, or null. A streamed body's through a credential
+ * (`scanned`), and a raw message's (`fed`).
+ */
+function declaredBody(length: number, digest: string | null): { take(part: Uint8Array): string | null; end(): string | null } {
+  let seen = 0;
+  const hash = digest === null ? null : createHash('sha256');
+  return {
+    take: (part) => {
+      seen += part.length;
+      if (seen > length) return 'the body ran past the length it declared';
+      hash?.update(part);
+      return null;
+    },
+    end: () => (seen !== length ? 'the body ended short of the length it declared' : hash !== null && hash.digest('hex') !== digest ? 'the body is not what its Content-Digest says' : null),
+  };
 }
 
 /** Whether a header's value carries what `pattern` finds, a handle say: as it is, or inside Basic authentication's base64. */
@@ -2095,7 +2256,9 @@ function checkSigner(name: string, signer: Signer, credentials: Map<string, Reso
     // HMAC-SHA256 alone, written as these schemes write it: a key it does not know is refused, never ignored.
     const unknown = Object.keys(signer).find((option) => !['kind', 'key', 'encoding', 'prefix', 'maxBytes', 'limit'].includes(option));
     if (unknown !== undefined) throw new Error(`credentialProxy: ${what} ${name}'s hmac() takes encoding, prefix, maxBytes and limit, and signs with SHA-256 alone; got ${unknown}`);
-    if (signer.maxBytes !== undefined && !(Number.isInteger(signer.maxBytes) && signer.maxBytes >= 1 && signer.maxBytes <= MAX_MESSAGE_BYTES)) throw new Error(`credentialProxy: ${what} ${name}'s maxBytes is a whole number of bytes, 1 MiB at most`);
+    // A signer's message past 1 MiB goes raw; a verifier's is JSON alone.
+    const most = what === 'signer' ? MAX_RAW_MESSAGE_BYTES : MAX_MESSAGE_BYTES;
+    if (signer.maxBytes !== undefined && !(Number.isInteger(signer.maxBytes) && signer.maxBytes >= 1 && signer.maxBytes <= most)) throw new Error(`credentialProxy: ${what} ${name}'s maxBytes is a whole number of bytes, ${sized(most)} at most`);
     if (signer.encoding !== 'hex' && signer.encoding !== 'base64' && signer.encoding !== 'base64url') throw new Error(`credentialProxy: ${what} ${name}'s hmac() writes its signatures in hex, base64 or base64url`);
     if (signer.prefix !== undefined && (typeof signer.prefix !== 'string' || !/^[\x21-\x7e]{1,32}$/.test(signer.prefix))) throw new Error(`credentialProxy: ${what} ${name}'s prefix is up to 32 printable characters, sha256=`);
   }

@@ -1415,6 +1415,26 @@ run` calls the same `credential(name).verify` from
   4xx, so that it stops retrying. The CPU is the body's: about 0.2 ms at
   4 KiB, 3 ms at 512 KiB and 5 ms at 1 MiB on Node, within a Worker's
   10 ms on the Free plan.
+- **Raw, for a long message.** SumSub signs a request as
+  HMAC-SHA256(secret, `ts + method + path + body`), and a document
+  upload's body is the whole multipart file, 10.1 MiB at most. Such a
+  message goes as the request's body itself, `POST
+  /use/<project>/<env>?sign=sumsub-key` with `Content-Type:
+  application/octet-stream`, and coffre feeds its bytes to the HMAC as
+  they come, 64 KiB at a time into one buffer, never held. The caller
+  sends `ts + method + path` and then the file, one stream.
+  `credential(name).sign` and the SDK's send a message past 1 MiB this
+  way on their own, and `coffre serve` streams it through. Raw is for an
+  `hmac()` signer whose `maxBytes` takes the message, up to 12 MiB
+  (`MAX_RAW_MESSAGE_BYTES`); a private key (415) and a verifier sign
+  nothing raw, and a verifier checks JSON alone. Everything is refused
+  before a byte is read: the signer and its kind, a missing
+  `Content-Length` (411) or one past `maxBytes` (413), the caller and its
+  proof, the environment, the secret. A workload's request declares the
+  body's SHA-256 in a `Content-Digest`, which its proof signs; a handle's
+  may. The signature answers only once the body ended at its length and
+  matched its digest; otherwise 400, and no signature. Opened, logged and
+  limited as a JSON sign.
 - **Opened as a credential's values are, logged once a minute.** A
   webhook comes on a request's path, and the vault is the instance's
   narrowest point, so a verify or an HMAC signature opens its secret as a

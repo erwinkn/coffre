@@ -1,6 +1,9 @@
+import { createHmac } from 'node:crypto';
+
 /**
  * An HMAC-SHA256 with a secret the app never holds, in WebCrypto, so the
- * same on Workers: what an `hmac()` signer or verifier of the credential
+ * same on Workers, and a raw message's in `node:crypto`'s, a part at a time
+ * (`hmacParts`): what an `hmac()` signer or verifier of the credential
  * proxy answers (docs/design/credential-proxy.md, section 5). The key is the
  * value's UTF-8 bytes, as Node's `createHmac('sha256', value)` takes a
  * string. A signature is written as its scheme says, a prefix and an
@@ -28,6 +31,19 @@ const MAC_BYTES = 32;
 export async function hmacSign(secret: string, message: Uint8Array<ArrayBuffer>, scheme: Scheme): Promise<string> {
   const mac = await crypto.subtle.sign('HMAC', await keyOf(secret, 'sign'), message);
   return `${scheme.prefix}${Buffer.from(mac).toString(scheme.encoding)}`;
+}
+
+/**
+ * The signature of a message given in parts, as they come, never held whole: a raw sign's body. Node's `createHmac`,
+ * which workerd runs under `nodejs_compat` as BoringSSL's own `HMAC_Update`, a part at a time; the same key, its
+ * UTF-8 bytes, so the same signature as `hmacSign` over the parts joined.
+ */
+export function hmacParts(secret: string, scheme: Scheme): { update(part: Uint8Array): void; signature(): string } {
+  const mac = createHmac('sha256', secret);
+  return {
+    update: (part) => void mac.update(part),
+    signature: () => `${scheme.prefix}${mac.digest(scheme.encoding)}`,
+  };
 }
 
 /** Whether `signature`, as received, is the scheme's for `message`. */
