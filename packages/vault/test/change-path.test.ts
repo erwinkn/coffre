@@ -392,24 +392,22 @@ test('renaming staging to prod takes a Developer scoped to staging off it, live 
   }
 });
 
-test('protecting an environment the cutover sealed is a change of its object; one before the cutover is 0.14\'s alone', async () => {
+test('protecting an environment is a change of its object; one whose row has no seal and the log no change of is refused, nothing written', async () => {
   const w = await world({}, configure(), { sealed: false });
   await genesis(w.keys, { kind: 'environment', id: w.prod }, environment(w.project, w.prod, 'prod'));
   const protect = (ids: string[], on: boolean) => w.vault.changePolicy({ actor: ROOT, change: { kind: 'protect', projectId: w.project, environmentIds: ids, protected: on } });
-  assert.ok((await protect([w.prod, w.dev], true)).ok);
-  assert.ok((await protect([w.prod], false)).ok);
+  // Dev has no seal and no change: written around the vault.
+  assert.equal((await protect([w.prod, w.dev], true)).ok, false);
+  assert.deepEqual(await opsOf(w.keys, { kind: 'environment', id: w.prod }), ['genesis']);
   assert.ok((await protect([w.prod], true)).ok);
-  assert.deepEqual(await opsOf(w.keys, { kind: 'environment', id: w.prod }), ['genesis', 'environment.protect', 'environment.protect', 'environment.protect']);
+  assert.ok((await protect([w.prod], false)).ok);
+  assert.deepEqual(await opsOf(w.keys, { kind: 'environment', id: w.prod }), ['genesis', 'environment.protect', 'environment.protect']);
   // Each names the policy.change entry it came with.
   const policies = await rows<{ seq: string }>(db.owner, sql`SELECT seq FROM audit_log WHERE action = 'policy.change' AND decision = 'allow' ORDER BY seq`);
   const cited = (await changeRows()).filter((row) => row.object === objectKey({ kind: 'environment', id: w.prod })).map((row) => (JSON.parse(row.payload) as { old?: string }).old);
   assert.deepEqual(cited, [undefined, ...policies.map(({ seq }) => seq.toString())]);
-  // Dev has no seal and no change: 0.14's log holds its protection, which the cutover will seal.
   assert.deepEqual(await opsOf(w.keys, { kind: 'environment', id: w.dev }), []);
-  const flags = await db.owner.select({ id: environments.id, protected: environments.protected }).from(environments).where(eq(environments.projectId, w.project));
-  assert.deepEqual(Object.fromEntries(flags.map((row) => [row.id, row.protected])), { [w.prod]: true, [w.dev]: null });
   await holdsReplay(w.keys, [{ kind: 'environment', id: w.prod }]);
-  assert.deepEqual([...(await w.vault.policy()).protected].sort(), [w.dev, w.prod].sort());
 });
 
 test('protecting two sealed environments in one call is two changes, each from its own seal; a deleted one changes nothing in 0.15\'s log', async () => {

@@ -286,7 +286,7 @@ test("a token of a person's own, asked on a request made before they were remove
   const vault = deps.vault as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
   const call = vault.issueToken!.bind(vault);
   t.mock.method(vault, 'issueToken', async (...args: unknown[]) => {
-    await signin.signOut(polled.credential.token, { requestId: 'signed-out', sourceIp: null });
+    await signin.signOut(polled.credential.token);
     return call(...args);
   }, { times: 1 });
   assert.equal(await status(bearer(polled.credential.token).tokens.issue(ADA, input)), 403);
@@ -294,16 +294,18 @@ test("a token of a person's own, asked on a request made before they were remove
   assert.equal((await db.owner.select().from(credentials).where(eq(credentials.kind, 'personal'))).length, 0, 'no token was made');
 });
 
-test('a personal token made on a session 0.14 made, which the log never held, is issued as before: the vault authenticates nothing of it (T149, review r3)', async () => {
+test("a session with no seal and no change of the log's issues no personal token: it is no credential", async () => {
   const started = await signin.startDevice({ clientLabel: 'laptop', sourceIp: null });
   await signin.decideDevice(await contextFor(deps, 'ada@acme.example'), started.userCode, true);
   const polled = await signin.pollDevice(started.deviceCode, { requestId: 'device', sourceIp: null });
   assert.ok(polled.status === 'approved');
-  // As 0.14 left it: no seal, no change.
   await db.owner.update(credentials).set({ seal: null }).where(eq(credentials.id, polled.credential.id));
   await db.owner.delete(logChanges).where(sql`${logChanges.payload} LIKE ${`%${polled.credential.id}%`}`);
-  const made = await bearer(polled.credential.token).tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
-  assert.equal(await reads(made.token, 'dev'), 'dev-key');
+  await assert.rejects(
+    bearer(polled.credential.token).tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } }),
+    (error: unknown) => (error as { status?: number }).status === 401,
+  );
+  assert.deepEqual(await db.owner.select({ id: credentials.id }).from(credentials).where(eq(credentials.kind, 'personal')), []);
 });
 
 test('a person lists and revokes their own tokens, and whoever runs the instance theirs; nobody else; and a token signs itself out', async () => {
@@ -327,7 +329,7 @@ test('a person lists and revokes their own tokens, and whoever runs the instance
   await root.tokens.revoke(ADA, second.id);
   assert.equal(await reads(second.token, 'dev'), 401);
   // `coffre logout` with the token: it revokes itself.
-  await signin.signOut(third.token, { requestId: 'logout', sourceIp: null });
+  await signin.signOut(third.token);
   assert.equal(await reads(third.token, 'dev'), 401);
   assert.deepEqual((await ada.tokens.list(ADA)).tokens, []);
 
@@ -388,7 +390,7 @@ test("a personal token's label is shown wherever it goes, so it holds no control
     assert.equal(await status(ada.tokens.issue(ADA, { label, expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } })), 400, JSON.stringify(label));
   }
   const issued = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
-  await signin.signOut(issued.token, { requestId: 'logout', sourceIp: null });
+  await signin.signOut(issued.token);
   // The vault ends it, and its change, which the page lists, names the token it ends.
   assert.deepEqual(await revokesLogged(db.owner), [{ actor: ADA, reason: 'sign_out', targetCredentialId: issued.id }]);
   const { entries } = await root.audit.list({ actor: ADA, detail: '1' });
@@ -417,7 +419,7 @@ test("a person's token issues, revokes and sign-outs are counted on the page of 
   await pause();
   await ada.tokens.revoke(ADA, second.id);
   await pause();
-  await signin.signOut(first.token, { requestId: 'logout', sourceIp: null });
+  await signin.signOut(first.token);
   await pause();
   await wrote('three');
 

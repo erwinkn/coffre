@@ -202,55 +202,6 @@ export async function everyProjectPreview(db: Queryable, at: number): Promise<Ev
 }
 
 /**
- * A service token or trust binding whose scope this release has not sealed
- * yet: none of its own, as 0.4 made it (`scope` null), or one that does not
- * say where it reads sensitive values, as a release before 0.11 made it. By
- * whom it was issued, `createdBy`, a person's email.
- */
-export type Unsealed = { kind: 'token' | 'binding'; id: string; principal: string; createdBy: string; scope: string | null };
-
-/**
- * Whether a stored scope is not sealed (`Unsealed`), as SQL. Every scope this release writes for a service says, at
- * each place it names, whether it reads the sensitive values there; one that names none, sealed while its account held
- * nothing, is sealed (`unsealedScope` in @coffre/server).
- */
-export function unsealed(scope: typeof credentials.scope | typeof serviceBindings.scope): SQL {
-  return or(isNull(scope), and(like(scope, '%"projectId"%'), sql`${scope} NOT LIKE '%"sensitive":%'`))!;
-}
-
-/**
- * The live service tokens and trust bindings of active service accounts
- * whose scope is not sealed yet (`Unsealed`): what the app seals once a
- * process (`sealScopes`), and what `coffre migrate` says it will. A
- * credential a binding issued carries its binding's.
- */
-export async function unsealedCredentials(db: Queryable, at: Date): Promise<Unsealed[]> {
-  const [tokens, bindings] = await Promise.all([
-    db
-      .select({ id: credentials.id, principal: credentials.principal, createdBy: credentials.createdBy, scope: credentials.scope })
-      .from(credentials)
-      .innerJoin(principals, and(eq(principals.principal, credentials.principal), eq(principals.generation, credentials.generation)))
-      .where(and(
-        eq(credentials.kind, 'service'),
-        unsealed(credentials.scope),
-        sql`${credentials.createdBy} NOT LIKE 'binding:%'`,
-        isNull(credentials.revokedAt),
-        gt(credentials.expiresAt, at),
-        eq(principals.status, 'active'),
-      )),
-    db
-      .select({ id: serviceBindings.id, principal: serviceBindings.principal, createdBy: serviceBindings.createdBy, scope: serviceBindings.scope })
-      .from(serviceBindings)
-      .innerJoin(principals, and(eq(principals.principal, serviceBindings.principal), eq(principals.generation, serviceBindings.generation)))
-      .where(and(unsealed(serviceBindings.scope), isNull(serviceBindings.revokedAt), eq(principals.status, 'active'))),
-  ]);
-  return [
-    ...tokens.map((row) => ({ kind: 'token' as const, ...row })),
-    ...bindings.map((row) => ({ kind: 'binding' as const, ...row })),
-  ].sort((a, b) => a.principal.localeCompare(b.principal) || a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
-}
-
-/**
  * The members the vault has found changed around it, and not started over
  * since, as a reader without its key can tell: `reportStands`' rule, taking
  * every entry in the vault's name as its own, for everyone at once, where

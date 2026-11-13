@@ -33,7 +33,6 @@ import {
 } from '@coffre/core/access';
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Queryable } from '@coffre/db';
-import { unsealedCredentials, type Unsealed } from '@coffre/db/grants';
 import { credentials } from '@coffre/db/schema';
 
 import { settingsShown } from '../db/answers.ts';
@@ -210,8 +209,7 @@ function narrowest(now: ScopeGrant, before: ScopeGrant): ScopeGrant {
 }
 
 /** A scope by path, as the caller would name its places now; one deleted is left out, as it reaches nothing. */
-export function scopeByPath(scope: readonly (GrantPlace & { role: Role })[] | null, known: readonly PlaceRow[]): ScopeByPath | null {
-  if (scope === null) return null;
+export function scopeByPath(scope: readonly (GrantPlace & { role: Role })[], known: readonly PlaceRow[]): ScopeByPath {
   const named = scope.flatMap((grant): [string, Role][] => {
     const project = known.find((candidate) => candidate.id === grant.projectId);
     if (project === undefined) return [];
@@ -296,14 +294,14 @@ export async function issuedScope(
   // Each as it will be kept: the caller gives, and the account holds, what the credential will hold, no more.
   const beyond = scope.find((grant) => !issuesCredential(ctx.caller, setting, actor, account, [{ ...grant, kept: scopeDefinition(kept(grant)) }]));
   if (beyond !== undefined) {
-    const path = Object.keys(scopeByPath([asGrant(beyond)], known)!)[0]!;
+    const path = Object.keys(scopeByPath([asGrant(beyond)], known))[0]!;
     throw new Refusal(
       forbidden(`a credential reaches at most what its account holds and what you could give it: not ${path}`),
       denied(ctx, refused.action, 'beyond_account', { metadata: { ...refused.metadata, path } }),
     );
   }
   const issued = scope.map(kept);
-  return { scope: issued, byPath: scopeByPath(issued, known)!, withheld: await withheldIn(db, issued, known) };
+  return { scope: issued, byPath: scopeByPath(issued, known), withheld: await withheldIn(db, issued, known) };
 }
 
 /**
@@ -329,7 +327,7 @@ async function withheldIn(db: Queryable, scope: CredentialScope, known: readonly
   const unowned = scope.filter((grant) => !owned.has(grant.projectId));
   const holding = await holdingSensitive(db, unowned.flatMap(environmentsOf));
   const withholds = (grant: ScopeGrant) => environmentsOf(grant).some((id) => holding.has(id));
-  return Object.keys(scopeByPath(unowned.filter(withholds), known)!);
+  return Object.keys(scopeByPath(unowned.filter(withholds), known));
 }
 
 /**
@@ -386,7 +384,7 @@ export async function personalScope(
   const scope = placedScope(wanted, known, policy);
   if (scope.length === 0) throw badRequest('say what the token reaches: a role on a project or an environment, as --scope market/dev=viewer');
   const issued = scope.map((grant) => issuedGrant(asGrant(grant), policy, heldColumns(holder, grant.place)));
-  const named = (grant: ServiceAccount['grants'][number]) => Object.keys(scopeByPath([asGrant(grant)], known)!)[0]!;
+  const named = (grant: ServiceAccount['grants'][number]) => Object.keys(scopeByPath([asGrant(grant)], known))[0]!;
   const managing = scope.find(({ role }) => !delegable(role, policy));
   if (managing !== undefined) {
     throw badRequest(`a personal token never manages access: name ${delegableRoles(policy).join(', ')} on ${named(managing)}, not ${managing.role}`);
@@ -400,22 +398,19 @@ export async function personalScope(
       denied(ctx, 'token.create', 'beyond_holder', { metadata: { ...metadata, path } }),
     );
   }
-  return { scope: issued, byPath: scopeByPath(issued, known)! };
+  return { scope: issued, byPath: scopeByPath(issued, known) };
 }
 
 /**
  * What the bindings a new one replaces reached, together, by id: what it
- * reaches unless told (`issuedScope`). Undefined when it replaces none, or
- * one 0.4 made and the app has not sealed, which reached all the account
- * held. Two that reach a place with different roles are for the caller to
+ * reaches unless told (`issuedScope`). Undefined when it replaces none.
+ * Two that reach a place with different roles are for the caller to
  * choose between.
  */
 export function inheritedScope(replaced: readonly { scope: string | null }[]): CredentialScope | undefined {
   if (replaced.length === 0) return undefined;
-  const scopes = replaced.map((row) => readScope(row.scope));
-  if (scopes.some((scope) => scope === null)) return undefined;
   const byPlace = new Map<string, CredentialScope[number]>();
-  for (const grant of scopes.flat() as CredentialScope[number][]) {
+  for (const grant of replaced.flatMap((row) => readScope(row.scope, { service: true }))) {
     const place = `${grant.projectId}/${grant.environmentId ?? ''}`;
     const before = byPlace.get(place);
     if (before !== undefined && before.role !== grant.role) {
@@ -429,100 +424,4 @@ export function inheritedScope(replaced: readonly { scope: string | null }[]): C
 
 function asGrant({ role, place }: ServiceAccount['grants'][number]): GrantPlace & { role: Role } {
   return { projectId: place.projectId, environmentId: place.environmentId ?? null, role };
-}
-
-/**
- * Whether a service token's or trust binding's stored scope is sealed by
- * this release: one of 0.4 has none, and one of a release before 0.11
- * names places without saying whether it reads the sensitive values there
- * (`unsealedCredentials`, whose query says the same).
- */
-export function unsealedScope(stored: string | null): boolean {
-  return stored === null || (stored.includes('"projectId"') && !stored.includes('"sensitive":'));
-}
-
-/**
- * Seal the tokens an older release made (`Unsealed`): once a
- * configuration, the isolate's or the process's, before it checks its
- * first credential (`SigninService.verify`). A token an older release
- * still makes while both run is sealed on its first use instead
- * (`sealCredentials`, from `verify`). A trust binding is never sealed: one
- * whose scope is unsealed is refused, and bound again. Returns how
- * many tokens it sealed.
- */
-export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): Promise<number> {
-  const unsealed = (await unsealedCredentials(db, new Date())).filter((row): row is UnsealedToken => row.kind === 'token');
-  let sealed = 0;
-  for (const principal of new Set(unsealed.map((row) => row.principal))) {
-    const policySeq = await newestPolicySeq(db);
-    const access = await vault.access(principal);
-    if (access.status !== 'active') continue;
-    sealed += await sealCredentials(db, chainKey, vault, access, policySeq, unsealed.filter((candidate) => candidate.principal === principal));
-  }
-  return sealed;
-}
-
-/** A token whose scope this release has not sealed yet. */
-type UnsealedToken = Unsealed & { kind: 'token' };
-
-/**
- * Seal these unsealed tokens of one account, as `access` answered it, asked
- * of the vault after the newest `policy.change` was `policySeq`. One of
- * 0.4 keeps what the account holds now, each grant with what its role
- * holds now, so nothing granted after reaches it; one of a release before
- * 0.11 keeps its scope. Each then reads the sensitive values of a place
- * where whoever issued it is an Owner of its project now (`ownsProject`,
- * R32), as one they issued now would: those an Owner issued keep reading
- * them, and those anyone else did never do. Each issuer's standing is the
- * vault's, asked before the transaction (`issuerNow`), and the transaction
- * commits only while it is still theirs (`issuerStill`): an issuer demoted
- * from Owner meanwhile seals no row reading them. In one transaction,
- * committed only while the policy is still `policySeq`'s (`policyStill`).
- * Each token it seals is a change (`credential.scope`) that carries its own
- * `token.seal` entry, naming it, as the change's actor (`COFFRE_ACTOR`,
- * 0.16). So a row put back unsealed later, and sealed again, shows in
- * the log. Each update matches the row's scope as read, so two at once seal
- * a row once, and record it once. Returns how many it sealed.
- */
-export async function sealCredentials(db: Database, chainKey: Buffer, vault: Vault, access: Access, policySeq: bigint | null, rows: readonly UnsealedToken[]): Promise<number> {
-  const policy = access.policy ?? DEFAULT_POLICY;
-  const held = access.grants.map(({ projectId, environmentId, role }) => issuedGrant({ projectId, environmentId, role }, policy));
-  // Each issuer as the vault answers them now, asked before the transaction: no vault call is made inside one.
-  const issuers = new Map<string, { caller: Caller; accessSeq: bigint | null }>();
-  for (const by of new Set(rows.map((row) => row.createdBy))) issuers.set(by, await issuerNow({ db, vault }, { type: 'user', id: by }));
-  const scopes = rows.map((row) => storedScope((readScope(row.scope) ?? held).map((grant) => ({ ...grant, sensitive: ownsProject(issuers.get(row.createdBy)!.caller, grant.projectId!) }))));
-  // A token's scope written is a change of it (`credential.scope`).
-  const tokens = rows.map((row, i) => ({ id: row.id, scope: scopes[i]! }));
-  const sealed = (id: string, scope: string): AuditEntry => ({
-    actorType: 'system',
-    actorId: 'app',
-    action: 'token.seal',
-    decision: 'allow',
-    metadata: { principalType: 'service', principalId: memberOf(access.principal).id, tokens: [id], scope: JSON.parse(scope) as unknown },
-  });
-  const changes = await AppChanges.prepare(vault, COFFRE_ACTOR, async () => {
-    const read = tokens.length === 0 ? [] : await liveCredentialsWhere(db, chainKey, credentialsBy.ids(tokens.map(({ id }) => id)));
-    return read.flatMap((row) => {
-      const token = tokens.find(({ id }) => id === row.id)!;
-      // Its entry rides its change, the change's actor's: one token not written drops with it.
-      const entry = { ...entryOf({ credentialId: null }, sealed(row.id, token.scope)), actor: COFFRE_ACTOR };
-      return row.scope === rows.find(({ id }) => id === row.id)!.scope ? [credentialChange(row, { ...row, scope: token.scope }, entry)] : [];
-    });
-  });
-  return audited({ db, chainKey, vault, caller: { policySeq, policy } }, async (tx) => {
-    for (const { caller, accessSeq } of issuers.values()) await issuerStill(tx, caller, accessSeq);
-    const written: string[] = [];
-    let count = 0;
-    for (const [i, row] of rows.entries()) {
-      const scope = scopes[i]!;
-      // A token none was prepared for (revoked since it was read) is left as it is.
-      if (changes !== null && !changes.has(row.id)) continue;
-      if ((await updateAuth(tx, chainKey, credentials, { id: row.id, scope: row.scope }, { scope })) === 0) continue;
-      count += 1;
-      written.push(row.id);
-    }
-    // Two at once seal a row once: only the changes of the rows this one wrote.
-    changes?.only(written);
-    return count;
-  }, changes);
 }

@@ -285,8 +285,7 @@ function isRun(run: unknown): run is Record<string, string | number> {
 /**
  * A revoke, decided and made: the object as the app read it, checked
  * against its seal (`NotLogged`, tampered, if the vault never made it), the
- * revoke applied and sealed, then one statement. A row 0.14 made and the
- * log never held is revoked with no change, as `prepare` leaves one.
+ * revoke applied and sealed, then one statement.
  */
 export async function revokeCredential(db: Database, keys: ChangeKeys, at: number, input: RevokeCredentialInput): Promise<Answer> {
   const { actor, before, authMacFrom, authMac, revokedAt, revokedBy, reason, via, trace, policy } = input ?? ({} as RevokeCredentialInput);
@@ -377,8 +376,8 @@ export function checkIssue(input: IssueTokenInput): CredentialScope {
   }
   if (c.passkeyId !== null && via === null) throw new Error('an issued token carries the passkey of the credential it came in on, and only then');
   if ((c.kind === 'handle') !== (c.places !== null)) throw new Error('a handle, and only a handle, names the places it stands in for');
-  const scope = readScope(c.scope);
-  if (scope === null || scope.length === 0) throw new Error('an issued token reaches what its stored scope names, at least one place');
+  const scope = readScope(c.scope, { service: c.kind === 'service' });
+  if (scope.length === 0) throw new Error('an issued token reaches what its stored scope names, at least one place');
   return scope;
 }
 
@@ -622,10 +621,9 @@ export function checkChangeBindings(input: ChangeBindingsInput): void {
  * The change, sealed: the binding made (`binding.make`), each ended
  * (`binding.revoke`), and each credential they issued (`credential.revoke`),
  * each object's seal over what it becomes and its change's MAC. A binding
- * or credential with no seal (0.14's, which the log never held) is ended
- * with no change, which the statement holds to its having none; one whose
- * seal is not the vault's, or not over its columns, is `tampered`, and so
- * is a credential of another binding, or account.
+ * or credential with no seal, or one whose seal is not the vault's, or not
+ * over its columns, is `tampered`, and so is a credential of another
+ * binding, or account.
  */
 export function bindingsCall(
   keys: ChangeKeys, input: ChangeBindingsInput, at: number, read: IssueRead | null,
@@ -658,17 +656,14 @@ export function bindingsCall(
     const { columns } = end.before;
     const ref: Ref = { kind: 'binding', id: columns.id };
     if (columns.principal !== principal || columns.revoked) return { refused: 'tampered' };
+    if (end.before.seal === null) return { refused: 'tampered' };
+    const sealFrom = Buffer.from(end.before.seal, 'base64');
+    const before = bindingObject(columns);
+    if (!sealed(keys.seals, ref, before, sealFrom)) return { refused: 'tampered' };
     if (input.sweep === true) {
       // Closed, not ended: no change of it, its row held to its MAC and seal as read (its seal its newest change's).
-      if (end.before.seal !== null && !sealed(keys.seals, ref, bindingObject(columns), Buffer.from(end.before.seal, 'base64'))) return { refused: 'tampered' };
-      ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom: end.before.seal === null ? null : Buffer.from(end.before.seal, 'base64'), authMac: Buffer.from(end.authMacFrom, 'base64'), seal: null });
-    } else if (end.before.seal === null) {
-      // One 0.14 made, which the log never held: its row ended, with no change; the statement holds it to having none.
-      ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom: null, authMac: Buffer.from(end.authMac, 'base64'), seal: null });
+      ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom, authMac: Buffer.from(end.authMacFrom, 'base64'), seal: null });
     } else {
-      const sealFrom = Buffer.from(end.before.seal, 'base64');
-      const before = bindingObject(columns);
-      if (!sealed(keys.seals, ref, before, sealFrom)) return { refused: 'tampered' };
       const seal = sealOf(keys.seals[0]!, ref, applyOp(before, ref, { op: 'binding.revoke' })!);
       change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.revoke' }, undefined, undefined, reportedOf(end.entry))), unbind: { by: actor, reason, replacedBy: make?.id ?? null, ...continuing } }), seal);
       ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom, authMac: Buffer.from(end.authMac, 'base64'), seal });
@@ -676,11 +671,7 @@ export function bindingsCall(
     for (const credential of end.credentials) {
       const cref: Ref = { kind: 'credential', id: credential.before.columns.id };
       if (credential.before.columns.principal !== principal || credential.before.columns.revoked) return { refused: 'tampered' };
-      // One with no seal is none of the log's: ended, its row revoked, with no change (the statement holds it to having none).
-      if (credential.before.seal === null) {
-        swept.push({ id: cref.id, binding: columns.id, macFrom: Buffer.from(credential.authMacFrom, 'base64'), sealFrom: null, authMac: Buffer.from(credential.authMac, 'base64'), seal: null });
-        continue;
-      }
+      if (credential.before.seal === null) return { refused: 'tampered' };
       const cfrom = Buffer.from(credential.before.seal, 'base64');
       const now = credentialObject(credential.before.columns);
       if (!sealed(keys.seals, cref, now, cfrom)) return { refused: 'tampered' };

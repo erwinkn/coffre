@@ -872,17 +872,21 @@ export function storedScope(scope: CredentialScope, { reads = false }: { reads?:
 }
 
 /**
- * The scope a row stores: null for one 0.4 made, not sealed yet, which
- * reaches all its account holds, as then. One its MAC checked but that
- * does not read as a scope reaches nothing.
+ * The scope a row stores, a service's (`service`: its tokens, bindings and
+ * their runs' sessions) or a person's. One that is missing or does not read
+ * as a scope reaches nothing; so does a service's with a grant that does not
+ * say whether it reads the sensitive values there, as a release before 0.11
+ * stored them and 0.15.0 sealed: 0.16 seals nothing, and its
+ * upgrade refuses a database that still holds one live.
  */
-export function readScope(stored: string | null): CredentialScope | null {
-  if (stored === null) return null;
+export function readScope(stored: string | null, { service }: { service: boolean }): CredentialScope {
+  if (stored === null) return [];
   let parsed: unknown = null;
   try {
     parsed = JSON.parse(stored);
   } catch {}
-  return isCredentialScope(parsed) ? parsed : [];
+  if (!isCredentialScope(parsed)) return [];
+  return service && parsed.some((grant) => grant.sensitive === undefined) ? [] : parsed;
 }
 
 /** What a workload binding's policy lists of reads, by environment id (`BindingPolicy['reads']`). */
@@ -897,7 +901,7 @@ type ListedReads = Readonly<Record<string, { readonly keys?: readonly string[] |
  * without `reads` is use-only, there.
  */
 export function sessionScope(row: { scope: string | null }, binding: { scope: string | null }, policy: { reads?: ListedReads }): CredentialScope {
-  const scope = readScope(row.scope ?? binding.scope) ?? [];
+  const scope = readScope(row.scope ?? binding.scope, { service: true });
   const projectOf = new Map<string, string>();
   for (const { projectId, environmentId } of scope) if (environmentId != null && projectId !== null) projectOf.set(environmentId, projectId);
   return scopeWithReads(scope, policy.reads, projectOf);

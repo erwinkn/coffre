@@ -190,7 +190,7 @@ test('a route answers by what it is asked: a dry run where it takes one, unprote
   const token = { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } };
   assert.deepEqual(refused(await act(bob, 'POST', `/api/members/user:${BOB}/tokens`, token)), [403, 'fresh_check_required', undefined]);
   const [passkey] = await db.owner.select({ id: passkeys.id }).from(passkeys).where(eq(passkeys.principal, `user:${BOB}`));
-  const terminal = await rows.confirmedSession(db.owner, deps.chainKey, BOB, passkey!.id, { confirmedAt: new Date(Date.now() - FRESH_MS) });
+  const terminal = await rows.confirmedSession(deps, BOB, passkey!.id, { confirmedAt: new Date(Date.now() - FRESH_MS) });
   const issued = await runtime.signin!.verify(terminal);
   assert.equal(issued.session?.kind, 'cli');
   const fromTerminal = await (await import('../src/fetch-api.ts')).fetchApi(new Request(`${ORIGIN}/api/members/user:${BOB}/tokens`, {

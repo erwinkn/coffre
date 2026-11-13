@@ -76,7 +76,7 @@ test('each way the API makes or ends a credential is a change of 0.15\'s log, be
   assert.deepEqual(ops.get(token.id), ['credential.issue']);
   assert.deepEqual(ops.get(revoked.id), ['credential.issue', 'credential.revoke']);
   // Signed out; then the member removed, which ends every way in they still had: each end is a change of its own.
-  await signin.signOut(browser.credential.token, meta());
+  await signin.signOut(browser.credential.token);
   await root.members.remove(`token:${SERVICE}`);
   ops = await opsByCredential();
   assert.deepEqual(ops.get(browser.credential.id), ['credential.issue', 'credential.revoke']);
@@ -144,7 +144,7 @@ test('a write answers once its change is sealed (R51): committed meanwhile, but 
 test('a workload session\'s sealed scope keeps the keys its binding lets it read: no wider than what 0.14 decides on', () => {
   const [project, prod, key] = [randomUUID(), randomUUID(), randomUUID()];
   // The binding reaches prod as a viewer, and reads one key there.
-  const binding = { scope: storedScope([issuedGrant({ projectId: project, environmentId: prod, role: 'viewer' })]) };
+  const binding = { scope: storedScope([{ ...issuedGrant({ projectId: project, environmentId: prod, role: 'viewer' }), sensitive: false }]) };
   const policy = { reads: { [prod]: { keys: [key] } } } as unknown as BindingPolicy;
   const sealed = JSON.parse(sealedSessionScope(null, binding, policy)) as { environmentId: string | null; reads?: unknown }[];
   assert.deepEqual(sealed.find((grant) => grant.environmentId === prod)?.reads, [key]);
@@ -201,18 +201,17 @@ test("a write that moves an environment's slug waits for the vault's issues in f
   assert.equal(renamed, true);
 });
 
-test("a credential 0.14 made, which the log never held, is revoked and signed out as 0.14 does, with 0.14's entry: the vault revokes only the log's (T149)", async () => {
+test("a credential with no seal and no change of the log's is none: its revoke is of an unknown credential, its sign-out ends nothing, and only the revoke's denial is written", async () => {
   const issued = await root.tokens.issue(`token:${SERVICE}`, { label: 'ci', expiresInDays: 30 });
   const session = await signin.completeSignin({ provider: 'github', subject: 'dev', emails: [DEV], name: null }, meta());
   assert.ok(session.ok);
-  // As 0.14 left them: no seal, no change.
   await db.owner.update(credentials).set({ seal: null }).where(inArray(credentials.id, [issued.id, session.credential.id]));
-  // Their changes gone, and theirs alone: the members' stay, which the vault decides on.
   await db.owner.delete(logChanges).where(inArray(logChanges.object, [issued.id, session.credential.id].map((id) => logObject('credential', id))));
-  await root.tokens.revoke(`token:${SERVICE}`, issued.id);
-  await signin.signOut(session.credential.token, meta());
-  const ended = await db.owner.select({ id: credentials.id, revokedAt: credentials.revokedAt }).from(credentials).where(inArray(credentials.id, [issued.id, session.credential.id]));
-  assert.ok(ended.every((row) => row.revokedAt !== null));
-  const entries = (await loggedEntries(db.owner, ['token.revoke', 'sign_out'])).filter((entry) => entry.decision === 'allow');
-  assert.deepEqual(entries.map(({ action }) => action).sort(), ['sign_out', 'token.revoke']);
+  const before = await loggedEntries(db.owner, ['token.revoke', 'sign_out']);
+  await assert.rejects(root.tokens.revoke(`token:${SERVICE}`, issued.id), (error: unknown) => (error as { reason?: string }).reason === 'unknown_credential');
+  await signin.signOut(session.credential.token);
+  const rows = await db.owner.select({ revokedAt: credentials.revokedAt }).from(credentials).where(inArray(credentials.id, [issued.id, session.credential.id]));
+  assert.ok(rows.length === 2 && rows.every((row) => row.revokedAt === null));
+  const written = (await loggedEntries(db.owner, ['token.revoke', 'sign_out'])).slice(before.length);
+  assert.deepEqual(written.map((entry) => [entry.action, entry.decision, entry.code]), [['token.revoke', 'deny', 'unknown_credential']]);
 });

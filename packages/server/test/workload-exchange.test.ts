@@ -1785,10 +1785,13 @@ test("a removal the scheduled run cannot read again after a move is its failure 
 
 test("a removal reads what is live on the database's clock, which the end names on: an app clock ahead of it ends the binding all the same (Fable on #520)", async (t) => {
   limits = processLimits();
-  // Credentials ending within the two minutes the app's clock is ahead: live on the database's, expired on the app's.
-  await run(sql`INSERT INTO credentials (kind, auth_mac, token_hash, token_hint, generation, principal, created_by, created_at, expires_at)
-    SELECT 'service', decode(repeat('00', 32), 'hex'), sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'coffre_svc_…', 0, ${MEMBER}, ${`binding:${bound}`}, now(), now() + n * interval '1 second'
-    FROM generate_series(1, 60) n`);
+  // Runs signed in on proofs ending within the two minutes the app's clock is ahead: live on the database's, expired on
+  // the app's.
+  for (let n = 0; n < 60; n += 16) {
+    for (const { status, body } of await Promise.all(Array.from({ length: Math.min(16, 60 - n) }, (_, i) => trade(token(rsa, { exp: seconds() + 30 + n + i }))))) {
+      assert.equal(status, 200, JSON.stringify(body));
+    }
+  }
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 120_000 });
   try {
     await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound);
@@ -2017,47 +2020,11 @@ test("a binding a removal closed shadows no other: a run another binding takes s
 });
 
 
-test("a binding an older release left with a scope that says nothing of sensitive values signs no run in, shadows none bound again, and its Owner still lists and removes it", async () => {
-  const ctx = () => contextFor(deps, ROOT);
-  await runtime.workloads!.unbind(await ctx(), SERVICE, bound);
-  const unknown = await trade(token(rsa));
-  const old = await bindUnsealed(DEPLOY);
-  const scopeOf = async () => (await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, old)))[0]!.scope!;
-  const scope = await scopeOf();
-  assert.ok(scope.includes('"projectId"') && !scope.includes('"sensitive":'), scope);
-  const held = () => db.owner.select({ id: credentials.id }).from(credentials).where(eq(credentials.principal, MEMBER));
+test("the vault makes no binding whose scope does not say where it reads sensitive values, as a release before 0.11 stored them: it would reach nothing", async () => {
+  const held = () => db.owner.select({ id: serviceBindings.id }).from(serviceBindings).where(eq(serviceBindings.principal, MEMBER));
   const before = await held();
-
-  // Alone, it is no binding: refused as an unknown one is, and nothing is written, its scope sealed from nothing.
-  assert.deepEqual(await trade(token(rsa)), unknown);
+  await assert.rejects(bindUnsealed(DEPLOY), /reaches what its scope names/);
   assert.deepEqual(await held(), before);
-  assert.deepEqual(await loggedEntries(db.owner, ['token.seal']), []);
-  assert.equal(await scopeOf(), scope);
-
-  // A credential it issued before, its scope the binding's, signs nobody in either.
-  const credential = generateToken('service');
-  const [member] = await db.owner.execute<{ generation: number }>(sql`SELECT generation FROM principals WHERE principal = ${MEMBER}`);
-  const issued = {
-    id: randomUUID(), kind: 'service', tokenHash: hashToken(credential), generation: member!.generation, tokenHint: tokenHint(credential), principal: MEMBER,
-    identityId: null, label: null, createdBy: `binding:${old}`, expiresAt: new Date(Date.now() + 300_000), revokedAt: null, passkeyId: null, confirmedAt: null, scope,
-  };
-  await db.owner.insert(credentials).values({ ...issued, authMac: authMac(deps.chainKey, 'credentials', issued) });
-  assert.equal(await caller(credential), 401);
-  assert.deepEqual(await loggedEntries(db.owner, ['token.seal']), []);
-
-  // Bound again, on the same claims: the run signs in through the new binding, which the old one does not shadow.
-  const fresh = await bind(DEPLOY);
-  const { status, body } = await trade(token(rsa));
-  assert.equal(status, 200, JSON.stringify(body));
-  assert.equal(await caller(body.token!), `service:${SERVICE}`);
-  const [made] = await db.owner.select({ createdBy: credentials.createdBy }).from(credentials).where(eq(credentials.tokenHash, hashToken(body.token!)));
-  assert.equal(made!.createdBy, `binding:${fresh}`);
-
-  // Its Owner still sees it beside the new one, and removes it.
-  const listed = async () => (await runtime.workloads!.listBindings(await ctx(), SERVICE)).map((binding) => binding.id);
-  assert.deepEqual(await listed(), [old, fresh]);
-  assert.deepEqual(await runtime.workloads!.unbind(await ctx(), SERVICE, old), { unbound: true });
-  assert.deepEqual(await listed(), [fresh]);
 });
 
 test("a binding ended, its row put back with its old seal and a change of it forged after its end with that seal: the app lists it, and the vault signs no run in, by that change's MAC", async () => {

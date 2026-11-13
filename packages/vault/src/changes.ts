@@ -40,13 +40,9 @@ import { isStale, laterInputs, loggedChanges, newestChange, readObject, type Cha
  * any of this; `change_input` takes the same, then the fence: row, head,
  * fence (RowFirst and ChangeHeadFirst; WriteLocks.tla holds the issue lock's place).
  *
- * An object that has a row but no seal, and no change in the log, is
- * 0.14's, which 0.15.0's cutover left unsealed: 0.14's log is
- * its record. A decision changes it as 0.14 did, and logs nothing of it
- * here. The roles' and the policy's rows are written only sealed, by
- * `change_input`: one with no seal was planted, and is refused. Any other
- * object with neither row nor change is new, the roles and the policy
- * included: only an op that makes it applies.
+ * An object that has a row but no seal, and no change in the log, was
+ * written around the vault, and is refused (`tampered`). One with neither
+ * row nor change is new: only an op that makes it applies.
  */
 
 /** Why an object a decision would change is not the log's: its seal is not the vault's over it, or not its newest change's. */
@@ -62,20 +58,20 @@ export class NotLogged extends Error {
 }
 
 /**
- * An object as the log has it: `unlogged`, 0.14's alone (no change, no seal
- * on its row: before the cutover); `gone`, the log's newest change of it
- * left none (a key archived or deleted: `secret.delete`); else its object,
- * its row checked against its seal and that seal the newest change's.
+ * An object as the log has it: `none`, never made (no change, no row);
+ * `gone`, the log's newest change of it left none (a key archived or
+ * deleted: `secret.delete`); else its object, its row checked against its
+ * seal and that seal the newest change's.
  */
-export type Held = { log: 'unlogged' } | { log: 'gone' } | { log: 'live'; object: Input };
+export type Held = { log: 'none' } | { log: 'gone' } | { log: 'live'; object: Input };
 
 /**
  * Whether `ref` has an object, from its log, never its row's columns (an
  * `archived_at` a writer set is no archive), and the object, checked: what
  * a decision may weigh (formal/SealedObjects.tla, LivenessFromLog,
  * ReferenceInObject). Throws `NotLogged` for a row the log does not bear
- * out: a seal no change wrote, a gone object's row live again, a live one's
- * row gone, or a row its seal does not cover.
+ * out: a row or a seal no change wrote, a gone object's row live again, a
+ * live one's row gone, or a row its seal does not cover.
  */
 export async function heldByLog(keys: ChangeKeys, db: Queryable, ref: Ref & { kind: ReadKind }): Promise<Held> {
   const [read, newest] = await Promise.all([readObject(db, ref), newestChange(db, ref, macsOf(keys))]);
@@ -93,7 +89,8 @@ export function heldFrom(keys: SealKeys, ref: Ref & { kind: ReadKind }, { row, s
   if (newest !== null && !newest.holds) throw new NotLogged(ref, 'tampered');
   if (newest === null) {
     if (seal !== null) throw new NotLogged(ref, 'stale');
-    return { log: 'unlogged' };
+    if (row !== null) throw new NotLogged(ref, 'tampered');
+    return { log: 'none' };
   }
   if (newest.seal === null) {
     if (row !== null || seal !== null) throw new NotLogged(ref, 'stale');
@@ -120,7 +117,7 @@ export type ChangeKeys = {
 };
 
 type Step = { op: Op; actor: string };
-type Read = { logged: false } | { logged: true; seal: Buffer | null; now: Input | null; afters: (Input | null)[] };
+type Read = { seal: Buffer | null; now: Input | null; afters: (Input | null)[] };
 type Staged = { ref: Ref & { kind: ReadKind }; steps: Step[]; read?: Read; old?: bigint };
 
 export class Changes {
@@ -197,13 +194,11 @@ export class Changes {
     const reads = await Promise.all(unread.map((staged) => this.#read(db, staged.ref, staged.ref.kind === 'role' || (staged.steps[0]?.op.op === 'proxy.save' && staged.steps[0].op.replace))));
     for (const [i, staged] of unread.entries()) {
       const read = reads[i]!;
-      if (read.logged) {
-        for (const { op } of staged.steps) {
-          const after = applyOp(read.now, staged.ref, op);
-          if (after === undefined) throw new Error(`${op.op} does nothing to the ${staged.ref.kind} ${staged.ref.id} as the log has it: the decision and its change disagree`);
-          read.afters.push(after);
-          read.now = after;
-        }
+      for (const { op } of staged.steps) {
+        const after = applyOp(read.now, staged.ref, op);
+        if (after === undefined) throw new Error(`${op.op} does nothing to the ${staged.ref.kind} ${staged.ref.id} as the log has it: the decision and its change disagree`);
+        read.afters.push(after);
+        read.now = after;
       }
       staged.read = read;
     }
@@ -219,26 +214,22 @@ export class Changes {
       // over stays below its pair, and the save seals past it; one still in its window halts every tick with an alert
       // (`its MAC does not hold`), so the save commits but its seal wait fails, until an operator puts the log right.
       const newest = await newestChange(db, ref, macsOf(this.#keys));
-      return { logged: true, seal: newest?.seal ?? null, now: null, afters: [] };
+      return { seal: newest?.seal ?? null, now: null, afters: [] };
     }
     const [{ row, seal }, newest] = this.#seen.get(objectKey(ref)) ?? await Promise.all([readObject(db, ref), newestChange(db, ref, macsOf(this.#keys))]);
     // Its newest change's MAC does not hold over the seal it records (HotPathOne.tla, ChangeChecksMac): a row put
     // back with its old seal, written into that change too, would pass every check below, and this change would seal
     // the writer's row as the log's. Refused, as a row its seal does not cover is.
     if (newest !== null && !newest.holds) throw new NotLogged(ref, 'tampered');
-    // A row, unsealed, that the log has never heard of: 0.14's alone, which 0.15's cutover left unsealed. Not the roles'
-    // or the policy's row, which only change_input writes, sealed: one with no seal was planted. With no row, the roles
-    // and the policy are made by their first change (a role defined, a cap set), as any object is.
-    if (newest === null && seal === null && row !== null) {
-      if (ref.kind === 'roles' || ref.kind === 'policy') throw new NotLogged(ref, 'tampered');
-      return { logged: false };
-    }
+    // A row, unsealed, that the log has never heard of: written around the vault. With no row, an object is made by its
+    // first change (a role defined, a cap set).
+    if (newest === null && seal === null && row !== null) throw new NotLogged(ref, 'tampered');
     if (row !== null && !sealed(this.#keys.seals, ref, row, seal)) throw new NotLogged(ref, 'tampered');
     // Gone (a key archived: `secret.delete`), its row no object and no seal: only an op that makes one applies.
-    if (newest !== null && newest.seal === null && row === null && seal === null) return { logged: true, seal, now: null, afters: [] };
+    if (newest !== null && newest.seal === null && row === null && seal === null) return { seal, now: null, afters: [] };
     // A row whose seal is not its newest change's; one with no row the log has a change for (deleted outright).
     if (newest !== null ? seal === null || newest.seal === null || !newest.seal.equals(seal) : row !== null) throw new NotLogged(ref, 'stale');
-    return { logged: true, seal, now: row, afters: [] };
+    return { seal, now: row, afters: [] };
   }
 
   /**
@@ -253,7 +244,6 @@ export class Changes {
     if ([...this.#staged.values()].some((staged) => staged.read === undefined)) throw new Error('changes committed before they were prepared: prepare reads each object before the writes run');
     const calls: ChangeCall[] = [];
     for (const { ref, steps, read, old } of this.#staged.values()) {
-      if (!read!.logged) continue;
       const { seal: base, now, afters } = read!;
       // The member's own rows, which the decision wrote: they must be what the ops leave, or something wrote around it.
       // As the decision read them back to seal them (`written`), or read again here.
@@ -293,7 +283,7 @@ export class Changes {
 /**
  * What each key in `refs` would be unarchived as: the object its log's
  * newest change with a seal left it, by the key's key in the log; null for a
- * key the log never held (0.14's alone, before the cutover). An archived
+ * key the log never held. An archived
  * key's newest change is its archive (`secret.delete`, which leaves no
  * seal), and the one before it the write or genesis it archived, its whole
  * object: both read in one statement (`loggedChanges`), both held to their
@@ -349,11 +339,9 @@ export async function changesHold(keys: ChangeKeys, db: Queryable, refs: readonl
  *   object's newest change's, and still the row's, is `app_change`'s to
  *   check under its locks (the fence; an issue, the issue lock: 0026)
  *   (ChangeChecksSeal, ChangeCAS), as `change_input`
- *   does for the vault's own. A row with no seal is 0.14's, before the
- *   cutover: its call logs nothing, and only checks that the log has no
- *   change of its object either (as `Changes` leaves such a row alone). No
- *   before is no object: no row, or a key archived, whose seal its delete
- *   left null.
+ *   does for the vault's own. A row with no seal was written around the
+ *   vault (`tampered`). No before is no object: no row, or a key archived,
+ *   whose seal its delete left null.
  * - **The changes:** what turns the object before into the object after,
  *   each one of the replay's ops (`opsBetween`), applied with `applyOp` and
  *   sealed in turn, each from the seal the one before leaves; a key's
@@ -367,7 +355,7 @@ export async function changesHold(keys: ChangeKeys, db: Queryable, refs: readonl
  *   any other (a version, a reference row or a source edited meanwhile, an
  *   older version put back, an end cleared) are `stale`. Its change carries
  *   that seal, which `app_change` holds to the log's newest sealed one. A
- *   key its log never held is 0.14's, before the cutover: logged nothing.
+ *   key its log never held has nothing to restore (`tampered`).
  */
 export function prepareChanges(
   keys: ChangeKeys, at: number, actor: string, changes: readonly ObjectChange[], kept: ReadonlyMap<string, { object: Input; seal: Buffer } | null>,
@@ -389,20 +377,13 @@ export function prepareChanges(
     }
     const ref: Ref = { kind, id };
     const object = objectKey(ref);
-    const unlogged = { kind, id, requestId: null, at, object, actor, payload: null, sealFrom: null, seal: null, mac: null, restores: null };
-    if (before !== null && before.seal === null) {
-      prepared.push(unlogged);
-      continue;
-    }
+    if (before !== null && before.seal === null) throw new NotLogged(ref, 'tampered');
     let restores: Buffer | null = null;
     if (change.kind === 'secret' && change.restores === true) {
       if (before !== null || after === null) throw new Error(`an unarchive makes an archived key's object again: the ${kind} ${id} is none to restore`);
       const last = kept.get(object);
       if (last === undefined) throw new Error(`the ${kind} ${id} is restored from what its log last sealed, which was not read`);
-      if (last === null) {
-        prepared.push(unlogged);
-        continue;
-      }
+      if (last === null) throw new NotLogged(ref, 'tampered');
       if (!sameObject(keys.seals[0]!, ref, last.object, after)) throw new NotLogged(ref, 'stale');
       restores = last.seal;
     }

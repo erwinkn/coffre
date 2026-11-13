@@ -238,25 +238,26 @@ test('app_change_strict, with the COMMIT: its number answers after it; a change 
   assert.equal((await stored(row.id))!.revokedAt, null, 'nothing written');
 });
 
-test('a row the vault never sealed is refused as tampered before anything is written; one the app says it never sealed is 0.14\'s, and logs nothing', async () => {
+test('a row the vault never sealed is refused as tampered before anything is written, whether its seal is not over it, it has none and the log no change of it, or its seal was taken off', async () => {
   const w = await world();
   const row = token();
   await write(row, await prepare(w, row), false);
+  const refusal = async (before: Row, seal: string | null, after: Row) => {
+    const outcome = await w.vault.prepare!({ actor: ROOT, changes: [{ kind: 'credential', entry: null, id: before.id, before: { columns: columns(before), seal }, after: columns(after) }] });
+    return outcome.ok ? null : outcome.refusal.code;
+  };
   // The writer widens the token's scope and keeps its seal: the vault's seal is not over it.
   const widened = { ...row, scope: JSON.stringify([{ projectId: null, environmentId: null, role: 'owner', permissions: { normal: [], protected: [] }, sensitive: true }]) };
-  const outcome = await w.vault.prepare!({ actor: ROOT, changes: [{ kind: 'credential', entry: null, id: row.id, before: { columns: columns(widened), seal: (await stored(row.id))!.seal!.toString('base64') }, after: { ...columns(widened), revoked: true } }] });
-  assert.equal(outcome.ok ? null : outcome.refusal.code, 'tampered');
-  // A row from before the cutover, unsealed, with no change: its change only checks that, logging nothing (the cutover seals it).
-  const old = token();
-  await db.owner.insert(credentials).values({ ...old, authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, createdBy: ROOT });
-  const revoked = { ...old, revokedAt: new Date() };
-  const calls = await prepare(w, revoked, old, null);
-  assert.deepEqual(calls.map((call) => call.requestId), [null]);
-  assert.deepEqual(await write(revoked, calls, true), [0n]);
-  assert.deepEqual(await opsOf(w.keys, old.id), []);
-  // An unsealed row whose object the log has changes of is not 0.14's: its seal was taken off (stale).
+  assert.equal(await refusal(widened, (await stored(row.id))!.seal!.toString('base64'), { ...widened, revokedAt: new Date() }), 'tampered');
+  // A row with no seal and no change of the log's: no change of the vault's made it.
+  const planted = token();
+  await db.owner.insert(credentials).values({ ...planted, authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, createdBy: ROOT });
+  assert.equal(await refusal(planted, null, { ...planted, revokedAt: new Date() }), 'tampered');
+  assert.deepEqual(await opsOf(w.keys, planted.id), []);
+  // The log's row, its seal taken off.
   await db.owner.update(credentials).set({ seal: null }).where(eq(credentials.id, row.id));
-  await assert.rejects(write({ ...row, revokedAt: new Date() }, await prepare(w, { ...row, revokedAt: new Date() }, row, null), true), (error: unknown) => isStaleChange(error));
+  assert.equal(await refusal(row, null, { ...row, revokedAt: new Date() }), 'tampered');
+  assert.equal((await stored(row.id))!.revokedAt, null);
 });
 
 test('app_change takes only the app\'s ops, each naming its object', async () => {

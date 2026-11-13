@@ -147,7 +147,7 @@ test("a read through a Cloudflare binding is its service's, as the binding's obj
   const id = await w.key();
   // A binding of the service's, reaching `dev`, sealed as the vault makes one (use-ways.test.ts).
   const binding = randomUUID();
-  const scope = [{ projectId: w.project, environmentId: w.dev, role: 'viewer' }];
+  const scope = [{ projectId: w.project, environmentId: w.dev, role: 'viewer', sensitive: false }];
   await db.owner.insert(serviceBindings).values({
     id: binding, authMac: Buffer.alloc(32), principal: w.principal, generation: 0, profile: 'cloudflare', issuer: 'urn:coffre:cloudflare', jwksUri: 'urn:coffre:cloudflare',
     claims: '{}', scope: JSON.stringify(scope), policy: '{}', origin: 'https://coffre.test', createdBy: ROOT,

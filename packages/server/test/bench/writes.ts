@@ -81,7 +81,7 @@ for (const person of people) {
   devices.push(started.deviceCode);
 }
 await timed('device login collected (sign_in, cli)', async (i) => signin.pollDevice(devices[i]!, meta()));
-await timed('sign-out (sign_out)', async (i) => signin.signOut(sessions[i]!, meta()));
+await timed('sign-out (sign_out)', async (i) => signin.signOut(sessions[i]!));
 await timed('member removed, its CLI session ended (member.remove)', async (i) => root.members.remove(`user:${people[i]}`));
 
 // Environments and keys (part 2): one project, each write on its own environment or key.

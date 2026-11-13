@@ -313,12 +313,11 @@ before(async () => {
     const signed = await signinService.completeSignin({ provider: 'github', subject: as, emails: [as === 'owner' ? ROOT : READER], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Chrome on Linux' });
     if (!('credential' in signed)) throw new Error(`${as} was not signed in again`);
   };
-  const scopes = { sealed: true };
   const render = async <T>(as: Persona, path: string, calls: (client: CoffreClient) => Promise<T>): Promise<T> => {
     const pool = new HyperdrivePool(relay.url, { groupReads: true });
     const db = createDatabase(app.watch(pool));
-    // As a configuration keeps them between requests: the vault's answers, and that older releases' scopes are sealed.
-    const signin = new SigninService({ ...base, db, signin: auth.signin, accesses, scopes });
+    // As a configuration keeps them between requests: the vault's answers.
+    const signin = new SigninService({ ...base, db, signin: auth.signin, accesses });
     const page = new Request(`${ORIGIN}${path}`, { headers: { cookie: `${sessionCookieName(auth)}=${sessions.get(as)!}`, 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' } });
     const syncs = relay.syncs;
     try {

@@ -498,7 +498,7 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
   const asked = at.place === null ? null : found.place;
   if (at.place !== null && asked === null) throw await refusedWith(new ApiError('not_found', `${at.place} names no environment`));
   // Where it reaches, by ID: its scope's environments, or a project's, read only when it names one.
-  const scope = readScope(binding.scope) ?? [];
+  const scope = readScope(binding.scope, { service: true });
   const reached = scope.every((grant) => grant.environmentId !== null)
     ? [...new Set(scope.map((grant) => grant.environmentId!))]
     : environmentsOf(scope, await placeRows(runtime.db)).map((environment) => environment.id);

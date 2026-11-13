@@ -132,7 +132,7 @@ test('only an Owner of its project gives a service account sensitive reads (R32)
 test('a token reaches at most what its account holds and its issuer could give it: a project the account holds nothing of is refused', async () => {
   const w = await world();
   const elsewhere = await newProject(db.owner);
-  const outcome = await w.vault.issueToken!(asked(w, (input) => ({ ...input, credential: { ...input.credential, scope: storedScope([issuedGrant({ projectId: elsewhere, environmentId: null, role: 'viewer' })]) } })));
+  const outcome = await w.vault.issueToken!(asked(w, (input) => ({ ...input, credential: { ...input.credential, scope: storedScope([{ ...issuedGrant({ projectId: elsewhere, environmentId: null, role: 'viewer' }), sensitive: false }]) } })));
   assert.equal(!outcome.ok && outcome.refused, 'refused');
 });
 
@@ -183,7 +183,7 @@ test("a service token keeps at most its roles' columns, and only a person gives 
   // A Developer account's token named `viewer` that writes: its scope says one thing, its columns another.
   const forged = asked(w, (input) => ({ ...input, principal: OTHER, credential: { ...input.credential, scope: storedScope([{
     ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }),
-    permissions: { normal: ['secret.read', 'secret.use', 'secret.write'], protected: ['secret.use'] },
+    permissions: { normal: ['secret.read', 'secret.use', 'secret.write'], protected: ['secret.use'] }, sensitive: false,
   } as ReturnType<typeof issuedGrant>]) } }));
   assert.equal(((await w.vault.issueToken!(forged)) as { refused?: string }).refused, 'refused');
   assert.ok((await w.vault.issueToken!(asked(w, (input) => ({ ...input, principal: OTHER })))).ok, 'a viewer as the role is');
@@ -237,14 +237,13 @@ test("a handle names each environment it reaches, and stands in for those alone:
   assert.equal(await credentialRows(), 0);
 });
 
-test("a credential 0.14 made, which the log never held, authorizes no issue of the vault's: it answers `unlogged`, and the app issues as before (review r3)", async () => {
+test("a credential with no seal and no change of the log's authorizes no issue: it answers `ended`, as a revoked one does, and the app issues nothing", async () => {
   const w = await world();
   const token = personal(w);
   assert.ok((await w.vault.issueToken!(token)).ok);
-  // As 0.14 left it: no seal, no change.
   await db.owner.update(credentials).set({ seal: null }).where(eq(credentials.id, token.credential.id));
   await db.owner.delete(logChanges).where(eq(logChanges.object, objectKey({ kind: 'credential', id: token.credential.id })));
-  assert.equal(((await w.vault.issueToken!(handleOf(w, token.credential.id, undefined, onViewerToken))) as { refused?: string }).refused, 'unlogged');
+  assert.equal(((await w.vault.issueToken!(handleOf(w, token.credential.id, undefined, onViewerToken))) as { refused?: string }).refused, 'ended');
 });
 
 test("an issue's write holds the credential it came in on to the end the vault authenticated: one extended while it waits, its seal unchanged, ends it (review r3)", async () => {
@@ -384,7 +383,7 @@ test("a policy change waits for the issues in flight, which hold the issue lock 
 
 test("an environment the scope names, renamed while the issue's write waits, refuses it: the slugs it was weighed on are held under the issue lock (Fable on PR 2)", async () => {
   const w = await world();
-  const scoped = asked(w, (input) => ({ ...input, credential: { ...input.credential, scope: storedScope([issuedGrant({ projectId: w.project, environmentId: w.environment, role: 'viewer' })]) } }));
+  const scoped = asked(w, (input) => ({ ...input, credential: { ...input.credential, scope: storedScope([{ ...issuedGrant({ projectId: w.project, environmentId: w.environment, role: 'viewer' }), sensitive: false }]) } }));
   const holder = postgresSession(OWNER_URL);
   try {
     // The account's row held: the issue's read is done, its write waits; meanwhile the environment is renamed.

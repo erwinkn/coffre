@@ -214,14 +214,14 @@ test('an archive undone around the app, its row live again with no seal, is refu
   const w = await world();
   const id = await w.key();
   await write([await keyChange(id, null)], async (tx) => run(tx, sql`UPDATE secrets SET archived_at = ${new Date().toISOString()} WHERE id = ${id}`));
-  // A writer brings the key back: the row reads live, with no seal, which the app takes for 0.14's, logging nothing.
+  // A writer brings the key back: the row reads live, with no seal, which the log does not bear out.
   await run(db.owner, sql`UPDATE secrets SET archived_at = NULL WHERE id = ${id}`);
   const back = await used(w, id);
   assert.ok(!back.ok && ['stale', 'tampered'].includes(codeOf(back)!), JSON.stringify(back));
   const next = await newVersion(w, id, 'over it');
   const change = await keyChange(id, { ...(await readKey(id)).columns, version: next.columns });
   assert.equal(change.before?.seal, null);
-  await assert.rejects(write([change], next.insert), (error: unknown) => isStaleChange(error));
+  await assert.rejects(write([change], next.insert), (error: unknown) => isStaleChange(error) || (error instanceof NotLogged && error.fault === 'tampered'));
   assert.deepEqual(await opsOf({ kind: 'secret', id }), ['genesis', 'secret.delete']);
 });
 
@@ -486,13 +486,11 @@ test("what an unarchive restores is read with two probes of each key's changes, 
   assert.ok(large - small <= 8, `${small} index buffers at 1k changes a key, ${large} at 100k`);
 });
 
-test("a key the log never held, archived (0.14's alone, before the cutover): its unarchive logs nothing, as any of 0.14's rows (T134)", async () => {
+test('a key the log never held (no seal, no change), archived, is no key: its unarchive is refused as tampered, nothing logged', async () => {
   const w = await world();
   const id = randomUUID();
   await db.owner.insert(secrets).values({ id, projectId: w.project, environmentId: w.dev, key: `OLD_${id.slice(0, 4)}`, archivedAt: new Date() });
-  const calls = await prepared([await keyChange(id, (await readKey(id)).columns)]);
-  assert.deepEqual(calls.map((call) => call.requestId), [null]);
-  await unarchive(id);
+  await assert.rejects(async () => prepared([await keyChange(id, (await readKey(id)).columns)]), (error: unknown) => error instanceof NotLogged && error.fault === 'tampered');
   assert.deepEqual(await opsOf({ kind: 'secret', id }), []);
 });
 
@@ -643,7 +641,7 @@ test("a reference broken while its archived holder's rows are a writer's (moved 
   await replayAgrees();
 });
 
-test("a reference broken whose holder 0.14's log alone holds (no seal, no change: before the cutover): its row's end alone, no change, so no genesis seals it live (T125)", async () => {
+test('a reference broken whose holder the log never held (no seal, no change) is refused as tampered: nothing ends, nothing is logged', async () => {
   const w = await world();
   const source = await w.key();
   const vault = await deciding();
@@ -651,18 +649,17 @@ test("a reference broken whose holder 0.14's log alone holds (no seal, no change
   const id = randomUUID();
   const made = await vault.reference({ principal: ROOT, caller: 'person', items: [{ id, holder: { projectId: w.project, environmentId: w.dev, secretId: holder, path: 'p/dev/OLD' }, source: { secretId: source } }] });
   assert.ok(made.ok);
-  // The app's rows as 0.14 writes them: no seal, no change.
+  // Rows written around the app: no seal, no change. No change of the vault's made them, so they are no key.
   await db.owner.insert(secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: `OLD_${holder.slice(0, 4)}` });
   await db.owner.insert(secretReferences).values({
     id, projectId: w.project, environmentId: w.dev, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
     createdSeq: BigInt(made.seqs[0]!), createdBy: ROOT,
   });
   const before = (await rows(db.owner, sql`SELECT number FROM log_changes`)).length;
-  assert.ok((await vault.endReferences({ principal: ROOT, caller: 'person', reason: 'broken', items: [{ reference: id, seq: made.seqs[0]! }] })).ok);
+  const ended = await vault.endReferences({ principal: ROOT, caller: 'person', reason: 'broken', items: [{ reference: id, seq: made.seqs[0]! }] });
+  assert.equal(ended.ok ? null : ended.refusal.code, 'tampered');
   assert.equal((await rows(db.owner, sql`SELECT number FROM log_changes`)).length, before);
-  const [at] = await endedAt(holder);
-  assert.ok(at !== null && at !== undefined, 'its row says it ended');
-  assert.equal(secretObject((await readKey(holder)).columns).source, null, 'a genesis from its rows seals it ended');
+  assert.deepEqual(await endedAt(holder), [null], 'its row is left as it is');
 });
 
 test("a reference row a writer planted beside the holder's, to the same source: the holder's object names its genuine row, so every use and the break are refused as tampered, the holder never served (Fable's review)", async () => {
@@ -778,28 +775,6 @@ test("a reference abandoned while another request's, for the same holder and sou
   assert.deepEqual((await endedAt(holder)).map((at) => at !== null), [false]);
   await write([await keyChange(holder, (await readKey(holder)).columns)], async (tx) => run(tx, sql`UPDATE secrets SET archived_at = NULL WHERE id = ${holder}`));
   assert.ok((await used(w, holder)).ok);
-});
-
-test("two references of one holder 0.14's log alone holds, ended in one call: each named row ends, and nothing else (review r8)", async () => {
-  const w = await world();
-  const [one, two] = [await w.key('one'), await w.key('two')];
-  const vault = await deciding();
-  const holder = randomUUID();
-  await db.owner.insert(secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: `OLD_${holder.slice(0, 4)}` });
-  const vias: Via[] = [];
-  for (const source of [one, two]) {
-    const id = randomUUID();
-    const made = await vault.reference({ principal: ROOT, caller: 'person', items: [{ id, holder: { projectId: w.project, environmentId: w.dev, secretId: holder, path: 'p/dev/OLD' }, source: { secretId: source } }] });
-    assert.ok(made.ok);
-    await db.owner.insert(secretReferences).values({
-      id, projectId: w.project, environmentId: w.dev, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
-      createdSeq: BigInt(made.seqs[0]!), createdBy: ROOT,
-    });
-    vias.push({ reference: id, seq: made.seqs[0]! });
-  }
-  assert.ok((await vault.endReferences({ principal: ROOT, caller: 'person', reason: 'broken', items: vias })).ok);
-  assert.deepEqual((await endedAt(holder)).map((at) => at !== null), [true, true]);
-  assert.equal(secretObject((await readKey(holder)).columns).source, null);
 });
 
 test("a break after a writer planted a forged `reference.end` (the vault's name, no valid MAC): only an authentic end counts, so the break happens and the holder reads it ended (review r9)", async () => {

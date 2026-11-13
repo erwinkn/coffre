@@ -2403,8 +2403,7 @@ class VaultService implements Vault {
       // (`readerOf`, as a use's reader). 0.14's reader reads rows no seal covers (an environment's slug, a project's
       // tombstone, the protection they make): a writer who swapped one could let a member end what they may not
       // (reviews r10 and r11). An end needs both to allow it, so an unsealed row can only refuse one. An object the log
-      // does not bear out refuses the end. Per reference: one whose holder environment, or the actor, 0.14's log alone
-      // holds (before the cutover) is 0.14's reader's alone, and no other reference of the call with it (review r12).
+      // does not bear out refuses the end.
       const allowed14 = !codes.some((code) => code !== null);
       if (allowed14) {
         const member = await d.changes.held(d.tx, { kind: 'principal', id: principal });
@@ -2414,17 +2413,15 @@ class VaultService implements Vault {
           const held = await d.changes.held(d.tx, { kind: 'environment', id });
           if (held.log === 'live' && held.object.kind === 'environment') places.set(id, held.object);
         }
-        if (member.log !== 'unlogged') {
-          const account = member.log === 'live' && member.object.kind === 'principal' ? member.object : null;
-          // The way the actor came in, as a reader takes it: its kind and scope (its generation weighs nothing here).
-          const credential: CredentialInput = {
-            kind: 'credential', id: principal, principal, caller: input.caller, scope: input.credentialScope ?? null, expiresAt: null, revoked: false, generation: account?.generation ?? 0,
-          };
-          const reader = readerOf(account, credential, roles.log === 'live' && roles.object.kind === 'roles' ? roles.object : noEdits(), places.values(), d.at);
-          mayEnd(reader, places).forEach((code, i) => {
-            if (places.has(seals[i]!.holder.environmentId)) codes[i] = code;
-          });
-        }
+        const account = member.log === 'live' && member.object.kind === 'principal' ? member.object : null;
+        // The way the actor came in, as a reader takes it: its kind and scope (its generation weighs nothing here).
+        const credential: CredentialInput = {
+          kind: 'credential', id: principal, principal, caller: input.caller, scope: input.credentialScope ?? null, expiresAt: null, revoked: false, generation: account?.generation ?? 0,
+        };
+        const reader = readerOf(account, credential, roles.log === 'live' && roles.object.kind === 'roles' ? roles.object : noEdits(), places.values(), d.at);
+        mayEnd(reader, places).forEach((code, i) => {
+          if (places.has(seals[i]!.holder.environmentId)) codes[i] = code;
+        });
       }
       if (!codes.some((code) => code !== null)) (await ended(d.tx)).forEach((code, i) => (codes[i] = code));
       const first = codes.find((code) => code !== null) ?? null;
@@ -4304,8 +4301,6 @@ class VaultService implements Vault {
     let viaScope: CredentialScope | null = null;
     if (input.via !== null) {
       if (via === null) return refuse('ended');
-      // One 0.14 made, which the log never held, has nothing the vault can authenticate: the app issues on it as before.
-      if (via.seal === null && via.newest === null) return refuse('unlogged');
       // Its newest change's MAC first (T190): `issue_token` and `change_bindings` hold the row to that change's seal
       // in SQL, which cannot authenticate it, so a revoked credential put back, the seal written to match, issues.
       if (via.newest !== null && !via.newest.holds) {
@@ -4386,8 +4381,8 @@ class VaultService implements Vault {
     let read: IssueRead | null = null;
     let reports: NewEntry[] = [];
     if (make !== null) {
-      const scope = readScope(make.scope);
-      if (scope === null || scope.length === 0) throw new Error('a binding made reaches what its scope names, at least one place');
+      const scope = readScope(make.scope, { service: true });
+      if (scope.length === 0) throw new Error('a binding made reaches what its scope names, at least one place');
       const weighed = await this.#issuerRead(log015, {
         actor, via: input.via, principal: make.principal, generation: make.generation, actorAccess: input.actorAccess, policy: input.policy, scope, service: true,
       });

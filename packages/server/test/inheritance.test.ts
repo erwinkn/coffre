@@ -7,6 +7,7 @@ import { and, eq } from 'drizzle-orm';
 
 import { auditChainHead, auditLog, environments, projects, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 import { clientFor, loggedSince, logMark, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { AppChanges, secretChange } from '../src/api/changes.ts';
 
 /**
  * Forks that inherit (docs/design/forking.md): an environment with a
@@ -313,10 +314,17 @@ test('no copy goes into an empty environment that inherits, and a chain made aro
   await assert.rejects(maintainer.secrets.reveal('market/prod-eu'), { status: 409, message: /parents loop or run past 3/ });
 });
 
-test("a fork's key of its own with neither a value nor a reference, written around the app, reads as no value rather than serve the parent's", async () => {
+test("a fork's key of its own with neither a value nor a reference, as an ended reference leaves one, reads as no value rather than serve the parent's", async () => {
   await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
   const [market] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
-  await db.owner.insert(secrets).values({ id: randomUUID(), projectId: market.id, environmentId: await environmentId('prod-eu'), key: 'STRIPE_KEY' });
+  const key = { id: randomUUID(), projectId: market.id, environmentId: await environmentId('prod-eu') };
+  // Its row, and the vault's change that seals it, as the app writes a key: a row with no seal is no key the log holds.
+  const made = await AppChanges.prepare(deps.vault, `user:${ROOT}`, [secretChange(key.id, undefined, { ...key, source: null, reference: null, version: null }, null)]);
+  await db.owner.transaction(async (tx) => {
+    await tx.insert(secrets).values({ ...key, key: 'STRIPE_KEY' });
+    await made!.commit(tx);
+  });
+  await made!.sealed(db.owner);
   // The list and the missing keys count it as prod-eu's own: a read settles it there too, and finds no value, as anywhere.
   assert.equal((await values(maintainer, 'market/prod-eu')).STRIPE_KEY, undefined);
   await assert.rejects(maintainer.secrets.reveal('market/prod-eu/STRIPE_KEY'), { status: 404 });

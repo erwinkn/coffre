@@ -5,20 +5,17 @@
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
-import { defineSignin, generateToken, github, hashToken, signin, tokenHint } from '@coffre/core/identity';
+import { defineSignin, github } from '@coffre/core/identity';
 import { and, asc, eq } from 'drizzle-orm';
 
-import { authMac } from '../src/auth-rows.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { fetchApi } from '../src/fetch-api.ts';
-import { resolveConfig } from '../src/config.ts';
-import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { auditLog, credentials, environments, logChanges, secrets, secretVersions, serviceBindings, principals } from '@coffre/db/schema';
+import type { CoffreRuntime } from '../src/runtime.ts';
+import { auditLog, credentials, environments, logChanges, secrets, secretVersions, serviceBindings } from '@coffre/db/schema';
 import { clientFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -307,68 +304,6 @@ test("a scope changed or cleared around the app fails the row's MAC, and the tok
   }
   await db.owner.update(credentials).set({ scope: row!.scope }).where(eq(credentials.id, row!.id));
   assert.equal(await reads(issued.token, 'dev'), 'dev-key', 'its own scope put back checks again');
-});
-
-/** A token of 0.4, issued for `principal`: no scope, its MAC over 0.4's tuple. Its value. */
-async function legacyToken(principal: string): Promise<{ token: string; id: string }> {
-  const token = generateToken('service');
-  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, principal));
-  const row = {
-    id: randomUUID(),
-    kind: 'service',
-    tokenHash: hashToken(token),
-    generation: member!.generation,
-    tokenHint: tokenHint(token),
-    principal,
-    identityId: null,
-    label: '0.4',
-    createdBy: 'ada@acme.example',
-    expiresAt: new Date(Date.now() + 86_400_000),
-    revokedAt: null,
-    passkeyId: null,
-    confirmedAt: null,
-  };
-  await db.owner.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) });
-  return { token, id: row.id };
-}
-
-test('on Workers, where each request builds its runtime, the isolate seals once: a later request reads no unsealed rows, and asks the vault of no other account', async () => {
-  const issued = await ada.tokens.issue(CI, { expiresInDays: 30 });
-  await ada.members.add('token:ci-old');
-  await ada.access.set('token:ci-old', { 'market/dev': 'viewer' });
-  const first = await legacyToken('token:ci-old');
-  // What `createCoffre` keeps for the isolate, and `runtimeFor` builds each runtime from, request by request.
-  const config = resolveConfig({ publicUrl: ORIGIN, vault: deps.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64') });
-  const transport = { json: async () => ({}) };
-  const asked: string[] = [];
-  const access = deps.vault.access.bind(deps.vault);
-  deps.vault.access = async (principal) => {
-    asked.push(principal);
-    return access(principal);
-  };
-  const scope = async (id: string) => (await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.id, id)))[0]!.scope;
-  /** A request of the isolate, with its own runtime: what it read of `credentials`' unsealed rows, and whom it asked the vault about. */
-  const request = async (isolate: typeof config) => {
-    asked.length = 0;
-    const answered = await fetchApi(
-      // A request the vault decides: `GET /api/me` asks it nothing.
-      new Request(`${ORIGIN}/api/projects`, { headers: { authorization: `Bearer ${issued.token}` } }),
-      createRuntime(isolate, deps.db, deps.vault, transport),
-      { sourceIp: null },
-    );
-    assert.equal(answered.status, 200);
-    return [...asked];
-  };
-  assert.deepEqual(await request(config), ['token:ci-old', 'user:ada@acme.example', CI], 'the first request seals, asking who issued what it seals, then checks its own token');
-  assert.notEqual(await scope(first.id), null);
-  // A token 0.4 makes while both run: no request of this isolate reads it, nor asks the vault about its account.
-  const second = await legacyToken('token:ci-old');
-  for (let i = 0; i < 3; i++) assert.deepEqual(await request(config), [CI]);
-  assert.equal(await scope(second.id), null);
-  // Another isolate, or process, seals it on its first request.
-  const another = resolveConfig({ publicUrl: ORIGIN, vault: deps.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64') });
-  assert.deepEqual(await request(another), ['token:ci-old', 'user:ada@acme.example', CI]);
-  assert.notEqual(await scope(second.id), null);
 });
 
 test("a token's dry run says what it would reach, checked as issuing it is, and issues and logs nothing", async () => {

@@ -142,7 +142,7 @@ function issue(actor: string, scope: CredentialScope): IssueTokenInput {
     actor, via: null, principal: CI, generation: 0, actorAccess: null,
     credential: {
       id: randomUUID(), kind: 'service', tokenHash: randomBytes(32).toString('base64'), tokenHint: 'coffre_svc_x', label: 'deploys',
-      scope: storedScope(scope), places: null, expiresAt: Date.now() + 86_400_000, createdBy: actor.slice('user:'.length), passkeyId: null, authMac: randomBytes(32).toString('base64'),
+      scope: storedScope(scope.map((grant) => ({ sensitive: false, ...grant }))), places: null, expiresAt: Date.now() + 86_400_000, createdBy: actor.slice('user:'.length), passkeyId: null, authMac: randomBytes(32).toString('base64'),
     },
     policy: { seq: null, protected: [] },
     appKey: APP_KEY,

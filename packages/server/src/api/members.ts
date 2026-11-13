@@ -582,7 +582,7 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
       hint: token.tokenHint,
       expiresAt: token.expiresAt.toISOString(),
       lastUsedAt: token.lastUsedAt?.toISOString() ?? null,
-      scope: scopeByPath(readScope(token.scope), known),
+      scope: scopeByPath(readScope(token.scope, { service: true }), known),
     })),
     apps,
     personalTokens: member.type === 'user' ? tokenRows(held, known) : [],

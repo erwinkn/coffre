@@ -96,7 +96,7 @@ function route(path: string, init: RequestInit = {}, on = runtime): Promise<Resp
  * or add takes (a fresh check, passkeys.md, section 4.1).
  */
 async function freshSession(email: string): Promise<string> {
-  return confirmedSession(db.owner, deps.chainKey, email, await addPasskey(db.owner, deps.chainKey, email));
+  return confirmedSession(deps, email, await addPasskey(db.owner, deps.chainKey, email));
 }
 
 /** A CLI session for `email`: how these tests stand in for the consent page's browser. */
@@ -713,7 +713,7 @@ test('a connection names the passkey that confirmed the session that made it, an
   const key = await addPasskey(db.owner, deps.chainKey, DEV);
   const { verifier, challenge } = pkce();
   const redirect = 'http://localhost:51234/callback';
-  const back = await decide(await confirmedSession(db.owner, deps.chainKey, DEV, key), request(CLAUDE_CODE, redirect, challenge, { scope: 'read' }), { approve: true, scopes: ['read'], touch: key });
+  const back = await decide(await confirmedSession(deps, DEV, key), request(CLAUDE_CODE, redirect, challenge, { scope: 'read' }), { approve: true, scopes: ['read'], touch: key });
   const [row] = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${DEV}`));
   assert.equal(row!.passkeyId, key);
   const redeemed = await route('/api/oauth/token', tokenRequest({ grant_type: 'authorization_code', code: back.searchParams.get('code')!, code_verifier: verifier, redirect_uri: redirect, client_id: CLAUDE_CODE, resource: RESOURCE }));
@@ -753,7 +753,7 @@ test("a token issued through a connection names the connection's passkey, and no
   const key = await addPasskey(db.owner, deps.chainKey, ROOT);
   const { verifier, challenge } = pkce();
   const redirect = 'http://localhost:51234/callback';
-  const back = await decide(await confirmedSession(db.owner, deps.chainKey, ROOT, key), request(CLAUDE_CODE, redirect, challenge, { scope: 'read manage-access' }), { approve: true, scopes: ['read', 'manage-access'], touch: key });
+  const back = await decide(await confirmedSession(deps, ROOT, key), request(CLAUDE_CODE, redirect, challenge, { scope: 'read manage-access' }), { approve: true, scopes: ['read', 'manage-access'], touch: key });
   const redeemed = await route('/api/oauth/token', tokenRequest({ grant_type: 'authorization_code', code: back.searchParams.get('code')!, code_verifier: verifier, redirect_uri: redirect, client_id: CLAUDE_CODE, resource: RESOURCE }));
   assert.equal(redeemed.status, 200, await redeemed.clone().text());
   const [connection] = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${ROOT}`));

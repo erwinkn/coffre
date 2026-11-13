@@ -104,7 +104,7 @@ test('a session the vault cannot check right now is an outage, answered 503, not
   assert.equal(tampered.status, 401);
   await db.owner.update(credentials).set({ expiresAt: row!.expiresAt }).where(eq(credentials.id, row!.id));
   // And one checked and revoked, too.
-  await signin.signOut(session.token, meta());
+  await signin.signOut(session.token);
   const refused = await authenticate();
   assert.ok(refused instanceof Response);
   assert.equal(refused.status, 401);
@@ -404,7 +404,7 @@ for (const readmitFirst of [false, true]) {
 test('a linking callback rechecks the session that authenticated it', async () => {
   const browser = await browserSession(DEV, 'original');
   const stale = { ...await contextFor(deps, DEV), credentialId: browser.id };
-  await signin.signOut(browser.token, meta());
+  await signin.signOut(browser.token);
   assert.deepEqual(await signin.linkIdentity(stale, {
     provider: 'github', subject: 'personal', emails: [], name: null,
   }), { ok: false, reason: 'deactivated' });

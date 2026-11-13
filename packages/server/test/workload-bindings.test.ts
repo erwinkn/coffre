@@ -263,17 +263,13 @@ test('removing a binding writes its tombstone; a denied attempt is no tombstone,
   assert.deepEqual(await liveBindings(db.runtime, deps.chainKey, MEMBER, 0), []);
 });
 
-test('a binding the log never held, removed, ends with no change: its token.unbind is an event, written through note (#569)', async () => {
+test("a binding with no seal and no change of the log's is none: its removal is of an unknown binding, and writes only its denial", async () => {
   const { binding } = await bind(DEPLOY);
-  // As the cutover left one it refused: no seal, no change.
   await db.owner.update(serviceBindings).set({ seal: null }).where(eq(serviceBindings.id, binding.id));
   await db.owner.delete(logChanges).where(eq(logChanges.object, logObject('binding', binding.id)));
-  assert.deepEqual(await as(LEAD).bindings.remove(MEMBER, binding.id), { unbound: true });
-  assert.deepEqual(
-    (await entries('token.unbind')).map((entry) => [entry.decision, entry.metadata.bindingId, entry.metadata.reason]),
-    [['allow', binding.id, 'removed']],
-  );
-  assert.deepEqual(await db.owner.select().from(auditLog).where(eq(auditLog.action, 'token.unbind')), [], 'none in the old log');
+  await assert.rejects(as(LEAD).bindings.remove(MEMBER, binding.id), (error: unknown) => (error as { reason?: string }).reason === 'unknown_binding');
+  assert.deepEqual((await entries('token.unbind')).map((entry) => [entry.decision, entry.metadata.reason]), [['deny', 'unknown_binding']]);
+  assert.equal((await db.owner.select({ revokedAt: serviceBindings.revokedAt }).from(serviceBindings).where(eq(serviceBindings.id, binding.id)))[0]!.revokedAt, null);
 });
 
 test('a binding row changed around the app, or made without its key, is passed over', async () => {

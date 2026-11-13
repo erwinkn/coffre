@@ -11,7 +11,7 @@ import { postgresClient } from '@coffre/db/connect';
 
 import { AfterMigrations, HandOverFailed, LockWaitsExhausted, managedObjects, migrateDatabase, MIGRATION_LOCK_ATTEMPTS, MIGRATION_LOCK_WAIT_MS, migrationsFolder, NotOwner } from '@coffre/db/migrate';
 
-import { describeEveryProject, describeFirstRun, describeIssuers, describeUnsealed, migrationFailure, pinProblem } from '../src/migrate.ts';
+import { describeEveryProject, migrationFailure, pinProblem } from '../src/migrate.ts';
 import { cliVersion } from '../src/version.ts';
 import { asSuperuser, CLUSTER, database, emptyCluster, needsCluster } from './cluster.ts';
 
@@ -120,71 +120,6 @@ test('migrate says what the vault will make of each grant on every project of 0.
     'Revoke or regrant any of them before you deploy to choose otherwise (docs/design/instance-roles.md).',
     '',
   ].join('\n'));
-});
-
-test("migrate lists 0.4's tokens and bindings by account, which keep what their account holds when this version first runs", () => {
-  assert.equal(describeUnsealed([]), '');
-  assert.equal(
-    describeUnsealed([
-      { kind: 'token', id: 't1', principal: 'token:ci-web', createdBy: 'erwin@acme.example', scope: null },
-      { kind: 'token', id: 't2', principal: 'token:ci-web', createdBy: 'erwin@acme.example', scope: null },
-      { kind: 'binding', id: 'b1', principal: 'token:ci-web', createdBy: 'erwin@acme.example', scope: null },
-      { kind: 'binding', id: 'b2', principal: 'token:deploy', createdBy: 'erwin@acme.example', scope: null },
-    ]),
-    [
-      '',
-      'Service tokens and trust bindings now carry their own scope, and what an account is given later reaches none made before.',
-      'When this version first checks a credential, each of these keeps what its account holds then, after any conversion above:',
-      '  service:ci-web: 2 tokens and 1 trust binding',
-      '  service:deploy: 1 trust binding',
-      'Grant or revoke before you deploy to choose what they keep; to change one after, issue another and revoke it.',
-      '',
-    ].join('\n'),
-  );
-});
-
-test('migrate lists the tokens and bindings of a release before 0.11 by account and issuer, which read sensitive values where their issuer owns the project', () => {
-  assert.equal(describeIssuers([]), '');
-  const scope = '[{"projectId":"p","environmentId":null,"role":"viewer"}]';
-  assert.equal(
-    describeIssuers([
-      { kind: 'token', id: 't1', principal: 'token:ci-web', createdBy: 'erwin@acme.example', scope },
-      { kind: 'binding', id: 'b1', principal: 'token:ci-web', createdBy: 'ada@acme.example', scope },
-      { kind: 'binding', id: 'b2', principal: 'token:deploy', createdBy: 'erwin@acme.example', scope },
-    ]),
-    [
-      '',
-      'A service token or trust binding now reads a sensitive value only where an Owner of its project issued it.',
-      'When this version first checks a credential, each of these reads them where whoever issued it is an Owner of the project then, project by project:',
-      '  service:ci-web: 1 token and 1 trust binding, issued by erwin@acme.example, ada@acme.example',
-      '  service:deploy: 1 trust binding, issued by erwin@acme.example',
-      "Anyone else's, one whose issuer has left included, read every other value; an Owner of the project issues one that reads them too.",
-      '',
-    ].join('\n'),
-  );
-});
-
-test('migrate says which accounts hold nothing, whose tokens and bindings would reach nothing for good', () => {
-  const unsealed = [
-    { kind: 'token' as const, id: 't1', principal: 'token:ci-web', createdBy: 'erwin@acme.example', scope: null },
-    { kind: 'token' as const, id: 't2', principal: 'token:idle', createdBy: 'erwin@acme.example', scope: null },
-    { kind: 'binding' as const, id: 'b1', principal: 'token:idle', createdBy: 'erwin@acme.example', scope: null },
-    { kind: 'token' as const, id: 't3', principal: 'token:old', createdBy: 'erwin@acme.example', scope: null },
-  ];
-  const conversion = (grants: number) => ({ role: 'member', scope: { projects: 'all', environments: 'all' }, grants: Array.from({ length: grants }, () => ({ projectId: 'p', environmentId: null, role: 'viewer' })), narrowed: [] });
-  const said = describeFirstRun({
-    everyProject: [
-      // On every project, which the vault converts: it holds what that becomes.
-      { principal: 'token:ci-web', before: [{ place: '*', role: 'viewer', expiresAt: null }], conversion: conversion(1), paths: { p: 'market' }, reported: false },
-      // Reported tampered with: left as it is, which no scope reaches.
-      { principal: 'token:old', before: [{ place: '*', role: 'viewer', expiresAt: null }], conversion: conversion(1), paths: { p: 'market' }, reported: true },
-    ] as never,
-    unsealed,
-    holding: new Set(['user:ada@acme.example']),
-  }).split('\n');
-  assert.ok(said.includes('  service:ci-web: 1 token'));
-  assert.ok(said.includes('  service:idle: 1 token and 1 trust binding, which will reach nothing: grant the account before you deploy, or reissue them after'));
-  assert.ok(said.includes('  service:old: 1 token, which will reach nothing: grant the account before you deploy, or reissue it after'));
 });
 
 test("a migration's refusal is its own sentence, not the SQL around it", () => {

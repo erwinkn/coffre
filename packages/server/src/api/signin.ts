@@ -95,10 +95,7 @@ import {
   personalScope,
   readScope,
   scopeByPath,
-  sealCredentials,
-  sealScopes,
   storedScope,
-  unsealedScope,
   type ScopeByPath,
 } from './services.ts';
 
@@ -108,12 +105,6 @@ export type SigninServiceDeps = {
   /** Who is a member, and who owns the instance while nobody does, is the vault's to say. */
   vault: Vault;
   signin: SigninConfig;
-  /**
-   * Whether 0.4's tokens and bindings are sealed (`sealScopes`), for as long
-   * as the configuration lives: the isolate's, which builds a service for
-   * each request, or the process's. The service's own when left out.
-   */
-  scopes?: { sealed: boolean };
   /** The vault's last answer about each principal, for as long as the configuration lives (`Accesses`). */
   accesses?: Accesses;
 };
@@ -411,7 +402,7 @@ export function tokenRows(held: readonly HeldCredential[], known: readonly Place
       expiresAt: row.expiresAt.toISOString(),
       lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
       lastUsedIp: row.lastUsedIp,
-      scope: scopeByPath(readScope(row.scope), known),
+      scope: scopeByPath(readScope(row.scope, { service: row.kind !== 'personal' && row.kind !== 'handle' }), known),
       ...(row.kind === 'workload' ? { session: { bindingId: issuingBinding(row.createdBy) } } : {}),
     }));
 }
@@ -459,14 +450,12 @@ export function normalizeUserCode(input: string): string | null {
 export class SigninService {
   readonly #deps: SigninServiceDeps;
   readonly #stateKey: Buffer;
-  readonly #scopes: { sealed: boolean };
 
   constructor(deps: SigninServiceDeps) {
     this.#deps = deps;
     // Derived rather than configured: one fewer secret to provision, and
     // HKDF keeps it independent of the audit chain key it comes from.
     this.#stateKey = deriveKey(deps.chainKey, 'signin-state/v1');
-    this.#scopes = deps.scopes ?? { sealed: false };
     this.#ceremonies = new CeremonyStates(deps.chainKey);
   }
 
@@ -1585,11 +1574,6 @@ export class SigninService {
         && row.identityIssuerHash === this.#issuerHash(row.identityProvider ?? '')));
   }
 
-  /** A live service token 0.4 made, or a run's credential its binding issued, that carries no scope yet. */
-  #unsealed(row: NonNullable<Awaited<ReturnType<typeof findCredential>>>, access: Access, now: Date): boolean {
-    return row.kind === 'service' && unsealedScope(row.scope) && this.#liveCredential(row, access, now);
-  }
-
   async #issue(
     tx: Transaction,
     kind: CredentialKind,
@@ -1612,9 +1596,8 @@ export class SigninService {
    * weighs the scope itself, and writes it in one statement; no 0.14 head,
    * and no 0.14 entry: its change records the issue (D147). What it read
    * moving meanwhile, it weighs again itself; still moving after that, 409
-   * (`ObjectMoved`). Each refusal is logged as the app's are. On a
-   * credential 0.14 made, which the vault cannot authenticate, null: the
-   * caller issues as before.
+   * (`ObjectMoved`). Each refusal is logged as the app's are. Null for a
+   * request through an MCP connection: the caller issues it.
    */
   async #issuedByVault(
     ctx: Asker,
@@ -1652,7 +1635,6 @@ export class SigninService {
     });
     if (outcome.ok) return issued;
     switch (outcome.refused) {
-      case 'unlogged': return null;
       case 'moved': throw new ObjectMoved();
       // The issuer's access moved since the scope was weighed: asked again, weighed as they are now (as `issuerStill`).
       case 'access': throw new ApiError('conflict', 'your access changed while this ran: try again', ACCESS_CHANGED);
@@ -1744,33 +1726,18 @@ export class SigninService {
     let settings: Settings | undefined;
     let policySeq: bigint | null = null;
     try {
-      if (!this.#scopes.sealed) {
-        await sealScopes(db, chainKey, this.#deps.vault);
-        this.#scopes.sealed = true;
-      }
       row = await findCredential(db, chainKey, { tokenHash }, request.shows === 'caller' ? 'answer' : request.shows ?? request.ahead, checked);
       const shown = row === null || request.shows !== 'caller' ? null : answerOf(row.principal, row.answer);
       settings = shown?.settings ?? row?.settings;
-      // Read with the row, before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
+      // Read with the row, before the vault is asked: what a write weighed on this caller is held to (`policyStill`).
       policySeq = row?.policySeq ?? null;
-      // A kept answer at the credential's generation, unless its scope is still to be sealed, from what the account holds now.
-      const unsealed = row !== null && row.kind === 'service' && unsealedScope(row.scope);
-      const recall = request.recall === true && row !== null && !unsealed;
-      // Only shown, read from the vault's rows, for an active member (`shownActive`); a scope still to be sealed is sealed from the vault's answer, asked.
-      if (shown !== null && !unsealed && shownActive(shown.access)) [access, unchecked] = [shown.access, true];
-      // Decided by the use this request made, on the sealed rows (a token still to be sealed asks, as it seals from the answer).
-      else if (row !== null && request.standing !== undefined && !unsealed) access = request.standing;
+      // A kept answer at the credential's generation.
+      const recall = request.recall === true && row !== null;
+      // Only shown, read from the vault's rows, for an active member (`shownActive`).
+      if (shown !== null && shownActive(shown.access)) [access, unchecked] = [shown.access, true];
+      // Decided by the use this request made, on the sealed rows.
+      else if (row !== null && request.standing !== undefined) access = request.standing;
       else if (row !== null) ({ access, recalled } = await accessFor(this.#deps, row.principal, recall && { generation: row.generation }));
-      // A token an older release made after this configuration sealed its own: sealed on its first use, with the account's
-      // grants the vault just answered. One a binding issued carries its binding's scope, which is never sealed: refused.
-      if (row !== null && access !== null && this.#unsealed(row, access, asked)) {
-        if (issuingBinding(row.createdBy) !== null) row = null;
-        else {
-          await sealCredentials(db, chainKey, this.#deps.vault, access, policySeq, [{ kind: 'token', id: row.id, principal: row.principal, createdBy: row.createdBy, scope: row.scope }]);
-          row = await findCredential(db, chainKey, { tokenHash }, undefined, checked);
-          if (row !== null && this.#unsealed(row, access, asked)) throw new Error('its scope could not be sealed');
-        }
-      }
     } catch (error) {
       if (error instanceof AuthRowTampered) throw error;
       throw new CredentialUncheckable(error);
@@ -1806,7 +1773,7 @@ export class SigninService {
           ...(unchecked === undefined ? {} : { unchecked }),
           ...(settings === undefined ? {} : { settings }),
           policySeq,
-          credentialScope: readScope(row.scope),
+          credentialScope: readScope(row.scope, { service: true }),
           exchanged: row.bindingStands !== null,
           personalToken: null,
           handlePlaces: null,
@@ -1828,7 +1795,7 @@ export class SigninService {
           ...(settings === undefined ? {} : { settings }),
           policySeq,
           // A personal token's scope is under its row's MAC; one that does not read as a scope reaches nothing.
-          credentialScope: row.kind === 'personal' || row.kind === 'handle' ? readScope(row.scope) ?? [] : null,
+          credentialScope: row.kind === 'personal' || row.kind === 'handle' ? readScope(row.scope, { service: false }) : null,
           personalToken: row.kind === 'personal' ? { id: row.id, label: row.label ?? '', expiresAt: row.expiresAt.toISOString() } : null,
           handlePlaces: row.kind === 'handle' ? readPlaces(row.places) : null,
           expiresAt: row.expiresAt.toISOString(),
@@ -1840,57 +1807,19 @@ export class SigninService {
 
   // --- signing out and revoking ---------------------------------------------
 
-  /** Revoke the credential this token is. Unknown tokens are a quiet no-op. */
-  async signOut(token: string, meta: Omit<ClientMeta, 'label'>): Promise<void> {
+  /** Revoke the credential this token is, in one call to the vault, whose change records the sign-out. Unknown tokens are a quiet no-op. */
+  async signOut(token: string): Promise<void> {
     if (!isCoffreToken(token)) return;
     const tokenHash = hashToken(token);
-    if (await vaultMakesCredentials(this.#deps.vault)) {
-      const vault = this.#deps.vault as CredentialsVault;
-      // With 0.15's log, the vault revokes it (T149): its row read, one call. Its change records the sign-out (D147). A row
-      // 0.14 made, which the log never held, is signed out as below, with 0.14's entry.
-      for (let tries = 0; ; tries++) {
-        const [row] = await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.tokenHash(tokenHash));
-        if (row === undefined) return;
-        if (row.seal === null) break;
-        // A run's credential signing itself out is the run's act, a personal token's the token's, as 0.14's entry says.
-        const trace = issuingBinding(row.createdBy) !== null || row.kind === 'personal' || row.kind === 'handle' ? { credentialId: row.id, mcp: null } : null;
-        if (await revokedByVault(vault, this.#deps.chainKey, row, { actor: row.principal, revokedBy: memberOf(row.principal).id, reason: 'sign_out', via: row.id, trace, caller: null })) return;
-        if (tries === 2) throw new ObjectMoved();
-      }
+    const vault = this.#deps.vault as CredentialsVault;
+    for (let tries = 0; ; tries++) {
+      const [row] = await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.tokenHash(tokenHash));
+      if (row === undefined) return;
+      // A run's credential signing itself out is the run's act, a personal token's the token's.
+      const trace = issuingBinding(row.createdBy) !== null || row.kind === 'personal' || row.kind === 'handle' ? { credentialId: row.id, mcp: null } : null;
+      if (await revokedByVault(vault, this.#deps.chainKey, row, { actor: row.principal, revokedBy: memberOf(row.principal).id, reason: 'sign_out', via: row.id, trace, caller: null })) return;
+      if (tries === 2) throw new ObjectMoved();
     }
-    // A row 0.14 made, which the log never held: its revoke writes no change, so its entry is an event, signed with it.
-    const signedOut = (row: { id: string; principal: string; kind: string; createdBy: string }): AuditEntry => {
-      const member = memberOf(row.principal);
-      return {
-        actorType: member.type,
-        actorId: member.id,
-        action: 'sign_out',
-        decision: 'allow',
-        requestId: meta.requestId,
-        sourceIp: meta.sourceIp,
-        // A run's credential signing itself out is the run's act, too; a personal token's, the token's.
-        metadata: { targetCredentialId: row.id, kind: row.kind, ...(issuingBinding(row.createdBy) !== null || row.kind === 'personal' || row.kind === 'handle' ? { credentialId: row.id } : {}) },
-      };
-    };
-    await retrying(async () => {
-    const read = await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.tokenHash(tokenHash));
-    // Its actor, the session's own principal: a sign-out acts for whoever holds the token.
-    const changes = await AppChanges.prepare(this.#deps.vault, read[0]?.principal ?? COFFRE_ACTOR, revokes(read), read[0] === undefined ? [] : eventsOf({ credentialId: null }, signedOut(read[0])));
-    await audited(this.#deps, async (tx, log) => {
-      const row = await findCredential(tx, this.#deps.chainKey, { tokenHash });
-      if (row === null) return changes?.expectRevoked([]);
-      const member = memberOf(row.principal);
-      const revoked = await updateAuth(
-        tx,
-        this.#deps.chainKey,
-        credentials,
-        { id: row.id, revokedAt: null },
-        { revokedAt: new Date(), revokedBy: member.id },
-      );
-      changes?.expectRevoked(revoked === 0 ? [] : [row.id]);
-      if (revoked > 0) log.push(signedOut(row));
-    }, changes);
-    });
   }
 
   /**
@@ -1898,62 +1827,14 @@ export class SigninService {
    * or, `of` a service account the caller manages (`managedAccount`, asked
    * before: no vault call runs in a transaction), one of its tokens. With
    * `of`, a credential that is not one of the member's tokens is unknown;
-   * as `'own handle'`, one that is not a handle of the caller's.
+   * as `'own handle'`, one that is not a handle of the caller's. The vault
+   * revokes it, in one call, once the row as read says the caller may,
+   * holding the policy that weighed it to the newest under the fence. Its
+   * change records the revoke; a refusal is logged as one.
    */
   async revokeCredential(ctx: Asker, credentialId: string, of: { member: string; managed: boolean } | 'own handle' | null = null): Promise<{ revoked: true }> {
-    const byVault = (await vaultMakesCredentials(this.#deps.vault)) ? await this.#revokedByVault(this.#deps.vault as CredentialsVault, ctx, credentialId, of) : null;
-    if (byVault !== null) return byVault;
-    // A row 0.14 made, which the log never held: its revoke writes no change, so its entry is an event, signed with it.
-    const revokedEntry = (row: { kind: string; principal: string }) => allowed(ctx, 'token.revoke', {
-      metadata: { targetCredentialId: credentialId, kind: row.kind, principalType: memberOf(row.principal).type, principalId: memberOf(row.principal).id },
-    });
-    return retrying(async () => {
-    const read = await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.id(credentialId));
-    const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), revokes(read), read[0] === undefined ? [] : eventsOf(ctx, revokedEntry(read[0])));
-    // Whether the caller manages the token's account (`of`) was weighed with the policy they were loaded with (`audited`).
-    return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
-      const row = await findCredential(tx, this.#deps.chainKey, { id: credentialId });
-      const unknown = () =>
-        new Refusal(
-          notFound('unknown credential'),
-          denied(ctx, 'token.revoke', 'unknown_credential', { metadata: { targetCredentialId: credentialId } }),
-        );
-      if (row === null || row.revokedAt !== null) throw unknown();
-      const { principal } = ctx.caller;
-      const own = row.principal === principalOf(principal);
-      // Of a service it manages: one of its tokens, or a workload's key-bound session, which its managers end as they revoke its tokens.
-      if (of === 'own handle' ? row.kind !== 'handle' || !own : of !== null && (row.principal !== of.member || !(isToken(row) || row.kind === 'workload'))) throw unknown();
-      if (!own && (of === null || of === 'own handle' || !of.managed)) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
-      const revoked = await updateAuth(
-        tx,
-        this.#deps.chainKey,
-        credentials,
-        { id: credentialId, revokedAt: null },
-        { revokedAt: new Date(), revokedBy: principal.id },
-      );
-      if (revoked === 0) throw unknown();
-      changes?.expectRevoked([credentialId]);
-      log.push(revokedEntry(row));
-      return { revoked: true as const };
-    }, changes);
-    });
-  }
-
-  /**
-   * `revokeCredential` with 0.15's log: the vault revokes it (T149), in one
-   * call, once the row as read says the caller may, as above, holding the
-   * policy that weighed it to the newest under the fence (as `audited`
-   * holds it under 0.14's head). Its change records the revoke; a refusal
-   * is logged as one. Null for a row 0.14 made, which the log never held:
-   * revoked as above, with 0.14's entry.
-   */
-  async #revokedByVault(
-    vault: CredentialsVault,
-    ctx: Asker,
-    credentialId: string,
-    of: { member: string; managed: boolean } | 'own handle' | null,
-  ): Promise<{ revoked: true } | null> {
     const { db, chainKey } = this.#deps;
+    const vault = this.#deps.vault as CredentialsVault;
     return withRefusals(this.#deps, async () => {
       for (let tries = 0; tries < 3; tries++) {
         const [row] = await liveCredentialsWhere(db, chainKey, credentialsBy.id(credentialId));
@@ -1967,7 +1848,6 @@ export class SigninService {
         const own = row.principal === principalOf(principal);
         if (of === 'own handle' ? row.kind !== 'handle' || !own : of !== null && (row.principal !== of.member || !(isToken(row) || row.kind === 'workload'))) throw unknown();
         if (!own && (of === null || of === 'own handle' || !of.managed)) requireInstance(ctx, 'token.revoke', { metadata: { targetCredentialId: credentialId } }, "revoke other people's credentials");
-        if (row.seal === null) return null;
         if (await revokedByVault(vault, chainKey, row, { actor: formatMember(principal), revokedBy: principal.id, reason: 'revoke', via: ctx.credentialId, trace: traceOf(ctx), caller: ctx.caller })) return { revoked: true as const };
       }
       throw new ObjectMoved();

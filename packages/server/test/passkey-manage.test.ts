@@ -211,14 +211,14 @@ test('removing a passkey takes a touch of one the person keeps, signs them out e
   // a challenge no newer than the last one answered is a replay (section 7.3).
   later(1);
   const laptop = await touch(runtime, BOB, yubikey);
-  const terminal = await rows.confirmedSession(db.owner, deps.chainKey, BOB, removed.id);
+  const terminal = await rows.confirmedSession(deps, BOB, removed.id);
   const token = await act(bob, 'POST', `/api/members/user:${BOB}/tokens`, { label: 'agent', expiresInMinutes: 60, scope: { market: 'viewer' } });
   assert.equal(token.status, 200, JSON.stringify(token.body));
   const handle = await act(bob, 'POST', '/api/handles', { label: 'agent', paths: ['market/prod'] });
   assert.equal(handle.status, 200, JSON.stringify(handle.body));
   // A terminal code approved with the passkey removed, not yet redeemed, and an app connected with it.
   const approval = await rows.approvedCode(db.owner, deps.chainKey, BOB, removed.id);
-  const app = await rows.connectedApp(db.owner, deps.chainKey, BOB, removed.id);
+  const app = await rows.connectedApp(deps, BOB, removed.id);
   assert.deepEqual((await listed(bob, BOB)).ends, { sessions: 2, tokens: 1, handles: 1, apps: 1 });
 
   // What the door asks: a touch of the one kept, never of the one removed.
@@ -300,9 +300,9 @@ test("an Owner of the whole instance resets someone's passkeys from a fresh sess
   const danaKey = await SoftAuthenticator.create('ES256');
   const dana = await enroll(runtime, DANA, danaKey);
   const danaPasskey = (await listed(dana, DANA)).passkeys[0]!.id;
-  const terminal = await rows.confirmedSession(db.owner, deps.chainKey, DANA, danaPasskey);
+  const terminal = await rows.confirmedSession(deps, DANA, danaPasskey);
   const approval = await rows.approvedCode(db.owner, deps.chainKey, DANA, danaPasskey);
-  const app = await rows.connectedApp(db.owner, deps.chainKey, DANA, danaPasskey);
+  const app = await rows.connectedApp(deps, DANA, danaPasskey);
   const bobKey = await SoftAuthenticator.create('ES256');
   let bob = await enroll(runtime, BOB, bobKey);
 

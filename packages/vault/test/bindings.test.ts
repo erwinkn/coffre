@@ -508,7 +508,7 @@ test("a binding's maker whose access moved since the app weighed it is refused, 
   assert.equal((await db.owner.select().from(serviceBindings)).length, 0);
 });
 
-test("a credential with no seal its sealed binding issued (one planted around the vault) is ended with it; the binding's object ends all the same (review r1)", async () => {
+test("a credential with no seal its sealed binding issued (one planted around the vault) refuses the end as tampered, nothing written", async () => {
   const w = await world();
   const made = binding(w);
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
@@ -519,10 +519,9 @@ test("a credential with no seal its sealed binding issued (one planted around th
     id: planted, kind: 'service', authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, principal: CI,
     createdBy: `binding:${made.id}`, expiresAt: new Date(Date.now() + 300_000),
   });
-  assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
-  assert.deepEqual(await ops({ kind: 'binding', id: made.id }), ['binding.make', 'binding.revoke']);
-  assert.deepEqual(await ops({ kind: 'credential', id: planted }), [], 'none of the log\'s: no change of it');
-  assert.ok((await db.owner.select().from(credentialsTable)).every((row) => row.revokedAt !== null), 'both ended');
+  assert.deepEqual(await w.vault.changeBindings!(change({ ends: [await ending(made.id)] })), { ok: false, refused: 'tampered' });
+  assert.deepEqual(await ops({ kind: 'binding', id: made.id }), ['binding.make']);
+  assert.ok((await db.owner.select().from(credentialsTable)).every((row) => row.revokedAt === null), 'neither ended');
 });
 
 test("a bind weighed beside the account's bindings as they were is read again when another was made meanwhile, or a key it reads renamed (review r1)", async () => {
@@ -565,18 +564,18 @@ test("the log of a bind, a sign-in through it and its unbind replays to the rows
   assert.equal((binding_?.row as { revoked?: boolean } | undefined)?.revoked, true, 'the replay ends it too');
 });
 
-test("a binding 0.14 made is ended by the vault with no change; one of the log's whose seal a writer cleared is stale, never ended with no change (review r2)", async () => {
+test("a binding with no seal is refused as tampered, never ended with no change: one the log never held, and one of the log's whose seal a writer cleared", async () => {
   const w = await world();
-  const old = binding(w);
-  await db.owner.insert(serviceBindings).values({ ...old, authMac: Buffer.from(old.authMac, 'base64'), createdAt: new Date(old.createdAt), revoked: undefined } as never);
-  assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(old.id)] }))).ok);
-  assert.deepEqual(await ops({ kind: 'binding', id: old.id }), [], 'the log holds no object of it');
-  assert.equal((await read(old.id)).columns.revoked, true);
-  // The log's binding, its seal cleared around the vault: no end of it with no change.
+  // Made first: a planted row is live in the table, so a make that lists the account's live bindings without it is refused.
   const made = binding(w);
   assert.ok((await w.vault.changeBindings!(change({ make: made, live: [], reason: 'replaced' }))).ok);
+  const old = binding(w);
+  await db.owner.insert(serviceBindings).values({ ...old, authMac: Buffer.from(old.authMac, 'base64'), createdAt: new Date(old.createdAt), revoked: undefined } as never);
+  assert.deepEqual(await w.vault.changeBindings!(change({ ends: [await ending(old.id)] })), { ok: false, refused: 'tampered' });
+  assert.deepEqual(await ops({ kind: 'binding', id: old.id }), [], 'the log holds no object of it');
+  assert.equal((await read(old.id)).columns.revoked, false);
   await db.owner.update(serviceBindings).set({ seal: null }).where(eq(serviceBindings.id, made.id));
-  assert.deepEqual(await w.vault.changeBindings!(change({ ends: [await ending(made.id)] })), { ok: false, refused: 'stale' });
+  assert.deepEqual(await w.vault.changeBindings!(change({ ends: [await ending(made.id)] })), { ok: false, refused: 'tampered' });
   assert.deepEqual(await ops({ kind: 'binding', id: made.id }), ['binding.make']);
 });
 

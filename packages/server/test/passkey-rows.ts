@@ -6,17 +6,34 @@ import { randomUUID } from 'node:crypto';
 import { CoffreError } from '@coffre/client';
 import { SoftAuthenticator } from '@coffre/conformance/authenticator';
 import { generateToken, hashToken, tokenHint } from '@coffre/core/identity';
+import type { ObjectChange } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { eq } from 'drizzle-orm';
 
 import { authMac } from '../src/auth-rows.ts';
+import { AppChanges, connectionChange, credentialChange } from '../src/api/changes.ts';
+import { audited } from '../src/api/context.ts';
 import type { SigninService } from '../src/api/signin.ts';
 import { memberStanding } from '../src/db/queries.ts';
+import type { FixtureDeps } from './api-fixture.ts';
 import { credentials, deviceLogins, mcpConnections, passkeys } from '@coffre/db/schema';
 
 async function generationOf(owner: Database, email: string): Promise<number> {
   return (await memberStanding(owner, `user:${email}`))!.generation;
 }
+
+/**
+ * A credential or connection row made as the app makes one: its insert and the vault's change that seals it, in one
+ * transaction. A row written with no seal is none (no change of the vault's made it).
+ */
+async function madeByApp(deps: Made, principal: string, change: ObjectChange, insert: (tx: Parameters<Parameters<typeof audited>[1]>[0]) => Promise<unknown>): Promise<void> {
+  const changes = await AppChanges.prepare(deps.vault, principal, [change]);
+  await audited(deps, async (tx) => { await insert(tx); }, changes);
+  await changes?.sealed(deps.db);
+}
+
+/** What `madeByApp` writes through: the app's database, its key and the vault. */
+type Made = Pick<FixtureDeps, 'db' | 'chainKey' | 'vault'>;
 
 /** The authenticator behind each passkey `addPasskey` wrote, by its id. */
 const keys = new Map<string, SoftAuthenticator>();
@@ -65,14 +82,14 @@ export async function removePasskey(owner: Database, chainKey: Buffer, id: strin
 }
 
 /** A CLI session of `email`'s that `passkeyId` confirmed at `confirmedAt`, a moment ago unless said: its token. */
-export async function confirmedSession(owner: Database, chainKey: Buffer, email: string, passkeyId: string, { confirmedAt = new Date() }: { confirmedAt?: Date } = {}): Promise<string> {
+export async function confirmedSession(deps: Made, email: string, passkeyId: string, { confirmedAt = new Date() }: { confirmedAt?: Date } = {}): Promise<string> {
   const token = generateToken('cli');
   const row = {
-    id: randomUUID(), kind: 'cli', tokenHash: hashToken(token), generation: await generationOf(owner, email), tokenHint: tokenHint(token), principal: `user:${email}`,
+    id: randomUUID(), kind: 'cli', tokenHash: hashToken(token), generation: await generationOf(deps.db, email), tokenHint: tokenHint(token), principal: `user:${email}`,
     identityId: null, label: null, createdBy: email, expiresAt: new Date(Date.now() + 3_600_000), scope: null, places: null, revokedAt: null,
     passkeyId, confirmedAt,
   };
-  await owner.insert(credentials).values({ ...row, authMac: authMac(chainKey, 'credentials', row) });
+  await madeByApp(deps, row.principal, credentialChange(null, row, null), (tx) => tx.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) }));
   return token;
 }
 
@@ -91,14 +108,14 @@ export async function approvedCode(owner: Database, chainKey: Buffer, email: str
 }
 
 /** An app `email` connected with a touch of `passkeyId`, its code redeemed: a live connection, for a day. Its id. */
-export async function connectedApp(owner: Database, chainKey: Buffer, email: string, passkeyId: string): Promise<string> {
+export async function connectedApp(deps: Made, email: string, passkeyId: string): Promise<string> {
   const row = {
-    id: randomUUID(), principal: `user:${email}`, generation: await generationOf(owner, email), clientId: 'https://claude.ai/oauth/claude-code-client-metadata',
+    id: randomUUID(), principal: `user:${email}`, generation: await generationOf(deps.db, email), clientId: 'https://claude.ai/oauth/claude-code-client-metadata',
     clientName: 'Claude Code', clientHost: 'claude.ai', registration: 'cimd', scopes: 'read', redirectUri: 'http://127.0.0.1:33418/callback',
     codeHash: null, codeChallenge: null, codeExpiresAt: null, refreshHash: Buffer.from(hashToken(randomUUID())), refreshPreviousHash: null,
     expiresAt: new Date(Date.now() + 86_400_000), revokedAt: null, passkeyId,
   };
-  await owner.insert(mcpConnections).values({ ...row, authMac: authMac(chainKey, 'mcp_connections', row) });
+  await madeByApp(deps, row.principal, connectionChange(null, row, null), (tx) => tx.insert(mcpConnections).values({ ...row, authMac: authMac(deps.chainKey, 'mcp_connections', row) }));
   return row.id;
 }
 

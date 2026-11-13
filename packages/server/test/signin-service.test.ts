@@ -515,14 +515,14 @@ test('signing out revokes that credential only, once, and is audited', async () 
   const kept = await signedIn(profile('github', '101', [DEV]));
   const ended = await signedIn(profile('github', '101', [DEV]));
 
-  await signin.signOut(ended.credential.token, { requestId: randomUUID(), sourceIp: IP });
+  await signin.signOut(ended.credential.token);
   await assert.rejects(signin.verify(ended.credential.token), /revoked/);
   assert.equal((await signin.verify(kept.credential.token)).id, DEV);
 
   // A second sign-out, an unknown token and garbage are all quiet no-ops.
-  await signin.signOut(ended.credential.token, { requestId: randomUUID(), sourceIp: IP });
-  await signin.signOut(`coffre_web_${'B'.repeat(43)}`, { requestId: randomUUID(), sourceIp: IP });
-  await signin.signOut('not a token', { requestId: randomUUID(), sourceIp: IP });
+  await signin.signOut(ended.credential.token);
+  await signin.signOut(`coffre_web_${'B'.repeat(43)}`);
+  await signin.signOut('not a token');
 
   const revoked = await credentialRow(ended.credential.id);
   assert.equal(revoked.revokedBy, DEV);
@@ -540,7 +540,7 @@ test('signing out revokes that credential only, once, and is audited', async () 
 test('sign-ins stay in the log, and the audit list shows them only when asked', async () => {
   const kept = await signedIn(profile('github', '101', [DEV]));
   await signin.completeSignin(profile('github', '9001', ['stranger@example.com']), meta());
-  await signin.signOut(kept.credential.token, { requestId: randomUUID(), sourceIp: IP });
+  await signin.signOut(kept.credential.token);
 
   // Asked as every client of this release asks it (`sealed`): the sign-out is the vault's change, which the
   // page lists in the place of an app entry, and counts where it hides it.
@@ -755,7 +755,7 @@ test('the session list shows live browser and CLI sessions only, and marks the c
   const current = await signedIn(profile('github', '101', [DEV]));
   const cli = await approvedCliSession(dev, 'coffre CLI on laptop');
   const ended = await signedIn(profile('github', '101', [DEV]));
-  await signin.signOut(ended.credential.token, { requestId: randomUUID(), sourceIp: IP });
+  await signin.signOut(ended.credential.token);
   const stale = await signedIn(profile('github', '101', [DEV]));
   await expire(credentials, eq(credentials.id, stale.credential.id));
   await signedIn(profile('github', '102', [LEAD]));
@@ -1191,7 +1191,7 @@ test('everything the sign-in service writes keeps the audit chain intact', async
   await signin.revokeCredential(lead, token.id);
   const [, google] = await signin.listIdentities(dev);
   await signin.unlinkIdentity(dev, google.id);
-  await signin.signOut(session.credential.token, { requestId: randomUUID(), sourceIp: IP });
+  await signin.signOut(session.credential.token);
 
   const verified = await verifyAudit(await contextFor(deps, ROOT));
   assert.equal(verified.ok, true);

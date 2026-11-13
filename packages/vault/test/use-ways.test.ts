@@ -82,7 +82,7 @@ async function connection(w: { principal: string }, generation = 0) {
 /** A Cloudflare binding of a service's world, reaching `dev` as a Viewer, sealed as the vault makes one. */
 async function binding(w: { principal: string; project: string; dev: string }, options: { profile?: string; reads?: boolean } = {}) {
   const id = randomUUID();
-  const scope = [{ projectId: w.project, environmentId: w.dev, role: 'viewer' }];
+  const scope = [{ projectId: w.project, environmentId: w.dev, role: 'viewer', sensitive: false }];
   const policy = JSON.stringify(options.reads === true ? { reads: { [w.dev]: { keys: [] } } } : {});
   const profile = options.profile ?? 'cloudflare';
   await db.owner.insert(serviceBindings).values({

@@ -67,7 +67,7 @@ export type CoffreRuntime = {
  * isolate's, or the process's. Settled values, never a pending read
  * (AGENTS.md, "What an isolate keeps").
  */
-type Known = { schema: { migrated: boolean }; scopes: { sealed: boolean }; appKey: CoffreRuntime['appKey']; accesses: Accesses };
+type Known = { schema: { migrated: boolean }; appKey: CoffreRuntime['appKey']; accesses: Accesses };
 const known = new WeakMap<ResolvedConfig, Known>();
 
 /**
@@ -93,14 +93,13 @@ export function createRuntime(
   let workloads: WorkloadService | null = null;
   let mcp: McpService | null = null;
   let verifier: IdentityVerifier;
-  const { schema, scopes, appKey, accesses } = knownOf(config);
+  const { schema, appKey, accesses } = knownOf(config);
   if (config.auth.mode === 'signin') {
     signin = new SigninService({
       db,
       chainKey: config.auditChainKey,
       vault,
       signin: config.auth.signin,
-      scopes,
       accesses,
     });
     verifier = signin;
@@ -142,7 +141,7 @@ export function createRuntime(
 function knownOf(config: ResolvedConfig): Known {
   let kept = known.get(config);
   if (kept === undefined) {
-    kept = { schema: { migrated: false }, scopes: { sealed: false }, appKey: { settled: false }, accesses: new Accesses() };
+    kept = { schema: { migrated: false }, appKey: { settled: false }, accesses: new Accesses() };
     known.set(config, kept);
   }
   return kept;

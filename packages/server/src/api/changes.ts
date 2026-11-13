@@ -397,10 +397,9 @@ export function credentialColumns(row: {
 export async function revokedByVault(
   vault: Required<Pick<Vault, 'revokeCredential'>>,
   chainKey: Buffer,
-  row: CredentialRow,
+  row: CredentialRow & { seal: Buffer },
   by: { actor: string; revokedBy: string; reason: 'revoke' | 'sign_out'; via: string | null; trace: RequestTrace | null; caller: Pick<Caller, 'policy' | 'policySeq'> | null },
 ): Promise<boolean> {
-  if (row.seal === null) throw new Error(`the credential ${row.id} is 0.14's, which the log never held: it is revoked as 0.14 revokes it`);
   const revokedAt = new Date();
   const outcome = await vault.revokeCredential({
     actor: by.actor,
@@ -564,11 +563,9 @@ export function madeBinding(chainKey: Buffer, origin: string, row: Omit<BindingR
 
 /**
  * A binding the vault ends (`changeBindings`), with the live credentials it
- * issued, each as read with its seal and MAC (no seal for one 0.14 made, or
- * written around the vault), and the app's MAC over it revoked at `at`.
- * Under the switch the vault ends every binding, its own and 0.14's: one
- * left to the app could be a binding of the log's whose seal a writer
- * cleared, and its object would stand past its end (reviews r1, r2).
+ * issued, each as read with its seal and MAC, and the app's MAC over it
+ * revoked at `at`. A binding or credential with no seal was written around
+ * the vault, which refuses the end as tampered.
  */
 export function endedBinding(chainKey: Buffer, publicUrl: string, row: BindingRow, credentials: readonly CredentialRow[], at: Date, entry: Entry | null): EndedBinding {
   return {

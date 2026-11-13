@@ -308,7 +308,7 @@ export async function logout(request: Request, runtime: CoffreRuntime, sourceIp:
       // Its key's proof is all it takes to end one's own session: no pending approval or moved address keeps it alive.
       const requestId = crypto.randomUUID();
       await standingSession(request, runtime, session, sourceIp, requestId, { place: null, credential: null, children: true, ending: true });
-      if (runtime.signin !== null) await runtime.signin.signOut(session, { requestId, sourceIp });
+      if (runtime.signin !== null) await runtime.signin.signOut(session);
       return jsonResponse({ signedOut: true });
     } catch (error) {
       if (error instanceof SessionRefused) return error.response;
@@ -319,7 +319,7 @@ export async function logout(request: Request, runtime: CoffreRuntime, sourceIp:
     const identity = await apiCaller(request, runtime, sourceIp);
     if (identity instanceof Response) return identity;
     const token = bearerToken(request);
-    if (runtime.signin !== null && token !== null) await runtime.signin.signOut(token, identity);
+    if (runtime.signin !== null && token !== null) await runtime.signin.signOut(token);
     return jsonResponse({ signedOut: true });
   } catch (error) {
     return errorResponse(error);
@@ -468,7 +468,7 @@ async function signedInCookies(
 ): Promise<string[]> {
   const sessionName = sessionCookieName(runtime.auth);
   const previous = readCookie(request, sessionName);
-  if (previous !== null && result.replaced !== true) await runtime.signin!.signOut(previous, meta).catch(() => {});
+  if (previous !== null && result.replaced !== true) await runtime.signin!.signOut(previous).catch(() => {});
   const maxAge = (Date.parse(result.credential.expiresAt) - Date.now()) / 1000;
   return [cookieHeader(runtime.auth, sessionName, result.credential.token, maxAge)];
 }
@@ -604,7 +604,7 @@ export async function signOut(request: Request, runtime: CoffreRuntime, sourceIp
   const name = sessionCookieName(auth);
   const token = readCookie(request, name);
   if (token !== null && runtime.signin !== null) {
-    await runtime.signin.signOut(token, { requestId: crypto.randomUUID(), sourceIp });
+    await runtime.signin.signOut(token);
   }
   return redirectResponse('/login', [clearCookieHeader(auth, name)], 303);
 }

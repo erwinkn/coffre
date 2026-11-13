@@ -8,7 +8,7 @@ import { propertySettings } from '../../../scripts/property-settings.ts';
 import { MAX_PARENTS, world } from '../../../scripts/properties/domain.ts';
 import { openTestDatabase, resetDatabase, testVault, type TestVault } from './api-fixture.ts';
 import { dismissedKeys, environments, projects, proxyDefinitions, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
-import { AppChanges, environmentChange } from '../src/api/changes.ts';
+import { AppChanges, environmentChange, secretChange } from '../src/api/changes.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { inheritedRows, resolveKeys } from '../src/api/inheritance.ts';
 import { missingKeys } from '../src/api/missing.ts';
@@ -199,6 +199,12 @@ async function write(scene: Scene, app: Scene): Promise<void> {
         createdSeq: BigInt(made.seqs[i]!), createdBy: `user:${ROOT}`,
       };
     }));
+    // Each holder sealed as the app's reference seals it (`secrets.ts`): the vault ends only a key its log holds.
+    const holders = await AppChanges.prepare(vault, `user:${ROOT}`, references.map((row, i) => secretChange(row.id, undefined, {
+      id: row.id, projectId: items[i]!.holder.projectId, environmentId: row.environmentId, source: row.source!, reference: row.id, version: null,
+    }, null)));
+    await db.transaction((tx) => holders!.commit(tx));
+    await holders!.sealed(db);
     const ended = references.flatMap((row, i) => (row.ended ? [{ reference: row.id, seq: made.seqs[i]! }] : []));
     if (ended.length > 0) {
       const broken = await vault.endReferences({ principal: `user:${ROOT}`, reason: 'broken', items: ended });

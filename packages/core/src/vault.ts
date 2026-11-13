@@ -838,8 +838,8 @@ type ChangeOf<K extends string, Before, After> = {
   id: string;
   /**
    * As the app read the row, with its seal: null for no object (no row, or
-   * a key archived); a null seal, a row the vault never sealed (0.14's,
-   * before the cutover).
+   * a key archived); a null seal, a row the vault never sealed, which it
+   * refuses (`tampered`).
    */
   before: { columns: Before; seal: string | null } | null;
   after: After;
@@ -1186,9 +1186,7 @@ export type PrepareInput = {
 /**
  * A change sealed, for the app's transaction to commit (`app_change`): its
  * entry's fields, the seal it moves the row from and to, and its MAC, bytes
- * in base64. A row the vault never sealed, 0.14's, which 0.15.0's cutover
- * left so, is the log's to leave alone: its call (`requestId` null) only
- * checks, under the fence, that the log has no change of its object either.
+ * in base64.
  */
 export type PreparedChange = {
   kind: ObjectChange['kind'];
@@ -1314,13 +1312,13 @@ export type MadeBinding = BindingColumns & {
 
 /** A binding a change ends: as the app read it, with its seal and MAC, the app's MAC over it revoked, and the credentials it issued that are live. */
 export type EndedBinding = {
-  /** Its seal null for one 0.14 made, which the log never held: ended all the same, its row revoked with no change. */
+  /** Its seal null for a row the vault never sealed, which it refuses (`tampered`). */
   before: { columns: BindingColumns; seal: string | null };
   authMacFrom: string;
   authMac: string;
   /**
    * Every live credential it issued, each as `revokeCredential` names one: the statement holds the set to the rows. One
-   * with no seal (0.14's, or written around the vault) is ended all the same, its row revoked with no change.
+   * with no seal was written around the vault, which refuses the change (`tampered`).
    */
   credentials: { before: { columns: CredentialColumns; seal: string | null }; authMacFrom: string; authMac: string }[];
   /** Its entry (`token.unbind`), as `ObjectChange.entry`; null for none (a sweep's close). */
@@ -1369,9 +1367,7 @@ export type ChangeBindingsInput = {
 /**
  * Why bindings were not changed, nothing written: as an issue's
  * (`IssueTokenRefusal`); `stale` or `tampered`, a row the log does not
- * hold as its newest (put back) or not the vault's seal; `unlogged`, the
- * credential the request came in on one 0.14 made (a binding 0.14 made,
- * the vault ends itself, with no change);
+ * hold as its newest (put back) or not the vault's seal, or no seal;
  * `full`, the account holds as many live bindings as one may
  * (`MAX_BINDINGS`), besides those the change ends.
  */
@@ -1486,12 +1482,9 @@ export type IssuedTokenRow = {
  * since the app weighed it (`access`); what it was weighed on moved
  * while it was written, each of the three times the vault weighed it
  * (`moved`), or the policy did (`policy`); a lock not had in time
- * (`busy`); the app's key one it rotated from (`retired`); the credential
- * the request came in on one 0.14 made, which the log never held, so
- * nothing the vault could authenticate (`unlogged`: the app issues on it
- * as before).
+ * (`busy`); the app's key one it rotated from (`retired`).
  */
-export type IssueTokenRefusal = 'refused' | 'ended' | 'gone' | 'access' | 'moved' | 'policy' | 'busy' | 'retired' | 'unlogged';
+export type IssueTokenRefusal = 'refused' | 'ended' | 'gone' | 'access' | 'moved' | 'policy' | 'busy' | 'retired';
 
 export type IssueTokenOutcome = { ok: true; number: string; witnessed: boolean | null } | { ok: false; refused: IssueTokenRefusal; why?: string };
 
@@ -1499,7 +1492,7 @@ export type IssueTokenOutcome = { ok: true; number: string; witnessed: boolean |
 export type RevokeCredentialInput = {
   /** Who revokes it, as its entry names them: `user:…`, `token:…`, or the app's own (`coffre`). */
   actor: string;
-  /** Its object's columns as read, and their seal: a row the log holds (one 0.14 made, with none, the app revokes as 0.14 does). */
+  /** Its object's columns as read, and their seal: a row the log holds. */
   before: { columns: CredentialColumns; seal: string };
   authMacFrom: string;
   authMac: string;

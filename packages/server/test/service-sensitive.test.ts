@@ -386,20 +386,3 @@ test('the vault decides it too, whatever the app asks: a service reads a sensiti
   assert.deepEqual(denied, Array(3).fill({ actor: CI, code: 'not_owner_issued' }));
 });
 
-test('an Owner demoted while their older token is sealed seals it reading nothing sensitive: the seal is weighed as the vault answered, committed only while still so', async () => {
-  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
-  const [dev] = await db.owner.select({ projectId: environments.projectId, id: environments.id }).from(environments).where(eq(environments.slug, 'dev'));
-  const scope = JSON.stringify([{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
-  const token = generateToken('service');
-  const row = {
-    id: randomUUID(), kind: 'service', tokenHash: hashToken(token), generation: member!.generation, tokenHint: tokenHint(token),
-    principal: CI, identityId: null, label: '0.10', createdBy: OWEN, expiresAt: new Date(Date.now() + 86_400_000), revokedAt: null, scope, passkeyId: null, confirmedAt: null,
-  };
-  await db.owner.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) });
-  // The seal asks the vault about Owen, an Owner of backend; he is demoted before it commits.
-  onNextAccess(`user:${OWEN}`, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }), { after: true });
-  assert.equal(await read(token, 'backend/dev/STRIPE_SECRET_KEY'), '503');
-  // The next use seals it as he is now: a Developer's, which reads none.
-  assert.equal(await read(token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
-  assert.deepEqual(await stored(credentials, row.id), [{ role: 'viewer', sensitive: false }]);
-});

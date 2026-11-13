@@ -103,7 +103,6 @@ import {
   parseScope,
   readScope,
   scopeByPath,
-  unsealedScope,
   serviceSettingFor,
   setsUp,
   storedScope,
@@ -633,7 +632,7 @@ export class WorkloadService {
     if (standing === null) throw notFound('unknown service');
     const [live, known] = await Promise.all([liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation), places(this.#deps.db)]);
     const shown = await this.#shownPolicies(live, known);
-    return live.map((row) => view(row, scopeByPath(readScope(row.scope), known), shown(row.policy)));
+    return live.map((row) => view(row, scopeByPath(readScope(row.scope, { service: true }), known), shown(row.policy)));
   }
 
   /** How these bindings' policies are shown: their reads by path and name, as they are named now (section 6.1, D16). */
@@ -641,17 +640,6 @@ export class WorkloadService {
     const listed = rows.flatMap((row) => Object.values((row.policy === null ? {} : (JSON.parse(row.policy) as BindingPolicy)).reads ?? {}));
     const [placed, named] = await Promise.all([known ?? places(this.#deps.db), keyNames(this.#deps.db, listed.flatMap(({ keys }) => (Array.isArray(keys) ? keys : [])))]);
     return (policy) => (policy === null ? null : namedPolicy(JSON.parse(policy) as BindingPolicy, placed, named));
-  }
-
-  /**
-   * A service's live bindings whose scope this release sealed. One an older
-   * release made with none, or with one that does not say where it reads
-   * sensitive values, is never sealed from what the account holds:
-   * it signs nobody in (`#exchange`), and nothing replaces it or inherits
-   * its scope. The service is bound again instead.
-   */
-  async #scopedBindings(member: string, generation: number): Promise<BindingRow[]> {
-    return (await liveBindings(this.#deps.db, this.#deps.chainKey, member, generation)).filter((row) => !unsealedScope(row.scope));
   }
 
   /** Check a binding and ask its issuer where its keys are; with `dryRun`, write nothing and log nothing. */
@@ -720,7 +708,7 @@ export class WorkloadService {
         if (live.length - replaces.length + 1 > MAX_BINDINGS) throw conflict(`a service holds at most ${MAX_BINDINGS} bindings`);
         return replaces;
       };
-      const replaced = replacing(open(await this.#scopedBindings(member, standing.generation)));
+      const replaced = replacing(open(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation)));
       // Left out, its scope is what those it replaces reached, so that trusting a workload again never widens it.
       const inherits = input.scope === undefined && replaced.length > 0;
       const issued = await issuedScope(
@@ -820,7 +808,7 @@ export class WorkloadService {
       };
       // Each binding is replaced on its own (below): those already on the new keys, which a request that stopped part way
       // left, are done, and its preview says so too (review r4).
-      const replaced = replacing(open(await this.#scopedBindings(member, standing.generation))).filter((row) => row.jwksUri !== jwksUri);
+      const replaced = replacing(open(await liveBindings(this.#deps.db, this.#deps.chainKey, member, standing.generation))).filter((row) => row.jwksUri !== jwksUri);
       // Each reaches what the one it replaces did, of what the account still holds: replacing keys never widens a binding.
       const scopes = new Map<string, Awaited<ReturnType<typeof issuedScope>>>();
       for (const row of replaced) {
@@ -1022,10 +1010,6 @@ export class WorkloadService {
     const bound = entries.find(({ action: done }) => done === 'token.bind');
     const made = bound === undefined ? null : carried(bound);
     const unbound = new Map(entries.filter(({ action: done }) => done === 'token.unbind').map((entry) => [entry.metadata?.bindingId, entry]));
-    // One the log never held, with no seal, ends with no change (`bindingsCall`), which can carry no entry: its entry is
-    // an event, written through `note` once it is ended, after the vault's commit (#569). Should that fail, the end stands
-    // and the request answers an error.
-    const sealless = ends.flatMap((row) => (row.seal === null ? (unbound.get(row.id) ?? []) : []));
     // Whether the make is in.
     let entered = false;
     /** Whether the request is done: its make in, what is left is the removal of those it replaces (on Workers, the scheduled run's). */
@@ -1066,9 +1050,9 @@ export class WorkloadService {
     const ids = ends.map(({ id }) => id);
     // Ended as named, with the credentials each issued of `named`: every one the statement counts, MAC or not (Fable on
     // PR 3a), as one the app's check passes over would refuse the end.
-    // A sweep's close carries no entry; an end, its binding's, unless it has no seal (above).
+    // A sweep's close carries no entry; an end, its binding's.
     const ended = (at: Date, named: readonly CredentialRow[], sweep: boolean) => ends.map((row) => {
-      const entry = sweep || row.seal === null ? undefined : unbound.get(row.id);
+      const entry = sweep ? undefined : unbound.get(row.id);
       return endedBinding(chainKey, this.#deps.publicUrl, row, named.filter(({ createdBy }) => createdBy === issuedBy(row.id)), at, entry === undefined ? null : carried(entry));
     });
     let closed = false;
@@ -1127,10 +1111,7 @@ export class WorkloadService {
       console.error({ event: 'removal_left', principal: member, bindings: ends.map(({ id }) => id), error: logged(error) }, 'the removal after a replacement stopped: the scheduled run goes on with it');
       return;
     }
-    if (outcome.ok) {
-      for (const entry of sealless) await noteEvent(vault, eventOf(entry, ctx?.credentialId ?? null));
-      return;
-    }
+    if (outcome.ok) return;
     if (entered) {
       console.error({ event: 'removal_left', principal: member, bindings: ends.map(({ id }) => id), refused: outcome.refused }, 'the removal after a replacement was refused: the scheduled run goes on with it');
       return;
@@ -1141,8 +1122,8 @@ export class WorkloadService {
     switch (outcome.refused) {
       case 'access': throw new ApiError('conflict', 'your access changed while this ran: try again', ACCESS_CHANGED);
       case 'gone': throw vaultDecided(ctx, notFound('unknown service'), action, 'unknown_principal', { metadata: details });
-      // The credential the request came in on ended, or is one 0.14 made, which the vault cannot vouch for: signed in again, it can.
-      case 'ended': case 'unlogged':
+      // The credential the request came in on ended: signed in again, it can.
+      case 'ended':
         throw new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked: sign in again'), denied(ctx, action, 'credential_ended', { metadata: details }));
       case 'refused':
         throw vaultDecided(ctx, forbidden(outcome.why ?? 'not allowed to trust workloads as it'), action, 'vault_refused', { metadata: { ...details, why: outcome.why ?? null } });
@@ -1414,7 +1395,7 @@ export class WorkloadService {
       }
       const { notAfter, expiresAt, scope, stored } = changes !== null ? planned : shape(committed, now.getTime());
       if (notAfter.getTime() <= now.getTime()) throw new ExchangeRefused('expired', 'the proof has expired');
-      const reached = environmentsOf(readScope(scope ?? binding.scope) ?? [], known);
+      const reached = environmentsOf(readScope(scope ?? binding.scope, { service: true }), known);
       const token = generateToken('workload');
       await insertSession(tx, chainKey, {
         id,
@@ -1475,7 +1456,7 @@ export class WorkloadService {
     const now = Date.now();
     const { notAfter, expiresAt } = sessionEnds(kind, verified, policy, {}, now);
     const scope = sealedSessionScope(null, binding, policy);
-    const reached = environmentsOf(readScope(binding.scope) ?? [], known);
+    const reached = environmentsOf(readScope(binding.scope, { service: true }), known);
     const token = generateToken('workload');
     const row = signedSession(this.#deps.chainKey, {
       id: randomUUID(), kind: 'workload', tokenHash: hashToken(token), tokenHint: tokenHint(token), generation: binding.generation, principal: member,

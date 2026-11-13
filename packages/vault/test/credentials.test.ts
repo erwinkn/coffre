@@ -69,7 +69,7 @@ async function world() {
   assert.ok((await vault.setAccess({ actor: ROOT, caller: 'person', principal: CI, changes: [{ projectId: project, environmentId: null, role: 'viewer', expiresAt: null }] })).ok);
   const keys: ChangeKeys = { seals: config.signingKeys.map((seed) => sealKey(seed)), mac: logMacKey(config.signingKeys[0]!) };
   const binding = randomUUID();
-  const scope = storedScope([issuedGrant({ projectId: project, environmentId: null, role: 'viewer' })]);
+  const scope = storedScope([{ ...issuedGrant({ projectId: project, environmentId: null, role: 'viewer' }), sensitive: false }]);
   const made = await vault.changeBindings!({
     actor: ROOT, via: null, actorAccess: null, connection: null, reason: 'replaced', ends: [], live: [], reads: [], revokedAt: Date.now(), revokedBy: 'root@acme.example',
     make: {

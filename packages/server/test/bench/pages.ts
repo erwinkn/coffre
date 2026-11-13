@@ -73,7 +73,7 @@ for (const [persona, email] of [['owner', ROOT], ['viewer', READER]] as const) {
 async function render(as: Persona, path: string, calls: (client: CoffreClient) => Promise<unknown>): Promise<{ ms: number; app: number; vault: number }> {
   const pool = new HyperdrivePool(app.url, { groupReads: true });
   const renderDb = createDatabase(pool);
-  const signin = new SigninService({ ...base, db: renderDb, signin: signinConfig, accesses, scopes: { sealed: true } });
+  const signin = new SigninService({ ...base, db: renderDb, signin: signinConfig, accesses });
   const page = new Request(`${ORIGIN}${path}`, { headers: { cookie: `${sessionCookieName(auth)}=${sessions.get(as)!}`, 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' } });
   const [appSyncs, vaultSyncs] = [app.syncs, vaultSide.syncs];
   const started = performance.now();

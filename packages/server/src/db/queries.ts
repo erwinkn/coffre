@@ -6,7 +6,7 @@ import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, prepared, type Queryable, type Transaction } from '@coffre/db';
 import { accessAllowed, changesOf, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
-import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers, unsealed } from '@coffre/db/grants';
+import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
@@ -1257,7 +1257,8 @@ export function stampIdentity(tx: Transaction, chainKey: Buffer, id: string, set
 /**
  * A credential by its token's hash or by id, with whether its sign-in
  * account is still bound. Revoked and expired ones too: the caller decides
- * what is live, and the vault whether its principal is still a member.
+ * what is live, and the vault whether its principal is still a member. A
+ * row with no seal is none: no change of the vault's made it.
  *
  * It reads the database clock as well, which keeps it out of Hyperdrive's
  * query cache: Hyperdrive caches no query that calls a stable or volatile
@@ -1296,7 +1297,7 @@ export async function findCredential(
     if (ahead !== null && !ahead.credential.tokenHash.equals(by.tokenHash)) throw new Error('the credential read ahead is of another token');
     row = ahead ?? undefined;
   }
-  if (row === undefined) return null;
+  if (row === undefined || row.credential.seal === null) return null;
   verifyAuthRow(chainKey, 'credentials', row.credential);
   if (row.identity !== null) verifyAuthRow(chainKey, 'identities', row.identity);
   if (row.credential.identityId !== null && row.identity === null) throw new Error('credential identity is missing');
@@ -1855,10 +1856,8 @@ export async function exchangeCandidates(
       eq(serviceBindings.principal, principal),
       eq(serviceBindings.issuer, issuer),
       isNull(serviceBindings.revokedAt),
-      // Closed by a removal under way, or its scope never sealed, as an older release left it: it signs
-      // nobody in, so it shadows no binding that would (review r6).
+      // Closed by a removal under way: it signs nobody in, so it shadows no binding that would.
       isNull(serviceBindings.closedAt),
-      not(unsealed(serviceBindings.scope)),
       isNull(serviceBindings.policy),
       inArray(serviceBindings.profile, [...BEARER_PROFILES]),
       // Standing as the log has it, as the vault holds it to after: a row put back over its end matches nothing here.
@@ -2102,15 +2101,16 @@ export const credentialsBy = {
 };
 
 /**
- * The live credentials `where` names: not revoked, and their MAC the app's
+ * The live credentials `where` names: not revoked, sealed (a row with no
+ * seal is none: no change of the vault's made it), and their MAC the app's
  * (a row that fails it is dead, and never signed again, as `updateAuth`
- * leaves it), with their seals. What a revoke of them changes: with 0.15's
- * log, its changes are prepared from this read before the transaction, in
- * which `revokeCredentialsWhere` reads them again (`AppChanges.expect`).
+ * leaves it). What a revoke of them changes: its changes are prepared from
+ * this read before the transaction, in which `revokeCredentialsWhere` reads
+ * them again (`AppChanges.expect`).
  */
-export async function liveCredentialsWhere(db: Queryable, chainKey: Buffer, where: CredentialsWhere): Promise<CredentialRow[]> {
-  const rows = await db.select().from(credentials).where(and(where(credentials as Tables['credentials']), isNull(credentials.revokedAt)));
-  return rows.filter((row) => checkAuthRow(chainKey, 'credentials', row));
+export async function liveCredentialsWhere(db: Queryable, chainKey: Buffer, where: CredentialsWhere): Promise<(CredentialRow & { seal: Buffer })[]> {
+  const rows = await db.select().from(credentials).where(and(where(credentials as Tables['credentials']), isNull(credentials.revokedAt), isNotNull(credentials.seal)));
+  return rows.filter((row): row is CredentialRow & { seal: Buffer } => checkAuthRow(chainKey, 'credentials', row));
 }
 
 /** Revoke the live credentials `where` names, each a compare-and-set on its MAC, as `updateAuth` does: the ids it revoked. */

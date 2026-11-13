@@ -68,7 +68,7 @@ function deployment(policy: PasskeyPolicy) {
 
 const addPasskey = (email: string) => rows.addPasskey(db.owner, deps.chainKey, email);
 const removePasskey = (id: string) => rows.removePasskey(db.owner, deps.chainKey, id);
-const confirmedSession = (passkeyId: string) => rows.confirmedSession(db.owner, deps.chainKey, ADA, passkeyId);
+const confirmedSession = (passkeyId: string) => rows.confirmedSession(deps, ADA, passkeyId);
 
 /** What a request answers, by its code: `ok`, or the API's error. */
 async function answer(request: Promise<unknown>): Promise<string> {
@@ -133,7 +133,7 @@ test('a passkey that is not the credential\'s person\'s, or whose row was change
 test('a credential the check exempts never fails on a passkey it does not need: a service\'s token, any under off', async () => {
   const key = await rows.addPasskey(db.owner, deps.chainKey, ROOT);
   const { bearer } = deployment('optional');
-  const session = await rows.confirmedSession(db.owner, deps.chainKey, ROOT, key);
+  const session = await rows.confirmedSession(deps, ROOT, key);
   await clientFor(deps, ROOT).members.add('token:ci');
   await clientFor(deps, ROOT).access.set('token:ci', { 'market/dev': 'viewer' });
   const issued = await bearer(session).tokens.issue('token:ci', { label: 'ci', expiresInDays: 30 });
