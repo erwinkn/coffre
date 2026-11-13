@@ -161,7 +161,23 @@ const uncommented = (sql: string) => sql.replace(/^\s*--[^\n]*$/gm, '');
 const words = (sql: string) => new Set(uncommented(sql).toLowerCase().match(/[a-z_][a-z0-9_$]*/g) ?? []);
 const named = (name: string) => name.replaceAll('"', '').replace(/^public\./, '');
 
-async function collectRuns(client: PostgresClient, runs: Runs, fns: Snapshot, ids: readonly string[]): Promise<void> {
+/**
+ * What runs a function by a path `runs` does not follow, or names a thing in a case `words` loses: an operator, a cast,
+ * an aggregate, an event trigger, a partition key's expression, a name in capitals. Coffre has none, and the collapse
+ * refuses one, rather than miss what it runs.
+ */
+const UNFOLLOWED = `
+  SELECT 'operator ' || oid::regoperator::text AS what FROM pg_operator WHERE oprnamespace = 'public'::regnamespace
+  UNION ALL SELECT 'cast ' || c.castsource::regtype || ' to ' || c.casttarget::regtype FROM pg_cast c JOIN pg_proc p ON p.oid = c.castfunc WHERE p.pronamespace = 'public'::regnamespace
+  UNION ALL SELECT 'aggregate ' || aggfnoid::regprocedure::text FROM pg_aggregate a JOIN pg_proc p ON p.oid = a.aggfnoid WHERE p.pronamespace = 'public'::regnamespace
+  UNION ALL SELECT 'event trigger ' || evtname FROM pg_event_trigger
+  UNION ALL SELECT 'partition key of ' || partrelid::regclass::text FROM pg_partitioned_table WHERE partexprs IS NOT NULL
+  UNION ALL SELECT 'name ' || quote_ident(relname) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname <> lower(relname)
+  UNION ALL SELECT 'name ' || quote_ident(proname) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname <> lower(proname)`;
+
+async function collectRuns(client: PostgresClient, runs: Runs, fns: Snapshot, ids: readonly string[], at: string): Promise<void> {
+  const unfollowed = await client.unsafe<{ what: string }[]>(UNFOLLOWED);
+  if (unfollowed.length > 0) throw new Error(`${at} leaves ${unfollowed.map(({ what }) => what).join(', ')}, which the collapse cannot follow`);
   const add = (runner: string, kind: Kind, what: Iterable<string>) => {
     const set = runs.edges.get(runner) ?? new Set();
     for (const name of what) set.add(`${kind} ${name}`);
@@ -248,7 +264,7 @@ async function replay(client: PostgresClient, where: readonly string[], list: re
   const first = await snapshot(client);
   outside(first.fns, 'the database the replay starts from');
   const runs: Runs = { edges: new Map(), functions: new Set() };
-  if (collect) await collectRuns(client, runs, first.fns, [...first.fns.keys()]);
+  if (collect) await collectRuns(client, runs, first.fns, [...first.fns.keys()], 'the database the replay starts from');
   let before = first;
   const steps: Snapshot[] = [];
   const touched: string[][] = [];
@@ -265,7 +281,7 @@ async function replay(client: PostgresClient, where: readonly string[], list: re
     }
     const ids = changed(before.fns, after.fns);
     touched.push(ids);
-    if (collect) await collectRuns(client, runs, after.fns, ids.filter((id) => after.fns.has(id)));
+    if (collect) await collectRuns(client, runs, after.fns, ids.filter((id) => after.fns.has(id)), where[index]!);
     steps.push(after.fns);
     before = after;
   }
