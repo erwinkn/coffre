@@ -13,6 +13,10 @@
  * no shared secret to leak. Each call is one HTTP POST over it, `/<method>`
  * with the arguments as a JSON array, and refusals come back as values, as
  * from any vault; only a failure is an error.
+ *
+ * The signer on Node is not built (docs/design/0.16.md, "Still to design"):
+ * until it is, whoever opens a vault here says where its wake-ups go
+ * (`VaultOptions`).
  */
 import { chmodSync, existsSync, lstatSync, rmSync } from 'node:fs';
 import { Agent, createServer, request as httpRequest, type IncomingMessage } from 'node:http';
@@ -24,7 +28,7 @@ import { openDatabase } from '@coffre/db/connect';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { failureOf } from './failure.ts';
 import { METHODS, openLocalVault, type LocalVault } from './local.ts';
-import type { VaultOptions } from './vault.ts';
+import { prepareVault, type VaultOptions } from './vault.ts';
 
 export type { Vault, VaultConfig };
 export * from './index.ts';
@@ -40,14 +44,11 @@ export type NodeVaultConfig = VaultConfig & {
 };
 
 /** The vault in this process. */
-export async function localVault(config: NodeVaultConfig, options: VaultOptions = {}): Promise<LocalVault> {
-  const resolved = resolveVaultConfig(config);
-  if (typeof config.database !== 'string') return openLocalVault(config.database, resolved, options);
+export async function localVault(config: NodeVaultConfig, options: VaultOptions): Promise<LocalVault> {
+  const prepared = prepareVault(resolveVaultConfig(config));
+  if (typeof config.database !== 'string') return openLocalVault(config.database, prepared, options);
   const { db, close } = await openDatabase(config.database);
-  return openLocalVault(db, resolved, options, close).catch(async (error: unknown) => {
-    await close();
-    throw error;
-  });
+  return openLocalVault(db, prepared, options, close);
 }
 
 const METHOD_NAMES = new Set<string>(METHODS);
@@ -60,8 +61,8 @@ export type VaultServer = { socket: string; close(): Promise<void> };
  * is made `0660`: put it in a directory the server's user can reach through
  * a shared group, e.g. `/run/coffre/vault.sock`.
  */
-export async function serveVault(config: NodeVaultConfig & { socket: string }): Promise<VaultServer> {
-  const vault = await localVault(config);
+export async function serveVault(config: NodeVaultConfig & { socket: string }, options: VaultOptions): Promise<VaultServer> {
+  const vault = await localVault(config, options);
   const server = createServer(async (req, res) => {
     const name = (req.url ?? '').slice(1);
     const reply = (status: number, body: unknown) => {

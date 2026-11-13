@@ -32,7 +32,8 @@ export type TestVault = Serving & {
 /** The vault's own login's connection string. */
 export const VAULT_URL = url('coffre_vault_runtime:local-vault-only');
 
-export async function openTestVault(): Promise<TestVault> {
+/** `more` replaces what it names: the keys a deployment's configuration makes, or the clock, where another process reads what this one writes. */
+export async function openTestVault(more: Partial<Serving> = {}): Promise<TestVault> {
   const [owner, vault] = await Promise.all([openDatabase(url('coffre_owner:local-dev-only')), openDatabase(VAULT_URL)]);
   const woken: Buffer[] = [];
   let now = Date.UTC(2026, 10, 13, 12);
@@ -48,6 +49,7 @@ export async function openTestVault(): Promise<TestVault> {
     tick: (ms) => void (now += ms),
     wake: (hash) => void woken.push(hash),
     woken,
+    ...more,
     close: async () => void (await Promise.all([owner.close(), vault.close()])),
   };
 }

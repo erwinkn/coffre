@@ -12,28 +12,19 @@
  *     owners: ['admin@acme.example'],
  *   }));
  *
- * Any number of isolates run it side by side: every decision locks what it
- * is about in the database, so they share one log and one bulk limit.
+ * It exports its signer too, and binds it (`CoffreSigner`, below): the
+ * vault tells it of each entry it writes.
+ *
+ * Any number of isolates run it side by side. A use takes no lock, and a
+ * change takes one in the database, so they share one log and one bulk
+ * limit.
  */
-import type {
-  AdmitInput,
-  RemoveInput,
-  ReferenceInput,
-  EndReferencesInput,
-  RewrapInput,
-  SetAccessInput,
-  SetSettingsInput,
-  ChangePolicyInput,
-  UnwrapInput,
-  Vault,
-  VerifyLogInput,
-  WrapInput,
-} from '@coffre/core/vault';
+import type { UseInput, Vault } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
-import { signerObject } from './cloudflare-signer.ts';
+import { signerObject, signerOf, type SignerNamespace } from './cloudflare-signer.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { openVault, prepareVault, type PreparedVault } from './vault.ts';
 
@@ -49,8 +40,7 @@ let configure: ((env: never) => WorkersVaultConfig) | null = null;
 
 /**
  * The configuration, checked and made ready once per `env`, which the
- * isolate keeps: the ready value itself, never the work of making it, which
- * would belong to the call that started it (vault.ts, `PreparedVault`).
+ * isolate keeps with the vault's short memory (vault.ts, `PreparedVault`).
  */
 const ready = new WeakMap<object, { database: PostgresDatabase; prepared: PreparedVault }>();
 
@@ -58,50 +48,46 @@ const ready = new WeakMap<object, { database: PostgresDatabase; prepared: Prepar
  * What the app's `VAULT` service binding calls. Each call gets a database of
  * its own, one client that its queries take turns on, since a Worker's
  * connections belong to the call that made them; it is closed once the
- * call is done.
+ * call is done. The signer's stub is the call's own too.
  */
 export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async #call<T>(run: (vault: Vault) => Promise<T>): Promise<T> {
-    const { prepared, database } = await this.#ready();
+    const { prepared, database } = this.#ready();
+    const { SIGNER } = this.env as { SIGNER?: SignerNamespace };
+    if (SIGNER === undefined) throw new Error('the vault Worker binds its signer: a durable_objects binding SIGNER to CoffreSigner, which it exports (docs/design/0.16.md, "The signer")');
     const pool = new HyperdrivePool(database.hyperdrive.connectionString);
+    // The reply does not wait for the signer, and the call lives on until it has heard. One that fails costs the entry
+    // its announcement, never the caller their answer: the minute's run signs it all the same.
+    const wake = (hash: Buffer) =>
+      this.ctx.waitUntil(
+        (async () => {
+          try {
+            await signerOf(SIGNER).wake(hash);
+          } catch (error) {
+            console.error('coffre: the signer was not told of an entry', error);
+          }
+        })(),
+      );
     try {
-      return await run(openVault(createDatabase(pool), prepared));
+      return await run(openVault(createDatabase(pool), prepared, { wake }));
     } finally {
       this.ctx.waitUntil(pool.end());
     }
   }
 
-  async #ready(): Promise<{ database: PostgresDatabase; prepared: PreparedVault }> {
+  #ready(): { database: PostgresDatabase; prepared: PreparedVault } {
     const env = this.env as object;
     let entry = ready.get(env);
     if (entry === undefined) {
       if (configure === null) throw new Error('the vault Worker must export default vault(…)');
       const config = configure(env as never);
-      const prepared = await prepareVault(resolveVaultConfig(config));
-      // Calls that raced here each made one; the first kept serves them all from now on.
-      entry = ready.get(env) ?? { database: config.database, prepared };
+      entry = { database: config.database, prepared: prepareVault(resolveVaultConfig(config)) };
       ready.set(env, entry);
     }
     return entry;
   }
 
-  async unwrap(input: UnwrapInput) { return this.#call((vault) => vault.unwrap(input)); }
-  async wrap(input: WrapInput) { return this.#call((vault) => vault.wrap(input)); }
-  async rewrap(input: RewrapInput) { return this.#call((vault) => vault.rewrap(input)); }
-  async reference(input: ReferenceInput) { return this.#call((vault) => vault.reference(input)); }
-  async endReferences(input: EndReferencesInput) { return this.#call((vault) => vault.endReferences(input)); }
-  async access(principal: string) { return this.#call((vault) => vault.access(principal)); }
-  async setAccess(input: SetAccessInput) { return this.#call((vault) => vault.setAccess(input)); }
-  async admit(input: AdmitInput) { return this.#call((vault) => vault.admit(input)); }
-  async remove(input: RemoveInput) { return this.#call((vault) => vault.remove(input)); }
-  async settings() { return this.#call((vault) => vault.settings()); }
-  async setSettings(input: SetSettingsInput) { return this.#call((vault) => vault.setSettings(input)); }
-  async policy() { return this.#call((vault) => vault.policy()); }
-  async changePolicy(input: ChangePolicyInput) { return this.#call((vault) => vault.changePolicy(input)); }
-  async checkpoint() { return this.#call((vault) => vault.checkpoint()); }
-  async about() { return this.#call((vault) => vault.about()); }
-  async keyChecks() { return this.#call((vault) => vault.keyChecks()); }
-  async verifyLog(input: VerifyLogInput) { return this.#call((vault) => vault.verifyLog(input)); }
+  async use(input: UseInput) { return this.#call((vault) => vault.use(input)); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {

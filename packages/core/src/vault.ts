@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import type { AccessFault } from './access-fault.ts';
 import type { CallerKind, CredentialScope, GrantPlace, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
+import type { BindingPolicy, Constraints } from './identity/index.ts';
 
 export type { CallerKind } from './access.ts';
 
@@ -9,192 +10,76 @@ export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './check
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
 
 /**
- * The vault as the app sees it: the contract between `@coffre/server` and
- * `@coffre/vault`, kept in core so that neither side owns it. Every argument
- * and result is plain JSON: strings, numbers, booleans, arrays and objects,
- * never a Buffer, a Date, a class or a function. So it crosses a Workers RPC
- * boundary, or a process boundary later, as it is, and the in-process
- * transport proves it by round-tripping everything through JSON.
+ * The vault as the app sees it (docs/design/0.16.md, "The contract"): the
+ * contract between `@coffre/server` and `@coffre/vault`, kept in core so
+ * that neither side owns it. Every argument and answer is plain JSON:
+ * strings, numbers, booleans, arrays and objects, never a Buffer, a Date, a
+ * class or a function. So it crosses a Workers RPC boundary, or a process
+ * boundary, as it is, and the in-process transport proves it by
+ * round-tripping everything through JSON.
  *
- * The app says who is asking and the vault decides. The app never holds a
- * key: it encrypts a value under a fresh data key, has the vault wrap that
- * key, and stores the result; to read, it names stored versions and the
- * vault loads their keys itself.
+ * The app says what a request showed and the vault decides: it finds the
+ * credential by its token, reads what it holds and opens the values
+ * itself. The app holds no key, no ciphertext it can open and no grant it
+ * decides on.
  *
- * Decisions come back as values: `{ ok: false, refusal }` for a refusal, which
- * the vault has already logged. Only a fault (a bug, the store down) throws.
+ * A decision comes back as a value: `{ refused }` for a refusal, which
+ * wrote nothing. Only a fault throws: a bug, or the database down.
  */
 export interface Vault {
-  /**
-   * Unwrap data keys for `principal`: all of them, or none. Given the
-   * revision of an answer of `access` the app decided the read on
-   * (`accessRevision`), only while the principal's access is still that
-   * one, under their row and the head the decision holds: otherwise it
-   * refuses `access_changed` and logs no read, and says, by naming it back,
-   * that it checked. A vault older than 0.14.1 names none: it checked none.
-   */
-  unwrap(input: UnwrapInput): Promise<Outcome<Unwrapped>>;
-  /**
-   * Wrap fresh data keys for new versions `principal` writes: all, or none.
-   * `seqs` are the `key.wrap` entries, one per key, which the app's
-   * `secret.write` entries name as related. `sensitive` says, per key,
-   * whether its wrap binds it as sensitive: a vault older than 0.10 answers
-   * none, binding none, and the app stores no sensitive version it wrapped.
-   */
-  wrap(input: WrapInput): Promise<Outcome<Wrapped>>;
-  /**
-   * Wrap existing data keys again for new versions of the same secrets,
-   * under the current key: restoring an old value, or making one stricter.
-   * It needs a write grant, not a read one, since the key never leaves the
-   * vault. A new version is never less sensitive than the one it is made
-   * from, or than its secret's newest: a value is made looser only by
-   * being written again (`invalid`). Except one: a key's current sensitive
-   * value made a secret, in place, by an Owner of its project, or of the
-   * whole instance, on no credential's scope (`ownsProject`; `not_allowed`
-   * for anyone else), its entry saying `was: 'sensitive'`.
-   */
-  rewrap(input: RewrapInput): Promise<Outcome<Wrapped>>;
-
-  /**
-   * Make secrets references to others: whoever can read the holder's
-   * environment reads the source through it (docs/design/environments.md).
-   * The vault checks that `principal` reads each source and writes each
-   * holder, by their own grants, and logs a `reference.create` per item:
-   * that entry, under the vault's MAC, is the reference. `seqs` are the
-   * entries, which the app stores beside each reference and names when it
-   * reads through one (`UnwrapInput`'s `via`). All, or none.
-   */
-  reference(input: ReferenceInput): Promise<Outcome<{ seqs: number[] }>>;
-  /**
-   * End references, each with a `reference.end` naming its creation:
-   * `replaced` when the holder gets a value of its own, which takes write on
-   * the holder; `broken` otherwise, which takes write on the holder, or
-   * managing the source's project's access. An ended reference reads no
-   * more, whatever any row says. All, or none.
-   */
-  endReferences(input: EndReferencesInput): Promise<Outcome<{ seqs: number[] }>>;
-
-  /**
-   * What one principal holds right now: the app asks once per request,
-   * unless the request reads values on an answer it kept (`accessRevision`),
-   * and at sign-in for each verified email. A decision, its rows checked:
-   * lists of who holds what read the rows themselves, and need not ask.
-   * A person the vault's `owners` names who is no Owner of all of it
-   * becomes one here, logged (`reason: 'owners'`).
-   */
-  access(principal: string): Promise<Access>;
-  /**
-   * Set roles at several places for one principal: all of it, or none.
-   * With `admit`, a service account that is not a member is admitted
-   * first, in the same decision, as `admit` would: `admitted` says so.
-   */
-  setAccess(input: SetAccessInput): Promise<Outcome<{ changes: AccessChange[]; admitted?: Admitted }>>;
-  /**
-   * Add a member, bring back a removed one, or change a person's instance
-   * role and its scope. `generation` is theirs now: sessions and tokens of
-   * an earlier one are dead.
-   */
-  admit(input: AdmitInput): Promise<Outcome<Admitted>>;
-  /**
-   * Remove a member: revoke every grant and refuse them until admitted
-   * again, from `generation` on. An Owner, only an Owner of the whole
-   * instance removes, and never the last.
-   */
-  remove(input: RemoveInput): Promise<Outcome<{ revoked: Grant[]; generation: number }>>;
-  /**
-   * The instance's settings, as the vault's newest `settings.change` entry
-   * says, by its MAC: an entry is where they live, so each change is logged
-   * by being made. Everywhere, until someone narrows it.
-   */
-  settings(): Promise<Settings>;
-  /** Change the instance's settings: those who run it, never anyone else. */
-  setSettings(input: SetSettingsInput): Promise<Outcome<{ settings: Settings }>>;
-
-  /**
-   * The instance's access policy (`Policy` in @coffre/core/access): its
-   * roles, as an Owner edited and made them, and its protected
-   * environments, as the vault's newest `policy.change` says, by its MAC.
-   * As it ships, before any. A vault older than 0.10 has none, and the app
-   * decides as it ships.
-   */
-  policy(): Promise<Policy>;
-  /**
-   * Change the policy by one change, its own `policy.change` entry, which
-   * names it and what it was (docs/design/roles.md):
-   * - a project or instance role defined, or put back as it ships (null),
-   *   or, one an Owner made, deleted while no grant names it: an Owner of
-   *   the whole instance, and never the Owner role, nor the instance's
-   *   Member;
-   * - environments of one project protected, by whoever manages its
-   *   environments, before their rows exist too (a fork's); or
-   *   unprotected, by an Owner of the project or of the whole instance
-   *   (`ownsProject`), as far as that project protected them.
-   * The policy after it, and the newest `policy.change`, which it is as of:
-   * the change's own, when it changed anything.
-   */
-  changePolicy(input: ChangePolicyInput): Promise<Outcome<{ policy: Policy; seq: number | null }>>;
-
-  /**
-   * Sign the log up to its last entry, in an `audit.checkpoint` entry of
-   * the vault's, if the chain recomputes from the last checkpoint, the
-   * vault's entries by their MACs, and that checkpoint's prefix is still
-   * there, whole. The entry keeps the checkpoint's tally beside it: what a
-   * walk from the first entry has gathered by the prefix's end (the
-   * vault's keys, its key batches under way, who is a member and what they
-   * hold), so that the next checkpoint, and every verification, go on from
-   * there and read only what is new. A log longer than one walk, as after
-   * an upgrade from 0.10.0, is signed a stretch a call, behind its head,
-   * until the checkpoints catch up. Each call also rehashes a stretch of
-   * what was signed before, round and round, which an entry edited in place
-   * fails: then it refuses, and every verification reports the refusal.
-   * A rehash the database fails moves on next time, and `warning` says so;
-   * a refusal it would have cleared stands meanwhile. The vault reads the log itself: it takes nobody's word for where
-   * it ends, or for what came before. It checks every member's row too, as
-   * `access` would, and logs a `vault.tampered` for each one changed around
-   * it: lists read rows without asking the vault.
-   */
-  checkpoint(): Promise<Outcome<{ checkpoint: Checkpoint; warning?: string }>>;
-  /**
-   * What the vault's configuration says, which the app shows: the keys its
-   * checkpoints verify under, by the key id each checkpoint names (the one
-   * it signs with now, and those of the KEKs it replaced).
-   */
-  about(): Promise<{
-    checkpointKeys: Record<string, CheckpointKey>;
-    /**
-     * The emails of those the deployment names Owners of the whole instance
-     * (`owners`), lowercased: the vault makes them Owners, and refuses to
-     * demote or remove them. Absent from a vault of 0.5, which names none.
-     */
-    owners?: string[];
-    /**
-     * @deprecated Always empty: an app of 0.5, deployed after this vault,
-     * lists and checks root admins here until it is. Gone in 0.7.
-     */
-    rootAdmins: [];
-  }>;
-  /**
-   * What an escrowed vault key is checked against: the vault key it wraps
-   * under now, and each one's check, as the vault wrote it. None of it is
-   * secret, and the vault answers no guess: a check opens only under its key.
-   */
-  keyChecks(): Promise<KeyChecks>;
-  /**
-   * Check the log from a checkpoint's tally, the newest unless `from`
-   * names another, or the first entry: the vault's entries since by their
-   * MACs, every checkpoint among them against the prefix it signed, the key
-   * batches accounted for, and the members and grants replayed on from the
-   * tally to see that the rows follow. With `to`, a later checkpoint, the
-   * walk stops at the prefix it signed and must come to the tally it keeps:
-   * a stretch of the whole log, walked from the first entry a stretch at a
-   * time. The links and hashes of the chain are the caller's to recompute
-   * through `upTo`, as the app does first; with none, the vault recomputes
-   * them itself, no further than one walk. A verdict and nothing else, so
-   * anyone may ask; the app asks for those who read the whole log
-   * (`readsWholeLog`).
-   */
-  verifyLog(input: VerifyLogInput): Promise<LogVerification>;
+  /** Open values for whoever presented a token: a reveal, `coffre run`, an export, a proxied request, a signature. */
+  use(input: UseInput): Promise<Used | Refused>;
 }
+
+/**
+ * What a request showed, which every call starts with. The app never says
+ * who is asking: the vault finds the credential by its token.
+ */
+export type Presented = {
+  /** The SHA-256 of the token the request presented, hex. */
+  token: string;
+  /**
+   * The thumbprint of the key that signed the request's proof (RFC 9449),
+   * once the app has held the proof to the request: a workload's session
+   * is its key's alone. Null with no proof.
+   */
+  proof: string | null;
+  /** The app's id for the request, for the log. */
+  request: string | null;
+  /** The address it came from, for the log, and for a workload's binding that names its sources. */
+  ip: string | null;
+};
+
+export type UseInput = Presented & {
+  /** The place, by its slugs. */
+  project: string;
+  environment: string;
+  /** The caller's personal config of that environment, `@me`, where they have one. */
+  mine: boolean;
+  /** The keys asked for, by name, 1,000 at most: null is every key the environment has. */
+  keys: string[] | null;
+  /** `use`: the value is used for the caller, by the credential proxy, and never handed back. Any other hands it back. */
+  purpose: Purpose;
+  /** The upstream credential the values are used for, by its name in the deployment's configuration. Null for none. */
+  credential: string | null;
+};
+
+/** One key's value, or why this caller is not given it. `secret` is where the value is held: a reference's source. */
+export type UsedValue = { key: string; secret: string; version: number; sensitive: boolean; value: string } | { key: string; refused: string };
+
+export type Used = {
+  principal: string;
+  /** The credential's id. */
+  credential: string;
+  values: UsedValue[];
+  /** For a workload's session, what only the app can hold its request to: an unsigned upload its binding must allow, a narrowed session's methods and paths. */
+  workload: { binding: string; profile: string; policy: BindingPolicy; constraints: Constraints | null } | null;
+};
+
+/** Why a call is not answered. It wrote nothing, the log included. */
+export type Refused = { refused: string };
+
+// 0.14's contract, from here on: each type goes with the last of the server's code that names it.
 
 /**
  * The vault's entries that change what a member holds: what their row's

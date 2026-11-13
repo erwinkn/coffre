@@ -1,39 +1,48 @@
-// The vault in workerd, as it runs on Cloudflare: a page load fires a
-// handful of calls at once, and on a fresh isolate they are its first. On
-// Cloudflare, a call that waits on a promise only another call's I/O can
-// settle is cancelled as hung when that call goes; local workerd lets it
-// finish, so isolate.test.ts holds the vault to that rule, and this runs the
-// same bursts through the entrypoint, over a database as slow as Hyperdrive
-// from far away.
-import test, { after, before, beforeEach } from 'node:test';
+// The vault in workerd, as it runs on Cloudflare: the app's route calls its
+// entrypoint over a service binding, the entrypoint its signer's Durable
+// Object over another, and each call has one connection through Hyperdrive.
+// vault.test.ts holds what crosses the contract, and signer-worker.test.ts
+// the signer's object; this holds that one request goes all the way.
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import test, { after } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import type { WrappedKey } from '@coffre/core/vault';
-import { tablesOf } from '@coffre/db';
-import { isUnavailable } from '@coffre/db/dialect';
-import { and, eq, inArray } from 'drizzle-orm';
-import { postgresSession } from '@coffre/db/connect';
+import type { Used } from '@coffre/core/vault';
+import { rowsOf } from '@coffre/db/dialect';
+import { sql } from 'drizzle-orm';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
-import { emptyDatabase, openTestDatabase, OWNER_URL, places, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
-import { READ_HEAD_WAITERS } from '../src/vault.ts';
+import { resolveVaultConfig } from '../src/config.ts';
+import { checked } from '../src/rows.ts';
+import { headText } from '../src/signer.ts';
+import { prepareVault } from '../src/vault.ts';
+import { emptyDatabase, openTestVault, VAULT_URL } from './database.ts';
+import { credential, environment, grant, principal, project, role, rows, secret, user, value, write } from './world.ts';
 
-const ROOT = 'user:root@acme.example';
+const VAULT_KEY = randomBytes(32).toString('base64');
+// The instance's rows are written here as the Worker's vault would write them: under its keys, and by the real
+// clock, which its signer dates entries by.
+const prepared = prepareVault(resolveVaultConfig({ kek: { id: 'vault-workers-test', key: VAULT_KEY }, owners: ['root@acme.example'] }));
+const world = await openTestVault({ ...prepared, now: Date.now });
+after(() => world.close());
 
-let db: TestDatabase;
-before(async () => {
-  db = await openTestDatabase();
-});
-after(() => db.close());
-beforeEach(async () => {
-  await emptyDatabase(db.owner);
-});
+const ada = user('ada');
+const KEYS = Array.from({ length: 8 }, (_, i) => `KEY_${i}`);
+
+/** `market/prod` with eight keys, which Ada reads. */
+async function instance(): Promise<void> {
+  await emptyDatabase(world.owner);
+  const market = project('market');
+  const prod = environment(market, 'prod');
+  const secrets = await Promise.all(KEYS.map((key) => value(world, secret(prod, key), `value of ${key}`)));
+  await write(world, ...rows('projects', market), ...rows('environments', prod), ...rows('secrets', ...secrets), ...rows('roles', role(false, 'viewer', ['secret.read'])),
+    ...rows('principals', principal(ada)), ...rows('grants', grant(ada, 'viewer', { project: market })), ...rows('credentials', credential('ada-cli', ada)));
+}
 
 /**
  * Postgres as Hyperdrive serves it from far away: each chunk either way
@@ -71,9 +80,12 @@ async function slowPostgres(ms: number): Promise<{ url: string; readonly opened:
   };
 }
 
-/** A fresh isolate of the vault Worker, over the suite's database through the vault's login. */
-async function freshVault(database: string): Promise<{
-  call(method: string, ...args: unknown[]): Promise<{ ok: boolean; error?: string; code?: string; result?: unknown }>;
+type Answer = { status: number; body: Used & { refused?: string; error?: string } };
+
+/** A fresh isolate of the vault Worker and its signer, over the suite's database through the vault's login. */
+async function freshVault(database: string, { signer = true } = {}): Promise<{
+  reveal(bearer: string, path: string, keys: string[] | null): Promise<Answer>;
+  post(path: string): Promise<{ error?: string }>;
   stop(): Promise<void>;
 }> {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-worker-'));
@@ -84,9 +96,12 @@ async function freshVault(database: string): Promise<{
       name,
       compatibility_date: '2026-08-06',
       compatibility_flags: ['nodejs_compat'],
-      vars: { VAULT_KEY: randomBytes(32).toString('base64') },
+      vars: { VAULT_KEY },
       hyperdrive: [{ binding: 'VAULT_HYPERDRIVE', id: 'vault-workers-test', localConnectionString: database }],
       services: [{ binding: 'VAULT', service: name, entrypoint: 'Vault' }],
+      // As a deployment's vault/wrangler.jsonc.
+      durable_objects: { bindings: signer ? [{ name: 'SIGNER', class_name: 'CoffreSigner' }] : [] },
+      migrations: [{ tag: 'signer', new_sqlite_classes: ['CoffreSigner'] }],
     }),
   );
   // Bundled from the packages' sources, as the tests read them.
@@ -103,14 +118,12 @@ async function freshVault(database: string): Promise<{
     throw error;
   }
   return {
-    async call(method, ...args) {
-      const response = await worker.fetch('/', { method: 'POST', body: JSON.stringify({ method, args }), signal: AbortSignal.timeout(20_000) });
-      const text = await response.text();
-      try {
-        return JSON.parse(text) as { ok: boolean; error?: string; code?: string; result?: unknown };
-      } catch {
-        return { ok: false, error: `${response.status}: ${text}` };
-      }
+    async reveal(bearer, path, keys) {
+      const response = await worker.fetch('/reveals', { method: 'POST', headers: { authorization: `Bearer ${bearer}` }, body: JSON.stringify({ path, keys }), signal: AbortSignal.timeout(20_000) });
+      return { status: response.status, body: (await response.json()) as Answer['body'] };
+    },
+    async post(path) {
+      return (await (await worker.fetch(path, { method: 'POST', signal: AbortSignal.timeout(20_000) })).json()) as { error?: string };
     },
     async stop() {
       await worker.stop();
@@ -119,75 +132,88 @@ async function freshVault(database: string): Promise<{
   };
 }
 
-function assertAllAnswered(results: { ok: boolean; error?: string }[]): void {
-  const failed = results.filter((result) => !result.ok).map((result) => result.error);
-  assert.deepEqual(failed, [], 'every call answered, none cancelled as hung');
+const count = async (table: 'log' | 'log_pending') => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM ${sql.identifier(table)}`))[0]!.n;
+const reads = async () => (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log WHERE NOT kept ORDER BY seq`)).map(({ body }) => JSON.parse(body) as { action: string; actor: string; detail: { keys: { key: string }[] } });
+
+/** `ready`, asked every 100 ms, within `ms`. */
+async function until(ready: () => Promise<boolean>, ms: number, what: string): Promise<void> {
+  for (const end = Date.now() + ms; !(await ready()); ) {
+    assert.ok(Date.now() < end, `${what}, within ${ms} ms`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
-test('a fresh isolate answers a page load of concurrent first calls', { timeout: 120_000 }, async () => {
-  const database = await slowPostgres(20);
-  const vault = await freshVault(database.url);
+const given = ({ body }: Answer) => body.values.map((item) => ('refused' in item ? item : { key: item.key, value: item.value }));
+
+test('a reveal through the app is answered its value, and its entry is in the log a second later, under a head of the vault\'s', { timeout: 120_000 }, async () => {
+  await instance();
+  const written = await count('log_pending');
+  const vault = await freshVault(VAULT_URL);
   try {
-    const results = await Promise.all([
-      vault.call('access', ROOT),
-      vault.call('access', ROOT),
-      vault.call('access', 'user:ada@acme.example'),
-      vault.call('access', 'user:bob@acme.example'),
-      vault.call('about'),
-      vault.call('about'),
-      vault.call('verifyLog', {}),
-      vault.call('verifyLog', {}),
-    ]);
-    assertAllAnswered(results);
+    const first = await vault.reveal('ada-cli', 'market/prod', ['KEY_0', 'NOPE']);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(first.body.principal, ada);
+    assert.deepEqual(given(first), [{ key: 'KEY_0', value: 'value of KEY_0' }, { key: 'NOPE', refused: 'unknown_key' }]);
+
+    // Nothing but the vault's own wake-up starts the signer here: its object does not exist until it is called.
+    await until(async () => (await count('log_pending')) === 0, 15_000, 'the signer has taken every entry');
+    assert.equal(await count('log'), written + 1);
+    assert.deepEqual((await reads()).map((entry) => [entry.action, entry.actor, entry.detail.keys.map(({ key }) => key)]), [['secret.read', ada, ['KEY_0']]]);
+    const [head] = await rowsOf<{ size: number; keptSize: number; keptRoot: string; agingSize: number; agingRoot: string; agingFrom: number; signedAt: number; mac: Buffer }>(
+      world.owner,
+      sql`SELECT size::int, kept_size::int AS "keptSize", encode(kept_root, 'hex') AS "keptRoot", aging_size::int AS "agingSize", encode(aging_root, 'hex') AS "agingRoot", aging_from::int AS "agingFrom", (extract(epoch FROM signed_at) * 1000)::float8 AS "signedAt", mac FROM log_head`,
+    );
+    assert.deepEqual([head!.size, head!.agingSize], [written + 1, 1]);
+    assert.ok(checked(world.keys, (each) => each.entries, headText(head!), head!.mac) !== undefined, 'the head is under the vault\'s MAC');
+
+    // The same key again within the minute is given, and logged once.
+    const again = await vault.reveal('ada-cli', 'market/prod', ['KEY_0']);
+    assert.deepEqual(given(again), [{ key: 'KEY_0', value: 'value of KEY_0' }]);
+    assert.deepEqual([await count('log'), await count('log_pending')], [written + 1, 0]);
   } finally {
     await vault.stop();
-    await database.close();
   }
 });
 
-test('a fresh isolate answers concurrent first key operations', { timeout: 120_000 }, async () => {
-  const placed = await places(db.owner);
-  const secrets = await Promise.all(Array.from({ length: 6 }, () => placed.secret(placed.dev)));
-  const database = await slowPostgres(20);
-  const vault = await freshVault(database.url);
+test('a refusal crosses the binding as an answer, and writes nothing', { timeout: 120_000 }, async () => {
+  await instance();
+  const written = await count('log_pending');
+  const vault = await freshVault(VAULT_URL);
   try {
-    // Settled by one call first, so that what is tested here is the key check before the first key operation.
-    assert.ok((await vault.call('access', ROOT)).ok);
-    const results = await Promise.all(
-      secrets.map((secret) => vault.call('wrap', { principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] })),
-    );
-    assertAllAnswered(results);
+    const nobody = await vault.reveal('nobody', 'market/prod', ['KEY_0']);
+    assert.deepEqual([nobody.status, nobody.body], [401, { refused: 'unauthenticated' }]);
+    const elsewhere = await vault.reveal('ada-cli', 'billing/prod', ['KEY_0']);
+    assert.deepEqual([elsewhere.status, elsewhere.body], [403, { refused: 'no_access' }]);
+    assert.deepEqual([await count('log'), await count('log_pending')], [0, written]);
   } finally {
     await vault.stop();
-    await database.close();
   }
 });
 
-test('each call opens one connection at most: on Cloudflare, a call that opened several at once was cancelled as hung', { timeout: 120_000 }, async () => {
-  const database = await slowPostgres(5);
+test('a vault Worker that binds no signer answers no call, and says why', { timeout: 120_000 }, async () => {
+  await instance();
+  const written = await count('log_pending');
+  const vault = await freshVault(VAULT_URL, { signer: false });
+  try {
+    const refused = await vault.reveal('ada-cli', 'market/prod', ['KEY_0']);
+    assert.equal(refused.status, 500);
+    assert.match(refused.body.error!, /binds its signer/);
+    assert.equal(await count('log_pending'), written);
+  } finally {
+    await vault.stop();
+  }
+});
+
+test('a fresh isolate answers a burst of first calls, each on one connection: on Cloudflare, a call that opened several at once was cancelled as hung', { timeout: 120_000 }, async () => {
+  await instance();
+  const database = await slowPostgres(20);
   const vault = await freshVault(database.url);
   try {
-    // A fresh isolate's first calls settle its keys and make root the bootstrap Owner: the most queries a call makes.
-    const calls: [string, ...unknown[]][] = [
-      ['access', ROOT],
-      ['access', 'user:ada@acme.example'],
-      ['about'],
-      ['verifyLog', {}],
-      ['access', ROOT],
-      ['checkpoint'],
-    ];
-    const opened: Record<string, number> = {};
-    for (const [index, [method, ...args]] of calls.entries()) {
-      const before = database.opened;
-      const result = await vault.call(method, ...args);
-      assert.ok(result.ok || method === 'checkpoint', `${method} failed: ${result.error}`);
-      opened[`${index} ${method}`] = database.opened - before;
-    }
-    assert.deepEqual(
-      Object.entries(opened).filter(([, count]) => count > 1),
-      [],
-      `connections each call opened: ${JSON.stringify(opened)}`,
-    );
+    const answers = await Promise.all(KEYS.map((key) => vault.reveal('ada-cli', 'market/prod', [key])));
+    assert.deepEqual(answers.map((answer) => [answer.status, answer.body.error]), KEYS.map(() => [200, undefined]), 'every call answered, none cancelled as hung');
+    assert.deepEqual(answers.flatMap(given), KEYS.map((key) => ({ key, value: `value of ${key}` })));
+    // One a call, its read and its write on it, and the signer's own: its runs a second apart share one.
+    assert.ok(database.opened <= KEYS.length + 2, `${database.opened} connections for ${KEYS.length} calls`);
   } finally {
     await vault.stop();
     await database.close();
@@ -198,65 +224,10 @@ test('in workerd too, a query on the database inside its own transaction is refu
   const database = await slowPostgres(5);
   const vault = await freshVault(database.url);
   try {
-    const refused = (await vault.call('queryOutsideTransaction')) as { ok: boolean; result?: string; error?: string };
-    assert.ok(refused.ok, refused.error ?? "refused");
-    assert.match(refused.result!, /^QueryOutsideTransaction: query outside its transaction: use tx/);
+    const refused = await vault.post('/query-outside-transaction');
+    assert.match(refused.error!, /^QueryOutsideTransaction: query outside its transaction: use tx/);
   } finally {
     await vault.stop();
     await database.close();
-  }
-});
-
-test('through the entrypoint, the credential a CI run came in on is copied into the entries it caused, never decided on', { timeout: 120_000 }, async () => {
-  const placed = await places(db.owner);
-  const secret = await placed.secret(placed.dev);
-  const credentialId = randomUUID();
-  const vault = await freshVault(VAULT_URL);
-  try {
-    // Root signs in first: the bootstrap makes them the Owner.
-    assert.ok((await vault.call('access', ROOT)).ok);
-    assert.ok((await vault.call('wrap', { principal: ROOT, credentialId, items: [{ secret, key: randomBytes(32).toString('base64') }] })).ok);
-    assert.ok((await vault.call('admit', { actor: ROOT, principal: 'token:ci-deploy', credentialId })).ok);
-    const { auditLog } = tablesOf(db.owner);
-    // Root's own row, which their bootstrap wrote, is its own: only what the calls asked for counts.
-    const entries = (await db.owner.select({ action: auditLog.action, subject: auditLog.subjectPrincipal, metadata: auditLog.metadata }).from(auditLog)
-      .where(and(eq(auditLog.author, 'vault'), inArray(auditLog.action, ['key.wrap', 'member.add'])))).filter((entry) => entry.subject !== ROOT);
-    assert.deepEqual(entries.map((entry) => [entry.action, (JSON.parse(entry.metadata) as { credentialId?: string }).credentialId]).sort(), [
-      ['key.wrap', credentialId],
-      ['member.add', credentialId],
-    ]);
-    const refused = await vault.call('admit', { actor: ROOT, principal: 'token:other', credentialId: 'not-a-uuid' });
-    assert.match(refused.error ?? '', /credentialId must be a lowercase UUID/);
-  } finally {
-    await vault.stop();
-  }
-});
-
-test('through the entrypoint, a read past the head\'s places in line fails at once with its code, which the app answers as unavailable', { timeout: 120_000 }, async () => {
-  const placed = await places(db.owner);
-  const secret = await placed.secret(placed.dev);
-  const vault = await freshVault(VAULT_URL);
-  const holder = postgresSession(OWNER_URL);
-  try {
-    assert.ok((await vault.call('access', ROOT)).ok);
-    const wrapped = (await vault.call('wrap', { principal: ROOT, items: [{ secret, key: randomBytes(32).toString('base64') }] })) as { ok: boolean; result: { wrapped: WrappedKey[] } };
-    assert.ok(wrapped.ok);
-    const items = await storedVersions(db.owner, [{ secret, wrapped: wrapped.result.wrapped[0]! }]);
-    const read = () => vault.call('unwrap', { principal: ROOT, caller: 'person', purpose: 'reveal', items });
-    // Once, so that what a process does once is done; then the head held, and every place in line taken.
-    assert.equal(((await read()).result as { ok: boolean }).ok, true);
-    await holder.unsafe('BEGIN');
-    await holder.unsafe('SELECT next_seq FROM audit_chain_head WHERE only_row FOR UPDATE');
-    await holder.unsafe('SELECT pg_advisory_xact_lock($1, place) FROM generate_series(1, $2::int) AS place', [0x636f6668, READ_HEAD_WAITERS]);
-    const started = Date.now();
-    const refused = await read();
-    assert.ok(Date.now() - started < 2_000, `refused after ${Date.now() - started} ms`);
-    assert.equal(refused.ok, false, JSON.stringify(refused));
-    assert.equal(refused.code, '55P03', 'the code crossed the binding');
-    assert.ok(isUnavailable({ code: refused.code }), 'which the app answers as unavailable');
-  } finally {
-    await holder.unsafe('ROLLBACK').catch(() => undefined);
-    await holder.end();
-    await vault.stop();
   }
 });

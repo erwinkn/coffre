@@ -1,29 +1,10 @@
 import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
-import type { ResolvedVaultConfig } from './config.ts';
-import { openVault, prepareVault, type VaultOptions } from './vault.ts';
+import { openVault, type PreparedVault, type VaultOptions } from './vault.ts';
 
 /** Every call the vault answers, in the order of the `Vault` interface. */
-export const METHODS = [
-  'unwrap',
-  'wrap',
-  'rewrap',
-  'reference',
-  'endReferences',
-  'access',
-  'setAccess',
-  'admit',
-  'remove',
-  'settings',
-  'setSettings',
-  'policy',
-  'changePolicy',
-  'checkpoint',
-  'about',
-  'keyChecks',
-  'verifyLog',
-] as const satisfies readonly (keyof Vault)[];
+export const METHODS = ['use'] as const satisfies readonly (keyof Vault)[];
 
 export type LocalVault = Vault & { close(): Promise<void> };
 
@@ -33,13 +14,8 @@ export type LocalVault = Vault & { close(): Promise<void> };
  * here does not rely on sharing objects with the caller. `close` is
  * whatever lets go of the database, when the vault opened it.
  */
-export async function openLocalVault(
-  db: Database,
-  config: ResolvedVaultConfig,
-  options: VaultOptions = {},
-  close: () => Promise<void> = async () => {},
-): Promise<LocalVault> {
-  const vault = openVault(db, await prepareVault(config, options));
+export function openLocalVault(db: Database, prepared: PreparedVault, options: VaultOptions, close: () => Promise<void> = async () => {}): LocalVault {
+  const vault = openVault(db, prepared, options);
   const local = Object.fromEntries(
     METHODS.map((name) => [
       name,
