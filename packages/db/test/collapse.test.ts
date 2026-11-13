@@ -272,7 +272,7 @@ test('each function is made once, by its own file, which the baseline names once
 
 test('the baseline makes what the numbered migrations make', async () => {
   const numberedPath = await database('numbered');
-  assert.deepEqual(await migrateDatabase(numberedPath), { unbuilt: [] });
+  assert.deepEqual(await migrateDatabase(numberedPath), { unbuilt: [], untimed: [] });
   const baseline = await database('baseline');
   await apply(baseline, [assemble(collapsed.baseline, collapsed.functions)]);
   same(await state(numberedPath), await state(baseline));
