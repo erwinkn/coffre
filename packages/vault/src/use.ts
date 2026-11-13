@@ -23,7 +23,9 @@ import { fromWire, sealedBy, type Row, type Sealed, type Wire } from './rows.ts'
  *    last minute: who has seen which key, the log entry, and the bulk cap,
  *    which refuses it all.
  *
- * It takes no lock. Within the vault's short memory a repeat is no database
+ * It takes no lock and waits on no change: its write touches `exposures`
+ * and the log's pending entries, which no change writes and which point at
+ * no other table. Within the vault's short memory a repeat is no database
  * call at all: the rows are remembered from when they were read, and
  * decided on again as of now.
  */
@@ -96,7 +98,9 @@ const shapeOfAsk = (ask: Ask) => JSON.stringify([ask.token.toString('hex'), ask.
 /** The rows this ask read within the vault's memory, if any. */
 export function recall(vault: Serving, ask: Ask): Read | undefined {
   const read = vault.memory.reads.get(shapeOfAsk(ask));
-  if (read === undefined || vault.now() < read.at + vault.memory.seconds * 1000) return read;
+  const now = vault.now();
+  // Fresh only between its read and the memory's length after it: a clock set back makes nothing fresher.
+  if (read === undefined || (now >= read.at && now < read.at + vault.memory.seconds * 1000)) return read;
   // Stale: its rows and the values opened from them go now, not when the next read happens to push them out.
   vault.memory.reads.delete(shapeOfAsk(ask));
   return undefined;
@@ -107,6 +111,8 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
   if (ask.token.length !== 32 || (ask.keys?.length ?? 0) > 1000) throw new Error('a use names a token by its SHA-256, and 1,000 keys at most');
   const at = vault.now();
   const keyed = (key: SQL) => (ask.keys === null ? sql`true` : sql`${key} = ANY(${sql.param(ask.keys)}::text[])`);
+  // The database's clock is read with the rows so that no pooler answers from a cache: Hyperdrive caches no
+  // statement that reads it. Its caching is off in every deployment besides (docs/deploy.md); this holds if one forgets.
   const found = await rowsOf<{ part: keyof Seen; row: Wire }>(vault.db, sql`
     WITH RECURSIVE
       c AS (SELECT * FROM credentials WHERE token_hash = decode(${ask.token.toString('hex')}, 'hex')),
@@ -118,6 +124,7 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
       -- By the project too: the index on secrets leads with it, and an environment's parents are its project's.
       keyed AS (SELECT s.* FROM secrets s WHERE s.project_id = (SELECT id FROM p) AND s.environment_id IN (SELECT id FROM chain) AND ${keyed(sql`s.key`)}),
       held AS (SELECT * FROM keyed UNION SELECT s.* FROM secrets s WHERE s.id IN (SELECT source_id FROM keyed))
+    SELECT part, row, clock_timestamp() AS read_at FROM (
     SELECT 'credential' AS part, to_jsonb(c) AS row FROM c
     UNION ALL SELECT 'principal', to_jsonb(t) FROM principals t, c WHERE t.id = c.principal
     UNION ALL SELECT 'identity', to_jsonb(t) FROM identities t, c WHERE t.id = c.identity_id
@@ -127,7 +134,7 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
     UNION ALL SELECT 'environment', to_jsonb(t) FROM environments t WHERE t.id IN (SELECT environment_id FROM held UNION ALL SELECT id FROM chain)
     UNION ALL SELECT 'secret', to_jsonb(t) FROM held t
     UNION ALL SELECT 'dismissed', to_jsonb(t) FROM dismissed_keys t WHERE t.environment_id IN (SELECT id FROM chain) AND t.restored_at IS NULL AND ${keyed(sql`t.key`)}
-    UNION ALL SELECT 'version', to_jsonb(t) FROM secret_versions t JOIN held ON t.secret_id = held.id AND t.version = held.current_version`);
+    UNION ALL SELECT 'version', to_jsonb(t) FROM secret_versions t JOIN held ON t.secret_id = held.id AND t.version = held.current_version) parts`);
   const seen = Object.fromEntries(Object.keys(READ).map((part) => [part, []])) as unknown as Seen;
   for (const { part, row: wire } of found) {
     const table = READ[part];
@@ -272,13 +279,14 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
       continue;
     }
     found.opened.set(version.id, value);
-    values.push({ key: item.key, secret: held.id, version: version.version, sensitive: version.sensitive, value });
+    // A copy: the caller may wipe what it is given, and the memory answers the next use from its own.
+    values.push({ key: item.key, secret: held.id, version: version.version, sensitive: version.sensitive, value: Buffer.from(value) });
     read.push(item);
   }
 
-  // What this credential has not been logged reading in the last minute, in one order for every use: two that write the same rows lock them in the same order.
+  // What this credential has not been logged reading in the last minute.
   const mark = ({ held, version }: Given) => `${caller.credential.id} ${ask.purpose} ${held.id} ${version.version}`;
-  const fresh = read.filter((item) => (memory.logged.get(mark(item))?.at ?? -Infinity) + LOGGED_MS <= at).sort((a, b) => (a.held.id < b.held.id ? -1 : 1));
+  const fresh = read.filter((item) => (memory.logged.get(mark(item))?.at ?? -Infinity) + LOGGED_MS <= at);
   if (fresh.length > 0) {
     const ids = [...new Set(fresh.map((item) => item.held.id))];
     const entry = pending(vault.keys[0]!, {
@@ -294,7 +302,8 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
     const time = sql`${new Date(at).toISOString()}::timestamptz`;
     const since = sql`${new Date(at - vault.cap.windowMs).toISOString()}::timestamptz`;
     // The cap counts the keys this principal was given in the window, these among them. Uses side by side each count
-    // without the other's, so it can be overshot by what is in flight (D217).
+    // without the other's, so it can be overshot by what is in flight (D217). The rows are written in one order,
+    // `ORDER BY id`, by every use: two that write the same ones wait in line, never on each other.
     const [{ ok }] = await rowsOf<{ ok: boolean }>(vault.db, sql`
       WITH ids AS (SELECT id FROM unnest(${sql.param(ids)}::uuid[]) AS id),
         cap AS (SELECT (SELECT count(*) FROM exposures WHERE principal = ${caller.principal} AND seen_at > ${since} AND secret_id NOT IN (SELECT id FROM ids)) + ${ids.length} <= ${vault.cap.count} AS ok),
@@ -303,16 +312,21 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
       SELECT ok FROM cap`) as [{ ok: boolean }];
     if (!ok) return { refused: 'bulk_limit' };
     vault.wake(entry.hash);
-    for (const item of fresh) keep(memory.logged, mark(item), { at }, at - LOGGED_MS);
+    for (const item of fresh) memory.logged.set(mark(item), { at });
+    keep(memory.logged, mark(fresh[0]!), { at }, at - LOGGED_MS);
   }
 
   // When the credential was last used: its row's own statement, since it shares one with nothing a change may lock.
   const { id, lastUsedAt } = caller.credential;
   if (Math.max(lastUsedAt?.getTime() ?? -Infinity, memory.touched.get(id)?.at ?? -Infinity) + TOUCHED_MS <= at) {
-    // Losing it never costs the use: it only says when.
-    await vault.db.execute(sql`UPDATE credentials SET last_used_at = ${new Date(at).toISOString()}::timestamptz, last_used_ip = ${ask.ip} WHERE id = ${id}`).then(() => keep(memory.touched, id, { at }, at - TOUCHED_MS), () => {});
+    // It only says when, so it never costs the use: a row a change holds is skipped, not waited for, a failure is
+    // dropped, and a later time is never put back.
+    const when = sql`${new Date(at).toISOString()}::timestamptz`;
+    const free = sql`SELECT id FROM credentials WHERE id = ${id} AND (last_used_at IS NULL OR last_used_at < ${when}) FOR NO KEY UPDATE SKIP LOCKED`;
+    await vault.db.execute(sql`UPDATE credentials SET last_used_at = ${when}, last_used_ip = ${ask.ip} WHERE id IN (${free})`).then(() => keep(memory.touched, id, { at }, at - TOUCHED_MS), () => {});
   }
-  if (memory.seconds > 0) keep(memory.reads, shapeOfAsk(ask), found, at - memory.seconds * 1000);
+  // Unless a newer read of the same is there already: a slow use does not put its older rows back over it.
+  if (memory.seconds > 0 && !((memory.reads.get(shapeOfAsk(ask))?.at ?? -Infinity) > found.at)) keep(memory.reads, shapeOfAsk(ask), found, at - memory.seconds * 1000);
   return { principal: caller.principal, credential: id, values };
 }
 

@@ -549,10 +549,6 @@ CREATE TABLE log_head (
     CONSTRAINT log_head_mac_check CHECK (octet_length(mac) = 36)
 );
 --> statement-breakpoint
-ALTER TABLE exposures
-    ADD CONSTRAINT exposures_principal_fkey FOREIGN KEY (principal) REFERENCES principals (id) ON DELETE RESTRICT,
-    ADD CONSTRAINT exposures_secret_id_fkey FOREIGN KEY (secret_id) REFERENCES secrets (id) ON DELETE RESTRICT;
---> statement-breakpoint
 CREATE INDEX exposures_secret_idx ON exposures (secret_id);
 --> statement-breakpoint
 

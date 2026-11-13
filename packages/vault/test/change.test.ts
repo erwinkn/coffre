@@ -147,7 +147,7 @@ test('a change is two round trips: its read, and its write, with the lock ahead 
     assert.deepEqual(await change(counted, setRole(ada, bo, 'member')), { answer: 'member' });
     assert.deepEqual({ trips: proxy.trips - before.trips, syncs: proxy.syncs - before.syncs }, { trips: 2, syncs: 2 });
     // What went together, in order: the read alone; then the transaction, its lock, its write and its end.
-    assert.deepEqual(sent, [['SELECT \'call'], ['begin isolat', 'SELECT set_c', 'WITH same AS', 'commit']]);
+    assert.deepEqual(sent, [['SELECT part,'], ['begin isolat', 'SELECT set_c', 'WITH same AS', 'commit']]);
     // And a write that lost to another is one more of each, read and write.
     const stale = await prepare(counted, setRole(ada, bo, 'owner'));
     assert.ok(!('refused' in stale));

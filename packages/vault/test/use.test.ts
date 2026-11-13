@@ -147,8 +147,8 @@ test('each key is its own answer: unknown, archived, empty, sensitive, a referen
   assert.deepEqual(await got(ask('ada', 'market/prod', ['DATABASE_URL', 'NOPE', 'OLD', 'HOLLOW', 'STRIPE_KEY', 'FLAG'])), {
     DATABASE_URL: 'postgres://prod', NOPE: 'refused: unknown_key', OLD: 'refused: unknown_key', HOLLOW: 'refused: no_value', STRIPE_KEY: 'refused: sensitive', FLAG: 'on',
   });
-  // Only what was handed over is logged and counted.
-  assert.deepEqual((await logged())[0]!.detail.keys, [w.database, w.flag].sort((a, b) => (a.id < b.id ? -1 : 1)).map((row) => ({ key: row.key, secret: row.id, version: row.currentVersion })));
+  // Only what was handed over is logged and counted, in the order asked.
+  assert.deepEqual((await logged())[0]!.detail.keys, [w.database, w.flag].map((row) => ({ key: row.key, secret: row.id, version: row.currentVersion })));
   assert.deepEqual((await exposed()).map((row) => row.secret_id).sort(), [w.database.id, w.flag.id].sort());
 });
 

@@ -1339,34 +1339,7 @@
           "with": {}
         }
       },
-      "foreignKeys": {
-        "exposures_principal_fkey": {
-          "name": "exposures_principal_fkey",
-          "tableFrom": "exposures",
-          "tableTo": "principals",
-          "columnsFrom": [
-            "principal"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
-        "exposures_secret_id_fkey": {
-          "name": "exposures_secret_id_fkey",
-          "tableFrom": "exposures",
-          "tableTo": "secrets",
-          "columnsFrom": [
-            "secret_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        }
-      },
+      "foreignKeys": {},
       "compositePrimaryKeys": {
         "exposures_pkey": {
           "name": "exposures_pkey",
