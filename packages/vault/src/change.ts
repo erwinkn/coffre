@@ -214,6 +214,7 @@ export async function commit<A>(vault: Running, prepared: Prepared<A>): Promise<
     .catch((error: unknown) => {
       throw waitedOut(error) ? new Busy(`a change waited ${LOCK_WAIT_MS} ms for a lock`) : error;
     });
+  // Read once the transaction has resolved: it committed. Were the write's answer lost on its way back, this throws for a write that landed, and the signer finds its entry unannounced, as after a vault that died.
   const [same] = await wrote;
   if (same!.ok) vault.wake(prepared.hash);
   return same!.ok;

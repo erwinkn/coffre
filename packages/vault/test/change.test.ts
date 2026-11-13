@@ -133,15 +133,19 @@ test('every sealed table has a row that reads back as the vault sealed it', asyn
 
 test('a change is two round trips: its read, and its write, with the lock ahead of it and the commit behind', async () => {
   // Through a proxy that counts what a pooler like Hyperdrive sends on one at a time.
-  const proxy = await postgresProxy(VAULT_URL);
+  const sent: string[][] = [];
+  const proxy = await postgresProxy(VAULT_URL, { onSync: (statements) => sent.push(statements.map((text) => text.trimStart().slice(0, 12))) });
   const through = await openDatabase(proxy.url);
   try {
     const counted = { ...vault, db: through.db };
     // The first opens the connection.
     assert.ok('answer' in (await change(counted, writing(put(principals, member(ada, 'owner')), put(principals, member(bo, 'owner'))))));
     const before = { trips: proxy.trips, syncs: proxy.syncs };
+    sent.length = 0;
     assert.deepEqual(await change(counted, setRole(ada, bo, 'member')), { answer: 'member' });
     assert.deepEqual({ trips: proxy.trips - before.trips, syncs: proxy.syncs - before.syncs }, { trips: 2, syncs: 2 });
+    // What went together, in order: the read alone; then the transaction, its lock, its write and its end.
+    assert.deepEqual(sent, [['SELECT \'call'], ['begin isolat', 'SELECT set_c', 'WITH same AS', 'commit']]);
     // And a write that lost to another is one more of each, read and write.
     const stale = await prepare(counted, setRole(ada, bo, 'owner'));
     assert.ok(!('refused' in stale));
