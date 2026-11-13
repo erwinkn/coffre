@@ -79,7 +79,7 @@ async function bound(w: World, as: Partial<MadeBinding> = {}): Promise<MadeBindi
     jwks: null, label: 'deploys', createdBy: 'root@acme.example', createdAt: Date.now(), authMac: randomBytes(32).toString('base64'), ...as,
   };
   const change: ChangeBindingsInput = {
-    actor: ROOT, via: null, actorAccess: null, connection: null, make: made, live: [...w.live], reads: [], ends: [], reason: 'replaced', revokedAt: Date.now(),
+    actor: ROOT, via: null, actorSeal: null, connection: null, make: made, live: [...w.live], reads: [], ends: [], reason: 'replaced', revokedAt: Date.now(),
     revokedBy: 'root@acme.example', policy: { seq: null, protected: [] }, appKey: APP_KEY,
   };
   const outcome = await w.vault.changeBindings!(change);

@@ -1332,8 +1332,8 @@ export type ChangeBindingsInput = {
   actor: string;
   /** The credential the request came in on, by id; null for none. */
   via: string | null;
-  /** The issuer's access as the app weighed the scope on (`access_seq`), decimal; null when it weighed none. */
-  actorAccess: string | null;
+  /** The issuer's seal as the app weighed the scope on (`IssueTokenInput.actorSeal`); null when it weighed none. */
+  actorSeal: string | null;
   /** The MCP connection the request came through, at the caller's generation, held to still connected; null for none. */
   connection: { id: string; generation: number } | null;
   /** The binding it makes; null for an unbind. Its account at its generation, as its columns name them. */
@@ -1442,11 +1442,11 @@ export type IssueTokenInput = {
   /** The principal's generation it is issued at. */
   generation: number;
   /**
-   * The issuer's access the app weighed the scope on: the vault's newest
-   * access entry about them (`issuerNow`), which the vault holds the issue
-   * to (`access`, as `issuerStill`); null to hold it to none.
+   * The issuer's seal as the app read it before it weighed the scope
+   * (`issuerNow`), hex: the vault's MAC over their object, which it holds
+   * the issue to (`access`, as `issuerStill`); null to hold it to none.
    */
-  actorAccess: string | null;
+  actorSeal: string | null;
   credential: IssuedTokenRow;
   /** The policy the app weighed the scope on: its newest `policy.change`, and the environments it protected (`policyStill`'s). */
   policy: { seq: string | null; protected: { environmentId: string; slug: string | null }[] };

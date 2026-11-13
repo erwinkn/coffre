@@ -422,7 +422,7 @@ type Remover = {
   ctx: Asker | null;
   actor: string;
   via: string | null;
-  actorAccess: string | null;
+  actorSeal: string | null;
   connection: { id: string; generation: number } | null;
   revokedBy: string;
   policy: ChangeBindingsInput['policy'];
@@ -430,10 +430,10 @@ type Remover = {
 };
 
 /** A person's request, as it removes bindings: who, on which credential and connection, weighed on which policy. */
-function asked(ctx: Asker, caller: Caller, accessSeq: bigint | null): Remover {
+function asked(ctx: Asker, caller: Caller, seal: string | null): Remover {
   return {
     ctx,
-    actor: formatMember(ctx.caller.principal), via: ctx.credentialId, actorAccess: accessSeq?.toString() ?? null,
+    actor: formatMember(ctx.caller.principal), via: ctx.credentialId, actorSeal: seal,
     connection: ctx.via?.connectionId == null ? null : { id: ctx.via.connectionId, generation: ctx.caller.generation },
     revokedBy: ctx.caller.principal.id,
     policy: {
@@ -681,8 +681,8 @@ export class WorkloadService {
     // Its scope's shape too, before the issuer is asked anything: what it names is checked once the bindings it replaces are known.
     if (input.scope !== undefined) parseScope(input.scope, ctx.caller.policy);
     return withRefusals(this.#deps, async () => {
-      // The issuer as the vault answers now, which its change is held to (`actorAccess`): demoted meanwhile, they give it nothing.
-      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.bind' });
+      // The issuer as the vault answers now, which its change is held to (`actorSeal`): demoted meanwhile, they give it nothing.
+      const { caller, seal } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.bind' });
       // Who runs the instance, or a person who reaches every grant it holds (`managesService`).
       const { standing, managed, setting } = await managedAccount(this.#deps, caller, serviceId);
       if (!managed) throw notManager(ctx, 'token.bind', details, 'trust workloads as it');
@@ -767,7 +767,7 @@ export class WorkloadService {
             },
           }),
         ];
-        await this.#bindingsByVault(asked(ctx, caller, accessSeq), member, row, { live: unrevoked.map(({ id }) => id), reads }, ending, planned.replaces.some(({ why }) => why === 'keys_moved') ? 'keys_moved' : 'replaced', details, entries);
+        await this.#bindingsByVault(asked(ctx, caller, seal), member, row, { live: unrevoked.map(({ id }) => id), reads }, ending, planned.replaces.some(({ why }) => why === 'keys_moved') ? 'keys_moved' : 'replaced', details, entries);
         return {
           binding: view({ ...row, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null, closedAt: null, closedBy: null }, byPath, planned.policy),
           replaced: planned.replaces.map(({ id }) => id),
@@ -797,8 +797,8 @@ export class WorkloadService {
     const uploaded = await keysOf(input.jwks);
     const jwksUri = `${UPLOADED_KEYS}${uploaded.digest}`;
     return withRefusals(this.#deps, async () => {
-      // The issuer as the vault answers now, which its change is held to (`actorAccess`), as in `bind`.
-      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.bind' });
+      // The issuer as the vault answers now, which its change is held to (`actorSeal`), as in `bind`.
+      const { caller, seal } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.bind' });
       const { standing, managed, setting } = await managedAccount(this.#deps, caller, serviceId);
       if (!managed) throw notManager(ctx, 'token.bind', details, 'trust workloads as it');
       const unknown = () => new Refusal(notFound('unknown service'), denied(ctx, 'token.bind', 'unknown_principal', { metadata: details }));
@@ -852,7 +852,7 @@ export class WorkloadService {
             // A millisecond apart, in the order of those they replace: an exchange tries bindings oldest first, and still does.
             createdAt: new Date(now + i),
           };
-          await this.#bindingsByVault(asked(ctx, caller, accessSeq), member, row, { live: unrevoked.map(({ id }) => id), reads: [] }, [old], 'keys_moved', { ...details, bindingId: old.id }, [
+          await this.#bindingsByVault(asked(ctx, caller, seal), member, row, { live: unrevoked.map(({ id }) => id), reads: [] }, [old], 'keys_moved', { ...details, bindingId: old.id }, [
             allowed(ctx, 'token.unbind', { metadata: { bindingId: old.id, principalType: 'service', principalId: serviceId, reason: 'keys_replaced', by: row.id } }),
             allowed(ctx, 'token.bind', {
               metadata: {
@@ -1044,7 +1044,7 @@ export class WorkloadService {
       }
       if (ctx !== null) this.#removalCalls.set(ctx, (this.#removalCalls.get(ctx) ?? 0) + 1);
       return vault.changeBindings!({
-      actor: who.actor, via: who.via, actorAccess: who.actorAccess,
+      actor: who.actor, via: who.via, actorSeal: who.actorSeal,
       // Through an MCP connection, held to it as `credentialStill` holds a write to it (review r3).
       connection: who.connection,
       // The binding a replacement makes, in its first call, which the vault weighs, and holds to its maker's rows (review r4).
@@ -1199,7 +1199,7 @@ export class WorkloadService {
       const by = row.closedBy;
       if (by === null || !/^[a-z]+:./.test(by) || row.closedAt === null) throw new Error('its close names no remover: a row changed around coffre');
       const remover: Remover = {
-        ctx: null, actor: SCHEDULE_ACTOR, via: null, actorAccess: null, connection: null,
+        ctx: null, actor: SCHEDULE_ACTOR, via: null, actorSeal: null, connection: null,
         revokedBy: by.slice(by.indexOf(':') + 1),
         // An unbind weighs no protected environment; the policy only as its newest change stands, as the vault holds it.
         policy: { seq: (await newestVaultSeq(db, 'policy'))?.toString() ?? null, protected: [] },

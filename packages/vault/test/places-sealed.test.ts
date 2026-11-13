@@ -139,7 +139,7 @@ async function credentialRows(): Promise<number> {
 /** A service token `actor` asks the vault to issue `CI`, scoped to `scope`. */
 function issue(actor: string, scope: CredentialScope): IssueTokenInput {
   return {
-    actor, via: null, principal: CI, generation: 0, actorAccess: null,
+    actor, via: null, principal: CI, generation: 0, actorSeal: null,
     credential: {
       id: randomUUID(), kind: 'service', tokenHash: randomBytes(32).toString('base64'), tokenHint: 'coffre_svc_x', label: 'deploys',
       scope: storedScope(scope), places: null, expiresAt: Date.now() + 86_400_000, createdBy: actor.slice('user:'.length), passkeyId: null, authMac: randomBytes(32).toString('base64'),

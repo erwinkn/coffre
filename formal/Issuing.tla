@@ -85,8 +85,9 @@ vars == <<rows, log, locks, procs, given>>
 \* membership (core vault.ts, ACCESS_ACTIONS).
 AccessKinds == {"member.add", "member.restore", "member.owner", "member.role", "member.remove", "access.grant", "access.revoke"}
 
-\* The newest entry about m's access, by its place in the log; 0 for none
-\* (server db/queries.ts, newestAccessSeq).
+\* The newest entry about m's access, by its place in the log; 0 for none:
+\* the model's stand-in for m's seal (server db/queries.ts, memberSeal),
+\* which each such entry moves.
 NewestAbout(m) ==
     LET about == {i \in 1..Len(log) : log[i].kind \in AccessKinds /\ log[i].who = m} IN
     IF about = {} THEN 0 ELSE CHOOSE i \in about : \A j \in about : j <= i

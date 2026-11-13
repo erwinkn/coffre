@@ -74,10 +74,16 @@ function binding(w: World, sensitive = false, by = ROOT): MadeBinding {
 /** A change as the app asks it; with a binding made, beside the account's live bindings `live` (none unless named). */
 function change(input: Partial<ChangeBindingsInput>): ChangeBindingsInput {
   return {
-    actor: ROOT, via: null, actorAccess: null, connection: null, make: null, ends: [], reason: 'unbound', revokedAt: Date.now(), revokedBy: 'root@acme.example',
+    actor: ROOT, via: null, actorSeal: null, connection: null, make: null, ends: [], reason: 'unbound', revokedAt: Date.now(), revokedBy: 'root@acme.example',
     policy: { seq: null, protected: [] }, appKey: APP_KEY, reads: [], ...input,
     live: input.live ?? (input.make == null ? null : []),
   };
+}
+
+/** A seal that is not `principal`'s: theirs with every bit flipped, as a seal from before a change of their access reads. */
+async function otherSeal(principal: string): Promise<string> {
+  const [row] = await db.owner.select({ seal: principals.seal }).from(principals).where(eq(principals.principal, principal));
+  return Buffer.from(row!.seal!.map((byte) => byte ^ 0xff)).toString('hex');
 }
 
 /** A binding as its row is now, with its seal: what a sign-in names, and what ending it names. */
@@ -502,8 +508,7 @@ test('an unbind takes the change lock, after the members\' rows, and waits for a
 
 test("a binding's maker whose access moved since the app weighed it is refused, for the app to weigh again", async () => {
   const w = await world();
-  const [{ accessSeq }] = (await db.owner.select({ accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, ROOT))) as [{ accessSeq: bigint }];
-  const stale = await w.vault.changeBindings!(change({ make: binding(w), reason: 'replaced', actorAccess: String(BigInt(accessSeq) + 1n) }));
+  const stale = await w.vault.changeBindings!(change({ make: binding(w), reason: 'replaced', actorSeal: await otherSeal(ROOT) }));
   assert.equal(!stale.ok && stale.refused, 'access');
   assert.equal((await db.owner.select().from(serviceBindings)).length, 0);
 });
@@ -725,10 +730,9 @@ test("a replacement's sweep makes its binding as it closes the one it replaces, 
   assert.ok((await w.vault.changeBindings!(change({ make: other, live: [old.id, next.id], reason: 'replaced' }))).ok);
   const second = await signIn(w, other.id);
   assert.ok(second.outcome.ok);
-  const [{ accessSeq }] = (await db.owner.select({ accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, ROOT))) as [{ accessSeq: bigint }];
   const refusedMake = binding(w);
   const stale = await w.vault.changeBindings!(change({
-    make: refusedMake, live: [old.id, next.id, other.id], ends: [await ending(other.id)], reason: 'replaced', sweep: true, actorAccess: String(BigInt(accessSeq) + 1n),
+    make: refusedMake, live: [old.id, next.id, other.id], ends: [await ending(other.id)], reason: 'replaced', sweep: true, actorSeal: await otherSeal(ROOT),
   }));
   assert.equal(!stale.ok && stale.refused, 'access');
   const [row] = await db.owner.select({ closedAt: serviceBindings.closedAt }).from(serviceBindings).where(eq(serviceBindings.id, other.id));

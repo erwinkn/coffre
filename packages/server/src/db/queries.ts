@@ -836,32 +836,37 @@ export function memberOf(principal: string): { type: 'user' | 'service'; id: str
 }
 
 /**
- * A member's status and generation as the vault last committed them, or
- * null for no member: `user:…` or `token:…`. Read without a lock:
+ * A member's status, generation and seal (`memberSeal`) as the vault last
+ * committed them, or null for no member: `user:…` or `token:…`. Read without a lock:
  * a member's row is the vault's to lock. Inside a transaction that holds
  * the log's head, any change the vault is making waits for it, so what this
  * reads holds until it commits.
  */
-export async function memberStanding(db: Queryable, principal: string): Promise<{ status: string; generation: number; accessSeq: bigint } | null> {
+export async function memberStanding(db: Queryable, principal: string): Promise<{ status: string; generation: number; seal: string | null } | null> {
   const [row] = await db
-    .select({ status: principals.status, generation: principals.generation, accessSeq: principals.accessSeq })
+    .select({ status: principals.status, generation: principals.generation, seal: principals.seal })
     .from(principals)
     .where(eq(principals.principal, principal));
-  return row ?? null;
+  return row === undefined ? null : { ...row, seal: sealHex(row.seal) };
+}
+
+/** A member's seal as the vault takes it back (`actorSeal`): hex, or null for none. */
+function sealHex(seal: Buffer | null): string | null {
+  return seal === null ? null : seal.toString('hex');
 }
 
 /**
- * The vault's newest entry about `principal`'s access, their role, grants
- * or membership, by its seq, as their row names it (`access_seq`); null for
- * no row. Read before the vault is asked about them, and again under the
- * head, it says whether its answer is still theirs (`issuerStill`): the
- * vault writes the row with each such entry, under the same head. With the
- * database clock, as `findCredential` reads, so that Hyperdrive never
- * answers it from its cache.
+ * `principal`'s seal, the vault's MAC over their object (status,
+ * generation, role, scope, grants), as hex; null for no row. Read before
+ * the vault is asked about them, and again under the head, it says whether
+ * its answer is still theirs (`issuerStill`): the vault reseals the row with
+ * each change of their access, under the same head. With the database
+ * clock, as `findCredential` reads, so that Hyperdrive never answers it
+ * from its cache.
  */
-export async function newestAccessSeq(db: Queryable, principal: string): Promise<bigint | null> {
-  const [row] = await db.select({ seq: principals.accessSeq, now: clock() }).from(principals).where(eq(principals.principal, principal));
-  return row?.seq ?? null;
+export async function memberSeal(db: Queryable, principal: string): Promise<string | null> {
+  const [row] = await db.select({ seal: principals.seal, now: clock() }).from(principals).where(eq(principals.principal, principal));
+  return sealHex(row?.seal ?? null);
 }
 
 /**
@@ -1437,13 +1442,13 @@ export async function passkeyHistory(db: Queryable, chainKey: Buffer, principal:
 }
 
 /** A member as a sign-in's callback weighs them (`signinMembers`). */
-export type SigninMember = { principal: string; status: string; generation: number; accessSeq: bigint; ever: number; live: number };
+export type SigninMember = { principal: string; status: string; generation: number; seal: string | null; ever: number; live: number };
 
 /**
  * What a sign-in's callback decides on (passkeys.md, section 3.1), beside the identity it reads in the same round trip
  * (`findIdentity`): the members its account may be, the one its live identity names and one per verified email, each
- * with its status and generation, the vault's newest entry about its access (`access_seq`, which the sign-in's
- * transaction holds it to under the head, as `issuerStill` does), and its passkeys, ever and live at that generation.
+ * with its status and generation, its seal (`memberSeal`, which the sign-in's transaction holds it to under the head,
+ * as `issuerStill` does), and its passkeys, ever and live at that generation.
  * One statement, with the database clock, so that Hyperdrive never answers it from its cache: a cached sequence
  * would read as moved under the head on every try. Rows of the vault's, unchecked: what they decide is only whether to
  * ask for a passkey first, and the sign-in checks the vault's own answer before it issues anything.
@@ -1463,7 +1468,7 @@ export async function signinMembers(
       principal: principals.principal,
       status: principals.status,
       generation: principals.generation,
-      accessSeq: principals.accessSeq,
+      seal: principals.seal,
       // Named in full: drizzle writes a column of the one table it selects from unqualified, which the subquery would read as its own.
       ever: sql<number>`(SELECT count(*) FROM passkeys ever WHERE ever.principal = principals.principal)`,
       live: sql<number>`(SELECT count(*) FROM passkeys live WHERE live.principal = principals.principal AND live.generation = principals.generation AND live.removed_at IS NULL)`,
@@ -1471,7 +1476,7 @@ export async function signinMembers(
     })
     .from(principals)
     .where(candidates.length === 0 ? inArray(principals.principal, bound) : or(inArray(principals.principal, candidates), inArray(principals.principal, bound)));
-  return new Map(rows.map(({ now: _, ever, live, ...row }) => [row.principal, { ...row, ever: Number(ever), live: Number(live) }]));
+  return new Map(rows.map(({ now: _, ever, live, seal, ...row }) => [row.principal, { ...row, seal: sealHex(seal), ever: Number(ever), live: Number(live) }]));
 }
 
 /** Whether a passkey row, anyone's, live or not, has this credential ID: what a first passkey's unique violation was. */

@@ -633,7 +633,7 @@ export class SigninService {
         });
         const now = new Date();
         const reading = Promise.all([
-          this.#stillMember(tx, principal, standing, known?.accessSeq),
+          this.#stillMember(tx, principal, standing, known?.seal),
           factor?.kind === 'enroll'
             ? none().then(({ ever, live }) => ever === factor.state.passkeysEver && live === 0)
             // `passkeyStands`' rule for a credential that names none, `optional` and none held, on rows checked.
@@ -820,7 +820,7 @@ export class SigninService {
     // The person: the live identity's, or the first verified email that the deployment names an Owner or the vault
     // holds a row of, in the order `#principalForEmails` asks the vault about them. Nobody: today's sign-in says why.
     const id = previous !== null ? memberOf(previous.principal).id : profile.emails.find((email) => owners.has(email) || members.has(`user:${email}`)) ?? null;
-    if (id === null) return this.#signedIn(profile, meta, null, { previous, person: null, accessSeq: null });
+    if (id === null) return this.#signedIn(profile, meta, null, { previous, person: null, seal: null });
     const principal = principalOf({ type: 'user', id });
     const row = members.get(principal);
     const active = row?.status === 'active' && (previous === null || previous.generation === row.generation) ? row : null;
@@ -844,7 +844,7 @@ export class SigninService {
     // Under `required`, a member who holds none adds one; under `optional`, one who asked to (`PendingState.addPasskey`).
     if (active !== null && (policy === 'required' || addPasskey)) return step('enroll', active.generation);
     try {
-      return await this.#signedIn(profile, meta, null, { previous, person: previous === null ? { id, email: id } : null, accessSeq: row?.accessSeq ?? null });
+      return await this.#signedIn(profile, meta, null, { previous, person: previous === null ? { id, email: id } : null, seal: row?.seal ?? null });
     } catch (error) {
       if (error instanceof StepWanted) return step('enroll', error.access.generation);
       throw error;
@@ -1236,7 +1236,7 @@ export class SigninService {
       return await withRefusals(this.#deps, async () => {
         // The Owner as the vault answers now, held to under the head: demoted meanwhile, they reset no one (`issuerStill`;
         // review r1 of #529), as an issuer demoted meanwhile gives a token nothing.
-        const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'passkey.reset' });
+        const { caller, seal } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'passkey.reset' });
         const asker = { ...ctx, caller };
         mayReset(asker, member);
         if (caller.principal.id === member.id) {
@@ -1270,7 +1270,7 @@ export class SigninService {
             // Read together, one round trip: the Owner's access as it was weighed, the session they asked on still live and
             // still backed by the passkey it names, the person still the member they were, and their passkeys.
             const [, , stands, still, rows] = await Promise.all([
-              issuerStill(tx, caller, accessSeq),
+              issuerStill(tx, caller, seal),
               credentialStill(asker, tx, 'passkey.reset'),
               sourceStands(tx, this.#deps.chainKey, this.#deps.signin.passkeys.policy, asker),
               this.#stillMember(tx, member, standing),
@@ -1528,14 +1528,14 @@ export class SigninService {
    * generation it was issued under; a later removal moves past it, and it
    * stops working, whatever its own row says.
    *
-   * With `accessSeq`, the vault's newest entry about their access as the callback read it, before the vault answered:
-   * moved since (a role, a grant, a scope), the callback's decision whether to ask for a passkey first was made on an
+   * With `seal`, their seal as the callback read it, before the vault answered (`memberSeal`): moved since (a role, a
+   * grant, a scope), the callback's decision whether to ask for a passkey first was made on an
    * answer no longer theirs, and it decides again (`AccessMoved`; review r1 of #500), as `issuerStill` holds an issue.
    */
-  async #stillMember(tx: Transaction, principal: PrincipalRef, standing: Access, accessSeq?: bigint | null): Promise<boolean> {
+  async #stillMember(tx: Transaction, principal: PrincipalRef, standing: Access, seal?: string | null): Promise<boolean> {
     if (standing.status !== 'active') return false;
     const row = await memberStanding(tx, principalOf(principal));
-    if (accessSeq !== undefined && (row?.accessSeq ?? null) !== accessSeq) throw new AccessMoved();
+    if (seal !== undefined && (row?.seal ?? null) !== seal) throw new AccessMoved();
     return row !== null && row.generation === standing.generation && row.status === 'active';
   }
 
@@ -1623,7 +1623,7 @@ export class SigninService {
     principal: PrincipalRef,
     options: CredentialOptions & { id: string },
     details: Record<string, unknown>,
-    held: { accessSeq: bigint | null; refusal?: () => Refusal },
+    held: { seal: string | null; refusal?: () => Refusal },
   ): Promise<IssuedCredential | null> {
     // The vault holds `via` to a credential it reads, and an MCP connection is none: what one issues, the app issues,
     // holding the connection and its passkey under its head (`sourceStands`; review of #497 by Fable 5.1).
@@ -1636,7 +1636,7 @@ export class SigninService {
       ...(ctx.confirmed == null ? {} : { confirmed: ctx.confirmed }),
       principal: principalOf(principal),
       generation: options.generation,
-      actorAccess: held.accessSeq?.toString() ?? null,
+      actorSeal: held.seal,
       credential: {
         id: row.id!, kind, tokenHash: row.tokenHash.toString('base64'), tokenHint: row.tokenHint, label: row.label ?? null, scope: row.scope!, places: row.places ?? null,
         expiresAt: row.expiresAt.getTime(), createdBy: row.createdBy, authMac: row.authMac.toString('base64'),
@@ -2090,13 +2090,13 @@ export class SigninService {
     return withRefusals(this.#deps, async () => {
       const service = { type: 'service' as const, id: serviceId };
       // The issuer as the vault answers now, held to under the head: demoted meanwhile, they give it nothing (`issuerStill`).
-      const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.create' });
+      const { caller, seal } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'token.create' });
       const { standing, scope, byPath, withheld, refusal } = await this.#tokenScope({ ...ctx, caller }, serviceId, input.scope, details);
       const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000), scope, generation: standing.generation };
       // With 0.15's log, the vault issues it, weighing the issuer itself (T149, PR 2): one call.
       if (await vaultIssuesTokens(this.#deps.vault)) {
         // It names the issuer's passkey, as the vault holds `via` to (section 6.3).
-        const credential = await this.#issuedByVault(ctx, caller, 'service', service, { ...plan, identityId: null, label: input.label, createdBy: ctx.caller.principal.id, passkeyId: ctx.passkeyId }, details, { accessSeq, refusal });
+        const credential = await this.#issuedByVault(ctx, caller, 'service', service, { ...plan, identityId: null, label: input.label, createdBy: ctx.caller.principal.id, passkeyId: ctx.passkeyId }, details, { seal, refusal });
         if (credential !== null) return { ...credential, scope: byPath, withheld };
       }
       // Its entry rides its issue.
@@ -2104,7 +2104,7 @@ export class SigninService {
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), [this.#issueChange('service', service, plan, created)]);
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
-        await issuerStill(tx, caller, accessSeq);
+        await issuerStill(tx, caller, seal);
         await credentialStill(ctx, tx, 'token.create');
         // The session it comes from, still backed by what it names, which the token names too (section 6.1).
         if ((ctx.credentialId !== null || ctx.via !== null) && !(await sourceStands(tx, this.#deps.chainKey, this.#deps.signin.passkeys.policy, ctx))) {
@@ -2186,7 +2186,7 @@ export class SigninService {
       const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInMinutes * 60_000), scope, generation: access.generation };
       if (await vaultIssuesTokens(this.#deps.vault)) {
         // At the generation the request was made at: a person removed and admitted again since is refused (`#currentCaller`).
-        const credential = await this.#issuedByVault(ctx, ctx.caller, 'personal', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id, passkeyId: ctx.passkeyId }, details, { accessSeq: null });
+        const credential = await this.#issuedByVault(ctx, ctx.caller, 'personal', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id, passkeyId: ctx.passkeyId }, details, { seal: null });
         if (credential !== null) return { ...credential, scope: byPath };
       }
       // Its entry rides its issue.
@@ -2253,7 +2253,7 @@ export class SigninService {
       const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
       const plan = { id: randomUUID(), expiresAt: new Date(ends), scope, generation: access.generation };
       if (await vaultIssuesTokens(this.#deps.vault)) {
-        const credential = await this.#issuedByVault(ctx, ctx.caller, 'handle', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id, places: madeFor, passkeyId: ctx.passkeyId }, details, { accessSeq: null });
+        const credential = await this.#issuedByVault(ctx, ctx.caller, 'handle', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id, places: madeFor, passkeyId: ctx.passkeyId }, details, { seal: null });
         if (credential !== null) return { ...credential, scope: byPath };
       }
       // Its entry rides its issue.
@@ -2634,8 +2634,8 @@ type Known = {
   previous: Awaited<ReturnType<typeof findIdentity>>;
   /** The member a first sign-in binds, by the verified email that matched: the vault is asked about them alone. */
   person: { id: string; email: string } | null;
-  /** The vault's newest entry about their access, read before it answered (`signinMembers`); null for no row. */
-  accessSeq: bigint | null;
+  /** Their seal, read before the vault answered (`signinMembers`); null for no row. */
+  seal: string | null;
 };
 
 /** The person's access moved between the callback's reads and its transaction: decided again, from the reads. */

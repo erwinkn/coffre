@@ -4262,7 +4262,7 @@ class VaultService implements Vault {
    */
   async #issuerRead(
     log015: PreparedVault['log015'],
-    input: Pick<IssueTokenInput, 'actor' | 'via' | 'principal' | 'generation' | 'actorAccess' | 'policy'> & { scope: CredentialScope; service: boolean },
+    input: Pick<IssueTokenInput, 'actor' | 'via' | 'principal' | 'generation' | 'actorSeal' | 'policy'> & { scope: CredentialScope; service: boolean },
   ): Promise<{ ok: false; refused: IssueTokenRefusal; why?: string } | {
     issue: IssueRead; holder: Holdings; places: (Place | null)[]; via: Awaited<ReturnType<typeof store.issuingCredential>>;
     service: { setting: ServiceSetting | null; account: ServiceAccount } | null; reports: NewEntry[];
@@ -4299,7 +4299,8 @@ class VaultService implements Vault {
     const actorRow = reads.members.get(actor);
     const acting = await this.#standing(this.#db, actor, actorRow, at, reports, reads);
     if (acting.status !== 'active' || actorRow === undefined) return refuse('ended');
-    if (input.actorAccess !== null && actorRow.accessSeq.toString() !== input.actorAccess) return refuse('access');
+    // Their seal, which `#standing` held to the log, as the app read it when it weighed them.
+    if (input.actorSeal !== null && acting.log.seal?.toString('hex') !== input.actorSeal) return refuse('access');
     // The credential the request came in on: the log's (its seal the vault's, and its object's newest change's), live, its issuer's.
     let viaScope: CredentialScope | null = null;
     if (input.via !== null) {
@@ -4389,7 +4390,7 @@ class VaultService implements Vault {
       const scope = readScope(make.scope);
       if (scope === null || scope.length === 0) throw new Error('a binding made reaches what its scope names, at least one place');
       const weighed = await this.#issuerRead(log015, {
-        actor, via: input.via, principal: make.principal, generation: make.generation, actorAccess: input.actorAccess, policy: input.policy, scope, service: true,
+        actor, via: input.via, principal: make.principal, generation: make.generation, actorSeal: input.actorSeal, policy: input.policy, scope, service: true,
       });
       if ('refused' in weighed) return weighed;
       const why = make.createdBy !== actor.slice(actor.indexOf(':') + 1) ? 'a binding names who made it, its maker'

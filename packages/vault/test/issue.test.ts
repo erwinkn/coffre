@@ -67,7 +67,7 @@ function asked(w: World, change: (input: IssueTokenInput) => IssueTokenInput = (
     via: null,
     principal: CI,
     generation: 0,
-    actorAccess: null,
+    actorSeal: null,
     credential: {
       id: randomUUID(), kind: 'service', tokenHash: randomBytes(32).toString('base64'), tokenHint: 'coffre_svc_x', label: 'deploys',
       scope: storedScope([{ ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }), sensitive }]),
@@ -352,12 +352,63 @@ test("an issue weighed before its issuer's demotion commits is weighed again, on
   }
 });
 
+/** A member's seal as the app reads it (`memberSeal`): hex, null for no row. */
+async function sealOf(principal: string): Promise<string | null> {
+  const [row] = await db.owner.select({ seal: principals.seal }).from(principals).where(eq(principals.principal, principal));
+  return row?.seal?.toString('hex') ?? null;
+}
+
+/** The Admin's service token, weighed on `seal`. */
+const byAdmin = (w: World, seal: string | null) => asked(w, (input) => ({ ...input, actor: ADMIN, actorSeal: seal, credential: { ...input.credential, createdBy: 'admin@acme.example' } }));
+
 test("an issue the app weighed on its issuer's access as it was is refused, for the app to weigh again; at the access as it is, issued", async () => {
   const w = await world();
-  const [{ accessSeq }] = (await db.owner.select({ accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, ADMIN))) as [{ accessSeq: bigint }];
-  const at = (seq: bigint) => asked(w, (input) => ({ ...input, actor: ADMIN, actorAccess: seq.toString(), credential: { ...input.credential, createdBy: 'admin@acme.example' } }));
-  assert.equal(((await w.vault.issueToken!(at(accessSeq - 1n))) as { refused?: string }).refused, 'access');
-  assert.ok((await w.vault.issueToken!(at(accessSeq))).ok);
+  const weighed = await sealOf(ADMIN);
+  assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'developer' })).ok);
+  assert.equal(((await w.vault.issueToken!(byAdmin(w, weighed))) as { refused?: string }).refused, 'access');
+  assert.ok((await w.vault.issueToken!(byAdmin(w, await sealOf(ADMIN)))).ok);
+});
+
+test("each change of a member's access moves their seal: an issue weighed before it is refused", async () => {
+  const w = await world();
+  const changes: [string, () => Promise<{ ok: boolean }>][] = [
+    ['role', () => w.vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'developer' })],
+    ['owner', () => w.vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'owner' })],
+    ['grant', () => w.vault.setAccess({ actor: ROOT, caller: 'person', principal: ADMIN, changes: [{ projectId: w.project, environmentId: null, role: 'viewer', expiresAt: null }] })],
+    ['revoke', () => w.vault.setAccess({ actor: ROOT, caller: 'person', principal: ADMIN, changes: [{ projectId: w.project, environmentId: null, role: null, expiresAt: null }] })],
+    ['remove', () => w.vault.remove({ actor: ROOT, caller: 'person', principal: ADMIN })],
+    ['restore', () => w.vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'admin' })],
+  ];
+  for (const [change, make] of changes) {
+    const weighed = await sealOf(ADMIN);
+    assert.ok((await make()).ok, change);
+    assert.notEqual(await sealOf(ADMIN), weighed, change);
+    // Removed, they are refused before their seal is weighed.
+    assert.equal(((await w.vault.issueToken!(byAdmin(w, weighed))) as { refused?: string }).refused, change === 'remove' ? 'ended' : 'access', change);
+  }
+  // An add: no row, no seal, then one.
+  assert.equal(await sealOf('user:new@acme.example'), null);
+  assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: 'user:new@acme.example' })).ok);
+  assert.match(String(await sealOf('user:new@acme.example')), /^[0-9a-f]{32}$/);
+  assert.equal(await credentialRows(), 0);
+});
+
+test('an issuer whose row holds no seal is refused, whatever seal the app weighed', async () => {
+  const w = await world();
+  const weighed = await sealOf(ADMIN);
+  await db.owner.update(principals).set({ seal: null }).where(eq(principals.principal, ADMIN));
+  for (const seal of [weighed, null]) assert.equal(((await w.vault.issueToken!(byAdmin(w, seal))) as { refused?: string }).refused, 'ended');
+  assert.equal(await credentialRows(), 0);
+});
+
+test('an issue weighed before a demotion and its undoing is issued: their seal is back where it was', async () => {
+  const w = await world();
+  const weighed = await sealOf(ADMIN);
+  assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'developer' })).ok);
+  assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'admin' })).ok);
+  // The seal is over their access alone: the same seal is the same access, so the issue weighed on it holds.
+  assert.equal(await sealOf(ADMIN), weighed);
+  assert.ok((await w.vault.issueToken!(byAdmin(w, weighed))).ok);
 });
 
 test("a policy change waits for the issues in flight, which hold the issue lock shared, before the fence: ordered, and no use waits on them (IssuePolicyHeld, PolicyIssueFirst; review r3)", async () => {

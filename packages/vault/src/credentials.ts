@@ -364,7 +364,7 @@ export function checkIssue(input: IssueTokenInput): CredentialScope {
   const member = /^(user:[^\s]{1,320}|token:[a-z0-9][a-z0-9._-]{0,99})$/;
   if (typeof actor !== 'string' || !member.test(actor) || typeof principal !== 'string' || !member.test(principal) || !Number.isInteger(generation)
     || (via !== null && (typeof via !== 'string' || !UUID.test(via))) || !isPolicy(policy)
-    || (input.actorAccess !== null && (typeof input.actorAccess !== 'string' || !/^-?[0-9]{1,19}$/.test(input.actorAccess))) || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)
+    || (input.actorSeal !== null && (typeof input.actorSeal !== 'string' || !/^[0-9a-f]{32}$/.test(input.actorSeal))) || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)
     || !isTrace(input.trace) || !isConfirmation(input.confirmed)) {
     throw new Error('an issue names its issuer, the credential it came in on, whom it acts as at which generation, the policy weighed, and the app\'s key');
   }
@@ -576,7 +576,7 @@ export type BindingsCall = {
 
 /** The shape of a change of bindings as the app sends it; throws on one no app of this release sends. */
 export function checkChangeBindings(input: ChangeBindingsInput): void {
-  const { actor, via, actorAccess, make, live, reads, ends, reason, revokedAt, revokedBy, policy, appKey } = input ?? ({} as ChangeBindingsInput);
+  const { actor, via, actorSeal, make, live, reads, ends, reason, revokedAt, revokedBy, policy, appKey } = input ?? ({} as ChangeBindingsInput);
   const member = /^(user:[^\s]{1,320}|token:[a-z0-9][a-z0-9._-]{0,99})$/;
   // The scheduled run going on with a removal a request left under way: an unbind only, naming whom it continues.
   const resumes = actor === 'system:schedule' && make === null && reason === 'unbound' && typeof input.continues?.by === 'string' && member.test(input.continues.by)
@@ -584,7 +584,7 @@ export function checkChangeBindings(input: ChangeBindingsInput): void {
   if (input?.continues !== undefined && !resumes) throw new Error('a change of bindings continues a removal only as the scheduled run, an unbind, naming its remover and when it closed them');
   const named = (before: { columns?: unknown; seal?: unknown } | undefined) => before !== undefined && isBase64(before.seal, 16);
   if (typeof actor !== 'string' || !(member.test(actor) || resumes) || (via !== null && (typeof via !== 'string' || !UUID.test(via)))
-    || (actorAccess !== null && (typeof actorAccess !== 'string' || !/^-?[0-9]{1,19}$/.test(actorAccess)))
+    || (actorSeal !== null && (typeof actorSeal !== 'string' || !/^[0-9a-f]{32}$/.test(actorSeal)))
     || !Array.isArray(ends) || (make === null && ends.length === 0) || !['replaced', 'keys_moved', 'unbound'].includes(reason)
     || typeof revokedAt !== 'number' || !Number.isSafeInteger(revokedAt) || typeof revokedBy !== 'string' || !isPolicy(policy) || policy === null
     || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)

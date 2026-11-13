@@ -14,8 +14,10 @@ import { and, asc, eq } from 'drizzle-orm';
 
 import { coffreRoute } from '../src/app.ts';
 
+import { issuerStill } from '../src/api/services.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { resolveConfig } from '../src/config.ts';
+import { memberSeal } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -231,6 +233,14 @@ test('an Owner demoted while issuing a token gives it no sensitive value: weighe
   const issued = await owen.tokens.issue(CI, { expiresInDays: 30 });
   assert.deepEqual(await stored(credentials, issued.id), [{ role: 'viewer', sensitive: false }, { role: 'viewer', sensitive: false }]);
   assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
+});
+
+test("an issuer read with no row is held to having none: admitted since, their seal is a move", async () => {
+  const nobody = { type: 'user' as const, id: 'nobody@acme.example' };
+  assert.equal(await memberSeal(db.owner, `user:${nobody.id}`), null);
+  await issuerStill(db.owner, { principal: nobody }, null);
+  await root.members.add(`user:${nobody.id}`);
+  await assert.rejects(issuerStill(db.owner, { principal: nobody }, null), { code: 'conflict' });
 });
 
 test('an issuer removed and admitted again while issuing issues nothing: the request came in as a membership that ended', async () => {
