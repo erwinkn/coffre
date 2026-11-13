@@ -4019,13 +4019,13 @@ class VaultService implements Vault {
     const everyMs: unknown = (input as { everyMs?: unknown } | undefined)?.everyMs;
     if (!Number.isSafeInteger(everyMs) || (everyMs as number) <= 0) throw new Error(`a beat runs every so many ms, a positive integer, not ${String(everyMs)}`);
     const { forged: _forged, listed, unlisted, ...checked } = await this.#audit({ events: [], cursor: input.cursor }, true);
-    const finding = checked.state === 'ok' ? null : await writeFinding(this.#db, this.#log015().macs, checked);
+    const finding = checked.state === 'ok' ? null : await writeFinding(this.#db, this.#prepared.log015.macs, checked);
     return { ok: true, ...checked, finding, projector: projectorStopped(listed, unlisted, everyMs as number) };
   }
 
   /** `check`'s and `beat`'s one ask of the signer, then the check (audit-check.ts). */
   async #audit(input: CheckInput, beat = false): Promise<Checked> {
-    const reached = this.#log015().reached;
+    const reached = this.#prepared.log015.reached;
     if (reached === undefined) throw new Error("the audit check asks the signer first: give the vault the checkpointer's reached");
     const said = await reached();
     return checkAudit(this.#db, await this.#verifierKeys(), input, { reached: said, upgraded: this.#upgraded(), beat });

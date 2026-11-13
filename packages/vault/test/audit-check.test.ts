@@ -366,10 +366,10 @@ async function vaulted() {
   };
   const signer: { cp: Checkpointer | null; sealing: Sealing } = { cp: null, sealing: { ok: true } };
   const vault = await openLocalVault(db.vault, config, {
-    log: '0.15', sealThrough: sealed, heldOutside: async () => (memory.record === null ? [] : [decodePair(memory.record)!]),
+    sealThrough: sealed, heldOutside: async () => (memory.record === null ? [] : [decodePair(memory.record)!]),
     reached: () => reachedOf(signer.cp, signer.sealing),
   });
-  // Its first call starts its log: the cutover's change, then the root's.
+  // Its first call starts its log, with the root's change.
   assert.equal((await vault.access('user:root@acme.example')).role, 'owner');
   const cp = (signer.cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [seed], memory }));
   assert.ok((await cp.tick()).signed);
