@@ -32,10 +32,13 @@
 (* waits for every number in flight.                                       *)
 (*                                                                         *)
 (* Object locks (L1, T282) order a use against a change, which the fence   *)
-(* did until 0.16, held exclusive by every change: each object a decision  *)
-(* reads (a credential, a member, a key, an environment, the roles, the    *)
-(* policy) has an advisory lock of its own, named `@` here. A use takes    *)
-(* the lock of each object it reads, shared; a change's last statement the *)
+(* did until 0.16, held exclusive by every change: each object whose seal  *)
+(* a decision checks has an advisory lock of its own, keyed as its changes *)
+(* are in the log (`log_object`), named `@` here. Today those are a        *)
+(* credential, a connection, a binding, a member, a key, its environment,  *)
+(* a reference's source, a proxy's definition, the roles and the policy:   *)
+(* the rule is the statement's seal probes, not this list. A use takes the *)
+(* lock of each object it reads, shared; a change's last statement the     *)
 (* lock of each object it writes, exclusive. So a change makes only the    *)
 (* uses of what it writes wait, for that one statement.                    *)
 (*                                                                         *)
@@ -81,7 +84,8 @@
 (*               row, which the issuer holds shared, queued for the issue  *)
 (*               lock behind the barrier, which waits for the write's      *)
 (*               issue lock: a cycle (review r1 of #469).                  *)
-(*   WriteTakesChangeLockthe write takes the change lock first, as it took *)
+(*   WriteTakesChangeLock                                                  *)
+(*               the write takes the change lock first, as it took         *)
 (*               the head. Without, it holds the issue lock, the fence and *)
 (*               the key's lock and waits for the key's row, which a patch *)
 (*               holds, under the change lock, queued for the issue lock   *)
@@ -108,7 +112,8 @@
 (*   use      a use: the fence shared, the credential's lock, the          *)
 (*            member's;                                                    *)
 (*   barrier, revoke as above.                                             *)
-(*   MembersFirstthe add locks the rows before the change lock, as every   *)
+(*   MembersFirst                                                          *)
+(*               the add locks the rows before the change lock, as every   *)
 (*               flow that takes both does. Without, it holds the lock and *)
 (*               waits for the row a demotion holds, which waits for the   *)
 (*               lock.                                                     *)
@@ -141,17 +146,20 @@
 (*   use      a use: the fence shared, then the credential's lock, the     *)
 (*            environment's, the member's and the policy's;                *)
 (*   barrier  as above.                                                    *)
-(*   ChangeLockFirstthe app's change takes the change lock before the      *)
+(*   ChangeLockFirst                                                       *)
+(*               the app's change takes the change lock before the         *)
 (*               issue lock. Without (an entry numbered, `note` or an      *)
 (*               issue, before the lock), it holds the issue lock shared   *)
 (*               and waits for the change lock, which the vault's change   *)
 (*               holds, queued for the issue lock behind the barrier,      *)
 (*               which waits for the app's.                                *)
-(*   IssueBeforeFenceit takes the issue lock before the fence. Without, it *)
+(*   IssueBeforeFence                                                      *)
+(*               it takes the issue lock before the fence. Without, it     *)
 (*               holds the fence shared and waits for the issue lock,      *)
 (*               which the barrier holds while it waits for the fence      *)
 (*               (Migration015.tla's, for 0.14's head).                    *)
-(*   BarrierIssueFirstthe barrier takes the issue lock before the fence.   *)
+(*   BarrierIssueFirst                                                     *)
+(*               the barrier takes the issue lock before the fence.        *)
 (*               Without, it holds the fence and waits for the issue lock, *)
 (*               which a change holds shared while it waits for the fence. *)
 (*                                                                         *)
@@ -171,32 +179,44 @@
 (*            lock shared, the fence shared, a's lock, b's, exclusive. Its *)
 (*            calls come b first;                                          *)
 (*   revoke   a credential's revoke, of b (`revoke_credential`): the       *)
-(*            change lock, the issue lock shared, under which it compares  *)
-(*            the policy its right was weighed on (a policy change takes   *)
-(*            it exclusive; until L1 the fence, exclusive on both sides,   *)
-(*            ordered the two), the fence shared, b's lock;                *)
+(*            change lock, which orders its compare of the policy against  *)
+(*            a policy change's as it always did; the issue lock shared,   *)
+(*            new with L1, which orders it against the barrier as it does  *)
+(*            every change; the fence shared, b's lock;                    *)
 (*   barrier  as above.                                                    *)
 (* `change_bindings` has no proc of its own. An unbind, a replacement and  *)
-(* a sweep that revokes are `change` here (the change lock, the issue lock *)
-(* shared, the fence, their objects sorted), their rows, locked by id      *)
-(* before the change lock, a member's in Flow = "add" (MembersFirst). A    *)
-(* bind that only makes a binding and a sweep that only closes take no     *)
-(* fence today and no object's lock after: nobody names a binding before   *)
-(* its commit, and no use reads `closed`.                                  *)
+(* a sweep that revokes take the locks of `app` in Flow = "change": the    *)
+(* change lock, then the rows they write (the bindings', then the          *)
+(* credentials', each by id), the issue lock shared, the fence, their      *)
+(* objects sorted. A replacement locks its members' rows before the change *)
+(* lock, as the add does (MembersFirst), and takes with its objects,       *)
+(* shared, the lock of each key it read by name, as a hold does: until L1  *)
+(* the fence held a rename off between its compare of those names and its  *)
+(* commit. A sign-in through a binding locks the binding's row and takes   *)
+(* no change lock: `issue`. A bind that only makes a binding and a sweep   *)
+(* that only closes take no fence today and no object's lock after. Each   *)
+(* numbers under the issue lock, shared, so the barrier waits for it;      *)
+(* nobody names a binding before its commit, and no use reads `closed`.    *)
 (* A change takes the fence before its objects' locks, as a use does: one  *)
-(* helper for both. No wait cycle needs it: every change takes the issue   *)
-(* lock first, which orders it against the barrier, so the flow holds with *)
-(* the two the other way round too (run once, not kept as a scenario).     *)
-(*   UsesInKeyOrdera use takes its objects' locks in key order, all before *)
+(* helper for both. No wait cycle needs it, but only while every change    *)
+(* takes the issue lock first, which orders it against the barrier.        *)
+(* `ObjectLocksFenceLast.cfg` is this flow with the two the other way      *)
+(* round (`FenceFirst = FALSE`, the code's shape and no protection): it    *)
+(* must hold too, and stops holding the day a change takes the fence with  *)
+(* no issue lock before it.                                                *)
+(*   UsesInKeyOrder                                                        *)
+(*               a use takes its objects' locks in key order, all before   *)
 (*               its first read: a batch every key's, sorted, not each     *)
 (*               key's as its turn comes in the request. Without, the      *)
 (*               batch holds b's and waits for a's, which the change holds *)
 (*               while it waits for b's.                                   *)
-(*   ChangesInKeyOrdera change takes them in key order too, all before its *)
+(*   ChangesInKeyOrder                                                     *)
+(*               a change takes them in key order too, all before its      *)
 (*               first write, not each call's as it comes. Without, it     *)
 (*               holds b's and waits for a's, which a use holds while it   *)
 (*               waits for b's.                                            *)
-(*   PrincipalLasta batch takes its principal's lock after its objects'    *)
+(*   PrincipalLast                                                         *)
+(*               a batch takes its principal's lock after its objects'     *)
 (*               locks, as a single use does, which learns that it needs   *)
 (*               it from what it reads under them (`use_batch` and         *)
 (*               `use_route` took it before their first key until L1).     *)
@@ -209,7 +229,8 @@ EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS Flow, TouchFirst, WriteTakesChangeLock, MembersFirst,
           ChangeLockFirst, IssueBeforeFence, BarrierIssueFirst,
-          UsesInKeyOrder, ChangesInKeyOrder, PrincipalLast
+          UsesInKeyOrder, ChangesInKeyOrder, PrincipalLast,
+          FenceFirst    \* a change takes the fence before its objects' locks: the code's shape, no protection
 
 Procs == CASE Flow = "write" -> {"write", "patch", "issue", "barrier", "revoke", "use"}
            [] Flow = "add" -> {"add", "demote", "issue", "barrier", "revoke", "use"}
@@ -220,7 +241,7 @@ Procs == CASE Flow = "write" -> {"write", "patch", "issue", "barrier", "revoke",
 \* named `@`; key order is their names'.
 Changing(takes) == IF takes THEN << <<"change", "X">> >> ELSE << >>
 \* A change's last statement, after the issue lock: the fence shared, then the object it writes.
-Last(object) == << <<"fence", "S">>, <<object, "X">> >>
+Last(object) == IF FenceFirst THEN << <<"fence", "S">>, <<object, "X">> >> ELSE << <<object, "X">>, <<"fence", "S">> >>
 \* A two-trip change's hold: the fence shared, then the caller's credential, which it read, shared, and the object it writes.
 \* The credential stands for every object the hold read (the member, the roles, the policy, the environment): each shared,
 \* in key order with those it writes.
@@ -259,7 +280,8 @@ Plan(p) ==
                                 ELSE << <<"fence", "S">>, <<"principal", "X">> >> \o objects
       [] p = "change" ->
             LET objects == IF ChangesInKeyOrder THEN << <<"@a", "X">>, <<"@b", "X">> >> ELSE << <<"@b", "X">>, <<"@a", "X">> >>
-            IN << <<"change", "X">>, <<"issue", "S">>, <<"fence", "S">> >> \o objects
+            IN << <<"change", "X">>, <<"issue", "S">> >> \o
+               (IF FenceFirst THEN << <<"fence", "S">> >> \o objects ELSE objects \o << <<"fence", "S">> >>)
 
 Locks == {"member", "change", "cred", "key", "issue", "fence", "principal", "@cred", "@key", "@member", "@policy", "@env", "@a", "@b"}
 

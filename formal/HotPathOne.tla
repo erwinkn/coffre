@@ -420,6 +420,9 @@ CONSTANTS
 ASSUME /\ ReadSets \subseteq SUBSET Inputs /\ Extra \subseteq Inputs /\ Unlocked \subseteq Inputs
        /\ Extra = {} \/ "secret" \in Inputs
        /\ \A R \in ReadSets : "policy" \in Inputs => "policy" \in R
+       \* A key's source is read through its link alone: the replay takes every Extra input off a use's reads
+       \* and puts back the one the log links (ReplayReads), which is wrong for a read set that holds one.
+       /\ Extra = {} \/ (ReadSets # {} /\ \A R \in ReadSets : R \cap Extra = {})
 
 None == "none"
 Change == "change"

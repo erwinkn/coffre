@@ -2834,15 +2834,22 @@ b's); the barrier. 147,807 states.
 
 A change takes the fence before its objects' locks, as a use does, through
 one helper. No wait cycle needs that order: every change takes the issue
-lock first, the revoke too since L1, which orders it against the barrier,
-and the flow holds with the two the other way round (run once; not a
-protection here). `change_bindings` has no step of its own. Its unbind, its
-replacement and its sweep that revokes take the locks of the change above,
-their rows first, sorted by id, as a member's in the add's flow. A bind
-that only makes a binding and a sweep that only closes take no fence today
-and no object's lock after L1: nobody names a binding before its commit,
-and no use reads `closed`. The caller's credential in a hold stands for
-every object the hold read.
+lock first, the revoke too since L1, which orders it against the barrier.
+`ObjectLocksFenceLast.cfg` is the same flow with the change and the revoke
+taking their objects first (`FenceFirst = FALSE`, the code's shape and no
+protection): it holds, 129,312 states, and is kept, since it stops holding
+the day a change takes the fence with no issue lock before it.
+`change_bindings` has no step of its own. Its unbind, its replacement and
+its sweep that revokes take the locks of the app's change in the order
+above: the change lock, the rows they write (the bindings', then the
+credentials', each by id), the issue lock shared, the fence, their objects
+sorted. A replacement locks its members' rows before the change lock, as
+the add does. A sign-in through a binding locks the binding's row and takes
+no change lock, as the issue above. A bind that only makes a binding and a
+sweep that only closes take no fence today and no object's lock after L1:
+each numbers under the issue lock, shared, so the barrier waits for it;
+nobody names a binding before its commit, and no use reads `closed`. The
+caller's credential in a hold stands for every object the hold read.
 
 ### Findings.tla
 
@@ -3363,9 +3370,14 @@ cutover.
 Until L1 (T282, D201) one lock ordered every use against every change: the
 fence, which a use took shared and a change's last statement exclusive. A
 write to one key made every use wait for that statement, whatever it read.
-L1 gives each object a decision reads (a credential, a member, a key, an
-environment, the roles, the policy) a lock of its own, an advisory lock
-keyed by the object, and leaves the fence to the checkpointer. The change
+L1 gives each object whose seal a decision checks a lock of its own, an
+advisory lock keyed as the object's changes are in the log (`log_object`),
+and leaves the fence to the checkpointer. Today those objects are a
+credential, a connection, a binding, a member, a key, its environment, a
+reference's source, a proxy's definition, the roles and the policy. The
+rule is the statement's seal probes, not this list: a kind added later is
+locked because it is probed, and `HotPathOneObjects` with one object left
+unlocked (`Unlocked`) is what an omission costs. The change
 lock stays as it is: it orders changes against each other, and object
 locks order a use against a change.
 
@@ -3374,10 +3386,10 @@ locks order a use against a change.
 | Statement | The fence | Object locks |
 |---|---|---|
 | a use (`use_credential`, `use_route`, each statement of `use_batch`), and the vault's read for a key write (`write_request`), which reads and numbers as a use does. An add's read (`admit_read`) numbers nothing and takes no lock, before L1 and after | shared | shared: every object it reads to decide |
-| a change's last statement (`change_input`, `app_change`, `change_bindings`, `revoke_credential`), after the issue lock: shared, or exclusive for a change of the policy or of a protected environment's slug | shared | exclusive: every object it writes. None, and no fence, where it takes no fence today: a bind that only makes a binding, a sweep that only closes |
+| a change's last statement (`change_input`, `app_change`, `change_bindings`, `revoke_credential`), after the issue lock: shared, or exclusive for a change of the policy or of a protected environment's slug | shared | exclusive: every object it writes; a replacement bind also takes, shared, the lock of each key it read by name, as a hold does (until L1 the fence held a rename off between its compare and its commit). None, and no fence, where it takes no fence today: a bind that only makes a binding, a sweep that only closes, an `app_change` of a credential or a connection its own transaction made. Each numbers under the issue lock, shared, so the barrier waits for it |
 | a two-trip change's hold (`hold_inputs`, `admit_hold`) | shared | shared: every object the vault decided on; exclusive: those it writes |
 | an entry that changes no object (`log_refusal`, `note`) | shared | none |
-| the checkpointer's barrier (`close_one`) | exclusive, after the issue lock | none |
+| the checkpointer's barrier (`close_one`), and a key rotation's number (`log_rotate_number`), which takes the same two locks | exclusive, after the issue lock | none |
 | an issue, a sign-in | none: the issue lock | none: nobody names its credential before it commits |
 
 **One order.** The rows a flow shares with an issue, the change lock, the
@@ -3389,16 +3401,19 @@ every key's, a statement of several changes every call's. `ObjectLocks`
 checks it with Postgres's queue, one run per lock taken out of turn
 (WriteLocks.tla, above).
 
-**What compares the policy takes the issue lock.** `issue_token`,
-`change_bindings` and `revoke_credential` go ahead only while the policy
-their caller was weighed on is in force: the roles' and the policy's
-numbers, and the slugs of the protected environments it was loaded with.
-A change of the policy, and a rename of a protected environment, take the
-issue lock exclusive; the three take it shared before they compare. The
-revoke is new to it: until L1 it took the fence exclusive, as those two
-changes did, and that ordered them. With the fence shared on both sides it
-would order nothing, so the revoke takes the issue lock as the other two
-do.
+**The issue lock, for every change.** `issue_token`, `change_bindings` and
+`revoke_credential` go ahead only while the policy their caller was weighed
+on is in force: the roles' and the policy's numbers, and the slugs of the
+protected environments it was loaded with. An issue and a bind take no
+change lock, so the issue lock orders their compare: a change of the
+policy, and a rename of a protected environment, take it exclusive, and
+they take it shared first. The revoke's compare is ordered by the change
+lock, which it and a policy change both hold, before L1 and after. What the
+revoke gains with L1 is the issue lock, shared, as every other change takes
+it. Until L1 its fence was exclusive, which ordered it against the barrier;
+with the fence shared the issue lock does, and that is why no flow needs
+the fence before its objects (`ObjectLocksFenceLast`, which holds only
+while every change takes the issue lock first).
 
 **The barrier.** It alone takes the fence exclusive, so it waits for every
 use and every change's last statement in flight, and every number handed
@@ -3432,7 +3447,15 @@ call locks what that read named, all of it, sorted, then runs the statement,
 which reads afresh and decides again. A caller found with no standing has
 read and locked nothing of the key. One who gained it meanwhile needs
 objects the call did not lock: `moved`, and the vault calls again. One who
-lost it meanwhile locked the key's side while she stood, and is refused.
+lost it meanwhile has locked the key's side, may have waited there for a
+write of the key, and is refused. So the instant that counts is the read's:
+a call locks nothing of the key unless its read saw her stand, and one
+whose read and whose statement both find her without standing costs and
+answers the same whatever the key is or was. A caller revoked between the
+two learns that a write of the key was under way at an instant when the key
+was hers to know of, as one who waits for her principal's lock has since
+T158 (`DecideBeforeLock`: decided on one call's rows, the lock in the
+next).
 What a call must not do is lock the caller's side, decide under it, and
 then lock the key's: two takes in one transaction are a second order, and
 close the cycle `UsesInKeyOrder` shows. `use_route` takes its route's
@@ -3440,6 +3463,23 @@ definition's lock, its caller's and every key's in that one take, then the
 principal's lock, as `use_batch` does. No call is added to those a named
 use makes today; the read before the locks is work added to each, to
 measure with V2a's statements.
+
+**`NamedLocks.tla`** is that split and nothing else of a use. Probing.tla
+takes a request as one step, so it cannot place a revoke between a read and
+a lock. Here a call is three steps (the read with no lock, one take of the
+locks, the statement), in two runs alike but for the key, as in Probing:
+in one someone makes the key, writes it under its lock, deletes it and
+makes it again under another id; in the other nobody does. Her standing is
+revoked and granted between any two steps. 650 states.
+
+| protection | turned off, TLC finds |
+|---|---|
+| the read names the key's ids only to a caller who stands at the place (StandingBeforeKey) | `NoKeyLockBeforeStanding`, `NoWaitBeforeStanding`, `NoIsFixed`: the read names the key by its name whoever asks; a caller with no standing locks it, waits for a write of it in the run that has the key, and for nothing in the other |
+
+`NoWaitForNo` breaks with the protection on, as `scripts/formal.sh`
+expects: she stands, the read names the key, she is revoked, the call
+waits for a write of the key to commit, and its statement refuses her. That
+is the case above, stated so that it cannot be mistaken for covered.
 
 **Advisory locks, not row locks.** `FOR SHARE` cannot carry it. A statement
 takes its snapshot before it waits for a row's lock, so a use that waited

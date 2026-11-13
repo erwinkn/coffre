@@ -609,6 +609,11 @@ REMOVALS=(
   "ObjectLocks UsesInKeyOrder NoWaitCycle"
   "ObjectLocks ChangesInKeyOrder NoWaitCycle"
   "ObjectLocks PrincipalLast NoWaitCycle"
+  # A named use's read before its locks (NamedLocks, L1, review r2 of #585): a read that names the key to a caller
+  # with no standing at the place locks the key's side for her, and she waits for a write of a key she may not know of.
+  "NamedLocks StandingBeforeKey NoKeyLockBeforeStanding"
+  "NamedLocks StandingBeforeKey NoWaitBeforeStanding"
+  "NamedLocks StandingBeforeKey NoIsFixed"
   # A finding about a member weighed by 0.14's rule (Findings.tla, T179 PR 4a): under 0.16 no access entry follows a
   # change, and a change above the finding settles nothing.
   "Findings WeighsChanges Settles"
@@ -738,6 +743,9 @@ EXPECTED=(
   "HotPathOneStall CheckpointsHold"
   # Not a gap but what L1 is for: a use reads beside a change in flight, of an object it does not read (HotPathOne.tla).
   "HotPathOneObjects NeverSideBySide"
+  # Standing is the read's: a caller who stood when a named use read, and was revoked before its locks, has locked the
+  # key's side, may wait there, and is refused, as one who waits for her principal's lock since T158 (NamedLocks.tla).
+  "NamedLocks NoWaitForNo"
   # Postgres's clock stepping back: a use may sit past its checkpoint's ceiling, which the verifier's bounded read
   # misses, and alarms on: fail closed (HotPathOne.tla's CeilingHolds).
   "HotPathOneChunksClock CeilingHolds"
