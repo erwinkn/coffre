@@ -1230,6 +1230,59 @@ export const proxyReserved = pgTable(
   ],
 );
 
+/** A `Filter`'s kind, as `settings` holds each of its two (`SettingsColumns` in @coffre/core/vault). */
+const FILTER_KIND = sql.raw(`('all', 'only', 'except')`);
+
+/**
+ * The instance's settings: one sealed row, read by key, where 0.15 read the
+ * newest `settings.change` of `audit_log`. Its one setting, where people set up service accounts themselves, is a
+ * scope, each of its two filters typed as a kind and a list (`SettingsColumns`): projects by id, environments by slug,
+ * the list empty for `all`. Its object is `settings`/`instance` (`settingsObject`). The seal is null only between the
+ * upgrade's migration, which fills the row from the newest entry, and the vault's upgrade step, which seals it with
+ * the object's first change (a compare-and-set on the null seal, so a rerun skips it): a row with no seal is never
+ * what a reader accepts. Written only through the vault's functions.
+ */
+export const settings = pgTable(
+  'settings',
+  {
+    name: text().primaryKey(),
+    serviceAccountsProjects: text('service_accounts_projects').notNull(),
+    serviceAccountsProjectIds: uuid('service_accounts_project_ids').array().notNull().default(sql`'{}'`),
+    serviceAccountsEnvironments: text('service_accounts_environments').notNull(),
+    serviceAccountsEnvironmentSlugs: text('service_accounts_environment_slugs').array().notNull().default(sql`'{}'`),
+    seal: bytea(),
+  },
+  (table) => [
+    check('settings_name_check', sql`${table.name} = 'instance'`),
+    check('settings_service_accounts_projects_check', sql`${table.serviceAccountsProjects} IN ${FILTER_KIND} AND (${table.serviceAccountsProjects} <> 'all' OR cardinality(${table.serviceAccountsProjectIds}) = 0)`),
+    check('settings_service_accounts_environments_check', sql`${table.serviceAccountsEnvironments} IN ${FILTER_KIND} AND (${table.serviceAccountsEnvironments} <> 'all' OR cardinality(${table.serviceAccountsEnvironmentSlugs}) = 0)`),
+    check('settings_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+  ],
+);
+
+/**
+ * Every key the app or the vault has written its log entries under: one sealed
+ * row each, read by key at sign-in, issue and bind, where 0.15 read the newest `key.rotate` of `audit_log`. `key_id` is
+ * `deriveLogKey`'s, `<holder>:<16 hex>`, and the object's id (`log-key`/`<key_id>`, `logKeyObject`); `retired` once its
+ * holder rotated from it. One key per holder is in force. The seal is null only between the upgrade's migration and
+ * the vault's upgrade step, as `settings`' is. Written only through the vault's functions.
+ */
+export const logKeys = pgTable(
+  'log_keys',
+  {
+    holder: text().notNull(),
+    keyId: text('key_id').notNull(),
+    retired: boolean().notNull().default(false),
+    seal: bytea(),
+  },
+  (table) => [
+    primaryKey({ name: 'log_keys_pkey', columns: [table.holder, table.keyId] }),
+    check('log_keys_holder_check', sql`${table.holder} IN ('app', 'vault')`),
+    check('log_keys_key_id_check', sql`${table.keyId} ~ ('^' || ${table.holder} || ':[0-9a-f]{16}$')`),
+    check('log_keys_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+  ],
+);
+
 /**
  * 0.15's log (0022_log_015, docs/design/hot-path-one.md): two tables numbered
  * from one sequence, `log_number`, each number taken under the fence's lock

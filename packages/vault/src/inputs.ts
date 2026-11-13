@@ -32,6 +32,10 @@ import { MAX_BULK_WINDOW_MINUTES, type BulkLimit } from './config.ts';
  *   covers the index of its items' digests, not their bodies (`proxyIndex`).
  * - **proxy-reserved:** the names the deployment's code reserved, the
  *   instance's whole set.
+ * - **settings:** the instance's settings, one object: where
+ *   people set up service accounts themselves.
+ * - **log-key:** each key the app or the vault has written its entries
+ *   under, and whether the log moved on from it.
  *
  * Each object's row carries its **seal**, the vault's HMAC-SHA256 over it
  * cut to 16 bytes, and each change records the seal it leaves. A row is
@@ -261,7 +265,31 @@ export type ProxyInput = { kind: 'proxy'; id: string; items: Readonly<Record<str
 /** Every name the deployment's code ever reserved and no instance Owner released, sorted. */
 export type ReservedInput = { kind: 'proxy-reserved'; names: readonly string[] };
 
-export type Input = PrincipalInput | CredentialInput | ConnectionInput | BindingInput | SecretInput | EnvironmentInput | RolesInput | RoleInput | PolicyInput | ProxyInput | ReservedInput;
+/**
+ * The instance's settings: its row of `settings`, the object 0.15 read from the
+ * vault's newest `settings.change` entry of `audit_log` (`settingsFrom`). Its one setting is where people set up
+ * service accounts themselves, a scope: projects by id, environments by slug. Its first change is the upgrade's
+ * `genesis` (upgrade.ts); every one after is a `settings.change`, the whole scope set.
+ *
+ *   CI for dev and staging; prod's takes an Admin
+ *     { kind: 'settings', serviceAccounts: { projects: 'all', environments: { except: ['prod'] } } }
+ */
+export type SettingsInput = { kind: 'settings'; serviceAccounts: Scope };
+
+/**
+ * A key the app or the vault has written its log entries under: its row of
+ * `log_keys`, which replaces the reads of the newest `key.rotate` entry of `audit_log`. Its id is the key's own
+ * (`deriveLogKey`'s `keyId`, `<holder>:<16 hex>`), so a holder's keys are distinct objects; `retired` once the holder
+ * rotated from it, after which that key vouches for nothing new. One key per holder is in force: its rotation's job,
+ * which adds the new key (`log-key.add`) and retires the old (`log-key.retire`) in one transaction; no constraint holds
+ * it, so that an upgrade landing during a rotation still takes both keys' rows. A key's first change is the upgrade's
+ * `genesis` (upgrade.ts) or its `log-key.add`.
+ *
+ *   { kind: 'log-key', id: 'app:3f0c9a1e5b7d2468', holder: 'app', retired: true }
+ */
+export type LogKeyInput = { kind: 'log-key'; id: string; holder: 'app' | 'vault'; retired: boolean };
+
+export type Input = PrincipalInput | CredentialInput | ConnectionInput | BindingInput | SecretInput | EnvironmentInput | RolesInput | RoleInput | PolicyInput | ProxyInput | ReservedInput | SettingsInput | LogKeyInput;
 export type Kind = Input['kind'];
 
 /** An object of the log: its kind and its id (the instance's own for the roles and the policy, of which there is one each). */
@@ -270,6 +298,8 @@ export type Ref = { kind: Kind; id: string };
 export const ROLES_REF: Ref = { kind: 'roles', id: 'instance' };
 export const POLICY_REF: Ref = { kind: 'policy', id: 'instance' };
 export const RESERVED_REF: Ref & { kind: 'proxy-reserved' } = { kind: 'proxy-reserved', id: 'instance' };
+/** The instance's settings, one object (`settings`' one row, `name = 'instance'`). */
+export const SETTINGS_REF: Ref & { kind: 'settings' } = { kind: 'settings', id: 'instance' };
 
 export function refOf(input: Input): Ref {
   switch (input.kind) {
@@ -277,6 +307,7 @@ export function refOf(input: Input): Ref {
     case 'roles': return ROLES_REF;
     case 'policy': return POLICY_REF;
     case 'proxy-reserved': return RESERVED_REF;
+    case 'settings': return SETTINGS_REF;
     default: return { kind: input.kind, id: input.id };
   }
 }
@@ -487,7 +518,20 @@ export type Op =
    */
   | { op: 'proxy.code'; names: readonly string[]; cleared?: Readonly<Record<string, ProxyItem>> }
   /** An instance Owner freed a reserved name (`proxy.release`). */
-  | { op: 'proxy.release'; name: string };
+  | { op: 'proxy.release'; name: string }
+  /**
+   * The settings changed after the upgrade's genesis: the scope, whole, as `setSettings` takes it. The
+   * projector lists it as `settings.change`, shown, its detail `{ serviceAccounts }`, as today's entry.
+   */
+  | { op: 'settings.change'; serviceAccounts: Scope }
+  /**
+   * A key a holder rotated to, in force from this change; `from`, the key it replaces, which the same
+   * transaction retires (`log-key.retire`), null for none. The projector lists it as `key.rotate`, shown, its detail
+   * `{ from }`, as today's entry; the retire it does not list.
+   */
+  | { op: 'log-key.add'; holder: 'app' | 'vault'; from: string | null }
+  /** A key its holder rotated from: it vouches for nothing written after. */
+  | { op: 'log-key.retire' };
 
 /** Every object, by its key: the rows a decision reads, as the log has them. */
 export type State = Map<string, Input>;
@@ -507,8 +551,8 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
   // The object, if it is of the kind the change is about: what every change but a create works on.
   const of = <K extends Kind>(kind: K) => (ref.kind === kind && before?.kind === kind ? (before as Extract<Input, { kind: K }>) : null);
   const created = (kind: Kind) => ref.kind === kind && before === null;
-  // The roles, the policy and the reserved names are one object each: a change to another of their kind does nothing.
-  if ((ref.kind === 'roles' || ref.kind === 'policy' || ref.kind === 'proxy-reserved') && ref.id !== ROLES_REF.id) return undefined;
+  // The roles, the policy, the reserved names and the settings are one object each: a change to another of their kind does nothing.
+  if ((ref.kind === 'roles' || ref.kind === 'policy' || ref.kind === 'proxy-reserved' || ref.kind === 'settings') && ref.id !== ROLES_REF.id) return undefined;
   switch (op.op) {
     case 'genesis': {
       // A whole object, held to what the ops that make one hold it to.
@@ -645,6 +689,19 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
       const reserved = of('proxy-reserved');
       if (reserved === null || !reserved.names.includes(op.name)) return undefined;
       return { kind: 'proxy-reserved', names: reserved.names.filter((name) => name !== op.name) };
+    }
+    case 'settings.change': {
+      const settings = of('settings');
+      return settings === null ? undefined : { kind: 'settings', serviceAccounts: op.serviceAccounts };
+    }
+    case 'log-key.add':
+      // A key's id names its holder (`<holder>:<16 hex>`), and a key replaces another of its holder's.
+      return created('log-key') && ref.id.startsWith(`${op.holder}:`) && (op.from === null || (op.from.startsWith(`${op.holder}:`) && op.from !== ref.id))
+        ? { kind: 'log-key', id: ref.id, holder: op.holder, retired: false }
+        : undefined;
+    case 'log-key.retire': {
+      const key = of('log-key');
+      return key !== null && !key.retired ? { ...key, retired: true } : undefined;
     }
   }
 }

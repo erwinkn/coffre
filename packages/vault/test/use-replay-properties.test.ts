@@ -322,6 +322,8 @@ function edited(row: Input): Input {
     case 'policy': return { ...row, bulk: { ...row.bulk, count: row.bulk.count + 1 } };
     case 'proxy': return { ...row, items: {} };
     case 'proxy-reserved': return { ...row, names: [...row.names, 'edited'] };
+    case 'settings': return { ...row, serviceAccounts: { ...row.serviceAccounts, projects: row.serviceAccounts.projects === 'all' ? { only: [] } : 'all' } };
+    case 'log-key': return { ...row, retired: !row.retired };
   }
 }
 

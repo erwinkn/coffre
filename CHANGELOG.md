@@ -47,6 +47,10 @@
   0.15.0, whose vault keeps 0.15's log already. `serveVault` and
   `localVault` now refuse a configuration without `hotDatabase`, as they
   did already unless `log: '0.14'` was set.
+- **Two state tables for 0.16's upgrade (0086): `settings` and
+  `log_keys`.** Each is one sealed row read by key, where 0.15 reads the
+  newest `settings.change` and `key.rotate` entries of `audit_log`. They
+  stay empty, and nothing reads them, until the vault's upgrade step.
 - **Node deployments are not tested in 0.16.0.** A Node deployment stays
   on 0.15.0 until 0.16.1, which brings Node back on Postgres; SQLite is
   gone.

@@ -28,6 +28,8 @@ export const OWNER_URL = url('coffre_owner:local-dev-only');
 export const VAULT_URL = url('coffre_vault_runtime:local-vault-only');
 /** 0.15's hot path's login (schema 0022): the vault's, with its lock and statement timeouts and generic plans. */
 export const HOT_URL = url('coffre_vault_hot:local-hot-only');
+/** The app's runtime login: what it may call, it may call with any arguments. */
+export const APP_URL = url('coffre_runtime:local-runtime-only');
 
 /** A vault's input as a test writes it: its `caller` may be left out, for `speaking` to say. */
 type Spoken<I> = I extends Through ? Omit<I, 'caller'> & Partial<Through> : I;
