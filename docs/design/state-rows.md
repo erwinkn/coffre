@@ -748,16 +748,17 @@ tests and the `Reads.tla` scenario. Lost: its table, triggers and migration, whi
    long (its app login has no statement timeout; 0.16's is S1): step 4 finds out whether one wrote.
 4. **`coffre migrate`**, run by the operator as the owner, with the flag that says so: one migration, in one
    transaction. It refuses unless `/readyz` answers `migrating` at this release, and it refuses a database that is not
-   a cut-over 0.15.0 (no cutover change in `log_changes`, or a schema past 0049 that is not 0.16's). Its first
-   statements lock `audit_chain_head`, `audit_log`, `log_changes` and `log_uses`, ACCESS EXCLUSIVE and held to the
-   commit. Then it compares the three numbers to the mark and refuses if one moved, or with no mark ("run the
-   precheck, then back up"), and drops the mark. Then it creates the tables; fills `settings` and `log_keys` from the
-   newest entries, unsealed, and the policy's protected set (section 3); drops the indexes, triggers, functions and
-   tables of section 5; revokes INSERT on `audit_log`; and, anywhere in the same transaction, replaces the sequence
-   both newer logs number from (`log_number` dropped, `log_next` started where it stood; below). It copies nothing
-   into the projections. A lock it cannot have within 500 ms ends the transaction (55P03): the migrator tries 5 times,
-   a second apart, then fails naming the sessions that hold the tables, and has written nothing. Nothing in it depends
-   on an index built after its commit.
+   a cut-over 0.15.0 (no cutover change in `log_changes`, or a schema past 0049 that is not 0.16's; `requireCutOver`,
+   on main since V0): one of the checks before its first write. Its first statements lock `audit_chain_head`,
+   `audit_log`, `log_changes` and `log_uses`, ACCESS EXCLUSIVE and held to the commit. Then it compares the three
+   numbers to the mark and refuses if one moved, or with no mark ("run the precheck, then back up"), and drops the
+   mark. Then it creates the tables; fills `settings` and `log_keys` from the newest entries, unsealed, and the
+   policy's protected set (section 3); drops the indexes, triggers, functions and tables of section 5; revokes INSERT
+   on `audit_log`; and, anywhere in the same transaction, replaces the sequence both newer logs number from
+   (`log_number` dropped, `log_next` started where it stood; below). It copies nothing into the projections. A lock it
+   cannot have within 500 ms ends the transaction (55P03): the migrator tries 5 times, a second apart, then fails
+   naming the sessions that hold the tables, and has written nothing. Nothing in it depends on an index built after
+   its commit.
 5. **The vault's step**, on its first call, while the app answers 503 `upgrading` at its one door. It is the same size
    whatever the log holds. The vault cannot read the watch's store, so the app reads it at the door and hands the
    checkpoint it holds in on the call that runs the step; the vault verifies its own signature on it and requires the
@@ -832,14 +833,17 @@ these, and need not: none is a write the rule above counts.
 
 **The projector lists the old log; the migration does not.** From the anchor it walks `audit_log` backward, 5,000
 entries a batch. An entry's hash covers its content and the hash before it (`entryHash`), so each batch is
-authenticated by the one above it, down from the anchored hash, with no key and no walk from the first entry. It
-lists every entry but heartbeats and checkpoints, signs each row, and moves the cursor's old position (a seq, and the
-hash the entry below must have) in the batch's transaction, so a batch that dies is done again from the cursor. A
-batch is about 1.7 MB and a few milliseconds of hashing, well inside a Worker's 128 MB and its CPU limit. Equisafe's
-440,000 entries are 88 batches. `coffre audit rebuild` reads the frozen log again the same way, so the old rows stay
-a cache that one job rebuilds, and the filter is one predicate: listing heartbeats after all is a rebuild. The door
-does not wait for the walk. Until it reaches the first entry, the audit page says how far back it lists and the
-offboarding report says `behind`.
+authenticated by the one above it, down from the anchored hash, with no key and no walk from the first entry. It lists
+every entry but heartbeats and checkpoints, signs each row, and moves the cursor's old position (a seq, and the hash
+the entry below must have) in the batch's transaction, so a batch that dies is done again from the cursor. The cursor
+alone says where the walk is. Not started and done are the same bytes (`old_from` 0 and the zero hash, which is the
+first entry's `prev_hash`), so the walk starts in the batch that lists the signed anchor change, which sets `old_from`
+to the anchor's seq plus one and `old_hash` to its hash; it is still listing while `through` is below the anchor
+change's number, or `old_from` is above 0. A batch is about 1.7 MB and a few milliseconds of hashing, well inside a
+Worker's 128 MB and its CPU limit. Equisafe's 440,000 entries are 88 batches. `coffre audit rebuild` reads the frozen
+log again the same way, so the old rows stay a cache that one job rebuilds, and the filter is one predicate: listing
+heartbeats after all is a rebuild. The door does not wait for the walk. Until it reaches the first entry, the audit
+page says how far back it lists and the offboarding report says `behind`.
 
 One case is refused by the precheck, not handled: a log in which an Owner accepted a loss under 0.15.0
 (`audit.loss_accepted`) has a break in its hashes at the accepted range, where the backward walk would stop with a
@@ -889,9 +893,10 @@ once more on the migrated database, to have its sign-in, token issue, bind, revo
 each kind refused, the three numbers standing. Once the walk is done it requires the same entries in the same order,
 the same report, a green `coffre verify log`, a use, a change, a second run of the vault's step killed between two of
 its writes, a step made to refuse that leaves no change, no seal and the signer's pair as it was, and a walk killed
-between two batches. `pnpm test:compat` is off for 0.16.0, as it was for 0.4.0, and returns with 0.16.1. A dev
-database on main's unreleased migrations starts over. One rehearsal of the whole runbook on a throwaway Cloudflare
-account, before the release, answers for what no test here can: invocations in flight at a real deploy.
+between two batches. `pnpm test:compat` is off for 0.16.0, as it was for 0.4.0, and returns with 0.16.1; until the tag
+this script is the release's gate in its place, a step of Validate. A dev database on main's unreleased migrations
+starts over. One rehearsal of the whole runbook on a throwaway Cloudflare account, before the release, answers for
+what no test here can: invocations in flight at a real deploy.
 
 ## 7. The work graph
 
