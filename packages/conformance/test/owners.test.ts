@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { OWNER_VARS } from '../src/harness.ts';
 
 test("the harness names the vault's Owners under every name a deployment's vault reads them by, the older ones included", () => {
-  // As `coffre init` writes the vault today, and as deployments written before still read it until 0.7.
+  // As `coffre init` writes the vault, and as a vault an older `init` wrote reads it.
   const entries = ['../../../examples/node/src/vault.ts', '../../../examples/workers/vault/src/worker.ts'].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8'));
   const read = entries.flatMap((source) => [...source.matchAll(/env(?:\('|\.)([A-Z_]*OWNERS)/g)].map((match) => match[1]!));
   assert.deepEqual([...new Set(read)], ['OWNERS']);

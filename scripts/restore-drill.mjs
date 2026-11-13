@@ -95,7 +95,7 @@ async function check(before) {
     const trees = await sealed(admin, BigInt(before.trees.checkpoint.upto) - 1n);
     say(`0.15's log verifies from its newest checkpoint, up to ${trees.checkpoint.upto}`);
 
-    // The directory as backed up; how far its reads are listed (T166) moves on with this sign-in's seal, so it is held
+    // The directory as backed up; how far its reads are listed moves on with this sign-in's seal, so it is held
     // apart: there as it was, and vouched for.
     const { reads, ...directory } = await call(admin, 'GET', '/api/members');
     const { reads: readsBefore, ...directoryBefore } = before.members;

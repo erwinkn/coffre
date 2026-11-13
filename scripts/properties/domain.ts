@@ -51,7 +51,7 @@ export const INSTANCE_ROLES = {
 export type InstanceRole = keyof typeof INSTANCE_ROLES;
 export const INSTANCE_ROLE_NAMES = Object.keys(INSTANCE_ROLES) as InstanceRole[];
 
-/** A key's nature (R16): `plain` is shown, `secret` read by whoever may, `sensitive` never handed to a person. */
+/** A key's nature: `plain` is shown, `secret` read by whoever may, `sensitive` never handed to a person. */
 export const NATURES = ['plain', 'secret', 'sensitive'] as const;
 export type Nature = (typeof NATURES)[number];
 
@@ -68,7 +68,7 @@ export type Environment = {
   slug: string;
   /** A fork's parent, in the same project; null for a root environment. */
   parentId: string | null;
-  /** An `@me` overlay's owner (`user:…`): a fork only they read and write (R8, R18, R20). */
+  /** An `@me` overlay's owner (`user:…`): a fork only they read and write. */
   owner: string | null;
 };
 export type Project = { id: string; slug: string; environments: Environment[] };
@@ -77,7 +77,7 @@ export type Secret = {
   environmentId: string;
   key: string;
   nature: Nature;
-  /** A reference's source secret, whose value and nature it takes (R20, R23); null for a value of its own. */
+  /** A reference's source secret, whose value and nature it takes; null for a value of its own. */
   reference: string | null;
   archived: boolean;
 };

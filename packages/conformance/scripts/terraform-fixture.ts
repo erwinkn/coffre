@@ -103,7 +103,7 @@ async function seed(api: CoffreClient, issuer: string) {
     label: 'terraform acceptance',
   });
 
-  // Who writes by hand, beside Terraform; who reads a value back to check it (issued by the instance's Owner, R32).
+  // Who writes by hand, beside Terraform; who reads a value back to check it (issued by the instance's Owner).
   for (const member of ['token:rotator', 'token:verifier']) await api.members.add(member);
   await api.access.set('token:rotator', SCOPE);
   await api.access.set('token:verifier', { 'infra/prod': 'viewer', 'infra/prod-eu': 'viewer' });

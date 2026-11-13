@@ -71,8 +71,8 @@ export async function memberTampering(deployment: Deployment, people: People, ki
 }
 
 /**
- * Access changes have one author, the vault that commits the changed rows. A first add down the two-trip path (0.16,
- * on Postgres) writes no 0.14 entry: its record is its change in 0.15's log, `member.add` with the request it was
+ * Access changes have one author, the vault that commits the changed rows. A first add down the two-trip path (on
+ * Postgres) writes no 0.14 entry: its record is its change in 0.15's log, `member.add` with the request it was
  * decided on, which only the vault makes (the app's login writes no row of `log_changes`).
  */
 export async function accessAuthorship(deployment: Deployment, people: People): Promise<string> {
@@ -111,7 +111,7 @@ export async function noAuditNoAccess(deployment: Deployment, people: People): P
       grants: await sql.query('SELECT * FROM grants ORDER BY principal, project_id, environment_id'),
     });
     const before = await snapshot();
-    // Both logs: since 0.16 a first add down the two-trip path appends to 0.15's alone.
+    // Both logs: a first add down the two-trip path appends to 0.15's alone.
     await logRefuses(sql, () => logRefuses(sql, async () => {
       for (const change of [
         () => admin.api.access.set(person.member, { [DEV]: 'developer' }),

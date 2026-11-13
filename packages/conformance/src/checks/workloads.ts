@@ -93,7 +93,7 @@ export async function runSignsIn(deployment: Deployment, admin: Person, canaries
   const { values } = await bearer(deployment.origin, token).secrets.reveal(`${DEV}/API_KEY`);
   expect(values.API_KEY === canaries[`${DEV}/API_KEY`], 'the credential did not read the value as the service');
 
-  // The read listed once sealed and projected, a tick or two on (T166).
+  // The read listed once sealed and projected, a tick or two on.
   let entries: AuditEntryView[] = [];
   const readIn = () => entries.find((entry) => entry.author === 'vault' && entry.action === 'secret.read' && entry.key === 'API_KEY');
   await listed(async () => ((entries = (await admin.api.audit.list({ actor: RUNNER, detail: '1', sealed: '1' })).entries), readIn() !== undefined));
@@ -238,7 +238,7 @@ export async function runUnbound(deployment: Deployment, admin: Person, bindingI
 /**
  * One address may exchange only so often: tokens that would be refused
  * anyway still count, before anything about them is read. `coffre init`
- * writes 10,000 per 10-second window (1,000 a second, W331, D177), more
+ * writes 10,000 per 10-second window (1,000 a second), more
  * than a machine running the checks may send in one, so the harness runs
  * the deployment at `LOCAL_RATE_LIMIT` a window (draining.ts: the Workers
  * build's config, and Node's `SIGN_IN_PER_SOURCE`). In fixed windows, so

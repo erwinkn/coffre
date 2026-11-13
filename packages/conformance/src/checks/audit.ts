@@ -25,7 +25,7 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
   const expected = purpose === 'reveal' ? { API_KEY: canaries[`${DEV}/API_KEY`] } : valuesIn(canaries, DEV);
   expect(JSON.stringify(Object.entries(values).sort()) === JSON.stringify(Object.entries(expected).sort()), 'the read returned different values', values);
   // With 0.15's log, each value read is its use, listed once the log has sealed it and the vault's projector has gone
-  // that far (T166).
+  // that far.
   if ((await admin.api.audit.verifyTrees()).kept) return usesAudited(deployment, { admin, reader }, Object.keys(expected), purpose, asked);
   const entries = await everyAuditEntry(admin.api);
   const bundle = entries.filter((entry) => entry.operationId === operationId);
@@ -61,7 +61,7 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
 
 /**
  * How long before a read 0.15's log may hold the use it rode on: a repeat
- * within a minute rides on the first one's entry (a cover, R53), and the
+ * within a minute rides on the first one's entry (a cover), and the
  * deployment's clock may stand a little off the harness's.
  */
 const COVERED_MS = 90_000;
@@ -72,7 +72,7 @@ const LISTED_WITHIN_MS = 20_000;
 /**
  * Whether `probe` holds within `LISTED_WITHIN_MS`, asked every quarter of a
  * second: what a check of 0.15's reads waits for, as a read is listed once
- * the log has sealed it and the vault's projector has gone that far (T166).
+ * the log has sealed it and the vault's projector has gone that far.
  */
 export async function listed(probe: () => Promise<boolean>): Promise<boolean> {
   for (const deadline = Date.now() + LISTED_WITHIN_MS; ;) {
@@ -84,7 +84,7 @@ export async function listed(probe: () => Promise<boolean>): Promise<boolean> {
 
 /**
  * Every value read, with 0.15's log, where a read is a use of each key,
- * which names no operation (R53, T166): the reader's newest read of each,
+ * which names no operation: the reader's newest read of each,
  * for the purpose, made by this read or by one within the minute before it
  * that this rode on, listed within `LISTED_WITHIN_MS`, the vault's and
  * vouched for, of the version the key holds, in the key's own log, and the
@@ -107,7 +107,7 @@ async function usesAudited(
     return entry;
   });
   // On the reader's own page, whole: the read may ride on a cover from the minute before. And on its key's and its
-  // environment's (T175): listed once, on every page that lists it.
+  // environment's: listed once, on every page that lists it.
   const theirs = await everyAuditEntry(admin.api, { actor: reader.member });
   const environment = await everyAuditEntry(admin.api, { path: DEV });
   for (const entry of read) {
@@ -149,14 +149,14 @@ export async function verification(deployment: Deployment, { admin }: People): P
     expect(result.through !== null && BigInt(result.through) === BigInt(last.seq), 'verification stopped before the head', { result, head: head.next_seq });
     expect(BigInt(result.entries) === BigInt(head.next_seq), 'verification did not count every entry', result);
   });
-  // 0.15's log, where the deployment keeps it (plan PR 8): its newest checkpoint and every entry since, as the audit
+  // 0.15's log, where the deployment keeps it: its newest checkpoint and every entry since, as the audit
   // page checks it. A deployment of 0.14's log alone has none (`kept` false).
   const trees = await admin.api.audit.verifyTrees();
   expect(!trees.kept || trees.problems.length === 0, "0.15's log does not verify from its newest checkpoint", trees);
   // Not checked to its head, as 0.14's checkpoints catching up above: a checkpointer behind, no break of the log, and
-  // no pass either (review r4 of W240).
+  // no pass either.
   expect(!trees.kept || !trees.capped, "0.15's log is not checked to its head: more entries wait above its newest checkpoint than a check reads, the checkpointer behind", trees);
-  // And the reads the pages list, held to the uses it sealed, from the first, as `coffre verify log` holds them (T166).
+  // And the reads the pages list, held to the uses it sealed, from the first, as `coffre verify log` holds them.
   const reads = await admin.api.audit.verifyReads();
   expect(!reads.kept || reads.ok, "the reads listed are not the uses 0.15's log sealed", reads);
   const page = await admin.browser.fetch('/audit');
@@ -198,7 +198,7 @@ export async function checkpoints(deployment: Deployment, { admin }: People): Pr
  * it was sealed with, `key.wrap` for a write and `key.rewrap` for a restore,
  * a mark and a loosening:
  * the same member, request and operation, the same secret and version. A
- * version written down the two-trip path (0.16, on Postgres) has no 0.14
+ * version written down the two-trip path (on Postgres) has no 0.14
  * entry: its record is its key's change in 0.15's log, which only the vault
  * makes, naming the version, the request it was decided on, its operation
  * and its request id; never both. And every value read is the vault's to
@@ -349,9 +349,9 @@ export async function rewrittenEntry(deployment: Deployment, { admin }: People, 
 
 /**
  * Beats of the scheduled job until 0.14's log holds an entry after its first
- * page of 1,000, each an `audit.heartbeat`: since 0.16.0 the key writes down
- * the two-trip path (Postgres's, the bulk limit's 1,001 among them) write no
- * 0.14 entry, which took a run past it before. How many it took.
+ * page of 1,000, each an `audit.heartbeat`: the key writes down the two-trip
+ * path (Postgres's, the bulk limit's 1,001 among them) write no 0.14 entry.
+ * How many it took.
  */
 async function pastFirstPage(deployment: Deployment): Promise<number> {
   for (let beats = 0; ; beats++) {

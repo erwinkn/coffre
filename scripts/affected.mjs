@@ -33,8 +33,8 @@ import { affectedBy, buildGraph, closureOf } from './graph.mjs'
 
 /**
  * Node's conformance, at both gates: its own step, and its run inside the packed
- * consumer. Off while 0.16.0 ships Workers alone (D198): Node is built and
- * typechecked, nothing more. T270 (0.16.1) turns it back on, here and in
+ * consumer. Off while 0.16.0 ships Workers alone: Node is built and
+ * typechecked, nothing more. Turning it on is this flag and
  * .github/workflows/validate.yml's `node` and `consumer` jobs.
  */
 export const nodeConformance = false

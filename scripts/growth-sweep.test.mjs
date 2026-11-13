@@ -42,7 +42,7 @@ test('literals and spaces aside, a statement is the same at both sizes', () => {
 
 test("a path whose run of a statement was a backend's first is not compared as grown, but reported unwarmed", () => {
   // At the smaller size, B warms backend 7 and A runs warm there; at the larger, A lands first on backend 8, which reads
-  // the catalog, and B runs warm on 7 (review r3 of #559).
+  // the catalog, and B runs warm on 7.
   const small = { 'GET /b': [[ACCESS, 1_295]], 'GET /a': [[ACCESS, 18]] };
   const large = { 'GET /a': [[ACCESS, 1_295, 8]], 'GET /b': [[ACCESS, 1_295], [ACCESS, 18]] };
   const [before, after] = [small, large].map((paths) => statementsOf(plansOf(logOf(paths))));

@@ -27,7 +27,7 @@ try {
     const logins = [
         ['coffre_runtime', 'local-runtime-only'],
         ['coffre_vault_runtime', 'local-vault-only'],
-        // 0.15's hot path's: made here as a login, as `coffre setup` makes it, before 0022 grants it coffre_vault.
+        // The vault's hot path's: made here as a login, as `coffre setup` makes it, before 0022 grants it coffre_vault.
         ['coffre_vault_hot', 'local-hot-only'],
         ['coffre_backup_login', 'local-backup-only'],
     ];

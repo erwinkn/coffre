@@ -8,7 +8,7 @@
 #   pnpm test:consumer [--kind workers|node] [--skip-conformance node] [--built] [--port <n>] [<dir>]
 # <dir> defaults to a new temporary one. Without --kind, exercise both kinds.
 # --skip-conformance leaves out that kind's conformance run, and only that: both
-# gates pass it for Node while 0.16.0 ships Workers alone (T270).
+# gates pass it for Node while 0.16.0 ships Workers alone.
 # --built packs the packages' dist/ as it is, built from this checkout already:
 # pnpm validate's, whose other steps read dist/ while this one runs, and a build
 # empties it first.

@@ -12,7 +12,7 @@ import { canary, DEV, PROD, PROJECT, valuesIn, type Canaries, type People } from
 import { query } from './storage.ts';
 import { listed } from './audit.ts';
 
-/** A read of one key refused, whatever the reason (D153): `outcome`'s status and code. */
+/** A read of one key refused, whatever the reason: `outcome`'s status and code. */
 const NO = '404 not_available';
 
 /** Where the fork check copies dev to; archived once checked. */
@@ -105,8 +105,8 @@ export async function inheritance({ admin, reader }: People, canaries: Canaries)
 const PERSONAL = 'CONFORMANCE_PERSONAL';
 
 /**
- * A personal config's values are its owner's alone (docs/design/forking.md,
- * R8): the reader, a viewer on dev, keeps a value in `dev@me` and reads it;
+ * A personal config's values are its owner's alone (docs/design/forking.md):
+ * the reader, a viewer on dev, keeps a value in `dev@me` and reads it;
  * the admin, an Owner of the whole instance, sees that it exists and its
  * key's name, and reads none of it, and their own `dev@me` is dev; and a
  * row made the admin's around coffre, in the database, opens nothing,
@@ -178,8 +178,8 @@ export async function references(deployment: Deployment, { admin, reader, leaver
   try {
     const read = await reader.api.secrets.reveal(`${DEV}/${HELD}`);
     expect(read.values[HELD] === canaries[source], "a viewer on dev did not read prod's value through dev's reference");
-    // On the whole log, filed at the source, the holder beside it, once sealed and projected, a tick or two on (T166);
-    // and on the source's environment's page and the holder's (T175).
+    // On the whole log, filed at the source, the holder beside it, once sealed and projected, a tick or two on;
+    // and on the source's environment's page and the holder's.
     const through = (entries: AuditEntryView[]) => entries.filter((entry) => entry.action === 'secret.read' && entry.actorId === reader.email
       && `${entry.project}/${entry.environment}/${entry.key}` === source && (entry.metadata.via as { path?: unknown } | undefined)?.path === `${DEV}/${HELD}`);
     expect(await listed(async () => through((await admin.api.audit.list({ limit: 200, sealed: '1' })).entries).length >= 1),
@@ -189,7 +189,7 @@ export async function references(deployment: Deployment, { admin, reader, leaver
       expect(through(page.entries).length >= 1, `${path}'s log does not list the read through the reference`, page.entries.slice(0, 5));
     }
 
-    // What it reads cannot be archived while it reads it (D41): not the key, nor its environment. Its
+    // What it reads cannot be archived while it reads it: not the key, nor its environment. Its
     // project could be, since the reference is held there too, and archiving it stops no one else's read.
     const archives: [string, (archived: boolean) => Promise<unknown>][] = [
       [source, (archived) => admin.api.secrets.update(source, { archived })],
@@ -201,14 +201,14 @@ export async function references(deployment: Deployment, { admin, reader, leaver
       expect(refusal instanceof CoffreError && refusal.status === 409 && refusal.message.includes(`${DEV}/${HELD} reads ${source}`),
         `${what} was archived, or refused without naming the reference, while a reference read it`, refusal instanceof Error ? refusal.message : refusal);
     }
-    // Unless what holds it is archived (D58): nobody reads through it then, so its source archives. Restored,
+    // Unless what holds it is archived: nobody reads through it then, so its source archives. Restored,
     // the holder reads nothing through it until its source is back, and says so.
     await admin.api.secrets.update(`${DEV}/${HELD}`, { archived: true });
     const underArchived = await outcome(admin.api.secrets.update(source, { archived: true })).finally(() => admin.api.secrets.update(`${DEV}/${HELD}`, { archived: false }));
     try {
       expect(underArchived === 'let through', `${source} could not be archived while only an archived key referred to it: ${underArchived}`);
       const restored = await outcome(reader.api.secrets.reveal(`${DEV}/${HELD}`));
-      // One key's refusal is the one "no" (D153): no reason, which the audit log keeps.
+      // One key's refusal is the one "no": no reason, which the audit log keeps.
       expect(restored === NO, `a reference read a source archived while its holder was: ${restored}`);
     } finally {
       if (underArchived === 'let through') await admin.api.secrets.update(source, { archived: false });
@@ -258,7 +258,7 @@ const PROD_ONLY = 'CONFORMANCE_PROD_ONLY';
 const LOOSE = 'CONFORMANCE_LOOSENED';
 
 /**
- * A sensitive value is made a secret in place by an Owner alone (R30): the
+ * A sensitive value is made a secret in place by an Owner alone: the
  * leaver, a developer on dev, is refused, and told the listing does not
  * offer it; the admin's mark answers no value, and the reader, a viewer on
  * dev, reads it after, as a secret, its old version still sensitive. Its

@@ -15,7 +15,7 @@ import { bearer } from '../browser.ts';
 import { canary, deviceLogin, DEV, personaOn, PROD, PROJECT, touching, valuesIn, type Canaries, type People, type Person } from './people.ts';
 
 const NAME = 'Conformance MCP client';
-/** A native client's redirect, on loopback. A custom scheme is left out of a registration (D37). */
+/** A native client's redirect, on loopback. A custom scheme is left out of a registration. */
 const REDIRECT = 'http://127.0.0.1:33418/callback';
 /** A `state` the router would read as a number: it must come back as sent. */
 const STATE = '1e5';

@@ -43,7 +43,7 @@ test('Validate waits for exactly the jobs this list names, each of them', () => 
 });
 
 // Node's conformance is one switch, `nodeConformance` (scripts/affected.mjs), which `pnpm validate` reads; the
-// workflow follows it by hand, in its `node` job and the consumer's run, and this holds the two in step (T270).
+// workflow follows it by hand, in its `node` job and the consumer's run, and this holds the two in step.
 test('Validate runs Node conformance exactly when pnpm validate does', () => {
     const off = [...workflow.matchAll(/\n  ([a-z0-9-]+):\n    if: false\n/g)].map((match) => match[1]);
     assert.deepEqual(off, nodeConformance ? [] : ['node']);
@@ -60,7 +60,7 @@ test('the jobs that judge shards run when a shard failed', () => {
     }
 });
 
-// Validate is run by hand and nightly, never by a pull request (R46).
+// Validate is run by hand and nightly, never by a pull request.
 test('no pull request runs Validate', () => {
     const triggers = workflow.match(/\non:\n([\s\S]*?)\npermissions:/)[1];
     assert.match(triggers, /^ {2}workflow_dispatch:/m);
