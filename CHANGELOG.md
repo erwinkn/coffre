@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.6 (2026-11-13)
+
 - **An `hmac()` signer signs a message of up to 12 MiB, streamed, never
   held: SumSub's document upload.** SumSub signs `ts + method + path +
   body`, and a document's body is the whole file, up to 10.1 MiB; a
