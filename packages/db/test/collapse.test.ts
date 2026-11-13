@@ -12,6 +12,7 @@ import { assemble, collapseMigrations, LEDGER, numbered, RELEASE, released, seve
 import { migrateDatabase, restrictDatabase } from '../src/migrate.ts';
 import { buildOnline, onlineIndex, onlineIndexes } from '../src/online-indexes.ts';
 import { postgresClient, postgresSession, quoteIdentifier } from '../src/postgres.ts';
+import { holdingRoles } from './roles-lock.ts';
 
 const BASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 // Short, not the suite's database name with a suffix: Postgres cuts a name at 63 bytes, which made two of these one.
@@ -53,7 +54,7 @@ async function apply(url: string, migrations: readonly string[]): Promise<Applie
   const FILES = `SELECT oid::text, oid::regclass::text AS name, relfilenode::text AS file FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'`;
   const applied: Applied[] = [];
   try {
-    await client.begin(async (tx) => {
+    await holdingRoles(BASE, () => client.begin(async (tx) => {
       await tx.unsafe(LEDGER);
       const files = async () => new Map((await tx.unsafe<{ oid: string; name: string; file: string }[]>(FILES)).map((row) => [row.oid, row]));
       let was = await files();
@@ -74,7 +75,7 @@ async function apply(url: string, migrations: readonly string[]): Promise<Applie
           applied.push({ statement, command: command ?? '', written: Number(after!.n) - Number(before!.n), rewritten });
         }
       }
-    });
+       }));
     const session = { client, briefly: <T>(run: () => Promise<T>) => run(), waitShort: async () => {}, waitLong: async () => {} };
     for (const index of onlineIndexes(migrations)) await buildOnline(session, index);
     await restrictDatabase(client);
@@ -248,7 +249,7 @@ let collapsed: Collapsed;
 let release: string[];
 
 before(async () => {
-  collapsed = await collapseMigrations(BASE);
+  collapsed = await holdingRoles(BASE, () => collapseMigrations(BASE));
   release = released().map(({ sql }) => sql);
 });
 
@@ -310,7 +311,7 @@ test('no function in schema public takes more than 10 arguments, but the ones OV
 
 test('the baseline makes what the numbered migrations make', async () => {
   const numberedPath = await database('numbered');
-  assert.deepEqual(await migrateDatabase(numberedPath), { unbuilt: [], untimed: [] });
+  assert.deepEqual(await holdingRoles(BASE, () => migrateDatabase(numberedPath)), { unbuilt: [], untimed: [] });
   const baseline = await database('baseline');
   await apply(baseline, [assemble(collapsed.baseline, collapsed.functions)]);
   same(await state(numberedPath), await state(baseline));
@@ -401,7 +402,7 @@ test('on the restored database COFFRE_TEST_RESTORED_DATABASE names, the upgrade 
   same(await state(stepped, { history: true, digest: true }), await state(upgraded, { history: true, digest: true }));
 });
 
-const probe = async (sql: string) => collapseMigrations(BASE, [...(await numbered()), { tag: '9999_probe', sql: statements(sql).join(`\n--> statement-breakpoint\n`) }]);
+const probe = async (sql: string) => holdingRoles(BASE, async () => collapseMigrations(BASE, [...(await numbered()), { tag: '9999_probe', sql: statements(sql).join(`\n--> statement-breakpoint\n`) }]));
 
 test('a statement of the migrations after 0.15.0 holds one command', async () => {
   // Two commands in one statement (r3's probe): the seed check would sort the INSERT by the DROP before it.

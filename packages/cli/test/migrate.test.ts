@@ -348,7 +348,7 @@ test("coffre's objects are what its migrations make, by name, as Postgres folds 
     { relations: ['audit_log', 'Mixed', 'folded', 'totals', 'numbers', 'Sums', 'kept'], functions: ['audit_log_append_only', 'Quoted'], types: ['use_row', 'Kind'] },
   );
   const made = managedObjects(readdirSync(migrationsFolder()).filter((file) => file.endsWith('.sql')).map((file) => readFileSync(join(migrationsFolder(), file), 'utf8')));
-  assert.ok(made.relations.includes('vault_members') && made.relations.includes('principals') && made.relations.includes('mcp_approvals') && made.functions.includes('secret_versions_erase_only'), JSON.stringify(made));
+  assert.ok(made.relations.includes('vault_members') && made.relations.includes('principals') && made.relations.includes('mcp_approvals') && made.functions.includes('secret_versions_erase_only') && made.functions.includes('append_retention'), JSON.stringify(made));
   assert.deepEqual(made.types.toSorted(), ['use_row', 'use_view'], JSON.stringify(made));
   // A name followed by a dot is a schema: the SQL that 0022's and 0049's functions run makes no table named public.
   assert.ok(!made.relations.includes('public'), JSON.stringify(made));

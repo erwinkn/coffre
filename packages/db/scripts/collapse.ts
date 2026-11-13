@@ -155,7 +155,7 @@ type Replayed = {
 };
 
 /**
- * `list` run one at a time, autocommitted, a CONCURRENTLY index built plainly: the functions after each statement,
+ * `list` run one at a time, in the scratch database's one transaction, a CONCURRENTLY index built plainly: the functions after each statement,
  * which each changed, and the indexes it made and removed. Refused: a function outside the public schema, which the
  * collapse does not write, and a function renamed or moved, which the collapse would drop and make anew, breaking
  * what holds it by its object ID (a trigger, a view).

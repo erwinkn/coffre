@@ -1,4 +1,4 @@
-// 0089_log_next (T289): the log numbers from `log_next`, so that a 0.15.0 append held inside its function's body
+// 0089_log_next: the log numbers from `log_next`, so that a 0.15.0 append held inside its function's body
 // across the upgrade's commit fails rather than write. Each held call is 0.15's body, planned once before, blocked on
 // the table lock the migration's transaction holds; the migration's own statements run in that transaction.
 import test, { after, before } from 'node:test';
@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { migrationsFolder } from '../src/migrate.ts';
+import { MIGRATION_LOCK_WAIT_MS, migrationsFolder } from '../src/migrate.ts';
 import { onlineIndex } from '../src/online-indexes.ts';
 import { postgresClient, postgresSession, quoteIdentifier, type PostgresClient } from '../src/postgres.ts';
 import { holdingRoles } from './roles-lock.ts';
@@ -85,6 +85,22 @@ async function waiting(observer: PostgresClient, pid: number): Promise<boolean> 
   const [row] = await observer.unsafe<{ waiting: boolean }[]>(`SELECT wait_event_type = 'Lock' AS waiting FROM pg_stat_activity WHERE pid = ${pid}`);
   return row?.waiting === true;
 }
+
+test(`${TAG}: a rotation numbered before the swap holds the sequence: the swap fails on its lock_timeout, the rotation appends`, async (t) => {
+  const migrator = postgresSession(url);
+  const rotation = postgresSession(url);
+  t.after(() => Promise.all([migrator, rotation].map((client) => client.end())));
+  await rotation.unsafe('BEGIN');
+  const [taken] = await rotation.unsafe<{ n: string }[]>(`SELECT log_rotate_number(decode('ffffffff', 'hex'))::text AS n`);
+  await migrator.unsafe('BEGIN');
+  await migrator.unsafe(`SET LOCAL lock_timeout = '${MIGRATION_LOCK_WAIT_MS}ms'`);
+  await assert.rejects(async () => { for (const statement of SWAP) await migrator.unsafe(statement); }, { code: '55P03' });
+  await migrator.unsafe('ROLLBACK');
+  await rotation.unsafe(`SELECT log_rotate(${taken!.n}, 'rotate', ${NOW}, '{"op":"rotate","at":"${taken!.n}"}', decode(repeat('11', 16), 'hex'), decode('ffffffff', 'hex'))`);
+  await rotation.unsafe('COMMIT');
+  const [found] = await migrator.unsafe<{ number: string }[]>(`SELECT number::text FROM log_changes WHERE request_id = 'rotate'`);
+  assert.equal(found?.number, taken!.n);
+});
 
 test(`${TAG}: an append held across the swap's commit fails, 42P01, and writes nothing; every function keeps all but its body`, async (t) => {
   const migrator = postgresSession(url);
