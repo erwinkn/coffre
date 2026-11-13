@@ -515,7 +515,7 @@ async function since<T>(work: () => Promise<T>): Promise<{ result: T; entries: s
   const result = await work();
   const entries = await run(db.owner, sql`SELECT author, action, decision FROM audit_log WHERE seq > ${seq} ORDER BY seq`) as { author: string; action: string; decision: string }[];
   const [{ changes }] = await run(db.owner, sql`SELECT count(*)::int AS changes FROM log_changes WHERE number > ${number}`) as { changes: number }[];
-  const wraps = await run(db.owner, sql`SELECT seq::text AS seq, operation_id AS operation FROM audit_log WHERE seq > ${seq} AND author = 'vault' AND action = 'key.wrap' ORDER BY seq`) as { seq: string; operation: string | null }[];
+  const wraps = await run(db.owner, sql`SELECT seq::text AS seq, operation_id AS operation FROM audit_log WHERE seq > ${seq} AND author = 'vault' AND action = 'key.wrap' ORDER BY audit_log.seq`) as { seq: string; operation: string | null }[];
   return { result, entries: entries.map((entry) => `${entry.author} ${entry.action} ${entry.decision}`), changes: Number(changes), wraps };
 }
 
@@ -757,7 +757,7 @@ test("Ada a Viewer of market/dev, her write refused on the vault's read: answere
 
 /** A refusal's record, as the vault wrote it: its row, its payload parsed. */
 async function refusalRecords(): Promise<{ number: string; requestId: string; object: string; actor: string; payload: Record<string, unknown>; mac: Buffer }[]> {
-  const rows = await run(db.owner, sql`SELECT number::text AS number, request_id, object::text AS object, actor, payload, mac FROM log_changes WHERE strpos(payload, '"op":"write.refused"') > 0 ORDER BY number`) as
+  const rows = await run(db.owner, sql`SELECT number::text AS number, request_id, object::text AS object, actor, payload, mac FROM log_changes WHERE strpos(payload, '"op":"write.refused"') > 0 ORDER BY log_changes.number`) as
     { number: string; request_id: string; object: string; actor: string; payload: string; mac: Uint8Array }[];
   return rows.map((row) => ({ number: row.number, requestId: row.request_id, object: row.object, actor: row.actor, payload: JSON.parse(row.payload) as Record<string, unknown>, mac: Buffer.from(row.mac) }));
 }
