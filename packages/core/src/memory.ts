@@ -6,7 +6,7 @@
 // bounded by shares of that number, each with its source:
 //
 //   share            bytes        holds                                               source
-//   uses in flight   64,000,000   the `/use` calls an isolate holds open              half (Q1)
+//   uses in flight   64,000,000   the `/use` calls an isolate holds open              half, a policy choice
 //   proxy bodies     16 MiB       request bodies the credential proxy reads whole     the 16 MiB one body took before
 //   caches           16 MiB       answers kept between requests                       as much as the bodies
 //   runtime          the rest     code, the runtime's own, a request's objects        measured: 8.6 MB of it idle
