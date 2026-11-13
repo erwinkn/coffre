@@ -75,7 +75,7 @@ export type Memory = { seconds: number; reads: Map<string, Read>; logged: Map<st
 
 export const memoryOf = (seconds: number): Memory => ({ seconds, reads: new Map(), logged: new Map(), touched: new Map() });
 
-/** A read of the same credential, place and keys within the last minute writes no second log entry. */
+/** A credential given the same version of a key for the same purpose within the last minute writes no second log entry, wherever it asked. */
 const LOGGED_MS = 60_000;
 /** A credential's last use is moved on at most this often. */
 const TOUCHED_MS = 5 * 60_000;
@@ -84,14 +84,11 @@ const MAX_PARENTS = 3;
 /** The most a memory's map holds, whatever the rate: past it, the oldest go. */
 const MOST = 1000;
 
-/** Remember `value`, and forget what is older than `since`: a map keeps its entries in the order they came. */
+/** Remember `value`, and forget what is older than `since`, and past `MOST` entries the ones that came first. */
 function keep<V extends { at: number }>(map: Map<string, V>, key: string, value: V, since: number): void {
   map.delete(key);
   map.set(key, value);
-  for (const [old, { at }] of map) {
-    if (at >= since && map.size <= MOST) break;
-    map.delete(old);
-  }
+  for (const [old, { at }] of map) if (at < since || map.size > MOST) map.delete(old);
 }
 
 const shapeOfAsk = (ask: Ask) => JSON.stringify([ask.token.toString('hex'), ask.project, ask.environment, ask.mine, ask.keys]);
@@ -99,7 +96,10 @@ const shapeOfAsk = (ask: Ask) => JSON.stringify([ask.token.toString('hex'), ask.
 /** The rows this ask read within the vault's memory, if any. */
 export function recall(vault: Serving, ask: Ask): Read | undefined {
   const read = vault.memory.reads.get(shapeOfAsk(ask));
-  return read !== undefined && vault.now() < read.at + vault.memory.seconds * 1000 ? read : undefined;
+  if (read === undefined || vault.now() < read.at + vault.memory.seconds * 1000) return read;
+  // Stale: its rows and the values opened from them go now, not when the next read happens to push them out.
+  vault.memory.reads.delete(shapeOfAsk(ask));
+  return undefined;
 }
 
 /** A use's one read. */
@@ -115,7 +115,8 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
       mine AS (SELECT e.* FROM environments e, base, c WHERE ${ask.mine} AND e.parent_id = base.id AND e.owner = c.principal AND strpos(e.slug, '~') = 0),
       -- UNION, not UNION ALL: a loop someone wrote around the vault ends where it closes.
       chain AS (SELECT * FROM base UNION SELECT * FROM mine UNION SELECT e.* FROM environments e JOIN chain ON e.id = chain.parent_id),
-      keyed AS (SELECT s.* FROM secrets s WHERE s.environment_id IN (SELECT id FROM chain) AND ${keyed(sql`s.key`)}),
+      -- By the project too: the index on secrets leads with it, and an environment's parents are its project's.
+      keyed AS (SELECT s.* FROM secrets s WHERE s.project_id = (SELECT id FROM p) AND s.environment_id IN (SELECT id FROM chain) AND ${keyed(sql`s.key`)}),
       held AS (SELECT * FROM keyed UNION SELECT s.* FROM secrets s WHERE s.id IN (SELECT source_id FROM keyed))
     SELECT 'credential' AS part, to_jsonb(c) AS row FROM c
     UNION ALL SELECT 'principal', to_jsonb(t) FROM principals t, c WHERE t.id = c.principal
@@ -191,6 +192,11 @@ export function decide(seen: Seen, ask: Ask, at: number): Decided | Refusal {
     last = parent;
   }
 
+  // By id, and the live ones by where they are: a batch is a thousand keys, decided again at every use from memory.
+  const secret = new Map(seen.secret.map((row) => [row.id, row]));
+  const keyed = new Map(seen.secret.filter((row) => row.archivedAt === null).map((row) => [`${row.environmentId} ${row.key}`, row]));
+  const versions = new Map(seen.version.map((row) => [`${row.secretId} ${row.version}`, row]));
+  const dismissed = new Set(seen.dismissed.filter((row) => row.restoredAt === null).map((row) => `${row.environmentId} ${row.key}`));
   const given = (key: string, asked: Row<typeof secrets>, layer: Row<typeof environments>): Decided['items'][number] => {
     // An inherited key is read where it is: the fork's reader reads its parent too, or is not given it.
     if (!may(layer)) return { key, refused: 'parent_unreadable' };
@@ -198,7 +204,7 @@ export function decide(seen: Seen, ask: Ask, at: number): Decided | Refusal {
     if (asked.sourceId !== null) {
       // A reference takes its value and nature from its source, and its permissions from where it lives. Never through
       // another reference, nor into or out of a personal config, whose values are their owner's alone.
-      const source = seen.secret.find((row) => row.id === asked.sourceId);
+      const source = secret.get(asked.sourceId);
       const where = source && environment.get(source.environmentId);
       const whose = source && seen.project.find((row) => row.id === source.projectId);
       if (source === undefined || source.archivedAt !== null || source.sourceId !== null || layer.owner !== null) return { key, refused: 'unreadable' };
@@ -206,22 +212,23 @@ export function decide(seen: Seen, ask: Ask, at: number): Decided | Refusal {
       held = source;
     }
     if (held.currentVersion === null) return { key, refused: held === asked ? 'no_value' : 'unreadable' };
-    const version = seen.version.find((row) => row.secretId === held.id && row.version === held.currentVersion);
+    const version = versions.get(`${held.id} ${held.currentVersion}`);
     if (version === undefined) return { key, refused: 'unreadable' };
     // A workload is handed only what its credential lists where the value is held, and a person no sensitive value, ever;
     // a service account one, on a credential an Owner of the value's project issued.
-    if (handed && useOnly(caller.holds, { projectId: held.projectId, environmentId: held.environmentId, secretId: held.id })) return { key, refused: 'use_only' };
+    // A plain value is no secret, use-only to nobody: and it opens as plain, or not at all (`answer`).
+    if (handed && version.plaintext === null && useOnly(caller.holds, { projectId: held.projectId, environmentId: held.environmentId, secretId: held.id })) return { key, refused: 'use_only' };
     if (handed && version.sensitive && caller.holds.service !== true) return { key, refused: 'sensitive' };
     if (handed && version.sensitive && !readsSensitive(caller.holds, held.projectId)) return { key, refused: 'not_owner_issued' };
-    return { key, held, asked, version, owner: environment.get(held.environmentId)?.owner ?? null };
+    // A value held in a personal config is read there alone: a reference's source is in none.
+    return { key, held, asked, version, owner: asked === held ? layer.owner : null };
   };
-  const inLayer = (layer: Row<typeof environments>, key: string) => seen.secret.find((row) => row.environmentId === layer.id && row.key === key && row.archivedAt === null);
   const resolve = (key: string): Decided['items'][number] => {
     for (const layer of layers) {
-      const asked = inLayer(layer, key);
+      const asked = keyed.get(`${layer.id} ${key}`);
       if (asked !== undefined) return given(key, asked, layer);
       // A fork that dismissed a key has none, whatever its parents hold.
-      if (seen.dismissed.some((row) => row.environmentId === layer.id && row.key === key)) break;
+      if (dismissed.has(`${layer.id} ${key}`)) break;
     }
     return { key, refused: 'unknown_key' };
   };
@@ -291,7 +298,7 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
     const [{ ok }] = await rowsOf<{ ok: boolean }>(vault.db, sql`
       WITH ids AS (SELECT id FROM unnest(${sql.param(ids)}::uuid[]) AS id),
         cap AS (SELECT (SELECT count(*) FROM exposures WHERE principal = ${caller.principal} AND seen_at > ${since} AND secret_id NOT IN (SELECT id FROM ids)) + ${ids.length} <= ${vault.cap.count} AS ok),
-        seen AS (INSERT INTO exposures (principal, secret_id, seen_at) SELECT ${caller.principal}, id, ${time} FROM ids, cap WHERE cap.ok ORDER BY id ON CONFLICT (principal, secret_id) DO UPDATE SET seen_at = excluded.seen_at),
+        seen AS (INSERT INTO exposures (principal, secret_id, seen_at) SELECT ${caller.principal}, id, ${time} FROM ids, cap WHERE cap.ok ORDER BY id ON CONFLICT (principal, secret_id) DO UPDATE SET seen_at = greatest(exposures.seen_at, excluded.seen_at)),
         entry AS (INSERT INTO log_pending (kept, body, mac) SELECT ${entry.kept}, ${entry.body}, decode(${entry.mac.toString('hex')}, 'hex') FROM cap WHERE cap.ok)
       SELECT ok FROM cap`) as [{ ok: boolean }];
     if (!ok) return { refused: 'bulk_limit' };
@@ -302,8 +309,8 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
   // When the credential was last used: its row's own statement, since it shares one with nothing a change may lock.
   const { id, lastUsedAt } = caller.credential;
   if (Math.max(lastUsedAt?.getTime() ?? -Infinity, memory.touched.get(id)?.at ?? -Infinity) + TOUCHED_MS <= at) {
-    await vault.db.execute(sql`UPDATE credentials SET last_used_at = ${new Date(at).toISOString()}::timestamptz, last_used_ip = ${ask.ip} WHERE id = ${id}`);
-    keep(memory.touched, id, { at }, at - TOUCHED_MS);
+    // Losing it never costs the use: it only says when.
+    await vault.db.execute(sql`UPDATE credentials SET last_used_at = ${new Date(at).toISOString()}::timestamptz, last_used_ip = ${ask.ip} WHERE id = ${id}`).then(() => keep(memory.touched, id, { at }, at - TOUCHED_MS), () => {});
   }
   if (memory.seconds > 0) keep(memory.reads, shapeOfAsk(ask), found, at - memory.seconds * 1000);
   return { principal: caller.principal, credential: id, values };

@@ -115,6 +115,7 @@ test('whoever the credential does not make a caller gets one answer, and nothing
       credential('readmitted', user('fay')),
       credential('unlinked', ada, { identityId: linked.id }),
       credential('workload', ci, { kind: 'workload', jkt: 'thumb', notAfter: far }),
+      credential('no-account', ada, { kind: 'browser' }),
       credential('exchanged', ci, { createdBy: 'binding:7' }),
     ),
   );
@@ -125,7 +126,7 @@ test('whoever the credential does not make a caller gets one answer, and nothing
   await vault.owner.execute(sql`DELETE FROM log_pending`);
   vault.woken.length = 0;
 
-  for (const label of ['nobody', 'expired', 'revoked', 'frozen', 'removed', 'readmitted', 'unlinked', 'workload', 'exchanged', 'forged', 'edited']) {
+  for (const label of ['nobody', 'expired', 'revoked', 'frozen', 'removed', 'readmitted', 'unlinked', 'workload', 'no-account', 'exchanged', 'forged', 'edited']) {
     assert.equal(await got(ask(label, 'market/prod', ['DATABASE_URL'])), 'unauthenticated', label);
   }
   await untouched();
@@ -175,6 +176,16 @@ test('a fork has its own keys, then its parent\'s, but for those it dismissed; i
   assert.deepEqual(await got(ask('ada', 'market/staging', null)), { DATABASE_URL: 'postgres://staging', HOLLOW: 'refused: no_value', LINK: 'billing-token', STRIPE_KEY: 'refused: sensitive' });
   assert.deepEqual(await got(ask('ada', 'market/staging', ['FLAG', 'DATABASE_URL'])), { FLAG: 'refused: unknown_key', DATABASE_URL: 'postgres://staging' });
   assert.deepEqual(await got(ask('bo', 'market/staging', ['DATABASE_URL', 'LINK'])), { DATABASE_URL: 'postgres://staging', LINK: 'refused: parent_unreadable' });
+  // A dismissal written around the vault hides nothing, and one deleted around it is caught by the signer, not here.
+  await vault.owner.execute(sql`INSERT INTO dismissed_keys (environment_id, key, dismissed_at, dismissed_by) VALUES (${w.staging.id}, 'LINK', now(), ${ada})`);
+  vault.tick(2000);
+  assert.deepEqual(await got(ask('ada', 'market/staging', ['LINK', 'FLAG'])), { LINK: 'billing-token', FLAG: 'refused: unknown_key' });
+  // Three parents at most.
+  const chain = [environment(w.market, 'fork-1', { parentId: w.staging.id })];
+  for (const n of [2, 3]) chain.push(environment(w.market, `fork-${n}`, { parentId: chain.at(-1)!.id }));
+  await write(vault, ...rows('environments', ...chain));
+  assert.deepEqual(await got(ask('ada', 'market/fork-2', ['DATABASE_URL'])), { DATABASE_URL: 'postgres://staging' });
+  assert.equal(await got(ask('ada', 'market/fork-3', ['DATABASE_URL'])), 'broken_chain');
   // A parent that is gone stops the whole read: the fork's keys are not all there.
   await vault.owner.execute(sql`UPDATE environments SET archived_at = now() WHERE slug = 'prod' AND project_id = ${w.market.id}`);
   vault.tick(2000);
@@ -232,7 +243,7 @@ test('what a database writer does to a value or a place is not honoured', async 
   assert.equal(await got(ask('dee', 'market/prod', ['FLAG'])), 'no_access');
 });
 
-test('within its memory a use reads nothing again, counted from the read; within a minute it logs nothing again', async () => {
+test('within its memory a use reads nothing again, counted from the read; within a minute it logs nothing again, but for another purpose', async () => {
   const asked = ask('ada', 'market/prod', ['FLAG']);
   assert.deepEqual(await got(asked), { FLAG: 'on' });
   // The credential's row deleted behind the vault: what was read still answers, for two seconds from the read.
@@ -253,7 +264,7 @@ test('within its memory a use reads nothing again, counted from the read; within
   vault.tick(1);
   assert.equal(recall(vault, slow), undefined);
 
-  // A minute on, the same read is logged again; a new credential or another purpose is another entry at once.
+  // A minute on, the same read is logged again; another purpose is another entry at once.
   assert.deepEqual(await got(slow), { FLAG: 'on' });
   assert.equal((await logged()).length, 2);
   vault.tick(60_000 - 500 - 1);
@@ -283,8 +294,8 @@ test('the bulk cap refuses the read that would pass it, writes nothing for it, a
   Object.assign(vault, { cap: { count: 3, windowMs: 60_000 } });
   assert.deepEqual(Object.keys(await got(ask('ci', 'market/prod', ['DATABASE_URL', 'FLAG'])) as object), ['DATABASE_URL', 'FLAG']);
   vault.tick(30_000);
-  // The same keys again count once, with a third.
-  assert.deepEqual(await got(ask('ci', 'market/prod', ['FLAG', 'LINK'])), { FLAG: 'on', LINK: 'billing-token' });
+  // A key given before counts once, here asked for another purpose so that it is written again, with a third.
+  assert.deepEqual(await got(ask('ci', 'market/prod', ['FLAG', 'LINK'], { purpose: 'run' })), { FLAG: 'on', LINK: 'billing-token' });
   const before = [await logged(), await exposed()];
   assert.equal(await got(ask('ci', 'market/vault', ['ROOT'])), 'bulk_limit');
   assert.deepEqual([await logged(), await exposed()], before);

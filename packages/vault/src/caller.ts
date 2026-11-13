@@ -54,7 +54,8 @@ export function callerOf(rows: CallerRows, at: number): Caller | null {
   if (credential.revokedAt !== null || credential.frozenAt !== null || credential.expiresAt.getTime() <= at) return null;
   // A removal moves the generation on: everything issued before it is dead, whatever its own row says.
   if (principal.id !== credential.principal || principal.status !== 'active' || principal.generation !== credential.generation) return null;
-  if (credential.identityId !== null && !rows.identity.some((identity) => identity.id === credential.identityId && identity.revokedAt === null)) return null;
+  // A browser's session is an account's, always; any credential that names an account goes with it.
+  if (credential.identityId === null ? credential.kind === 'browser' : !rows.identity.some((identity) => identity.id === credential.identityId && identity.revokedAt === null)) return null;
 
   const service = principal.id.startsWith('token:');
   const scope = principal.scope === null ? EVERYWHERE : parsed(principal.scope);
