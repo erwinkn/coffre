@@ -680,7 +680,7 @@ signed row (below) the old key signed again under the new one, a step of
 100 rows a transaction under the head, and signs people's sessions out.
 Each step appends a `key.reseal` entry under the new key, naming the old
 key as its subject and saying where the next step goes on. Once no row is
-left, the audit anchor is sealed again under the new key, and a last
+left, a last
 transaction appends `key.rotate`. Until then, the app serves nothing but
 health, 503 `rotating`, each request taking it a step further, so no row
 is ever checked under the old key. From the first step, an append under a
@@ -697,16 +697,7 @@ own author. The owner can lift the triggers and bypass row-level security;
 the MACs still expose changes made without the keys.
 
 Every five minutes the Cron trigger runs the scheduled job. Core asks the
-vault to checkpoint the log, below, and forgets spent tokens. With the
-audit watch, a plugin of coffre's own that `coffre init` writes into
-every deployment ([deploy.md](deploy.md#the-audit-watch)), it runs a
-beat first; without it, nothing reads the log until someone verifies it,
-and `/readyz` says only that the database is migrated. A beat: the app appends an
-`audit.heartbeat` entry, the signal that the log takes writes, and asks
-the vault to checkpoint the log. Then it walks the chain from where the
-anchor says it verified to, to the prefix the vault just signed, every
-link and hash and its own entries by their MACs, and writes the anchor
-(below). The vault reads the log itself: from its newest checkpoint, it
+vault to checkpoint the log, below, and forgets spent tokens. The vault reads the log itself: from its newest checkpoint, it
 checks that the prefix that checkpoint signed is still there, its hash
 where it was and every entry of it, by one count of the log's index;
 recomputes the chain since, every hash from content and its own entries
@@ -764,67 +755,6 @@ found it running again and passing. A rehash the database fails leaves
 the lap where it was and the checkpoint is signed all the same, with a
 warning in the app's log, unless such a refusal stands.
 
-**The anchor.** What a beat verified is kept outside the database, where
-whoever writes the database cannot reach it: one small record per
-instance, in a Durable Object on Workers (`durableAnchor`), a file on Node
-(`fileAnchor`), or any store with a compare-and-set that the deployment
-hands the watch (`packages/server/src/anchor.ts`). The watch reaches the
-log and the vault through capabilities core hands it, a walk of the
-chain, one entry's hash, entries of its own kinds, the vault's checkpoint,
-an alert ([plugins](design/plugins.md#watching-the-log)), never a
-database or vault client. It holds the
-vault's newest checkpoint, signed under the vault's key; how far the app
-verified, the checkpoint's prefix once caught up; what a walk found, if
-anything stands; and the beat that wrote it. The app MACs it under a key
-derived from `auditChainKey`, so a store with weak access control is
-still tamper-evident, and the record names that key, `app:<fingerprint>`
-as the log's entries do, so that a rotation of the key can re-seal it. A
-write replaces the record the beat read before its checkpoint, and never
-moves either point back: two beats at once, the second loses the
-compare-and-set, and finds nothing; a beat that loses it to a walk
-between beats, toward the same checkpoint, goes again from that walk's
-record. The heartbeat rows
-say nothing a beat reads: hiding, forging or deleting one is an edit or a
-gap like any other.
-
-Say the anchor holds checkpoint 9,411, verified through 9,411. The next
-beat appends its heartbeat at 9,430, and the vault signs 0 to 9,430. The
-app checks that entry 9,411 still has the hash the anchor holds, walks
-9,412 to 9,430, checks that the hash it computes at 9,430 is the one the
-vault signed, and writes the anchor: checkpoint 9,430, verified through
-9,430. Twenty entries, however long the log. Had someone deleted 9,400
-onwards and put the head row back, 9,411 is gone and the beat writes a
-finding; had they rewritten 9,000 and chained everything after it again,
-9,411's hash has changed.
-
-A finding stands until the entry it names verifies again: each beat
-checks that entry alone, two reads, however long it stands, and once it
-verifies, walks on from where the anchor was, so over it again. A vault
-that refused or could not be asked, or a log that took no write, stands
-until a beat verifies. Each finding and its clearing is logged
-(`audit.finding`, `audit.finding_cleared`). A backlog is walked 10,000
-entries a beat, and between beats, the anchor keeping how far. An empty
-store, the first beat's or one lost since, is re-anchored the same way:
-the whole log walked, readiness green meanwhile, then `audit.reanchor`
-and an alert; a cut made before the store emptied goes unseen. Entries
-lost for good, a tail cut with no backup, are accepted by an Owner of the
-whole instance (`coffre audit accept-loss`), logged with the finding,
-which stays: the anchor goes on past them, in a new epoch, the one write
-its store lets move a point back.
-
-With the watch, `/readyz` reads the anchor and one entry of the log: ready while the
-anchor is the app's, under eleven minutes old, holds no finding, has
-verified through its checkpoint, or is re-anchoring, which covers the beat that wrote it and
-carries the vault's signature, and the log still holds that checkpoint's
-prefix, by its hash at entry `seq`. A constant cost, however long the log
-and however far it ran since the last beat: the entries since are the
-next beat's to walk. A log that stops taking writes, a vault that stops
-signing, a store that cannot be reached, a cut or rewrite of the anchored
-prefix, an entry forged in the app's name or a wrong vault key all turn
-it red within one beat, the anchored prefix's cut or rewrite at once; an
-entry edited in place behind it, within two laps of the scrub. There is
-no heartbeat table.
-
 `GET /api/audit/verification` (those who read the whole log), which the
 audit page calls on every visit, checks the log from where the last checks
 left off. The app walks the chain, every link and hash and its own MACs,
@@ -843,18 +773,6 @@ the entry verified through, or the entry where it breaks and whose check
 found it, and the entries the check did not reach, if the checkpoints are
 catching up. On Equisafe's log of 7,000 entries this took 1.2 seconds of a
 Worker's CPU, from the first entry; it now reads five minutes of the log.
-
-The beat's two halves are what make that sound. The app's MACs only the
-app can check, so the vault's checkpoint signs over the app's entries
-without them: an entry forged in the app's name, linked to the chain as
-anyone can, is signed over. The beat's own walk finds it, and the anchor
-keeps the finding where nobody who writes the database can clear it, so
-readiness stays red until someone acts. One of the app's rows relabelled
-as the vault's, and chained again, is the vault's checkpoint's to find by
-its MAC; behind the anchor, it changes the anchored hash. The model of
-it, against someone who edits any entry, heartbeat rows among them, and
-puts it back at any step, while beats run at once, is
-[formal.md](formal.md#the-audit-chain-the-app-key-and-the-tunnel).
 
 `coffre verify log`, and the audit page's "Verify whole log", walk the log
 from its first entry, as the tallies take on trust: a stretch a request,
@@ -1252,12 +1170,7 @@ Each limit is stated here once; the other documents link to it.
   app or vault process that ran across the rewind, which refuses to append
   behind the head it remembers, and, with AWS KMS, CloudTrail, whose Decrypts
   then have no entries. Restarting both processes after a restore is what
-  makes a deliberate rewind work ([restore.md](restore.md)). The anchor
-  notices a rewind past its checkpoint, a beat old at most: the entries
-  written since the last beat are the window a cut can take unseen. A
-  restore that should stand is accepted by an Owner, its range named
-  (`coffre audit accept-loss`); a restore into a new deployment, whose
-  anchor's store starts empty, re-anchors by itself and alerts.
+  makes a deliberate rewind work ([restore.md](restore.md)).
 - **A cut in the middle of the log is found at the next checkpoint, and an
   edit in place within a lap of the past, not at once.** Say Ada was
   removed at entry 812, and the database's owner deletes 812 and puts back

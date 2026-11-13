@@ -4,13 +4,12 @@ import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { runScheduled } from './app.ts';
 import { cloudflareSourceIp } from './auth.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';
-import { anchorObject, type AnchorNamespace } from './cloudflare-anchor.ts';
 import { CoffreGates, workersGates, type GatesNamespace } from './cloudflare-gates.ts';
 import { forwardSocket, IDLE_DATABASE_MS, socketsObject, type SocketsNamespace } from './cloudflare-sockets.ts';
 import { CoffreWorkload } from './cloudflare-workload.ts';
 import type { Gates } from './gate.ts';
 import { takesSocket } from './plugins.ts';
-import { createRuntime, watchOf } from './runtime.ts';
+import { createRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
 import { admitSocket } from './socket-admission.ts';
 import { fetchTransport } from './workloads/transport.ts';
@@ -24,12 +23,11 @@ export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
  * refused. `gates`, the one whose class is `coffre.Gates`, holds each
  * workload's gate (docs/design/workload-access.md, section 5.2): without
  * it, no key-bound session is taken, since nothing else on Workers can
- * hold a proof to one use. The audit watch's anchor is a third,
- * `coffre.Anchor`'s, which its plugin names (`durableAnchor`).
+ * hold a proof to one use.
  */
 export type WorkersConfig = CoffreConfig & { database: PostgresDatabase; sockets?: SocketsNamespace; gates?: GatesNamespace };
 
-export type { AnchorNamespace, GatesNamespace, SocketsNamespace };
+export type { GatesNamespace, SocketsNamespace };
 
 /** The part of the Workers `ExecutionContext` coffre uses. */
 export type WaitUntil = { waitUntil(promise: Promise<unknown>): void };
@@ -53,8 +51,6 @@ export type CoffreWorker<Env> = {
   Sockets: ReturnType<typeof socketsObject<Env>>;
   /** The workloads' gates' Durable Object class, which `GATES` binds: `export const CoffreGates = coffre.Gates` (docs/design/workload-access.md, section 5.2). */
   Gates: typeof CoffreGates;
-  /** The audit watch's anchor's Durable Object class, which `ANCHOR` binds: `export const CoffreAnchor = coffre.Anchor`. */
-  Anchor: ReturnType<typeof anchorObject<Env>>;
   /** The entrypoint another Worker binds with `props` naming its service: `export const CoffreWorkload = coffre.Workload` (section 9.2). */
   Workload: typeof CoffreWorkload;
 };
@@ -130,22 +126,6 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
       return (request, sourceIp, hold) => admitSocket(request, runtime, sourceIp, hold);
     }),
     Gates: CoffreGates,
-    // Its alarm walks a backlog, over its own storage, with a database client of its own for the walk.
-    Anchor: anchorObject<Env>((env) => {
-      const { config, resolved } = configured(env);
-      return async (store) => {
-        const pool = new HyperdrivePool(config.database.hyperdrive.connectionString);
-        const left: Promise<unknown>[] = [];
-        try {
-          const runtime = createRuntime(resolved, createDatabase(pool), config.vault, fetchTransport(), (promise) => void left.push(promise));
-          const watch = watchOf(runtime);
-          return watch === null ? false : await watch.hooks.walkOn(watch.context(), store);
-        } finally {
-          await Promise.allSettled(left);
-          await pool.end();
-        }
-      };
-    }),
     Workload: CoffreWorkload,
   };
 }

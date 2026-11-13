@@ -299,14 +299,7 @@ Before reopening traffic:
    their old sessions and tokens stay refused.
 4. Write a value and read it back.
 5. Wait for the next heartbeat, or trigger the Cron, then check `/readyz`:
-   `ok`, with `checkpointed: true`. With the audit watch, a restore into a
-   new deployment, whose anchor's store is empty, is walked whole and
-   re-anchored by itself, with an alert ([deploy.md](deploy.md#the-audit-watch)).
-   Restored over the same deployment, the anchor finds the log older than
-   it: `/readyz` stays red on that finding until an Owner accepts the
-   entries the backup lacks, `coffre audit accept-loss <from> <to>`, the
-   range from the backup's first missing entry to the one the finding
-   names.
+   `ok`, with `checkpointed: true`.
 6. `coffre verify keys` with the keys you deployed it with, from the
    escrow: both must be the instance's, the vault key the current one.
 7. Optionally, `coffre verify instance` from outside: as no one, then as

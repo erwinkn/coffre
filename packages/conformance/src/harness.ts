@@ -308,7 +308,6 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         PUBLIC_URL: origin,
         DATABASE_URL: runtime,
         VAULT_SOCKET: socket,
-        AUDIT_ANCHOR: join(scratch, 'anchor.json'),
         APP_KEY: KEYS.APP_KEY,
         ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT: 'true',
         ...github,
