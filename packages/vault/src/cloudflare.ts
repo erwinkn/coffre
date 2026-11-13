@@ -33,6 +33,7 @@ import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
+import { signerObject } from './cloudflare-signer.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { openVault, prepareVault, type PreparedVault } from './vault.ts';
 
@@ -107,6 +108,22 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     return new Response('not found', { status: 404 });
   }
 }
+
+/**
+ * The signer's Durable Object (cloudflare-signer.ts), configured as the
+ * vault is. The vault Worker exports it beside its default export, and
+ * binds it:
+ *
+ *   export { CoffreSigner } from '@coffre/vault/cloudflare';
+ *
+ *   "durable_objects": { "bindings": [{ "name": "SIGNER", "class_name": "CoffreSigner" }] },
+ *   "migrations": [{ "tag": "signer", "new_sqlite_classes": ["CoffreSigner"] }]
+ */
+export const CoffreSigner = signerObject((env: object) => {
+  if (configure === null) throw new Error('the vault Worker must export default vault(…)');
+  const config = configure(env as never);
+  return { database: config.database, signingKeys: resolveVaultConfig(config).signingKeys, alert: config.alert };
+});
 
 /** The vault Worker's default export, `VaultEntrypoint`, configured from its `env`. */
 export function vault<Env>(configure_: (env: Env) => WorkersVaultConfig): typeof VaultEntrypoint {

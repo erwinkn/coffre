@@ -1,0 +1,263 @@
+import type { Database } from '@coffre/db';
+
+import type { Key } from './rows.ts';
+import { Signer, type Finding, type Store } from './signer.ts';
+
+/**
+ * What runs the signer (docs/design/0.16.md, "The signer"): its storage,
+ * its clock, and where a finding goes. On Workers, a Durable Object of the
+ * vault's (`signerObject` in cloudflare-signer.ts), whose alarm is the
+ * clock.
+ *
+ * - **A second after the vault tells of an entry**, a run: what waits is
+ *   signed and moved. More than a run takes, and the next comes at once.
+ * - **Each minute**, a run that also checks the rows and the log's end.
+ * - **After each run**, what it found is sent, and let go once sent.
+ *
+ * One alarm does all three: it is always set, for the next of them.
+ */
+
+/**
+ * The part of a Durable Object's storage the host uses, as Cloudflare
+ * names it, SQLite-backed: the synchronous key-value calls, which a
+ * transaction can hold together, and the one alarm.
+ */
+export type Storage = {
+  kv: {
+    get(key: string): unknown;
+    list(): Iterable<[string, unknown]>;
+    put(key: string, value: unknown): void;
+    delete(key: string): boolean;
+  };
+  /** All of what `run` writes, or none of it if it throws. */
+  transactionSync<T>(run: () => T): T;
+  /** Resolves once everything written is on disk. */
+  sync(): Promise<void>;
+  /** One alarm at a time: setting it replaces the one set before. Null once it fires, its handler running or not, until it is set again. */
+  getAlarm(): Promise<number | null>;
+  setAlarm(at: number): Promise<void>;
+};
+
+/** A finding of the signer's, or the host's own: no check completed since `of`, an ISO date. */
+export type Alerted = Finding | { found: 'stopped'; of: string };
+
+/** What a deployment's `alert` is given: `text` to post as it is, and what it says, one by one. */
+export type SignerAlert = { text: string; findings: Alerted[] };
+
+export type Hosting = {
+  storage: Storage;
+  /** Runs `run` with nothing else of the object running meanwhile: a Durable Object's `blockConcurrencyWhile`. */
+  alone<T>(run: () => Promise<T>): Promise<T>;
+  keys: readonly Key[];
+  /** The signer's database, for as long as the host lasts: on Workers, a client that opens with a query and closes once idle. */
+  db: Database;
+  now(): number;
+  /** Where an alert goes. Without one, the process's log. */
+  alert?: ((alert: SignerAlert) => void | Promise<void>) | undefined;
+};
+
+/** How long after the vault told of an entry the signer runs: the entries of that second are one run's. */
+export const TICK_MS = 1000;
+/** How often a run checks the rows and the log's end. */
+export const CHECK_MS = 60_000;
+/** How old the last completed check may be before the signer is said to be stopped: its runs fail, or wait behind entries that keep coming. */
+export const STOPPED_MS = 5 * CHECK_MS;
+/** How long the deployment's `alert` has to return: one that hangs has failed, and holds the next run back no longer. */
+export const ALERT_MS = 5000;
+/** How many findings wait for an alert that cannot be sent. Past it they go to the process's log, and are let go: the signer's storage holds them in one value. */
+export const KEEP = 1000;
+
+
+const SAYS: Record<Alerted['found'], string> = {
+  forged: 'an entry that waited to be signed was not the vault\'s. Removed',
+  replayed: 'an entry already signed was put back to be signed again. Removed',
+  stale: 'an entry of the vault\'s was dated before anything the signer still takes, and it does not remember signing it. Removed',
+  missing: 'an entry the vault committed was gone before it was signed',
+  rewritten: 'a change replaced this row, or was decided on it, and it was not the row the log says',
+  row: 'this row is not what the log says: changed, put back, deleted, or written behind the vault',
+  cut: 'this tree of the log does not end with the entry signed last',
+  lost: 'an entry signed is not in the log as it was signed',
+  stopped: 'the signer has completed no check of the database since then: its runs fail, or entries keep it waiting',
+};
+/** How many findings an alert's text names: the rest are counted, and all are in `findings`. */
+const NAMED = 10;
+
+export function alertOf(findings: Alerted[]): SignerAlert {
+  const lines = findings.slice(0, NAMED).map(({ found, of }) => `- ${found} ${of}: ${SAYS[found]}`);
+  if (findings.length > NAMED) lines.push(`and ${findings.length - NAMED} more`);
+  return { text: `coffre's signer reports (${findings.length}):\n${lines.join('\n')}`, findings };
+}
+
+/** The signer's storage in a Durable Object's: a step's changes in one transaction, on disk before the step is done. */
+export const storeOf = (storage: Storage): Store => ({
+  read: async () => new Map(storage.kv.list()),
+  async write(changes) {
+    storage.transactionSync(() => {
+      for (const [key, value] of changes) {
+        if (value === undefined) storage.kv.delete(key);
+        else storage.kv.put(key, value);
+      }
+    });
+    await storage.sync();
+  },
+});
+
+/** What the host keeps beside the signer's own, under a key the signer does not read: that it said the signer is stopped. */
+const STOPPED = 'stopped said';
+
+export class SignerHost {
+  readonly #on: Hosting;
+  readonly #store: Store;
+  #signer: Signer | null = null;
+  /** When a check was last asked for, done or not: one that fails is asked again a minute on. In memory only: a host that starts asks by the last one completed. */
+  #asked = 0;
+  /** When the alarm is set for: read once from the storage, since an object that starts again may have one, then kept as this host sets it. */
+  #alarm: number | null = null;
+
+  constructor(on: Hosting) {
+    this.#on = on;
+    this.#store = storeOf(on.storage);
+  }
+
+  /** The signer, opened from its storage: once, and again after one failed a step. Alone, so that no two are opened. */
+  async #open(): Promise<Signer> {
+    if (this.#signer === null || this.#signer.dead) {
+      await this.#on.alone(async () => {
+        if (this.#signer !== null && !this.#signer.dead) return;
+        const signer = await Signer.open({ db: this.#on.db, keys: this.#on.keys, now: this.#on.now, store: this.#store });
+        this.#alarm = await this.#on.storage.getAlarm();
+        this.#signer = signer;
+      });
+    }
+    return this.#signer!;
+  }
+
+  /** The alarm no later than `at`: one already set for sooner stays. */
+  async #by(at: number): Promise<void> {
+    if (this.#alarm !== null && this.#alarm <= at) return;
+    this.#alarm = at;
+    try {
+      await this.#on.storage.setAlarm(at);
+    } catch (error) {
+      this.#alarm = null;
+      throw error;
+    }
+  }
+
+  /** The vault's word that an entry was committed: expected from now, and signed within a second. */
+  async wake(hash: Uint8Array): Promise<void> {
+    await (await this.#open()).wake(hash);
+    await this.#by(this.#on.now() + TICK_MS);
+  }
+
+  /**
+   * When the last check completed, and what stands: the rows and the trees
+   * it found wrong, and that none has completed for too long. Whoever asks
+   * also sets the alarm, if it was not: a signer nobody told of anything
+   * checks all the same.
+   */
+  async status(): Promise<{ checked: number; standing: Alerted[] }> {
+    const signer = await this.#open();
+    const now = this.#on.now();
+    await this.#by(now + CHECK_MS);
+    return { checked: signer.checked, standing: [...signer.standing, ...this.#stopped(signer, now)] };
+  }
+
+  #stopped(signer: Signer, now: number): Alerted[] {
+    return now - signer.checked > STOPPED_MS ? [{ found: 'stopped', of: new Date(signer.checked).toISOString() }] : [];
+  }
+
+  /**
+   * The alarm: one run, the alarm set for the next, and what the run found
+   * sent. A run that fails is tried again a second on, for as long as it
+   * takes: it is not thrown, since the runtime gives up on an alarm that
+   * threw a few times. Only an alarm that cannot be set is, so that the
+   * runtime tries this one again. An alert that fails is sent again after
+   * the next run.
+   */
+  async alarm(): Promise<void> {
+    // It fired: none is set, until a wake-up or this sets one.
+    this.#alarm = null;
+    const now = this.#on.now();
+    let next = now + TICK_MS;
+    let signer: Signer | null = null;
+    try {
+      signer = await this.#open();
+      next = (await this.#run(signer, now)) ? now : this.#due(signer);
+    } catch (error) {
+      console.error('coffre: a run of the signer failed, and the next tries again', error);
+    }
+    // Before anything is sent: an object stopped in the middle of an alert has its next run set. One alarm runs at a time, so a slow alert holds that run back, by `ALERT_MS` at most.
+    await this.#by(next);
+    // One that failed a step says what it found once it is opened again, by the next run.
+    if (signer === null || signer.dead) return;
+    try {
+      await this.#tell(signer, now);
+    } catch (error) {
+      console.error('coffre: the signer could not send what it found, and tries again after its next run', error);
+    }
+  }
+
+  /** When the next check is: a minute after the last completed, or the last asked for. */
+  #due(signer: Signer): number {
+    return Math.max(signer.checked, this.#asked) + CHECK_MS;
+  }
+
+  /** One run, with the check when it is due. Its answer: whether to run again at once. */
+  #run(signer: Signer, now: number): Promise<boolean> {
+    const full = now >= this.#due(signer);
+    if (full) this.#asked = now;
+    return signer.run(full);
+  }
+
+  /**
+   * What the signer found is sent, then let go; and that it is stopped,
+   * once, until a check completes, and again at the next stop. An alert that fails throws, and the
+   * findings wait for the next run. Unless more than `KEEP` already do:
+   * then they go to the log and are let go, and what stands is news again.
+   */
+  async #tell(signer: Signer, now: number): Promise<void> {
+    const stopped = this.#stopped(signer, now);
+    const said = this.#on.storage.kv.get(STOPPED) === true;
+    // A check completed: the next time it stops is news, whether an alert goes through now or not.
+    if (said && stopped.length === 0) await this.#mark(false);
+    const news = said ? [] : stopped;
+    let reached = true;
+    await signer.take(async (found) => {
+      const all: Alerted[] = [...found, ...news];
+      if (all.length === 0) return true;
+      const alert = alertOf(all);
+      try {
+        await this.#send(alert);
+      } catch (error) {
+        if (found.length <= KEEP) throw error;
+        console.error(`coffre: an alert could not be sent, and ${found.length} findings waited for it. They are let go, and here is what it said:\n${alert.text}`, alert.findings, error);
+        reached = false;
+      }
+      return reached;
+    });
+    if (reached && news.length > 0) await this.#mark(true);
+  }
+
+  /** That it said the signer is stopped, or no longer: on disk before anything else. */
+  async #mark(said: boolean): Promise<void> {
+    if (said) this.#on.storage.kv.put(STOPPED, true);
+    else this.#on.storage.kv.delete(STOPPED);
+    await this.#on.storage.sync();
+  }
+
+  /** To the deployment's `alert`, or the log without one. One that fails, or has not returned in time, throws. */
+  async #send(alert: SignerAlert): Promise<void> {
+    const { alert: send } = this.#on;
+    if (send === undefined) return console.error(`${alert.text}\n(no alert is configured: the vault's \`alert\`)`);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.resolve().then(() => send(alert)),
+        new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`the alert did not return within ${ALERT_MS} ms`)), ALERT_MS))),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}

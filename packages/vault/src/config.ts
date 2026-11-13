@@ -1,5 +1,7 @@
 import { derivedSigningKey, KekRegistry, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 
+import type { SignerAlert } from './signer-host.ts';
+
 /** At most `count` distinct data keys unwrapped per principal in any `windowMs`. */
 export type BulkLimit = { count: number; windowMs: number };
 
@@ -74,6 +76,17 @@ export type VaultConfig = {
    * window is a day at most: the releases it counts are kept a day and an hour (`prune_vault_releases`).
    */
   bulkLimit?: { count: number; windowMinutes: number };
+  /**
+   * Where the signer's alerts go: what it found in the database that the
+   * vault did not write, or that it has stopped checking (docs/design/0.16.md,
+   * "The signer"). `text` is ready to post:
+   *
+   *   alert: ({ text }) => fetch(env.SLACK_WEBHOOK, { method: 'POST', body: JSON.stringify({ text }) }).then(() => undefined)
+   *
+   * One that throws is called again with the same findings after the next
+   * run. Without it, alerts go to the vault's own log.
+   */
+  alert?: (alert: SignerAlert) => void | Promise<void>;
   /**
    * @deprecated Gone in 0.10, and refused: each key says who sees it now. Mark
    * those no person may read sensitive (`coffre mark <env> sensitive`), and

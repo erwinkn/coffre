@@ -71,6 +71,13 @@ const FRESH_MS = 60_000;
 /** The most entries one run takes: a tile's worth. More wait for the next, at once. */
 const MOST = 256;
 /**
+ * The most rows one check names. What a run found is one value of the
+ * signer's storage, which has a size: after a restore from a backup every
+ * row changed since is wrong, and whoever writes the database can make as
+ * many wrong as they like, which must not cost the check its findings.
+ */
+const MOST_ROWS = 1000;
+/**
  * How long a statement of the signer's runs: half the minute its full run
  * comes round in. Whoever writes the database can hold a lock for good; the
  * run then fails, and the next one tries again, where it would have waited
@@ -153,6 +160,8 @@ export class Signer {
   #moving: Move | null = null;
   /** What it found and nobody has taken yet. */
   #found: Finding[] = [];
+  /** The rows and the trees its last check found wrong. One still wrong at the next is no news. */
+  #stands: Finding[] = [];
   /** When its last full check completed. */
   #checked: number;
   /** A full run asked for and not yet done, or failed, and whether entries waited past the last read. In memory only: the next minute asks again. */
@@ -190,6 +199,7 @@ export class Signer {
       else if (kind === 'signed') signer.#signed.set(name, value as number);
       else if (kind === 'moving') signer.#moving = value as Move;
       else if (kind === 'found') signer.#found = value as Finding[];
+      else if (kind === 'stands') signer.#stands = value as Finding[];
       else if (kind === 'checked') signer.#checked = value as number;
       else if (kind === 'state') {
         const { drained, trees } = value as Kept;
@@ -221,6 +231,16 @@ export class Signer {
     }
   }
 
+  /** The rows and the trees the last check found wrong. */
+  get standing(): Finding[] {
+    return [...this.#stands];
+  }
+
+  /** Whether a step failed: its memory and its storage may differ, and whoever runs it opens another. */
+  get dead(): boolean {
+    return this.#dead;
+  }
+
   #alive(): void {
     if (this.#dead) throw new Error('this signer failed a step: open another');
   }
@@ -245,18 +265,27 @@ export class Signer {
   }
 
   /**
-   * What was found since this was last asked: where a finding goes is its
-   * caller's. Kept in the signer's storage until then, so that neither a
-   * run that fails after a finding nor a signer that dies loses it.
+   * What was found and not yet let go, to `send`, which says where a
+   * finding goes; let go once `send` has returned. One that throws leaves
+   * them for the next call, and the same ones are sent again: twice is
+   * better than never. Kept in the signer's storage until then, so that
+   * neither a run that fails after a finding nor a signer that dies loses
+   * it. `send` answers whether they reached someone: if not, what stands
+   * is news again to the next check.
    */
-  async take(): Promise<Finding[]> {
-    let found: Finding[] = [];
+  async take(send: (found: Finding[]) => boolean | Promise<boolean> = () => true): Promise<Finding[]> {
+    this.#alive();
+    const found = [...this.#found];
+    const reached = await send(found);
     await this.#step((changes) => {
-      found = this.#found;
-      this.#found = [];
-      if (found.length > 0) changes.set('found', undefined);
+      // Those sent, and not what a run found meanwhile.
+      const sent = new Set(found);
+      this.#found = this.#found.filter((each) => !sent.has(each));
+      if (found.length > 0) changes.set('found', this.#found.length > 0 ? [...this.#found] : undefined);
+      if (reached || this.#stands.length === 0) return;
+      this.#stands = [];
+      changes.set('stands', undefined);
     });
-    // Given even if a step beside this one failed meanwhile: the next signer may find its findings again, and twice is better than never.
     return found;
   }
 
@@ -331,9 +360,18 @@ export class Signer {
       for (const hex of [...seen, ...gone]) if (this.#expected.delete(hex)) changes.set(`expected ${hex}`, undefined);
 
       if (snapshot.drained && snapshot.rows !== null && snapshot.ends !== null) {
-        for (const name of new Set([...snapshot.rows.keys(), ...this.#mirror.keys()])) if (snapshot.rows.get(name) !== this.#mirror.get(name)) this.#find(changes, 'row', name);
-        // Before this run's entries: the log read is the one the last run signed, and must end as that one did.
-        for (const tree of TREES) if (snapshot.ends[tree].size !== this.#trees[tree].size || snapshot.ends[tree].last !== this.#last[tree]) this.#find(changes, 'cut', tree);
+        const wrong = [...new Set([...snapshot.rows.keys(), ...this.#mirror.keys()])].filter((name) => snapshot.rows!.get(name) !== this.#mirror.get(name));
+        const stands: Finding[] = [
+          // More than it names at once: the first by name, the same at each check, and the rest by the checks after those are put right.
+          ...(wrong.length > MOST_ROWS ? wrong.sort().slice(0, MOST_ROWS) : wrong).map((of) => ({ found: 'row' as const, of })),
+          // Before this run's entries: the log read is the one the last run signed, and must end as that one did.
+          ...TREES.filter((tree) => snapshot.ends![tree].size !== this.#trees[tree].size || snapshot.ends![tree].last !== this.#last[tree]).map((of) => ({ found: 'cut' as const, of })),
+        ];
+        // Found when it turns wrong, once: what the last check found wrong too is no news, nor what still waits to be said.
+        const known = new Set([...this.#stands, ...this.#found].map(({ found, of }) => `${found} ${of}`));
+        for (const { found, of } of stands) if (!known.has(`${found} ${of}`)) this.#find(changes, found, of);
+        if (stands.length > 0 || this.#stands.length > 0) changes.set('stands', stands.length > 0 ? stands : undefined);
+        this.#stands = stands;
         this.#checked = snapshot.at;
         changes.set('checked', snapshot.at);
       }

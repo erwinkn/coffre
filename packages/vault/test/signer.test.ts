@@ -176,6 +176,49 @@ test('an entry gone before it was signed is missed, because the vault told of it
   assert.deepEqual(await run(), [{ found: 'row', of: named(bo) }]);
 });
 
+test('what was found is let go once it is sent: not if sending fails, and not what a run found meanwhile', async () => {
+  const forge = () => vault.owner.execute(sql`INSERT INTO log_pending (kept, body, mac) VALUES (false, '{}', decode(repeat('00', 36), 'hex'))`);
+  await forge();
+  await signer.run(false);
+  const first = [{ found: 'forged', of: 'pending:1' }];
+  await assert.rejects(signer.take(() => Promise.reject(new Error('not sent'))), /not sent/);
+  // Still there, and in its storage.
+  assert.deepEqual(store.kept.get('found'), first);
+  const sent = await signer.take(async (found) => {
+    assert.deepEqual(found, first);
+    await forge();
+    await signer.run(false);
+    return true;
+  });
+  assert.deepEqual(sent, first);
+  assert.deepEqual(await signer.take(), [{ found: 'forged', of: 'pending:2' }]);
+  assert.deepEqual(await signer.take(), []);
+});
+
+test('a check names a thousand rows at most, the first by name, however many are wrong', async () => {
+  await member(ada, 'owner');
+  assert.deepEqual(await run(), []);
+  // Rows written behind the vault, as many as a writer likes.
+  const planted = Array.from({ length: 1001 }, (_, index) => user(`planted-${String(index).padStart(4, '0')}`));
+  await vault.owner.insert(principals).values(planted.map((id) => ({ ...principal(id, { role: 'member' }), mac: Buffer.alloc(36) })));
+  const first = planted.map(named).sort().slice(0, 1000).map((of) => ({ found: 'row', of }));
+  assert.deepEqual(await run(), first);
+  // Still wrong at the next check, and no news; the last one once one of them is put right.
+  vault.tick(60_000);
+  assert.deepEqual(await run(), []);
+  assert.deepEqual(signer.standing, first);
+  await vault.owner.execute(sql`DELETE FROM principals WHERE id = ${planted[0]!}`);
+  vault.tick(60_000);
+  const last = { found: 'row', of: planted.map(named).sort()[1000]! };
+  assert.deepEqual(await run(), [last]);
+  assert.deepEqual(signer.standing, [...first.slice(1), last]);
+  // Told that what it found reached nobody, it forgets what stands: the next check finds them all again.
+  await signer.take(() => false);
+  assert.deepEqual(signer.standing, []);
+  vault.tick(60_000);
+  assert.deepEqual(await run(), [...first.slice(1), last]);
+});
+
 test('a change that replaced a MAC the mirror does not hold is false history', async () => {
   await member(bo, 'member');
   assert.deepEqual(await run(), []);
@@ -232,14 +275,17 @@ test('the full run finds a row put back, one deleted, one written behind the vau
   assert.deepEqual(await run(), [{ found: 'row', of: named(bo) }]);
   await vault.owner.insert(principals).values(principal(cy));
   await vault.owner.execute(sql`DELETE FROM principals WHERE id = ${ada}`);
-  const found = [{ found: 'row', of: named(bo) }, { found: 'row', of: named(cy) }, { found: 'row', of: named(ada) }, { found: 'cut', of: 'kept' }];
+  // Bo's row still stands, and is no news.
+  const found = [{ found: 'row', of: named(cy) }, { found: 'row', of: named(ada) }, { found: 'cut', of: 'kept' }];
   // The log's last entry moved further on: it ends with the entry signed, and not where.
   await vault.owner.execute(sql`UPDATE log SET seq = 9, leaf = 7 WHERE seq = 2`);
   assert.deepEqual(await run(false), []);
   assert.deepEqual(await run(), found);
   // Put back and replaced: it ends where it did, and not with the entry signed.
   await vault.owner.execute(sql`UPDATE log SET seq = 2, leaf = 2, body = 'another' WHERE seq = 9`);
-  assert.deepEqual(await run(), found);
+  // Wrong still, each of them, which is no news.
+  assert.deepEqual(await run(), []);
+  assert.deepEqual(signer.standing, [{ found: 'row', of: named(bo) }, ...found]);
 });
 
 test('an entry told of during a run, or after it was signed, raises nothing', async () => {
