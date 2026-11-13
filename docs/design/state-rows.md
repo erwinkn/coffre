@@ -776,8 +776,14 @@ migration 0049), built behind the checkpoints, and the migration drops it. What 
 restore may lose: the last-used stamps of credentials and connections; a device login just started and an approval's
 `reported_at`, which the user starts again; an OAuth client's registration, which the client repeats; the alert cap;
 and what the checkpointer and the projector derive from the logs (the floor, tiles, checkpoints, day partitions,
-`log_reads`), made again once the checkpointer's memory is reset. A write between the mark and the dump's snapshot is
-in the backup and still refuses: the error is toward backing up again, never toward a lost write.
+`log_reads`), made again once the checkpointer's memory is reset. Three more are the second transaction of an act
+whose first moved a log, with an empty entry list of their own (all 46 `audited` sites of 0.15.0 were walked): a
+copied fork's keys filed in their folders (`fileSecrets`), the `revoked_at` stamp on a past membership's identities
+(`endPriorMembership`, `removeMember`), and a device code marked consumed on a refused poll (`pollDevice`). A restore
+that loses one leaves what a crash between the two transactions leaves, which 0.15.0 survives already: keys unfiled,
+an identity not yet stamped, a code refused once more. None admits anyone: a credential stands only at its member's
+current generation (`#liveCredential`), and the stamp is written for an older one. A write between the mark and the
+dump's snapshot is in the backup and still refuses: the error is toward backing up again, never toward a lost write.
 
 **After the commit, 0.15.0 cannot append.** The locks carry the comparison to the commit; what is left is a 0.15.0
 statement that runs after it. One sent after the commit meets the new schema. One *already running inside a function*
