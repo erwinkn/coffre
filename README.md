@@ -101,7 +101,6 @@ The checks:
 
 ```sh
 pnpm test              # lint, then every test on Postgres (needs it up: pnpm db:up)
-pnpm test:sqlite       # the same suite on SQLite
 pnpm test:properties   # bounded Hegel properties; --long for 100x cases (docs/property-tests.md)
 pnpm test:properties:server  # modeled server operations; --long for 40 sequences
 pnpm test:schema       # what the restricted logins may and may not do
@@ -110,7 +109,7 @@ pnpm formal:lean       # the Lean proofs of the access rules, envelopes and log,
 pnpm build             # every package
 pnpm typecheck         # every package, the examples and dev/ (after pnpm build)
 pnpm conformance:workers   # examples/workers, held to docs/conformance.md (after pnpm build)
-pnpm conformance:node      # examples/node, its two processes, on SQLite
+pnpm conformance:node      # examples/node, its two processes (after pnpm build)
 pnpm test:consumer     # pack the packages, init both examples outside the repo, run them
                        # --kind workers or --kind node selects one deployment
 pnpm check:pins        # every dependency pinned exactly

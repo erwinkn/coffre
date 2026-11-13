@@ -9,7 +9,6 @@ import {
   TEST_OWNER_DATABASE_URL,
   TEST_RUNTIME_DATABASE_URL,
 } from './connections.ts';
-import { postgresOnly } from './engine.ts';
 
 const EXPECTED_UPDATE_COLUMNS = [
   'audit_chain_head.head_hash',
@@ -87,7 +86,6 @@ const EXPECTED_UPDATE_COLUMNS = [
 
 test(
   'Drizzle migrations preserve the restricted runtime database identity',
-  postgresOnly('the restricted runtime role and its grants exist only on Postgres'),
   async () => {
     const owner = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
     const runtime = new pg.Pool({ connectionString: TEST_RUNTIME_DATABASE_URL });
@@ -95,7 +93,7 @@ test(
       const migrations = await owner.query<{ count: number }>(
         'SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations',
       );
-      assert.equal(migrations.rows[0].count, KNOWN_MIGRATIONS.postgres.length);
+      assert.equal(migrations.rows[0].count, KNOWN_MIGRATIONS.length);
 
       const identity = await runtime.query<{
         current_user: string;
@@ -172,7 +170,6 @@ test(
 
 test(
   'migrate reasserts database privileges even when no migrations are pending',
-  postgresOnly('SQLite has no database privileges'),
   async () => {
     const owner = new pg.Pool({ connectionString: TEST_OWNER_DATABASE_URL });
     const revoke = `DO $$ BEGIN

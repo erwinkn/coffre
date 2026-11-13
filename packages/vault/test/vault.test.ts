@@ -1,9 +1,7 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
 
 import { deriveLogKey, entryHash, entryMac, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import {
@@ -36,13 +34,11 @@ import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
 import { openVault, prepareVault, READ_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
 import {
   emptyDatabase,
-  ENGINE,
   newEnvironment,
   newProject,
   openTestDatabase,
   places,
   storedVersions,
-  postgresOnly,
   rows,
   run,
   withLogUnlocked,
@@ -207,7 +203,7 @@ test("a read on an answer of access the app kept opens only while it is still th
   assert.equal(!removed.ok && removed.refusal.code, 'access_changed');
 });
 
-test('through a key service, a read on a kept answer the policy changed under while the key service answered accounts for its intent', postgresOnly('a policy change commits while a read holds its row, not the head: SQLite runs one writer at a time'), async () => {
+test('through a key service, a read on a kept answer the policy changed under while the key service answered accounts for its intent', async () => {
   const { keks, seen } = service();
   const w = await world({ keks });
   await member(w, ADA, [[w.dev, 'viewer']]);
@@ -360,7 +356,7 @@ test("a key's current sensitive value is made a secret in place by an Owner of i
   assert.ok((await w.vault.rewrap({ principal: ROOT, items: [{ secret: { ...base, version: 3, sensitive: true }, ...v1! }] })).ok);
 });
 
-test('a rewrap is held to its secret\'s newest version as the decision commits: one written sensitive meanwhile refuses it', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('a rewrap is held to its secret\'s newest version as the decision commits: one written sensitive meanwhile refuses it', async () => {
   const remote = service();
   const w = await world({ keks: remote.keks });
   const base = await w.secret(w.dev);
@@ -377,7 +373,7 @@ test('a rewrap is held to its secret\'s newest version as the decision commits: 
   assert.equal(!refused.ok && refused.refusal.code, 'invalid', JSON.stringify(refused));
 });
 
-test("a loosening is held to its key's current version as the decision commits: one written meanwhile refuses it", postgresOnly('SQLite runs one writer at a time'), async () => {
+test("a loosening is held to its key's current version as the decision commits: one written meanwhile refuses it", async () => {
   const remote = service();
   const w = await world({ keks: remote.keks });
   const { secrets } = tablesOf(db.owner);
@@ -602,18 +598,13 @@ function service(options: { delayMs?: number } = {}) {
 /** Make every append of these vault actions fail, as a database that refuses the write would. */
 async function failAppends(owner: Database, actions: string[]): Promise<() => Promise<void>> {
   const list = actions.map((action) => `'${action}'`).join(', ');
-  if (ENGINE === 'postgres') {
-    await run(owner, sql.raw(`CREATE FUNCTION test_refuse_append() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN IF NEW.author = 'vault' AND NEW.action IN (${list}) THEN RAISE EXCEPTION 'test log failure'; END IF; RETURN NEW; END $$`));
-    await run(owner, sql`CREATE TRIGGER test_refuse_append BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION test_refuse_append()`);
-    return async () => {
-      await run(owner, sql`DROP TRIGGER test_refuse_append ON audit_log`);
-      await run(owner, sql`DROP FUNCTION test_refuse_append()`);
-    };
-  }
-  await run(owner, sql.raw(`CREATE TRIGGER test_refuse_append BEFORE INSERT ON audit_log
-    WHEN NEW.author = 'vault' AND NEW.action IN (${list}) BEGIN SELECT RAISE(ABORT, 'test log failure'); END`));
-  return () => run(owner, sql`DROP TRIGGER test_refuse_append`);
+  await run(owner, sql.raw(`CREATE FUNCTION test_refuse_append() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN IF NEW.author = 'vault' AND NEW.action IN (${list}) THEN RAISE EXCEPTION 'test log failure'; END IF; RETURN NEW; END $$`));
+  await run(owner, sql`CREATE TRIGGER test_refuse_append BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION test_refuse_append()`);
+  return async () => {
+    await run(owner, sql`DROP TRIGGER test_refuse_append ON audit_log`);
+    await run(owner, sql`DROP FUNCTION test_refuse_append()`);
+  };
 }
 
 for (const [operation, failure] of [
@@ -836,7 +827,7 @@ test('an expired grant refuses with its own code', async () => {
   assert.deepEqual((await w.vault.access(ADA)).grants, []);
 });
 
-test('a read that waits for the log\'s head is decided as of when it holds it: a grant that lapsed meanwhile refuses', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('a read that waits for the log\'s head is decided as of when it holds it: a grant that lapsed meanwhile refuses', async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer', Date.now() + 1_500]]);
   const secret = await w.secret(w.dev);
@@ -988,38 +979,6 @@ test('two instances share one log, one bulk limit and one set of generations', a
   assert.equal((await w.vault.verifyLog({})).ok, true);
 });
 
-test('two processes on one SQLite file share the bulk limit exactly', { skip: ENGINE !== 'sqlite' && 'two processes on one file is SQLite\'s case' }, async () => {
-  // Postgres serialises a member's reads on their row; SQLite on its file's
-  // write lock, which other processes wait for, as a second server would.
-  const kek = randomBytes(32);
-  const bulkLimit = { count: 6, windowMs: 60_000 };
-  const w = await world({ keks: new KekRegistry(new LocalKekProvider(kek, 'test-kek-1')), bulkLimit });
-  await member(w, ADA, [[w.dev, 'viewer']]);
-  // Twelve keys, one a read: the same key again would count once.
-  const inputs = await Promise.all((await keys(w, 12)).map(async (item) => ({ principal: ADA, purpose: 'run' as const, items: await versionItems([item]) })));
-
-  const reader = spawn(
-    process.execPath,
-    [
-      '--conditions=coffre:source',
-      fileURLToPath(new URL('reader.ts', import.meta.url)),
-      JSON.stringify({ url: process.env.COFFRE_TEST_DATABASE_URL, kek: kek.toString('base64'), signingKey: SIGNING_KEY.toString('base64'), bulkLimit, inputs: inputs.slice(6) }),
-    ],
-    { stdio: ['ignore', 'pipe', 'inherit'] },
-  );
-  const theirs = new Promise<string[]>((resolve, reject) => {
-    let out = '';
-    reader.stdout.on('data', (chunk: Buffer) => (out += chunk));
-    reader.once('exit', (code) => (code === 0 ? resolve(JSON.parse(out) as string[]) : reject(new Error(`the reader exited ${code}`))));
-  });
-  const ours = Promise.all(inputs.slice(0, 6).map((input) => w.vault.unwrap(input))).then((outcomes) =>
-    outcomes.map((outcome) => (outcome.ok ? 'ok' : outcome.refusal.code)),
-  );
-  const all = [...(await theirs), ...(await ours)];
-  assert.equal(all.filter((outcome) => outcome === 'ok').length, 6, JSON.stringify(all));
-  assert.equal(all.filter((outcome) => outcome === 'bulk_limit').length, 6);
-});
-
 test('a removal waits for a read in flight at the key service, and the next read is refused before it', async () => {
   const { keks, seen } = service({ delayMs: 300 });
   const w = await world({ keks });
@@ -1045,7 +1004,7 @@ test('a removal waits for a read in flight at the key service, and the next read
   assert.equal(seen.unwrap, asked, 'refused before the key service is asked');
 });
 
-test('one member\'s reads at the key service run side by side, not one behind the other', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('one member\'s reads at the key service run side by side, not one behind the other', async () => {
   const { keks, seen } = service();
   const w = await world({ keks });
   await member(w, ADA, [[w.dev, 'viewer']]);
@@ -1066,7 +1025,7 @@ test('one member\'s reads at the key service run side by side, not one behind th
 });
 
 for (const [change, action, code] of [['removal', 'member.remove', 'removed'], ['revocation', 'access.revoke', 'no_grant']] as const) {
-  test(`a ${change} amid a steady stream of one member's reads is not starved: it lands in turn, and no read is released after it`, postgresOnly('SQLite runs one writer at a time'), async () => {
+  test(`a ${change} amid a steady stream of one member's reads is not starved: it lands in turn, and no read is released after it`, async () => {
     // Postgres lets a share lock join those held even while a writer waits: without a queue, a change waits until
     // the reads stop, here for good (`lockMembers`). A revocation locks two rows, its actor's and hers, in order.
     const { keks } = service({ delayMs: 150 });
@@ -1101,7 +1060,7 @@ for (const [change, action, code] of [['removal', 'member.remove', 'removed'], [
   });
 }
 
-test('a read gives up a lock it waits seconds for, and fails as unavailable, its connection let go', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('a read gives up a lock it waits seconds for, and fails as unavailable, its connection let go', async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
@@ -1127,7 +1086,7 @@ test('a read gives up a lock it waits seconds for, and fails as unavailable, its
   assert.equal((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok, true, 'and the next one, the head free, reads');
 });
 
-test("a burst of reads at a held head: those past its places in line are refused at once, and none waits past its deadline", postgresOnly('SQLite runs one writer at a time'), async () => {
+test("a burst of reads at a held head: those past its places in line are refused at once, and none waits past its deadline", async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
@@ -1234,7 +1193,7 @@ test('a checkpoint forgets the releases a day and an hour old, longer than any w
   assert.equal(counted.released, 1);
 });
 
-test('a checkpoint whose prune fails signs all the same, and says so', postgresOnly('the function is Postgres\'s'), async () => {
+test('a checkpoint whose prune fails signs all the same, and says so', async () => {
   const w = await world();
   await member(w, ADA, [[w.dev, 'viewer']]);
   const secret = await w.secret(w.dev);
@@ -2029,7 +1988,7 @@ test('the log is chained, append-only, and shows a rewritten entry', async () =>
   assert.equal(!after.ok && after.reason, 'hash does not match the entry');
 });
 
-test('the vault appends only as itself, and writes none of the app\'s rows', postgresOnly('logins are Postgres\'s'), async () => {
+test('the vault appends only as itself, and writes none of the app\'s rows', async () => {
   const { auditLog, projects } = tablesOf(db.vault);
   const w = await world();
   await member(w, ADA, []);
@@ -2417,7 +2376,7 @@ async function whileHeadHeld<T>(decision: () => Promise<T>, during: () => Promis
   return pending;
 }
 
-test('a grant written around the vault while it decides about its member is refused, not sealed in (review R2)', postgresOnly('SQLite lets no write in beside a decision'), async () => {
+test('a grant written around the vault while it decides about its member is refused, not sealed in (review R2)', async () => {
   const w = await world();
   const { vaultGrants } = tablesOf(db.owner);
   // Mallory manages access on a sandbox project, holds nothing on market, and has the owner's login.
@@ -2446,7 +2405,7 @@ test('a grant written around the vault while it decides about its member is refu
   assert.ok(!(await w.vault.access(ADA)).grants.some((grant) => grant.environmentId === w.prod));
 });
 
-test('a grant written around the vault while it removes a member goes with the removal', postgresOnly('SQLite lets no write in beside a decision'), async () => {
+test('a grant written around the vault while it removes a member goes with the removal', async () => {
   const w = await world();
   const { vaultGrants } = tablesOf(db.owner);
   await member(w, ADA, [[w.dev, 'viewer']]);
@@ -2647,7 +2606,7 @@ test("a tally whose members and grants are kept nowhere is refused wherever a wa
   assert.deepEqual(!resumed.ok && [resumed.failedAtSeq, resumed.reason], [second.checkpoint.seq + 1, 'its tally keeps its members and grants in entry 0, which holds none']);
 });
 
-test('two checkpoints at once, catching up from the same tally, sign one prefix each, never the same nor a shorter one', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('two checkpoints at once, catching up from the same tally, sign one prefix each, never the same nor a shorter one', async () => {
   const w = await world({}, { walks: { checkpoint: 40 } });
   await reads(200);
   const other = await w.twin();
@@ -3297,7 +3256,6 @@ test('membership generations advance on removal even when time does not', async 
   assert.equal((await w.vault.verifyLog({})).ok, true);
 });
 
-
 test('a deadline aborts KMS requests and drops queued keys before a removal can commit', async () => {
   const arn = 'arn:aws:kms:eu-west-3:123456789012:key/deadline';
   let started = 0;
@@ -3579,7 +3537,7 @@ test('on a new instance, the first person its deployment names to sign in become
   assert.equal((await again.verifyLog({})).ok, true);
 });
 
-test('two people the list names, signing in at once on a new instance, both become Owners', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('two people the list names, signing in at once on a new instance, both become Owners', async () => {
   await places(db.owner);
   const first = await namingOwners('root@acme.example', 'sam@acme.example');
   const second = await openLocalVault(await db.connect(), configure({ owners: ['root@acme.example', 'sam@acme.example'] }));
@@ -3654,7 +3612,6 @@ test('the last Owner of the whole instance is not demoted, narrowed or removed, 
   assert.equal((await w.vault.verifyLog({})).ok, true);
 });
 
-
 test('only an Owner of the whole instance makes someone an Owner, or changes or removes one, scoped or not', async () => {
   const w = await world(UNNAMED);
   const market = { projects: { only: [w.project] }, environments: 'all' as const };
@@ -3725,7 +3682,7 @@ async function headHeldWhile<T>(both: () => Promise<T>[]): Promise<T[]> {
 }
 
 for (const how of ['each leaving', 'each stepping down'] as const) {
-  test(`two Owners, ${how}, at once, leave one`, postgresOnly('SQLite runs one writer at a time'), async () => {
+  test(`two Owners, ${how}, at once, leave one`, async () => {
     const w = await world(UNNAMED);
     const other = await w.twin();
     assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB, role: 'owner' })).ok);
@@ -3766,7 +3723,7 @@ async function inTurn<A, B>(first: () => Promise<A>, second: () => Promise<B>): 
   return [await one, await two];
 }
 
-test('an Owner demoted while they make another sees it: the promotion decides under their row\'s lock', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('an Owner demoted while they make another sees it: the promotion decides under their row\'s lock', async () => {
   const w = await world();
   const other = await w.twin();
   assert.ok((await w.vault.admit({ actor: ROOT, principal: BOB, role: 'owner' })).ok);
@@ -3781,7 +3738,7 @@ test('an Owner demoted while they make another sees it: the promotion decides un
   assert.deepEqual((await store.instanceOwners(db.owner)).map((row) => row.principal), [ROOT]);
 });
 
-test('an Admin removing someone just made an Owner sees it: the removal decides under their row\'s lock', postgresOnly('SQLite runs one writer at a time'), async () => {
+test('an Admin removing someone just made an Owner sees it: the removal decides under their row\'s lock', async () => {
   const w = await world();
   const other = await w.twin();
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'admin' })).ok);
@@ -3794,7 +3751,6 @@ test('an Admin removing someone just made an Owner sees it: the removal decides 
   assert.deepEqual(!removed.ok && removed.refusal.code, 'not_allowed');
   assert.equal((await w.vault.access(CAROL)).role, 'owner');
 });
-
 
 test('naming someone makes them an Owner again as the vault starts, however they were demoted or removed: the way back in once no Owner can sign in', async () => {
   const w = await world();
@@ -3903,7 +3859,6 @@ async function rowOf05(principal: string, detail: Record<string, unknown>, actor
   }));
   await reseal(principal);
 }
-
 
 test('on an instance that ran 0.5, everyone the deployment names becomes an Owner, root admins who signed in or not, and nobody else 0.5 let in', async () => {
   await places(db.owner);

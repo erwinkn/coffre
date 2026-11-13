@@ -1,10 +1,9 @@
 // Each component's database login writes its own tables and nothing else:
 // the app cannot write members, grants or the vault's entries, the vault
-// cannot write the app's tables, and neither can rewrite the log. Postgres
-// only: SQLite has no logins.
+// cannot write the app's tables, and neither can rewrite the log.
 import { using, type Sql } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect, Skip } from '../report.ts';
+import { expect } from '../report.ts';
 import { quoted, tables } from './storage.ts';
 
 const ZEROS = "decode(repeat('00', 32), 'hex')";
@@ -66,8 +65,6 @@ async function noWrites(sql: Sql, names: readonly string[]): Promise<void> {
 }
 
 export async function appLogin(deployment: Deployment): Promise<string> {
-  if (deployment.kind === 'node') throw new Skip('SQLite has no database logins');
-  expect(deployment.runtime !== null, 'the app runtime login is missing');
   const protectedTables = (await using(deployment.database(), tables)).filter((name) => name.startsWith('vault_'));
   return using(deployment.runtime(), async (sql) => {
     await noWrites(sql, protectedTables);
@@ -82,8 +79,6 @@ export async function appLogin(deployment: Deployment): Promise<string> {
 }
 
 export async function vaultLogin(deployment: Deployment): Promise<string> {
-  if (deployment.kind === 'node') throw new Skip('SQLite has no database logins');
-  expect(deployment.vaultRuntime !== null, 'the vault runtime login is missing');
   const appTables = (await using(deployment.database(), tables)).filter((name) =>
     !['vault_members', 'vault_grants', 'audit_log', 'audit_chain_head'].includes(name));
   return using(deployment.vaultRuntime(), async (sql) => {

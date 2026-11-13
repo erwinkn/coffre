@@ -16,7 +16,7 @@ This review covers [the proposal](oidc.md), the existing
 [authentication MACs](../../packages/server/src/auth-rows.ts),
 [credential queries](../../packages/server/src/db/queries.ts), both
 [Postgres](../../packages/db/src/schema.ts) and
-[SQLite](../../packages/db/src/schema.sqlite.ts) schemas, the vault's access
+[SQLite](https://github.com/erwinkn/coffre/blob/7be559628/packages/db/src/schema.sqlite.ts) schemas, the vault's access
 checks, and the [architecture limits](../architecture.md#limits).
 Platform statements below were checked against their public documentation.
 Findings describe defects or missing guarantees in the proposed design,

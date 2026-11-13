@@ -139,7 +139,7 @@ export function createCoffre(config: NodeConfig): CoffreNode {
 
 /** coffre's configuration on Node. */
 export type NodeConfig = CoffreConfig & {
-  /** `postgres://…`, or `file:coffre.db` for local SQLite. */
+  /** `postgres://…`. */
   database: string;
   /**
    * The client's address, for a deployment behind a load balancer, whose

@@ -17,16 +17,6 @@ if (args[0] === '--only') {
 }
 
 async function apply(url, text) {
-    if (url.startsWith('file:')) {
-        const { DatabaseSync } = await import('node:sqlite');
-        const db = new DatabaseSync(new URL(url).pathname);
-        try {
-            db.exec(text);
-        } finally {
-            db.close();
-        }
-        return;
-    }
     const { default: pg } = await import('pg');
     const client = new pg.Client({ connectionString: url });
     await client.connect();

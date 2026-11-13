@@ -14,7 +14,6 @@ import { openDatabase } from '../src/connect.ts';
 import { createDatabase, QueryOutsideTransaction } from '../src/database.ts';
 import { HyperdrivePool } from '../src/hyperdrive.ts';
 
-const skip = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only: Hyperdrive' : false;
 const DATABASE = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${process.env.COFFRE_TEST_DATABASE ?? 'coffre_test'}`;
 
 /** Postgres behind a proxy that counts the connections made to it, and can cut them. */
@@ -65,7 +64,7 @@ async function counted() {
 
 const n = (rows: { rows: Record<string, unknown>[] }) => Number(rows.rows[0]!.n);
 
-test('a call opens one connection, and its queries and transactions take turns on it', { skip }, async () => {
+test('a call opens one connection, and its queries and transactions take turns on it', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -85,7 +84,7 @@ test('a call opens one connection, and its queries and transactions take turns o
   }
 });
 
-test('a query asked while a transaction holds the connection waits for it, and is not part of it', { skip }, async () => {
+test('a query asked while a transaction holds the connection waits for it, and is not part of it', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -120,7 +119,7 @@ test('a query asked while a transaction holds the connection waits for it, and i
   await pool.end();
 });
 
-test('closing waits for what is under way; a connection lost or closed is opened again for the next query', { skip }, async () => {
+test('closing waits for what is under way; a connection lost or closed is opened again for the next query', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -142,7 +141,7 @@ test('closing waits for what is under way; a connection lost or closed is opened
   await pool.end();
 });
 
-test('a query on the database from inside its own transaction is refused at once, not left to wait for itself', { skip, timeout: 10_000 }, async () => {
+test('a query on the database from inside its own transaction is refused at once, not left to wait for itself', { timeout: 10_000 }, async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);
   const db = createDatabase(pool);
@@ -194,7 +193,7 @@ test('a query on the database from inside its own transaction is refused at once
   await pool.end();
 });
 
-test("Node's pool refuses the same query, so that the suites catch it before a Worker would hang on it", { skip, timeout: 10_000 }, async () => {
+test("Node's pool refuses the same query, so that the suites catch it before a Worker would hang on it", { timeout: 10_000 }, async () => {
   const { db, close } = await openDatabase(DATABASE);
   try {
     await assert.rejects(db.transaction(async () => db.execute(sql`select 1`)), QueryOutsideTransaction);
@@ -204,7 +203,7 @@ test("Node's pool refuses the same query, so that the suites catch it before a W
   }
 });
 
-test("with closeIdleMs, what outlives a call closes its connection once idle, and the next query connects again", { skip }, async () => {
+test("with closeIdleMs, what outlives a call closes its connection once idle, and the next query connects again", async () => {
   const proxy = await counted();
   // As a Durable Object's coffre does: a check now and then, none of them a call that ends the pool.
   const pool = new HyperdrivePool(proxy.url, { closeIdleMs: 50 });

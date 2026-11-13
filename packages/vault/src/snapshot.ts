@@ -1,11 +1,10 @@
 import type { StoredEntry } from '@coffre/core/audit';
 import type { Queryable, Transaction } from '@coffre/db';
 import { LogHeadMismatch, lockLogHead, lockLogHeadQueued } from '@coffre/db/log';
-import { engineOf, rowsOf } from '@coffre/db/dialect';
+import { rowsOf } from '@coffre/db/dialect';
 import type { GrantRow } from '@coffre/db/grants';
 
-import { snapshotQuery as postgres } from './snapshot.postgres.ts';
-import { snapshotQuery as sqlite } from './snapshot.sqlite.ts';
+import { snapshotQuery } from './snapshot.postgres.ts';
 import * as store from './store.ts';
 import type { EnvironmentRow, Member } from './store.ts';
 
@@ -117,8 +116,7 @@ export function current(head: LockedHead): boolean {
 }
 
 async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
-  const query = (engineOf(db) === 'postgres' ? postgres : sqlite)(asked);
-  const [row] = await rowsOf<{ snapshot: string | Raw }>(db, query);
+  const [row] = await rowsOf<{ snapshot: string | Raw }>(db, snapshotQuery(asked));
   const raw: Raw = typeof row!.snapshot === 'string' ? (JSON.parse(row!.snapshot) as Raw) : row!.snapshot;
   return {
     at: Number(raw.at),

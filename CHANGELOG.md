@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Postgres only.** coffre no longer runs on SQLite. `@coffre/db` drops its
+  SQLite schema, migrations and driver (`@libsql/client`), and a `file:`
+  URL is refused wherever a database URL is taken (`createCoffre`,
+  `serveVault`, `localVault`, `coffre-server migrate`). There is no
+  converter: a Node deployment that ran on SQLite for local development
+  starts again on Postgres, and can drop `@libsql/client` from its
+  dependencies. Node conformance, the packed consumer test and `pnpm
+  bench:node` run the Node example on a Postgres database of their own,
+  each process through its own login, as Workers did.
+
 ## 0.14.7 (2026-11-13)
 
 - **An HMAC key written as text: `keyEncoding`.** An `hmac()` signer's or

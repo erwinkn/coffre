@@ -36,7 +36,7 @@ const uiBoundaries = {
 /**
  * What each of the vault's files may import: Drizzle only in its queries, and
  * what opens a database from a URL only in its Node entry, since the Worker
- * cannot load it. SQLite only ever through @coffre/db.
+ * cannot load it.
  */
 function vaultBoundaries({ drizzle = false, connect = false } = {}) {
   return {
@@ -49,8 +49,7 @@ function vaultBoundaries({ drizzle = false, connect = false } = {}) {
           },
         ],
     patterns: [
-      ...(drizzle ? [] : [{ ...noDrizzle, message: "The vault's queries live in src/store.ts, and a decision's read in src/snapshot.<dialect>.ts; add or extend one there." }]),
-      { regex: '^(node:sqlite|@libsql/)', message: 'The vault reaches SQLite only through @coffre/db, and only on Node.' },
+      ...(drizzle ? [] : [{ ...noDrizzle, message: "The vault's queries live in src/store.ts, and a decision's read in src/snapshot.postgres.ts; add or extend one there." }]),
     ],
   };
 }

@@ -27,7 +27,7 @@ const backupLogin = (database: string) => url('coffre_backup_login:local-backup-
 // PostgreSQL's own tools, which the commands run: of the server's major version, as a deployment's pipeline has them.
 const tools = spawnSync('pg_restore', ['--version'], { encoding: 'utf8' });
 const postgres = {
-  skip: process.env.COFFRE_TEST_ENGINE === 'sqlite' ? 'Postgres only: coffre backup runs pg_dump' : tools.status !== 0 ? 'needs pg_dump and pg_restore on PATH' : false,
+  skip: tools.status !== 0 ? 'needs pg_dump and pg_restore on PATH' : false,
 };
 
 // --- without a database --------------------------------------------------------------

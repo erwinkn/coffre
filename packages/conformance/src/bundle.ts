@@ -35,7 +35,6 @@ const MARKERS: { label: string; pattern: RegExp }[] = [
   { label: 'drizzle-orm', pattern: /drizzle:[A-Z]/ },
   ...SERVER_TABLES.map((name) => ({ label: `the table ${name}`, pattern: new RegExp(`\\b${name}\\b`) })),
   { label: 'pg', pattern: /cloudflare:sockets|pg-protocol|pgpass/ },
-  { label: 'libsql', pattern: /@libsql|libsql/ },
   { label: 'a COFFRE_ variable read', pattern: /env\s*(\.|\[\s*['"`])COFFRE_/ },
 ];
 

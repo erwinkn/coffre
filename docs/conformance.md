@@ -18,15 +18,15 @@ the database like anyone who could reach them.
 From a deployment, a devDependency since `coffre init`:
 
 ```sh
-pnpm conformance                   # Node: the server and its vault process, on SQLite in a temp dir
 pnpm conformance \
   --postgres postgres://owner:…@127.0.0.1:5432 \
   --runtime postgres://coffre_runtime:…@127.0.0.1:5432 \
   --vault-runtime postgres://coffre_vault_runtime:…@127.0.0.1:5432
                                    # Workers: both, under wrangler dev
+                                   # Node: the server and its vault process
 ```
 
-On Workers, `--postgres` is a login that may create databases: the run makes
+`--postgres` is a login that may create databases: the run makes
 one of its own, `coffre_conformance_<random>`, migrates it and drops it
 after. `--runtime` is the same server as `coffre_runtime`, the login the app
 runs as, and `--vault-runtime` as `coffre_vault_runtime`, the vault's. All
@@ -148,13 +148,13 @@ In order, since each builds on the ones before:
 | keys behind writes | Every `secret.write`, `secret.restore` and `secret.loosen` names, by `related_seq`, the vault's `key.wrap` (a new value) or `key.rewrap` (a restore, a mark, a loosening) for the same member, request, operation, secret and version; and no value read is logged by the app, only by the vault |
 | no audit, no value | With a trigger refusing `secret.read` appends, a reveal gets 500 `internal_error`, the injected cause appears in the process output, and no value leaves; it works again once the log does |
 | canary scan | No value in any answer to any GET route, or any page, as each of the people, signed in or removed; nor in the database, in any column of any table; nor the processes' output |
-| app login, vault login | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant. Postgres only: SQLite has no logins |
+| app login, vault login | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant |
 | access authorship | Admission, grant, revoke, removal and re-admission leave only vault entries |
 | no audit, no access | A refused append commits no grant, removal or admission |
 | full verification | Verification from the newest checkpoint, and the walk from the first entry a stretch a request, each reach the actual head and count every entry; the audit page is sent with its verification result |
 | checkpoint refused, checkpoint missing | A recent heartbeat without an accepted checkpoint turns readiness red; restoring checkpointing recovers |
 | forged grant, forged member, stale member | A forged grant, an edited member or a genuine older member row put back is refused at use, marked tampered, and logged as vault.tampered. Sign-in mode refuses the credential with 401 |
-| sealing race | On Postgres, a grant inserted while the vault's decision waits on the held log head is refused as `tampered` and logged; removal recovers the member. SQLite prevents that concurrent write; the vault suite covers review R2 on Postgres |
+| sealing race | A grant inserted while the vault's decision waits on the held log head is refused as `tampered` and logged; removal recovers the member |
 | forged credential, forged identity, forged approval, edited generation | Owner-written authentication rows cannot mint sessions or revive old tokens, and the row failure is reported |
 | app rewritten, vault rewritten, vault forged | The walk from the first entry catches each author's first entry rewritten in place at its sequence; verification catches a publicly chained vault entry without its MAC |
 | middle gap, first gap, batch gap | Missing entries fail verification, including the first entry and the 1,000-entry paging boundary |
@@ -163,11 +163,10 @@ In order, since each builds on the ones before:
 | tail deleted | The newest entries removed with the head retained fail verification; this runs last |
 
 All table inspection and tampering goes through the one database. There
-is no vault file or Durable Object to discover. On Postgres, the canary scan
-reads every public table as the owner, including binary columns as bytes.
-Every run plants a binary canary to prove the table reader sees bytes.
-Missing shared tables fail. On SQLite it also scans the database file and
-its write-ahead log; a missing file fails. Workers also tests both restricted logins and the author policies.
+is no vault file or Durable Object to discover. The canary scan reads every
+public table as the owner, including binary columns as bytes. Every run
+plants a binary canary to prove the table reader sees bytes. Missing shared
+tables fail. Each kind also tests both restricted logins and the author policies.
 
 A read has one entry, the vault's, committed before any key leaves, so there
 is no second record of it to disagree. A write the app prepares again leaves

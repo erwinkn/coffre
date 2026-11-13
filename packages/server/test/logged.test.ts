@@ -11,7 +11,6 @@ import { sql } from 'drizzle-orm';
 import { ApiError, toErrorBody } from '../src/api/errors.ts';
 import { errorResponse } from '../src/http.ts';
 import { openTestDatabase } from './api-fixture.ts';
-import { TEST_ENGINE } from './db/engine.ts';
 
 const db = await openTestDatabase();
 after(() => db.close());
@@ -29,14 +28,12 @@ test('an unhandled database error is logged with its message and what Postgres s
   const [label, line] = logged[0] as [string, Record<string, unknown>];
   assert.equal(label, 'unhandled API error');
   assert.ok(!JSON.stringify(logged).includes(value), 'a parameter in the log');
-  assert.match(String(line.message), /^Failed query: select (\$1|\?) from no_such_table/);
+  assert.match(String(line.message), /^Failed query: select \$1 from no_such_table/);
   assert.ok(typeof line.stack === 'string' && line.stack.includes('logged.test.ts'), 'no stack');
   const cause = line.cause as Record<string, unknown>;
   assert.ok(typeof cause.message === 'string' && cause.message.length > 0, 'no cause');
-  if (TEST_ENGINE === 'postgres') {
-    assert.deepEqual([cause.code, cause.severity, cause.routine !== undefined], ['42P01', 'ERROR', true]);
-    assert.match(String(cause.message), /relation "no_such_table" does not exist/);
-  }
+  assert.deepEqual([cause.code, cause.severity, cause.routine !== undefined], ['42P01', 'ERROR', true]);
+  assert.match(String(cause.message), /relation "no_such_table" does not exist/);
 });
 
 test("a database that does not answer is 503 unavailable, the request's to ask again, and logged as such", (t) => {
