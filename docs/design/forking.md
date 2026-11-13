@@ -1,22 +1,13 @@
 # Forks that inherit, and personal configs
 
-Written on 2026-10-17 for T93, from Erwin's request: "let's allow forking
-environments, either to define a personal config (like Doppler allows) or
-an environment that shares most secrets with another one but may
-add/remove/overwrite a few."
+`coffre fork market/prod staging` makes a one-off: it copies prod's values, or with `--reference`
+makes each key a reference to prod's (docs/design/environments.md). A copy never follows prod, and
+a key added to prod later never reaches staging. `fork --inherit` makes an environment that keeps
+reading its parent live, except for the keys it sets or removes. A personal config is the same
+thing, owned by one person: a developer's own `DATABASE_URL` over the shared dev.
 
-Coffre already forks, but a fork is a one-off. `coffre fork market/prod
-staging` copies prod's values into staging, and `--reference` makes each
-key a reference to prod's (docs/design/environments.md). A copy never
-follows prod. References follow each key's value, but a key added to prod
-later never reaches staging. The log's `environment.create` entry says
-staging was forked from prod, but nothing links the two afterwards. This
-note adds the missing piece: an environment that keeps reading its
-parent, live, except for the keys it sets or removes. A personal config is the same thing, owned by one person.
-
-The examples use one project, `market`, and four people. Ada is a
-developer on `market`. Bo reads `market/dev` only. Cy is a maintainer on
-`market`. Dee reads `market/prod-eu` only, once it exists.
+The examples use one project, `market`, and four people. Ada is a developer on `market`. Bo reads
+`market/dev` only. Cy is a maintainer on `market`. Dee reads `market/prod-eu` only.
 
 ```
 market/prod   DATABASE_URL=postgres://prod   STRIPE_KEY=sk_live_1   SENTRY_DSN=https://sentry/prod
@@ -25,41 +16,13 @@ market/dev    DATABASE_URL=postgres://dev    STRIPE_KEY=sk_test_1
 
 ## In short
 
-- **One model.** An environment may have a parent in its project, set
-  when it is made and never changed. Its keys are its own live keys, then
-  its parent's, then its grandparent's, for the keys no nearer
-  environment holds or removed. A personal config is such an environment
-  with an owner.
-- **A key in a fork is in one of four states:** inherited (no row of its
-  own), overridden (a value or a reference of its own), added (a key the
-  parent lacks), or removed. Removing is a dismissal, the record the
-  missing-keys strip already keeps for "this environment does without K".
-  No new table, and only two new columns, both on `environments`.
-- **Inheriting never grants.** An inherited value is the parent's value,
-  read by the reader's own grants on the parent and logged as the
-  parent's read. It also shows up in the fork's log. A fork lends nothing.
-  Lending a value across a trust boundary stays what references are for,
-  one key at a time, sealed by the vault.
-- **Nothing is re-encrypted.** The fork opens the parent's ciphertext as
-  the parent's. The vault and the key formats don't change for overlays.
-  The vault gains one log label, `through`, which decides nothing.
-- **A personal config is readable by its owner alone,** instance Owners
-  included, and its sensitive values by nobody, its owner included (R18).
-  The vault enforces it by binding the owner into each wrapped
-  data key, so a forged database row fails to decrypt instead of granting
-  access. A plain value, which is in the clear by being plain, is held to
-  its owner by the app's rule alone (section 3).
-- **A personal config is a partial overlay.** Each key its owner sets is
-  theirs, over its environment's key or beside it; every other key falls
-  through to the environment's, live. Each value of its own is plain,
-  secret or sensitive, as anywhere: written saying nothing, it takes the
-  level of the value the key reads now (0.10, decision 27 in
-  credential-proxy.md).
-- **Status.** Erwin agreed to the three recommendations below (no
-  lending, owner-only personal configs, explicit `@me`). Forks that
-  inherit shipped first, as 0.7's first PR; personal configs second, with
-  their `owner` column in a migration of their own. Section 7 says what
-  each built, and where the build differs from this design.
+- **Inheriting never grants.** An inherited value is the parent's, read by the reader's own grants
+  on the parent and logged as the parent's read. Lending across a trust boundary stays what
+  references are for, one key at a time, sealed by the vault.
+- **Nothing is re-encrypted.** The fork opens the parent's ciphertext as the parent's.
+- **A personal config is readable by its owner alone,** instance Owners included: the vault binds
+  the owner into each wrapped data key, so a forged database row fails to decrypt. Its sensitive
+  values, as anywhere, are handed to no person, its owner included.
 
 ## 1. The model
 
@@ -67,24 +30,26 @@ market/dev    DATABASE_URL=postgres://dev    STRIPE_KEY=sk_test_1
 
 ```
 environments
-  parent_id   uuid, null       the environment it inherits from, same project
-  owner       text, null       a personal config's owner, user:<email>; needs parent_id
+  parent_id   uuid, null    the environment it inherits from, same project
+  owner       text, null    a personal config's owner, user:<email>; needs parent_id
 ```
 
-`parent_id` has a foreign key on `(parent_id, project_id)` to `(id,
-project_id)`, so a parent is always in the same project. The app's login
-may insert both columns and update neither, so a parent can't change.
-The app makes a parent before its child, so its chains can't loop. The
-database can't promise that alone: its login could insert two rows naming
-each other in one statement. So a check refuses the simplest case, an
-environment that is its own parent, and a read refuses a chain that
-loops or runs past the cap, written around the app, instead of following
-it. A unique index on `(parent_id, owner)` gives each person at most one
-personal config per environment. It's partial, leaving out tombstones, so
-deleting a personal config frees its place.
+In `packages/db/src/schema.ts`:
 
-A fork's own keys are ordinary `secrets` rows in its environment. Here is
-`market/prod-eu`, forked from prod, after Cy sets two keys and removes one:
+- `environments_parent_in_project`, a foreign key on `(parent_id, project_id)` to `(id,
+  project_id)`, keeps a parent in the same project. It is `NO ACTION`, checked at the end of a
+  statement, so one statement that deletes a fork and its parent together leaves no orphan.
+- The app's login gets `UPDATE (slug, name, archived_at)` on `environments` only, so neither column
+  can change after insert.
+- `environments_parent_check` refuses an environment that is its own parent. The app makes a parent
+  before its child, so its chains cannot loop; a longer loop written around the app is refused at
+  read, as is a chain past the cap (`MAX_PARENTS`, 3, in `packages/core/src/vault.ts`).
+- `environments_owner_check`: an owner needs a parent and is a `user:`.
+- `environments_parent_id_owner_key`, unique on `(parent_id, owner)`, gives each person at most one
+  personal config per environment. It leaves out tombstones, so deleting one frees its place.
+
+A fork's own keys are ordinary `secrets` rows. Here is `market/prod-eu`, forked from prod, after
+Cy sets two keys and removes one:
 
 | Key | Row in prod-eu | Dismissal in prod-eu | prod-eu reads |
 |---|---|---|---|
@@ -93,386 +58,194 @@ A fork's own keys are ordinary `secrets` rows in its environment. Here is
 | `STRIPE_KEY` | none | | prod's `sk_live_1`, inherited |
 | `SENTRY_DSN` | none | yes | nothing, removed |
 
-A read walks the chain nearest first, in one read-only snapshot, so a
-write that sets a key and ends its removal meanwhile is seen whole or not
-at all, and the snapshot closes before the vault is asked. A key is settled by the first
-environment that holds it live or dismissed it. That's the whole rule.
-It's `readableValues` in `packages/server/src/api/references.ts`, a loop
-over the layers.
+**The rule:** a key is settled by the first environment in the chain, nearest first, that holds it
+live or dismissed it. A read walks the chain in one read-only snapshot, closed before the vault is
+asked, so a write that sets a key and ends its removal meanwhile is seen whole or not at all. Values
+resolve in `readableValues` (`packages/server/src/api/references.ts`); `inheritedRows` and
+`resolveKeys` (`packages/server/src/api/inheritance.ts`) do the same by name for the list, missing
+keys, project counts, resets and renames.
 
-**Reset to the parent** archives the override row. Archived rows are not
-live, so the parent's value shows through again, and the override keeps
-its history ("prod-eu set its own DATABASE_URL from 3 Oct to 9 Oct").
-Writing the key again revives the row with a new version. Reset takes
-`secret.write`, not `secret.archive`, since it loses nothing: a Developer
-who may override may also stop overriding.
+**Reset to the parent** archives the override row. The parent's value shows through again, and the
+override keeps its history. It takes `secret.write`, not `secret.archive`, since it loses nothing,
+and is logged as `secret.reset`; its undo serves the fork's own value again. It is refused where
+the parent holds no such key, or while a reference reads the override.
 
-**Removing is dismissing.** A dismissal already means "this environment
-deliberately does without K" (`dismissed_keys`, from 0.6). In a plain
-environment that only hides K from the missing-keys strip. In a fork it
-also hides the parent's K. One fact, one record. Restoring the dismissal
-brings the inherited value back. A live row of the fork's own beats its
-dismissal, so writing a removed key gives it a value. The other way round
-is refused: a fork can't remove a key it holds a live value of, which it
-would go on serving, so `coffre remove` says to reset or archive it first,
-checked under the log's head with the dismissal. Two records, the
-row and the dismissal, now describe one key, so one rule keeps them
-apart: whatever makes a fork's row live ends its key's removal, in the
-same transaction, through one function, `endRemovals`. A row becomes live
-in exactly four places, and each calls it: a write (a value or a
-reference), a restored version, an unarchive, and a rename onto the key.
-A later reset then lands on the parent's value, not on "removed".
+**Removing is dismissing.** In a plain environment a dismissal only hides K from the missing-keys
+strip; in a fork it also hides the parent's K. Restoring the dismissal inherits K again. A fork
+cannot remove a key it holds a live value of, which it would go on serving: `coffre remove` says to
+reset or archive it first, checked under the log's head.
 
-This is the design's one sharp edge. Reviewers found the missing call
-four times, a different path each time, before the list above was
-checked to be complete. A future fifth path has to call `endRemovals`
-too. The alternative is a removed state on the fork's own row, one record
-per key. It needs a new column, and every write path would have to clear
-it, so it has the same edge with no reuse. I kept dismissals, and a test
-per path.
+**The sharp edge: `endRemovals`.** Two records, the row and the dismissal, describe one key. So
+whatever makes a fork's row live ends its key's removal in the same transaction, through
+`endRemovals` (`packages/server/src/api/secrets.ts`). Otherwise a later reset would land on
+"removed" instead of the parent's value. A row becomes live in five places, and each calls it: a
+write, a restored version, an unarchive, a rename onto the key, and an override undoing a reset. A
+sixth path must call it too; the tests hold one case per path.
 
 ### A personal config is a fork with an owner
 
-`market/dev@ada` is an environment with `parent_id = dev` and `owner =
-user:ada@acme.example`. It inherits, overrides, adds and removes exactly
-like `prod-eu`. Only three things differ, and all of them are access:
+`market/dev@ada` is an environment with `parent_id = dev` and `owner = user:ada@acme.example`. It
+inherits, overrides, adds and removes exactly like `prod-eu`. Only access differs:
 
-1. Only its owner reads or writes it, and only while they read its parent
-   (section 3).
-2. It isn't one of the project's environments. It stays out of lists,
-   switchers and the missing-keys comparison, except for its owner, and
-   for the project's maintainers, who may delete it.
-3. Its address is the parent's path plus `@me` (section 5). Its slug is
-   generated and never shown, for example `dev-p-3f9c2a1b`.
+1. Only its owner reads or writes it, and only while they read its parent (section 3).
+2. It is not one of the project's environments: it stays out of lists, switchers and the
+   missing-keys comparison, except for its owner, and for the maintainers who may delete it.
+3. Its address is the parent's path plus `@me` (section 5). Its slug is generated and never shown.
+4. It holds values only: no references out of it or into it, and nobody forks one (section 4).
 
-So one model covers both asks. Splitting them would mean two resolution
-rules, two UIs and two sets of tests, for a difference that lives only in
-who may read.
+### Why this shape
 
-### How Doppler does it, and where coffre differs
-
-Doppler has root configs, one per environment, and branch configs under
-them (`dev_stripe_billing`). A branch reads its root live and may
-override a key or add one. Its docs never show a branch hiding a key the
-root has, and a branch can't have a branch. A personal config is a branch
-named `dev_personal` that resolves to a different config for each user,
-private to them. A repo commits `config: dev_personal` in `doppler.yaml`.
-Access is per environment, so whoever reads a branch reads its root. A
-separate paid feature, Config Inheritance, lets any config inherit others,
-across projects, in a ranked list.
-
-Coffre keeps the parts that matter and differs in four ways:
-
-- **Removal exists.** An overlay often needs it: `prod-eu` doesn't
-  report to the US Sentry. It costs nothing, since dismissals already
-  exist.
-- **One parent, and chains, capped.** No ranked list of parents; one
-  parent keeps "where does this value come from" a single answer. Chains
-  are allowed, at most three parents above any environment, for example
-  `prod → prod-eu → prod-eu-canary → prod-eu-canary@ada`. A fork can't
-  have a personal config as its parent.
-- **Access is never inherited.** Doppler gets this for free because
-  branches live inside their root's environment. In coffre a fork is an
-  environment with its own grants, so the rule has to be stated: inherited
-  values take read on the parent.
-- **Cross-project sharing stays references.** Doppler's Config Inheritance
-  is sharing across projects. Coffre has references for that, which the
-  vault seals key by key. Inheritance stays within a project.
-
-### Options I rejected
-
-- **A fork made of references.** `coffre fork --reference` exists. Its
-  keys follow prod's values, but it doesn't pick up keys added to prod
-  later, it writes one sealed vault entry per key, and only its creation's
-  log entry says where it came from. It's the right tool for lending
-  specific keys to people who can't read the source, which is a different
-  job.
-- **Inheritance that lends, sealed by the vault.** The vault would seal
-  "prod-eu inherits prod", and anyone reading prod-eu would read prod's
-  values through it, as references work. It's the same machinery as
-  references, but it breaks their founding rule, "a reference is a
-  decision taken when it's created". The decision would cover keys that
-  don't exist yet. Add `PAYMENTS_ROOT_KEY` to prod next month, and every
-  reader of every fork of prod reads it, with nobody having decided they
-  should.
-- **Personal overrides as a property of each secret** (Infisical's model).
-  That's an override per key per person, with no inheritance of new keys
-  and no removal. It's also a second model next to environments.
+- **One parent, chains capped at three.** One parent keeps "where does this value come from" a
+  single answer; past three levels a reader cannot tell without a diagram. For example
+  `prod → prod-eu → prod-eu-canary → prod-eu-canary@ada`.
+- **Removal exists.** An overlay often needs it (`prod-eu` does not report to the US Sentry), and
+  dismissals already exist.
+- **No lending.** If the vault sealed "prod-eu inherits prod", every key added to prod later would
+  reach every reader of every fork, with nobody having decided it. References lend, one decided
+  key at a time.
+- **Cross-project sharing stays references.** Inheritance stays within a project.
 
 ## 2. Semantics, by example
 
-**The parent's value changes.** Cy rotates `market/prod/STRIPE_KEY` to
-`sk_live_2`. The next `coffre run market/prod-eu` reads `sk_live_2`. A
-fork that overrides the key keeps its own value. Its row is marked
-"prod changed since" while prod's version is newer than the override,
-because an override that silently drifts from what it overrides is the
-classic overlay bug.
+**The parent's value changes.** Cy rotates `market/prod/STRIPE_KEY`; the next `coffre run
+market/prod-eu` reads the new value. A fork's override keeps its own value, marked "prod changed
+since" while prod's version is newer, because an override that silently drifts is the classic
+overlay bug.
 
-**A key is added to the parent.** Cy adds `NEW_KEY` to prod. It's in
-`prod-eu` at once, and in `dev@ada` if it was added to dev. That's the
-point of inheriting.
+**A key is added to the parent.** It is in every fork at once. That is the point.
 
-**A key is renamed in the parent.** Cy renames `STRIPE_KEY` to
-`STRIPE_SECRET_KEY` in prod. The inherited key follows by itself, since
-its name lives in prod's row. A fork's override or removal is keyed by
-name, though. Left alone, `prod-eu` would export its old `STRIPE_KEY`
-override and prod's `STRIPE_SECRET_KEY` side by side: EU would quietly run
-on the US key. So a rename in a parent renames the same key's overrides
-and removals in every fork below it, in the same transaction, logging a
-`secret.rename` in each fork, personal configs included. A rename moves no
-value, so the renamer needs no access to the forks. If a shared fork
-already holds `STRIPE_SECRET_KEY`, the rename is refused and names that
-fork. A personal config is never named to anyone but its owner: there,
-the colliding key of its own is renamed out of the way
-(`STRIPE_SECRET_KEY_2`), the cascade goes through, and its owner is told
-on their next read and in their config's log.
+**A key is renamed in the parent.** The inherited key follows by itself. An override or a removal
+is keyed by name, though: left alone, `prod-eu` would export its old `STRIPE_KEY` override beside
+prod's `STRIPE_SECRET_KEY`, and EU would quietly run on the US key. So a rename carries down to
+every fork below, archived ones and personal configs included (`renameBelow`), logging a
+`secret.rename` in each. It moves no value, so the renamer needs no access to the forks. If a shared
+fork already holds the new name, the rename is refused and names that fork. A personal config is
+named to nobody but its owner, so there its own key of the new name moves aside (`STRIPE_SECRET_KEY_2`),
+logged in it, and the rename goes through.
 
-**A key moves to a folder.** Folders are per environment. A key the
-parent holds is shown in the parent's folder wherever it's inherited or
-overridden. A key only the fork has is filed in the fork, as today. That's
-derived, not copied, so a move in prod shows in every fork at once.
+**Folders.** A key the parent holds is shown in the parent's folder wherever it is inherited or
+overridden; a key only the fork has is filed in the fork.
 
-**A key is archived in the parent.** Inheriting stops, as archived keys
-are not live. A fork's override of it stays, and now reads as an
-addition. A fork's removal of it does nothing, and the page shows it as
-"removed here · prod dropped it too", which Restore cleans up. So it is when a
-parent between them removes the key itself.
+**A key is archived in the parent.** Inheriting stops. A fork's override stays, and reads as an
+addition. A fork's removal does nothing and stays listed as such ("removed · prod dropped it"),
+with Restore, as when a parent between them removes the key too.
 
-**The parent is archived or deleted.** Archiving an environment that live
-forks inherit from is refused. The 409 names them: "market/prod is
-inherited by market/prod-eu: archive it first". This is D41's rule for
-references, applied to parents, and it is built. Personal
-configs are the exception: they're private and derived, so archiving dev
-archives every `dev@…` with it, and restoring dev restores them. A fork
-is restored only while its parent is live. Deleting a parent for good is
-refused while any fork names it, archived or not: "market/prod is the
-parent of market/prod-eu: delete it first". A deleted parent would leave
-its forks naming a tombstone forever, unrestorable, and deleting is rare
-and the instance Owners' alone, so they delete forks first. Personal
-configs are deleted with their parent. If a
-parent is archived anyway, around the app, a read of the fork refuses
-and says why ("market/prod-eu inherits from market/prod, which is
-archived"). It never runs half empty.
-
-**Chains.** Fork `prod-eu` into `prod-eu-canary`, and the canary reads
-its own keys, then prod-eu's (including prod-eu's overrides and
-removals), then prod's. The canary can set a key prod-eu removed. Making
-a fourth level is refused (409). One query per level, three at most,
-before the values. The cap is about clarity, not speed: past three, a
-reader of a key can't tell where it comes from without a diagram.
+**The parent is archived or deleted.** Archiving a parent with live forks is refused, 409: "market/prod
+is inherited by market/prod-eu: archive it first". A fork is restored only while its parent is live.
+Deleting a parent is refused while any fork names it, archived or not: a deleted parent would leave
+its forks naming a tombstone forever. Personal configs are the exception: private and derived, they
+are archived, restored and deleted with their parent. A parent archived anyway, around the app, makes
+the fork's read refuse and say why. A fork never runs half empty.
 
 **References.**
 
-- *The parent holds a reference.* Say `prod/SHARED` is a reference to
-  `billing/prod/SHARED`. prod-eu inherits it, so its readers read through
-  prod's reference. The vault checks the reader on the reference's
-  holder, prod, which is what inheriting needs anyway.
-- *Something references a fork's key.* A reference to a key a fork only
-  inherits is refused: "market/prod-eu/STRIPE_KEY is inherited from
-  market/prod; reference that instead". A reference to an override is
-  fine, as for any key.
-- *Personal configs* hold values only: no references out, none in. A
-  read through a reference unwraps its source's data key, which isn't
-  bound to any owner (section 4). So a reference held in Ada's personal
-  config would be guarded only by the `owner` column, which a forged row
-  or a 0.6 vault ignores. Ada who wants `billing/dev/X` locally copies
-  it.
-- *Forking a fork as references* resolves each key to where its value
-  really lives, prod's key for an inherited one, as one hop already
-  requires.
+- *The parent holds a reference.* prod-eu inherits it; the vault checks the reader on the
+  reference's holder, prod.
+- *A reference to a key a fork only inherits* is refused, naming the parent's key to a reader of the
+  fork. A reference to an override is fine.
+- *Forking a fork as references or copies* takes what each key resolves to: where it is held, with
+  that folder.
 
 ## 3. Access and audit
 
-**Who may fork.** An inheriting fork takes what any fork takes:
-`environment.manage` on the project and read on the parent. A personal
-config takes only read on its parent. A Viewer who wants a local
-`DATABASE_URL` shouldn't need a maintainer. A service account can't own
-one.
+**Who may fork.** An inheriting fork takes `environment.manage` on the project and read on the
+parent. A personal config takes only read on its parent: a Viewer who wants a local `DATABASE_URL`
+should not need a maintainer. A service account keeps none.
 
-**A fork lends nothing.** Bo reads `market/dev` only. Cy makes
-`market/dev-eu`, inheriting dev, and grants Bo on it. Bo reads dev-eu's
-own keys and, through the fork, dev's, because Bo reads dev. Now suppose
-Cy grants Dee on `market/prod-eu` and nothing else. Dee's `coffre run
-market/prod-eu` refuses, 403, naming what's missing: "market/prod-eu
-inherits SENTRY_DSN, STRIPE_KEY from market/prod, which you cannot read".
-Dee still reads prod-eu's own keys one at a time
-(`market/prod-eu/DATABASE_URL`). It's all or nothing, as references
-already are: never run without a key. The app refuses before the vault is
-asked. The vault refuses anyway if asked, since it decides an inherited
-read on the parent's place, by the reader's own grants (tested). The
-parent check comes before any other refusal. If prod's `SHARED` is a
-broken reference into `billing`, Dee hears only that SHARED comes from
-prod, never which billing key it pointed at or who broke it.
+**A fork lends nothing.** Cy makes `market/dev-eu`, inheriting dev, and grants Bo on it. Bo reads
+its own keys and, through it, dev's, because Bo reads dev. Now Cy grants Dee on `market/prod-eu`
+alone. Dee's `coffre run market/prod-eu` is 403: "market/prod-eu inherits SENTRY_DSN, STRIPE_KEY from
+market/prod, which you cannot read". It is all or nothing, as references are: never run without a key. Dee still reads
+prod-eu's own keys one at a time. The app refuses before the vault is asked, and the vault refuses
+anyway, since it decides an inherited read on the parent's place. The parent check comes before any
+other refusal, so Dee never learns more than a key's name: not where a broken reference of prod's
+pointed, nor who broke it.
 
-**What a fork's reader sees of the parent.** The inherited key names,
-since key names are not secret within a project (docs/design/environments.md,
-"Missing keys"). That they come from prod and prod's folder, too. Version and age
-only if they read prod. Never values without read on prod.
+A fork's reader sees the inherited key names (not secret within a project), that they come from
+prod, and prod's folder; versions and ages only if they read prod; never values.
 
-**Scoped roles and slugs.** Reading a fork takes read on the fork, and
-on each parent it inherits a value from. An overlay is an environment with
-its own slug, `prod-eu`, and scopes treat it like any other. A Developer
-scoped `only: [prod]` doesn't read prod-eu at all; they read prod. One
-scoped `except: [prod]` reads prod-eu's own keys one at a time, but not
-what it inherits, so their `run` of prod-eu refuses. That's right: a scope
-that excludes prod excludes prod's values wherever they show up. Name forks so scopes read well: `prod-eu`, not `eu`. A personal
-config's slug never matters, because nobody's grant decides it (below).
+**Scoped roles.** A fork is an environment with its own slug, and scopes treat it like any other.
+A Developer scoped `except: [prod]` reads prod-eu's own keys but not what it inherits, so their
+`run` of prod-eu refuses: a scope that excludes prod excludes prod's values wherever they show up.
+Name forks so scopes read well: `prod-eu`, not `eu`.
 
-**Personal configs: the owner alone.** Ada's `market/dev@ada` is hers.
-Nobody else reads or writes its values: not Cy, not the project's Owners,
-not the instance's Owners. The vault reads it for Ada only while Ada reads
-dev, deciding on dev's place. So losing dev also loses her personal dev,
-and a scope or a grant on the personal environment itself means nothing.
-Values in a personal config are typically the person's own (their
-sandbox API key, their local database). Nobody else needs them, and an
-Owner who could read them would just be one more way they leak. That
-holds whatever a value's level: Ada's plain `REGION=eu-west-1` lists to
-her, inline, and to nobody else. What others see:
+**Personal configs: the owner alone.** Nobody else reads or writes `market/dev@ada`'s values: not
+Cy, not the project's Owners, not the instance's Owners. The app's `can()` decides its `secret.*`
+permissions on its owner and their read on dev, never on grants or roles there, and a grant on one
+is refused. So losing dev also loses her personal dev. The values are typically the person's own
+(a sandbox key, a local database); an Owner who could read them would be one more way they leak.
+What others see:
 
-- The project's maintainers (`environment.manage`) see that personal
-  configs exist: who owns one, its parent, its key names, and when
-  it was last read. They may delete one, which is how offboarding cleans
-  up.
-- Nobody else sees them: not in lists, the switcher or the missing-keys
-  comparison.
-- Removing a member makes their personal configs unreadable at once, as
-  any removal does. The offboarding report lists them for deletion.
+- Maintainers (`environment.manage`) list a project's personal configs (`GET /personal/:project`,
+  `coffre personal`): whose, of what, their key names, and the slug that deletes one. Deleting is
+  how offboarding cleans up; the owner may delete theirs too. Neither archives it first.
+- The offboarding report lists a member's personal configs. Removing a member makes them unreadable
+  at once.
+- The log files a personal config's entries under it, so its project's auditors see its key names.
 
-**The log.** Every inherited value is the parent's read. The vault logs
-one `secret.read` per key under prod's project, environment and secret,
-so prod's history and its offboarding "what to rotate" count it. It also
-carries `through`, the fork it was read in, and `also`, which puts it in
-the fork's log too:
+**The log.** An inherited value is the parent's read. The vault logs one `secret.read` under prod
+listing the keys it opened there, so prod's history and its offboarding "what to rotate" count it.
+It carries `through`, the fork it was read in, and `also`, which puts it in the fork's log too:
 
 ```json
-{ "subject": "market/prod/STRIPE_KEY", "version": 2, "purpose": "run",
+{ "secrets": [{ "subject": "market/prod/STRIPE_KEY", … }], "purpose": "run",
   "through": { "environmentId": "…prod-eu", "slug": "prod-eu" },
   "also": { "projectId": "…market", "environmentId": "…prod-eu" } }
 ```
 
-The audit page words it "cy read market/prod/STRIPE_KEY in
-market/prod-eu". `through` is the app's word, checked by the vault to be
-a live environment of the same project, other than the value's own. It's
-checked once, not again under the log's head as grants are, because it
-decides nothing: the vault doesn't ask whether the reader reads the fork
-it names. The worst a lying app does is file a read under another live
-environment of the same project, a read the reader was allowed anyway. A read
-of a reference that the fork inherits has three places (the source, the
-holder prod, the fork), and `also` names one: the holder, as for any
-reference read. `through` still names the fork, but the fork's log does
-not list the read: its entry is the source's, perhaps in another project,
-and a fork's log would show an auditor of the fork alone what prod's
-reference reads, which is prod's to tell. A list-valued `also` with a
-redacted fork view could add it, at the price of the log's expression
-indexes.
+The audit page words it "… market/prod/STRIPE_KEY in market/prod-eu". `through` is the app's
+claim. The vault checks it is a live environment of the same project, other than the value's own,
+and refuses a read whose claim fails (`bad_claim`); it decides nothing else, so the worst a lying
+app does is file a read under another live environment of the same project, a read the reader was
+allowed anyway. A read of a reference the fork inherits has three places (the source, the holder
+prod, the fork); `also` names the holder, as for any reference read, and the fork's log does not
+list it: that read is the source's, perhaps in another project, which is prod's to tell.
 
 ## 4. Vault and crypto
 
-Each version has its own data key. The instance's KEK wraps it, with AAD
-`coffre.aad.v1|project|environment|secret` (and under KMS, the same three
-ids as the encryption context). There's no per-environment key. The
-ciphertext is bound to the environment that holds it, so it can't be
-reused under another environment's ids.
+Each version has its own data key, wrapped by the instance's KEK with AAD
+`coffre.aad.v1|<project>|<environment>|<secret>` (under KMS, the same ids as the encryption
+context), so a ciphertext cannot be reused under another environment's ids.
 
-**Inherited values are served without re-encrypting.** The fork never
-copies anything. A read of `prod-eu/STRIPE_KEY` opens prod's current
-version as prod's (`SecretRef` with prod's ids), exactly as a reference
-opens its source's. So:
+**Inherited values are served without re-encrypting.** A read of `prod-eu/STRIPE_KEY` opens prod's
+current version as prod's, exactly as a reference opens its source's. So KEK rotation adds no wraps
+for forks; rotating a value in prod is one write every fork reads next time; taking prod away from
+Cy refuses Cy's next read of prod-eu's inherited keys, with nothing cached in the fork to revoke.
+An override is an ordinary write under the fork's ids.
 
-- **KEK rotation** changes nothing: no new wraps, and old versions unwrap
-  under the key their row names, forks included.
-- **Rotating a value** in prod is one write, and every fork reads it next
-  time. That's better than copies, which each need rotating.
-- **Revocation** is immediate. Take prod away from Cy, and Cy's next read
-  of prod-eu's inherited keys refuses. There's nothing cached in the fork
-  to revoke.
-- **An override** is an ordinary write in the fork, under the fork's ids.
+**Personal configs: the owner is in the wrapped key.** Privacy cannot rest on `environments.owner`,
+which the app's login writes: flip it to Bo, and Bo would read Ada's values. Nor on grants: Cy's
+project grant covers every environment of `market`. So:
 
-**Personal configs: the owner is in the wrapped key.** A personal config's
-privacy can't rest on `environments.owner`, which the app's login writes.
-Flip it to Bo, and Bo would read Ada's values. Nor can it rest on grants:
-Cy's project grant covers every environment of `market`. The design that
-needs no new sealed state:
+1. The vault adds the owner to a personal config's wrap: `|owner:<ownerKey>` in the AAD for a local
+   KEK, `coffre:owner` in the KMS encryption context. `ownerKey` is the SHA-256 of
+   `user:<email>` (`packages/core/src/context.ts`), hashed because AAD fields are joined with `|`.
+2. On every key operation the vault reads the environment's owner from the database, refuses anyone
+   else (`personal`), checks the owner reads the parent by its own grants, and binds the owner it
+   read into the wrap or unwrap.
 
-1. When it wraps a data key for a personal config's value, the vault adds
-   the owner to the wrap's AAD: `…|owner:<sha256 of user:ada@acme.example>`
-   for a local KEK, and `coffre:owner` in the KMS encryption context. It's
-   hashed, because AAD fields are joined with `|` and an email isn't a
-   UUID.
-2. The vault wraps only for the owner, and only while the owner reads the
-   parent. That's `allows(owner, 'secret.read', parent place)`, from the
-   vault's own grants, with the parent taken from the database.
-3. To unwrap, the vault reads the version's environment's owner from the
-   database, refuses anyone else (`personal`), checks the owner reads the
-   parent, and unwraps with the owner in the AAD.
+A forged `owner` column now fails to decrypt instead of granting: Bo as owner computes Bo's AAD, not
+the one Ada's keys were wrapped under. A cleared column fails the same way, and so does a vault that
+knows nothing of owners. A forged `parent_id` could only let Ada read her own values after losing
+the parent, the mildest case.
 
-A forged `owner` column now fails to decrypt instead of granting: Bo as
-owner computes Bo's AAD, which isn't the one Ada's keys were wrapped
-under. A plain value is the exception, as anywhere (0.10): it is stored
-in the clear beside its ciphertext and read without the vault, so the
-app's `can()` alone holds it to Ada, the one door every read goes through
-(the list, `get`, `export`, the proxy's plan, history, versions, dry
-runs and MCP); whoever reads the database reads it, as they read every
-plain value. That is what plain means: no secret, the person's own
-`REGION` or local host. A value nobody else should see in a dump is a
-secret. A cleared column fails the same way. A forged `parent_id` could
-only let Ada read her own values after losing the parent, which is the
-mildest case. And rolling back to 0.6, whose vault knows nothing of
-owners, fails closed: it unwraps without the owner and gets an
-authentication failure, so an old release can't leak personal values to
-project readers. That's the real reason to bind the owner
-cryptographically and not with a sealed log entry, the way references
-work. It also explains why personal configs hold no references: a value
-read through one is wrapped under its source's ids alone, so the binding
-can't reach it.
+A **plain** value is stored in the clear beside its ciphertext and read without
+the vault, so only the app's `can()` holds it to Ada, the one door every read goes through (list,
+`get`, `export`, the proxy's plan, history, versions, dry runs, MCP); whoever reads the database
+reads it, as every plain value. A value nobody else should see in a dump is a secret, not plain.
+And a personal config holds **no references**: a value read through one is wrapped under its
+source's ids alone, so the binding cannot reach it, and only the `owner` column would guard it.
+
+A value written to a personal config without a level takes the level of the value the key reads
+now, plain included (`bareLevel`); a generated value is never plain.
 
 ## 5. Surfaces
-
-### UI
-
-The environment page of a fork:
-
-```
-prod-eu  ·  inherits from prod                     All  Overrides  Inherited  Removed
-database/
-  DATABASE_URL   ••••••••   overrides prod  ·  prod changed since    v1   cy   3 Oct
-  DATABASE_POOL  ••••••••   from prod                                v2   prod · 1 Oct
-EU_REGION        ••••••••                                            v1   cy   3 Oct
-STRIPE_KEY       ••••••••   from prod                                v2   prod · 2 Oct  Rotate
-SENTRY_DSN       removed here  ·  not inherited from prod                                Restore
-```
-
-- An **inherited** row is muted, with "from prod" linking to the parent's
-  row. Its menu has "Override…" and "Remove from prod-eu". Editing its
-  value in place is overriding: the save bar counts it as "override
-  DATABASE_POOL".
-- An **override** says "overrides prod". Its menu has "Reset to prod",
-  whose confirmation says the value stops being used and stays in
-  history, and "Compare with prod", a deliberate reveal of both, logged
-  as two reads.
-- A **removed** key is struck through, with Restore.
-- An **addition** is an ordinary row.
-- The filter chips appear only on a fork.
-- **Age and Rotate.** An inherited key's age is its parent's version's,
-  and its Rotate tag links to the parent, where rotating happens. An
-  override has its own age. That's how references already show "source ·
-  1y ago".
-- **Switcher.** Forks are indented under their parent: `prod`, then
-  `prod-eu`. Your personal configs read `dev · yours`.
-- **New environment.** "Start from" offers "Inherit from prod" first, and
-  preselects it. Then "A copy of prod", "References to prod" and "Empty".
-  The inherit option says what it means: "Keeps reading prod's keys, live,
-  except those you set or remove here. Readers of this environment need
-  read on prod for those."
-- **Personal configs.** "Make my own dev" in dev's menu. Project settings
-  list the personal configs, with Delete, for maintainers.
-- **The missing-keys strip** is unchanged (below).
 
 ### CLI
 
 ```sh
-coffre fork market/prod prod-eu --inherit          # a fork that inherits
-coffre list market/prod-eu                         # each key: (from prod), (overrides prod), (removed here: not inherited from prod)
+coffre fork market/prod prod-eu --inherit          # a fork that inherits; copying stays the default
+coffre list market/prod-eu                         # each key: from prod, overrides prod, removed here
 coffre set market/prod-eu/DATABASE_URL             # an override, prompted as ever
 coffre remove market/prod-eu/SENTRY_DSN            # does without prod's key; --undo inherits it again
 coffre reset market/prod-eu/DATABASE_URL           # back to prod's, its own kept; --undo serves it again
@@ -480,238 +253,47 @@ coffre run market/dev@me -- pnpm dev               # your personal dev, or dev i
 coffre set market/dev@me DATABASE_URL              # makes your personal dev on first write
 ```
 
-`coffre.json` names only the instance's URL, and every command takes its
-`project/environment` explicitly, so a personal config has to be part of
-the path. `@me` is that part. `market/dev@me` reads your personal config
-of `market/dev`, and falls back to `market/dev` itself when you have none.
-So a repo commits `coffre run market/dev@me -- pnpm dev` in its
-`package.json`, and it works for everyone: for Ada with her overrides, for
-Bo without any, and in CI, where a service account owns no personal
-config. That's Doppler's committed `config: dev_personal`, but in the
-path. Writes never fall back: `coffre set market/dev@me` writes yours and
-makes it if needed, and `coffre set market/dev` writes the shared one.
-`get`, `export` and `missing` resolve forks on the server, as `run` does.
-The CLI receives values, as now. `fork --inherit` stays a flag: the CLI's
-default is a compatibility promise, and copying stays the default.
+**`@me` is explicit.** `market/dev@me` reads your personal config of dev, and falls back to dev
+itself when you have none. So a repo commits `coffre run market/dev@me -- pnpm dev`, and it works
+for Ada with her overrides, for Bo without any, and in CI, where a service account's `@me` is dev.
+Swapping `market/dev` for your config automatically would leave `coffre set market/dev` needing a
+way to mean the shared one, and a script reading different values for different people with
+nothing in it saying so. Writes never fall back: `coffre set market/dev@me` writes yours, making it
+if needed. `list` notes when `@me` fell back.
 
 ### API
 
 ```
 PUT   /api/projects/market/prod-eu                 {"from": "prod", "inherit": true}
 GET   /api/secrets/market/prod-eu                  "parents": ["prod"]; each key's "parent"
-PATCH /api/secrets/market/prod-eu/DATABASE_URL     {"inherit": true}      reset to the parent; false undoes it
-PATCH /api/projects/market/prod-eu/dismissals      {"SENTRY_DSN": true}   remove; null inherits it again
-POST  /api/reveals                                 {"path": "market/dev@me"}   a personal config (PR 2)
+PATCH /api/secrets/market/prod-eu/DATABASE_URL     {"inherit": true}      reset; false undoes it
+PATCH /api/projects/market/prod-eu/dismissals      {"SENTRY_DSN": true}   remove; null inherits again
+POST  /api/reveals                                 {"path": "market/dev@me"}
 ```
 
-Each listed key's `parent` is null outside a fork and for a key only the
-fork holds; otherwise `{ from, state, changed, reset, held }`: `state`
-is `inherited`, `overridden` or `removed`, `from` the environment holding
-the parent's key, `changed` that its value is newer than the override,
-`reset` that the fork's own value was reset and is kept, and `held`,
-false for a removal of a key no parent passes down any more, `from` then
-naming the nearest that archived or removed it ("removed · prod dropped
-it", with Restore). A fork's folder actions reach only the keys
-it holds; an inherited key is filed where its parent files it. A key is
-listed once: a reset override is folded into its inherited entry, not
-listed again as archived.
+A listed key's `parent` is `{ from, state, changed, reset, held }`, null outside a fork and for a
+key only the fork holds; `held` is false for a removal of a key no parent passes down any more. A
+reset override is folded into its inherited entry. For `@me`, the list says `personal: { of,
+fallback }`. With no personal config, a write to `dev@me` makes one and any other non-read is 404.
+`GET /api/projects/<p>/<e>/version` hashes the read's own resolution, so a rotation in the parent,
+an override, a removal or a reset changes it.
 
-`GET /api/projects` lists each environment's `parent`, and its owner for a
-personal config, to those who may see it. A fork's count is of the keys
-it resolves to.
+### UI, MCP, missing keys, the Action
 
-`GET /api/projects/market/prod-eu/version` is a version of what a read
-of the fork would open (`coffre version`, and `coffre export --watch`
-polls it). It hashes the read's own resolution, `readableValues`, key by
-key with the version each resolves to, so an inherited value rotated in
-prod, an override, a removal or a reset changes it, with no code of its
-own for forks. A personal config's layer changes it the same way once
-reads resolve `market/dev@me`, asked of that same path.
+- **UI.** Add environment offers "Inheriting from …". A fork's page says what it inherits from and
+  tags each key "from prod", "overrides prod" (with "prod changed since") or removed, with
+  Override, Remove, Restore, Reset to prod and its undo. An inherited key's age and Rotate are its
+  parent's. Dev's menu has "My own dev"; the project's Environments tab lists personal configs.
+- **MCP.** Tools take paths, so `market/prod-eu` works as it is, and read tools read a person's
+  own `@me`. `list_secrets` gives each key's `parent`. `create_environment` takes
+  `inherits`, a slug of the same project, and its approval names the parent. It makes no copies: a
+  copy reads every value, which is no approval's to grant in passing.
+- **Missing keys** compare what environments resolve to: inherited keys are not missing, and a
+  parent misses nothing only its forks hold (`EU_REGION` does not flag prod). Personal configs are
+  compared with nothing. The Action's `require-complete` uses the same check.
 
-### MCP
+## 6. Tests
 
-The tools take paths, so `market/prod-eu` and `market/dev@me` work as
-they are. `list_secrets` gains each key's `parent`, and
-`reveal_secret_values` resolves forks like `run`. `create_environment`
-takes `inherits`, a slug of the same project, and makes a fork that
-inherits; its approval page names the parent. It makes no copies: a copy
-reads every value, which is no approval's to grant in passing.
-
-### Missing keys
-
-A fork has what it resolves to: inherited keys aren't missing, and its
-removals are dismissals already. A parent is never "missing" a key that
-only its own forks hold: `EU_REGION` in prod-eu doesn't flag prod.
-Personal configs aren't siblings, either way. So `coffre missing
-market/prod-eu --check` in CI behaves as people expect.
-
-### The Action
-
-Unchanged. `environments: market/prod-eu` exports the resolved values, and
-`require-complete` uses the resolved check above. CI never meets a
-personal config.
-
-## 6. Migrations
-
-`0004_environment_parents` adds `parent_id`, nullable, with its index
-and check. On Postgres it also adds the same-project foreign key. This is
-an expand-only change. The previous release, serving on the new schema
-during a deploy, ignores the column and meets no fork, since only the new
-code makes them. Personal configs' `owner`, with its check and its unique
-index on `(parent_id, owner)`, comes in PR 2's own migration: nothing in
-PR 1 reads or writes it, and a column added before the code that guards
-it would only be one the app's login could write unchecked.
-
-- **The foreign key is `NO ACTION`, not `RESTRICT`.** It's checked at the
-  end of a statement, not at each row, so one statement that deletes a
-  fork and its parent together isn't an orphan. SQLite checks `RESTRICT`
-  row by row, which broke the tests' reset.
-- **On SQLite the migration is written by hand.** drizzle-kit rebuilds the
-  table for any new constraint, and its generated copy selected the new
-  columns from the old table. Worse, a migration runs in one transaction,
-  where SQLite ignores `foreign_keys=OFF`, so dropping a table other rows
-  reference would fail on any database with data. The hand-written
-  version adds the columns in place. `parent_id` gets a single-column
-  foreign key, since SQLite can't add a table constraint to an existing
-  table, and the same-project rule is the app's on SQLite. The
-  migration's first line says so. Deployed databases are Postgres.
-- **Rollback.** Rolled back to 0.6.2 after forks exist, the old release
-  reads a fork as an environment holding only its overrides: inherited
-  keys vanish from `run`. Personal configs fail closed (section 4). Worth
-  a line in the release notes: archive forks before rolling back past
-  0.7.
-- **Grants.** No new grant is needed. The app's table-level `INSERT` on
-  `environments` covers the columns, and the absent `UPDATE` keeps them
-  immutable.
-
-## 7. What 0.7's first PR built
-
-Forks that inherit, everywhere but personal configs:
-
-- **Schema.** `0004_environment_parents`, both engines (section 6).
-- **Reads.** `readableValues` resolves the chain in one snapshot (`run`,
-  `export`, `get`, reveals); `inheritedRows` and `resolveKeys`
-  (`packages/server/src/api/inheritance.ts`) do the same by name for the
-  list, the missing keys, the project list's counts, resets and renames.
-  The parent check comes before any other refusal, and the vault logs
-  inherited reads under the parent with `through` and `also`.
-- **Writes.** `PUT … {from, inherit}` makes a fork; a write in a fork
-  revives a reset override and ends its key's removal (`endRemovals`, in
-  five places now: the reset's undo is the fifth). Reset and its undo are
-  `PATCH /secrets/…/:key {inherit}`, under `secret.write`, logged as
-  `secret.reset` and `secret.unarchive`, and refused where the parent holds
-  no such key or a reference reads the override. A rename carries down to
-  every fork below, archived ones included (`renameBelow`), moving
-  removals with the key and refusing, named, where a fork holds the new
-  name. A reference to a key a fork only inherits is refused, naming the
-  parent's key.
-- **Guards.** No archiving a parent with live forks, no deleting one any
-  fork names, no restoring a fork under an archived parent.
-- **Missing keys** compare what environments resolve to, and leave out a
-  key only an environment's own forks hold.
-- **Surfaces.** The UI's Add environment offers "Inheriting from …"; the
-  environment page says what it inherits from, tags each key "from prod",
-  "overrides prod" (with "prod changed since") or "removed · prod has it",
-  and offers Override, Remove, Restore, Reset to prod and Use its own value
-  again, each with an Undo. The CLI has `fork --inherit`, `reset`, `remove`
-  and a fork's `list`; MCP's `create_environment` takes `inherits`; the
-  audit page reads "revealed market/prod/STRIPE_KEY in market/prod-eu".
-- **Tests.** `packages/server/test/inheritance.test.ts` on both engines,
-  the CLI's, the UI's sentences, MCP's approval, and the conformance
-  check `inheritance`.
-
-Left out, on purpose or for later:
-
-- the page's filter chips, the switcher's indenting, "Compare with prod",
-  and preselecting "Inheriting from" in Add environment: an empty
-  environment stays the default, as the CLI's copy does;
-- a list-valued `also`, so a read of a reference a fork inherits also
-  reaches the fork's log, redacted (section 3).
-
-### What 0.7's second PR built: personal configs
-
-- **Schema.** `0007_personal_configs` adds `environments.owner`, its check
-  (an owner needs a parent, and is a `user:`), and a unique index on
-  `(parent_id, owner)` that leaves out tombstones. The app's login has no
-  UPDATE on it, so an owner never changes.
-- **The vault's binding.** `SecretContext` takes an optional `owner`, the
-  SHA-256 of `user:<email>` (`ownerKey`), which the local KEK's wrap AAD and
-  KMS's encryption context (`coffre:owner`) carry. Every key operation
-  reads each environment's owner from the database before deciding
-  (`#keys`), and for a personal config's key decides `personal` for anyone
-  but its owner, and for the owner, their read on the parent. The wrap and
-  unwrap then bind the owner the decision read: a forged or cleared owner
-  column fails to open. No reference holds or reads one (`personal`).
-- **The app's rule.** `can()` decides a personal config's `secret.*`
-  permissions on its owner and their read on the parent, never on grants
-  or roles there; anything else as at the parent. A grant on one is
-  refused.
-- **`@me`.** `market/dev@me` resolves to the caller's personal config of
-  dev. With none, a read (list, reveal, `run`, `export`, `get`, missing
-  keys) is of dev, the list saying `personal: { of, fallback: true }`; a
-  write to `PATCH /secrets/market/dev@me` makes one, and `PUT
-  /projects/market/dev@me` makes one empty; anything else is 404, and a
-  dry run makes nothing. A service account keeps none: its `@me` is dev.
-- **Privacy.** Lists show you your own as `dev@me` and nobody else's;
-  missing keys compare none. Maintainers (`environment.manage`) list a
-  project's personal configs, `GET /personal/:project`: whose, of what,
-  their key names and the slug that deletes one. The offboarding report
-  lists a member's. The log files a personal config's entries under it,
-  so its project's auditors see its key names, as maintainers do.
-- **Lifecycle.** Its owner or a maintainer deletes one, without archiving
-  it first, its values erased. It is archived, restored and deleted with
-  its parent, and stops none of these. A rename in the parent renames its
-  override and removal; its own key of the new name moves aside,
-  `NEXT_KEY_2`, logged in it, rather than name it to the renamer.
-- **Surfaces.** The UI: "My own dev" in dev's page's ⋯ menu, `dev@me`'s page (with
-  Make, and Delete in its ⋯), "yours alone" on its card, Personal configs on
-  the project's Environments tab; the CLI: `@me` in every path, `coffre personal`, and a
-  note on `list` when `@me` fell back; MCP's read tools take `@me` paths.
-- **Tests.** `packages/server/test/personal.test.ts`, on both engines, and
-  the conformance check `personal configs`.
-
-Where the build differs from the design above: a rename's collision is
-logged in the personal config, not announced on the owner's next read;
-MCP's write tools take no `@me` path; and a release before 0.7 rolled back
-to fails closed only for the values themselves, since it would list a
-personal config as an environment of the project.
-
-## 8. Recommendation
-
-Build it as above, in two PRs, for **0.7.0**. A schema change and a new
-read rule make it a minor release.
-
-1. **Forks that inherit.** Built: section 7.
-2. **Personal configs.** The vault's owner binding (both KEK providers),
-   `@me` in path parsing (server, client, CLI, MCP), privacy in lists,
-   switcher, missing keys and audit, the settings list, offboarding and
-   deletion, and conformance: another member, an instance Owner included,
-   is refused; a forged owner column fails to decrypt; a 0.6 vault fails
-   closed (`test:compat`). Two to three days. The binding needs the most
-   care in review.
-
-## Questions for Erwin
-
-Answered on 2026-10-17: Erwin took each recommendation (standing rule
-R8), reversible before 0.7.0.
-
-1. **Should a fork lend its parent's values to people who can't read the
-   parent?** I recommend no. Inheriting is a view of the parent, never a
-   grant, and anyone who must read prod's values without prod access gets
-   references, key by key, which the vault seals and prod's owners can
-   see and break. Saying yes means the vault seals the inheritance, and
-   every key added to prod later reaches every fork's readers without
-   anyone deciding it.
-2. **Who sees a personal config?** I recommend: values for the owner
-   alone, instance Owners included, enforced by the vault. The project's
-   maintainers see that it exists and its key names, and can delete it.
-   The alternative, Owners reading everything, removes the vault binding
-   and makes personal configs readable by project grants, like any other
-   environment.
-3. **How is a personal config chosen?** I recommend an explicit
-   `market/dev@me`, falling back to `market/dev` for people who have
-   none, so one committed script serves everyone. The alternative is
-   swapping `market/dev` for your personal config automatically, as soon
-   as you have one. That's less typing, but `coffre set market/dev` then
-   needs a way to mean the shared one, and a script reads different values
-   for different people with nothing in it saying so.
+The columns came in `0004_environment_parents` and `0007_personal_configs`
+(`packages/db/src/migrations/postgres`). Tests: `packages/server/test/inheritance.test.ts`, `packages/server/test/personal.test.ts`, and the
+conformance checks for inheritance and personal configs (`packages/conformance/src/checks/environments.ts`).
