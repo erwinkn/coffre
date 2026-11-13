@@ -223,11 +223,13 @@ function sameEntries(saved, now) {
 /**
  * This checkout's report, held to 0.15.0's where they differ by more than content: `reads.through`, how far sealed
  * reads are listed, moves on with every seal since (the beats), and must not go back; `proxy`, the proxy items a
- * member saved (0.16), is a field 0.15.0 has not, and nobody saved one. The rest is compared as it is.
+ * member saved (0.16), is a field 0.15.0 has not, and nobody saved one; `readsFrom`, the day retention keeps reads
+ * from (0.16), is null, since retention has dropped none. The rest is compared as it is.
  */
 function sameAs(now, saved) {
-    const { proxy, ...report } = now;
+    const { proxy, readsFrom, ...report } = now;
     assert.deepEqual(proxy, [], `${now.principalId} has proxy items nobody saved`);
+    assert.equal(readsFrom, null, `${now.principalId}'s reads are weighed from ${readsFrom}, though retention has dropped none`);
     if (saved.reads === undefined) return report;
     assert.ok(saved.reads.through === null || report.reads.through >= saved.reads.through, `reads listed through ${report.reads.through}, before 0.15.0's ${saved.reads.through}`);
     return { ...report, reads: { ...report.reads, through: saved.reads.through } };
