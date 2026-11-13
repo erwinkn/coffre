@@ -564,7 +564,7 @@ test("a refusal the vault's read finds (a forged change's MAC, a row its newest 
     assert.deepEqual(fast.answers, [why], what);
     assert.notEqual(fast.result.status, 200, what);
     // The same answer, the same entries, the same changes: the vault's unserved call wrote nothing (the number its
-    // statement drew from `log_number` is a gap, which the checkpoints seal past, as a rolled-back change's).
+    // statement drew from `log_next` is a gap, which the checkpoints seal past, as a rolled-back change's).
     assert.deepEqual({ status: fast.result.status, body: fast.result.body }, { status: today.result.status, body: today.result.body }, what);
     assert.deepEqual(fast.entries, today.entries, what);
     assert.equal(fast.changes, today.changes, what);
