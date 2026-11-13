@@ -2,7 +2,7 @@
 
 Written on 2026-10-10, from Erwin's decisions that week (D82, D84; the
 Auditor's log, D96; people setting up service accounts, D97 and D99). It
-replaces the grants on every project of 0.4 ([instance-grants.md](instance-grants.md)).
+replaces the grants on every project of 0.4.
 
 0.4 had two ways to reach many projects: an instance role, `user` or
 `owner`, and grants on every project, `*` and `*/<environment>`. People
