@@ -430,7 +430,7 @@ function sending(name: string) {
  * Until the backend named `name` waits in pg_sleep, then end it: in this database, since another run of this file, from
  * another checkout on the same Postgres, names its own the same. The caller listens for what the cut fails before it
  * cuts: the failure may reach this process before the terminate's answer does, and a rejection left unheard until then
- * is an unhandled one, which node:test fails the case with (T238).
+ * is an unhandled one, which node:test fails the case with.
  */
 async function cutWhileAsleep(owner: ReturnType<typeof postgresClient>, name: string): Promise<void> {
   for (let tries = 0; ; tries += 1) {

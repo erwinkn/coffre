@@ -25,9 +25,9 @@ import { postgresSession, quoteIdentifier, quoteLiteral, type PostgresClient } f
  * it makes is its own, so in the migrations' transaction, before it
  * commits, each of coffre's objects whose owner's privileges the login has
  * is handed to the ledger's owner (`HANDED_OVER`): what this run made, and
- * what a member made before T193; a superuser has every role's. So a function the owner's functions call is the owner's too, and
+ * what a member made in an earlier run; a superuser has every role's. So a function the owner's functions call is the owner's too, and
  * needs no grant to them (0057's, 0058's, 0060's, 0064's and 0073's were
- * for a member that made its own, T187). Handing an object to a role asks a
+ * for a member that made its own). Handing an object to a role asks a
  * login that may become it (SET ROLE): one that inherits the owner's
  * privileges but may not is refused too.
  */
@@ -78,8 +78,7 @@ export const MIGRATION_LOCK_PAUSE_MS = 1_000;
  * the migration lock, or another database's of the same server, for the
  * roles' rows that reasserting the privileges changes, which the roles of
  * every database share. Neither wait holds a table, so no use queues behind
- * it. 5 minutes is history (277928a5, docs/design/limits.md D2), kept for the
- * waits that hold up no use.
+ * it, and it may be long: 5 minutes (docs/design/limits.md).
  */
 const OTHER_RUN_LOCK_TIMEOUT = '5min';
 
@@ -340,8 +339,8 @@ export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Prom
 /**
  * Clear what 0.15.0 set on the runtime logins, server-wide: `jit = off` on
  * each, and `plan_cache_mode = force_generic_plan` on the hot login alone
- * (`logins` and `hot`: the tests' own roles). From 0.16.0 every statement plans
- * and runs at the server's settings (0068, docs/design/planner-defaults.md).
+ * (`logins` and `hot`: the tests' own roles). Every statement plans and runs
+ * at the server's settings (0068, docs/design/planner-defaults.md).
  *
  * Only those values on those logins, which coffre set (an administrator's
  * own setting of either stays, generic plans on another login included),
@@ -480,8 +479,8 @@ export type ForeignOwner = { name: string; member: boolean; memberOfLogin?: bool
  * which each one's GRANT says; before, a membership, and a login that
  * inherits (`ALTER ROLE … INHERIT`).
  *
- * An owner that is a member of the login (a member that migrated before
- * T193, when the login is the ledger's owner) cannot be granted to it: its
+ * An owner that is a member of the login (a member that migrated in an
+ * earlier run, when the login is the ledger's owner) cannot be granted to it: its
  * own login, or a superuser's, migrating once hands its objects to the
  * ledger's owner. Unless it is the ledger's owner, as a member's first run
  * of a fresh database makes it: then it is coffre's owner, whose login
@@ -552,7 +551,7 @@ type Managed = { relations: string[]; functions: string[]; types: string[] };
  * Postgres folds it. A name followed by a dot is a schema's, never the
  * object's: `CREATE TABLE public.%I`, in the SQL a function runs (0022,
  * 0049), makes no table named public. A renamed table's old name stays
- * among them: 0076 keeps it, a view, one release (T178).
+ * among them: 0076 keeps it, a view, one release.
  */
 export function managedObjects(sqlTexts: readonly string[]): Managed {
   const name = String.raw`(?:"?public"?\.)?(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_$]*))(?![A-Za-z0-9_$"]|\s*\.)`;
@@ -739,7 +738,7 @@ const CLEAN_BREAK = '0.4.0';
  * changes only what a database yet to apply it would do. 0022 gave the hot
  * login generic plans until 0.16.0; once a run had cleared them, a login
  * without ADMIN on the role could no longer migrate another database of the
- * server through it (T207, docs/design/planner-defaults.md).
+ * server through it (docs/design/planner-defaults.md).
  */
 const REWRITTEN: Readonly<Record<string, readonly string[]>> = {
   '0022_log_015': ['738dd033a0339eac8218494a5cc43568c1b06ad363cd2aa3c0dfc9c82570a2da'],
@@ -769,7 +768,7 @@ function verifyHistory(
   }
 }
 
-/** The last migration of 0.15.0, the one release 0.16 upgrades from (D197). */
+/** The last migration of 0.15.0, the one release 0.16 upgrades from. */
 const UPGRADES_FROM = '0049_reads';
 
 /**

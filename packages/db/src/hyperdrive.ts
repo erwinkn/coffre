@@ -191,7 +191,7 @@ export class HyperdrivePool implements Client {
   /**
    * The connection cut now, what it was asked failing at once, and every
    * turn after refused: for what a host stopped waiting on, a connection
-   * gone dead or a connect that never answers (T169), so that whatever
+   * gone dead or a connect that never answers, so that whatever
    * still awaits it fails rather than waits for good. Its statement may
    * still run in the database.
    */

@@ -1,4 +1,4 @@
-// Where each count of the log's prefix goes (T245): the whole prefix while it is short, else a window a checkpoint,
+// Where each count of the log's prefix goes: the whole prefix while it is short, else a window a checkpoint,
 // round the log; a verification's, the newest window.
 import test from 'node:test';
 import assert from 'node:assert/strict';

@@ -15,8 +15,7 @@ import * as schema from './schema.ts';
  * by the tables drizzle-kit generates from the schema. The template holds
  * what a schema cannot say: the audit chain's first rows, the audit log's
  * append-only and the secret versions' erase-only triggers, and the runtime
- * roles and their grants. Since 0.4.0, every database starts from this one
- * baseline.
+ * roles and their grants. Every database starts from this one baseline.
  *
  * The template is held to 0000_baseline.sql, so it keeps 0.4.0's names: a
  * table later renamed (0076's `vault_members`, now `principals`) is granted

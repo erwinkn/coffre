@@ -118,7 +118,7 @@ export type Client = Pick<PostgresClient, 'unsafe' | 'begin'>;
 /**
  * `lockWaitMs`: how long each lock wait of each transaction waits at most (`lock_timeout`, set in the transaction's
  * first Sync, a round trip no more: `later`), unless the work sets its own. Past it, the transaction fails with 55P03,
- * unavailable (`gaveUp`), rather than queue on: the app's, at `LOCK_WAIT_MS` (`@coffre/core/vault`, R75), so that a write
+ * unavailable (`gaveUp`), rather than queue on: the app's, at `LOCK_WAIT_MS` (`@coffre/core/vault`), so that a write
  * waiting for the fence never holds back the uses behind it longer than half their own wait. None: Postgres's own, for ever.
  */
 export function createDatabase(client: Client, { lockWaitMs }: { lockWaitMs?: number } = {}): Database {

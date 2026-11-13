@@ -1,4 +1,4 @@
-// The indexes the migrator builds without blocking writes (T245, `online-indexes.ts`): after the migrations'
+// The indexes the migrator builds without blocking writes (`online-indexes.ts`): after the migrations'
 // transaction, on every run until each is built, writes going on meanwhile; a build cut short built again; a
 // table partitioned by day indexed a day at a time, and a day made since taking its own.
 import test, { after, before } from 'node:test';
@@ -152,8 +152,7 @@ test("a run that finds every index built takes no lock a use's insert waits for:
     await writer.unsafe('LOCK TABLE log_uses, log_reads IN ROW EXCLUSIVE MODE');
     const started = Date.now();
     assert.deepEqual((await migrateDatabase(url)).unbuilt, []);
-    // In this database: pg_locks lists the cluster's, and another test file's waiter is not the run's (two in another
-    // file of 0.14's suite failed it, the run having waited for nothing).
+    // In this database: pg_locks lists the cluster's, and another test file's waiter is not the run's.
     const waiting = await session.unsafe<{ lock: string }[]>(`SELECT l.locktype || ' ' || l.mode || coalesce(' on ' || l.relation::regclass::text, '') AS lock
        FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`);
     assert.equal(waiting.length, 0, waiting.map(({ lock }) => lock).join(', '));

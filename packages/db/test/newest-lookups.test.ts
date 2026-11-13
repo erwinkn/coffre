@@ -1,6 +1,6 @@
-// The guard of T245's class of reads (R48): every read at run time that asks the audit log for the newest entries of a
+// The guard of one class of reads: every read at run time that asks the audit log for the newest entries of a
 // kind, its first, or a page back by `seq` (an `ORDER BY seq … LIMIT`, or its greatest or least `seq`), and every read
-// of an object's newest changes in 0.15's log, is one a test holds to the same cost however long the run of other
+// of an object's newest changes in `log_changes`, is one a test holds to the same cost however long the run of other
 // entries since: the vault's and the database's in `packages/vault/test/newest-lookups.test.ts`,
 // the server's in `packages/server/test/newest-lookups.test.ts`, each against a run of its kind then a long tail of
 // others. Postgres prices a walk back by `seq` with the rest as a filter as the one row it expects to meet first,
@@ -8,8 +8,8 @@
 // rotation behind 20,000 checkpoints. A new read of the kind fails here until it is listed, with the test that holds
 // it, or why it needs none. A read of an object's changes goes through `changesOf` (access-entries.ts): asked plainly,
 // Postgres walked the primary key back past every other object's changes, 441 pages behind 20,000 of another's. The database's functions' own are the vault's test's to list and hold.
-// Two shapes more walk a log as far (Sol r8 of #556): an `EXISTS` gate over a log, which the vault's start asked of
-// every rotation (4,741 pages past 40,000), and the least or greatest of a column of 0.15's uses, which the
+// Two shapes more walk a log as far: an `EXISTS` gate over a log, as one the vault's start asked of every rotation
+// (4,741 pages past 40,000), and the least or greatest of a column of `log_uses`, which the
 // checkpointer's `lowestAbove` asks past every use sealed at the `at` a backlog shares (7,069 pages past 390,000). Each
 // is listed too, with its test or why none needs one.
 import test from 'node:test';
@@ -50,13 +50,13 @@ const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   'packages/db/src/log.ts#firstEntryUnder': { by: VAULT, as: 'firstVaultEntryUnder' },
   'packages/server/src/db/rotation.ts#newestAppEntry': { by: SERVER, as: 'newestAppEntry' },
   'packages/server/src/db/queries.ts#memberAccess': { by: SERVER, as: 'memberAccess' },
-  // Whether a member no row names has an access entry: as an `EXISTS`, a scan past every refusal about them (review r8).
+  // Whether a member no row names has an access entry: as an `EXISTS`, a scan past every refusal about them.
   'packages/server/src/db/queries.ts#missingMembers': { by: SERVER, as: 'missingMembers' },
   // A member's tamper reports of either kind, by `audit_log_tamper_idx` (`reportsAbout`): the newest of 0.14's beside a
   // statement's other reads.
   'packages/db/src/grants.ts#findingsOf': { by: VAULT, as: 'findingsOf' },
-  // Over all of a kind's history at once, which T248 bounds (Sol r6 of #556, items 5 and 6): every member's findings,
-  // and every member's newest access entry, a pass over the vault (its start on 0.14's log alone, a cutover).
+  // Over all of a kind's history at once, not bounded yet: every member's findings, and every member's newest access
+  // entry, a pass over the vault (its start on 0.14's log alone, a cutover).
   'packages/db/src/grants.ts#tamperedMembers': { none: "every member's findings, grouped: T248" },
   'packages/db/src/grants.ts#tamperedMembers#2': { none: "the newest access entry of each member with 0.14's findings, grouped: T248" },
   'packages/server/src/db/audit.ts#appVerifier': { none: "the first of the app's moves from each previous key, grouped: the moves alone, a few for each change of key" },
@@ -66,12 +66,12 @@ const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   'packages/db/src/log.ts#streamsOf': { by: SERVER, as: 'auditPage' },
   'packages/vault/src/store.ts#entriesFrom': { none: 'a batch of the chain from an entry on, by the primary key, with nothing to filter' },
   // The audit page: by actor a stream of each one's through `audit_log_actor_idx` (`withinBytes`' `by`), held by the
-  // server's test; its other filters a search, a page at a time, which T248 bounds with its counts.
+  // server's test; its other filters a search, a page at a time, not bounded yet.
   'packages/server/src/db/queries.ts#auditPage': { by: SERVER, as: 'auditPage' },
 };
 
 /**
- * Each read of an object's newest changes in 0.15's log through `changesOf`, by the function it is in: the test that
+ * Each read of an object's newest changes in `log_changes` through `changesOf`, by the function it is in: the test that
  * holds it. `changesOf` itself, its shape of a value, of `log_object(…)` and of a column beside, is the vault's test's.
  */
 const CHANGES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> = {
@@ -98,11 +98,11 @@ const CHANGES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> 
 const LOG_STORE = 'packages/vault/test/log-store.test.ts';
 
 /**
- * Each `EXISTS` gate over a log (0.14's, 0.15's changes or uses), by the function it is in: the test that holds it to
+ * Each `EXISTS` gate over a log (`audit_log`, `log_changes` or `log_uses`), by the function it is in: the test that holds it to
  * the same cost however long the run of other entries.
  */
 const GATES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | { none: string }> = {
-  // 0.15's named findings, by `audit_log_tamper_idx` and the change it names.
+  // Findings that name a change, by `audit_log_tamper_idx` and the change it names.
   'packages/db/src/grants.ts#findingsOf': { by: VAULT, as: 'findingsOf' },
   // Whether an append's key was moved from, by `audit_log_subject_idx` keyed by the key.
   'packages/db/src/log.ts#underHead': { by: VAULT, as: 'lockLogHeadRead' },
@@ -112,13 +112,13 @@ const GATES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
 };
 
 /**
- * Each least or greatest of a column of 0.15's uses (`min(…)`, `max(…)` … `FROM log_uses`), by the function it is in:
+ * Each least or greatest of a column of `log_uses` (`min(…)` or `max(…)`), by the function it is in:
  * the test that holds it, or why none needs one.
  */
 const USES: Record<string, { by: typeof LOG_STORE; as: string } | { none: string }> = {
-  // The lowest `at` of the uses a part of a capped window left above it (T169). Uses stamped one after another move the
+  // The lowest `at` of the uses a part of a capped window left above it. Uses stamped one after another move the
   // floor it reads from with the cursor, which the test holds; past uses sharing one `at` it walks every use sealed at
-  // it: T248, its floor from the skew bound changes what HotPathOne.tla's ChunkFloor signs, the model first (R45). The
+  // it. Its fix, a floor from the skew bound, changes what HotPathOne.tla's ChunkFloor signs: the model first. The
   // test's case for it is a todo until then.
   'packages/vault/src/log-store.ts#postgresStore': { by: LOG_STORE, as: 'lowestAbove' },
 };
@@ -135,7 +135,7 @@ function within(text: string, at: number): string {
   return found?.[1] ?? found?.[2] ?? '(top)';
 }
 
-/** The table a statement at `at` reads, the last named before it: the audit log or 0.15's changes. */
+/** The table a statement at `at` reads, the last named before it: the audit log or `log_changes`. */
 function tableAt(text: string, at: number): 'audit' | 'changes' | null {
   const named = [...text.slice(Math.max(0, at - 700), at).matchAll(/\b(audit_log|auditLog|log_changes|logChanges)\b/g)].pop()?.[1];
   return named === undefined ? null : /audit/i.test(named) ? 'audit' : 'changes';
@@ -179,7 +179,7 @@ function changeSites(): { keyed: string[]; plain: string[] } {
   for (const { file, text } of sources()) {
     if (file === 'packages/db/src/access-entries.ts') continue;
     for (const use of text.matchAll(/\bchangesOf\(/g)) keyed.add(`${file}#${within(text, use.index)}`);
-    // Each spelling: SQL's words, or Drizzle's columns interpolated (`${logChanges.number}`, Sol r7 of #556).
+    // Each spelling: SQL's words, or Drizzle's columns interpolated (`${logChanges.number}`).
     const asked = /\.object\}?\s*=\s*(?:(?!ORDER BY|`).)*?ORDER BY (?:\$\{)?[\w.]*number|eq\(logChanges\.object,[^\n]*\n?[^\n]*orderBy\((?:asc|desc)\(logChanges\.number\)\)|\b(?:max|min)\((?:\$\{\w+\.number\}|\w*\.?number)\)\s+FROM (?:log_changes|\$\{logChanges\})\s*\w*\s*WHERE (?:\$\{\w+\.object\}|\w*\.?object)\s*=/g;
     for (const read of text.matchAll(asked)) plain.add(`${file}#${within(text, read.index)}`);
   }
@@ -210,13 +210,13 @@ function placesOf(pattern: RegExp, files: Source[], keep: (match: RegExpMatchArr
 
 /** A log, as a statement names it: its table, or Drizzle's (`${auditLog}`, or `${log}` as `findingsOf` calls it). */
 const LOG = /^(?:audit_log|log_changes|log_uses|\$\{(?:auditLog|logChanges|logUses|log)\})$/;
-/** 0.15's uses, as a statement names them. */
+/** `log_uses`, as a statement names it. */
 const LOG_USES = /^(?:log_uses|\$\{logUses\})$/;
 
 /**
  * What else a gate's subquery or an aggregate reads from, by the name a statement gives it: no log, each with what it
  * is. A name neither a log nor here (a CTE, an alias, Drizzle's table under a name of its own: `${history}`) is one the
- * scans cannot follow, so it is a site to list as a log's would be, until it is named here (review r9 of #556).
+ * scans cannot follow, so it is a site to list as a log's would be, until it is named here.
  */
 const NOT_LOGS: Record<string, string> = {
   ...Object.fromEntries(['pg_locks', 'pg_roles', 'pg_shdepend', 'pg_auth_members', 'pg_db_role_setting', 'pg_depend', 'pg_inherits'].map((name) => [name, "Postgres's catalog"])),
@@ -252,8 +252,8 @@ function gateSites(files: Source[] = sources()): string[] {
 }
 
 /**
- * Each `min(…)` or `max(…)` of a statement whose first table after it is 0.15's uses (`FROM log_uses`, or Drizzle's
- * `${logUses}`), or one the scan cannot follow, whatever else it selects beside.
+ * Each `min(…)` or `max(…)` of a statement whose first table after it is `log_uses` (or Drizzle's `${logUses}`), or
+ * one the scan cannot follow, whatever else it selects beside.
  */
 function useSites(files: Source[] = sources()): string[] {
   return placesOf(/\b(?:max|min)\((?:\$\{[\w.]+\}|[\w.]+)\)(?:(?!\bFROM\b|`|\(SELECT\b).){0,200}?\bFROM\s+(\$\{[\w.]+\}|\w+)/gs, files, (match) =>
