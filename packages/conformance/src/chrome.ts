@@ -146,9 +146,24 @@ export class Chrome {
    * whose text is read with the rest, and may answer what it saw.
    */
   async load(url: string, cookies: [string, string][], settle = 2_000, then?: string): Promise<Loaded> {
+    // Chrome aborts every request in flight when a network interface of the host comes or goes (a Docker network
+    // made or removed by another run), loopback included, and no switch turns that off. Measured while such a
+    // network was made and removed every 8 s: 9 of 40 page loads failed this way, 2 of 40 with the retry here
+    // (a second change during the retry). A load that saw that before `then` ran is made once more and judged on
+    // its own.
+    const first = await this.#load(url, cookies, settle, then);
+    if (first !== null) return first;
+    console.log(`  note  ${url}: Chrome aborted its requests as the host's network changed; loaded again, judged on its own`);
+    const second = await this.#load(url, cookies, settle, then);
+    if (second === null) throw new Error(`Chrome aborted the requests of ${url} twice as the host's network changed`);
+    return second;
+  }
+
+  async #load(url: string, cookies: [string, string][], settle: number, then?: string): Promise<Loaded | null> {
     const { targetId } = (await this.#send('Target.createTarget', { url: 'about:blank' })) as { targetId: string };
     const { sessionId } = (await this.#send('Target.attachToTarget', { targetId, flatten: true })) as { sessionId: string };
     const errors: string[] = [];
+    let networkChanged = false;
     let loaded!: () => void;
     const load = new Promise<void>((resolve) => (loaded = resolve));
     const listener = (message: Message) => {
@@ -163,6 +178,8 @@ export class Chrome {
       } else if (message.method === 'Log.entryAdded') {
         const entry = params.entry as { level: string; text: string; url?: string };
         if (entry.level === 'error') errors.push(`${entry.text}${entry.url ? ` (${entry.url})` : ''}`);
+      } else if (message.method === 'Network.loadingFailed' && params.errorText === 'net::ERR_NETWORK_CHANGED') {
+        networkChanged = true;
       } else if (message.method === 'Page.loadEventFired') {
         loaded();
       }
@@ -175,6 +192,7 @@ export class Chrome {
       await Promise.race([load, new Promise((resolve) => setTimeout(resolve, 30_000))]);
       // What streams in after the load, and hydration, have their time: the page may render, then fail.
       await new Promise((resolve) => setTimeout(resolve, settle));
+      if (networkChanged) return null;
       let answer: unknown = null;
       if (then !== undefined) {
         const { result } = (await this.#send('Runtime.evaluate', { expression: then, awaitPromise: true, returnByValue: true }, sessionId)) as {
