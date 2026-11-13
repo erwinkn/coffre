@@ -5,7 +5,8 @@
 The vault makes and ends these credentials itself, each in one call to it:
 
 - a sign-in through a trust binding: a CI run's (`POST /api/auth/oidc`) or a workload's (`POST
-  /api/auth/workload`), `Vault.signIn`;
+  /api/auth/workload`) for a proof that decides nothing in a transaction (`oidc`, `aws`),
+  `Vault.signIn`;
 - a revoke or a sign-out, `Vault.revokeCredential`;
 - a token's issue, a service token, a personal token or a handle, `Vault.issueToken`;
 - making and ending a service's trust bindings, `Vault.changeBindings`.
@@ -17,8 +18,8 @@ app's login, so were these its transactions it could mint any credential. And no
 statements takes the log's head, which every app write waits for, so a burst of CI sign-ins queues
 nothing behind it.
 
-Other credential changes (a browser, device or passkey sign-in, a passkey reset, the key rotation's
-sign-outs) stay the app's transactions, each change sealed by the vault first
+Other credential changes (a browser, device or passkey sign-in, a workload's enrollment session, whose
+proof decides its capacity in the transaction, a passkey reset, the key rotation's sign-outs) stay the app's transactions, each change sealed by the vault first
 (`AppChanges.prepare`). A vault mid-deploy that does not say it makes, issues or binds (`about()`)
 gets those paths too. `formal/Lifecycle.tla` models it all (section 5).
 

@@ -65,7 +65,9 @@ sets an instance role, and makes a project only when its scope takes new ones in
 `all` or `all except`, environments `all`: `makesProjects`).
 
 - **Nobody changes their own instance role or scope, nor grants themselves a role** (`not_allowed`).
-  Giving one up is fine.
+  Giving one up is fine. The one exception is an Owner of the whole instance, who holds all there is
+  and so may change their own role, stepping down included (`ownsInstance` in
+  `packages/vault/src/vault.ts`).
 - **An Admin holds no secret permission, and that is no boundary.** It can grant a reading role to
   someone else, or reach any value in its scope in three logged steps: admit a service account,
   grant it `owner` on a project, issue its token. Keep Admins to people you would trust with the

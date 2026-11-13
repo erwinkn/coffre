@@ -134,7 +134,9 @@ Each way is a vault `reference.end` entry naming the reference's `reference.crea
   value until written again: refused, never stale.
 - **Abandoned, by the app**, `reason: "abandoned"`: when the row's write stores nothing, the app
   ends the seal at once, as its maker; the vault takes this end from the seal's maker alone. A crash
-  between the two leaves a seal with no row, which is no reference.
+  between the two leaves a seal with no row, which is no reference. Reviving it takes the app's
+  login, and yields only a reference its maker was allowed to make, read only by whoever reads its
+  holder.
 
 An ended reference stays ended. Archiving the holder ends nothing: unarchiving brings it back.
 
