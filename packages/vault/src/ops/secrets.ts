@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { Answers, Presented, SecretWrite } from '@coffre/core/vault';
+import type { Answers, Presented, SecretsChanges, SecretWrite } from '@coffre/core/vault';
 import { environments, projects, secrets } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
@@ -8,6 +8,7 @@ import { callerFrom, callerParts, live } from '../caller.ts';
 import { part, put, type Operation, type Parts, type Seen, type Value, type Write } from '../change.ts';
 import type { Fresh } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
+import type { Operations } from './index.ts';
 import { KEY, presented, text } from './input.ts';
 
 /** The app's own bounds (its routes'): a value's length in characters, the keys of one write, and a request's body, which every value of a write came in. */
@@ -26,7 +27,7 @@ const written = (value: unknown): value is string => typeof value === 'string' &
  * that reaches it. A key that was a reference holds its own value from
  * here on. All of them, or none.
  */
-export function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation<Parts, Answers['secret.write']> {
+function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation<Parts, Answers['secret.write']> {
   const shown = presented(input);
   const { project: projectSlug, environment: environmentSlug, values } = input;
   const items = Array.isArray(values) ? [...values] : [];
@@ -95,3 +96,6 @@ export function secretWrite(input: Presented & SecretWrite, vault: Deciding): Op
     },
   };
 }
+
+/** The changes of keys and their values. */
+export const secretOperations: Operations<SecretsChanges> = { 'secret.write': secretWrite };
