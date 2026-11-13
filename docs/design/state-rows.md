@@ -4,12 +4,12 @@ Draft, `[DESIGN, DO NOT MERGE]`: the build plan for finishing what 0.15 started.
 Postgres; a clean break (0.16 upgrades offline from exactly 0.15.0, rollback is restoring the backup); at most 2
 secondary indexes per table; derive, don't sync; typed columns; no planner steering; the 5 s statement timeout last.
 Decided since the first draft and folded in (section 8): the two JSON values SQL never reads stay JSON (D199); the
-audit page checks the log on every visit, at a flat cost (D200); per-object locks are in 0.16, last before the timeout
-(D201); the offboarding report covers the reads retention keeps and every write; old heartbeats and checkpoints are
-not listed. Assumed: audit filtered by place stays for the CLI and API; a change still answers only once sealed.
-Numbers were measured on 2026-11-12 on main `021a8863`, on a Postgres 16.14 of my own: `pg_stat_statements` under the
-dev stack, `EXPLAIN (ANALYZE, BUFFERS)` in a warm session, `pgbench` with one client, and `change-cost.test.ts`'s
-harness for round trips. Catalog facts come from a migrated database.
+audit page checks the log on every visit, at a flat cost (D200); 0.16 keeps 0.15's one fence, and per-object locks are
+not in it (D202, which supersedes D201); the offboarding report covers the reads retention keeps and every write; old
+heartbeats and checkpoints are not listed. Assumed: audit filtered by place stays for the CLI and API; a change still
+answers only once sealed. Numbers were measured on 2026-11-12 on main `021a8863`, on a Postgres 16.14 of my own:
+`pg_stat_statements` under the dev stack, `EXPLAIN (ANALYZE, BUFFERS)` in a warm session, `pgbench` with one client,
+and `change-cost.test.ts`'s harness for round trips. Catalog facts come from a migrated database.
 
 ## 1. Today in one page
 
@@ -56,9 +56,9 @@ checkpointer's ticks and the projector's batches included. Section 3 has the req
 Every authenticated request pays the same toll, whatever it does: the vault's snapshot statement reads the policy and
 the caller's access from `audit_log` 2 to 4 times, and a cutover check (`SELECT number FROM log_changes WHERE object =
 $1`) runs as often. Changes are written twice: a seeded database holds 56 `audit_log` entries beside 58 changes. And a
-change takes two global locks: the row `audit_chain_head` in its first statement, which no use takes, then in its
-last statement an advisory lock exclusive (the **fence**) that every use takes shared. So a use waits for a change
-only from the change's last statement to its commit, one round trip; that wait is what L1 removes.
+change takes two global locks: the row `audit_chain_head` in its first statement, which no use takes, then in its last
+statement an advisory lock exclusive (the **fence**) that every use takes shared. So a use waits for a change only
+from the change's last statement to its commit, one round trip. 0.16 keeps that wait (D202).
 
 **The cost is planning.** In a warm session:
 
@@ -575,11 +575,10 @@ object 0.16 seals again. One test per path: protect, unprotect, a protect of an 
 must touch nothing. That change carries the `policy.change` entry (above), from the PR that deletes the vault's append
 of it to `audit_log`, not before. It is built with the carrier, and A1's two numbers stack on it.
 
-Under L1, which lands after V2b, a protect locks the policy object alone, exclusive, as a change of the cap does.
-Every use holds it shared, so a protect excludes uses for its last statement, and `ChangeLocks`' policy change is its
-scenario already: no model changes. What a use pays is the list in the policy row, 16 bytes an id, read when its copy
-of the policy is not cached, and a lookup in it; V2a measures it. A protect's change holds the whole policy, so its
-payload grows with the set, as the `policy.change` entry's does today.
+A protect is a policy change as the lock table has it (below): the issue lock exclusive, then the fence in its last
+statement, where every use waits for it. What a use pays is the list in the policy row, 16 bytes an id, read when its
+copy of the policy is not cached, and a lookup in it; V2a measures it. A protect's change holds the whole policy, so
+its payload grows with the set, as the `policy.change` entry's does today.
 
 **Locks after.** `audit_chain_head`, the reads under it, the 0.14 appends and the queued read head are deleted; one
 advisory lock statement stays in multi-statement changes. The head did two jobs and only the first dies with the last
@@ -596,139 +595,77 @@ write holds the fence and waits for the key's row, while another change of that 
 fence. The member add takes it as every change does: one rule, no exemption. Each statement is the one the head's
 was, so no budget gains one.
 
-**Object locks (L1, D201).** Last before the timeout, the fence becomes the checkpointer's alone: a use and a
-change's last statement take it shared, so its barrier still waits for every number in flight. Each object a decision
-reads gets an advisory lock keyed by the object. A use takes the lock of each object it reads, shared; a change's last
-statement the lock of each object it writes, exclusive. A write to one key then makes only the uses of that key wait,
-for that statement. L1 moves none of the 14 protections: they are change against change, the change lock's. A use
-stays one statement, one round trip, one vault call. The models (T282, a draft stacked on #573) hold it; what they
-fixed:
+**The fence stays (Erwin, D202, which supersedes D201).** 0.16 keeps 0.15's one fence. A use takes it shared inside
+its one statement, a change exclusive in its last statement, the checkpointer's barrier exclusive at each tick. So a
+use waits for a change from the change's last statement to its commit, and for nothing else of it. 0.15 held 1,000
+uses a second that way with no refusal. The rule for every lock is Erwin's: one only where it is necessary or
+measurably better.
 
-- **Which objects:** the ones whose seal the statement checks, so whose newest change a use already seeks. That is the
-  rule; a list is today's instance of it, and a kind left out is the unlocked object the models break on. Its
-  credential (or connection, binding or Access account), its member, the roles, the policy, the key and the key's
-  environment: 6. Another place, a personal config's parent, a reference's source and the source's environment make 10
-  at most by ids. By name, the fork chain adds up to 3 environments; a route, its definition a level and its editor's
-  member.
-- **One order:** the change lock, the issue lock, the fence, the objects' locks sorted by lock key, then a use's
-  principal's lock. A transaction takes its objects' locks once, all of them, before its first read or write under
-  them. Three ways to break that each close a wait cycle, a 1 s stall in Postgres: a batch taking each key's lock as
-  its turn comes; a statement of several `app_change` calls (a project's delete) taking each call's as it comes; and
-  `use_batch` (`use_id_batch` from V2a) taking its principal's lock before its keys, as it does today.
-  `revoke_credential` takes the issue lock shared, new with L1, as every other change does: its fence was exclusive,
-  which ordered it against the checkpointer's barrier, and shared it no longer does. With that, the fence before the
-  objects is the code's shape and no protection (the models keep the other order as a scenario that holds). An event
-  the app commits with its changes (`log_events`, which shares the fence) comes after them in that statement: before
-  them, the transaction would hold the fence when its change asks for the issue lock, while the checkpointer holds the
-  issue lock and waits for the fence.
-- **A use reads ids before it locks.** The call names its credential, key and place; the member is on the credential's
-  row, a reference's source on the reference's. The function reads those ids with no lock, takes the locks, then runs
-  its statement. A key made a reference in between names an object the call did not lock: the statement writes nothing
-  and answers `moved`, and the vault calls again. A use never locks after its first read. The locks are a statement of
-  their own, ahead of the lean and the full read statement alike (taken inside a reading statement, they would come
-  after its snapshot). A handoff from the lean one takes none, so a use still waits once. By name, the read names the
-  key's ids only to a caller who stands at the place, so one with no standing locks nothing of the key and no wait
-  tells her it exists. A caller revoked between that read and the locks may wait for a write of the key and is
-  refused: the instant that counts is the read's, when the key was hers to know of.
-- **A hold shares what it read.** The fence held exclusive did one more job: it made a two-trip write's hold stand to
-  its COMMIT against a change that takes no change lock. So `hold_inputs` and `admit_hold` take the lock of each
-  object the vault decided on, shared, with those they write; `write_request` reads as a use does, under the same
-  locks. A bind that makes a binding does the same for each key it read by name, where its statement takes the fence
-  today (it also ends a binding outright, or revokes a credential): there the fence holds a rename off between its
-  compare of those names and its commit. Where it takes none today, it takes no lock after, and a rename that commits
-  after its compare is a rename after the bind, as today. An entry that changes no object (`note`, a refusal) shares
-  the fence and takes none.
-- **Advisory locks, not `FOR SHARE`.** A statement takes its snapshot before it waits for a row's lock, so a use that
-  waited for a change would decide on the other rows as they were before it. Row share locks also write the row
-  (`xmax`, then a multixact for two holders, on the rows every use reads: 0.14.3's cost) and conflict with every
-  update of it, a credential's last use too.
+**Every lock 0.16 takes.** Read on main `95efd73ad`: the final definition of each of its 53 SQL functions, and the
+TypeScript that locks. The head's row is counted as the change lock already. "Without it" names the model's removal
+run, the protection taken out and the invariant that then breaks, or says that nothing models it.
 
-Cost, on the reference rig: 11 shared advisory locks taken in one statement cost 0.0024 ms more than 1 (0.0095 ms
-against 0.0071 ms a round); the 0.013 ms measured first took each in a statement of its own. The bound that matters is
-Postgres's shared lock memory, where advisory locks live. It is two tables (`lock.c`, `InitLocks`, Postgres 16). One
-has an entry for each locked object, whoever holds it: `max_locks_per_transaction` (64) for each process Postgres can
-run, 6,400 at 100 connections as the documentation counts, 7,808 with its own workers at stock settings. The other has
-an entry for each object for each holder, sized at twice the first ("Assume an average of 2 holders per lock"). What
-holds locks at once is a connection, not one of the 1,250 keys an isolate has in flight. Keyed by the object, single
-uses never come near (13 each). A batch statement of 100 keys holds its caller's 4 and 1 to 6 a key: about 110 when
-its keys share an environment, 604 at the very worst (each key in a place of its own and a reference into another),
-and twenty of those on the hot path's connections lock 12,080 objects, since every key is an object of its own. Memory
-that runs out fails whoever asks next, anywhere in the cluster, with an error.
+| Lock | Who takes it, how, for how long | Without it | Who waits, at worst | Verdict |
+|---|---|---|---|---|
+| **Change lock** (advisory, one a database; the row `audit_chain_head` until A1) | every change, exclusive, from its first round trip to its commit | 14 protections, each with its run (the `…UnderChangeLock` of `Coffre.tla`'s scenarios: two Owners who each remove themselves, `OwnerStays`); `WriteLocks`: WriteTakesChangeLock, ChangeLockFirst > `NoWaitCycle` | every other change, for the holder's transaction: 2 to 5 round trips, tens of ms through Hyperdrive. No use. Each wait is bounded (`LOCK_WAIT_MS`) and tried again | necessary |
+| **Issue lock** (advisory `(1668244070, 1)`) | shared: a sign-in, an issue, and a change's last statement, to the commit. Exclusive: the barrier and a rotation's number, before the fence; a policy change and a protected environment's rename, from that statement to the commit | `Lifecycle`: IssuePolicyHeld > `SensitiveOnlyFromOwners`. `HotPathOne`: BarrierWaitsIssues, IssueNumberUnderLock > `CheckpointsHold`; IssueOwnLock > `UsesNeverWaitOnIssues`. `ChangeLocks`: IssueBeforeFence, BarrierIssueFirst > `NoWaitCycle` | sign-ins and issues, behind a policy change's last round trips and behind each barrier. No use, which is its point | advantageous: before it, a fifth of the uses beside 30 sign-ins waited up to 50 ms (R58, `0.15-plan.md`). On merging it into the fence, see below |
+| **Fence** (advisory `(1668244070, 0)`) | shared: every use, a refusal's entry, an event, a retention change, a write's request, for the statement. Exclusive: a change's last statement (except the change of a credential its own transaction made), a two-trip write's hold, a revoke, a bind that ends a binding or revokes; the barrier | `HotPathOne`: UseLocks, ChangeLocks, LockToCommit > `TotalOrder`, `NothingAllowedAfterAnswer`; CheckpointLocks > `CheckpointsHold`. `Lifecycle`: RevokeTakesFence > `RevokeOrdersUses`. `Writing`: HoldAfterFence > `WritesStandAtCommit` | every use, behind each change's last statement and its commit (a few ms; a removal's revokes in batches of 10 ms) and behind each barrier | necessary |
+| **Principal's lock** (advisory `(1668244066, hash)`) | a use whose key enters its caller's cap set, exclusive; one that moves a key on to a new period, shared; a batch's second round, exclusive, before its first key. To the commit | `HotPathOne`: PrincipalLocks > `BulkCapHolds`, `BulkReplayAgrees`; RefreshLocks > `BulkReplayAgrees`; RefreshShared > `RefreshesNeverQueue`. `Batching`: StrongestFirst > `NoWaitCycle` | the same caller's other uses that take it, for one statement and its commit | necessary |
+| **The cap's election lock** (`b_lock`: advisory, one a caller, key, period and round) | the uses moving one key on, under the principal's lock shared: one gets it without waiting and writes the cap's row; the others take it shared and read the row again; a winner that rolled back costs them a round more, on another lock. To the commit | nothing modelled, and no test names it. By the SQL's comment, each mover's UPDATE would queue on the row and keep it locked to its own commit: N uses committing one behind another at each period | the losers, for the winner's commit | advantageous under the shared lock, though never measured alone. Neither under the exclusive one: delete it there (below) |
+| **Member's queue** (advisory `(1668245101, hash)`), with the member's row | a decision that names members: queue, then row, in principal order. Exclusive for a change, shared for the vault's reads under the head. A key rotation takes every member's | the row: `Members`, `Sharing`: StandingRecheckUnderChangeLock > `NothingReleasedAfterRevocation`; `Locks`: SortedMemberLocks > `NoWaitCycle`. The queue: nothing modelled. It is fairness: a stream of shared row locks never lets a removal in (`store.ts`) | changes that name the same member, for the holder's transaction | the row: necessary. The queue: neither, once nothing takes it shared (below) |
+| **Factor lock** (advisory `(1717658484, hash)`) | an issue, for its issuer, and a change of that person's passkeys: exclusive, first, to the commit | `Factor`: IssueTakesFactor, ChangeTakesFactor > `ChangeEndsAll`, `LiveFromLive`; FactorFirst > `NoWaitCycle` | one person's issues and passkey changes, each behind the other | necessary |
+| **Place in line** (advisory, tried: `reserveProxy`'s one place. The reads' 16 go with the reads under the head) | the one call that reserves a deploy's proxy names, to its commit; the others are refused at once and ask again | nothing modelled. Measured (#467): 3,080 no-op decisions queued 200 s behind the head at 1,000 uses a second, and every use behind them | nobody: it is tried, never waited for | advantageous |
+| **Rows of members, credentials, bindings, connections** (`FOR SHARE`, `FOR KEY SHARE`, `FOR UPDATE`, in id order) | a sign-in, an issue, a bind, a revoke, inside their one statement, to the commit | `Lifecycle`: IssuerLocked > `SensitiveOnlyFromOwners`, `IssuedByLiveCredential`; BindingLocked, UnbindExclusive > `EndedBindingEndsCredentials`; TouchSkipsLocked > `SignInsRunTogether`. `Members`: MemberRecheckInSignin > `CredentialsAtCurrentGeneration` | an unbind behind the sign-ins through its binding, and they behind it, for one statement | necessary: an issue and a sign-in take no change lock |
+| **A key's row** (`FOR UPDATE` at 7 sites of the app; `FOR SHARE` in `end_reference`) | a key's write, move, restore or delete, each in a change, to the commit | nothing modelled for the explicit lock: `WriteLocks` has the row as the UPDATE takes it | another change of that key, which the change lock already holds off | not judged: each site says which race it is for, and I did not read the seven |
+| **A key rotation's signed rows** (`FOR UPDATE`, a page a step) | the app's rotation step, to its commit | nothing modelled that I found. By its comment: a session's renewal, which takes no change lock, would slip past the step | a renewal of a row on that page, for one step | necessary by its comment, not checked |
+| **Sweeps** (`FOR UPDATE SKIP LOCKED`: the cap's old rows, spent tokens, old releases) | one sweeper at a time, for its statement | nothing modelled: two sweepers would do one's work twice | nobody: a locked row is skipped | harmless |
+| **The projector's** (P1: the fence shared in `project_audit`; a rebuild's `TRUNCATE`) | a batch of the projector; a rebuild | `Reads`: CursorAfterRows > `LagShown` | the audit page, behind a rebuild's `TRUNCATE` | P1's to state |
+| **The migrator's two** (advisory, session-long) | `coffre migrate`, and its index builds | nothing modelled: two migrators at once. On no request's path | a second migrator | necessary |
 
-**Stripes (coordinator, on L1's report).** An object's lock key is a hash of the object modulo a fixed count of
-stripes. A transaction takes its stripes once, sorted and deduplicated, exclusive on a stripe it asks for both ways. A
-stripe is one object to Postgres however many connections share it, so every use and change of a database lock the
-count of stripes between them, 32 objects where the worst moment above locked 12,080. And a transaction holds at most
-that count whatever it reads, with no limit on a batch and no Postgres setting for a deployment to raise. Not taken:
-smaller batch statements (a 100-key request becomes 4 statements in turn), and a setup that refuses a small
-`max_locks_per_transaction` (a restart, which not every managed Postgres allows).
+Not locks, and counted nowhere above: the UPDATEs' own row locks (a credential's last use, a binding's stamp, the
+cap's row), which no statement asks for by name.
 
-**The count is 32, derived.** With stripes the objects are no bound. The stripes and the three locks everyone shares
-(the change lock, the issue lock, the fence) are 35 objects a database. The other advisory locks are one object a
-caller, so at most a few a connection: a use's principal's lock and the cap's election locks under it (below), an
-issuer's factor lock, a place in line for the change lock (`reserveProxy`), and the queue lock of each member a
-decision names. All of it is a few hundred of 6,400 with every pool busy. The bound is the holders, and it is a
-transaction's own: Postgres reserves 128 holder entries for each process by the source, and by the documentation only
-the 64, which it calls the average number of object locks a transaction uses. So if no transaction of coffre's holds
-more than its budget, coffre cannot run the memory out, whatever the pools' sizes and whichever of them is busy. A
-transaction holds its stripes, at most 5 other advisory locks (a change: the three shared and two members' queues,
-when one member changes another; a use: the fence, its principal's lock and at most 3 of the cap's election, below),
-and its relation locks past the 16 a backend keeps outside the tables (the fast path), tables and indexes both.
+**What can go now.** Three, none of which needs a model:
 
-- **128 stripes** and the 5 others are 133 holder entries, past 128 before a relation is counted. They hold only while
-  other connections sit idle.
-- **64 stripes** leave room: 64 + 5 + 27 = 96 of 128, with no argument about pools. But they stand on the factor of 2,
-  which is in the source and in no documentation.
-- **32 stripes** fit the documented setting alone: 32 + 5 + 27 = 64.
+- **The election under the exclusive lock.** A batch's second round holds its principal's lock exclusive, and each key
+  still runs the election and wins it at once: up to 100 advisory locks a statement (`limits.batch`), each an entry in
+  Postgres's lock table, electing among nobody. The smallest change: the cap's write is a plain UPDATE when its
+  transaction holds the lock exclusive (`locked` in the function, `p_lock` from `use_batch` and `use_route`). V2a
+  rewrites these statements anyway.
+- **The batch that locks nothing first.** A second round whose rows name two principals for one credential, which only
+  a credential's row written around the log produces, is sent with no lock ahead of its keys (`byIds`, `lock = null`):
+  each key locks as its turn comes, and two such calls can wait on each other until Postgres ends one. The smallest
+  change: `byIds` answers busy and sends nothing.
+- **The members' queue, with its last shared caller.** Its 5 shared callers on main are the vault's reads under the
+  head (`#decide` with `reads: true`), which the plan deletes. After that only changes take it, exclusive, in the
+  statement that locks the same member's row, and it orders nothing the row does not. The smallest change:
+  `lockMembers` and `change_input` drop their `pg_advisory_xact_lock`, in the PR that removes the last shared caller,
+  with the check of the pair's order in `scripts/test-schema.sh`. If a shared caller stays, the queue stays.
 
-So 32: going from 17% to 9% of a few milliseconds behind a rare change (below) does not pay for leaning on an
-undocumented factor. The pools add margin on top, since `coffre setup` gives the three Hyperdrive configs (the app's,
-the vault's, the hot path's) a third each of `max_connections` less the reserved slots and 3, at most 20: at most 60
-of 100 processes are coffre's. This section first set 60 connections x 128 stripes = 7,680 against the 6,400; those
-are holders counted against the objects' table, and 128 falls for the reason above, not that one. Neither size is a
-cap: both reserve one pool of shared memory with a tenth over (`LockShmemSize`), and a table past its size takes what
-the other left. That is how one session alone held 12,832 distinct locks at 100 connections (5,248 at 25), an entry in
-each table for each. Postgres promises none of that slack, and the count leans on none.
+**What does not go now: the issue lock into the fence.** They do different jobs today. The fence orders uses against
+changes. The issue lock lets a transaction number a new credential, and compare the policy it was weighed on, without
+standing on the fence. It could not be the fence taken shared, for one reason (`0.15-plan.md`, "Uses never wait on
+sign-ins"): Postgres queues a shared request behind a waiting exclusive one, the barrier asks for the fence exclusive
+at every tick, and a sign-in held its lock for its last two round trips, about 40 ms, so every use queued behind the
+barrier that queued behind the sign-in. Freezing `audit_log` removes most of that reason: the 0.14 entry whose trigger
+took the locks early is gone, and `sign_in`, `issue_token` and `change_bindings` are one statement each, their lock
+taken last. If every issue takes it in its transaction's last statement, an issue holds the fence no longer than a use
+does, and the fence shared could carry it. Three things stand between that and a deletion. A policy change takes the
+issue lock exclusive from the middle of its transaction (`vault.ts:3262`), which on the fence would stop every use for
+its remaining round trips, so it moves to the last statement first. I did not read A1's app sign-in to see that its
+issue is in its last Sync. And `HotPathOneIssue`, `Lifecycle` and `ChangeLocks` are re-cut (about seven protections go
+with the lock, one comes: an issue takes the fence last), with R58's bench run again. It would save one lock statement
+in each change and in the barrier, and one rule of the order. Nothing measured asks for it, so it is a task for after
+0.16.
 
-One transaction is outside the budget, today as after: a key rotation locks every member's queue (`#rotate`), an
-object and a holder a member, once; the declared Owners made at a start are the same on a small scale. Postgres allows
-a transaction over the average while the whole fits, and the objects' table is the room: an instance of thousands of
-members would need its rotation in batches. L1 neither adds that nor fixes it.
-
-The price is false sharing, for one statement: a use of 6 objects waits for an unrelated change of one object with
-probability 1 - (31/32)^6, 17% (9% at 64 stripes, 5% at 128), where today every use waits for every change. A 100-key
-batch covers nearly every stripe and waits for any change's last statement, as it does today. Changes are rare, and
-uses share with each other. L1's PR measures three things against the same run unstriped: a single use's wait while an
-unrelated change is in flight; uses per second with a change every second; and the rows of `pg_locks` outside the fast
-path that a use, a batch and a change each hold, a use and a batch that move a cap's row on among them, which is what
-the 5 and the 27 must cover: it is the holders' budget it checks. If they do not, the count goes down, not the budget
-up.
-
-**The cap's election locks (coordinator, on `use_credential`).** One advisory lock is neither a stripe nor shared by
-everyone. A use whose key is in its principal's cap set from an earlier period moves the cap's row on. It holds the
-principal's lock shared, beside the principal's other uses doing the same, and they elect one to write: each tries,
-without waiting, a lock named for the principal, the key, the period and a round (`b_lock`). The one that gets it
-updates the row. The others take it shared, which waits only for that one to end, and read the row again. If the
-winner rolled back the row has not moved, and they go one round on, to another lock. All are held to the commit, and
-each is an object of its own. They come last in the order, and a loser waits only for a use that takes no lock after.
-After L1:
-
-- **A single use keeps it**, by ids or by name, in the call the vault makes once it has decided the use: 1 lock, and 1
-  more for each round it lost. Nothing bounds the rounds today but the statement's 2 s. L1's statement stops at the
-  third lock: a use that lost two rounds ends as one past its deadline does (`57014`, nothing written, the vault
-  answers busy). Two winners rolled back in a row on one key is an instance in trouble, where asking again is the
-  right answer. So a use holds the fence, its principal's lock and at most 3 of these: 5, a change's count.
-- **A batch statement holds none.** Its second round takes the principal's lock exclusive before its first key
-  (`use_batch`, and `use_route` for keys by name), so no other use is under that lock to elect among. Today each key
-  runs the election anyway and wins it at once: 1 lock for each key it moves on, up to 100 a statement
-  (`limits.batch`). L1's statement moves those rows with no lock.
-- **No batch statement holds the principal's lock shared.** One does today: a second round whose rows name two
-  principals for one credential, which only a credential's row written around the log between two keys' reads
-  produces. The vault sends it with no lock first (`byIds`), each key takes the lock as its turn comes, and up to 100
-  keys each run the election, rounds and all. L1's vault does not send that call. It answers busy, as the wait cycle
-  the call risks is answered today (`40P01`).
-
-These add at most 3 objects for each connection of the hot path, 60 beside the 35.
+**Not in 0.16: per-object locks (L1).** The design gave each object a decision reads a lock of its own, so that a
+write to one key made only that key's uses wait, and left the fence to the checkpointer. Its models are written and
+hold, each removal run breaking what it names (#585, parked). What they cost is in that pull request and in this
+file's history (`bb16a17713`): a lock statement ahead of every use, an order of five kinds of lock, shared locks for a
+hold, and a bound on Postgres's lock memory that pushed the keys into 32 stripes, where one use in six waits for an
+unrelated change again. What would bring it back: a load test that shows uses waiting behind changes, and then the
+smallest form that removes the wait measured, which may be less than this (one lock for the policy and the roles, say,
+if those are the changes that hurt).
 
 ## 4. The security argument
 
@@ -785,7 +722,6 @@ table, prepared: 0.143 ms against 0.132 ms at 100k changes, 0.196 ms against 0.1
 | The head becomes the change lock | `Coffre.tla` with its 11 scenarios, `Credentials`, `Issuing`, `Factor`, `WorkloadEnrollment`, `Writing`, `WriteLocks`, `Lifecycle`: 14 "under the head" protections keep their place and take the lock's name, with their 18 runs; the order change lock, issue lock, fence gets a deadlock check; the key write and the member add are checked without the lock. `Bulk`, `Audit` and `AppKey` keep the head, 0.14's chain's, and go with the code that ends it | first (A0) |
 | The policy revision becomes the newest change numbers of the roles and the policy objects | `Lifecycle` (LifecyclePolicy), `Writing` (WritingDigest, which holds the narrower per-write digest) | first (A0) |
 | The cap read from the `policy` row, the 0.14 guard gone from uses | `HotPathOne` (CapSealed, HotPathOnePolicy) | first, small |
-| Per-object locks | `HotPathOne` (UseLocks, ChangeLocks, LockToCommit), `WriteLocks` (NoWaitCycle), `Batching` | first, the largest: its model starts once A0's is in review, stacked on it, ahead of V2b's and A1's code |
 | Two new sealed objects | `SealedObjects`, after `Roles.tla`'s pattern | with the PR |
 | The projector covers changes, the summary | `Reads.tla`, with #560's scenario | with the PR |
 | The cutover deleted | `Migration015` goes; its issue-lock order moves to `WriteLocks` | with the PR |
@@ -1040,30 +976,27 @@ the collapse. Days are working days for one agent under the fast gate. Net lines
 | V1 | The vault's entries go to the chain only; `settings`, `log_keys`; the vault's upgrade step (one beat's tail, the anchor), and what tells `check` it ran, from outside the database (open, section 6); `note` for events, and a refused read written by the call that refused it | P2 | `SealedObjects` with it | yes | 4 | -300 |
 | A1 | The app's entries go to the chain; `audit_chain_head`, the reads under it and the policy revision deleted, `lockLogHead` replaced by the change lock, no re-check moved; sign-in in 5 round trips; then `audit_log` frozen, directly on P3's swap | P2, A0; the freeze P3's swap | A0 | yes | 4 | -700 |
 | V2b | `audit_log` reads out of the use and change functions; the cap from its row; old overloads dropped | V1, V2a | `HotPathOne`, small | yes | 1.5 | -300 |
-| L1 | Per-object locks; the fence is the checkpointer's alone (D201). Its model is a draft PR stacked on A0, started in week one | V2b, A1 | yes | yes | 4 | +100 |
 | U1 | `scripts/upgrade-check.sh`, its 0.15.0 pages compared without heartbeats and checkpoints | V1, A1 | no | no | 2 | +500 |
 | S1 | The 5 s timeout from #552, with #559's sweep green at two sizes. Adds the sweep, which is the proof | all above | no | no | 2 | +1,600 |
 | C1 | The collapse: one upgrade migration from 0.15.0, one baseline for new databases, 80 migration files deleted, functions as one file each, a parity test (0.15.0 plus the migration equals the baseline) | all above | no | it is the migration | 2 | -30,000 |
 | C2 | `AGENTS.md`: 0.16.0 is a clean break like 0.4.0, expand-then-contract resumes with 0.16.1. Old design docs deleted | C1 | no | no | 0.5 | -5,300 |
 
-**Order.** Day 0: E4 alone, since it edits `vault.ts`. Then three lanes at once, built against a contract pinned
-first (K1): `note` and the row it writes, `settings` and `log_keys`, the upgrade's changes, and `check` with the MAC
-inputs of a projection row and of the cursor. V: V0, V2a, V1, V2b, L1. P: P1, P2, P3. A: T1, A0, A1, U1, S1. C1 and
-C2 close. V1 and A1 are built beside P1 and P2 and land after P2: once entries go to the chain only, a page still
-reading `audit_log` loses them. V2b lands after V1, whose rows it reads; L1 after A1, which freezes `audit_log`,
-whose insert trigger still takes the fence exclusive. The freeze waits for P3's swap, which removes the last
-appender (the old beat) and is built beside A1's sites, so the path does not grow.
-**Pairs that collide:** V1 and A1 both need `note` in the vault's contract (`packages/core/src/vault.ts`), which the
-contract PR lands first. P2 and P3 both edit `server/src/api/audit.ts` and run in sequence, as do E4 and V0 in `vault.ts`.
-Every schema PR appends to `schema.ts` and the journal, one-line conflicts.
+**Order.** Day 0: E4 alone, since it edits `vault.ts`. Then three lanes at once, built against a contract pinned first
+(K1): `note` and the row it writes, `settings` and `log_keys`, the upgrade's changes, and `check` with the MAC inputs
+of a projection row and of the cursor. V: V0, V2a, V1, V2b. P: P1, P2, P3. A: T1, A0, A1, U1, S1. C1 and C2 close. V1
+and A1 are built beside P1 and P2 and land after P2: once entries go to the chain only, a page still reading
+`audit_log` loses them. V2b lands after V1, whose rows it reads. The freeze waits for P3's swap, which removes the
+last appender (the old beat) and is built beside A1's sites, so the path does not grow. **Pairs that collide:** V1 and
+A1 both need `note` in the vault's contract (`packages/core/src/vault.ts`), which the contract PR lands first. P2 and
+P3 both edit `server/src/api/audit.ts` and run in sequence, as do E4 and V0 in `vault.ts`. Every schema PR appends to
+`schema.ts` and the journal, one-line conflicts.
 
-**Estimate.** About 40 agent-days. With the contract pinned, the longest path is the contract, V1, V2b, L1, S1, C1:
-14.5 build days, 15 to 17 working days with the landings in order (18 to 22 while V1 waited for P2). The two
-model-first PRs were where the risk is, and both are written. A0 found that the fence cannot stand in for the head,
-so the 14 protections keep a lock of their own and A1 moves none of them. L1's found the order above and the hold's
-shared locks, before V2b's and A1's code.
-On Node, the projector runs on a timer in the vault's process, where Workers use a Durable Object alarm. The beat
-is the app's scheduled run on both.
+**Estimate.** About 40 agent-days. With the contract pinned, the longest path is the contract, V1, V2b, S1, C1: 10.5
+build days with L1's 4 gone (D202), which I have not laid out again against the landings (it was 15 to 17 working days
+with L1). The two model-first PRs were where the risk is, and both are written. A0 found that the fence cannot stand
+in for the head, so the 14 protections keep a lock of their own and A1 moves none of them. L1's is parked with its
+pull request (#585). On Node, the projector runs on a timer in the vault's process, where Workers use a Durable Object
+alarm. The beat is the app's scheduled run on both.
 
 ## 8. Decided
 
@@ -1076,6 +1009,7 @@ No question is open. The five the first draft asked:
 - **The offboarding report and retention** (coordinator, on D161): the report covers the reads retention keeps,
   stating the date they start from, and every write of a value, however old (W385: `drop_audit_day` and `reads_from`
   leave `wrote` rows alone). The summary stays a cache the projector rebuilds.
-- **Per-object locks** (Erwin, D201): in 0.16, last before the timeout.
+- **One fence** (Erwin, D202, superseding D201): 0.16 keeps 0.15's fence. Per-object locks are parked with their
+  models (#585) until a load test asks for them (section 3).
 - **Old heartbeats and checkpoints** (coordinator): not listed. They stay in `audit_log`, verified, and a rebuild
   with another filter brings them back.
