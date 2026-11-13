@@ -1197,7 +1197,7 @@ rest of the server writes no SQL (lint keeps `drizzle-orm` inside it and
 reads, one per shape of data the server needs (the caller, a path, an
 environment's secrets, the members, a page of the log), each
 returning everything its callers use in one statement. There are also four
-generic writes (insert, insert if absent, upsert, update) and a row lock.
+generic writes (insert, insert if absent, upsert, update).
 Writes do not check first and do not read back. A unique constraint answers
 "is this slug taken". An update that matches the old value answers "was it
 still there": `{ id, revokedAt: null }` changes one row or none. Row locks are

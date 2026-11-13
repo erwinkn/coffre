@@ -15,7 +15,6 @@ import {
   environmentSecrets,
   insert,
   insertIfAbsent,
-  lock,
   heldWrites,
   touchCredential,
   recipeRow,
@@ -24,6 +23,7 @@ import {
   secretHeads,
   secretObjects,
   secretPlaces,
+  secretRows,
   plainVersions,
   sensitiveVersions,
   secretsInFolder,
@@ -522,7 +522,7 @@ function recipesOf(patch: Readonly<Record<string, SecretValue | null>>): Map<str
 
 /**
  * Append a version and make it current. Versions are never rewritten. The
- * caller holds the secret's row lock, which is what makes `version` its own.
+ * caller holds the change lock, which is what makes `version` its own.
  */
 async function appendVersion(
   tx: Transaction,
@@ -920,7 +920,7 @@ export async function setSecrets(
         ...items.map(({ key, secret }) => ({ key, id: secret.secretId })),
         ...references.map(({ key, holder }) => ({ key, id: holder.secretId })),
       ].filter(({ key }) => !prepared.has(key)).map(({ key, id }) => ({ id, ...environment, key })));
-      const rows = await lock(tx, secrets, { projectId: environment.projectId, environmentId: environment.environmentId, key: keysIn });
+      const rows = await secretRows(tx, { projectId: environment.projectId, environmentId: environment.environmentId, key: keysIn });
       const byKey = new Map(rows.map((row) => [row.key, row]));
       const created = new Map([
         ...items.map((item) => [item.key, item.secret.secretId] as const),
@@ -1555,7 +1555,7 @@ export async function patchSecret(
       if (archiving && changes !== null) await stillAsRead(tx, secret.id, read);
       // A rename names the key it found: renamed meanwhile, the forks below would be searched for a name gone.
       if (renaming) {
-        const [now] = await lock(tx, secrets, { id: secret.id });
+        const [now] = await secretRows(tx, { id: secret.id });
         if (now?.key !== secret.key) {
           throw new Refusal(
             conflict(`${secret.key} was renamed meanwhile${now === undefined ? '' : ` to ${now.key}`}: nothing changed`),
@@ -1570,7 +1570,7 @@ export async function patchSecret(
       if (archiving && !archived) madeLive(ctx, place, await natureOfRow(tx, environment.environmentId, secret.id), 'secret.unarchive', { metadata: { key: secret.key } });
       // What the rename carries down, read under the lock before it writes anything, as its events were read before the
       // transaction (`renamesBelow`); a fork's refusal of it heard after the key's own, as ever.
-      const below = renaming ? await renamesBelow(ctx, tx, place, secret.key, nextKey, (fork) => lock(tx, secrets, { projectId: place.project.id, environmentId: fork, key: [secret.key, nextKey] }))
+      const below = renaming ? await renamesBelow(ctx, tx, place, secret.key, nextKey, (fork) => secretRows(tx, { projectId: place.project.id, environmentId: fork, key: [secret.key, nextKey] }))
         .catch((error: unknown) => (error instanceof Refusal ? error : Promise.reject(error))) : null;
       if (renaming || archiving) {
         try {
@@ -1593,7 +1593,7 @@ export async function patchSecret(
       }
       // The row as it is now, under the head, names the key.
       if (liveAs !== null) {
-        const [now] = await lock(tx, secrets, { id: secret.id });
+        const [now] = await secretRows(tx, { id: secret.id });
         if (now !== undefined && now.archivedAt === null) await endRemovals(ctx, tx, log, place, environment, [now.key], null);
       }
       if (moving) {
@@ -1616,7 +1616,7 @@ export async function patchSecret(
  * holds the new name already refuses the rename, named. No value moves, so
  * the forks take nothing of the renamer.
  *
- * Written from what it read first (`renamesBelow`), each fork's rows locked, before the key's own rename.
+ * Written from what it read first (`renamesBelow`), each fork's rows as read under the change lock, before the key's own rename.
  */
 async function renameBelow(
   ctx: ApiContext,
@@ -1661,7 +1661,7 @@ type RenamedBelow = {
 
 /**
  * What a rename carries down to each fork below (`renameBelow`), as read in `db`: before the rename's transaction, the
- * events it prepares; under the change lock, each fork's rows of the two names locked (`rows`), what it writes, which
+ * events it prepares; under the change lock, each fork's rows of the two names (`rows`), what it writes, which
  * must log those (`onlyPrepared`). Both read the rows as they are before the rename writes anything, the key's own
  * rename included: so they agree unless another write came between.
  */
@@ -1801,7 +1801,7 @@ export async function inheritSecret(ctx: ApiContext, place: ResolvedPath, inheri
     }, eventsOf(ctx, ...restoring));
     return audited(ctx, async (tx, log) => {
       await checkEnvironment(tx, place, environment);
-      const [row] = await lock(tx, secrets, { id: secret.id });
+      const [row] = await secretRows(tx, { id: secret.id });
       if (row === undefined) throw notFound('unknown secret');
       // Renamed meanwhile, it is not the key the request named, and no retry finds that one (`retrying` retries `ObjectMoved`).
       if (row.key !== secret.key) throw conflict(`${secret.key} was renamed meanwhile to ${row.key}: nothing changed`);
@@ -1996,7 +1996,7 @@ export async function restoreVersion(
     }, eventsOf(ctx, ...restoring));
     return audited(ctx, async (tx, log) => {
       await checkEnvironment(tx, place, environment);
-      const [current] = await lock(tx, secrets, { id: secret.id });
+      const [current] = await secretRows(tx, { id: secret.id });
       if (current === undefined || current.currentVersion !== fromVersion || current.currentVersionId !== prepared.currentVersionId
         || current.archivedAt !== null || current.key !== prepared.key) throw new PrepareAgain();
       const { was, sensitive } = await floor(tx, (await secretHistory(tx, secret.id))[0]);

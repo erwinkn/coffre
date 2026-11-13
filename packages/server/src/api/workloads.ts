@@ -1532,31 +1532,28 @@ export class WorkloadService {
     const proof = proofOf(binding.profile);
     if (proof === null) throw new ExchangeRefused('no_match', 'this release renews no session of this binding\'s profile');
     const { kind } = proof;
-    // With 0.15's log, the end it moves to is a change, sealed before the transaction, from the database's clock read
-    // before it: in `audited`, whose head comes before the row, as every change of the app's takes them (AppHeadFirst).
-    const logged = await keeps015(this.#deps.vault);
+    // The end it moves to is a change, sealed before the transaction, from the database's clock read before it: in
+    // `audited`, whose change lock comes before the row, as every change of the app's takes them (AppHeadFirst).
     const expiresAt = await retrying(async () => {
-      const planned = logged ? Math.min((await databaseNow(db)) + kind.lifetimeMs, row.notAfter!.getTime()) : null;
-      const changes = planned === null || planned <= row.expiresAt.getTime()
+      const until = async (at: Queryable) => Math.min((await databaseNow(at)) + kind.lifetimeMs, row.notAfter!.getTime());
+      const planned = await until(db);
+      const changes = planned <= row.expiresAt.getTime()
         ? null
         : await AppChanges.prepare(this.#deps.vault, row.principal, [credentialChange(row, { ...row, expiresAt: new Date(planned) }, null)]);
-      const renew = async (tx: Transaction) => {
+      return audited(this.#deps, async (tx) => {
         const refusal = kind.renew === undefined ? null : await kind.renew.check(tx, row);
         if (refusal !== null) throw refusal;
-        const until = async () => Math.min((await databaseNow(tx)) + kind.lifetimeMs, row.notAfter!.getTime());
-        const next = planned ?? (await until());
-        if (next <= row.expiresAt.getTime()) {
-          // Planned before a wait for the head, an end that would move now is made again from now (`retrying`).
-          if (planned !== null && (await until()) > row.expiresAt.getTime()) throw new ObjectMoved();
+        if (planned <= row.expiresAt.getTime()) {
+          // Planned before a wait for the change lock, an end that would move now is made again from now (`retrying`).
+          if ((await until(tx)) > row.expiresAt.getTime()) throw new ObjectMoved();
           // At its hard end already: nothing to move, and nothing revived.
           return row.expiresAt;
         }
-        if (!(await renewSession(tx, chainKey, row, new Date(next)))) {
+        if (!(await renewSession(tx, chainKey, row, new Date(planned)))) {
           throw new ExchangeRefused('expired', 'the session ended, or was renewed or revoked meanwhile: sign in again');
         }
-        return new Date(next);
-      };
-      return logged ? audited(this.#deps, renew, changes) : db.transaction(renew);
+        return new Date(planned);
+      }, changes);
     });
     if (kind.renew !== undefined) {
       const ctx: ProofContext = { db, chainKey, config, transport, publicUrl, service: row.principal, jkt: row.jkt!, sourceIp: meta.sourceIp, requestId: meta.requestId };

@@ -16,9 +16,10 @@ import { coffreRoute, keyReady, respond, runScheduled, settleKey } from '../src/
 import { authMac, signedBy, type AuthTable } from '../src/auth-rows.ts';
 import { resolveConfig } from '../src/config.ts';
 import { appendAudit, appLogKey, CHAIN_START, movedOnIn, verifyAppEntries, walkChain } from '../src/db/audit.ts';
-import { auditRange, insertConnection, insertOauthClient, memberStanding } from '../src/db/queries.ts';
+import { auditRange, insertConnection, insertOauthClient, memberStanding, sweepOauthClients } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import { sealAnchor } from '../src/anchor.ts';
+import { ObjectMoved } from '../src/api/changes.ts';
 import { toErrorBody } from '../src/api/errors.ts';
 import { finishRotation, keyState, rotateStep, SIGNED_TABLES, type KeyState } from '../src/key-rotation.ts';
 import { newestAppEntry } from '../src/db/rotation.ts';
@@ -466,6 +467,65 @@ test('a CLI login approved but not yet taken is used up: everyone signs in again
   const next = startUnder(B, [A]);
   assert.equal(await keyReady(next), null);
   assert.deepEqual(await next.signin!.pollDevice(started.deviceCode, { requestId: randomUUID(), sourceIp: null }), { status: 'expired' });
+});
+
+test('a client the sweep revokes between a step\'s read and its write is signed again as revoked, and no row is named unsigned', async () => {
+  // A registration no connection names, which the sweep of an instance still under A revokes on the bare database, under no head.
+  const unused = randomUUID();
+  await insertOauthClient(deps.db, A, { id: unused, name: 'Unused', redirectUris: ['http://127.0.0.1/callback'] });
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let revoked = () => {};
+  const revoking = new Promise<void>((resolve) => (revoked = resolve));
+  // Its revocation, not yet committed: the step reads the row as it was, and its write of it waits for this commit.
+  const sweep = db.owner.transaction(async (tx) => {
+    assert.equal(await sweepOauthClients(tx, A, new Date(Date.now() + 60_000), 10), 1);
+    revoked();
+    await released;
+  });
+  await revoking;
+  const next = startUnder(B, [A]);
+  const step = rotateStep(deps.db, next, { vault: deps.vault });
+  const waiting = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+    WHERE NOT l.granted AND l.locktype = 'transactionid' AND a.datname = current_database()`))[0]!.n;
+  try {
+    for (let tries = 0; (await waiting()) < 1; tries += 1) {
+      assert.ok(tries < 500, 'the step waits at the row the sweep holds');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  } finally {
+    release();
+    await sweep;
+  }
+  assert.equal((await step).kind, 'sealing');
+  // One step's entry: the attempt that lost the row wrote none.
+  const steps = (await appEntries()).filter((entry) => entry.action === 'key.reseal').map((entry) => JSON.parse(entry.metadata) as { unsigned: unknown[]; unsignedCount: number });
+  assert.deepEqual(steps.map((entry) => [entry.unsigned, entry.unsignedCount]), [[[], 0]]);
+  const [row] = await db.owner.select().from(oauthClients).where(eq(oauthClients.id, unused));
+  assert.ok(row!.revokedAt !== null, 'the sweep revoked it');
+  assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every(Boolean)), 'every row is under the new key, the revoked client among them');
+});
+
+test('a step whose write loses a row on every try signs nothing and writes no entry: the door answers rotating, and the next step goes on from the same place', async () => {
+  // Every write of a client's row changes nothing, as when another writer changed the row first, on each of the step's tries.
+  await db.owner.execute(sql`CREATE FUNCTION write_lost() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$`);
+  await db.owner.execute(sql`CREATE TRIGGER lost BEFORE UPDATE ON oauth_clients FOR EACH ROW EXECUTE FUNCTION write_lost()`);
+  const next = startUnder(B, [A]);
+  try {
+    await assert.rejects(rotateStep(deps.db, next, { vault: deps.vault }), ObjectMoved);
+    // The tables before the clients' were signed in the same transactions, which the lost row rolled back whole.
+    const signed = await signedUnder(B);
+    assert.ok(signed.credentials.length > 0 && signed.oauth_clients.length > 0);
+    assert.ok(Object.values(signed).every((rows) => rows.every((row) => !row)), 'no row is under the new key');
+    assert.equal((await appEntries()).filter((entry) => entry.action === 'key.reseal').length, 0);
+    assert.deepEqual(await keyReady(next), { kind: 'rotating' });
+    assert.equal((await appEntries()).filter((entry) => entry.action === 'key.reseal').length, 0);
+  } finally {
+    await db.owner.execute(sql`DROP TRIGGER lost ON oauth_clients`);
+    await db.owner.execute(sql`DROP FUNCTION write_lost()`);
+  }
+  assert.equal(await keyReady(next), null);
+  assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every(Boolean)), 'every row is under the new key');
 });
 
 test('a step the door takes while another start holds the head leaves it to that one, and answers rotating at once', async () => {

@@ -228,6 +228,7 @@ export async function keyReady(runtime: CoffreRuntime, { wait = false }: { wait?
   try {
     state = await keyStateNow(runtime.db, runtime);
     // With 0.15's log, a step that other starts' steps kept coming between, past its tries, leaves the rotation to them.
+    // One whose rows other writers kept changing under it, past its tries too, wrote nothing: the next request steps again.
     const read = state;
     if (read.kind === 'rotating') state = await rotateStep(runtime.db, runtime, { wait, vault: runtime.vault }).catch((error: unknown) => {
       if (error instanceof ObjectMoved) return read;
