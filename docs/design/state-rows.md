@@ -725,10 +725,10 @@ tests and the `Reads.tla` scenario. Lost: its table, triggers and migration, whi
 ## 6. The upgrade from 0.15.0
 
 1. **Before.** On 0.15.0, run `coffre verify log`: the full walk of the old chain, in steps, green. Run the upgrade's
-   precheck, which only reads and refuses before anything is touched: a log with an `audit.loss_accepted` entry (it
-   prints the count and their seqs), a member a finding stands for, a `redirect_uris` value the type change of T278
-   cannot carry. It prints, and does not refuse, a live binding whose seal is not its newest change's: no supported
-   operation of 0.15.0 leaves one.
+   precheck, which writes one thing, the mark of step 3, and otherwise only reads. It refuses before anything else is
+   touched: a log with an `audit.loss_accepted` entry (it prints the count and their seqs), a member a finding stands
+   for, a `redirect_uris` value the type change of T278 cannot carry. It prints, and does not refuse, a live binding
+   whose seal is not its newest change's: no supported operation of 0.15.0 leaves one.
 2. **Deploy 0.16.** This starts the downtime, and it is what stops 0.15.0: no route is taken off, no cron removed, no
    beat waited for. The build's own `coffre migrate` skips this migration, loudly, and exits 0. Both Workers then run
    below their migrations, where 0.16 does nothing: the app answers 503 `migrating` to all but `/livez` and `/readyz`,
@@ -737,12 +737,15 @@ tests and the `Reads.tla` scenario. Lost: its table, triggers and migration, whi
    0.15.0's cron goes with its deploy.
 3. **Mark, then back up.** Run the precheck again. Passing, it writes the **mark**: one row that holds the newest
    committed number of each of the three logs, `audit_log`'s seq and the numbers of `log_changes` and `log_uses`. Each
-   is a `max` over the rows, never a sequence's value, which a rolled-back append moves. The row is in a table no
-   migration creates (`coffre_upgrade_mark`), with SELECT for `coffre_backup` in the same transaction; a passing rerun
-   overwrites it and a refusing one removes it. Then `coffre backup`, whose dump carries the mark. Nothing waits for
-   0.15.0 to drain and no value passes from one command to the next. A request or a scheduled run in flight at the
-   deploy ends on 0.15.0's code, and nothing in 0.15.0 bounds how long (its app login has no statement timeout; 0.16's
-   is S1): step 4 finds out whether one wrote.
+   is a `max` over the rows, never a sequence's value, which a rolled-back append moves, and it is read under `LOCK
+   TABLE audit_log, log_changes, log_uses IN SHARE MODE`, taken first in the precheck's transaction: numbers do not
+   commit in the order they are drawn, so without it the mark reads 101 while 100 is still open, 100 commits after the
+   dump, and step 4 still finds 101. The lock is the migration's own in its table order, with its wait (500 ms, 5
+   tries, the holders named). The row is in a table no migration creates (`coffre_upgrade_mark`), with SELECT for
+   `coffre_backup` in the same transaction; a passing rerun overwrites it and a refusing one removes it. Then `coffre
+   backup`, whose dump carries the mark. Nothing waits for 0.15.0 to drain and no value passes from one command to the
+   next. A request or a scheduled run in flight at the deploy ends on 0.15.0's code, and nothing in 0.15.0 bounds how
+   long (its app login has no statement timeout; 0.16's is S1): step 4 finds out whether one wrote.
 4. **`coffre migrate`**, run by the operator as the owner, with the flag that says so: one migration, in one
    transaction. It refuses unless `/readyz` answers `migrating` at this release, and it refuses a database that is not
    a cut-over 0.15.0 (no cutover change in `log_changes`, or a schema past 0049 that is not 0.16's). Its first
@@ -815,11 +818,11 @@ Each log's numbers come from one place, and the migration removes both:
 | `change_bindings` (53) | The overload goes; 0.16's takes 54 (`p_sweep`, 0079), then the two numbers and the entries it carries | V2b, A1, the carrier |
 | `revoke_credential` (16) | The policy revision becomes two numbers: 17 | A1 |
 | `use_credential` (27) | Main's 31 lose their four defaults, which take a call of 27 today; rewritten as two statements | V2a |
-| `use_batch` (19) | Unchanged since 0048. If V2b reads the cap from its row, the two cap arguments leave its list and `use_credential`'s; to confirm | V2b, open |
-| `log_retention` (4) | Nothing: unchanged since 0027, and no PR of this plan touches it | none, open |
+| `use_batch` (19) | Unchanged since 0048. If V2b reads the cap from its row, the two cap arguments leave its list and `use_credential`'s. To confirm; if they stay, it takes another name in the last PR that rewrites it | W386 |
+| `log_retention` (4) | Its list stays, so its name goes: `ALTER FUNCTION ... RENAME TO append_retention`, which keeps owner, grants and settings | the sequence's swap |
 
-The last two are the ones whose list could stay 0.15.0's. No argument is invented for them: either the list changes
-for a reason of its own, or the function takes another name, which is a part of what a call resolves.
+The last two are the ones whose list could stay 0.15.0's. No argument is invented for them: a name is part of what a
+call resolves, so the function takes another. There is no list of exceptions: the test refuses all seven.
 
 A running 0.15.0 checkpointer can still raise the floor or write a checkpoint (`close_one`, `write_checkpoint`, whose
 lists do not change), and a request can still stamp a last use. The vault's step reads neither the floor nor a
