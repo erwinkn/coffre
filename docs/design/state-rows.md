@@ -297,6 +297,11 @@ in the change that records the same act, under the vault's MAC:
   rest. An op the map does not name carries nothing, and `prepare` refuses the whole call for an action outside it. So
   the page cannot name an act the object did not undergo. The rest of the entry is the app's word, as an event's is,
   and `author` says so.
+- *What an entry may name.* It is signed at `prepare`, before the transaction, so it names only what was read before
+  it. Whatever of that the transaction reads again under the change lock, the site compares: a key's level before a
+  write or a restore, the parent a reset shows through, the count of versions a deletion erases. A difference prepares
+  again. What the transaction would choose is chosen before and written as chosen: a deletion's tombstone, which the
+  slug's unique index refuses if it is taken.
 - *No line is inferred from an op.* A change with no entry shows only where main's page shows it today, the eight
   records of the vault's own changes (a sign-in, an issue, a revoke, a sign-out, a two-trip write or add, either's
   refusal), by the same rules before the upgrade and after. Any other lists nothing. Otherwise the page gains lines no
@@ -320,8 +325,10 @@ in the change that records the same act, under the vault's MAC:
 - *One change carries one entry.* `audit_events` has one row per row of the chain (its key holds the chain's number),
   so the field is not a list. The one case of two today is a key revived and written in one change (`secret.unarchive`
   beside `secret.write`): the write carries one entry, whose detail says `unarchived: true`, and the page's sentence
-  adds the revival. An entry about something that has no change is an event in the same `prepare` call
-  (`PrepareInput.events`), committed after the changes in the same transaction.
+  adds the revival. Two more acts share a change the same way: a rename that also archives or restores an environment
+  carries the archive's entry (`environment.archive`, `environment.restore`) with `from` in its detail, and a
+  `secret.reference` on a revived key takes `unarchived: true`. An entry about something that has no change is an
+  event in the same `prepare` call (`PrepareInput.events`), committed after the changes in the same transaction.
 - *Once only.* A site hands its entry over in the commit that stops appending it to `audit_log`, never before: the
   interim projector lists `audit_log`'s entries and would list the act twice.
 - *The member's summary.* A carried `secret.write` whose `detail` has no `kept` writes the `wrote` row of
