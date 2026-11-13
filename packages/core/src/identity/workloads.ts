@@ -658,9 +658,10 @@ export type BindingReads = Readonly<Record<string, { readonly keys?: readonly st
  * A binding's policy, as `checkPolicy` returns it: a field left out holds
  * its default (`POLICY_DEFAULTS`), so one policy has one spelling.
  *
- * - `audience`: the exact audience of an `azure` token, an Entra
- *   application ID URI, which Entra fixes; required for it, refused for
- *   every other profile.
+ * - `audience`: the exact audience of an `azure` token, which Entra
+ *   fixes: a v1 token's is the resource as asked for (its application ID
+ *   URI or client ID), a v2 token's always the API's client ID, a GUID.
+ *   Required for it, refused for every other profile.
  * - `keyAudience`: the token's audience must name the session's key,
  *   `<publicUrl>#jkt=<thumbprint>`: always for the platforms whose caller
  *   picks the audience (`KEY_NAMING_PROFILES`), and where a `custom`

@@ -6716,7 +6716,7 @@ async function platformBinding(platform, flags, lookup) {
 		case "azure": {
 			const tenant = required("tenant", "the managed identity's tenant ID");
 			const object = required("object", "the managed identity's object ID");
-			const audience = required("audience", "the application ID URI Entra mints its tokens for, the resource's audience");
+			const audience = required("audience", "the resource Entra mints its tokens for, its application ID URI or client ID (the client ID with a v2 --issuer), the audience");
 			return {
 				profile: "azure",
 				issuer: flags.issuer ?? `https://sts.windows.net/${tenant}/`,
@@ -16539,7 +16539,7 @@ function deriveLogKey(author, secret) {
 	};
 }
 //#endregion
-//#region ../core/dist/types-R8BelyKX.js
+//#region ../core/dist/types-TypQkMSe.js
 /**
 * Version prefix for the AAD encoding. If the encoding ever changes, this
 * changes with it, and old ciphertexts keep decrypting under the old rule.

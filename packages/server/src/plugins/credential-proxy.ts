@@ -414,8 +414,8 @@ const MESSAGE_BYTES = 64 * 1024;
  * The longest message an `hmac()` signer's `maxBytes` may take, raw (`signRaw`): what the 20 ms of a request's CPU
  * at p99 holds of the signing's own work, two passes of SHA-256 over the message (the HMAC's and a workload's
  * `Content-Digest` check), 1.2 ms per MiB, past about 4 ms of every request's: (20 − 4) ÷ 1.2, about 13 MiB, rounded down.
- * The body's delivery into the isolate is the platform's, as every streamed body's (docs/design/config.md, "A raw
- * message to sign"). SumSub's document upload is 10.1 MiB at most.
+ * The body's delivery into the isolate is the platform's, as every streamed body's (docs/design/limits.md,
+ * "Memory, per isolate"). SumSub's document upload is 10.1 MiB at most.
  */
 const MAX_RAW_MESSAGE_BYTES = 12 * 1024 * 1024;
 /**
@@ -575,7 +575,7 @@ function movedOptions(options: CredentialProxyOptions): MovedSetting[] {
 
 /**
  * The proxy's windows, each derived from R, the deployment's `proxy.revokedWithinSeconds`, so that a revoked credential
- * works through the proxy for R at most, whichever way it goes (docs/design/config.md, section 1):
+ * works through the proxy for R at most, whichever way it goes (docs/design/config.md, "`proxy.revokedWithinSeconds`"):
  *
  *   R = 60    values kept 60 s; a request sends by 60 s from its use; a tunnel checks every 50 s, each given 10 s
  *   R = 4     values kept 4 s; a request sends by 4 s from its use; a tunnel checks every 2 s, each given 2 s
@@ -3186,7 +3186,7 @@ type Sending = Aim & Carried & {
   /**
    * When the values decided for the request may last go out (epoch ms), a code credential's as a UI route's: checked as
    * the fetch starts, after the body came and every signature was made, so a request that took longer sends none
-   * (docs/design/config.md, section 1, `proxy.revokedWithinSeconds`).
+   * (docs/design/config.md, "`proxy.revokedWithinSeconds`").
    */
   sendBy: number;
 };

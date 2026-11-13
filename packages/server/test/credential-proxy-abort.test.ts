@@ -1,4 +1,5 @@
-// The credential proxy sets no time bound of its own on an upstream request (docs/design/config.md, Q7):
+// The credential proxy sets no time bound of its own on an upstream request
+// (docs/design/limits.md, "Other bounds on load"):
 // it ends the request when the app's does. Under srvx, as `coffre serve`'s Node deployments run, an app that
 // hangs up while the upstream has not answered, while it is still sending a body the proxy streams on, or
 // while the upstream's answer is still streaming back, ends the upstream's connection with it. The Workers

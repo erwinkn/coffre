@@ -153,7 +153,7 @@ test("a live reference in a batch: its source's value, decided by its name on th
   assert.deepEqual(values(await vault.useNamedMany!(many(w, null))), { [name]: 'own', LIVE_REF: 'source of LIVE_REF', [await w.nameOf(ref.source)]: 'source of LIVE_REF' });
 });
 
-test('every key the place holds takes a place in admission while its key opens, once the vault has listed them (config.md, Q1)', async () => {
+test('every key the place holds takes a place in admission while its key opens, once the vault has listed them', async () => {
   const w = await named();
   const made = [await w.key('x'), await w.key('y'), await w.key('z')];
   const held = heldKeks();
@@ -168,7 +168,7 @@ test('every key the place holds takes a place in admission while its key opens, 
   assert.equal(cache.inFlight, 0);
 });
 
-test("a batch past its gate whose keys' statement Postgres gave up on, before its deadline, counts as late to the throttle (config.md, Q1, step 2; Sol's review r2 of #554)", async () => {
+test("a batch past its gate whose keys' statement Postgres gave up on, before its deadline, counts as late to the throttle", async () => {
   const w = await named();
   const names = [await w.nameOf(await w.key('x')), await w.nameOf(await w.key('y'))];
   for (const code of ['55P03', '57014']) {

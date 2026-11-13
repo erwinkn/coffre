@@ -1,17 +1,18 @@
 import { USE_DEADLINE_MS } from '@coffre/core/vault';
 
 /**
- * Adaptive throttling (Google's SRE book, "Handling Overload"; docs/design/config.md, Q1, step 2). An isolate counts,
+ * Adaptive throttling (Google's SRE book, "Handling Overload"; docs/design/limits.md,
+ * "Refusing fast on overload: adaptive throttling"). An isolate counts,
  * over the last two use deadlines, the uses it has answered or refused (`requests`) and those that settled before their
  * deadline (`accepts`: answered, refused by policy or failed at once, but not `late`), and refuses a new use at once, `overloaded`, at the rate
  *
  *   p = max(0, (requests − K × accepts) ÷ (requests + 1)),   K = 1.5,   window = 2 × 3 s
  *
  * So it lets through about K times what it answered in time, and refuses the rest before it costs a statement or a
- * place. The book's numbers, K = 2 and two minutes, failed on Cloudflare (the first run, config.md): the excess
+ * place. The book's numbers, K = 2 and two minutes, failed on Cloudflare (the first run, limits.md): the excess
  * this vault lets through is not refused cheaply downstream but goes `late`, holding its place and a hot connection
  * for the whole 3 s, so K = 2 let half the burst go late; and a two-minute window kept refusing a light load three
- * minutes after the burst. Each number here comes from that, as config.md derives:
+ * minutes after the burst. Each number here comes from that, as limits.md derives:
  *
  * - The window is two deadlines, nominally 6 s (a count leaves it 5 to 6 s after it lands, by where in its second it
  *   fell): a use's outcome is known at most one deadline after it is asked, so the window weighs the asks whose
@@ -22,7 +23,7 @@ import { USE_DEADLINE_MS } from '@coffre/core/vault';
  *   (overlapping windows let it grow faster, and the + 1 lets even K = 1 recover at a trickle), but it is why K must
  *   sit well above 1: near 1 the refusals long outlive the overload. Above, the late: past K × the vault's capacity
  *   everything is refused, and the K − 1 between goes late; at 2,500 uses a second against about 1,000 answered, the
- *   late outnumber the refused from K = 1.75 up. K = 1.5 sits inside both (config.md, Q1, step 2): in its model, a
+ *   late outnumber the refused from K = 1.75 up. K = 1.5 sits inside both (limits.md): in its model, a
  *   third of such a burst's excess late, and full service again 9 to 12 s after it at 500 a second (about 17 s if the
  *   load drops to 50); the second Cloudflare run is to confirm it.
  *

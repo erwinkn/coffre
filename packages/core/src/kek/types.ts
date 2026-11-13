@@ -77,7 +77,8 @@ export class KekCancelledError extends KekUnavailableError {
 /**
  * The key service turned the call away for load: its last try was throttled (AWS KMS's `ThrottlingException`, past
  * the account's request quota). Still unavailable to every caller, and answered as any outage is; only a vault's own
- * `/use` throttle reads the difference, counting it as overload, not as answered in time (config.md, Q1, step 2).
+ * `/use` throttle reads the difference, counting it as overload, not as answered in time
+ * (docs/design/limits.md, "Refusing fast on overload: adaptive throttling").
  * Credentials refused, a key disabled or KMS failing on its side are no such reason.
  */
 export class KekThrottledError extends KekUnavailableError {

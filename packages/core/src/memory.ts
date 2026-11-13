@@ -26,7 +26,7 @@ const MiB = 1024 * 1024;
  */
 export const ISOLATE_BYTES = 128_000_000;
 
-/** The `/use` calls an isolate holds open at once: half the isolate (docs/design/config.md, section 2.2). */
+/** The `/use` calls an isolate holds open at once: half the isolate (docs/design/limits.md, "Memory, per isolate"). */
 export const USES_BYTES = 64_000_000;
 
 /**
@@ -56,9 +56,10 @@ export const USE_CPU_MS = 2.4;
  *   min(USES_BYTES ÷ USE_IN_FLIGHT_BYTES, USE_DEADLINE_MS ÷ USE_CPU_MS)
  *     = min(64,000,000 ÷ 30,720, 3,000 ms ÷ 2.4 ms) = min(2,083, 1,250) = 1,250
  *
- * Derived, never set (docs/design/config.md, Q1). On Node, the same two bounds for the process, as for the other
- * shares. To re-measure the bytes: `packages/vault/test/bench/held.ts` (its header says how to run it), and a heap
- * snapshot of the vault's Worker under `pnpm bench:workers`; the CPU: `pnpm bench:workers`, its use's warm CPU.
+ * Derived, never set (docs/design/limits.md, "Admission: places in flight, from memory and CPU"). On Node, the same
+ * two bounds for the process, as for the other shares. To re-measure the bytes: `packages/vault/test/bench/held.ts`
+ * (its header says how to run it), and a heap snapshot of the vault's Worker under `pnpm bench:workers`; the CPU:
+ * `pnpm bench:workers`, its use's warm CPU.
  */
 export const USES_IN_FLIGHT = Math.min(Math.floor(USES_BYTES / USE_IN_FLIGHT_BYTES), Math.floor(USE_DEADLINE_MS / USE_CPU_MS));
 
@@ -69,9 +70,9 @@ export const USES_IN_FLIGHT = Math.min(Math.floor(USES_BYTES / USE_IN_FLIGHT_BYT
 export const BODIES_BYTES = 16 * MiB;
 
 /**
- * The most of one request's body held whole: an API call's, not an upload's, which streams. Sixteen at once fill
- * `BODIES_BYTES`, each held twice at most (the bytes, and a copy's or its chunks'). A WebSocket's message on Node is
- * held to it too.
+ * The most of one request's body held whole: an API call's, not an upload's, which streams. Eight at once fill
+ * `BODIES_BYTES`, since each byte is charged twice (the bytes, and a copy's or its chunks'). A WebSocket's message on
+ * Node is held to it too.
  */
 export const BODY_READ_WHOLE_BYTES = 1 * MiB;
 

@@ -546,7 +546,7 @@ async function platformBinding(platform: Platform, flags: TrustFlags, lookup: Pl
     case 'azure': {
       const tenant = required('tenant', "the managed identity's tenant ID");
       const object = required('object', "the managed identity's object ID");
-      const audience = required('audience', "the application ID URI Entra mints its tokens for, the resource's audience");
+      const audience = required('audience', "the resource Entra mints its tokens for, its application ID URI or client ID (the client ID with a v2 --issuer), the audience");
       return { profile: 'azure', issuer: flags.issuer ?? `https://sts.windows.net/${tenant}/`, claims: claimed({ tid: tenant, oid: object }), policy: { audience } };
     }
     case 'fly': {

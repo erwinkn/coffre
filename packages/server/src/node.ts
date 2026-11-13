@@ -96,7 +96,8 @@ export function createCoffre(config: NodeConfig): CoffreNode {
   return {
     request(request) {
       // srvx watches for the caller's disconnect from the first read of `signal`: read it now, before any await, so a hang-up
-      // during the vault's reads is seen, and the proxy's upstream request, sent after them, is never made (docs/design/config.md, Q7).
+      // during the vault's reads is seen, and the proxy's upstream request, sent after them, is never made
+      // (docs/design/limits.md, "Other bounds on load").
       void request.signal;
       // The caller's address, as srvx gives it on Node; behind a proxy, the proxy's.
       const sourceIp = (request as { ip?: string }).ip ?? null;

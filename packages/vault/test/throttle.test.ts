@@ -1,4 +1,5 @@
-// Adaptive throttling (docs/design/config.md, Q1, step 2): the share of uses an isolate refuses at once, from what it
+// Adaptive throttling (docs/design/limits.md, "Refusing fast on overload: adaptive throttling"):
+// the share of uses an isolate refuses at once, from what it
 // answered, in time or not, over the last two use deadlines. No database.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -133,7 +134,7 @@ test('after an overload, a load under capacity is let through in full within two
   const during = seconds.slice(10, burst);
   const sum = (key: 'inTime' | 'late' | 'refused') => during.reduce((n, second) => n + second[key], 0);
   assert.ok(sum('inTime') >= 0.95 * 100 * during.length, `answered in time ${sum('inTime')}, about all it can`);
-  // At K = 1.5 the steady state refuses 2 for every late one (config.md); spread asks and settled outcomes land
+  // At K = 1.5 the steady state refuses 2 for every late one; spread asks and settled outcomes land
   // under that, so the check is the run's own: most of the excess refused.
   assert.ok(sum('refused') > sum('late'), `refused ${sum('refused')}, late ${sum('late')}`);
   // The last second anything is refused, or late, after the burst: about 9 s in this model, held to two windows.
