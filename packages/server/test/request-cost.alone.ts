@@ -1078,23 +1078,32 @@ test('readiness costs the same however long the log, and however far it ran past
  * log as after a short one.
  */
 test("a checkpoint's transactions read the same however far its walk goes", async () => {
-  const held = async (count: number): Promise<{ statements: number; rows: number; walked: number }> => {
+  // The first checkpoint, and the first after access changed, keeps the members and grants itself, and the one that
+  // resumes from it reads them a statement fewer: one signed first, so that no measured call resumes from it. And more
+  // than two stretches of the rehash of the past (`walks.scrub`, 100 entries), so that a lap started over the whole log
+  // is mid-lap at its second call.
+  assert.ok((await signLog()).ok);
+  await append(200);
+  const held = async (count: number): Promise<{ statements: number; rows: number; walked: number } | null> => {
     assert.ok((await signLog()).ok);
     await append(count);
     const before = { ...vaultPool.held };
     let signed: { ok: boolean } = { ok: false };
     const all = await cost(async () => (signed = await signLog()));
     assert.ok(signed.ok, 'the measured checkpoint signed');
-    // The call that ends a lap of the rehash of the past rehashes fewer than its stretch (`walks.scrub`), in a statement
-    // fewer; how many checkpoints ran before says which call that is. The next call starts a lap over the whole log.
+    // The call that ends a lap of the rehash rehashes the rest of the log, fewer rows than a stretch; the checkpoint
+    // says so (`scrub` null). The next call starts a lap over the whole log, so the measured call after it is mid-lap.
     const [newest] = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
       .where(eq(auditLog.action, 'audit.checkpoint')).orderBy(desc(auditLog.seq)).limit(1);
-    if ((JSON.parse(newest!.metadata) as { scrub: unknown }).scrub === null) return held(count);
+    if ((JSON.parse(newest!.metadata) as { scrub: unknown }).scrub === null) return null;
     return { statements: vaultPool.held.statements - before.statements, rows: vaultPool.held.rows - before.rows, walked: all.vault.rows };
   };
-  const short = await held(10);
+  const logLength = async () => (await db.owner.select({ n: sql<number>`count(*)::int` }).from(auditLog))[0]!.n;
+  const measured = async (count: number) => (await held(count)) ?? (await held(count))
+    ?? assert.fail(`two measured checkpoints in a row ended a lap of the rehash, the log ${await logLength()} entries long`);
+  const short = await measured(10);
   // Past a batch (`VERIFY_BATCH`): the walk reads two.
-  const long = await held(6000);
+  const long = await measured(6000);
   assert.ok(long.walked > short.walked + 6000, `the long walk read ${long.walked} rows, the short ${short.walked}`);
   assert.deepEqual({ statements: long.statements, rows: long.rows }, { statements: short.statements, rows: short.rows });
 });
@@ -1108,6 +1117,10 @@ test("a checkpoint's transactions read the same however far its walk goes", asyn
  * backlog as after a short one.
  */
 test("a beat's transactions read the same however far its walk goes", async () => {
+  // An empty anchor store, as before the file's first beat, is re-anchored: the beat that ends it logs
+  // `audit.reanchor`, a transaction more. Beaten first, so that no measured beat ends it.
+  assert.equal(await beat(), true);
+  await append(1);
   const held = async (count: number) => {
     assert.equal(await beat(), true);
     await append(count);
@@ -1633,6 +1646,14 @@ test("the audit pages and the offboarding report are each one statement, and rea
     await plant(1, 20_000);
     const small = await pages();
     for (const [name, statements] of Object.entries(small)) assert.equal(statements.length, 1, `${name} is one statement`);
+    // And they read what was planted: a full page of each, the newest first.
+    const planted = async (newest: bigint) => {
+      const page = await eventsPage(counted, { stream: { all: true, shownOnly: true }, match: {}, detail: false, counted: false, limit: 2 });
+      assert.deepEqual(page.rows.map(({ number }) => number), [newest, newest - 1n]);
+      const member = await eventsPage(counted, { stream: { actors: [ADA] }, match: {}, detail: false, counted: false, limit: 2 });
+      assert.deepEqual(member.rows.map(({ actor, shown }) => [actor, shown]), [[ADA, true], [ADA, true]]);
+    };
+    await planted(20_000n);
     await t.test('as many pages with the projection grown tenfold [full]', async () => {
       await plant(20_001, 180_000);
       const grown = await pages();
@@ -1641,11 +1662,7 @@ test("the audit pages and the offboarding report are each one statement, and rea
         const { pages: after, plan } = grown[name]![0]!;
         assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with the projection grown tenfold, ${before} before:\n${plan}`);
       }
-      // And they read what was planted: a full page of each, the newest first.
-      const newest = await eventsPage(counted, { stream: { all: true, shownOnly: true }, match: {}, detail: false, counted: false, limit: 2 });
-      assert.deepEqual(newest.rows.map(({ number }) => number), [200_000n, 199_999n]);
-      const member = await eventsPage(counted, { stream: { actors: [ADA] }, match: {}, detail: false, counted: false, limit: 2 });
-      assert.deepEqual(member.rows.map(({ actor, shown }) => [actor, shown]), [[ADA, true], [ADA, true]]);
+      await planted(200_000n);
     });
   } finally {
     await db.owner.execute(sql`TRUNCATE audit_events, audit_event_places, audit_member_keys`);

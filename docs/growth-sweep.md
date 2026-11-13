@@ -17,8 +17,9 @@ COMPOSE_PROJECT_NAME=coffre_mine COFFRE_POSTGRES_PORT=56432 pnpm sweep:growth --
 It needs a Postgres of its own (it refuses the shared one on :55432): it turns
 auto_explain on for its own databases, which logs a plan for every statement,
 and reads the server's log through `docker compose logs`. `pnpm validate` runs
-it on a Postgres of its step's, with `--full` and on a diff to the migrations or
-to source the sweep runs (`scripts/affected.mjs`); `pnpm test` never does.
+it on a Postgres of its step's, with `--full` and on a diff to the migrations, to
+source the sweep runs or to its own files (`scripts/affected.mjs`); `pnpm test`
+never does.
 
 ## The list of known growers
 

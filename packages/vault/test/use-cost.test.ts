@@ -76,7 +76,7 @@ async function grow(total: number): Promise<void> {
   await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0)`);
 }
 
-test('a use is one statement, its buffers the same at 10k and at 1M entries, probing and from the cache [full]', { timeout: 600_000 }, async () => {
+test('a use is one statement, probing and from the cache', { timeout: 600_000 }, async (t) => {
   const w = await world();
   const id = await w.key();
   const { pool, statements } = counting();
@@ -95,55 +95,56 @@ test('a use is one statement, its buffers the same at 10k and at 1M entries, pro
   } finally {
     await pool.end();
   }
-
-  // Each form's buffers, as the hot login runs it again on a connection of its own, its plans made. The least of
-  // several runs: every run inserts its use, and an insert now and then splits an index page or extends the heap,
-  // eight or so buffers more (50 and 51 where 41 and 42 are the rule, one run in 400), which no size of history
-  // moves. The first run is the cold one, and it costs thousands.
-  const client = postgresClient(HOT_URL, { max: 1 });
-  // What a named use names (T145, 0034): its token's hash, its place's slugs and its key's name, for which the call
-  // also reads the rows the app checks.
-  const [names] = await rows<{ token_hash: Buffer; project: string; key: string }>(db.owner, sql`SELECT c.token_hash, p.slug AS project, s.key
-    FROM credentials c, secrets s JOIN projects p ON p.id = s.project_id WHERE c.id = ${w.credentialId} AND s.id = ${id}`);
-  const buffers = async (cached: boolean, named = false): Promise<number> => {
-    let least = Infinity;
-    for (let i = 0; i < 6; i += 1) {
-      const [newest] = await rows<{ number: string; mac: Buffer }>(db.owner, sql`SELECT number, mac FROM log_changes ORDER BY number DESC LIMIT 1`);
-      const at = Date.now();
-      const requestId = newRequestId();
-      const mac = entryMac(logMacKey(randomBytes(32)), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
-      // Named, as the app asks: its config accepting the credential (0045's `p_signin`), so that the call reads its names.
-      const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12, $13, $14, p_signin => $15)';
-      const argsOf = (request: string, macOf: Buffer) => [w.credentialId, id, request, String(at), macOf, String(at + 3000), cached ? newest!.number : null, cached ? newest!.mac : null,
-        cached ? 1000 : null, cached ? String(15 * 60_000) : null, named ? names!.token_hash : null, named ? names!.project : null, named ? 'dev' : null, named ? names!.key : null,
-        named ? true : null] as never[];
-      const args = argsOf(requestId, mac);
-      if (named && i === 0) {
-        // A request of its own, beside the one measured: each use's entry is its request's.
-        const checked = newRequestId();
-        const checkedMac = entryMac(logMacKey(randomBytes(32)), { tree: 'uses', row: { at, requestId: BigInt(checked), credential: w.credentialId, secret: id, purpose: 4, place: null } });
-        const [row] = await client.unsafe(`SELECT ${call}::text AS use`, argsOf(checked, checkedMac)) as unknown as { use: string }[];
-        const answered = JSON.parse(row!.use) as { state: string | null; n_secret: string | null };
-        assert.ok(answered.state !== 'unknown' && answered.n_secret === id, `the names read: ${row!.use.slice(0, 200)}`);
+  await t.test('its buffers the same at 10k and at 1M entries, probing, from the cache and named [full]', { timeout: 600_000 }, async () => {
+    // Each form's buffers, as the hot login runs it again on a connection of its own, its plans made. The least of
+    // several runs: every run inserts its use, and an insert now and then splits an index page or extends the heap,
+    // eight or so buffers more (50 and 51 where 41 and 42 are the rule, one run in 400), which no size of history
+    // moves. The first run is the cold one, and it costs thousands.
+    const client = postgresClient(HOT_URL, { max: 1 });
+    // What a named use names (T145, 0034): its token's hash, its place's slugs and its key's name, for which the call
+    // also reads the rows the app checks.
+    const [names] = await rows<{ token_hash: Buffer; project: string; key: string }>(db.owner, sql`SELECT c.token_hash, p.slug AS project, s.key
+      FROM credentials c, secrets s JOIN projects p ON p.id = s.project_id WHERE c.id = ${w.credentialId} AND s.id = ${id}`);
+    const buffers = async (cached: boolean, named = false): Promise<number> => {
+      let least = Infinity;
+      for (let i = 0; i < 6; i += 1) {
+        const [newest] = await rows<{ number: string; mac: Buffer }>(db.owner, sql`SELECT number, mac FROM log_changes ORDER BY number DESC LIMIT 1`);
+        const at = Date.now();
+        const requestId = newRequestId();
+        const mac = entryMac(logMacKey(randomBytes(32)), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
+        // Named, as the app asks: its config accepting the credential (0045's `p_signin`), so that the call reads its names.
+        const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12, $13, $14, p_signin => $15)';
+        const argsOf = (request: string, macOf: Buffer) => [w.credentialId, id, request, String(at), macOf, String(at + 3000), cached ? newest!.number : null, cached ? newest!.mac : null,
+          cached ? 1000 : null, cached ? String(15 * 60_000) : null, named ? names!.token_hash : null, named ? names!.project : null, named ? 'dev' : null, named ? names!.key : null,
+          named ? true : null] as never[];
+        const args = argsOf(requestId, mac);
+        if (named && i === 0) {
+          // A request of its own, beside the one measured: each use's entry is its request's.
+          const checked = newRequestId();
+          const checkedMac = entryMac(logMacKey(randomBytes(32)), { tree: 'uses', row: { at, requestId: BigInt(checked), credential: w.credentialId, secret: id, purpose: 4, place: null } });
+          const [row] = await client.unsafe(`SELECT ${call}::text AS use`, argsOf(checked, checkedMac)) as unknown as { use: string }[];
+          const answered = JSON.parse(row!.use) as { state: string | null; n_secret: string | null };
+          assert.ok(answered.state !== 'unknown' && answered.n_secret === id, `the names read: ${row!.use.slice(0, 200)}`);
+        }
+        const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ${call}`, args);
+        const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
+        least = Math.min(least, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
       }
-      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ${call}`, args);
-      const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
-      least = Math.min(least, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
+      return least;
+    };
+    const at = async (size: number) => ({ size, probing: await buffers(false), cached: await buffers(true), named: await buffers(true, true) });
+    await grow(10_000);
+    const small = await at(10_000);
+    await grow(990_000);
+    const large = await at(1_000_000);
+    await client.end();
+    console.log(JSON.stringify({ small, large }));
+    // Flat: no statement reads history, only probes it by index. Of the indexes a use reads, only the uses' own
+    // (at, request_id) grows a level from 10k to 1M here: its insert and a cover's probe of it, a buffer each at most.
+    for (const form of ['probing', 'cached', 'named'] as const) {
+      assert.ok(large[form] - small[form] <= 2, `${form}: ${small[form]} buffers at 10k, ${large[form]} at 1M`);
     }
-    return least;
-  };
-  const at = async (size: number) => ({ size, probing: await buffers(false), cached: await buffers(true), named: await buffers(true, true) });
-  await grow(10_000);
-  const small = await at(10_000);
-  await grow(990_000);
-  const large = await at(1_000_000);
-  await client.end();
-  console.log(JSON.stringify({ small, large }));
-  // Flat: no statement reads history, only probes it by index. Of the indexes a use reads, only the uses' own
-  // (at, request_id) grows a level from 10k to 1M here: its insert and a cover's probe of it, a buffer each at most.
-  for (const form of ['probing', 'cached', 'named'] as const) {
-    assert.ok(large[form] - small[form] <= 2, `${form}: ${small[form]} buffers at 10k, ${large[form]} at 1M`);
-  }
+  });
 });
 
 test("a named use reads what it names by index, its buffers the same at 1k places and at 10k, its ids mapped or not [full]", { timeout: 600_000 }, async () => {

@@ -252,8 +252,12 @@ test('Node, Postgres: stall after stall, each on a connection of its own, which 
     await until(() => kept.sealing().ok, 10_000, 'sealing again');
     const number = await commitChange(w);
     // At this test's 200 ms tick bound, a loaded host stalls a tick with nothing held, and the stalled runner answers
-    // unsealed until the keeper opens the next: asked again until one seals it.
-    await until(async () => (await vault.waitSealed!({ number: String(number) })).ok, 10_000, 'the change sealed');
+    // unsealed, the app's 503, until the keeper opens the next: asked again until one seals it. Any other answer fails.
+    const sealed = () => vault.waitSealed!({ number: String(number) }).then((answer) => answer.ok, (error: Error) => {
+      if (isUnsealed(error)) return false;
+      throw error;
+    });
+    await until(sealed, 10_000, 'the change sealed');
   } finally {
     proxy.release();
     await kept.stop();

@@ -127,9 +127,9 @@ holds each change route to. A request asks the vault about its caller once.
 by its author on its exact head, rebased on `main`. It runs what the diff against
 `origin/main` can change (`scripts/affected.mjs --list` shows what and why), except the test
 cases named `[full]` (a growth, heap or large-N check, or a buffer count a dead row can move),
-and the growth sweep only on a diff to the migrations or to source the sweep runs. `--full`,
-`pnpm test` and CI run every case; `Validate` has no sweep job, so before a tag a local
-`--full` runs it. The upgrade check (`pnpm upgrade:check`) runs with `--full` too, and on a
+and the growth sweep only on a diff to the migrations, to source the sweep runs or to its own
+files. `--full`, `pnpm test` and CI run every case; `Validate` has no sweep job, so before a
+tag a local `--full` runs it. The upgrade check (`pnpm upgrade:check`) runs with `--full` too, and on a
 change to its own scripts, the migrations or the migrator; it starts its own Postgres, on one
 more Docker network.
 When `main` moves after a gate and the rebase is mechanical (clean, or conflicting only

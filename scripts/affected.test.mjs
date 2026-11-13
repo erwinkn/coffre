@@ -242,9 +242,11 @@ test('the slow tier runs on its own inputs: the matrices and Terraform', () => {
 
 test('the growth sweep runs on the migrations and on the source it runs', () => {
   // missing.ts imports no query builder: a file that passes a table and a filter to a helper changes a plan too.
-  for (const file of ['packages/db/src/migrations/postgres/0001.sql', 'packages/server/src/api/missing.ts']) assert.equal(run([file]).steps.sweep?.why, `${file} changed`, file)
-  // Its own test and helpers, source it does not run, SQL it does not run, docs and the dependencies.
-  for (const file of ['packages/server/test/growth.sweep.ts', 'packages/server/test/helpers.ts', 'packages/vault/src/other.ts', 'packages/server/test/fixtures/seed.sql', 'docs/guide.md', 'pnpm-lock.yaml']) {
+  // Its own files: the requests it makes, its runner and the growths it knows.
+  for (const file of ['packages/db/src/migrations/postgres/0001.sql', 'packages/server/src/api/missing.ts', 'packages/server/test/growth.sweep.ts',
+    'scripts/growth-sweep.sh', 'scripts/growth-sweep.mjs', 'scripts/growth-sweep-known.txt']) assert.equal(run([file]).steps.sweep?.why, `${file} changed`, file)
+  // The test helpers it shares with the suite, source it does not run, SQL it does not run, docs and the dependencies.
+  for (const file of ['packages/server/test/helpers.ts', 'packages/vault/src/other.ts', 'packages/server/test/fixtures/seed.sql', 'docs/guide.md', 'pnpm-lock.yaml']) {
     assert.ok(!run([file]).names.includes('sweep'), file)
   }
 })
@@ -269,7 +271,7 @@ test('--full runs every step that is on, every file and every scenario', () => {
 })
 
 test('the upgrade check runs on a change to its own scripts, the migrations or the migrator, not to the pages it reads', () => {
-  for (const f of ['scripts/upgrade-check.sh', 'packages/db/src/migrations/postgres/0001.sql', 'packages/db/src/migrate.ts']) {
+  for (const f of ['scripts/upgrade-check.sh', 'packages/db/src/migrations/postgres/0001.sql', 'packages/db/src/migrate.ts', 'packages/cli/src/migrate.ts', 'packages/vault/src/upgrade.ts']) {
     assert.equal(run([f]).steps.upgrade?.why, `${f} changed`)
   }
   assert.ok(!run(['packages/core/src/access.ts']).names.includes('upgrade'))
