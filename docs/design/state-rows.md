@@ -633,19 +633,21 @@ cap's row), which no statement asks for by name.
   still runs the election and wins it at once: up to 100 advisory locks a statement (`limits.batch`), each an entry in
   Postgres's lock table, electing among nobody. The smallest change: the cap's write is a plain UPDATE when its
   transaction holds the lock exclusive. The function knows one case itself (`locked`: it took the lock exclusive for
-  this key). The other it must be told, by one boolean argument: under `p_lock` from `use_id_batch` or `use_route`,
-  each key's call takes the lock shared (`moving`) and cannot see that its transaction already holds it exclusive.
+  this key). The other it must be told: under `p_lock` from `use_id_batch` or `use_route`, each key's call takes the
+  lock shared (`moving`) and cannot see that its transaction already holds it exclusive. No new argument tells it. The
+  batch notes the principal it holds exclusive in a setting local to its transaction, and `use_credential` reads the
+  note only in its `in_set` branch, to skip the election, never as `locked` (W386's shape, in #590).
 - **The batch that locks nothing first.** A second round whose rows name two principals for one credential, which only
   a credential's row written around the log produces, is sent with no lock ahead of its keys (`byIds`, `lock = null`):
   each key locks as its turn comes, and two such calls can wait on each other until Postgres ends one. The smallest
   change: `byIds` answers busy and sends nothing, and `use_id_batch`'s second round without `p_lock` goes, having no
   caller.
 
-  Both land with V2b, not V2a. V2a's claim is "the same locks in the same order", which its test of the lean statement
-  against the full one holds, and V2a has nothing of L1's to undo (W386, on #590: the fence inside the statement, no
-  read before it, no new `moved`). V2b makes `use_credential` again for its policy reads, so the argument rides that
-  migration instead of a second copy of a 700-line function. If V2b's owner declines, W386 stacks one small PR on
-  #590.
+  Both land in #590 (V2a), as a commit of their own (W386, by the coordinator's ruling), under one stop rule: past
+  about 40 lines of SQL, the election stays and its deletion falls to V2b. V2a's claim, "the same locks in the same
+  order", which its test of the lean statement against the full one holds, then stands for a single use only, and that
+  commit restates it for the batch. V2a has nothing of L1's to undo (W386, on #590: the fence inside the statement, no
+  read before it, no new `moved`).
 - **The members' queue, with its last shared caller: V1's (W391).** Its 5 shared callers on main are not reads of the
   log. They are the vault's key decisions, `unwrap`, `wrap` and `rewrap` (`#keys` and `#refuseVersions`,
   `vault.ts:1964` to `:2207`), which the app reaches from an interactive write, a reveal, a fork and a restore
@@ -1038,7 +1040,7 @@ the collapse. Days are working days for one agent under the fast gate. Net lines
 | A0 | Models: the head becomes the change lock (section 3), the policy revision a digest of newest change numbers | now | it is the model | no | 2 | 0 |
 | V1 | The vault's entries go to the chain only; `settings`, `log_keys`; the vault's upgrade step (one beat's tail, the anchor), and what tells `check` it ran, from outside the database (open, section 6); `note` for events, and a refused read written by the call that refused it | P2 | `SealedObjects` with it | yes | 4 | -300 |
 | A1 | The app's entries go to the chain; `audit_chain_head`, the reads under it and the policy revision deleted, `lockLogHead` replaced by the change lock, no re-check moved; sign-in in 5 round trips; then `audit_log` frozen, directly on P3's swap | P2, A0; the freeze P3's swap | A0 | yes | 4 | -700 |
-| V2b | `audit_log` reads out of the use and change functions; the cap from its row; old overloads dropped; the two batch locks section 3 lets go | V1, V2a | `HotPathOne`, small | yes | 1.5 | -300 |
+| V2b | `audit_log` reads out of the use and change functions; the cap from its row; old overloads dropped; the two batch locks section 3 lets go, only if #590's stop rule trips (#590, own commit, otherwise) | V1, V2a | `HotPathOne`, small | yes | 1.5 | -300 |
 | U1 | `scripts/upgrade-check.sh`, its 0.15.0 pages compared without heartbeats and checkpoints | V1, A1 | no | no | 2 | +500 |
 | S1 | The 5 s timeout from #552, with #559's sweep green at two sizes. Adds the sweep, which is the proof | all above | no | no | 2 | +1,600 |
 | C1 | The collapse: one upgrade migration from 0.15.0, one baseline for new databases, 80 migration files deleted, functions as one file each, a parity test (0.15.0 plus the migration equals the baseline) | all above | no | it is the migration | 2 | -30,000 |
