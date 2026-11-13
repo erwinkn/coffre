@@ -69,7 +69,11 @@ const folderCheck = (name: string, column: AnyPgColumn) =>
 
 // ---------------------------------------------------------------- Secrets
 
-/** No MAC: a project's row decides nothing. A grant names its id, and an environment's row, under its MAC, says whose it is. */
+/**
+ * Under a MAC for its slug: a request names a project by it, and a grant by
+ * its id. With none, a database writer could swap two projects' slugs, and
+ * whoever holds both would be handed one's values under the other's name.
+ */
 export const projects = pgTable(
   'projects',
   {
@@ -79,11 +83,13 @@ export const projects = pgTable(
     createdAt: at('created_at').notNull(),
     archivedAt: at('archived_at'),
     folder: text(),
+    mac: mac(),
   },
   (table) => [
     unique('projects_slug_key').on(table.slug),
     check('projects_slug_check', sql`${table.slug} ~ ${PLACE_SLUG}`),
     folderCheck('projects_folder_check', table.folder),
+    macCheck('projects_mac_check', table.mac),
   ],
 );
 
@@ -193,7 +199,7 @@ export const secrets = pgTable(
   ],
 );
 
-/** No MAC: a version's encryption names its secret, its number and its sensitivity, so one moved or relabelled does not open. */
+/** No MAC: a version's encryption names its secret, its number and whether it is plain or sensitive, so one moved or relabelled does not open (docs/design/0.16.md, "Value encryption", which says what that leaves unbound). */
 export const secretVersions = pgTable(
   'secret_versions',
   {
@@ -219,7 +225,8 @@ export const secretVersions = pgTable(
     pairId: uuid('pair_id'),
     pairHalf: text('pair_half'),
     // The value itself, for a plain one: a key marked not secret, an account's
-    // id, which whoever lists the environment sees. Null for a secret.
+    // id, which whoever lists the environment sees. Null for a secret. A copy
+    // for the pages, under no MAC: a use opens the ciphertext, never this.
     plaintext: text(),
     // A sensitive value: never handed back to a person, Owners included, only
     // used for them through the credential proxy, or read by a service

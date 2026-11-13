@@ -17,8 +17,8 @@ function fixture() {
   const projectId = randomUUID();
   const secretId = randomUUID();
 
-  const dev: SecretContext = { projectId, environmentId: randomUUID(), secretId };
-  const prod: SecretContext = { projectId, environmentId: randomUUID(), secretId };
+  const dev = { projectId, environmentId: randomUUID(), secretId, version: 1 } satisfies SecretContext;
+  const prod = { projectId, environmentId: randomUUID(), secretId, version: 1 } satisfies SecretContext;
 
   const keks = new KekRegistry(LocalKekProvider.generate('kek-test-1'));
   return { dev, prod, keks, projectId, secretId };
@@ -33,6 +33,47 @@ test('seal then open round-trips the plaintext', async () => {
 
   const opened = await open(envelope, dev, keks);
   assert.deepEqual(opened, plaintext);
+});
+
+test('a version opens under its own number only', async () => {
+  const { dev, keks } = fixture();
+  const old = await seal(Buffer.from('rotated away', 'utf8'), { ...dev, version: 1 }, keks);
+  const current = await seal(Buffer.from('current', 'utf8'), { ...dev, version: 3 }, keks);
+  assert.deepEqual(await open(current, { ...dev, version: 3 }, keks), Buffer.from('current', 'utf8'));
+
+  // A database writer copies version 1's row over version 3's: the old value, as the current one.
+  await assert.rejects(open(old, { ...dev, version: 3 }, keks), KekBadClaimError);
+  // Its sensitivity is in the wrap as before, and no caller leaves the number out.
+  await assert.rejects(open(current, { ...dev, version: 3, sensitive: true }, keks), KekBadClaimError);
+  const { version: _, ...unnumbered } = dev;
+  await assert.rejects(open(current, unnumbered as typeof dev, keks), /version's number/);
+  await assert.rejects(seal(Buffer.from('x'), unnumbered as typeof dev, keks), /version's number/);
+});
+
+test('a plain value opens as plain only, and a secret never as plain: relabelled, neither is handed to whoever reads the other', async () => {
+  const { dev, keks } = fixture();
+  const plain = await seal(Buffer.from('acct_123', 'utf8'), { ...dev, plain: true }, keks);
+  const secret = await seal(Buffer.from('sk_live', 'utf8'), dev, keks);
+  assert.deepEqual(await open(plain, { ...dev, plain: true }, keks), Buffer.from('acct_123', 'utf8'));
+  await assert.rejects(open(secret, { ...dev, plain: true }, keks), KekBadClaimError);
+  await assert.rejects(open(plain, dev, keks), KekBadClaimError);
+  await assert.rejects(seal(Buffer.from('x'), { ...dev, plain: true, sensitive: true }, keks), /never with sensitive/);
+});
+
+test("a row in 0.14's format does not open, as itself or relabelled: one kept aside is not put back over a later version", async () => {
+  const { dev, keks } = fixture();
+  const { version: _, ...unnumbered } = dev;
+  // As 0.14 wrote one: the value under its data key, and the key wrapped with no number.
+  const dek = randomBytes(32);
+  const wrapped = await keks.wrap(dek, unnumbered);
+  const legacy = { envelopeVersion: 1, ...encrypt(Buffer.from('from 0.14', 'utf8'), dev, dek), kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion, wrappedDek: wrapped.bytes };
+  await assert.rejects(open(legacy, { ...dev, version: 3 }, keks), /unsupported envelope version: 1/);
+  await assert.rejects(open({ ...legacy, envelopeVersion: ENVELOPE_VERSION }, { ...dev, version: 3 }, keks), KekBadClaimError);
+  // What adoption does: the same data key, wrapped again with its number, opens as that version alone.
+  const again = await keks.wrap(await keks.unwrap(wrapped, unnumbered), { ...dev, version: 3 });
+  const adopted = { ...legacy, envelopeVersion: ENVELOPE_VERSION, wrappedDek: again.bytes };
+  assert.deepEqual(await open(adopted, { ...dev, version: 3 }, keks), Buffer.from('from 0.14', 'utf8'));
+  await assert.rejects(open(adopted, { ...dev, version: 2 }, keks), KekBadClaimError);
 });
 
 test('ciphertext is not the plaintext and a fresh DEK is used per seal', async () => {

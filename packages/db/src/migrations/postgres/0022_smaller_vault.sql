@@ -580,7 +580,7 @@ BEGIN
             EXECUTE format('ALTER TABLE %I ALTER COLUMN %I TYPE timestamp(3) with time zone', col.table_name, col.column_name);
         END IF;
     END LOOP;
-    FOREACH starred IN ARRAY ARRAY['environments', 'secrets', 'principals', 'grants', 'identities', 'bindings', 'credentials', 'enrollment_codes', 'oauth_clients'] LOOP
+    FOREACH starred IN ARRAY ARRAY['projects', 'environments', 'secrets', 'principals', 'grants', 'identities', 'bindings', 'credentials', 'enrollment_codes', 'oauth_clients'] LOOP
         EXECUTE format('ALTER TABLE %I ADD COLUMN mac bytea DEFAULT ''\x''::bytea NOT NULL', starred);
         EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I CHECK (octet_length(mac) IN (0, 36))', starred, starred || '_mac_check');
     END LOOP;
