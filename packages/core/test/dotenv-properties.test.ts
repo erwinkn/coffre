@@ -131,7 +131,7 @@ test(`every line of any input is an entry, a problem, blank or a comment, and a 
     assert.deepEqual(Object.keys(problem).filter((field) => !['line', 'key', 'reason'].includes(field)), []);
     assert.ok(REASONS.has(problem.reason), problem.reason);
     if (problem.key === undefined) continue;
-    // A key is named only when it is the line's own, before its "=": key names are not secret (R6), values are.
+    // A key is named only when it is the line's own, before its "=": key names are not secret, values are.
     const text = all[problem.line - 1]!.trim().replace(/^export /, '').trimStart();
     assert.equal(problem.key, text.slice(0, text.indexOf('=')).trim());
     assert.ok(isKeyName(problem.key));

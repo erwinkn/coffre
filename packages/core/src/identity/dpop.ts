@@ -36,7 +36,7 @@ import {
 
 export { canonicalHtu, canonicalRequest, fetchMethod, MAX_PROOF_LENGTH, MAX_SIGNED_HEADERS, sentTarget, thumbprint, type ProofClaims, type PublicJwk } from '@coffre/client/dpop';
 
-/** How far a proof's `iat` may be from now: the nonce, not the clock, is what makes a proof fresh (kept by Erwin, #501 D3; `CLOCK_SKEW_MS` is for the checks a time alone makes fresh). */
+/** How far a proof's `iat` may be from now: the nonce, not the clock, is what makes a proof fresh (`CLOCK_SKEW_MS` is for the checks a time alone makes fresh). */
 export const PROOF_SKEW_SECONDS = 300;
 
 /** Why a proof was refused, which a 401's `reason` names under `error="invalid_dpop_proof"`. */

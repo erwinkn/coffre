@@ -167,7 +167,7 @@ test('the presets name an environment only when given one', () => {
 
 test('a reusable workflow is pinned to one commit and called from one ref; the whole organization is an explicit profile', () => {
   checkBinding({ profile: 'github-reusable', issuer: null, claims: { ...REUSABLE } });
-  // The caller's ref is required: a feature branch's own caller cannot borrow production's binding (review R3).
+  // The caller's ref is required: a feature branch's own caller cannot borrow production's binding.
   const { ref: _, ...noRef } = REUSABLE;
   refused({ profile: 'github-reusable', issuer: null, claims: noRef }, /requires ref/);
   const { job_workflow_sha: __, ...noSha } = REUSABLE;
@@ -185,7 +185,7 @@ test('a reusable workflow is pinned to one commit and called from one ref; the w
 test('a GitLab binding names the namespace and the project by ID, the ref and its type, and a pipeline that is no merge request', () => {
   const checked = checkBinding({ profile: 'gitlab', issuer: null, claims: { ...GITLAB } });
   assert.equal(checked.issuer, GITLAB_ISSUER);
-  // A transferred project keeps its ID: the namespace is required too (review R4).
+  // A transferred project keeps its ID: the namespace is required too.
   const { namespace_id: _, ...noNamespace } = GITLAB;
   refused({ profile: 'gitlab', issuer: null, claims: noNamespace }, /requires namespace_id/);
   refused({ profile: 'gitlab', issuer: null, claims: { ...GITLAB, pipeline_source: 'merge_request_event' } }, /pipeline_source must be one or more of push, web, schedule/);
@@ -208,7 +208,7 @@ test('a known issuer forces its profile; any other issuer is custom, by its subj
 });
 
 test('claims are nonempty strings with names a binding may match, and never the exchange\'s own, as many and as long as the body holds', () => {
-  // No count or length of their own (R70): the body's bounds hold them (`API_BODY_BYTES`, `MAX_BODY_NODES`).
+  // No count or length of their own: the body's bounds hold them (`API_BODY_BYTES`, `MAX_BODY_NODES`).
   const many = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`c${i}`, 'é'.repeat(1000)]));
   assert.equal(Object.keys(checkBinding({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { ...many, sub: 'x' } }).claims).length, 201);
   // The issuer is held to what fits in its index entry beside its service, the one bound left that is storage's.

@@ -1,4 +1,4 @@
-// Proxy definitions as the vault keeps them (0.16, T186; docs/design/proxy-ui.md, sections 1, 5 and 7): each
+// Proxy definitions as the vault keeps them (0.16; docs/design/proxy-ui.md, sections 1, 5 and 7): each
 // definition checked at save and kept in one canonical shape, the keys its templates name read by one parser, and
 // what an Owner may not point a definition at.
 import test from 'node:test';
@@ -79,7 +79,7 @@ test('what no UI definition may be: each refused with its reason', () => {
     ['a placeholder with no rule to shape', { ...ROUTE, inject: [{ kind: 'basic', user: '{A}', password: '{B}' }], placeholder: { kind: 'prefix', prefix: 'sk_' } }, /placeholder shapes/],
     ['a tunnel to a private host', { kind: 'tunnel', name: 'db', key: 'DB_URL', hosts: ['10.0.1.5'], network: null }, /private/],
     ['a key name with a dash', { kind: 'signer', name: 's', signer: { kind: 'private-key', key: 'MY-KEY' } }, /names a key/],
-    // What `credentialProxy` refuses (`checkPlaceholder`, `checkSigner`), refused at save too (r3).
+    // What `credentialProxy` refuses (`checkPlaceholder`, `checkSigner`), refused at save too.
     ['a prefix with a space', { ...ROUTE, placeholder: { kind: 'prefix', prefix: 'bad prefix' } }, /placeholder\.prefix is up to 64/],
     ['a jwt copying exp', { ...ROUTE, placeholder: { kind: 'jwt', claims: ['sub', 'exp'] } }, /never names exp/],
     ['a signer reading past 1 MiB', { kind: 'signer', name: 's', signer: { kind: 'hmac', key: 'S', encoding: 'hex', maxBytes: 1024 * 1024 + 1 } }, /1 MiB at most/],

@@ -230,7 +230,7 @@ const SHARED: Case[] = [
   ['clientDataJSON not JSON', { clientDataJSON: (text) => text.slice(1) }, {}, 'malformed'],
   ['clientDataJSON an array', { clientDataJSON: (text) => `[${text}]` }, {}, 'malformed'],
   ['clientDataJSON not UTF-8', { response: inner((r) => void (r.clientDataJSON = toBase64url(Uint8Array.of(0x7b, 0xff, 0x7d)))) }, {}, 'malformed'],
-  // No size of its own: the spec lets a browser add members (R70; the request's body bound is the server's).
+  // No size of its own: the spec lets a browser add members (the request's body bound is the server's).
   ['clientDataJSON of 64 KiB, an unknown member its bulk', { clientData: { padding: 'x'.repeat(64 * 1024) } }, {}, 'ok'],
   ['ED set with nothing after', { flags: FLAGS.UP | FLAGS.UV | FLAGS.ED }, {}, 'malformed'],
   ['extensions that are no map', { extensions: encodeCbor([1, 2]) }, {}, 'malformed'],
@@ -390,7 +390,7 @@ test("a response decodes to no more CBOR values than its request may hold, all i
     assert.ok(fewest > 10 && fewest < 100, `${name}: ${fewest}`);
   }
   // An attestation statement nested a million maps deep, two megabytes the verifier ignores: built, it was about
-  // 150 MiB of maps (review r2 of #500); now refused at the request's 20,000th value, before anything past it is built.
+  // 150 MiB of maps; now refused at the request's 20,000th value, before anything past it is built.
   const deep = inner((r) => {
     const original = cborMap(b64(String(r.attestationObject)));
     const nested = new Uint8Array(2_000_001).fill(0xa1);
@@ -402,7 +402,7 @@ test("a response decodes to no more CBOR values than its request may hold, all i
   });
   const refused = await register({ response: deep });
   assert.ok(!refused.ok && refused.reason === 'malformed' && /more CBOR values/.test(refused.message), JSON.stringify(refused));
-  // Decoded client data counts too, toward the same budget (review r12 of #500): an ignored member of three
+  // Decoded client data counts too, toward the same budget: an ignored member of three
   // elements is four more values, and one of 20,001, 54 KB a body may hold, is refused at 20,000 by either ceremony.
   for (const [name, run] of [['registration', register], ['assertion', assertion]] as const) {
     const fewest = async (tweak: Tweak) => {

@@ -12,7 +12,7 @@ export type { JSONWebKeySet };
  * refusal says which, as a reason a CI user can act on.
  */
 
-/** Each side of every time check of a CI run's ID token: 30 s, kept by Erwin (#501 D3). */
+/** Each side of every time check of a CI run's ID token: 30 s, a policy choice. */
 export const CLOCK_TOLERANCE_SECONDS = 30;
 /** The oldest token accepted, by its `iat`: tokens handed to a job at its start fit, day-old ones do not. */
 export const MAX_TOKEN_AGE_SECONDS = 3600;
@@ -161,7 +161,7 @@ export function issuedRefusal(iat: number, now: number, maxAge = MAX_TOKEN_AGE_S
  * signing input made once: jose's own verification parses the token's
  * protected header again and copies it at each call, which a stranger's
  * header of a thousand members made 32 times dearer, 27 to 45 ms where a
- * plain one costs 8 (review r8 of #533). Its first call parsed the header
+ * plain one costs 8. Its first call parsed the header
  * once and held it to jose's checks (`crit`, `b64`, the algorithm's
  * allow-list) before it found several keys; the key whose signature
  * verifies is then held to the whole of them once more, claims included.

@@ -116,7 +116,7 @@ export const ROLE_NAMES = Object.keys(ROLES) as BuiltinRole[];
  * key, which people type in a URL (`/roles/release-manager`), a CLI flag and a policy, and whose format, length
  * included, every copy of it holds: the API's schema, the vault's checks, the database's role check
  * (`grants_role_check`) and the UI's field. No platform sets 32; it is the format custom roles
- * shipped with (W128, 0.10), kept as a format, not as a bound on work (the limits audit, #501, S68 and C4). A role's
+ * shipped with in 0.10, kept as a format, not as a bound on work. A role's
  * name and description are text, and bounded only by the body that carries them.
  */
 export const ROLE_ID_MAX = 32;
@@ -319,9 +319,9 @@ export function ownsInstance(standing: { role: InstanceRole; scope: Scope }): bo
  * Whether the holder is an Owner of a project, as a person on no
  * credential's scope: an Owner of the whole instance, one scoped to the
  * project, or one by a grant on it. They alone issue a service's token or
- * trust binding that reads its sensitive values (R32, `readsSensitive`),
+ * trust binding that reads its sensitive values (`readsSensitive`),
  * and so make a sensitive value of its own a secret in place, and take its
- * environments' protection off (R30): an Owner reads any value there
+ * environments' protection off: an Owner reads any value there
  * anyway, through a service account they give read (break-glass). An
  * Owner scoped to environments by slug, Owner of every `prod`, owns no
  * project, and an Owner's token, scoped, none.
@@ -574,7 +574,7 @@ export const DELEGABLE_ROLES: readonly Role[] = delegableRoles();
 export const HANDLE_HOLDS: RoleDefinition = { name: 'Handle', description: 'Read and use, as its person does.', permissions: ['secret.read', 'secret.use'], protected: ['secret.read', 'secret.use'] };
 
 /**
- * The roles a handle's scope is issued under (the server's `issueHandle`; the vault holds a handle's columns to them, T149): each place
+ * The roles a handle's scope is issued under (the server's `issueHandle`; the vault holds a handle's columns to them): each place
  * keeps what its person holds there, in each column, of reading and using
  * (`issuedGrant`, capped by `heldColumns`), whatever an Owner made of the
  * roles. `viewer` names a place its person reads, `contributor` one they
@@ -593,9 +593,8 @@ export const HANDLE_POLICY: Policy = { ...DEFAULT_POLICY, roles: { ...ROLES, vie
 export const MAX_PERSONAL_TOKEN_MINUTES = 7 * 24 * 60;
 
 /**
- * The longest a service account's token lives, in days: a year, Erwin's policy (R76). A deployment may set a lower
- * maximum (`signin({ serviceTokenMaxDays })`), which the app holds tokens to; the vault holds an issue to this one
- * (T149).
+ * The longest a service account's token lives, in days: a year, a policy choice. A deployment may set a lower
+ * maximum (`signin({ serviceTokenMaxDays })`), which the app holds tokens to; the vault holds an issue to this one.
  */
 export const MAX_SERVICE_TOKEN_DAYS = 365;
 
@@ -753,13 +752,13 @@ function scopeHolds(holder: Holdings, permission: Permission, place: Place): boo
 
 /**
  * Whether a sensitive value of the project `projectId` is handed to
- * `holder` (R32): never to a person, Owners included (R16); to a service
+ * `holder`: never to a person, Owners included; to a service
  * account, only on a credential an Owner of that project issued, as a
  * grant of its scope in the project says (`ScopeGrant`'s `sensitive`).
  * The project is the one the key is held in: a reference's holder's, as
- * any key held there, whatever project its source is in (R71), which takes
- * only its value and nature from the source (R23); its source was checked
- * once, when its maker made it, who read the value there (R24). A person
+ * any key held there, whatever project its source is in, which takes
+ * only its value and nature from the source; its source was checked
+ * once, when its maker made it, who read the value there. A person
  * who could not read the value gets it through no account they set up, nor
  * through a value made sensitive after they issued its token:
  *
@@ -773,7 +772,7 @@ export function readsSensitive(holder: Holdings, projectId: string): boolean {
   return holder.service === true && (holder.credentialScope ?? []).some((grant) => grant.sensitive === true && grant.projectId === projectId);
 }
 
-/** A key, by its id and where it is held: an inherited key's parent's; a reference's own, at its holder (R71). */
+/** A key, by its id and where it is held: an inherited key's parent's; a reference's own, at its holder. */
 export type HeldKey = { projectId: string; environmentId: string; secretId: string };
 
 /**
@@ -782,7 +781,7 @@ export type HeldKey = { projectId: string; environmentId: string; secretId: stri
  * one its credential's scope lists, by the key's id, on a grant that covers
  * the place where the key is held, never the place a request names: an
  * inherited key's parent; a reference's holder, by the reference's own id,
- * as any key held there (R71). A rename therefore moves no listing, nor
+ * as any key held there. A rename therefore moves no listing, nor
  * does a fork; a reference or a copy lands its value where it is made,
  * which only someone who reads it there may do (`referenceRefusal`). Nobody
  * else's: their roles and the value's nature decide. A plain value is no
@@ -909,7 +908,7 @@ export function sessionScope(row: { scope: string | null }, binding: { scope: st
  * uses hold (`sessionScope`), its binding's per-key reads included, so that
  * its object, all a 0.15 use decides on, is no wider than what 0.14 decides
  * on from its binding. The vault makes it from the binding's columns too,
- * for the session it signs in (T149).
+ * for the session it signs in.
  */
 export function sealedSessionScope(scope: string | null, binding: { scope: string | null }, policy: { reads?: ListedReads }): string {
   return storedScope(sessionScope({ scope }, binding, policy), { reads: true });

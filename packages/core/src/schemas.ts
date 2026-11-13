@@ -67,7 +67,7 @@ export const secretKey = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
  * 32 pages, 128 KiB on 4 KiB pages (execve(2), "Limits on size of arguments
  * and environment"; `include/uapi/linux/binfmts.h`), else the command does
  * not start (`E2BIG`). Half of that, so the name (at most 128 bytes,
- * `secretKey`) always fits beside it (W331, 2026-11-06).
+ * `secretKey`) always fits beside it (2026-11-06).
  */
 export const MAX_VALUE_BYTES = 64 * 1024;
 
@@ -118,7 +118,7 @@ export const emailAddress = z.string().email().max(320);
 export const API_BODY_BYTES = 1024 * 1024;
 
 /**
- * A request's CPU at p99, in microseconds: R27's 20 ms, under which every
+ * A request's CPU at p99, in microseconds: 20 ms, under which every
  * request stays, so that a body, refused or not, costs no more before its
  * route runs.
  */
@@ -177,7 +177,7 @@ export const MAX_KEYS = 32;
  * tokens of 1 to 256 KiB, their bytes in the payload or in the protected
  * header, however it is shaped: 139 to 222 µs for ES256 and 65 to 168 for
  * RS256, of 2,048 and 4,096 bits, each signature as long as its modulus
- * (review r9) and below it, so checked to the end (r10), over nine runs,
+ * and below it, so checked to the end, over nine runs,
  * taken as the dearest, rounded up.
  */
 export const KEY_TRY_CPU_US = 230;
@@ -185,10 +185,10 @@ export const KEY_TRY_CPU_US = 230;
 /**
  * Each byte of a workload token, per key tried, in nanoseconds of CPU: each
  * signature check hashes the signing input again, its one decoding spread
- * over the tries. 0 to 1.8 over the same fits, taken as 2. Before review r8
- * of #533 each try went through jose's whole verification, which parsed the
- * header and copied the token again: 10 to 21 ns a byte, and a header of a
- * thousand members 27 ms at 16 KiB.
+ * over the tries. 0 to 1.8 over the same fits, taken as 2. A try does not go
+ * through jose's whole verification, which parses the header and copies the
+ * token again: that costs 10 to 21 ns a byte, and a header of a thousand
+ * members 27 ms at 16 KiB.
  */
 export const TOKEN_BYTE_CPU_NS = 2;
 

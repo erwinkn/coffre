@@ -1,5 +1,5 @@
 /**
- * What a deployment chooses, in one object (docs/design/config.md, D172):
+ * What a deployment chooses, in one object (docs/design/config.md):
  * the file `deployment.ts` beside `app/` and `vault/`, which `coffre init`
  * writes and both sides import as they build. The app enforces its part
  * and the vault its own; neither takes these from the other at run time,
@@ -18,7 +18,7 @@
  * Every field has a default; `defineDeployment()` is today's behavior.
  */
 
-/** The longest a service token may last anywhere, in days (R76). */
+/** The longest a service token may last anywhere, in days. */
 export const MOST_TOKEN_DAYS = 365;
 
 /** The window `signInsPerAddress` counts in, which Cloudflare's rate-limiting bindings take as 10 or 60 seconds: 10. */
@@ -47,12 +47,12 @@ export type DeploymentOptions = {
     cliSessionDays?: number;
   };
   services?: {
-    /** The longest a service token may last, in whole days, 1 to 365 (R76); the app and the vault both hold it. 365 unless set. */
+    /** The longest a service token may last, in whole days, 1 to 365; the app and the vault both hold it. 365 unless set. */
     tokenMaxDays?: number;
     /**
      * Sign-ins one address may start in 10 s, each entry point that takes
      * anyone counted apart (`/api/auth/oidc`, `/api/auth/workload`, the MCP
-     * OAuth endpoints). 10,000 unless set: 1,000 a second (R44), a fleet
+     * OAuth endpoints). 10,000 unless set: 1,000 a second, a fleet
      * behind one NAT being one address. On Workers, Cloudflare reads the
      * number from `app/wrangler.jsonc`'s `SIGN_IN_PER_SOURCE` binding, and
      * the build (`@coffre/ui/vite`) fails unless the two agree; on Node,
@@ -66,7 +66,7 @@ export type DeploymentOptions = {
     noReads?: boolean;
   };
   reads?: {
-    /** At most `count` distinct data keys opened per principal in any `windowMinutes` (R28, R52); the window a day at most. 1,000 in 15 unless set. */
+    /** At most `count` distinct data keys opened per principal in any `windowMinutes`; the window a day at most. 1,000 in 15 unless set. */
     bulkLimit?: { count: number; windowMinutes: number };
   };
   values?: {

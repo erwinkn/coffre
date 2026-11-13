@@ -689,13 +689,13 @@ export type BindingPolicy = {
   readonly unsignedUploads?: true;
 };
 
-/** How long a credential an exchange issues lives: one `coffre run` needs it for seconds. The vault holds a sign-in to it (T149). */
+/** How long a credential an exchange issues lives: one `coffre run` needs it for seconds. The vault holds a sign-in to it. */
 export const EXCHANGED_CREDENTIAL_MS = 5 * 60 * 1000;
 
 /** How long a session lives past each renewal, unless its proof says less: an hour (section 5.4). The vault holds a sign-in to it. */
 export const SESSION_MS = 60 * 60 * 1000;
 
-/** A workload's sign-in route, whose URL on the instance its DPoP proof signs: the app's route, and what the vault checks the proof for (PR 3b). */
+/** A workload's sign-in route, whose URL on the instance its DPoP proof signs: the app's route, and what the vault checks the proof for. */
 export const WORKLOAD_SIGN_IN_PATH = '/api/auth/workload';
 /** How far a sign-in's DPoP proof's `iat` may be from now: it carries no nonce, so its clock bounds it (section 4.1), by `CLOCK_SKEW_MS`. The app and the vault alike. */
 export const EXCHANGE_SKEW_SECONDS = CLOCK_SKEW_MS / 1000;

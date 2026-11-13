@@ -2,17 +2,17 @@ import { CREDENTIAL_NAME } from './identity/workloads.ts';
 import { alike, FIELD_NAME, HANDLE_CLAIM, MAX_MESSAGE_BYTES, PARAMETER_NAME, pathTemplate, PLACEHOLDER_PREFIX, readPattern, SIGNATURE_PREFIX } from './proxy-match.ts';
 
 /**
- * Proxy definitions written in the UI, per environment (0.16, T186;
- * docs/design/proxy-ui.md). The shapes are the Proxy tab's (#421): a route
+ * Proxy definitions written in the UI, per environment (0.16;
+ * docs/design/proxy-ui.md). The shapes are the Proxy tab's: a route
  * (`/use/<name>`), a signer, a verifier or a database tunnel, each a plain
  * JSON object the vault seals in the environment's `proxy` object. What
  * code defines (`credentialProxy({ … })`) is not here: a UI item whose name
- * code also defines is ignored (R66).
+ * code also defines is ignored.
  *
  * The vault checks every definition at save (`proxyDefinitionProblem`) and keeps
  * it in its canonical form (`canonicalDefinition`), with the keys its
  * templates name (`definitionKeys`), so that live uses and the log's replay
- * read one key list (R53). The app checks what needs code: an egress or a
+ * read one key list. The app checks what needs code: an egress or a
  * network it declares.
  */
 

@@ -57,8 +57,8 @@ test('tokenHint shows the kind and the last four characters only', () => {
 });
 
 test('tokenHint does not leak a random part that contains underscores', () => {
-  // Regression: the hint used to cut at the last `_`, which base64url also
-  // uses, so a token like this one showed everything after its first `_`.
+  // base64url uses `_` too: a hint cut at the last `_` would show everything
+  // after this token's first one.
   const secret = 'Qm9Y_a1b2c3d4e5f6g7h8i9j0k_l1m2n3o4p5q6r7s8';
   const token = `coffre_cli_${secret}`;
   assert.equal(isCoffreToken(token), true);

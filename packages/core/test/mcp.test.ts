@@ -51,7 +51,7 @@ test("a client ID is a document's HTTPS URL with a path", () => {
     assert.equal(isClientIdUrl(refused, { allowLoopback: false }), false, refused);
   }
   assert.equal(isClientIdUrl('http://127.0.0.1:8081/client.json', { allowLoopback: false }), false);
-  // No longer than the vault's record of a token issued through its connection takes (Fable on T164).
+  // No longer than the vault's record of a token issued through its connection takes.
   assert.equal(isClientIdUrl(`https://claude.ai/${'c'.repeat(2048 - 'https://claude.ai/'.length)}`, { allowLoopback: false }), true);
   assert.equal(isClientIdUrl(`https://claude.ai/${'c'.repeat(2049 - 'https://claude.ai/'.length)}`, { allowLoopback: false }), false);
   assert.equal(isClientIdUrl('http://127.0.0.1:8081/client.json', { allowLoopback: true }), true);
@@ -98,7 +98,7 @@ test('signin({ mcp }) needs its limit per source, and loopback clients only on a
   const none = signin({ providers }).resolve('https://secrets.acme.example');
   assert.equal(none.mode === 'signin' && none.signin.mcp, null);
   assert.throws(() => signin({ providers, mcp: { limits: { total: limiter } as never } }), /mcp needs its limit per source/);
-  // 0.15's other two limits are still taken, for a deployment not yet changed (W331, D177), and read no more.
+  // 0.15's other two limits are still taken, for a deployment not yet changed, and read no more.
   const old = signin({ providers, mcp: { limits: { perSource: limiter, perConnection: limiter, total: limiter } } }).resolve('https://secrets.acme.example');
   assert.deepEqual(old.mode === 'signin' && old.signin.mcp?.limits, { perSource: limiter });
   assert.throws(

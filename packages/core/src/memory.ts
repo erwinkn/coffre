@@ -6,7 +6,7 @@
 // bounded by shares of that number, each with its source:
 //
 //   share            bytes        holds                                               source
-//   uses in flight   64,000,000   the `/use` calls an isolate holds open              half (D1, Q1)
+//   uses in flight   64,000,000   the `/use` calls an isolate holds open              half (Q1)
 //   proxy bodies     16 MiB       request bodies the credential proxy reads whole     the 16 MiB one body took before
 //   caches           16 MiB       answers kept between requests                       as much as the bodies
 //   runtime          the rest     code, the runtime's own, a request's objects        measured: 8.6 MB of it idle
@@ -26,7 +26,7 @@ const MiB = 1024 * 1024;
  */
 export const ISOLATE_BYTES = 128_000_000;
 
-/** The `/use` calls an isolate holds open at once: half the isolate (D1; docs/design/config.md, section 2.2). */
+/** The `/use` calls an isolate holds open at once: half the isolate (docs/design/config.md, section 2.2). */
 export const USES_BYTES = 64_000_000;
 
 /**
@@ -34,7 +34,7 @@ export const USES_BYTES = 64_000_000;
  * included: 30 KiB, the largest of the measurements, so that `USES_IN_FLIGHT` holds whichever is nearest workerd's.
  *
  *   a use held in its statement, local workerd, its RPC from the app included     30 KiB (36 by heap snapshot), flat
- *                                                                                  from 100 to 500 (W331, phase 2a)
+ *                                                                                  from 100 to 500
  *   a lone use held at its key service, Node, in process                          13 to 15 KiB, 250 to 1,000 held
  *   a batch's key held there, batches of 100, Node, in process                    6 to 9 KiB, 500 and 1,000 held
  *
@@ -45,18 +45,18 @@ export const USES_BYTES = 64_000_000;
  */
 export const USE_IN_FLIGHT_BYTES = 30 * 1024;
 
-/** The CPU one use takes in the vault's isolate, warm: 2.4 ms, local workerd (W331, `pnpm bench:workers`'s use). */
+/** The CPU one use takes in the vault's isolate, warm: 2.4 ms, local workerd (`pnpm bench:workers`'s use). */
 export const USE_CPU_MS = 2.4;
 
 /**
  * How many keys an isolate or process has in flight at once, each a place in the vault's admission (`UseCache`,
- * `@coffre/vault`): past it, a use is refused at once, `overloaded` (R44). The smaller of what its memory holds and
+ * `@coffre/vault`): past it, a use is refused at once, `overloaded`. The smaller of what its memory holds and
  * what its CPU can serve within one use's deadline, since a use admitted past that could only be answered `late`:
  *
  *   min(USES_BYTES ÷ USE_IN_FLIGHT_BYTES, USE_DEADLINE_MS ÷ USE_CPU_MS)
  *     = min(64,000,000 ÷ 30,720, 3,000 ms ÷ 2.4 ms) = min(2,083, 1,250) = 1,250
  *
- * Derived, never set (R70; docs/design/config.md, Q1). On Node, the same two bounds for the process, as for the other
+ * Derived, never set (docs/design/config.md, Q1). On Node, the same two bounds for the process, as for the other
  * shares. To re-measure the bytes: `packages/vault/test/bench/held.ts` (its header says how to run it), and a heap
  * snapshot of the vault's Worker under `pnpm bench:workers`; the CPU: `pnpm bench:workers`, its use's warm CPU.
  */
@@ -82,7 +82,7 @@ export const CACHES_BYTES = 16 * MiB;
  * What is left for the runtime: the code, the runtime's own state, and what no share counts (a request's objects, a
  * response on its way, the collector's slack). 30.4 MB, of which the app's Worker of `examples/workers` holds 8.6 MB
  * idle, warmed by a sign-in and a few pages (8,602,928 bytes of heap once collected: local workerd, the inspector's
- * `Runtime.getHeapUsage` after `HeapProfiler.collectGarbage`, W331 phase 2b). The vault's Worker, the smaller bundle,
+ * `Runtime.getHeapUsage` after `HeapProfiler.collectGarbage`). The vault's Worker, the smaller bundle,
  * was not measured.
  */
 export const RUNTIME_BYTES = ISOLATE_BYTES - USES_BYTES - BODIES_BYTES - CACHES_BYTES;
@@ -107,7 +107,7 @@ const ENTRY_BYTES = 128;
  * (one-byte strings take one), each with its header; numbers boxed; arrays and objects their slots, a key's name
  * shared by every object of its shape. Measured against the heap on Node 24, every entry of the caches as they keep
  * it, its slot in the map included, holds less than `weight` gives its key and value alone: a handle's environments
- * 232 bytes against 350, a cached value 310 against 576, an access 1,256 against 2,926 (W331 phase 2b).
+ * 232 bytes against 350, a cached value 310 against 576, an access 1,256 against 2,926.
  */
 export function weight(value: unknown): number {
   switch (typeof value) {

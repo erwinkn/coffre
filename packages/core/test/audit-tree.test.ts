@@ -139,7 +139,7 @@ test('a tree past 2^32 leaves splits as the RFC says: no 32-bit arithmetic (W212
   // A consistency proof from 2^32 + 1 leaves is not one from a power of two, made or checked.
   assert.equal(consistencyProof(() => Buffer.alloc(32), 2 ** 32 + 1, 2 ** 32 + 2).length, 3);
   // Checked against heads of a tree whose leaves are all one hash, so that any subtree's hash depends on its level
-  // alone and a tree of 2^33 leaves costs 33 hashes: the split points are what the old code got wrong.
+  // alone and a tree of 2^33 leaves costs 33 hashes: a wrong split point shows.
   const levels: Hash[] = [leafHash(Buffer.from('x'))];
   const same: Nodes = (level) => {
     while (levels.length <= level) levels.push(nodeHash(levels.at(-1)!, levels.at(-1)!));
@@ -229,7 +229,7 @@ test('a signed checkpoint opens with its key and no other, and nothing but a che
     body.replace(/^.*\n/, 'has space\n'),
   ]) assert.throws(() => parseCheckpoint(text), /not a checkpoint/, text);
   assert.equal(await openNote('garbage', verifier), null);
-  // As strict as Go's note.Open (review r1): a bad signature by this key spoils the note whatever follows; base64 must be
+  // As strict as Go's note.Open: a bad signature by this key spoils the note whatever follows; base64 must be
   // canonical; at most 100 signature lines; no control characters.
   const line = note.slice(note.lastIndexOf('\n\n') + 2);
   const [, name, encoded] = /^— (\S+) (\S+)\n$/.exec(line)!;

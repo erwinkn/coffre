@@ -39,7 +39,7 @@ export const KMS_ATTEMPTS = 3;
 
 /**
  * How long one attempt waits for KMS's answer, at most; less when its operation's deadline comes first (each attempt
- * is cut at what is left of it). From a measurement (W331, 2026-11-07; #538's thread): coffre's own requests to a key in
+ * is cut at what is left of it). From a measurement (2026-11-07): coffre's own requests to a key in
  * us-east-2, p50 / p95 / p99 / max in ms, 475-500 calls each of Encrypt, Decrypt and GenerateDataKey:
  *
  *   a Worker placed next to the key (ORD)     19-20 / 23-64 / 60-70 / 70-92
@@ -56,7 +56,7 @@ export const KMS_ATTEMPTS = 3;
  * retried by the next attempt: a lost SYN, which Linux retries after 1 s (`TCP_TIMEOUT_INIT`); a path whose round trip
  * is much longer than 124 ms; a host whose cached metrics for KMS's address hold a longer round trip, which Linux
  * puts in place of the handshake's (`tcp_init_metrics`, net/ipv4/tcp_metrics.c: a cached 400 ms makes it 1,200 ms);
- * and a route that raises `rto_min` (`tcp_rto_min`) (Fable's review of #549, Sol's r5 and r6).
+ * and a route that raises `rto_min` (`tcp_rto_min`).
  */
 export const KMS_ATTEMPT_MS = 506 + (FAR_RTT_MS + Math.max(2 * FAR_RTT_MS, 200));
 
@@ -88,7 +88,7 @@ const NOT_THIS_KEY = new Set(['InvalidCiphertextException', 'IncorrectKeyExcepti
 /**
  * Each operation's slots (`CONCURRENCY`), kept while it lives, whichever provider its requests go to: a call's keys
  * under its `kek` and its `previousKeks` (a rotation's batch) take turns in the same six, as Workers counts them for
- * the invocation (review r2 of #549). Keyed by the operation, which is one call's alone: no call waits on another's.
+ * the invocation. Keyed by the operation, which is one call's alone: no call waits on another's.
  */
 const operationSlots = new WeakMap<KeyOperation, Slots>();
 function slotsOf(operation: KeyOperation | undefined): Slots {
@@ -252,7 +252,7 @@ export class AwsKmsKekProvider implements KekProvider {
       response = await this.#fetch(this.#url, {
         method: 'POST', headers, body,
         // An attempt waits `KMS_ATTEMPT_MS` at most, and no longer than what is left of its operation's deadline: then the
-        // operation's own signal ends it, the one timer of the deadline, so no slot frees a moment before it (review r1).
+        // operation's own signal ends it, the one timer of the deadline, so no slot frees a moment before it.
         signal: operation !== undefined && operation.deadline - Date.now() <= KMS_ATTEMPT_MS && signal !== undefined
           ? signal
           : AbortSignal.any([AbortSignal.timeout(KMS_ATTEMPT_MS), ...(signal === undefined ? [] : [signal])]),
