@@ -897,17 +897,20 @@ test("each hot request's statements read as many pages however long the log grow
  * the vault's rows as they are. One call, one statement, as any other.
  */
 test("a reveal after the reader's access changed costs what any other does", async () => {
-  await inBulkPeriod(PERIOD_ROOM_MS, db.owner, [`user:${READER}`], 'market/dev');
-  await reader.secrets.reveal('market/dev/API_KEY');
-  const before = spentOf(await cost(() => reader.secrets.reveal('market/dev/API_KEY')));
-  await root.access.set(`user:${READER}`, { 'market/dev': 'developer' });
-  const revealed = (into: unknown[]) => async () => into.push(await reader.secrets.reveal('market/dev/API_KEY'));
-  const answers: unknown[] = [];
-  const changed = await cost(revealed(answers));
-  const after = await cost(revealed(answers));
+  const readers = [`user:${READER}`];
+  const { before, changed, after, answers } = await inOnePeriod(() => inBulkPeriod(PERIOD_ROOM_MS, db.owner, readers, 'market/dev'), db.owner, readers, 'market/dev', async () => {
+    await reader.secrets.reveal('market/dev/API_KEY');
+    const before = spentOf(await cost(() => reader.secrets.reveal('market/dev/API_KEY')));
+    await root.access.set(`user:${READER}`, { 'market/dev': 'developer' });
+    const answers: unknown[] = [];
+    const revealed = async () => void answers.push(await reader.secrets.reveal('market/dev/API_KEY'));
+    const changed = await cost(revealed);
+    const after = await cost(revealed);
+    await root.access.set(`user:${READER}`, { 'market/dev': 'viewer' });
+    return { before, changed, after, answers };
+  });
   // Each a reveal that answered, not one refused early.
   for (const answer of answers) assert.match(JSON.stringify(answer), /fake-api-key/);
-  await root.access.set(`user:${READER}`, { 'market/dev': 'viewer' });
   for (const spent of [changed, after]) assert.deepEqual(spentOf(spent), before);
 });
 
@@ -919,9 +922,11 @@ test("a reveal after the reader's access changed costs what any other does", asy
  */
 test("a reveal's first use of its keys in a new period of the bulk cap moves their rows: one statement more, once", async () => {
   await reader.secrets.reveal('market/dev');
-  await pastBulkTurn(PERIOD_ROOM_MS, db.owner, [`user:${READER}`], 'market/dev');
-  const first = await cost(() => reader.secrets.reveal('market/dev'));
-  const next = await cost(() => reader.secrets.reveal('market/dev'));
+  const readers = [`user:${READER}`];
+  const { first, next } = await inOnePeriod(() => pastBulkTurn(PERIOD_ROOM_MS, db.owner, readers, 'market/dev'), db.owner, readers, 'market/dev', async () => ({
+    first: await cost(() => reader.secrets.reveal('market/dev')),
+    next: await cost(() => reader.secrets.reveal('market/dev')),
+  }));
   assert.deepEqual(spentOf(first), { ...spentOf(next), statements: spentOf(next).statements + 1 });
   assertWithin('a reveal of an environment, its keys in a new period', spentOf(first), BUDGET.read);
 });
