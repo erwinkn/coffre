@@ -254,15 +254,17 @@ test('Node, Postgres: stall after stall, each on a connection of its own, which 
     // At this test's 200 ms tick bound, a loaded host can stall one tick with nothing held (measured: once in a
     // 4-way suite run, 'a tick ran past 200 ms'; never in 6 runs alone). The change then answers unsealed, the app's
     // 503, and the runner the keeper opens next seals it: the case waits for that runner, as after the release, and
-    // asks once more. A second unsealed answer fails it with what the checkpointer says then, and any other at once.
+    // asks once more, noting it. A second unsealed answer fails it with both answers and what the checkpointer says then,
+    // and any other at once.
     const waitSealed = () => vault.waitSealed!({ number: String(number) });
     const sealed = await waitSealed().catch(async (error: Error) => {
       if (!isUnsealed(error)) throw error;
+      console.log(`  note  change ${number} answered unsealed once (${error.message}); asking again once the keeper seals`);
       await until(() => kept.sealing().ok, 10_000, `sealing again after change ${number} answered unsealed: ${error.message}`);
       return waitSealed().catch((again: Error) => {
         if (!isUnsealed(again)) throw again;
         const sealing = kept.sealing();
-        throw new Error(`change ${number} answered unsealed twice: ${again.message}; the checkpointer: ${sealing.ok ? 'sealing' : sealing.reason}`, { cause: again });
+        throw new Error(`change ${number} answered unsealed twice: first ${error.message}, then ${again.message}; the checkpointer: ${sealing.ok ? 'sealing' : sealing.reason}`, { cause: again });
       });
     });
     assert.ok(sealed.ok);
