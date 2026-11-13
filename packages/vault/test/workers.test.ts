@@ -219,7 +219,8 @@ test('a fresh isolate answers a burst of first calls, each on one connection: on
     const before = database.opened;
     const same = await Promise.all(KEYS.map(() => vault.reveal('ada-cli', 'market/prod', ['KEY_0', 'KEY_1'])));
     assert.deepEqual(same.map((answer) => [answer.status, given(answer).length]), KEYS.map(() => [200, 2]));
-    assert.ok(database.opened - before >= KEYS.length, `${database.opened - before} connections for ${KEYS.length} uses of the same keys at once`);
+    const opened = database.opened - before;
+    assert.ok(opened >= KEYS.length && opened <= KEYS.length + 2, `${opened} connections for ${KEYS.length} uses of the same keys at once`);
   } finally {
     await vault.stop();
     await database.close();
