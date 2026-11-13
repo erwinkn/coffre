@@ -18,7 +18,7 @@ import { GITHUB_RUN } from '../idp/index.ts';
 import { expect, Skip } from '../report.ts';
 import { Cli } from './cli.ts';
 import { DEV, type Canaries, type Person } from './people.ts';
-import { listed } from './audit.ts';
+import { listed, settled } from './audit.ts';
 import { LOCAL_RATE_LIMIT } from '../draining.ts';
 
 /** The service the runs sign in as: a viewer on dev. */
@@ -139,6 +139,7 @@ export async function runsRefused(deployment: Deployment, admin: Person): Promis
     ['from a pull request', await mint(deployment, { event_name: 'pull_request', ref: 'refs/pull/1/merge', base_ref: 'main', workflow_ref: GITHUB_RUN.workflow_ref.replace(/@.*/, '@refs/pull/1/merge'), sub: 'repo:acme/api:pull_request' }), 'no_match'],
     ['from another repository', await mint(deployment, { repository_id: '1', repository: 'acme/fork' }), 'no_match'],
   ] as const;
+  await settled(deployment);
   const before = (await admin.api.audit.list({ actor: RUNNER, detail: '1' })).entries.filter((entry) => entry.action === 'token.exchange').length;
   for (const [what, token, reason] of cases) {
     const answer = await exchange(deployment, token);
@@ -147,6 +148,7 @@ export async function runsRefused(deployment: Deployment, admin: Person): Promis
   }
   const stranger = await exchange(deployment, await mint(deployment), 'token:conformance-nobody');
   expect(stranger.status === 401 && stranger.reason === 'no_match', 'a token was taken for a service no binding names', shown(stranger));
+  await settled(deployment);
   const after = (await admin.api.audit.list({ actor: RUNNER, detail: '1' })).entries.filter((entry) => entry.action === 'token.exchange').length;
   expect(after === before, `${after - before} refused exchanges were logged as exchanges`);
   return `${cases.length + 1} refused, each for its reason, none saying what the binding expects, none logged: ${cases.map(([what]) => what).join(', ')}, for another service`;

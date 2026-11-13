@@ -11,6 +11,7 @@ import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
 import type { Cli } from './cli.ts';
 import type { Person } from './people.ts';
+import { settled } from './audit.ts';
 import { query } from './storage.ts';
 
 const PROJECT = 'conformance-gone';
@@ -81,6 +82,7 @@ export async function deletion(deployment: Deployment, cli: Cli, admin: Person):
   await admin.api.secrets.set(`${PROJECT}/prod`, { API_KEY: fresh });
   expect((await projectId(deployment, PROJECT)) !== id, 'the new project took the deleted one\'s row');
   expect((await admin.api.secrets.reveal(`${PROJECT}/prod/API_KEY`)).values.API_KEY === fresh, 'the new project does not read its own value');
+  await settled(deployment);
   const { entries } = await admin.api.audit.list({ path: tombstone!.slug, limit: 500 });
   expect(entries.some((entry) => entry.action === 'project.delete' && entry.decision === 'allow'), 'the deletion is not in the log under its tombstone', entries.slice(0, 5));
 

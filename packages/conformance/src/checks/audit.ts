@@ -7,7 +7,7 @@ import type { AuditEntryView, CoffreClient } from '@coffre/client';
 
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect, until } from '../report.ts';
+import { expect, Failure, until } from '../report.ts';
 import { appendOnlyLifted, entryFields, insertRow, LOG_REFUSAL, logRefuses, query } from './storage.ts';
 import { DEV, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
 
@@ -80,6 +80,36 @@ export async function listed(probe: () => Promise<boolean>): Promise<boolean> {
     if (Date.now() >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+}
+
+/**
+ * Waits until the audit page lists every entry written before the call:
+ * the projector's cursor has passed the newest seq of `audit_log` and the
+ * newest number of the chains, as they stood. One projector transaction
+ * lists an entry on every page and moves the cursor, so a check that reads a
+ * page after this reads every entry it made, once, and none it did not.
+ */
+export async function settled(deployment: Deployment): Promise<void> {
+  const [target] = await using(deployment.database(), (sql) => query<{ seq: string; number: string }>(sql, `SELECT
+    (SELECT coalesce(max(seq), -1) FROM audit_log)::text AS seq,
+    greatest((SELECT coalesce(max(number), 0) FROM log_changes), (SELECT coalesce(max(number), 0) FROM log_uses))::text AS number`));
+  const { seq, number } = target!;
+  // Temporary: the projector lists an entry of `audit_log` only up to the newest signed checkpoint, and only the
+  // scheduled run's beat writes one, every 5 minutes on a deployment. This run goes once the app's entries are signed
+  // changes, listed a tick after the write; the wait on `old_floor` goes with that column.
+  await deployment.scheduled();
+  let cursor: { old_floor: string; through: string } | undefined;
+  const oldPassed = () => cursor !== undefined && BigInt(cursor.old_floor) > BigInt(seq);
+  const chainsPassed = () => cursor !== undefined && BigInt(cursor.through) >= BigInt(number);
+  const passed = async () => {
+    [cursor] = await using(deployment.database(), (sql) => query<{ old_floor: string; through: string }>(sql, 'SELECT old_floor::text, through::text FROM audit_cursor'));
+    return oldPassed() && chainsPassed();
+  };
+  await until('the audit projector', passed, LISTED_WITHIN_MS / 1000).catch(() => {
+    const missed = [oldPassed() ? null : `audit_log seq ${seq}`, chainsPassed() ? null : `chain number ${number}`].filter(Boolean);
+    const at = cursor === undefined ? 'no audit cursor read' : `old_floor ${cursor.old_floor}, through ${cursor.through}`;
+    throw new Failure(`the audit projector did not pass ${missed.join(' or ')} within ${LISTED_WITHIN_MS / 1000} s (${at})`);
+  });
 }
 
 /**
@@ -170,7 +200,8 @@ export async function verification(deployment: Deployment, { admin }: People): P
  * Each heartbeat has the vault sign the log up to its last entry, in an
  * entry of its own, after checking that the prefix it signed last is still
  * there. Two, so the second covers the first; then the log is verified from
- * its first entry, every checkpoint with it.
+ * its first entry, every checkpoint with it. The audit page lists no
+ * checkpoint: they are the log's, read where it keeps them.
  */
 export async function checkpoints(deployment: Deployment, { admin }: People): Promise<string> {
   const before = await admin.api.audit.verify();
@@ -180,16 +211,15 @@ export async function checkpoints(deployment: Deployment, { admin }: People): Pr
   const after = await admin.api.audit.verify();
   expect(after.ok && after.checkpoint !== null, 'the audit log is not verified and checkpointed', after);
   expect(after.checkpoint.seq > (before.through ?? -1), 'the checkpoint does not cover what was written before it', { before, after });
+  const signed = await using(deployment.database(), (sql) => query<{ seq: string; author: string; metadata: string }>(sql,
+    "SELECT seq, author, metadata FROM audit_log WHERE action = 'audit.checkpoint' AND decision = 'allow' ORDER BY seq DESC LIMIT 2"));
+  expect(signed.length === 2 && signed.every((entry) => entry.author === 'vault'), "the checkpoints are not the vault's entries", signed);
+  const [newest, previous] = signed as [(typeof signed)[number], (typeof signed)[number]];
+  expect((JSON.parse(newest.metadata) as { seq: number }).seq === after.checkpoint.seq, 'the newest checkpoint entry is not the one verified', { signed, after });
+  expect(Number(previous.seq) <= after.checkpoint.seq, 'the newest checkpoint does not cover the one before it', signed);
+  await settled(deployment);
   const { entries } = await admin.api.audit.list({ detail: '1', limit: 20 });
-  const signed = entries.filter((entry) => entry.action === 'audit.checkpoint' && entry.decision === 'allow');
-  expect(
-    signed.length >= 2 && signed.every((entry) => entry.author === 'vault' && entry.detail),
-    "the checkpoints are not the vault's entries, hidden as detail",
-    signed,
-  );
-  const [newest, previous] = signed as [AuditEntryView, AuditEntryView];
-  expect(newest.metadata.seq === after.checkpoint.seq, 'the newest checkpoint entry is not the one verified', { signed, after });
-  expect(previous.seq <= after.checkpoint.seq, 'the newest checkpoint does not cover the one before it', signed);
+  expect(!entries.some((entry) => entry.action === 'audit.checkpoint'), 'the audit page lists a checkpoint', entries.slice(0, 5));
   return `${after.entries} entries verified through ${after.through}, checkpointed at ${after.checkpoint.seq}`;
 }
 

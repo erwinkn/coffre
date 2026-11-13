@@ -50,7 +50,7 @@ export async function conform(
   await report.check('inheritance', all, ({ people, canaries }) => inheritance(people, canaries));
   await report.check('personal configs', { people }, ({ people }) => personalConfigs(deployment, people));
   await report.check('references', all, ({ people, canaries }) => references(deployment, people, canaries));
-  await report.check('loosening', { people }, ({ people }) => loosening(people));
+  await report.check('loosening', { people }, ({ people }) => loosening(deployment, people));
   await report.check('missing keys', { people }, ({ people }) => missingKeys(people));
   // Before offboarding: the leaver's CLI session is one of the credentials /mcp must refuse.
   await report.check('MCP connect', { people }, ({ people }) => mcpConnect(deployment, people));
