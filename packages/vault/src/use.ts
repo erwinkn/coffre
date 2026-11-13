@@ -149,7 +149,7 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
     -- Read before its MAC is checked, so only what is shaped like ids is cast: a row someone else wrote is no row, not an error.
     UNION ALL SELECT 'binding', to_jsonb(t) FROM bindings t, c WHERE t.id = CASE WHEN c.created_by ~ '^binding:${ID}$' THEN substr(c.created_by, 9)::uuid END
     -- An array the statement works out once, so each id is one lookup by the key.
-    UNION ALL SELECT 'ancestor', to_jsonb(t) FROM credentials t WHERE t.id = ANY(ARRAY(SELECT above::uuid FROM c, jsonb_array_elements_text(CASE WHEN c.kind = 'workload' AND c.ancestors ~ '^\\[("${ID}"(,"${ID}")*)?\\]$' THEN c.ancestors::jsonb END) above))
+    UNION ALL SELECT 'ancestor', to_jsonb(t) FROM credentials t WHERE t.id = ANY(ARRAY(SELECT above::uuid FROM c, jsonb_array_elements_text(CASE WHEN c.kind = 'workload' AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) above))
     UNION ALL SELECT 'policy', to_jsonb(t) FROM policy t, c WHERE c.kind = 'workload'
     UNION ALL SELECT 'project', to_jsonb(t) FROM projects t WHERE t.id IN (SELECT project_id FROM held UNION ALL SELECT id FROM p)
     UNION ALL SELECT 'environment', to_jsonb(t) FROM environments t WHERE t.id IN (SELECT environment_id FROM held UNION ALL SELECT id FROM chain)
