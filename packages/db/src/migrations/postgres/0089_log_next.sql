@@ -24,4 +24,13 @@ END
 $$;--> statement-breakpoint
 DROP SEQUENCE "log_number";--> statement-breakpoint
 -- The one appender whose argument list 0.16 keeps from 0.15.0: a call sent after the commit resolves to no function.
-ALTER FUNCTION public.log_retention(text, bigint, text, bytea) RENAME TO append_retention;
+-- Made anew, not renamed: the collapse makes a function renamed anew (T285), so the numbered path does too.
+DO $$
+BEGIN
+    EXECUTE replace(pg_get_functiondef('public.log_retention(text, bigint, text, bytea)'::regprocedure),
+        'FUNCTION public.log_retention(', 'FUNCTION public.append_retention(');
+END
+$$;--> statement-breakpoint
+REVOKE ALL ON FUNCTION append_retention(text, bigint, text, bytea) FROM PUBLIC;--> statement-breakpoint
+GRANT EXECUTE ON FUNCTION append_retention(text, bigint, text, bytea) TO coffre_vault;--> statement-breakpoint
+DROP FUNCTION log_retention(text, bigint, text, bytea);

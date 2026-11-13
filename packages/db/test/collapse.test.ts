@@ -240,6 +240,8 @@ const SEED = `
 /** The upgrade's statements that look like they write rows but write none, by design. */
 const WRITES_NOTHING: { reason: string; matches: RegExp }[] = [
   { reason: '0076 makes the old names as views, and grants on them', matches: /EXECUTE format\('CREATE VIEW public\.%I WITH \(security_invoker = true\)/ },
+  { reason: '0086 locks the log tables, which writes nothing', matches: /^LOCK TABLE "log_changes", "log_uses" IN ACCESS EXCLUSIVE MODE;$/m },
+  { reason: "0086 sets log_next from log_number, a sequence's state, which parity compares", matches: /^SELECT setval\('log_next', nextval\('log_number'\), false\);$/m },
 ];
 
 let collapsed: Collapsed;
@@ -268,6 +270,10 @@ test('each function is made once, by its own file, which the baseline names once
     assert.deepEqual(statements(assemble(sql, collapsed.functions)).filter((statement) => onlineIndex(statement) !== null), []);
   }
   assert.deepEqual(named(collapsed.baseline).sort(), [...collapsed.functions.keys()].sort());
+  // 0086 numbers the log from log_next: no function names log_number, and each path's last word on it drops it.
+  const naming = (sql: string) => statements(sql).map(code).filter((statement) => statement.includes('log_number'));
+  assert.deepEqual([...collapsed.functions.values()].flatMap(naming), []);
+  for (const sql of [collapsed.baseline, collapsed.upgrade]) assert.equal(naming(sql).at(-1), 'DROP SEQUENCE "log_number";');
 });
 
 // A function takes at most 10 arguments (AGENTS.md, "Writing code here"). These take more: each

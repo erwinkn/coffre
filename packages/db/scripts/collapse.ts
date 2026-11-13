@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url';
 
 import { migrationsFolder } from '../src/migrate.ts';
 import { onlineIndex, type OnlineIndex } from '../src/online-indexes.ts';
-import { postgresClient, quoteIdentifier, type PostgresClient } from '../src/postgres.ts';
+import { postgresClient, postgresSession, quoteIdentifier, type PostgresClient } from '../src/postgres.ts';
 
 export const BREAK = '--> statement-breakpoint';
 /** The release the upgrade starts from, as its tag holds its migrations (0000 and 0022 were rewritten since: migrate.ts, `REWRITTEN`). */
@@ -96,6 +96,8 @@ const aboutFunctions = (statement: string) =>
   !temporary(statement) &&
   /^(?:CREATE (?:OR REPLACE )?FUNCTION|DROP FUNCTION|ALTER FUNCTION|(?:GRANT|REVOKE)\s[^;]*?\sON (?:FUNCTION|ALL (?:FUNCTIONS|ROUTINES) IN SCHEMA))\s/i.test(bare(statement));
 const ownerGrant = (statement: string) => /^DO\s/.test(bare(statement)) && statement.includes('pg_get_userbyid(proowner)');
+/** A DO block that makes functions anew from their own definitions, as 0086 points their bodies at another sequence. */
+const remakes = (statement: string) => /^DO\s/.test(bare(statement)) && statement.includes('pg_get_functiondef(');
 
 /**
  * Each function, by its signature (`regprocedure`, as the default search path writes it): its schema and owner, a
@@ -248,7 +250,7 @@ function collapse(where: readonly string[], list: readonly string[], replayed: R
   const out: string[] = [];
   const placed = new Set<string>();
   list.forEach((statement, index) => {
-    if (!aboutFunctions(statement) && !ownerGrant(statement)) {
+    if (!aboutFunctions(statement) && !ownerGrant(statement) && !remakes(statement)) {
       if (touched[index]!.length > 0) throw new Error(`${where[index]} changes ${touched[index]!.join(', ')} but is no statement about functions`);
       const online = onlineIndex(statement);
       const lost = gone[index]!.filter((oid) => left.has(oid));
@@ -330,10 +332,14 @@ async function scratch<T>(cluster: string, work: (client: PostgresClient) => Pro
   const admin = postgresClient(cluster, { max: 1 });
   try {
     await admin.unsafe(`CREATE DATABASE ${quoteIdentifier(name)}`);
-    const client = postgresClient(Object.assign(new URL(cluster), { pathname: `/${name}` }).toString(), { max: 1, onnotice: () => {} });
+    // One session and one transaction, as the migrator applies the migrations (a LOCK TABLE needs one).
+    const client = postgresSession(Object.assign(new URL(cluster), { pathname: `/${name}` }).toString(), { onnotice: () => {} });
     try {
+      await client.unsafe('BEGIN');
       await client.unsafe(LEDGER);
-      return await work(client);
+      const done = await work(client);
+      await client.unsafe('COMMIT');
+      return done;
     } finally {
       await client.end();
     }

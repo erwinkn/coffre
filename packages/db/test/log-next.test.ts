@@ -48,9 +48,9 @@ const use = (r: number) =>
  * Every function of the schema, its row as text but for its name and body, which the swap alone may change. A default's
  * parse tree keeps where it stood in the CREATE's text (`:location`, for an error's cursor), which another text moves.
  */
-const FUNCTIONS = `SELECT p.oid::int AS oid, p.proname AS name, p.prosrc AS body, (to_jsonb(p) - 'proname' - 'prosrc' - 'proargdefaults')::text AS rest,
+const FUNCTIONS = `SELECT p.oid::regprocedure::text AS id, p.proname AS name, p.prosrc AS body, (to_jsonb(p) - 'oid' - 'proname' - 'prosrc' - 'proargdefaults')::text AS rest,
     regexp_replace(p.proargdefaults::text, ':location -?[0-9]+', '', 'g') AS defaults,
-    obj_description(p.oid, 'pg_proc') AS comment FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace ORDER BY p.oid`;
+    obj_description(p.oid, 'pg_proc') AS comment FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace ORDER BY id`;
 const SEQUENCE = (name: string) => `SELECT pg_get_userbyid(c.relowner) AS owner, c.relacl::text AS acl, (to_jsonb(s) - 'seqrelid')::text AS params
     FROM pg_class c JOIN pg_sequence s ON s.seqrelid = c.oid WHERE c.oid = to_regclass('public.${name}')`;
 
@@ -97,7 +97,7 @@ test(`${TAG}: an append held across the swap's commit fails, 42P01, and writes n
   const [first] = await changes.unsafe<{ n: string }[]>(refusal('warm'));
   const [second] = await uses.unsafe<{ n: string }[]>(use(1));
   assert.equal(BigInt(second!.n), BigInt(first!.n) + 1n, 'both logs number from one sequence');
-  const functions = await observer.unsafe<{ oid: number; name: string; body: string; rest: string; defaults: string | null; comment: string | null }[]>(FUNCTIONS);
+  const functions = await observer.unsafe<{ id: string; name: string; body: string; rest: string; defaults: string | null; comment: string | null }[]>(FUNCTIONS);
   const [sequence] = await observer.unsafe(SEQUENCE('log_number'));
   assert.ok(functions.some((f) => f.body.includes('public.log_number')));
 
@@ -117,13 +117,13 @@ test(`${TAG}: an append held across the swap's commit fails, 42P01, and writes n
     `SELECT (SELECT count(*)::int FROM log_changes WHERE request_id = 'held') AS changes, (SELECT count(*)::int FROM log_uses WHERE request_id = 2) AS uses`);
   assert.deepEqual({ ...found }, { changes: 0, uses: 0 });
 
-  // Every function is the same row, but for the sequence its body names, and log_retention's name.
+  // Every function is the same row, but for the sequence its body names, and log_retention's name (and object ID: made anew).
   const swapped = await observer.unsafe<typeof functions>(FUNCTIONS);
-  const expected = new Map(functions.map((f) => [f.oid, {
+  const expected = new Map(functions.map((f) => [f.id.replace(/^log_retention\(/, 'append_retention('), {
     ...f, name: f.name === 'log_retention' ? 'append_retention' : f.name, body: f.body.replaceAll('public.log_number', 'public.log_next'),
   }]));
   const drift = swapped.flatMap((f) => {
-    const was = expected.get(f.oid);
+    const was = expected.get(f.id);
     return was === undefined ? [`${f.name}: new`] : (['name', 'body', 'rest', 'defaults', 'comment'] as const).filter((k) => f[k] !== was[k]).map((k) => `${f.name}: ${k}`);
   });
   assert.deepEqual(drift, []);
