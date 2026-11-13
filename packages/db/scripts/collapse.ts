@@ -35,7 +35,7 @@ import { onlineIndex, type OnlineIndex } from '../src/online-indexes.ts';
 import { postgresClient, quoteIdentifier, type PostgresClient } from '../src/postgres.ts';
 
 export const BREAK = '--> statement-breakpoint';
-/** The release the upgrade starts from, as its tag holds its migrations (0022 was rewritten since: migrate.ts, `REWRITTEN`). */
+/** The release the upgrade starts from, as its tag holds its migrations (0000 and 0022 were rewritten since: migrate.ts, `REWRITTEN`). */
 export const RELEASE = 'v0.15.0';
 /** Where a function's file goes in a migration: the line `-- @function <name>`, a statement of its own. */
 const MARKER = /^-- @function (\S+)$/gm;
