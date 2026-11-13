@@ -212,7 +212,7 @@ export class SignerHost {
 
   /**
    * What the signer found is sent, then let go; and that it is stopped,
-   * once, until a check completes. An alert that fails throws, and the
+   * once, until a check completes, and again at the next stop. An alert that fails throws, and the
    * findings wait for the next run. Unless more than `KEEP` already do:
    * then they go to the log and are let go, and what stands is news again.
    */
