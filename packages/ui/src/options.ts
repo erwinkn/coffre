@@ -92,7 +92,7 @@ export const home = {
 
 /**
  * `/projects`, and, for a person its prompt may ask to add a passkey, their passkeys: an Owner's reset of them, which
- * the prompt says, is in the page the server renders (section 3.7; review r1 of #539).
+ * the prompt says, is in the page the server renders (section 3.7).
  */
 export const projects = {
   loader: async ({ context }: Loader) => {

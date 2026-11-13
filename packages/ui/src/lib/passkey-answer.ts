@@ -8,8 +8,7 @@
  * all of those, so the page offers to try again rather than send the person
  * back to their provider. A 401 or 409 whose body did not arrive whole is
  * unread too: those are the statuses whose refusals may keep the step
- * (`passkey_failed`, `changed`), so the page cannot tell it ended (review r7
- * of #500).
+ * (`passkey_failed`, `changed`), so the page cannot tell it ended.
  */
 export type PasskeyAnswer<T> = { kind: 'ok'; value: T } | { kind: 'refused'; code: string | undefined } | { kind: 'unavailable' };
 
@@ -72,8 +71,8 @@ export function leftOf(ends: Deadline, clock: Clock): number {
  * A call to the authenticator ended at `left` milliseconds, by this page: `call` is given the signal to pass to
  * `create()` or `get()`, aborted then, and a call it ended throws `TimeoutError` (`lapsed`). The options' `timeout` is
  * a hint the browser may stretch: Chromium raises one under three minutes to three, so a step with seconds left would
- * wait minutes, and a passkey made after the step lapsed is one coffre refuses, left on the device (review r2 of
- * #539). An answer that came first is kept: coffre, not the page, says whether it came in time.
+ * wait minutes, and a passkey made after the step lapsed is one coffre refuses, left on the device. An answer that
+ * came first is kept: coffre, not the page, says whether it came in time.
  */
 export async function withinDeadline<T>(left: number, call: (signal: AbortSignal) => Promise<T>, closed?: AbortSignal): Promise<T> {
   const controller = new AbortController();
@@ -111,19 +110,19 @@ export type Unsent = { body: string | null; asked?: boolean; ends?: Deadline };
 
 /**
  * One press of the passkey page's button: the authenticator's answer, sent. An answer the server did not answer
- * (`unavailable`) is kept, and the next press sends it again rather than ask the authenticator for another (review r7
- * of #500): the page's options name one user handle, and a second `create()` with it could replace on the
- * authenticator a passkey the first POST added though its answer was lost, which the server would refuse
+ * (`unavailable`) is kept, and the next press sends it again rather than ask the authenticator for another: the
+ * page's options name one user handle, and a second `create()` with it could replace on the authenticator a passkey
+ * the first POST added though its answer was lost, which the server would refuse
  * (`passkey_exists`), leaving the person a key coffre does not hold. Sent again, the same passkey either completes the
  * step or, the first having committed, ends it with `passkey_exists`, and the key on the device is the one coffre holds.
- * Another tab, or the page reloaded, asks its own GET, whose options draw a user handle of their own (D173), so no
+ * Another tab, or the page reloaded, asks its own GET, whose options draw a user handle of their own, so no
  * page's `create()` replaces another's. A touch is the same: the same assertion again, never a second touch for one
  * challenge. `ask` throws as the browser's `create()` or `get()` does, and its throw forgets the press: no passkey was
  * made.
  *
  * `landed`: a 2xx whose body did not arrive whole. The server did what was asked: the sign-in, the step-up or the
  * removal is done, and the response's cookie is this browser's new session. Sent again, the same answer would meet a
- * step that ended, a refusal of something done (review r6 of #539), so the page goes on as on `ok`, without the
+ * step that ended, a refusal of something done, so the page goes on as on `ok`, without the
  * answer's `next`.
  *
  * `once`: the options may be asked of the authenticator once only, as a `create()`'s are: after a refusal that keeps
@@ -131,12 +130,12 @@ export type Unsent = { body: string | null; asked?: boolean; ends?: Deadline };
  * their own. A refusal says nothing of the answers sent before it: tab A's POST commits and its response is lost, tab
  * B's sign-in replaces the pending cookie, and A's answer, sent again, fails B's challenge (`passkey_failed`); a
  * second `create()` with A's options would name the handle coffre now holds, and could replace that passkey on the
- * authenticator (review r13 of #500).
+ * authenticator.
  *
  * `ends`: a press past it answers `expired`, asking nothing either. A page left open past its five minutes would
  * otherwise hand the authenticator options the server no longer takes, and the person a passkey coffre refuses (the
  * `timeout` the options carry starts when the authenticator is called, not at the GET). Before it, `ask` is given what
- * is left, the `timeout` to call the authenticator with (review r14 of #500), and an `ask` the page ended there
+ * is left, the `timeout` to call the authenticator with, and an `ask` the page ended there
  * (`withinDeadline`) answers `expired` too.
  */
 export async function sendPasskey<T>(
@@ -171,7 +170,7 @@ export async function sendPasskey<T>(
  * is the browser refusing the RP ID for this origin: one that is not the host or a registrable parent of it, which
  * only the browser's public suffix list decides (`co.uk`, `workers.dev`). coffre's startup check holds `rpId` to the
  * host or a parent on a label boundary, and leaves that list to the browser (docs/design/passkeys.md, section 7.1), so
- * the first to press here, the Owner setting the deployment up, is told which setting to fix (review r15 of #500).
+ * the first to press here, the Owner setting the deployment up, is told which setting to fix.
  */
 export function authenticatorError(thrown: unknown, rpId: string): string {
   const name = thrown instanceof DOMException ? thrown.name : undefined;

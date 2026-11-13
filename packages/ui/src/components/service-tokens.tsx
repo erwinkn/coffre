@@ -147,7 +147,7 @@ function IssueToken({ serviceId, grants, maxDays }: { serviceId: string; grants:
   const coffre = useCoffre();
   const { pending, error, setError, run } = useAction();
   const member = memberRef('service', serviceId);
-  // Told before it is issued: the sensitive values it would not read, as the server decides (R32).
+  // Told before it is issued: the sensitive values it would not read, as the server decides.
   const plan = useQuery({ ...queries.tokenPlan(coffre, member, scope), enabled: open && issued === null && Object.keys(scope).length > 0 });
   const unread = withheldInWords(plan.data?.withheld, 'token');
 

@@ -20,10 +20,10 @@ import type { environmentProxy } from '../options';
 const Route = pageRoute<typeof environmentProxy>();
 
 /**
- * An environment's Proxy tab (0.16, T186; docs/design/proxy-ui.md): what
+ * An environment's Proxy tab (0.16; docs/design/proxy-ui.md): what
  * its credential proxy holds, routes, signers, verifiers and databases, as
  * a list and a panel. The deployment's code's items show locked, with
- * code's values (R66); the environment's own, and those it inherits from
+ * code's values; the environment's own, and those it inherits from
  * its fork's parents, take edits from whoever holds `proxy.edit` here.
  * Edits wait on the page for one Save, which the vault decides.
  */

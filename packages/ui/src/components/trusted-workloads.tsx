@@ -95,7 +95,7 @@ export function TrustedWorkloads({ serviceId, bindings, grants }: { serviceId: s
                         </td>
                         <td className="nowrap cell-muted">
                           {binding.removing !== null ? (
-                            // Closed, its credentials still being revoked: a removal longer than one request (W331).
+                            // Closed, its credentials still being revoked: a removal longer than one request.
                             <span className="cell-stack">
                               <span>Being removed</span>
                               <small>
@@ -405,7 +405,7 @@ function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; gra
   const whole = (): ScopeChoice => ({ scope: wholeScope(grants), chosen: false });
   const [choice, setChoice] = useState(whole);
   const [plan, setPlan] = useState<BindingPlan | null>(null);
-  // The sensitive values its credentials would not read, as the server planned it (R32).
+  // The sensitive values its credentials would not read, as the server planned it.
   const unread = withheldInWords(plan?.withheld, 'binding');
   // What the plan was made from: Save sends it, whatever the form says by then.
   const [reviewed, setReviewed] = useState<ReturnType<typeof input> | null>(null);

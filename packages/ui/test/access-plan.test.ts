@@ -91,7 +91,7 @@ test('the plan read from what is held changes nothing', () => {
 });
 
 test('asking for access already held creates only what is missing', () => {
-  // The case that used to fail: write on dev was held, and asked for again.
+  // Write on dev is held, and asked for again.
   const grants = [held('g1', 'developer', 'dev')];
   assert.deepEqual(
     accessChanges(grants, perEnvironment({ dev: 'developer', prod: 'viewer', staging: 'viewer' })),

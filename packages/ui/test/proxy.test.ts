@@ -1,4 +1,4 @@
-// The Proxy tab (0.16, T186; docs/design/proxy-ui.md): what it lists, code's
+// The Proxy tab (0.16; docs/design/proxy-ui.md): what it lists, code's
 // items locked beside the environment's own and those its fork inherits; what
 // a save sends; what discarding leaves; what the review says after another
 // save came first (409); and a reader's page, every field inert. The rows'
@@ -385,7 +385,7 @@ test('a path rule: its segment in the sample call, the path the proxy would take
   assert.equal(samplePath(telegram), '/bot{TELEGRAM_BOT_TOKEN}/sendMessage');
   assert.equal(samplePath({ ...telegram, allow: [{ methods: ['GET'], path: '/file/*/**' }] }), '/file/bot{TELEGRAM_BOT_TOKEN}/x');
   assert.equal(samplePath({ ...telegram, allow: null }), '/bot{TELEGRAM_BOT_TOKEN}');
-  // Where the sample call takes it (review r2 of #483): beneath a literal entry, and a `*` of the template's own kept.
+  // Where the sample call takes it: beneath a literal entry, and a `*` of the template's own kept.
   const file = { ...telegram, allow: [{ methods: ['GET'], path: '/file' }] };
   assert.equal(samplePath(file), '/file/bot{TELEGRAM_BOT_TOKEN}');
   assert.equal(sampleCall(file, 'GET', samplePath(file)).refusal, null);

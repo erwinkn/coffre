@@ -184,7 +184,7 @@ function ConsiderRotating({ report, person }: { report: PrincipalReport; person:
 
 /**
  * References they made, as the log names them: each belongs to the
- * environment that holds it, like a value, not to them (D46), so their
+ * environment that holds it, like a value, not to them, so their
  * leaving ends none. Listed to review.
  */
 function MadeReferences({ report }: { report: PrincipalReport }) {

@@ -104,7 +104,7 @@ export function RenameEnvironment({
 
 /**
  * Archiving an environment, or restoring an archived one. What archiving
- * would stop is asked once the dialog opens (D41), and Archive waits for
+ * would stop is asked once the dialog opens, and Archive waits for
  * the answer; `onArchived` once the server has archived it.
  */
 export function ArchiveEnvironment({

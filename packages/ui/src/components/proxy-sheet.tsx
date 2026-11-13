@@ -1,4 +1,4 @@
-// The Proxy tab's list and panel (0.16, T186): every item one short line,
+// The Proxy tab's list and panel (0.16): every item one short line,
 // routes, databases, signers and verifiers alike, and beside them the one
 // picked, its fields as its kind has them, what a sample call through a route
 // becomes, and the item as code. Edits wait for the page's one Save.
@@ -197,7 +197,7 @@ function Provenance({ row, edits }: { row: Row; edits: Edits }) {
   if (item === null) return row.copiedFrom === null ? null : <p className="proxy-provenance">Copied from {row.copiedFrom}, not saved yet.</p>;
   if (row.overtaken) return <p className="proxy-provenance">Changed by another save since you began editing it: saving keeps it as you saw it, with your edits. The review shows each field that sets back.</p>;
   if (row.gone) return <p className="proxy-provenance">Removed by another save since you began editing it: saving makes it again, {row.state === 'resaved' ? 'as it was' : 'as you edited it'}.</p>;
-  // Code's item shows locked with code's values, its lock saying where it serves (R66); only one that serves elsewhere says so here.
+  // Code's item shows locked with code's values, its lock saying where it serves; only one that serves elsewhere says so here.
   if (item.source === 'code') {
     return item.serves ? null : <p className="proxy-provenance">{scopeInWords(item)}: {edits.place.project}/{edits.place.environment} has no {item.definition.name}, and none of its own takes the name.</p>;
   }
