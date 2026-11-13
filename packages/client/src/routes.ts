@@ -156,6 +156,7 @@ const EVERY_ROUTE: { [K in RouteKey]: true } = {
   'GET /audit/reads': true,
   'GET /audit/keys': true,
   'POST /audit/loss': true,
+  'POST /audit/rebuild': true,
 };
 
 /**

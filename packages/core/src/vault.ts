@@ -426,6 +426,12 @@ export interface Vault {
    */
   check?(input: CheckInput): Promise<CheckOutcome>;
   /**
+   * `coffre audit rebuild` (0.16): the audit projection emptied and its cursor put back at the start of every
+   * log, and the record of it, a change of the request's own naming who asked, in one transaction (`rebuild_audit`);
+   * then the seal wait. The vault's projector lists everything again. Its number in the log.
+   */
+  rebuildAudit?(input: RebuildAuditInput): Promise<{ number: string }>;
+  /**
    * Answers once the log's entry `number` is sealed in a signed checkpoint
    * and, if a witness is configured, witnessed or past its 2 s (R51): what a
    * change the app committed waits for before it answers. Only with 0.15's
@@ -924,6 +930,9 @@ export type AdmitReadOutcome =
  * (`ticket`), which `recordRefusal` writes once the app has.
  */
 export type VaultRefused = { served: false; why: 'refused'; refusal: Refusal; at: number; app: string; standing: Access; ticket: string };
+
+/** Who asked for a rebuild of the audit projection (`user:…`, an Owner, as the app checked), under the request's id. */
+export type RebuildAuditInput = { actor: string; requestId: string };
 
 /** A refusal's record, as `writeKeys` or `admitRead` prepared it. */
 export type RecordRefusalInput = { ticket: string };

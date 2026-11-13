@@ -1,14 +1,20 @@
 import { entryLeaf, parseCheckpoint, splitNote, tileLeaves, type LogEntry, type PairNotes, type StoredPair, type Tile, type TileKey, type TreeName } from '@coffre/core/merkle';
+import type { StoredEntry } from '@coffre/core/audit';
 import type { Database } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
-import { changesOf } from '@coffre/db/log';
-import { sql, type SQL } from 'drizzle-orm';
+import { changesOf, entryColumns } from '@coffre/db/log';
+import { auditLog } from '@coffre/db/schema';
+import { and, asc, eq, gt, gte, lt, sql, type SQL } from 'drizzle-orm';
+
+import type { AuditCursor } from './audit-rows.ts';
 
 import { USE_AHEAD_MS, USE_DEADLINE_MS } from './bulk.ts';
 import { misplaced, Refused, type CheckpointStore, type Locating } from './checkpointer.ts';
 import { changeEntry, KEY_OBJECT, RETENTION_OBJECT, useEntry } from './log-entry.ts';
+import type { ProjectionStore, rebuildRow } from './projection.ts';
 import { CursorGone, type ReadRow, type ReadsCursor, type ReadsStore } from './reads.ts';
 import type { RetentionStore } from './retention.ts';
+import { latestSigned } from './store.ts';
 
 /**
  * The checkpointer's database (checkpointer.ts, `CheckpointStore`): 0.15's
@@ -72,7 +78,7 @@ export type RotationStore = {
 };
 
 /** The checkpointer's database, with retention's part, the reads' and the rotations'. */
-export type LogStore = CheckpointStore & RetentionStore & ReadsStore & RotationStore;
+export type LogStore = CheckpointStore & RetentionStore & ReadsStore & RotationStore & ProjectionStore;
 
 export function logStore(db: Database, options: Options = {}): LogStore {
   const range = options.tileRange ?? TILE_RANGE;
@@ -80,8 +86,10 @@ export function logStore(db: Database, options: Options = {}): LogStore {
   if (!Number.isSafeInteger(range) || range <= 0 || range % 256 !== 0) throw new Error(`tileRange must be a positive multiple of 256, not ${range}`);
   const base = postgresStore(db, range);
   const reads = readsStore(db);
+  const audit = projectionStore(db);
   return {
     ...base,
+    ...audit,
     readsCursor: reads.readsCursor,
     objects: reads.objects,
     writeReads: reads.writeReads,
@@ -95,6 +103,9 @@ export function logStore(db: Database, options: Options = {}): LogStore {
       await reads.makeDays(days);
     },
     async dropDay(day) {
+      // The audit projection's rows of the day's uses, and the summary's reads older than its end: retention waits for
+      // the projector to pass the cut (retention.ts), so none is listed after.
+      await rowsOf(db, sql`SELECT drop_audit_day(${day}::date)`);
       await reads.dropDay(day);
       const state = await base.dropDay(day);
       if (state === 'detached') await reads.dropDay(day);
@@ -269,7 +280,7 @@ export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling:
       ORDER BY n${limitOf(limit)}`;
 }
 
-function postgresStore(db: Database, range: number): CheckpointStore & Omit<RetentionStore, 'readsCursor'> & RotationStore {
+function postgresStore(db: Database, range: number): CheckpointStore & Omit<RetentionStore, 'readsCursor' | 'auditCursor'> & RotationStore {
   const CHANGE = sql.raw(`json_build_object('tree', 'changes', 'number', c.number::text, 'at', c.at::text, 'requestId', c.request_id,
     'object', c.object::text, 'actor', c.actor, 'payload', c.payload, 'seal', encode(c.seal, 'hex'), 'mac', encode(c.mac, 'hex'))`);
   const USE = sql.raw(`json_build_object('tree', 'uses', 'number', u.number::text, 'at', u.at::text, 'requestId', u.request_id::text,
@@ -543,6 +554,65 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
       if (row?.state !== 'kept') made.delete(day);
     },
   };
+}
+
+/**
+ * The audit projection's database (projection.ts; migration 0087):
+ * its cursor, the 0.14 log's anchor and entries, the versions its entries
+ * name by number, and the batch's write, `project_audit`, one statement.
+ */
+function projectionStore(db: Database): Pick<ProjectionStore, 'auditCursor' | 'oldAnchor' | 'oldEntries' | 'lossesAbove' | 'versionIds' | 'writeAudit'> {
+  const hex = (bytes: Buffer | null) => (bytes === null ? null : bytes.toString('hex'));
+  const json = (value: unknown) => JSON.stringify(value, (_, inner: unknown) => (typeof inner === 'bigint' ? String(inner) : inner));
+  const cursorJson = (c: AuditCursor) => json({
+    through: c.through, pair: c.pair, at: c.at, oldFloor: c.oldFloor, oldFrom: c.oldFrom, oldTop: c.oldTop, oldHash: hex(c.oldHash), mac: hex(c.mac),
+  });
+  return {
+    async auditCursor() {
+      type Row = { through: string; pair: string; at: string; old_floor: string; old_from: string; old_top: string; old_hash: Uint8Array; mac: Uint8Array | null };
+      const [row] = await rowsOf<Row>(db, sql`SELECT CAST(through AS text) AS through, CAST(pair AS text) AS pair, CAST(at AS text) AS at,
+        CAST(old_floor AS text) AS old_floor, CAST(old_from AS text) AS old_from, CAST(old_top AS text) AS old_top, old_hash, mac FROM audit_cursor WHERE only_row`);
+      // The migration's one row: gone, nothing is projected (a database writer's doing), never a fresh start.
+      if (row === undefined) throw new Error("the audit cursor is gone: a database writer deleted it");
+      return {
+        through: BigInt(row.through), pair: BigInt(row.pair), at: Number(row.at), oldFloor: BigInt(row.old_floor), oldFrom: BigInt(row.old_from),
+        oldTop: BigInt(row.old_top), oldHash: Buffer.from(row.old_hash), mac: row.mac === null ? null : Buffer.from(row.mac),
+      };
+    },
+    async oldAnchor() {
+      return (await latestSigned(db)) ?? null;
+    },
+    async oldEntries(from, below) {
+      return await db.select(entryColumns()).from(auditLog).where(and(gte(auditLog.seq, from), lt(auditLog.seq, below))) as StoredEntry[];
+    },
+    async lossesAbove(seq) {
+      return await db.select(entryColumns()).from(auditLog).where(and(eq(auditLog.action, 'audit.loss_accepted'), gt(auditLog.seq, seq))).orderBy(asc(auditLog.seq)) as StoredEntry[];
+    },
+    async versionIds(asked) {
+      const found = new Map<string, string>();
+      if (asked.length === 0) return found;
+      const rows = await rowsOf<{ secret: string; version: number; id: string }>(db, sql`
+        SELECT CAST(v.secret_id AS text) AS secret, v.version, CAST(v.id AS text) AS id
+          FROM jsonb_to_recordset(${json(asked)}::jsonb) AS p (secret uuid, version integer)
+          JOIN secret_versions v ON v.secret_id = p.secret AND v.version = p.version`);
+      for (const row of rows) found.set(`${row.secret}:${Number(row.version)}`, row.id);
+      return found;
+    },
+    async writeAudit(events, keys, from, to) {
+      const rows = events.map((row) => ({ ...row, mac: hex(row.mac) }));
+      const [row] = await rowsOf<{ wrote: boolean }>(db, sql`SELECT project_audit(${json(rows)}::jsonb, ${json(keys)}::jsonb, ${cursorJson(from)}::jsonb,
+        ${cursorJson(to)}::jsonb) AS wrote`);
+      return row!.wrote === true;
+    },
+  };
+}
+
+/** `rebuild_audit`: the record, the cursor at the start and the tables emptied, one transaction. Its number. */
+export async function callRebuild(db: Database, row: ReturnType<typeof rebuildRow>): Promise<bigint> {
+  const [written] = await rowsOf<{ n: string }>(db, sql`SELECT CAST(rebuild_audit(
+    ${String(row.at)}::bigint, ${row.requestId}::text, ${row.actor}::text, ${row.payload}::text, ${row.mac}::bytea
+  ) AS text) AS n`);
+  return BigInt(written!.n);
 }
 
 export type { ReadRow, ReadsCursor };

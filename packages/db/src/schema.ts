@@ -1490,6 +1490,115 @@ export const logReadsCursor = pgTable(
 );
 
 /**
+ * The audit projection (0.16; docs/design/state-rows.md, section 2;
+ * migration 0087): one row per entry of any log, as the pages list it,
+ * derived by the vault's projector (@coffre/vault's projection.ts), its only
+ * writer, from the chains' signed windows and the frozen `audit_log`, walked
+ * backward from an anchor. `detail` is JSON text that no SQL parses.
+ * `places`, every place it is listed at, and every other column are under
+ * the vault's MAC (`eventMac`).
+ */
+export const auditEvents = pgTable(
+  'audit_events',
+  {
+    at: bigint({ mode: 'number' }).notNull(),
+    // Its number in its log: a 0.14 entry's seq, a change's or a use's number.
+    number: bigint({ mode: 'bigint' }).notNull(),
+    // 14: audit_log, 15: log_changes, 16: log_uses.
+    log: smallint().notNull(),
+    author: text().notNull(),
+    action: text().notNull(),
+    // False for sign-ins and technical steps, which a page lists only when asked (?detail=1).
+    shown: boolean().notNull(),
+    allowed: boolean().notNull(),
+    code: text(),
+    actor: text().notNull(),
+    subject: text(),
+    credential: uuid(),
+    project: uuid(),
+    environment: uuid(),
+    secret: uuid(),
+    version: uuid(),
+    places: uuid().array().notNull(),
+    requestId: text('request_id'),
+    operationId: uuid('operation_id'),
+    related: bigint({ mode: 'bigint' }),
+    sourceIp: text('source_ip'),
+    detail: text().notNull(),
+    mac: bytea().notNull(),
+  },
+  (table) => [
+    primaryKey({ name: 'audit_events_pkey', columns: [table.at, table.number, table.log] }),
+    check('audit_events_log_check', sql`${table.log} IN (14, 15, 16)`),
+    check('audit_events_author_check', sql`${table.author} IN ('app', 'vault')`),
+    check('audit_events_mac_check', sql`octet_length(${table.mac}) = 16`),
+    // The default page, newest first, of shown events alone: the newest rows can all be hidden (a burst of
+    // sign-ins), and the key read backward with a filter on `shown` would read every one of them first. And a
+    // member's page.
+    index('audit_events_shown_idx').on(table.at, table.number, table.log).where(sql`${table.shown}`),
+    index('audit_events_actor_idx').on(table.actor, table.at, table.number, table.log),
+  ],
+);
+
+/** The page of a project, an environment or a key: a row for each place an event is at (its `places`). */
+export const auditEventPlaces = pgTable(
+  'audit_event_places',
+  {
+    place: uuid().notNull(),
+    at: bigint({ mode: 'number' }).notNull(),
+    number: bigint({ mode: 'bigint' }).notNull(),
+    log: smallint().notNull(),
+  },
+  (table) => [primaryKey({ name: 'audit_event_places_pkey', columns: [table.place, table.at, table.number, table.log] })],
+);
+
+/** The offboarding report's summary: the newest time each member read, or wrote, each version of each key. */
+export const auditMemberKeys = pgTable(
+  'audit_member_keys',
+  {
+    principal: text().notNull(),
+    secret: uuid().notNull(),
+    version: uuid().notNull(),
+    wrote: boolean().notNull(),
+    at: bigint({ mode: 'number' }).notNull(),
+    number: bigint({ mode: 'bigint' }).notNull(),
+  },
+  (table) => [primaryKey({ name: 'audit_member_keys_pkey', columns: [table.principal, table.secret, table.version, table.wrote] })],
+);
+
+/**
+ * How far the audit projector has gone, one row: in the chains, through
+ * `through`, the signed pair `pair` at or below it, the pair's time `at`; in
+ * `audit_log`, every seq below `oldFloor` and in [`oldFrom`, `oldTop`), the
+ * walk going on below `oldFrom`, whose entry must hash to `oldHash`. Under
+ * the vault's MAC (`cursorMac`), null only at the start, but for `oldFloor`
+ * and `oldTop`, temporary columns. `readsFrom` is retention's: the
+ * summary keeps no read older.
+ */
+export const auditCursor = pgTable(
+  'audit_cursor',
+  {
+    onlyRow: boolean('only_row').primaryKey().default(true),
+    through: bigint({ mode: 'bigint' }).notNull(),
+    pair: bigint({ mode: 'bigint' }).notNull(),
+    at: bigint({ mode: 'number' }).notNull(),
+    // Temporary, outside the MAC: old_floor and old_top go once `audit_log` is frozen. Never sign them back in.
+    oldFloor: bigint('old_floor', { mode: 'bigint' }).notNull(),
+    oldFrom: bigint('old_from', { mode: 'bigint' }).notNull(),
+    oldTop: bigint('old_top', { mode: 'bigint' }).notNull(),
+    oldHash: bytea('old_hash').notNull(),
+    mac: bytea(),
+    readsFrom: bigint('reads_from', { mode: 'number' }).notNull().default(0),
+  },
+  (table) => [
+    check('audit_cursor_only_row_check', sql`${table.onlyRow}`),
+    check('audit_cursor_old_check', sql`${table.oldFloor} <= ${table.oldFrom} AND ${table.oldFrom} <= ${table.oldTop}`),
+    check('audit_cursor_old_hash_check', sql`octet_length(${table.oldHash}) = 32`),
+    check('audit_cursor_mac_check', sql`${table.mac} IS NULL OR octet_length(${table.mac}) = 16`),
+  ],
+);
+
+/**
  * The bulk cap (R28, R52): each principal's last logged use of each key, as
  * the start of that use's refresh period, written only by a use that holds
  * the principal's lock (exclusive to enter a key, shared to move it on:

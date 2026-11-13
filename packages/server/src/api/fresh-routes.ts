@@ -150,6 +150,8 @@ export const FRESH_ROUTES: { [K in RouteKey]: Answer<K> } = {
   'GET /audit/keys': 'never',
   // Accepting lost entries for good.
   'POST /audit/loss': 'always',
+  // Emptying the audit pages until the projector lists every log again.
+  'POST /audit/rebuild': 'always',
 };
 
 /** How long a touch keeps its session fresh: Erwin's five minutes (D170, open question 1). */

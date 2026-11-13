@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-import { entryLeaf, inclusionProof, nodesFrom, tileMap, tilesFor, verifyInclusion, verifyLog, type Cut, type LogEntry, type LogReader, type Pair, type StoredPair } from '@coffre/core/merkle';
+import { Edge, edgeOf, entryLeaf, inclusionProof, nodesFrom, tileMap, tilesFor, verifyInclusion, verifyLog, type Cut, type LogEntry, type LogReader, type Pair, type StoredPair } from '@coffre/core/merkle';
 import { USE_WAYS } from '@coffre/core/vault';
 
 import { logObject } from './inputs.ts';
@@ -154,10 +154,15 @@ export type Projected = { through: bigint; sealed: bigint; projected: number };
  * derived from it. A tick seals its whole window, so a range is what one
  * tick sealed: a few hundred entries, more after an outage, which the
  * checkpointer read whole too. Only a range at or above retention's cut
- * (`sealedCut`) is asked for, whose uses are all kept. Throws on a range
- * that does not hold.
+ * (`sealedCut`) is asked for its uses, which are all kept there; a range at
+ * or below `cut` is its changes alone (`changesBelow`), for the audit
+ * projection, which lists changes from the start. Throws on a range that
+ * does not hold.
  */
-async function sealedRange(store: ReadsStore, ring: Keyring, start: StoredPair | null, next: StoredPair): Promise<LogEntry[]> {
+export async function sealedRange(
+  store: Pick<ReadsStore, 'tiles' | 'pair' | 'pairs' | 'entries'>, ring: Keyring, start: StoredPair | null, next: StoredPair, cut: Cut | null = null,
+): Promise<LogEntry[]> {
+  if (cut !== null && next.upto <= cut.upto) return changesBelow(store, ring, start, next);
   const walked: LogEntry[] = [];
   // The log as far as `next`, and no further: the walk takes `next` for the newest pair.
   const reader: LogReader = {
@@ -176,6 +181,37 @@ async function sealedRange(store: ReadsStore, ring: Keyring, start: StoredPair |
 }
 
 /**
+ * A range below retention's cut, whose uses went with their days, and the
+ * uses tree's tiles with them: its changes alone, which are kept for good,
+ * held to the changes tree as `verifyLog` holds a walk below a cut, from the
+ * edge the start's tiles give to `next`'s signed head, numbers rising and
+ * the pair's time and floor never back. A use still there (a straggler of
+ * the next day) is neither expected nor listed: the uses tree there is gone,
+ * so nothing would vouch for it (as `checkReads`).
+ */
+async function changesBelow(store: Pick<ReadsStore, 'tiles' | 'pairs' | 'entries'>, ring: Keyring, start: StoredPair | null, next: StoredPair): Promise<LogEntry[]> {
+  const row = start ?? (await store.pairs(-1n, 1))[0] ?? null;
+  const from = row === null ? null : ((await openUnder(ring, row.notes))?.pair ?? null);
+  const to = (await openUnder(ring, next.notes))?.pair ?? null;
+  if (from === null || to === null || from.upto !== (start?.upto ?? 0n) || to.upto !== next.upto) {
+    throw new Error(`the pairs at ${start?.upto ?? 0n} and ${next.upto} are not ones the vault signed`);
+  }
+  const edge = Edge.load(from.changes.size, tileMap(await store.tiles('changes', edgeOf(from.changes.size).filter((e) => e.width > 0))));
+  if (!edge.root().equals(from.changes.root)) throw new Error(`checkpoint ${from.upto}: the changes tiles at its edge do not give its signed head`);
+  const changes = (await store.entries(from.upto, to.upto, { floor: from.floor })).filter((entry) => entry.tree === 'changes');
+  let previous = from.upto;
+  for (const entry of changes) {
+    if (entry.number <= previous || entry.number > to.upto) throw new Error(`${entry.number}: out of order, or outside the range from ${from.upto} to ${to.upto}`);
+    previous = entry.number;
+  }
+  edge.append(changes.map((entry) => entryLeaf('changes', entry.number, entry.columns)));
+  if (edge.size !== to.changes.size || !edge.root().equals(to.changes.root) || to.at < from.at || to.floor < from.floor) {
+    throw new Error(`the log up to ${to.upto} does not hold to the pair that sealed it: the changes head differs from the entries, or its time or floor runs back`);
+  }
+  return changes;
+}
+
+/**
  * Where retention cut the log, when it has (plan PR 7): the newest
  * retention change, proven in the changes tree of the newest pair (`head`)
  * from its tiles, as the whole log's walk holds it (Seal.tla's CutSealed),
@@ -183,7 +219,7 @@ async function sealedRange(store: ReadsStore, ring: Keyring, start: StoredPair |
  * reads with them: the projector and the check start at the cut. Null
  * before any retention change is sealed; throws on one a writer put there.
  */
-async function sealedCut(store: ReadsStore, head: Pair): Promise<Cut | null> {
+export async function sealedCut(store: Pick<ReadsStore, 'retention' | 'tiles'>, head: Pair): Promise<Cut | null> {
   const retained = await store.retention();
   if (retained === null || retained.entry.number > head.upto) return null;
   const { entry, index } = retained;
@@ -195,11 +231,14 @@ async function sealedCut(store: ReadsStore, head: Pair): Promise<Cut | null> {
   if (cut === null || proof === null || !verifyInclusion(entryLeaf('changes', entry.number, entry.columns), index, size, proof, head.changes.root)) {
     throw new Error(`the retention change ${entry.number} is not one the log sealed`);
   }
+  // Retention cuts a sealed prefix, then logs the cut: a cut at or above its own change (so above the head too) is
+  // none the vault made.
+  if (cut.upto >= entry.number) throw new Error(`the retention change ${entry.number} names a cut at ${cut.upto}, not below it`);
   return cut;
 }
 
 /** The range the pair at `at` starts: its row (none for the genesis at 0), the next pair's, and that one opened. */
-async function rangeAt(store: ReadsStore, ring: Keyring, at: bigint): Promise<{ start: StoredPair | null; next: StoredPair; pair: Pair }> {
+export async function rangeAt(store: Pick<ReadsStore, 'pair' | 'pairs'>, ring: Keyring, at: bigint): Promise<{ start: StoredPair | null; next: StoredPair; pair: Pair }> {
   const start = await store.pair(at);
   if (start === null && at !== 0n) throw new Error(`no pair at ${at}, where the reads' projection stands: checkpoints were deleted`);
   const [next] = await store.pairs(at, 1);
@@ -264,7 +303,7 @@ export async function projectReads(store: ReadsStore, keys: VerifierKeys, option
  * with nothing to project or check (review r12: a newest pair edited had
  * the check answer ok, and the projector caught up, unsaid).
  */
-async function newestHeld(store: ReadsStore, ring: Keyring, cursor: ReadsCursor): Promise<Pair | null | string> {
+export async function newestHeld(store: Pick<ReadsStore, 'newest'>, ring: Keyring, cursor: Pick<ReadsCursor, 'through'>): Promise<Pair | null | string> {
   const newest = await store.newest();
   if (newest === null) return cursor.through === 0n ? null : `the reads are listed through ${cursor.through}, but the log holds no signed pair`;
   const head = (await openUnder(ring, newest.notes))?.pair ?? null;
@@ -432,7 +471,7 @@ function wayObject(use: { credential: string; purpose: number }): string {
  * edited since its seal stops the projection (fail closed), never derives
  * a read from it.
  */
-async function derive(store: ReadsStore, ring: Keyring, entries: readonly LogEntry[]): Promise<ReadRow[]> {
+export async function derive(store: Pick<ReadsStore, 'objects'>, ring: Keyring, entries: readonly LogEntry[]): Promise<ReadRow[]> {
   const holds = (change: LogEntry) => entryVouched(ring, change) === 'held';
   const read = async (asked: { object: string; below: bigint; first: boolean; use: bigint }[]) => (await store.objects(asked)).map((change, i) => {
     if (change !== null && !holds(change)) throw new Error(`change ${change.number}, which use ${asked[i]!.use} is read from, does not hold to its MAC: edited since its seal`);

@@ -615,6 +615,8 @@ export function createClient(options: ClientOptions) {
        * in the log, and its anchor goes on past them.
        */
       acceptLoss: (range: RouteInput<'POST /audit/loss'>) => call('POST /audit/loss', {}, range),
+      /** Start the audit projection over, as an Owner of the whole instance: the vault records who asked. */
+      rebuild: () => call('POST /audit/rebuild', {}, undefined),
     },
   };
 }

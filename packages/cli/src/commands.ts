@@ -454,6 +454,11 @@ export const SECTIONS = [
         usage: ['audit accept-loss <from> <to>'],
         about: ['as an owner of the whole instance: entries <from> to <to> are lost for', "good, a cut with no backup; the audit watch's finding stays logged"],
       },
+      {
+        command: 'audit rebuild',
+        usage: ['audit rebuild'],
+        about: ["as an owner of the whole instance: the audit pages' listing started over;", 'the vault records who asked, and lists every log again, the oldest too'],
+      },
     ],
   },
   {
@@ -632,6 +637,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'GET /audit/reads': { commands: ['verify log'] },
   'GET /audit/keys': { commands: ['verify keys'] },
   'POST /audit/loss': { commands: ['audit accept-loss'] },
+  'POST /audit/rebuild': { commands: ['audit rebuild'] },
   'GET /members/:member/passkeys': { browser: "a person's passkeys are Account → Passkeys': a passkey lives in a browser or a phone, which a terminal cannot touch" },
   'POST /members/:member/passkeys/options': { browser: 'adding a passkey asks the browser that makes it, on Account → Passkeys, as above' },
   'POST /members/:member/passkeys': { browser: 'adding a passkey, on that page, as above' },

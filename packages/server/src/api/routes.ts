@@ -6,7 +6,8 @@ import { POLICY_REVISION, type ProxyDefinition } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { setAccess } from './access.ts';
-import { acceptAuditLoss, AUDIT_NEXT, auditKeys, listAudit, verifyAudit, verifyAuditReads, verifyAuditTrees } from './audit.ts';
+import { acceptAuditLoss,
+  rebuildAudit, AUDIT_NEXT, auditKeys, listAudit, verifyAudit, verifyAuditReads, verifyAuditTrees } from './audit.ts';
 import type { ApiContext } from './context.ts';
 import { approveSession, listEnrollments, mintEnrollment, mintInput, promoteEnrollment, promoteInput } from './enrollments.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
@@ -844,6 +845,8 @@ export const routes = {
     input: z.object({ from: z.number().int().min(0), to: z.number().int().min(0) }).refine(({ from, to }) => from <= to, 'from comes no later than to'),
     run: (ctx, { input }) => acceptAuditLoss(ctx, input),
   }),
+  // An Owner starts the audit projection over: the vault records who asked and the projector lists every log again.
+  ...route('POST /audit/rebuild', { run: (ctx) => rebuildAudit(ctx) }),
 };
 
 export type Routes = typeof routes;

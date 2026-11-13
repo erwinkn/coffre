@@ -53,6 +53,7 @@ export const VAULT_METHODS = [
   'recordRefusal',
   'note',
   'check',
+  'rebuildAudit',
   'waitSealed',
   'signIn',
   'revokeCredential',
